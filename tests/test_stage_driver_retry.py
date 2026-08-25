@@ -3,6 +3,7 @@
 Pure functions, no OpenRouter / network: exercises the retry-message construction
 and the per-stage retry budget that help the wiring stage converge.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,19 +27,22 @@ from kicraft.server.session import run_session
 
 
 def test_retry_feedback_includes_errors_and_offenders():
-    out = {"ok": False, "errors": ["9.11 net coverage: uncovered pin(s)"],
-           "offenders": ["U2.4 ('EN', unspecified) not in connections or no_connect_pins"]}
+    out = {
+        "ok": False,
+        "errors": ["9.11 net coverage: uncovered pin(s)"],
+        "offenders": ["U2.4 ('EN', unspecified) not in connections or no_connect_pins"],
+    }
     msg = _retry_feedback(out)
-    assert "9.11 net coverage" in msg          # the rule that failed
-    assert "U2.4" in msg                        # the exact pin the model must fix
-    assert "preserv" in msg.lower()             # patch, do not redraft
+    assert "9.11 net coverage" in msg  # the rule that failed
+    assert "U2.4" in msg  # the exact pin the model must fix
+    assert "preserv" in msg.lower()  # patch, do not redraft
     assert "ONLY the slot JSON" in msg
 
 
 def test_retry_feedback_without_offenders_omits_that_line():
     msg = _retry_feedback({"ok": False, "errors": ["some other error"]})
     assert "some other error" in msg
-    assert "offenders" not in msg               # no offenders line when none present
+    assert "offenders" not in msg  # no offenders line when none present
 
 
 def test_parse_failure_classification_distinguishes_the_three_kinds():
@@ -66,10 +70,9 @@ def test_extract_json_rejects_trailing_prose_and_second_object():
     assert _extract_json('{"a": "}", "b": {"c": 1}}') == {"a": "}", "b": {"c": 1}}
 
 
-
 def test_wiring_gets_more_retries_than_the_simple_stages():
-    assert _stage_max_retries("wiring", 2) >= 4   # wiring floors higher than default
-    assert _stage_max_retries("intent", 2) == 2   # simple stages keep the default
+    assert _stage_max_retries("wiring", 2) >= 4  # wiring floors higher than default
+    assert _stage_max_retries("intent", 2) == 2  # simple stages keep the default
     assert _stage_max_retries("functional_spec", 2) == 2
 
 
@@ -79,36 +82,40 @@ def test_caller_default_wins_when_higher_than_the_floor():
 
 
 def test_wiring_gets_a_larger_token_budget():
-    assert _stage_max_tokens("wiring", 4096) >= 8192   # wiring floors higher
-    assert _stage_max_tokens("intent", 4096) == 4096   # simple stages keep default
+    assert _stage_max_tokens("wiring", 4096) >= 8192  # wiring floors higher
+    assert _stage_max_tokens("intent", 4096) == 4096  # simple stages keep default
     assert _stage_max_tokens("wiring", 16000) == 16000  # a higher caller default wins
 
 
 def test_bom_gets_more_retries_for_symbol_resolution():
-    assert _stage_max_retries("bom", 2) >= 4           # bom floors higher now
+    assert _stage_max_retries("bom", 2) >= 4  # bom floors higher now
     assert _stage_max_retries("architecture", 2) == 2
 
 
 def test_bom_has_a_symbol_search_tool():
     names = {t["function"]["name"] for t in BOM_TOOLS}
-    assert "search_symbols" in names                   # discover, do not guess
+    assert "search_symbols" in names  # discover, do not guess
     assert {"list_parts", "lookup_symbol", "lookup_lcsc_id", "add_part_from_lcsc"} <= names
 
 
 def test_bom_has_a_footprint_search_tool():
     names = {t["function"]["name"] for t in BOM_TOOLS}
-    assert "search_footprints" in names                # footprint discovery, do not guess
-    assert "lookup_footprint" in names                 # verify a footprint exists + pad count
+    assert "search_footprints" in names  # footprint discovery, do not guess
+    assert "lookup_footprint" in names  # verify a footprint exists + pad count
 
 
 # ---- clarifying questions -------------------------------------------------
 
+
 def test_normalize_questions_shapes_and_drops_junk():
     qs = _normalize_questions(
-        [{"text": "Battery chemistry?", "options": ["LiPo", "18650"], "blocking": True},
-         {"text": "   ", "blocking": True},   # dropped: blank text
-         {"nope": 1}],                        # dropped: not a question
-        "intent")
+        [
+            {"text": "Battery chemistry?", "options": ["LiPo", "18650"], "blocking": True},
+            {"text": "   ", "blocking": True},  # dropped: blank text
+            {"nope": 1},
+        ],  # dropped: not a question
+        "intent",
+    )
     assert len(qs) == 1
     q = qs[0]
     assert q["stage"] == "intent" and q["blocking"] is True
@@ -120,14 +127,21 @@ def test_normalize_questions_carries_and_whitelists_reconcile_target():
     # target is dropped to None so a park can't route to an arbitrary/looping
     # stage, and an untagged question stays a plain user question.
     qs = _normalize_questions(
-        [{"text": "Add 3 more 100nF for U1 DEC pins", "blocking": True,
-          "reconcile_target": "bom"},
-         {"text": "Active-high or active-low button?", "blocking": True},
-         {"text": "route to nowhere", "blocking": True, "reconcile_target": "wiring"}],
-        "wiring")
+        [
+            {
+                "text": "Add 3 more 100nF for U1 DEC pins",
+                "blocking": True,
+                "reconcile_target": "bom",
+            },
+            {"text": "Active-high or active-low button?", "blocking": True},
+            {"text": "route to nowhere", "blocking": True, "reconcile_target": "wiring"},
+        ],
+        "wiring",
+    )
     assert [q["reconcile_target"] for q in qs] == ["bom", None, None]
     # the normalized dicts still validate as Question (schema-safe for state.json)
     from kicraft.design.models import Question
+
     for q in qs:
         Question.model_validate(q)
 
@@ -158,12 +172,16 @@ def test_architecture_spec_declares_power_rails_are_not_sheets():
 
 def test_bom_reconcile_instruction_lists_the_missing_parts():
     from kicraft.server.web import _bom_reconcile_instruction
+
     instr = _bom_reconcile_instruction(
-        [{"text": "Add three 100nF caps for U1 DEC3-DEC5", "reconcile_target": "bom"},
-         {"text": "", "reconcile_target": "bom"}])   # blank text is skipped
+        [
+            {"text": "Add three 100nF caps for U1 DEC3-DEC5", "reconcile_target": "bom"},
+            {"text": "", "reconcile_target": "bom"},
+        ]
+    )  # blank text is skipped
     assert "Add three 100nF caps for U1 DEC3-DEC5" in instr
     assert "Do NOT ask the user" in instr
-    assert instr.count("\n- ") == 1   # only the one non-blank deficit line
+    assert instr.count("\n- ") == 1  # only the one non-blank deficit line
 
 
 def test_retry_feedback_unknown_ref_in_wiring_points_at_reconcile(tmp_path):
@@ -171,15 +189,17 @@ def test_retry_feedback_unknown_ref_in_wiring_points_at_reconcile(tmp_path):
     # parts and to park with reconcile_target=bom, and list the real refs -- so it
     # stops inventing refs and burning its retry budget.
     from kicraft.server.stage_driver import _retry_feedback
+
     out = {"errors": ["NetConnection 'PWR' references unknown ref 'Q99'"]}
     msg = _retry_feedback(out, stage="wiring", valid_refs=["C1", "U1"])
     assert "CANNOT add parts" in msg
-    assert 'reconcile_target' in msg and '"bom"' in msg
+    assert "reconcile_target" in msg and '"bom"' in msg
     assert "C1" in msg and "U1" in msg
 
 
 def test_retry_feedback_no_reconcile_note_for_non_wiring_stage():
     from kicraft.server.stage_driver import _retry_feedback
+
     out = {"errors": ["some symbol not found"]}
     msg = _retry_feedback(out, stage="bom")
     assert "reconcile_target" not in msg
@@ -189,20 +209,22 @@ def test_retry_feedback_power_name_as_ref_teaches_net_name_shape():
     # KC-6DCV66: the model wrote '+3V3'/'GND' as an endpoint.ref and got a raw
     # Pydantic regex dump. Feedback must name the fix (rails are net_name values,
     # not component refs), not just echo the regex.
-    err = ("slot validation failed: 2 validation errors for BOM\n"
-           "connections.7.endpoints.1.ref\n"
-           "  Value error, PinEndpoint.ref '+3V3' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$ "
-           "[type=value_error, input_value='+3V3', input_type=str]\n"
-           "connections.9.endpoints.1.ref\n"
-           "  Value error, PinEndpoint.ref 'GND' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$ "
-           "[type=value_error, input_value='GND', input_type=str]")
+    err = (
+        "slot validation failed: 2 validation errors for BOM\n"
+        "connections.7.endpoints.1.ref\n"
+        "  Value error, PinEndpoint.ref '+3V3' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$ "
+        "[type=value_error, input_value='+3V3', input_type=str]\n"
+        "connections.9.endpoints.1.ref\n"
+        "  Value error, PinEndpoint.ref 'GND' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$ "
+        "[type=value_error, input_value='GND', input_type=str]"
+    )
     msg = _retry_feedback({"ok": False, "errors": [err]}, stage="wiring")
     assert "is a power/ground NET NAME, not a component ref" in msg
     assert "+3V3" in msg and "GND" in msg
 
 
 def test_retry_feedback_power_name_as_ref_skipped_for_other_stages():
-    err = ("PinEndpoint.ref '+3V3' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$")
+    err = "PinEndpoint.ref '+3V3' must match ^[A-Z]+[0-9]+[A-Z0-9_-]*$"
     msg = _retry_feedback({"ok": False, "errors": [err]}, stage="bom")
     assert "not a component ref" not in msg  # wiring-only guidance
 
@@ -219,8 +241,16 @@ def test_attach_questions_writes_open_questions(tmp_path):
 def test_attach_questions_replaces_only_that_stage(tmp_path):
     sp = tmp_path / ".kicraft" / "state.json"
     sp.parent.mkdir(parents=True)
-    sp.write_text(json.dumps({"open_questions": [
-        {"text": "old-intent", "stage": "intent"}, {"text": "keep-arch", "stage": "architecture"}]}))
+    sp.write_text(
+        json.dumps(
+            {
+                "open_questions": [
+                    {"text": "old-intent", "stage": "intent"},
+                    {"text": "keep-arch", "stage": "architecture"},
+                ]
+            }
+        )
+    )
     _attach_questions(sp, "intent", _normalize_questions([{"text": "new-intent"}], "intent"))
     texts = {q["text"] for q in json.loads(sp.read_text())["open_questions"]}
     assert texts == {"new-intent", "keep-arch"}  # intent replaced, architecture kept
@@ -228,14 +258,17 @@ def test_attach_questions_replaces_only_that_stage(tmp_path):
 
 def test_build_system_offers_clarifying_questions():
     sysmsg = build_system("intent")
-    assert '"questions"' in sysmsg   # the model is told it may ask
+    assert '"questions"' in sysmsg  # the model is told it may ask
     assert "blocking" in sysmsg
 
 
 def test_bom_part_hints_extracts_pasted_lcsc_ids():
     from kicraft.server.stage_driver import _bom_part_hints
-    brief = ("ToF breakout with the sensor at "
-             "https://www.lcsc.com/product-detail/C7386355.html and an LDO C6186")
+
+    brief = (
+        "ToF breakout with the sensor at "
+        "https://www.lcsc.com/product-detail/C7386355.html and an LDO C6186"
+    )
     hint = _bom_part_hints(brief, "also use c2924337 please")
     assert "C7386355" in hint and "C6186" in hint and "C2924337" in hint
     assert "add_part_from_lcsc" in hint
@@ -243,6 +276,7 @@ def test_bom_part_hints_extracts_pasted_lcsc_ids():
 
 def test_bom_part_hints_ignores_refdes_and_embedded_runs():
     from kicraft.server.stage_driver import _bom_part_hints
+
     # C1/C104 are refdes/values, C8051F320 is an MPN — none are LCSC ids.
     assert _bom_part_hints("decouple C1 with 100nF, C104 pattern, MCU C8051F320") == ""
     assert _bom_part_hints("", None) == ""
@@ -256,6 +290,7 @@ def test_bom_prompt_mentions_search_budget():
 
 # ---- in-stream reasoning-loop breakout (KC-VWW5X7) -------------------------
 
+
 class _LoopGuard:
     def status(self):
         return {"spent_total_usd": 0.0}
@@ -264,6 +299,7 @@ class _LoopGuard:
 class _LoopClient:
     """First N chat replies are a reasoning-loop abort; the next is a valid
     intent slot. Records the `reasoning` policy each call received."""
+
     def __init__(self, loop_replies, ok_json):
         self.loop_replies = loop_replies
         self.ok_json = ok_json
@@ -271,22 +307,44 @@ class _LoopClient:
         self.guard = _LoopGuard()
         self._n = 0
 
-    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None,
-             meta_ctx=None, reasoning=None):
+    def chat(
+        self,
+        messages,
+        max_tokens=4096,
+        temperature=0.2,
+        progress=None,
+        meta_ctx=None,
+        reasoning=None,
+    ):
         self.reasoning_seen.append(reasoning)
         self._n += 1
         if self._n <= self.loop_replies:
-            return {"text": "", "reasoning": "x" * 600, "finish_reason": "reasoning_loop",
-                    "loop_detected": True, "cost_usd": 0.0}
-        return {"text": self.ok_json, "reasoning": "", "finish_reason": "stop",
-                "loop_detected": False, "cost_usd": 0.0}
+            return {
+                "text": "",
+                "reasoning": "x" * 600,
+                "finish_reason": "reasoning_loop",
+                "loop_detected": True,
+                "cost_usd": 0.0,
+            }
+        return {
+            "text": self.ok_json,
+            "reasoning": "",
+            "finish_reason": "stop",
+            "loop_detected": False,
+            "cost_usd": 0.0,
+        }
 
 
-_OK_INTENT = json.dumps({
-    "goal": "a USB-powered LED", "constraints": [], "named_parts": [],
-    "inferred_expertise": "intermediate", "assumptions": [],
-    "project_stem": "USB_LED",
-})
+_OK_INTENT = json.dumps(
+    {
+        "goal": "a USB-powered LED",
+        "constraints": [],
+        "named_parts": [],
+        "inferred_expertise": "intermediate",
+        "assumptions": [],
+        "project_stem": "USB_LED",
+    }
+)
 
 
 def test_loop_detected_retries_reasoning_disabled_then_commits(tmp_path):
@@ -324,6 +382,7 @@ def test_design_reasoning_policy_selection():
 
 # ---- serialization recovery (bom-stage-programming-and-json-gaps) ---------
 
+
 class _ScriptedClient:
     """Replies in order, one dict per completion; records (max_tokens,
     reasoning, serialization-flag) per call so the tests can assert the exact
@@ -336,19 +395,48 @@ class _ScriptedClient:
         class _G:
             def status(self):
                 return {"spent_total_usd": 0.0}
+
         self.guard = _G()
 
-    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None,
-             meta_ctx=None, reasoning=None):
-        self.calls.append({"max_tokens": max_tokens, "reasoning": reasoning,
-                           "serialization": bool((meta_ctx or {}).get("serialization"))})
+    def chat(
+        self,
+        messages,
+        max_tokens=4096,
+        temperature=0.2,
+        progress=None,
+        meta_ctx=None,
+        reasoning=None,
+    ):
+        self.calls.append(
+            {
+                "max_tokens": max_tokens,
+                "reasoning": reasoning,
+                "serialization": bool((meta_ctx or {}).get("serialization")),
+                "messages": list(messages),
+            }
+        )
         return dict(self.replies.pop(0))
 
-    def chat_with_tools(self, messages, tools, executor, max_tokens=4096,
-                        temperature=0.2, max_rounds=6, progress=None, meta_ctx=None,
-                        reasoning=None):
-        self.calls.append({"max_tokens": max_tokens, "reasoning": reasoning,
-                           "serialization": bool((meta_ctx or {}).get("serialization"))})
+    def chat_with_tools(
+        self,
+        messages,
+        tools,
+        executor,
+        max_tokens=4096,
+        temperature=0.2,
+        max_rounds=6,
+        progress=None,
+        meta_ctx=None,
+        reasoning=None,
+    ):
+        self.calls.append(
+            {
+                "max_tokens": max_tokens,
+                "reasoning": reasoning,
+                "serialization": bool((meta_ctx or {}).get("serialization")),
+                "messages": list(messages),
+            }
+        )
         r = dict(self.replies.pop(0))
         r.setdefault("rounds", 1)
         r.setdefault("tool_calls", 0)
@@ -356,19 +444,24 @@ class _ScriptedClient:
 
 
 def _ok_intent_reply():
-    return {"text": _OK_INTENT, "reasoning": "", "finish_reason": "stop",
-            "cost_usd": 0.0}
+    return {"text": _OK_INTENT, "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0}
 
 
 def test_truncated_json_triggers_one_plain_tool_free_serialization_call(tmp_path):
     # finish=length WITH content -> truncated_json -> exactly ONE serialization
     # call: tool-free (plain chat), reasoning disabled, FIXED cap (never the
     # old cap-doubling), then the parseable result commits.
-    client = _ScriptedClient([
-        {"text": '{"goal": "x", truncated', "reasoning": "", "finish_reason": "length",
-         "cost_usd": 0.0},
-        _ok_intent_reply(),
-    ])
+    client = _ScriptedClient(
+        [
+            {
+                "text": '{"goal": "x", truncated',
+                "reasoning": "",
+                "finish_reason": "length",
+                "cost_usd": 0.0,
+            },
+            _ok_intent_reply(),
+        ]
+    )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "ok"
     assert len(client.calls) == 2
@@ -376,34 +469,47 @@ def test_truncated_json_triggers_one_plain_tool_free_serialization_call(tmp_path
     assert first["serialization"] is False
     assert serial["serialization"] is True
     assert serial["reasoning"] == {"enabled": False}
-    assert serial["max_tokens"] == 8192            # fixed serialization cap for intent
+    assert serial["max_tokens"] == 8192  # fixed serialization cap for intent
     assert serial["max_tokens"] == 2 * first["max_tokens"]  # ... which is 2x the 4096 normal
+    retry_message = serial["messages"][-1]["content"]
+    assert "about 23 characters" in retry_message
+    assert "collection must contain" not in retry_message
     # the cap is the policy's fixed value, never doubled AGAIN: a truncated
     # serialization result would go terminal, not raise to 16384.
 
 
 def test_second_truncated_serialization_result_terminates_as_truncated_json(tmp_path):
-    client = _ScriptedClient([
-        {"text": '{"goal": "x", truncated', "reasoning": "", "finish_reason": "length",
-         "cost_usd": 0.0},
-        {"text": '{"goal": "y", still', "reasoning": "", "finish_reason": "length",
-         "cost_usd": 0.0},
-    ])
+    client = _ScriptedClient(
+        [
+            {
+                "text": '{"goal": "x", truncated',
+                "reasoning": "",
+                "finish_reason": "length",
+                "cost_usd": 0.0,
+            },
+            {
+                "text": '{"goal": "y", still',
+                "reasoning": "",
+                "finish_reason": "length",
+                "cost_usd": 0.0,
+            },
+        ]
+    )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "failed"
     last = res["results"][-1]
-    assert len(client.calls) == 2                    # normal + ONE serialization, no more
+    assert len(client.calls) == 2  # normal + ONE serialization, no more
     assert last["failure_kind"] == "truncated_json"  # classified by its own signature
-    assert last["attempts"] == 2                     # actual calls, not max_retries+1
+    assert last["attempts"] == 2  # actual calls, not max_retries+1
 
 
 def test_malformed_normal_stop_terminates_as_invalid_json_after_one_serialization(tmp_path):
-    client = _ScriptedClient([
-        {"text": "not json at all", "reasoning": "", "finish_reason": "stop",
-         "cost_usd": 0.0},
-        {"text": "still not json", "reasoning": "", "finish_reason": "stop",
-         "cost_usd": 0.0},
-    ])
+    client = _ScriptedClient(
+        [
+            {"text": "not json at all", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": "still not json", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+        ]
+    )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "failed"
     last = res["results"][-1]
@@ -421,17 +527,22 @@ def test_serialization_available_once_across_commit_corrections(tmp_path):
     # attempt 1 (call 3) returns malformed -> serialization exhausted ->
     # terminal invalid_json. Exactly 3 calls proves the parseable serialization
     # output reached _commit (otherwise the stage would have ended at 2).
-    client = _ScriptedClient([
-        {"text": '{"goal": "x", truncated', "reasoning": "", "finish_reason": "length",
-         "cost_usd": 0.0},
-        {"text": "{}", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
-        {"text": "malformed again", "reasoning": "", "finish_reason": "stop",
-         "cost_usd": 0.0},
-    ])
+    client = _ScriptedClient(
+        [
+            {
+                "text": '{"goal": "x", truncated',
+                "reasoning": "",
+                "finish_reason": "length",
+                "cost_usd": 0.0,
+            },
+            {"text": "{}", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": "malformed again", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+        ]
+    )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "failed"
     last = res["results"][-1]
-    assert len(client.calls) == 3                    # normal + serialization + correction
+    assert len(client.calls) == 3  # normal + serialization + correction
     assert sum(1 for c in client.calls if c["serialization"]) == 1  # only once
     assert last["failure_kind"] == "invalid_json"
 
@@ -440,18 +551,28 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path):
     # Serialization recovery must route through plain client.chat() for the BOM
     # stage too — never chat_with_tools, so no tool rounds and no transcript
     # resend. The normal attempt is the tool loop (chat_with_tools).
-    client = _ScriptedClient([
-        {"text": '{"parts": [trunc', "reasoning": "", "finish_reason": "length",
-         "cost_usd": 0.0},
-        {"text": "also bad", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
-    ])
+    client = _ScriptedClient(
+        [
+            {
+                "text": '{"parts": [trunc',
+                "reasoning": "",
+                "finish_reason": "length",
+                "cost_usd": 0.0,
+            },
+            {"text": "also bad", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+        ]
+    )
     res = run_session(tmp_path, "a USB-powered LED", ["bom"], client=client)
     assert res["status"] == "failed"
     assert len(client.calls) == 2
-    assert client.calls[0]["serialization"] is False   # chat_with_tools (tool loop)
-    assert client.calls[1]["serialization"] is True    # plain chat for serialization
-    assert client.calls[1]["max_tokens"] == 32768      # bom serialization cap
+    assert client.calls[0]["serialization"] is False  # chat_with_tools (tool loop)
+    assert client.calls[1]["serialization"] is True  # plain chat for serialization
+    assert client.calls[1]["max_tokens"] == 32768  # bom serialization cap
     assert client.calls[1]["reasoning"] == {"enabled": False}
+    retry_message = client.calls[1]["messages"][-1]["content"]
+    assert "about 16 characters" in retry_message
+    assert "`parts` collection must contain at most 500 items total" in retry_message
+    assert "at most 450 items per `sheet`" in retry_message
     assert res["results"][-1]["failure_kind"] == "invalid_json"
 
 
@@ -459,11 +580,12 @@ def test_empty_length_takes_reasoning_recovery_not_invalid_json(tmp_path):
     # finish=length with NO content is provider exhaustion (even without the
     # client loop detector firing): reasoning is disabled for the retry, and
     # the failure is NEVER mislabeled invalid_json.
-    client = _ScriptedClient([
-        {"text": "", "reasoning": "x" * 600, "finish_reason": "length",
-         "cost_usd": 0.0},
-        _ok_intent_reply(),
-    ])
+    client = _ScriptedClient(
+        [
+            {"text": "", "reasoning": "x" * 600, "finish_reason": "length", "cost_usd": 0.0},
+            _ok_intent_reply(),
+        ]
+    )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "ok"
     assert client.calls[0]["serialization"] is False
@@ -472,27 +594,27 @@ def test_empty_length_takes_reasoning_recovery_not_invalid_json(tmp_path):
 
 
 def test_empty_length_twice_fails_as_reasoning_loop(tmp_path):
-    client = _ScriptedClient([
-        {"text": "", "reasoning": "x" * 600, "finish_reason": "length",
-         "cost_usd": 0.0},
-        {"text": "", "reasoning": "y" * 600, "finish_reason": "length",
-         "cost_usd": 0.0},
-    ])
+    client = _ScriptedClient(
+        [
+            {"text": "", "reasoning": "x" * 600, "finish_reason": "length", "cost_usd": 0.0},
+            {"text": "", "reasoning": "y" * 600, "finish_reason": "length", "cost_usd": 0.0},
+        ]
+    )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "failed"
     last = res["results"][-1]
-    assert last["failure_kind"] == "reasoning_loop"   # never invalid_json
+    assert last["failure_kind"] == "reasoning_loop"  # never invalid_json
     assert last["error"] == "reasoning_loop"
     assert len(client.calls) == 2
 
 
 def test_failure_kind_reaches_stage_status(tmp_path):
-    client = _ScriptedClient([
-        {"text": "not json", "reasoning": "", "finish_reason": "stop",
-         "cost_usd": 0.0},
-        {"text": "not json either", "reasoning": "", "finish_reason": "stop",
-         "cost_usd": 0.0},
-    ])
+    client = _ScriptedClient(
+        [
+            {"text": "not json", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": "not json either", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+        ]
+    )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     last = res["results"][-1]
     sp = tmp_path / ".kicraft" / "state.json"
@@ -504,6 +626,7 @@ def test_failure_kind_reaches_stage_status(tmp_path):
 
 # ---- provider/transport failures never enter JSON recovery -----------------
 
+
 class _RaisingClient:
     """Raises the configured exception on every completion call."""
 
@@ -514,10 +637,18 @@ class _RaisingClient:
         class _G:
             def status(self):
                 return {"spent_total_usd": 0.0}
+
         self.guard = _G()
 
-    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None,
-             meta_ctx=None, reasoning=None):
+    def chat(
+        self,
+        messages,
+        max_tokens=4096,
+        temperature=0.2,
+        progress=None,
+        meta_ctx=None,
+        reasoning=None,
+    ):
         self.calls += 1
         raise self.exc
 
@@ -529,7 +660,7 @@ def test_provider_failure_is_terminal_and_not_sent_through_json_recovery(tmp_pat
     last = res["results"][-1]
     assert last["failure_kind"] == "provider_error"
     assert last["attempts"] == 1
-    assert client.calls == 1     # terminal: NO serialization retry, NO re-parse
+    assert client.calls == 1  # terminal: NO serialization retry, NO re-parse
 
 
 def test_transport_failure_is_terminal_and_not_sent_through_json_recovery(tmp_path):
@@ -547,6 +678,7 @@ def test_budget_exceeded_propagates_and_is_not_classified(tmp_path):
     class _BrokeClient(_RaisingClient):
         def __init__(self):
             super().__init__(BudgetExceeded("run budget exhausted"))
+
     with pytest.raises(BudgetExceeded):
         run_session(tmp_path, "a USB-powered LED", ["intent"], client=_BrokeClient())
 
@@ -554,16 +686,22 @@ def test_budget_exceeded_propagates_and_is_not_classified(tmp_path):
 def test_response_policy_falls_back_for_mock_clients():
     from kicraft.server.config import StageResponsePolicy
     from kicraft.server.stage_driver import _response_policy
+
     # a settings-less mock client: floored normal cap, no reasoning control
     # (no design_reasoning), the fixed serialization cap, one serialization retry
     pol = _response_policy(object(), "bom", 4096)
     assert isinstance(pol, StageResponsePolicy)
-    assert pol.normal_max_tokens == 16384        # caller 4096 floored up for bom
-    assert pol.normal_reasoning is None          # no .s -> no reasoning control
+    assert pol.normal_max_tokens == 16384  # caller 4096 floored up for bom
+    assert pol.normal_reasoning is None  # no .s -> no reasoning control
     assert pol.serialization_max_tokens == 32768
     assert pol.serialization_retries == 1
+    assert len(pol.collection_bounds) == 1
+    assert pol.collection_bounds[0].field == "parts"
+    assert pol.collection_bounds[0].total == 500
+    assert pol.collection_bounds[0].per_group == 450
     # a HIGHER caller cap is preserved (never floored down)
     assert _response_policy(object(), "bom", 20000).normal_max_tokens == 20000
+
     # a settings object WITH the policy method drives the values
     class _S:
         def design_stage_policy(self, stage, normal_max_tokens):
@@ -571,6 +709,7 @@ def test_response_policy_falls_back_for_mock_clients():
 
     class _C:
         s = _S()
+
     pol2 = _response_policy(_C(), "bom", 4096)
     assert pol2.serialization_max_tokens == 12345
     assert pol2.normal_reasoning == {"enabled": False}

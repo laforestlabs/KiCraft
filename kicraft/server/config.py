@@ -4,6 +4,7 @@ Defaults are intentionally conservative and sit well under a typical prepaid
 balance, so the application self-stops before the provider balance is even
 touched (defense in depth behind the prepaid + virtual-card limits).
 """
+
 from __future__ import annotations
 
 import os
@@ -60,6 +61,36 @@ def _env_bool_default(name: str, default: bool) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+@dataclass(frozen=True)
+class CollectionBound:
+    """Cardinality policy for one collection in a design-stage response."""
+
+    field: str
+    total: int
+    per_group: int | None = None
+    group_key: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.total <= 0:
+            raise ValueError("collection total bound must be positive")
+        if (self.per_group is None) != (self.group_key is None):
+            raise ValueError("per_group and group_key must be configured together")
+        if self.per_group is not None and self.per_group <= 0:
+            raise ValueError("collection per-group bound must be positive")
+
+
+STAGE_COLLECTION_BOUNDS: dict[str, tuple[CollectionBound, ...]] = {
+    "bom": (
+        CollectionBound(
+            field="parts",
+            total=500,
+            per_group=450,
+            group_key="sheet",
+        ),
+    ),
+}
+
+
 # Fixed output cap (tokens) for the serialization recovery call per design
 # stage: one plain, tool-free, reasoning-disabled re-emission of the slot
 # after a parse failure. The model re-serializes content it already drafted,
@@ -92,6 +123,7 @@ class StageResponsePolicy:
     normal_reasoning: dict | None
     serialization_max_tokens: int
     serialization_retries: int = 1
+    collection_bounds: tuple[CollectionBound, ...] = ()
 
 
 @dataclass
@@ -135,7 +167,12 @@ class Settings:
     # Fixed output cap for that serialization call, per stage (see
     # STAGE_SERIALIZATION_MAX_TOKENS). Never doubled dynamically.
     serialization_max_tokens: dict = field(
-        default_factory=lambda: dict(STAGE_SERIALIZATION_MAX_TOKENS))
+        default_factory=lambda: dict(STAGE_SERIALIZATION_MAX_TOKENS)
+    )
+    # Parse-side degeneration guards. Tuples keep the per-drive policy immutable.
+    collection_bounds: dict[str, tuple[CollectionBound, ...]] = field(
+        default_factory=lambda: dict(STAGE_COLLECTION_BOUNDS)
+    )
 
     # --- Design-stage reasoning budget + in-stream loop breaker ---------------
     # Reasoning budget for the design stages. Intent/functional_spec (small,
@@ -201,7 +238,8 @@ class Settings:
     # down, and `max_price` is a hard per-Mtok ceiling that bounds any fallback to
     # the cheap caching tier. All are USD per million tokens; 0.0 means "omit".
     provider_order: list[str] = field(
-        default_factory=lambda: ["novita/fp8", "siliconflow/fp8", "streamlake"])
+        default_factory=lambda: ["novita/fp8", "siliconflow/fp8", "streamlake"]
+    )
     provider_allow_fallbacks: bool = True
     max_price_prompt: float = 0.18
     max_price_completion: float = 0.35
@@ -294,84 +332,115 @@ class Settings:
             api_key=key,
             model=os.environ.get("KICRAFT_MODEL", cls.model).strip() or cls.model,
             max_tokens_per_call=int(
-                os.environ.get("KICRAFT_MAX_TOKENS_PER_CALL", cls.max_tokens_per_call)),
+                os.environ.get("KICRAFT_MAX_TOKENS_PER_CALL", cls.max_tokens_per_call)
+            ),
             daily_usd_ceiling=float(
-                os.environ.get("KICRAFT_DAILY_USD_CEILING", cls.daily_usd_ceiling)),
+                os.environ.get("KICRAFT_DAILY_USD_CEILING", cls.daily_usd_ceiling)
+            ),
             total_usd_ceiling=float(
-                os.environ.get("KICRAFT_TOTAL_USD_CEILING", cls.total_usd_ceiling)),
+                os.environ.get("KICRAFT_TOTAL_USD_CEILING", cls.total_usd_ceiling)
+            ),
             ledger_path=Path(os.environ.get("KICRAFT_SPEND_LEDGER", str(cls.ledger_path))),
             users_db_path=Path(os.environ.get("KICRAFT_USERS_DB", str(cls.users_db_path))),
             projects_dir=Path(os.environ.get("KICRAFT_PROJECTS_DIR", str(cls.projects_dir))),
             work_dir=Path(os.environ.get("KICRAFT_WORK_DIR", str(cls.work_dir))),
             legal_dir=Path(os.environ.get("KICRAFT_LEGAL_DIR", str(cls.legal_dir))),
             kill_switch=_env_bool("KICRAFT_KILL_SWITCH"),
-            llm_max_retries=int(
-                os.environ.get("KICRAFT_LLM_MAX_RETRIES", cls.llm_max_retries)),
+            llm_max_retries=int(os.environ.get("KICRAFT_LLM_MAX_RETRIES", cls.llm_max_retries)),
             llm_retry_backoff_s=float(
-                os.environ.get("KICRAFT_LLM_RETRY_BACKOFF_S", cls.llm_retry_backoff_s)),
+                os.environ.get("KICRAFT_LLM_RETRY_BACKOFF_S", cls.llm_retry_backoff_s)
+            ),
             design_temperature=float(
-                os.environ.get("KICRAFT_DESIGN_TEMPERATURE", cls.design_temperature)),
+                os.environ.get("KICRAFT_DESIGN_TEMPERATURE", cls.design_temperature)
+            ),
             serialization_retries=int(
-                os.environ.get("KICRAFT_SERIALIZATION_RETRIES", cls.serialization_retries)),
+                os.environ.get("KICRAFT_SERIALIZATION_RETRIES", cls.serialization_retries)
+            ),
             serialization_max_tokens=dict(STAGE_SERIALIZATION_MAX_TOKENS),
+            collection_bounds=dict(STAGE_COLLECTION_BOUNDS),
             design_reasoning_tokens=int(
-                os.environ.get("KICRAFT_DESIGN_REASONING_TOKENS", cls.design_reasoning_tokens)),
+                os.environ.get("KICRAFT_DESIGN_REASONING_TOKENS", cls.design_reasoning_tokens)
+            ),
             reasoning_max_tokens=int(
-                os.environ.get("KICRAFT_REASONING_MAX_TOKENS", cls.reasoning_max_tokens)),
+                os.environ.get("KICRAFT_REASONING_MAX_TOKENS", cls.reasoning_max_tokens)
+            ),
             reasoning_repeat_window=int(
-                os.environ.get("KICRAFT_REASONING_REPEAT_WINDOW", cls.reasoning_repeat_window)),
+                os.environ.get("KICRAFT_REASONING_REPEAT_WINDOW", cls.reasoning_repeat_window)
+            ),
             reasoning_repeat_threshold=int(
-                os.environ.get("KICRAFT_REASONING_REPEAT_THRESHOLD", cls.reasoning_repeat_threshold)),
-            public_url=os.environ.get(
-                "KICRAFT_PUBLIC_URL", cls.public_url).strip().rstrip("/") or cls.public_url,
-            email_from=(os.environ.get("KICRAFT_EMAIL_FROM", "").strip()
-                        or os.environ.get("KICRAFT_SMTP_FROM", "").strip()
-                        or os.environ.get("KICRAFT_SMTP_USERNAME", "").strip()),
+                os.environ.get("KICRAFT_REASONING_REPEAT_THRESHOLD", cls.reasoning_repeat_threshold)
+            ),
+            public_url=os.environ.get("KICRAFT_PUBLIC_URL", cls.public_url).strip().rstrip("/")
+            or cls.public_url,
+            email_from=(
+                os.environ.get("KICRAFT_EMAIL_FROM", "").strip()
+                or os.environ.get("KICRAFT_SMTP_FROM", "").strip()
+                or os.environ.get("KICRAFT_SMTP_USERNAME", "").strip()
+            ),
             resend_api_key=os.environ.get("KICRAFT_RESEND_API_KEY", "").strip(),
             smtp_host=os.environ.get("KICRAFT_SMTP_HOST", "").strip(),
             smtp_port=int(os.environ.get("KICRAFT_SMTP_PORT", cls.smtp_port)),
             smtp_username=os.environ.get("KICRAFT_SMTP_USERNAME", "").strip(),
             smtp_password=os.environ.get("KICRAFT_SMTP_PASSWORD", ""),
-            smtp_from=(os.environ.get("KICRAFT_SMTP_FROM", "").strip()
-                       or os.environ.get("KICRAFT_SMTP_USERNAME", "").strip()),
+            smtp_from=(
+                os.environ.get("KICRAFT_SMTP_FROM", "").strip()
+                or os.environ.get("KICRAFT_SMTP_USERNAME", "").strip()
+            ),
             smtp_starttls=_env_bool_default("KICRAFT_SMTP_STARTTLS", True),
             smtp_ssl=_env_bool("KICRAFT_SMTP_SSL"),
             stripe_secret_key=os.environ.get("KICRAFT_STRIPE_SECRET_KEY", "").strip(),
-            stripe_webhook_secret=os.environ.get(
-                "KICRAFT_STRIPE_WEBHOOK_SECRET", "").strip(),
+            stripe_webhook_secret=os.environ.get("KICRAFT_STRIPE_WEBHOOK_SECRET", "").strip(),
             stripe_price_pro=os.environ.get("KICRAFT_STRIPE_PRICE_PRO", "").strip(),
             stripe_price_max=os.environ.get("KICRAFT_STRIPE_PRICE_MAX", "").strip(),
-            provider_order=[p.strip() for p in os.environ.get(
-                "KICRAFT_PROVIDER_ORDER",
-                "novita/fp8,siliconflow/fp8,streamlake").split(",") if p.strip()],
-            provider_allow_fallbacks=_env_bool_default(
-                "KICRAFT_PROVIDER_ALLOW_FALLBACKS", True),
+            provider_order=[
+                p.strip()
+                for p in os.environ.get(
+                    "KICRAFT_PROVIDER_ORDER", "novita/fp8,siliconflow/fp8,streamlake"
+                ).split(",")
+                if p.strip()
+            ],
+            provider_allow_fallbacks=_env_bool_default("KICRAFT_PROVIDER_ALLOW_FALLBACKS", True),
             max_price_prompt=float(
-                os.environ.get("KICRAFT_MAX_PRICE_PROMPT", cls.max_price_prompt)),
+                os.environ.get("KICRAFT_MAX_PRICE_PROMPT", cls.max_price_prompt)
+            ),
             max_price_completion=float(
-                os.environ.get("KICRAFT_MAX_PRICE_COMPLETION", cls.max_price_completion)),
+                os.environ.get("KICRAFT_MAX_PRICE_COMPLETION", cls.max_price_completion)
+            ),
             enable_prompt_cache=_env_bool_default("KICRAFT_ENABLE_PROMPT_CACHE", True),
             enable_core_defaults=_env_bool_default("KICRAFT_CORE_DEFAULTS", True),
             eval_judge_model=(os.environ.get("KICRAFT_EVAL_JUDGE_MODEL", "").strip() or None),
             eval_judge_max_tokens=int(
-                os.environ.get("KICRAFT_EVAL_JUDGE_MAX_TOKENS", cls.eval_judge_max_tokens)),
+                os.environ.get("KICRAFT_EVAL_JUDGE_MAX_TOKENS", cls.eval_judge_max_tokens)
+            ),
             review_model=(os.environ.get("KICRAFT_REVIEW_MODEL", "").strip() or cls.review_model),
             review_reasoning_tokens=int(
-                os.environ.get("KICRAFT_REVIEW_REASONING_TOKENS", cls.review_reasoning_tokens)),
+                os.environ.get("KICRAFT_REVIEW_REASONING_TOKENS", cls.review_reasoning_tokens)
+            ),
             review_reasoning_effort=os.environ.get(
-                "KICRAFT_REVIEW_REASONING_EFFORT", cls.review_reasoning_effort).strip(),
+                "KICRAFT_REVIEW_REASONING_EFFORT", cls.review_reasoning_effort
+            ).strip(),
             review_max_tokens=int(
-                os.environ.get("KICRAFT_REVIEW_MAX_TOKENS", cls.review_max_tokens)),
-            review_provider_order=[p.strip() for p in os.environ.get(
-                "KICRAFT_REVIEW_PROVIDER_ORDER", "").split(",") if p.strip()],
+                os.environ.get("KICRAFT_REVIEW_MAX_TOKENS", cls.review_max_tokens)
+            ),
+            review_provider_order=[
+                p.strip()
+                for p in os.environ.get("KICRAFT_REVIEW_PROVIDER_ORDER", "").split(",")
+                if p.strip()
+            ],
             review_max_price_prompt=float(
-                os.environ.get("KICRAFT_REVIEW_MAX_PRICE_PROMPT", cls.review_max_price_prompt)),
+                os.environ.get("KICRAFT_REVIEW_MAX_PRICE_PROMPT", cls.review_max_price_prompt)
+            ),
             review_max_price_completion=float(
-                os.environ.get("KICRAFT_REVIEW_MAX_PRICE_COMPLETION", cls.review_max_price_completion)),
+                os.environ.get(
+                    "KICRAFT_REVIEW_MAX_PRICE_COMPLETION", cls.review_max_price_completion
+                )
+            ),
             review_corroboration=int(
-                os.environ.get("KICRAFT_REVIEW_CORROBORATION", cls.review_corroboration)),
+                os.environ.get("KICRAFT_REVIEW_CORROBORATION", cls.review_corroboration)
+            ),
             review_temperature=float(
-                os.environ.get("KICRAFT_REVIEW_TEMPERATURE", cls.review_temperature)),
+                os.environ.get("KICRAFT_REVIEW_TEMPERATURE", cls.review_temperature)
+            ),
             enable_electrical_review=_env_bool_default("KICRAFT_ELECTRICAL_REVIEW", True),
         )
 
@@ -381,9 +450,12 @@ class Settings:
         `provider_order`); the once-per-build review is allowed past it so a
         pricier or closed-weight `review_model` can route. Spend guard still
         bounds total spend."""
-        return replace(self, provider_order=self.review_provider_order,
-                       max_price_prompt=self.review_max_price_prompt,
-                       max_price_completion=self.review_max_price_completion)
+        return replace(
+            self,
+            provider_order=self.review_provider_order,
+            max_price_prompt=self.review_max_price_prompt,
+            max_price_completion=self.review_max_price_completion,
+        )
 
     def for_judge(self) -> "Settings":
         """A copy with provider routing relaxed for the Class-J eval judge call.
@@ -393,8 +465,7 @@ class Settings:
         past the pin (empty provider order = OpenRouter picks; no price cap). The
         design stages keep the global cap and the spend guard still bounds total
         spend (the judge is one call per graded run)."""
-        return replace(self, provider_order=[], max_price_prompt=0.0,
-                       max_price_completion=0.0)
+        return replace(self, provider_order=[], max_price_prompt=0.0, max_price_completion=0.0)
 
     def review_reasoning(self) -> dict | None:
         """OpenRouter reasoning control for the review: effort-based when
@@ -433,8 +504,10 @@ class Settings:
             normal_reasoning=self.design_reasoning(stage),
             serialization_max_tokens=int(
                 self.serialization_max_tokens.get(stage)
-                or STAGE_SERIALIZATION_MAX_TOKENS.get(stage, 8192)),
+                or STAGE_SERIALIZATION_MAX_TOKENS.get(stage, 8192)
+            ),
             serialization_retries=max(0, int(self.serialization_retries)),
+            collection_bounds=tuple(self.collection_bounds.get(stage, ())),
         )
 
     @property
@@ -442,8 +515,12 @@ class Settings:
         """Whether Stripe billing is fully configured (key, webhook secret, and
         both tier price ids). Anything less and the paid-tier checkout is
         hidden, so a partially configured box can never half-charge a card."""
-        return bool(self.stripe_secret_key and self.stripe_webhook_secret
-                    and self.stripe_price_pro and self.stripe_price_max)
+        return bool(
+            self.stripe_secret_key
+            and self.stripe_webhook_secret
+            and self.stripe_price_pro
+            and self.stripe_price_max
+        )
 
     def redacted(self) -> dict:
         """Settings safe to display/log (without the secret key)."""

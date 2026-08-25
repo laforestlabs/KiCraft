@@ -4,6 +4,7 @@ Each check has a positive (passing) and negative (failing) case using small
 hand-rolled fixture directories. The LLUPS project (live, slightly quirky) is
 used as a real-world smoke fixture.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,6 +27,8 @@ from kicraft.design.synthesis.validation import (
     check_autoplacer_is_valid_json,
     check_capacitor_polarity_consistency,
     check_footprints_nonempty,
+    check_bom_size,
+    check_collection_bounds,
     check_inter_sheet_nets_realized,
     check_named_refs_exist,
     check_no_dangling_signal_nets,
@@ -50,35 +53,35 @@ LLUPS_AVAILABLE = (LLUPS_ROOT / "LLUPS.kicad_sch").is_file()
 def _write_minimal_project(d: Path, stem: str = "TINY") -> None:
     """Two-sheet fixture that passes every §9 check."""
     (d / f"{stem}.kicad_sch").write_text(
-        f'(kicad_sch\n'
-        f'\t(version 20250114)\n'
+        f"(kicad_sch\n"
+        f"\t(version 20250114)\n"
         f'\t(generator "eeschema")\n'
         f'\t(uuid "11111111-1111-1111-1111-111111111111")\n'
-        f'\t(lib_symbols)\n'
-        f'\t(sheet\n'
-        f'\t\t(at 30 40) (size 30 15)\n'
+        f"\t(lib_symbols)\n"
+        f"\t(sheet\n"
+        f"\t\t(at 30 40) (size 30 15)\n"
         f'\t\t(uuid "22222222-2222-2222-2222-222222222222")\n'
         f'\t\t(property "Sheetname" "REG" (at 30 39 0))\n'
         f'\t\t(property "Sheetfile" "REG.kicad_sch" (at 30 56 0))\n'
         f'\t\t(pin "VBUS" bidirectional (at 60 45 0) (uuid "33333333-3333-3333-3333-333333333333"))\n'
-        f'\t)\n'
-        f')\n'
+        f"\t)\n"
+        f")\n"
     )
     (d / "REG.kicad_sch").write_text(
-        '(kicad_sch\n'
-        '\t(version 20250114)\n'
+        "(kicad_sch\n"
+        "\t(version 20250114)\n"
         '\t(generator "eeschema")\n'
         '\t(uuid "44444444-4444-4444-4444-444444444444")\n'
-        '\t(lib_symbols)\n'
-        '\t(symbol\n'
+        "\t(lib_symbols)\n"
+        "\t(symbol\n"
         '\t\t(lib_id "Device:R")\n'
-        '\t\t(at 100 80 0)\n'
+        "\t\t(at 100 80 0)\n"
         '\t\t(uuid "55555555-5555-5555-5555-555555555555")\n'
         '\t\t(property "Reference" "R1" (at 100 70 0))\n'
         '\t\t(property "Value" "10k" (at 100 73 0))\n'
         '\t\t(property "Footprint" "Resistor_SMD:R_0402_1005Metric" (at 100 86 0))\n'
-        '\t)\n'
-        ')\n'
+        "\t)\n"
+        ")\n"
     )
     (d / f"{stem}_autoplacer.json").write_text(
         json.dumps(
@@ -126,11 +129,11 @@ def test_footprints_pass(tmp_path: Path) -> None:
 
 def test_footprints_fail_on_real_instance(tmp_path: Path) -> None:
     (tmp_path / "X.kicad_sch").write_text(
-        '(kicad_sch (version 20250114) (lib_symbols)\n'
+        "(kicad_sch (version 20250114) (lib_symbols)\n"
         '(symbol (lib_id "Device:R") (at 0 0 0)\n'
         '  (property "Reference" "R1" (at 0 0 0))\n'
         '  (property "Footprint" "" (at 0 0 0))\n'
-        ')\n)\n'
+        ")\n)\n"
     )
     r = check_footprints_nonempty(tmp_path)
     assert not r.ok
@@ -140,17 +143,17 @@ def test_footprints_fail_on_real_instance(tmp_path: Path) -> None:
 def test_footprints_ignore_lib_symbols_template(tmp_path: Path) -> None:
     # lib_symbols carries an empty Footprint template; placed instance has a real one.
     (tmp_path / "X.kicad_sch").write_text(
-        '(kicad_sch (version 20250114)\n'
-        '(lib_symbols\n'
+        "(kicad_sch (version 20250114)\n"
+        "(lib_symbols\n"
         '  (symbol "Device:R"\n'
         '    (property "Reference" "R" (at 0 0 0))\n'
         '    (property "Footprint" "" (at 0 0 0))\n'
-        '  )\n'
-        ')\n'
+        "  )\n"
+        ")\n"
         '(symbol (lib_id "Device:R") (at 0 0 0)\n'
         '  (property "Reference" "R1" (at 0 0 0))\n'
         '  (property "Footprint" "Resistor_SMD:R_0402_1005Metric" (at 0 0 0))\n'
-        ')\n)\n'
+        ")\n)\n"
     )
     r = check_footprints_nonempty(tmp_path)
     assert r.ok, r.offenders
@@ -159,11 +162,11 @@ def test_footprints_ignore_lib_symbols_template(tmp_path: Path) -> None:
 def test_footprints_ignore_power_symbols(tmp_path: Path) -> None:
     # #PWR is KiCad's power-flag pseudo-component; its empty Footprint is correct.
     (tmp_path / "X.kicad_sch").write_text(
-        '(kicad_sch (version 20250114) (lib_symbols)\n'
+        "(kicad_sch (version 20250114) (lib_symbols)\n"
         '(symbol (lib_id "power:GND") (at 0 0 0)\n'
         '  (property "Reference" "#PWR0042" (at 0 0 0))\n'
         '  (property "Footprint" "" (at 0 0 0))\n'
-        ')\n)\n'
+        ")\n)\n"
     )
     r = check_footprints_nonempty(tmp_path)
     assert r.ok, r.offenders
@@ -180,10 +183,10 @@ def test_pin_directions_pass(tmp_path: Path) -> None:
 
 def test_pin_directions_fail(tmp_path: Path) -> None:
     (tmp_path / "X.kicad_sch").write_text(
-        '(kicad_sch (version 20250114) (lib_symbols)\n'
-        '(sheet (at 0 0) (size 10 5)\n'
+        "(kicad_sch (version 20250114) (lib_symbols)\n"
+        "(sheet (at 0 0) (size 10 5)\n"
         '  (pin "VBUS" power_in (at 0 0 0) (uuid "x"))\n'
-        ')\n)\n'
+        ")\n)\n"
     )
     r = check_pin_directions(tmp_path)
     assert not r.ok
@@ -201,7 +204,7 @@ def test_sheetfile_refs_resolve(tmp_path: Path) -> None:
 
 def test_sheetfile_refs_missing(tmp_path: Path) -> None:
     (tmp_path / "X.kicad_sch").write_text(
-        '(kicad_sch (version 20250114) (lib_symbols)\n'
+        "(kicad_sch (version 20250114) (lib_symbols)\n"
         '(sheet (property "Sheetfile" "GHOST.kicad_sch" (at 0 0 0)))\n)\n'
     )
     r = check_sheetfile_refs_resolve(tmp_path)
@@ -310,6 +313,49 @@ def _part(ref: str, sheet: str) -> BomPart:
     )
 
 
+def _bom_with_sheet_counts(*counts: tuple[str, int]) -> BOM:
+    parts = []
+    index = 1
+    for sheet, count in counts:
+        for _ in range(count):
+            parts.append(_part(f"R{index}", sheet))
+            index += 1
+    return BOM(parts=parts)
+
+
+def test_bom_size_preserves_documented_array_scale() -> None:
+    result = check_bom_size(_bom_with_sheet_counts(("ARRAY", 400)))
+    assert result.ok
+    assert result.name == "9.35 BOM emission bounds"
+
+
+def test_bom_size_rejects_total_overflow() -> None:
+    result = check_bom_size(_bom_with_sheet_counts(("LEFT", 251), ("RIGHT", 250)))
+    assert not result.ok
+    assert result.offenders == ["parts total (501 items, > 500)"]
+
+
+def test_bom_size_rejects_per_sheet_overflow() -> None:
+    result = check_bom_size(_bom_with_sheet_counts(("ARRAY", 451)))
+    assert not result.ok
+    assert result.offenders == ["ARRAY (451 items, > 450)"]
+
+
+def test_collection_bounds_sorts_worst_groups_deterministically() -> None:
+    items = ["B"] * 5 + ["A"] * 7
+    result = check_collection_bounds(
+        "parts",
+        items,
+        total=20,
+        per_group=4,
+        group_key=lambda item: item,
+    )
+    assert result.offenders == [
+        "A (7 items, > 4)",
+        "B (5 items, > 4)",
+    ]
+
+
 def _two_sheet_design() -> tuple[Architecture, BOM]:
     """CONTROLLER -> DRIVER over one signal net (SIG) and one power net (GND),
     both fully wired. Passes §9.13 and §9.14."""
@@ -320,27 +366,37 @@ def _two_sheet_design() -> tuple[Architecture, BOM]:
         ],
         power_nets=["GND"],
         inter_sheet_nets=[
-            InterSheetNet(name="SIG", endpoints=[
-                SheetPin(sheet="CONTROLLER", direction="output"),
-                SheetPin(sheet="DRIVER", direction="input"),
-            ]),
-            InterSheetNet(name="GND", endpoints=[
-                SheetPin(sheet="CONTROLLER", direction="bidirectional"),
-                SheetPin(sheet="DRIVER", direction="bidirectional"),
-            ]),
+            InterSheetNet(
+                name="SIG",
+                endpoints=[
+                    SheetPin(sheet="CONTROLLER", direction="output"),
+                    SheetPin(sheet="DRIVER", direction="input"),
+                ],
+            ),
+            InterSheetNet(
+                name="GND",
+                endpoints=[
+                    SheetPin(sheet="CONTROLLER", direction="bidirectional"),
+                    SheetPin(sheet="DRIVER", direction="bidirectional"),
+                ],
+            ),
         ],
     )
     bom = BOM(
         parts=[_part("U1", "CONTROLLER"), _part("U2", "DRIVER")],
         connections=[
-            NetConnection(net_name="SIG", sheet="CONTROLLER",
-                          endpoints=[PinEndpoint(ref="U1", pin="1")]),
-            NetConnection(net_name="SIG", sheet="DRIVER",
-                          endpoints=[PinEndpoint(ref="U2", pin="1")]),
-            NetConnection(net_name="GND", sheet="CONTROLLER",
-                          endpoints=[PinEndpoint(ref="U1", pin="2")]),
-            NetConnection(net_name="GND", sheet="DRIVER",
-                          endpoints=[PinEndpoint(ref="U2", pin="2")]),
+            NetConnection(
+                net_name="SIG", sheet="CONTROLLER", endpoints=[PinEndpoint(ref="U1", pin="1")]
+            ),
+            NetConnection(
+                net_name="SIG", sheet="DRIVER", endpoints=[PinEndpoint(ref="U2", pin="1")]
+            ),
+            NetConnection(
+                net_name="GND", sheet="CONTROLLER", endpoints=[PinEndpoint(ref="U1", pin="2")]
+            ),
+            NetConnection(
+                net_name="GND", sheet="DRIVER", endpoints=[PinEndpoint(ref="U2", pin="2")]
+            ),
         ],
     )
     return arch, bom
@@ -354,8 +410,9 @@ def test_inter_sheet_realized_passes_when_wired_both_sides() -> None:
 def test_inter_sheet_realized_flags_unwired_signal_endpoint() -> None:
     arch, bom = _two_sheet_design()
     # Drop the DRIVER side of SIG: the parent sheet pin now has no leaf label.
-    bom.connections = [c for c in bom.connections
-                       if not (c.net_name == "SIG" and c.sheet == "DRIVER")]
+    bom.connections = [
+        c for c in bom.connections if not (c.net_name == "SIG" and c.sheet == "DRIVER")
+    ]
     r = check_inter_sheet_nets_realized(arch, bom)
     assert not r.ok
     assert len(r.offenders) == 1
@@ -366,8 +423,9 @@ def test_inter_sheet_realized_ignores_power_nets() -> None:
     arch, bom = _two_sheet_design()
     # Drop a power-net endpoint: power crosses via global symbols, not sheet
     # pins, so §9.14 must not flag it (§9.11 owns per-pin power coverage).
-    bom.connections = [c for c in bom.connections
-                       if not (c.net_name == "GND" and c.sheet == "DRIVER")]
+    bom.connections = [
+        c for c in bom.connections if not (c.net_name == "GND" and c.sheet == "DRIVER")
+    ]
     assert check_inter_sheet_nets_realized(arch, bom).ok
 
 
@@ -410,48 +468,82 @@ def test_sheets_have_parts_exempts_library_backed_sheets() -> None:
     arch, bom = _two_sheet_design()
     # A library-backed sheet has no BOM parts of its own (the leaf installer
     # populates it); §9.8 checks its interface, so §9.13 must not flag it.
-    arch.sheets.append(Sheet(name="REG MODULE", stem="REG_MODULE", function="reg",
-                             from_library="buck_3v3@1.0", library_instance=1))
+    arch.sheets.append(
+        Sheet(
+            name="REG MODULE",
+            stem="REG_MODULE",
+            function="reg",
+            from_library="buck_3v3@1.0",
+            library_instance=1,
+        )
+    )
     assert check_sheets_have_parts(arch, bom).ok
 
 
 def test_wireless_charger_regression() -> None:
     """The exact project-3 failure: PWM_H/PWM_L/COIL_OUT unrealized on the
     COIL DRIVER (and QI CONTROLLER) side, plus an empty COIL DRIVER sheet."""
-    sheets = ["USB C INPUT", "POWER MANAGEMENT", "QI CONTROLLER",
-              "COIL DRIVER", "TRANSMIT COIL"]
+    sheets = ["USB C INPUT", "POWER MANAGEMENT", "QI CONTROLLER", "COIL DRIVER", "TRANSMIT COIL"]
     arch = Architecture(
         sheets=[Sheet(name=n, stem=n.replace(" ", "_"), function="f") for n in sheets],
         power_nets=["VBUS", "+3V3", "GND"],
         inter_sheet_nets=[
-            InterSheetNet(name="VBUS", endpoints=[
-                SheetPin(sheet="USB C INPUT", direction="bidirectional"),
-                SheetPin(sheet="POWER MANAGEMENT", direction="bidirectional"),
-                SheetPin(sheet="COIL DRIVER", direction="bidirectional")]),
-            InterSheetNet(name="+3V3", endpoints=[
-                SheetPin(sheet="POWER MANAGEMENT", direction="bidirectional"),
-                SheetPin(sheet="QI CONTROLLER", direction="bidirectional")]),
-            InterSheetNet(name="PWM_H", endpoints=[
-                SheetPin(sheet="QI CONTROLLER", direction="output"),
-                SheetPin(sheet="COIL DRIVER", direction="input")]),
-            InterSheetNet(name="PWM_L", endpoints=[
-                SheetPin(sheet="QI CONTROLLER", direction="output"),
-                SheetPin(sheet="COIL DRIVER", direction="input")]),
-            InterSheetNet(name="COIL_OUT", endpoints=[
-                SheetPin(sheet="COIL DRIVER", direction="output"),
-                SheetPin(sheet="TRANSMIT COIL", direction="input")]),
-            InterSheetNet(name="GND", endpoints=[
-                SheetPin(sheet=s, direction="bidirectional") for s in sheets]),
+            InterSheetNet(
+                name="VBUS",
+                endpoints=[
+                    SheetPin(sheet="USB C INPUT", direction="bidirectional"),
+                    SheetPin(sheet="POWER MANAGEMENT", direction="bidirectional"),
+                    SheetPin(sheet="COIL DRIVER", direction="bidirectional"),
+                ],
+            ),
+            InterSheetNet(
+                name="+3V3",
+                endpoints=[
+                    SheetPin(sheet="POWER MANAGEMENT", direction="bidirectional"),
+                    SheetPin(sheet="QI CONTROLLER", direction="bidirectional"),
+                ],
+            ),
+            InterSheetNet(
+                name="PWM_H",
+                endpoints=[
+                    SheetPin(sheet="QI CONTROLLER", direction="output"),
+                    SheetPin(sheet="COIL DRIVER", direction="input"),
+                ],
+            ),
+            InterSheetNet(
+                name="PWM_L",
+                endpoints=[
+                    SheetPin(sheet="QI CONTROLLER", direction="output"),
+                    SheetPin(sheet="COIL DRIVER", direction="input"),
+                ],
+            ),
+            InterSheetNet(
+                name="COIL_OUT",
+                endpoints=[
+                    SheetPin(sheet="COIL DRIVER", direction="output"),
+                    SheetPin(sheet="TRANSMIT COIL", direction="input"),
+                ],
+            ),
+            InterSheetNet(
+                name="GND", endpoints=[SheetPin(sheet=s, direction="bidirectional") for s in sheets]
+            ),
         ],
     )
     bom = BOM(
         # Every sheet populated EXCEPT COIL DRIVER (the empty-sheet bug).
-        parts=[_part("U1", "USB C INPUT"), _part("U2", "POWER MANAGEMENT"),
-               _part("U3", "QI CONTROLLER"), _part("L1", "TRANSMIT COIL")],
+        parts=[
+            _part("U1", "USB C INPUT"),
+            _part("U2", "POWER MANAGEMENT"),
+            _part("U3", "QI CONTROLLER"),
+            _part("L1", "TRANSMIT COIL"),
+        ],
         connections=[
             # Only the TRANSMIT COIL side of COIL_OUT ever got wired.
-            NetConnection(net_name="COIL_OUT", sheet="TRANSMIT COIL",
-                          endpoints=[PinEndpoint(ref="L1", pin="1")]),
+            NetConnection(
+                net_name="COIL_OUT",
+                sheet="TRANSMIT COIL",
+                endpoints=[PinEndpoint(ref="L1", pin="1")],
+            ),
         ],
     )
 
@@ -488,71 +580,115 @@ def _soil_like_design(fixed: bool = False) -> tuple[Architecture, BOM]:
     both sides (USB_DP, USB_DN), which is how the design should have been wired.
     """
     inter = [
-        InterSheetNet(name="GND", endpoints=[
-            SheetPin(sheet=s, direction="bidirectional")
-            for s in ("USB POWER", "ESP32", "CAP SENSOR")]),
-        InterSheetNet(name="VCC_3V3", endpoints=[
-            SheetPin(sheet="ESP32", direction="bidirectional"),
-            SheetPin(sheet="CAP SENSOR", direction="bidirectional")]),
-        InterSheetNet(name="ANALOG_OUT", endpoints=[
-            SheetPin(sheet="CAP SENSOR", direction="output"),
-            SheetPin(sheet="ESP32", direction="input")]),
+        InterSheetNet(
+            name="GND",
+            endpoints=[
+                SheetPin(sheet=s, direction="bidirectional")
+                for s in ("USB POWER", "ESP32", "CAP SENSOR")
+            ],
+        ),
+        InterSheetNet(
+            name="VCC_3V3",
+            endpoints=[
+                SheetPin(sheet="ESP32", direction="bidirectional"),
+                SheetPin(sheet="CAP SENSOR", direction="bidirectional"),
+            ],
+        ),
+        InterSheetNet(
+            name="ANALOG_OUT",
+            endpoints=[
+                SheetPin(sheet="CAP SENSOR", direction="output"),
+                SheetPin(sheet="ESP32", direction="input"),
+            ],
+        ),
     ]
     conns = [
         # Power (exempt) + a healthy 2-pin local net on the connector sheet.
-        NetConnection(net_name="VBUS", sheet="USB POWER",
-                      endpoints=[PinEndpoint(ref="J1", pin="A4")]),
-        NetConnection(net_name="GND", sheet="USB POWER",
-                      endpoints=[PinEndpoint(ref="J1", pin="A1"),
-                                 PinEndpoint(ref="R1", pin="2")]),
-        NetConnection(net_name="CC1", sheet="USB POWER",
-                      endpoints=[PinEndpoint(ref="J1", pin="A5"),
-                                 PinEndpoint(ref="R1", pin="1")]),
+        NetConnection(
+            net_name="VBUS", sheet="USB POWER", endpoints=[PinEndpoint(ref="J1", pin="A4")]
+        ),
+        NetConnection(
+            net_name="GND",
+            sheet="USB POWER",
+            endpoints=[PinEndpoint(ref="J1", pin="A1"), PinEndpoint(ref="R1", pin="2")],
+        ),
+        NetConnection(
+            net_name="CC1",
+            sheet="USB POWER",
+            endpoints=[PinEndpoint(ref="J1", pin="A5"), PinEndpoint(ref="R1", pin="1")],
+        ),
         # ESP32 sheet: power + a healthy 2-pin local net (EN) + the ANALOG_OUT
         # inter-sheet stub (single local pin, but joins across sheets -> OK).
-        NetConnection(net_name="VCC_3V3", sheet="ESP32",
-                      endpoints=[PinEndpoint(ref="U2", pin="3"),
-                                 PinEndpoint(ref="R3", pin="1")]),
-        NetConnection(net_name="EN", sheet="ESP32",
-                      endpoints=[PinEndpoint(ref="U2", pin="45"),
-                                 PinEndpoint(ref="R3", pin="2")]),
-        NetConnection(net_name="ANALOG_OUT", sheet="ESP32",
-                      endpoints=[PinEndpoint(ref="U2", pin="8")]),
+        NetConnection(
+            net_name="VCC_3V3",
+            sheet="ESP32",
+            endpoints=[PinEndpoint(ref="U2", pin="3"), PinEndpoint(ref="R3", pin="1")],
+        ),
+        NetConnection(
+            net_name="EN",
+            sheet="ESP32",
+            endpoints=[PinEndpoint(ref="U2", pin="45"), PinEndpoint(ref="R3", pin="2")],
+        ),
+        NetConnection(
+            net_name="ANALOG_OUT", sheet="ESP32", endpoints=[PinEndpoint(ref="U2", pin="8")]
+        ),
         # CAP SENSOR sheet: the other ANALOG_OUT stub + power.
-        NetConnection(net_name="ANALOG_OUT", sheet="CAP SENSOR",
-                      endpoints=[PinEndpoint(ref="J2", pin="3")]),
-        NetConnection(net_name="VCC_3V3", sheet="CAP SENSOR",
-                      endpoints=[PinEndpoint(ref="J2", pin="1")]),
+        NetConnection(
+            net_name="ANALOG_OUT", sheet="CAP SENSOR", endpoints=[PinEndpoint(ref="J2", pin="3")]
+        ),
+        NetConnection(
+            net_name="VCC_3V3", sheet="CAP SENSOR", endpoints=[PinEndpoint(ref="J2", pin="1")]
+        ),
     ]
     if fixed:
         inter += [
-            InterSheetNet(name="USB_DP", endpoints=[
-                SheetPin(sheet="USB POWER", direction="bidirectional"),
-                SheetPin(sheet="ESP32", direction="bidirectional")]),
-            InterSheetNet(name="USB_DN", endpoints=[
-                SheetPin(sheet="USB POWER", direction="bidirectional"),
-                SheetPin(sheet="ESP32", direction="bidirectional")]),
+            InterSheetNet(
+                name="USB_DP",
+                endpoints=[
+                    SheetPin(sheet="USB POWER", direction="bidirectional"),
+                    SheetPin(sheet="ESP32", direction="bidirectional"),
+                ],
+            ),
+            InterSheetNet(
+                name="USB_DN",
+                endpoints=[
+                    SheetPin(sheet="USB POWER", direction="bidirectional"),
+                    SheetPin(sheet="ESP32", direction="bidirectional"),
+                ],
+            ),
         ]
         conns += [
-            NetConnection(net_name="USB_DP", sheet="USB POWER",
-                          endpoints=[PinEndpoint(ref="J1", pin="A6")]),
-            NetConnection(net_name="USB_DP", sheet="ESP32",
-                          endpoints=[PinEndpoint(ref="U2", pin="24")]),
-            NetConnection(net_name="USB_DN", sheet="USB POWER",
-                          endpoints=[PinEndpoint(ref="J1", pin="A7")]),
-            NetConnection(net_name="USB_DN", sheet="ESP32",
-                          endpoints=[PinEndpoint(ref="U2", pin="23")]),
+            NetConnection(
+                net_name="USB_DP", sheet="USB POWER", endpoints=[PinEndpoint(ref="J1", pin="A6")]
+            ),
+            NetConnection(
+                net_name="USB_DP", sheet="ESP32", endpoints=[PinEndpoint(ref="U2", pin="24")]
+            ),
+            NetConnection(
+                net_name="USB_DN", sheet="USB POWER", endpoints=[PinEndpoint(ref="J1", pin="A7")]
+            ),
+            NetConnection(
+                net_name="USB_DN", sheet="ESP32", endpoints=[PinEndpoint(ref="U2", pin="23")]
+            ),
         ]
     else:
         conns += [
-            NetConnection(net_name="USB_DP_POWER", sheet="USB POWER",
-                          endpoints=[PinEndpoint(ref="J1", pin="A6")]),
-            NetConnection(net_name="USB_DN_POWER", sheet="USB POWER",
-                          endpoints=[PinEndpoint(ref="J1", pin="A7")]),
-            NetConnection(net_name="USB_DP_ESP32", sheet="ESP32",
-                          endpoints=[PinEndpoint(ref="U2", pin="24")]),
-            NetConnection(net_name="USB_DN_ESP32", sheet="ESP32",
-                          endpoints=[PinEndpoint(ref="U2", pin="23")]),
+            NetConnection(
+                net_name="USB_DP_POWER",
+                sheet="USB POWER",
+                endpoints=[PinEndpoint(ref="J1", pin="A6")],
+            ),
+            NetConnection(
+                net_name="USB_DN_POWER",
+                sheet="USB POWER",
+                endpoints=[PinEndpoint(ref="J1", pin="A7")],
+            ),
+            NetConnection(
+                net_name="USB_DP_ESP32", sheet="ESP32", endpoints=[PinEndpoint(ref="U2", pin="24")]
+            ),
+            NetConnection(
+                net_name="USB_DN_ESP32", sheet="ESP32", endpoints=[PinEndpoint(ref="U2", pin="23")]
+            ),
         ]
     arch = Architecture(
         sheets=[
@@ -564,9 +700,13 @@ def _soil_like_design(fixed: bool = False) -> tuple[Architecture, BOM]:
         inter_sheet_nets=inter,
     )
     bom = BOM(
-        parts=[_part("J1", "USB POWER"), _part("R1", "USB POWER"),
-               _part("U2", "ESP32"), _part("R3", "ESP32"),
-               _part("J2", "CAP SENSOR")],
+        parts=[
+            _part("J1", "USB POWER"),
+            _part("R1", "USB POWER"),
+            _part("U2", "ESP32"),
+            _part("R3", "ESP32"),
+            _part("J2", "CAP SENSOR"),
+        ],
         connections=conns,
     )
     return arch, bom
@@ -634,8 +774,7 @@ def _fake_lookup(pinmap):
             "symbol": lib_id,
             "unit_count": 1,
             "pins": [
-                {"number": n, "name": nm, "electrical_type": t}
-                for (n, nm, t) in pinmap[lib_id]
+                {"number": n, "name": nm, "electrical_type": t} for (n, nm, t) in pinmap[lib_id]
             ],
         }
 
@@ -643,61 +782,80 @@ def _fake_lookup(pinmap):
 
 
 def _bpart(ref, symbol, sheet="MCU"):
-    return BomPart(ref=ref, value="x", symbol=symbol,
-                   footprint="Package_SO:SOIC-8", sheet=sheet)
+    return BomPart(ref=ref, value="x", symbol=symbol, footprint="Package_SO:SOIC-8", sheet=sheet)
 
 
 def test_power_pin_polarity_flags_reversed_supply(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
-        {"Fake:MCU": [("1", "VDD", "power_in"), ("2", "VSS", "power_in")]}))
-    bom = BOM(parts=[_bpart("U1", "Fake:MCU")], connections=[
-        NetConnection(net_name="GND", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="1")]),   # VDD -> GND
-        NetConnection(net_name="+3V3", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="2")]),   # VSS -> +3V3
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup({"Fake:MCU": [("1", "VDD", "power_in"), ("2", "VSS", "power_in")]}),
+    )
+    bom = BOM(
+        parts=[_bpart("U1", "Fake:MCU")],
+        connections=[
+            NetConnection(
+                net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]
+            ),  # VDD -> GND
+            NetConnection(
+                net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="2")]
+            ),  # VSS -> +3V3
+        ],
+    )
     res = check_power_pin_polarity(bom)
     assert not res.ok
     assert len(res.offenders) == 2
 
 
 def test_power_pin_polarity_passes_correct_supply(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
-        {"Fake:MCU": [("1", "VDD", "power_in"), ("2", "VSS", "power_in")]}))
-    bom = BOM(parts=[_bpart("U1", "Fake:MCU")], connections=[
-        NetConnection(net_name="+3V3", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="1")]),
-        NetConnection(net_name="GND", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="2")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup({"Fake:MCU": [("1", "VDD", "power_in"), ("2", "VSS", "power_in")]}),
+    )
+    bom = BOM(
+        parts=[_bpart("U1", "Fake:MCU")],
+        connections=[
+            NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+            NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="2")]),
+        ],
+    )
     assert check_power_pin_polarity(bom).ok
 
+
 def _fake_two_supply_bom(positive_net: str, negative_net: str) -> BOM:
-    return BOM(parts=[_bpart("U1", "Fake:OPAMP")], connections=[
-        NetConnection(net_name=positive_net, sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="4")]),
-        NetConnection(net_name=negative_net, sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="11")]),
-    ])
+    return BOM(
+        parts=[_bpart("U1", "Fake:OPAMP")],
+        connections=[
+            NetConnection(
+                net_name=positive_net, sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="4")]
+            ),
+            NetConnection(
+                net_name=negative_net, sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="11")]
+            ),
+        ],
+    )
 
 
 def _patch_fake_two_supply_lookup(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({
-        "Fake:OPAMP": [
-            ("4", "VCC+", "power_in"),
-            ("11", "VCC-", "power_in"),
-        ],
-    }))
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "Fake:OPAMP": [
+                    ("4", "VCC+", "power_in"),
+                    ("11", "VCC-", "power_in"),
+                ],
+            }
+        ),
+    )
 
 
 def test_power_pin_polarity_accepts_vcc_suffix_single_and_dual_supply(monkeypatch) -> None:
     _patch_fake_two_supply_lookup(monkeypatch)
-    assert check_power_pin_polarity(
-        _fake_two_supply_bom("+5V", "GND")
-    ).ok
-    assert check_power_pin_polarity(
-        _fake_two_supply_bom("+12V", "-12V")
-    ).ok
+    assert check_power_pin_polarity(_fake_two_supply_bom("+5V", "GND")).ok
+    assert check_power_pin_polarity(_fake_two_supply_bom("+12V", "-12V")).ok
 
 
 def test_power_pin_polarity_rejects_vcc_suffix_reversal(monkeypatch) -> None:
@@ -705,88 +863,118 @@ def test_power_pin_polarity_rejects_vcc_suffix_reversal(monkeypatch) -> None:
     res = check_power_pin_polarity(_fake_two_supply_bom("GND", "+5V"))
     assert not res.ok
     assert len(res.offenders) == 2
-    assert any("U1.4" in offender and "ground net" in offender
-               for offender in res.offenders)
-    assert any("U1.11" in offender and "positive rail" in offender
-               for offender in res.offenders)
+    assert any("U1.4" in offender and "ground net" in offender for offender in res.offenders)
+    assert any("U1.11" in offender and "positive rail" in offender for offender in res.offenders)
 
 
 @pytest.mark.parametrize("negative_net", ["VSS", "VEE", "-12V"])
 def test_power_pin_polarity_rejects_positive_pin_on_negative_net(
-    monkeypatch, negative_net: str,
+    monkeypatch,
+    negative_net: str,
 ) -> None:
     _patch_fake_two_supply_lookup(monkeypatch)
-    res = check_power_pin_polarity(
-        _fake_two_supply_bom(negative_net, "+5V")
-    )
+    res = check_power_pin_polarity(_fake_two_supply_bom(negative_net, "+5V"))
     assert not res.ok
-    assert any("U1.4" in offender and negative_net in offender
-               and "negative rail" in offender for offender in res.offenders)
-    assert any("U1.11" in offender and "positive rail" in offender
-               for offender in res.offenders)
+    assert any(
+        "U1.4" in offender and negative_net in offender and "negative rail" in offender
+        for offender in res.offenders
+    )
+    assert any("U1.11" in offender and "positive rail" in offender for offender in res.offenders)
 
 
 def test_power_pin_polarity_ignores_differential_input(monkeypatch) -> None:
     # A differential analog input (VIN-/VINP) must NOT be read as a supply.
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
-        {"Fake:ADC": [("1", "VIN-", "input"), ("2", "VINP", "input")]}))
-    bom = BOM(parts=[_bpart("U2", "Fake:ADC")], connections=[
-        NetConnection(net_name="GND", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U2", pin="1")]),
-        NetConnection(net_name="+3V3", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U2", pin="2")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup({"Fake:ADC": [("1", "VIN-", "input"), ("2", "VINP", "input")]}),
+    )
+    bom = BOM(
+        parts=[_bpart("U2", "Fake:ADC")],
+        connections=[
+            NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="1")]),
+            NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="2")]),
+        ],
+    )
     assert check_power_pin_polarity(bom).ok
 
 
 def test_two_terminal_self_short_flags_fuse_across_one_net(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
-        {"Device:Fuse": [("1", "~", "passive"), ("2", "~", "passive")]}))
-    bom = BOM(parts=[_bpart("F1", "Device:Fuse", sheet="POWER")], connections=[
-        NetConnection(net_name="VIN", sheet="POWER",
-                      endpoints=[PinEndpoint(ref="F1", pin="1"),
-                                 PinEndpoint(ref="F1", pin="2")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup({"Device:Fuse": [("1", "~", "passive"), ("2", "~", "passive")]}),
+    )
+    bom = BOM(
+        parts=[_bpart("F1", "Device:Fuse", sheet="POWER")],
+        connections=[
+            NetConnection(
+                net_name="VIN",
+                sheet="POWER",
+                endpoints=[PinEndpoint(ref="F1", pin="1"), PinEndpoint(ref="F1", pin="2")],
+            ),
+        ],
+    )
     res = check_two_terminal_self_short(bom)
     assert not res.ok
     assert len(res.offenders) == 1
 
 
 def test_two_terminal_self_short_passes_series_part(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
-        {"Device:Fuse": [("1", "~", "passive"), ("2", "~", "passive")]}))
-    bom = BOM(parts=[_bpart("F1", "Device:Fuse", sheet="POWER")], connections=[
-        NetConnection(net_name="VIN", sheet="POWER",
-                      endpoints=[PinEndpoint(ref="F1", pin="1")]),
-        NetConnection(net_name="VOUT", sheet="POWER",
-                      endpoints=[PinEndpoint(ref="F1", pin="2")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup({"Device:Fuse": [("1", "~", "passive"), ("2", "~", "passive")]}),
+    )
+    bom = BOM(
+        parts=[_bpart("F1", "Device:Fuse", sheet="POWER")],
+        connections=[
+            NetConnection(
+                net_name="VIN", sheet="POWER", endpoints=[PinEndpoint(ref="F1", pin="1")]
+            ),
+            NetConnection(
+                net_name="VOUT", sheet="POWER", endpoints=[PinEndpoint(ref="F1", pin="2")]
+            ),
+        ],
+    )
     assert check_two_terminal_self_short(bom).ok
 
 
 def test_rf_feed_isolation_flags_antenna_feed_on_gnd(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
-        {"Fake:ANT": [("1", "FEED", "passive"), ("2", "GND", "passive")]}))
-    bom = BOM(parts=[_bpart("ANT1", "Fake:ANT", sheet="RF")], connections=[
-        NetConnection(net_name="GND", sheet="RF",
-                      endpoints=[PinEndpoint(ref="ANT1", pin="1")]),  # FEED -> GND
-        NetConnection(net_name="GND", sheet="RF",
-                      endpoints=[PinEndpoint(ref="ANT1", pin="2")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup({"Fake:ANT": [("1", "FEED", "passive"), ("2", "GND", "passive")]}),
+    )
+    bom = BOM(
+        parts=[_bpart("ANT1", "Fake:ANT", sheet="RF")],
+        connections=[
+            NetConnection(
+                net_name="GND", sheet="RF", endpoints=[PinEndpoint(ref="ANT1", pin="1")]
+            ),  # FEED -> GND
+            NetConnection(net_name="GND", sheet="RF", endpoints=[PinEndpoint(ref="ANT1", pin="2")]),
+        ],
+    )
     res = check_rf_feed_isolation(bom)
     assert not res.ok
     assert len(res.offenders) == 1
 
 
 def test_rf_feed_isolation_passes_feed_on_rf_net(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
-        {"Fake:ANT": [("1", "FEED", "passive"), ("2", "GND", "passive")]}))
-    bom = BOM(parts=[_bpart("ANT1", "Fake:ANT", sheet="RF")], connections=[
-        NetConnection(net_name="ANT_FEED", sheet="RF",
-                      endpoints=[PinEndpoint(ref="ANT1", pin="1")]),
-        NetConnection(net_name="GND", sheet="RF",
-                      endpoints=[PinEndpoint(ref="ANT1", pin="2")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup({"Fake:ANT": [("1", "FEED", "passive"), ("2", "GND", "passive")]}),
+    )
+    bom = BOM(
+        parts=[_bpart("ANT1", "Fake:ANT", sheet="RF")],
+        connections=[
+            NetConnection(
+                net_name="ANT_FEED", sheet="RF", endpoints=[PinEndpoint(ref="ANT1", pin="1")]
+            ),
+            NetConnection(net_name="GND", sheet="RF", endpoints=[PinEndpoint(ref="ANT1", pin="2")]),
+        ],
+    )
     assert check_rf_feed_isolation(bom).ok
 
 
@@ -801,13 +989,19 @@ from kicraft.design.synthesis.validation import (  # noqa: E402
 def test_single_net_per_pin_flags_pin_on_two_nets() -> None:
     # DRV8833-style: VM pin (12) listed on both VBAT and VCP_VM shorts them
     # (and removes the charge-pump cap). No symbol lookup needed.
-    bom = BOM(parts=[_bpart("U4", "drv8833:DRV8833", sheet="DRV")], connections=[
-        NetConnection(net_name="VBAT", sheet="DRV",
-                      endpoints=[PinEndpoint(ref="U4", pin="12")]),
-        NetConnection(net_name="VCP_VM", sheet="DRV",
-                      endpoints=[PinEndpoint(ref="U4", pin="11"),
-                                 PinEndpoint(ref="U4", pin="12")]),
-    ])
+    bom = BOM(
+        parts=[_bpart("U4", "drv8833:DRV8833", sheet="DRV")],
+        connections=[
+            NetConnection(
+                net_name="VBAT", sheet="DRV", endpoints=[PinEndpoint(ref="U4", pin="12")]
+            ),
+            NetConnection(
+                net_name="VCP_VM",
+                sheet="DRV",
+                endpoints=[PinEndpoint(ref="U4", pin="11"), PinEndpoint(ref="U4", pin="12")],
+            ),
+        ],
+    )
     res = check_single_net_per_pin(bom)
     assert not res.ok
     assert len(res.offenders) == 1
@@ -815,91 +1009,162 @@ def test_single_net_per_pin_flags_pin_on_two_nets() -> None:
 
 
 def test_single_net_per_pin_passes_clean_wiring() -> None:
-    bom = BOM(parts=[_bpart("U4", "drv8833:DRV8833", sheet="DRV")], connections=[
-        NetConnection(net_name="VBAT", sheet="DRV",
-                      endpoints=[PinEndpoint(ref="U4", pin="12")]),
-        NetConnection(net_name="VCP_VM", sheet="DRV",
-                      endpoints=[PinEndpoint(ref="U4", pin="11")]),
-    ])
+    bom = BOM(
+        parts=[_bpart("U4", "drv8833:DRV8833", sheet="DRV")],
+        connections=[
+            NetConnection(
+                net_name="VBAT", sheet="DRV", endpoints=[PinEndpoint(ref="U4", pin="12")]
+            ),
+            NetConnection(
+                net_name="VCP_VM", sheet="DRV", endpoints=[PinEndpoint(ref="U4", pin="11")]
+            ),
+        ],
+    )
     assert check_single_net_per_pin(bom).ok
 
 
 def test_single_net_per_pin_allows_repeated_name() -> None:
     # The same net_name appearing in two connections (different pins, one each)
     # is not a short -- only DISTINCT names on ONE pin are flagged.
-    bom = BOM(parts=[_bpart("U1", "Fake:X", sheet="MCU")], connections=[
-        NetConnection(net_name="SIG", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="1")]),
-        NetConnection(net_name="SIG", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="2")]),
-    ])
+    bom = BOM(
+        parts=[_bpart("U1", "Fake:X", sheet="MCU")],
+        connections=[
+            NetConnection(net_name="SIG", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+            NetConnection(net_name="SIG", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="2")]),
+        ],
+    )
     assert check_single_net_per_pin(bom).ok
 
 
 def test_family_contract_flags_flash_supply_on_data_net(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"w25q:W25Q16": [
-        ("8", "VCC", "power_in"), ("4", "GND", "power_in"),
-        ("5", "DI/IO0", "bidirectional"), ("6", "CLK", "input"),
-    ]}))
-    bom = BOM(parts=[_bpart("U2", "w25q:W25Q16", sheet="MCU")], connections=[
-        NetConnection(net_name="QSPI_SD0", sheet="MCU",   # VCC scrambled onto a data net
-                      endpoints=[PinEndpoint(ref="U2", pin="8")]),
-        NetConnection(net_name="GND", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U2", pin="4")]),
-        NetConnection(net_name="QSPI_SD1", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U2", pin="5")]),
-        NetConnection(net_name="QSPI_SCLK", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U2", pin="6")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "w25q:W25Q16": [
+                    ("8", "VCC", "power_in"),
+                    ("4", "GND", "power_in"),
+                    ("5", "DI/IO0", "bidirectional"),
+                    ("6", "CLK", "input"),
+                ]
+            }
+        ),
+    )
+    bom = BOM(
+        parts=[_bpart("U2", "w25q:W25Q16", sheet="MCU")],
+        connections=[
+            NetConnection(
+                net_name="QSPI_SD0",
+                sheet="MCU",  # VCC scrambled onto a data net
+                endpoints=[PinEndpoint(ref="U2", pin="8")],
+            ),
+            NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="4")]),
+            NetConnection(
+                net_name="QSPI_SD1", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="5")]
+            ),
+            NetConnection(
+                net_name="QSPI_SCLK", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="6")]
+            ),
+        ],
+    )
     res = check_family_wiring_contracts(bom)
     assert not res.ok
     assert any("U2.8" in o for o in res.offenders)
 
 
 def test_family_contract_flags_flash_data_on_rail(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"w25q:W25Q16": [
-        ("8", "VCC", "power_in"), ("4", "GND", "power_in"),
-        ("5", "DI/IO0", "bidirectional"),
-    ]}))
-    bom = BOM(parts=[_bpart("U2", "w25q:W25Q16", sheet="MCU")], connections=[
-        NetConnection(net_name="+3V3", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U2", pin="8")]),
-        NetConnection(net_name="GND", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U2", pin="4")]),
-        NetConnection(net_name="+3V3", sheet="MCU",   # IO0 data line tied to the rail
-                      endpoints=[PinEndpoint(ref="U2", pin="5")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "w25q:W25Q16": [
+                    ("8", "VCC", "power_in"),
+                    ("4", "GND", "power_in"),
+                    ("5", "DI/IO0", "bidirectional"),
+                ]
+            }
+        ),
+    )
+    bom = BOM(
+        parts=[_bpart("U2", "w25q:W25Q16", sheet="MCU")],
+        connections=[
+            NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="8")]),
+            NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="4")]),
+            NetConnection(
+                net_name="+3V3",
+                sheet="MCU",  # IO0 data line tied to the rail
+                endpoints=[PinEndpoint(ref="U2", pin="5")],
+            ),
+        ],
+    )
     res = check_family_wiring_contracts(bom)
     assert not res.ok
     assert any("U2.5" in o for o in res.offenders)
 
 
 def test_family_contract_passes_correct_flash(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"w25q:W25Q16": [
-        ("8", "VCC", "power_in"), ("4", "GND", "power_in"),
-        ("5", "DI/IO0", "bidirectional"), ("6", "CLK", "input"),
-        ("1", "~{CS}", "input"),
-    ]}))
-    bom = BOM(parts=[_bpart("U2", "w25q:W25Q16", sheet="MCU")], connections=[
-        NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="8")]),
-        NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="4")]),
-        NetConnection(net_name="QSPI_SD0", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="5")]),
-        NetConnection(net_name="QSPI_SCLK", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="6")]),
-        NetConnection(net_name="QSPI_CSn", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="1")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "w25q:W25Q16": [
+                    ("8", "VCC", "power_in"),
+                    ("4", "GND", "power_in"),
+                    ("5", "DI/IO0", "bidirectional"),
+                    ("6", "CLK", "input"),
+                    ("1", "~{CS}", "input"),
+                ]
+            }
+        ),
+    )
+    bom = BOM(
+        parts=[_bpart("U2", "w25q:W25Q16", sheet="MCU")],
+        connections=[
+            NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="8")]),
+            NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="4")]),
+            NetConnection(
+                net_name="QSPI_SD0", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="5")]
+            ),
+            NetConnection(
+                net_name="QSPI_SCLK", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="6")]
+            ),
+            NetConnection(
+                net_name="QSPI_CSn", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="1")]
+            ),
+        ],
+    )
     assert check_family_wiring_contracts(bom).ok
 
 
 def test_family_contract_flags_can_rs_on_rail(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"sn65hvd230:SN65HVD230": [
-        ("3", "VCC", "power_in"), ("2", "GND", "power_in"), ("8", "RS", "input"),
-    ]}))
-    bom = BOM(parts=[_bpart("U3", "sn65hvd230:SN65HVD230", sheet="CAN")], connections=[
-        NetConnection(net_name="+3V3", sheet="CAN", endpoints=[PinEndpoint(ref="U3", pin="3")]),
-        NetConnection(net_name="GND", sheet="CAN", endpoints=[PinEndpoint(ref="U3", pin="2")]),
-        NetConnection(net_name="+3V3", sheet="CAN",   # RS high = standby (wrong)
-                      endpoints=[PinEndpoint(ref="U3", pin="8")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "sn65hvd230:SN65HVD230": [
+                    ("3", "VCC", "power_in"),
+                    ("2", "GND", "power_in"),
+                    ("8", "RS", "input"),
+                ]
+            }
+        ),
+    )
+    bom = BOM(
+        parts=[_bpart("U3", "sn65hvd230:SN65HVD230", sheet="CAN")],
+        connections=[
+            NetConnection(net_name="+3V3", sheet="CAN", endpoints=[PinEndpoint(ref="U3", pin="3")]),
+            NetConnection(net_name="GND", sheet="CAN", endpoints=[PinEndpoint(ref="U3", pin="2")]),
+            NetConnection(
+                net_name="+3V3",
+                sheet="CAN",  # RS high = standby (wrong)
+                endpoints=[PinEndpoint(ref="U3", pin="8")],
+            ),
+        ],
+    )
     res = check_family_wiring_contracts(bom)
     assert not res.ok
     assert any("U3.8" in o for o in res.offenders)
@@ -914,87 +1179,196 @@ from kicraft.design.synthesis.validation import (  # noqa: E402
 
 def test_mcu_prog_path_flags_esp32_boot_strap_hard_tied(monkeypatch) -> None:
     # #12 esp32-s3: IO0 hard-tied to +3V3 -> cannot enter download mode.
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"esp32:ESP32-S3": [
-        ("1", "VDD", "power_in"), ("2", "GND", "power_in"), ("3", "IO0", "bidirectional"),
-    ]}))
-    bom = BOM(parts=[_bpart("U1", "esp32:ESP32-S3")], connections=[
-        NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
-        NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="2")]),
-        NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="3")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "esp32:ESP32-S3": [
+                    ("1", "VDD", "power_in"),
+                    ("2", "GND", "power_in"),
+                    ("3", "IO0", "bidirectional"),
+                ]
+            }
+        ),
+    )
+    bom = BOM(
+        parts=[_bpart("U1", "esp32:ESP32-S3")],
+        connections=[
+            NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+            NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="2")]),
+            NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="3")]),
+        ],
+    )
     res = check_mcu_programming_path(bom)
     assert not res.ok and any("U1" in o and "IO0/GPIO0" in o for o in res.offenders)
 
 
 def test_mcu_prog_path_passes_esp32_drivable_strap(monkeypatch) -> None:
     # IO0 on a signal net (a boot button/strap can pull it low) -> OK.
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"esp32:ESP32-S3": [
-        ("3", "IO0", "bidirectional"),
-    ]}))
-    bom = BOM(parts=[_bpart("U1", "esp32:ESP32-S3"),
-                     BomPart(ref="SW1", value="boot", symbol="Switch:SW_Push",
-                             footprint="Button_Switch_SMD:SW_SPST", sheet="MCU")],
-              connections=[
-        NetConnection(net_name="BOOT", sheet="MCU", endpoints=[
-            PinEndpoint(ref="U1", pin="3"), PinEndpoint(ref="SW1", pin="1")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "esp32:ESP32-S3": [
+                    ("3", "IO0", "bidirectional"),
+                ]
+            }
+        ),
+    )
+    bom = BOM(
+        parts=[
+            _bpart("U1", "esp32:ESP32-S3"),
+            BomPart(
+                ref="SW1",
+                value="boot",
+                symbol="Switch:SW_Push",
+                footprint="Button_Switch_SMD:SW_SPST",
+                sheet="MCU",
+            ),
+        ],
+        connections=[
+            NetConnection(
+                net_name="BOOT",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U1", pin="3"), PinEndpoint(ref="SW1", pin="1")],
+            ),
+        ],
+    )
     assert check_mcu_programming_path(bom).ok
 
 
 def test_mcu_prog_path_flags_rp2040_no_swd_no_button(monkeypatch) -> None:
     # #10 rp2040-min: SWD no-connect + no BOOTSEL button -> unprogrammable.
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"rp2040:RP2040": [
-        ("1", "VDD", "power_in"), ("2", "SWCLK", "input"), ("3", "SWDIO", "bidirectional"),
-    ]}))
-    bom = BOM(parts=[_bpart("U1", "rp2040:RP2040")], connections=[
-        NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
-    ], no_connect_pins=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U1", pin="3")])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "rp2040:RP2040": [
+                    ("1", "VDD", "power_in"),
+                    ("2", "SWCLK", "input"),
+                    ("3", "SWDIO", "bidirectional"),
+                ]
+            }
+        ),
+    )
+    bom = BOM(
+        parts=[_bpart("U1", "rp2040:RP2040")],
+        connections=[
+            NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+        ],
+        no_connect_pins=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U1", pin="3")],
+    )
     res = check_mcu_programming_path(bom)
     assert not res.ok and any("SWD" in o for o in res.offenders)
 
 
 def test_mcu_prog_path_passes_rp2040_with_swd_broken_out(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"rp2040:RP2040": [
-        ("2", "SWCLK", "input"), ("3", "SWDIO", "bidirectional"),
-    ]}))
-    bom = BOM(parts=[_bpart("U1", "rp2040:RP2040")], connections=[
-        NetConnection(net_name="SWCLK", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="2")]),
-        NetConnection(net_name="SWDIO", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="3")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "rp2040:RP2040": [
+                    ("2", "SWCLK", "input"),
+                    ("3", "SWDIO", "bidirectional"),
+                ]
+            }
+        ),
+    )
+    bom = BOM(
+        parts=[_bpart("U1", "rp2040:RP2040")],
+        connections=[
+            NetConnection(
+                net_name="SWCLK", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="2")]
+            ),
+            NetConnection(
+                net_name="SWDIO", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="3")]
+            ),
+        ],
+    )
     assert check_mcu_programming_path(bom).ok
 
 
 def test_mcu_prog_path_passes_rp2040_with_bootsel_button(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"rp2040:RP2040": [
-        ("2", "SWCLK", "input"), ("3", "SWDIO", "bidirectional"),
-    ]}))
-    bom = BOM(parts=[_bpart("U1", "rp2040:RP2040"),
-                     BomPart(ref="SW1", value="boot", symbol="Switch:SW_Push",
-                             footprint="Button_Switch_SMD:SW_SPST", sheet="MCU")],
-              connections=[
-        NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="SW1", pin="1")]),
-    ], no_connect_pins=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U1", pin="3")])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "rp2040:RP2040": [
+                    ("2", "SWCLK", "input"),
+                    ("3", "SWDIO", "bidirectional"),
+                ]
+            }
+        ),
+    )
+    bom = BOM(
+        parts=[
+            _bpart("U1", "rp2040:RP2040"),
+            BomPart(
+                ref="SW1",
+                value="boot",
+                symbol="Switch:SW_Push",
+                footprint="Button_Switch_SMD:SW_SPST",
+                sheet="MCU",
+            ),
+        ],
+        connections=[
+            NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="SW1", pin="1")]),
+        ],
+        no_connect_pins=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U1", pin="3")],
+    )
     assert check_mcu_programming_path(bom).ok
 
 
 def test_mcu_prog_path_ignores_non_mcu_parts(monkeypatch) -> None:
     # A plain regulator is not an MCU -> never flagged.
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"Regulator:AMS1117": [
-        ("1", "GND", "power_in"), ("2", "VOUT", "power_out"), ("3", "VIN", "power_in"),
-    ]}))
-    bom = BOM(parts=[_bpart("U1", "Regulator:AMS1117")], connections=[
-        NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
-    ])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "Regulator:AMS1117": [
+                    ("1", "GND", "power_in"),
+                    ("2", "VOUT", "power_out"),
+                    ("3", "VIN", "power_in"),
+                ]
+            }
+        ),
+    )
+    bom = BOM(
+        parts=[_bpart("U1", "Regulator:AMS1117")],
+        connections=[
+            NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+        ],
+    )
     assert check_mcu_programming_path(bom).ok
 
 
 def test_mcu_prog_path_flags_generic_mcu_unconnected_swd(monkeypatch) -> None:
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"MCU_ST:STM32F030": [
-        ("1", "VDD", "power_in"), ("2", "SWCLK", "input"), ("3", "SWDIO", "bidirectional"),
-    ]}))
-    bom = BOM(parts=[_bpart("U1", "MCU_ST:STM32F030")], connections=[
-        NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
-    ], no_connect_pins=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U1", pin="3")])
+    monkeypatch.setattr(
+        _sp,
+        "lookup_pins",
+        _fake_lookup(
+            {
+                "MCU_ST:STM32F030": [
+                    ("1", "VDD", "power_in"),
+                    ("2", "SWCLK", "input"),
+                    ("3", "SWDIO", "bidirectional"),
+                ]
+            }
+        ),
+    )
+    bom = BOM(
+        parts=[_bpart("U1", "MCU_ST:STM32F030")],
+        connections=[
+            NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+        ],
+        no_connect_pins=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U1", pin="3")],
+    )
     res = check_mcu_programming_path(bom)
     assert not res.ok and any("SWD/JTAG" in o for o in res.offenders)
 
@@ -1008,44 +1382,64 @@ from kicraft.design.models import IntentSlot  # noqa: E402
 
 
 def _conn(ref, sheet="IO"):
-    return BomPart(ref=ref, value="hdr", symbol="Connector:Conn_01x04",
-                   footprint="Connector_PinHeader:PinHeader_1x04", sheet=sheet)
+    return BomPart(
+        ref=ref,
+        value="hdr",
+        symbol="Connector:Conn_01x04",
+        footprint="Connector_PinHeader:PinHeader_1x04",
+        sheet=sheet,
+    )
 
 
 def test_breakout_flags_unbridged_connectors() -> None:
     # #11 fpc-breakout: two connectors, no net spans both -> intent undone.
     intent = IntentSlot(goal="A simple FPC-to-header breakout board")
-    bom = BOM(parts=[_conn("J1"), _conn("J2")], connections=[
-        NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
-        NetConnection(net_name="B", sheet="IO", endpoints=[PinEndpoint(ref="J2", pin="1")]),
-    ])
+    bom = BOM(
+        parts=[_conn("J1"), _conn("J2")],
+        connections=[
+            NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
+            NetConnection(net_name="B", sheet="IO", endpoints=[PinEndpoint(ref="J2", pin="1")]),
+        ],
+    )
     res = check_breakout_connectivity(intent, bom)
     assert not res.ok and any("J1" in o and "J2" in o for o in res.offenders)
 
 
 def test_breakout_passes_when_a_net_bridges() -> None:
     intent = IntentSlot(goal="A USB breakout / adapter")
-    bom = BOM(parts=[_conn("J1"), _conn("J2")], connections=[
-        NetConnection(net_name="D+", sheet="IO", endpoints=[
-            PinEndpoint(ref="J1", pin="1"), PinEndpoint(ref="J2", pin="1")]),
-    ])
+    bom = BOM(
+        parts=[_conn("J1"), _conn("J2")],
+        connections=[
+            NetConnection(
+                net_name="D+",
+                sheet="IO",
+                endpoints=[PinEndpoint(ref="J1", pin="1"), PinEndpoint(ref="J2", pin="1")],
+            ),
+        ],
+    )
     assert check_breakout_connectivity(intent, bom).ok
 
 
 def test_breakout_skips_non_breakout_brief() -> None:
     intent = IntentSlot(goal="A 3.3V buck regulator board")
-    bom = BOM(parts=[_conn("J1"), _conn("J2")], connections=[
-        NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
-        NetConnection(net_name="B", sheet="IO", endpoints=[PinEndpoint(ref="J2", pin="1")]),
-    ])
+    bom = BOM(
+        parts=[_conn("J1"), _conn("J2")],
+        connections=[
+            NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
+            NetConnection(net_name="B", sheet="IO", endpoints=[PinEndpoint(ref="J2", pin="1")]),
+        ],
+    )
     assert check_breakout_connectivity(intent, bom).ok  # not a breakout -> not judged
 
 
 def test_breakout_skips_single_connector() -> None:
     intent = IntentSlot(goal="A sensor breakout board")
-    bom = BOM(parts=[_conn("J1")], connections=[
-        NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
-    ])
+    bom = BOM(
+        parts=[_conn("J1")],
+        connections=[
+            NetConnection(net_name="A", sheet="IO", endpoints=[PinEndpoint(ref="J1", pin="1")]),
+        ],
+    )
     assert check_breakout_connectivity(intent, bom).ok  # <2 connectors -> not judged
 
 
@@ -1053,32 +1447,24 @@ def test_breakout_skips_single_connector() -> None:
 
 
 def _cap(ref: str, symbol: str, footprint: str) -> BomPart:
-    return BomPart(
-        ref=ref, value="10uF", symbol=symbol, footprint=footprint, sheet="PWR"
-    )
+    return BomPart(ref=ref, value="10uF", symbol=symbol, footprint=footprint, sheet="PWR")
 
 
 def test_cap_polarity_flags_nonpolar_symbol_on_polarized_footprint() -> None:
     # The KC-U2VAA8 defect: a film cap (Device:C) given an electrolytic can.
-    bom = BOM(
-        parts=[_cap("C1", "Device:C", "Capacitor_THT:CP_Radial_D12.5mm_P7.50mm")]
-    )
+    bom = BOM(parts=[_cap("C1", "Device:C", "Capacitor_THT:CP_Radial_D12.5mm_P7.50mm")])
     r = check_capacitor_polarity_consistency(bom)
     assert not r.ok
     assert r.offenders and "C1" in r.offenders[0]
 
 
 def test_cap_polarity_flags_polar_symbol_on_nonpolarized_footprint() -> None:
-    bom = BOM(
-        parts=[_cap("C2", "Device:CP", "Capacitor_SMD:C_0805_2012Metric")]
-    )
+    bom = BOM(parts=[_cap("C2", "Device:CP", "Capacitor_SMD:C_0805_2012Metric")])
     assert not check_capacitor_polarity_consistency(bom).ok
 
 
 def test_cap_polarity_flags_tantalum_footprint_on_nonpolar_symbol() -> None:
-    bom = BOM(
-        parts=[_cap("C3", "Device:C", "Capacitor_Tantalum_SMD:CP_EIA-3216-18")]
-    )
+    bom = BOM(parts=[_cap("C3", "Device:C", "Capacitor_Tantalum_SMD:CP_EIA-3216-18")])
     assert not check_capacitor_polarity_consistency(bom).ok
 
 
@@ -1088,9 +1474,7 @@ def test_cap_polarity_passes_matching_nonpolarized() -> None:
 
 
 def test_cap_polarity_passes_matching_polarized() -> None:
-    bom = BOM(
-        parts=[_cap("C5", "Device:CP", "Capacitor_THT:CP_Radial_D8.0mm_P3.50mm")]
-    )
+    bom = BOM(parts=[_cap("C5", "Device:CP", "Capacitor_THT:CP_Radial_D8.0mm_P3.50mm")])
     assert check_capacitor_polarity_consistency(bom).ok
 
 
@@ -1127,30 +1511,46 @@ from kicraft.design.synthesis.validation import check_mcu_programming_access
 
 
 def _jpart(ref, value, symbol="Connector:Conn_01x03", sheet="MCU"):
-    return BomPart(ref=ref, value=value, symbol=symbol,
-                   footprint="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
-                   sheet=sheet)
+    return BomPart(
+        ref=ref,
+        value=value,
+        symbol=symbol,
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+        sheet=sheet,
+    )
 
 
 ATTINY = "attiny412:ATTINY412-SSNR"
-ATTINY_PINS = {ATTINY: [
-    ("1", "VDD", "power_in"), ("8", "GND", "power_in"),
-    ("6", "UPDI/PA0", "bidirectional"), ("4", "PA6", "bidirectional"),
-]}
+ATTINY_PINS = {
+    ATTINY: [
+        ("1", "VDD", "power_in"),
+        ("8", "GND", "power_in"),
+        ("6", "UPDI/PA0", "bidirectional"),
+        ("4", "PA6", "bidirectional"),
+    ]
+}
 
 
 def test_prog_access_ok_without_mcu() -> None:
-    bom = BOM(parts=[_bpart("J1", "jst:JST"), ], connections=[])
+    bom = BOM(
+        parts=[
+            _bpart("J1", "jst:JST"),
+        ],
+        connections=[],
+    )
     assert check_mcu_programming_access(bom).ok
 
 
 def test_prog_access_fails_mcu_with_no_access_part() -> None:
     # The KC-HN59RJ BOM shape: MCU + power JST only. Must fail at BOM commit
     # (no connections yet) with the MCU as offender and actionable text.
-    bom = BOM(parts=[
-        _bpart("U1", ATTINY),
-        _jpart("J1", "JST-PH 2-pin SMD", symbol="jst-ph-2p:S2B-PH-SM4-TB"),
-    ], connections=[])
+    bom = BOM(
+        parts=[
+            _bpart("U1", ATTINY),
+            _jpart("J1", "JST-PH 2-pin SMD", symbol="jst-ph-2p:S2B-PH-SM4-TB"),
+        ],
+        connections=[],
+    )
     res = check_mcu_programming_access(bom)
     assert not res.ok
     assert res.offenders and "U1" in res.offenders[0]
@@ -1158,14 +1558,18 @@ def test_prog_access_fails_mcu_with_no_access_part() -> None:
 
 
 def test_prog_access_part_presence_satisfied_by_updi_header() -> None:
-    bom = BOM(parts=[_bpart("U1", ATTINY), _jpart("J2", "UPDI header 1x03")],
-              connections=[])
+    bom = BOM(parts=[_bpart("U1", ATTINY), _jpart("J2", "UPDI header 1x03")], connections=[])
     assert check_mcu_programming_access(bom).ok
 
 
 def test_prog_access_part_presence_satisfied_by_test_pads() -> None:
-    tp = BomPart(ref="TP1", value="UPDI pad", symbol="Connector:TestPoint",
-                 footprint="TestPoint:TestPoint_Pad_D1.5mm", sheet="MCU")
+    tp = BomPart(
+        ref="TP1",
+        value="UPDI pad",
+        symbol="Connector:TestPoint",
+        footprint="TestPoint:TestPoint_Pad_D1.5mm",
+        sheet="MCU",
+    )
     bom = BOM(parts=[_bpart("U1", ATTINY), tp], connections=[])
     assert check_mcu_programming_access(bom).ok
 
@@ -1175,34 +1579,50 @@ def test_prog_access_part_presence_usb_alone_insufficient_for_esp32() -> None:
     # not a workable ESP32 download-mode story -- entering the bootloader
     # needs BOOT+EN buttons, strap test pads, or a USB-UART bridge whose
     # DTR/RTS auto-reset drives the straps. The bridge variant passes.
-    usb = BomPart(ref="J1", value="USB-C receptacle", symbol="usbc:TYPE-C-16P",
-                  footprint="usbc:HRO-TYPE-C-16P", sheet="POWER")
+    usb = BomPart(
+        ref="J1",
+        value="USB-C receptacle",
+        symbol="usbc:TYPE-C-16P",
+        footprint="usbc:HRO-TYPE-C-16P",
+        sheet="POWER",
+    )
     mcu = _bpart("U1", "esp32-s3-mini-1:ESP32-S3-MINI-1")
     res = check_mcu_programming_access(BOM(parts=[mcu, usb], connections=[]))
     assert not res.ok
     assert "download mode" in res.offenders[0]
-    bridge = BomPart(ref="U2", value="CH340C USB-UART bridge",
-                     symbol="Device:R",
-                     footprint="Resistor_SMD:R_0402_1005Metric", sheet="POWER")
-    assert check_mcu_programming_access(
-        BOM(parts=[mcu, usb, bridge], connections=[])
-    ).ok
+    bridge = BomPart(
+        ref="U2",
+        value="CH340C USB-UART bridge",
+        symbol="Device:R",
+        footprint="Resistor_SMD:R_0402_1005Metric",
+        sheet="POWER",
+    )
+    assert check_mcu_programming_access(BOM(parts=[mcu, usb, bridge], connections=[])).ok
 
 
 def test_prog_access_updi_wired_to_pullup_only_fails(monkeypatch) -> None:
     # The exact observed failure: UPDI net exists (pullup R1) but never reaches
     # the header -- wiring commit must reject with a wire-it instruction.
     monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(ATTINY_PINS))
-    bom = BOM(parts=[
-        _bpart("U1", ATTINY),
-        _bpart("R1", "Device:R"),
-        _jpart("J2", "UPDI header 1x03"),
-    ], connections=[
-        NetConnection(net_name="UPDI_PULLUP", sheet="MCU", endpoints=[
-            PinEndpoint(ref="U1", pin="6"), PinEndpoint(ref="R1", pin="2")]),
-        NetConnection(net_name="+5V", sheet="MCU", endpoints=[
-            PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="R1", pin="1")]),
-    ])
+    bom = BOM(
+        parts=[
+            _bpart("U1", ATTINY),
+            _bpart("R1", "Device:R"),
+            _jpart("J2", "UPDI header 1x03"),
+        ],
+        connections=[
+            NetConnection(
+                net_name="UPDI_PULLUP",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U1", pin="6"), PinEndpoint(ref="R1", pin="2")],
+            ),
+            NetConnection(
+                net_name="+5V",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="R1", pin="1")],
+            ),
+        ],
+    )
     res = check_mcu_programming_access(bom)
     assert not res.ok
     assert "UPDI" in res.offenders[0] and "J2" in res.offenders[0]
@@ -1210,29 +1630,44 @@ def test_prog_access_updi_wired_to_pullup_only_fails(monkeypatch) -> None:
 
 def test_prog_access_updi_reaching_header_passes(monkeypatch) -> None:
     monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(ATTINY_PINS))
-    bom = BOM(parts=[
-        _bpart("U1", ATTINY),
-        _bpart("R1", "Device:R"),
-        _jpart("J2", "UPDI header 1x03"),
-    ], connections=[
-        NetConnection(net_name="UPDI", sheet="MCU", endpoints=[
-            PinEndpoint(ref="U1", pin="6"), PinEndpoint(ref="R1", pin="2"),
-            PinEndpoint(ref="J2", pin="1")]),
-    ])
+    bom = BOM(
+        parts=[
+            _bpart("U1", ATTINY),
+            _bpart("R1", "Device:R"),
+            _jpart("J2", "UPDI header 1x03"),
+        ],
+        connections=[
+            NetConnection(
+                net_name="UPDI",
+                sheet="MCU",
+                endpoints=[
+                    PinEndpoint(ref="U1", pin="6"),
+                    PinEndpoint(ref="R1", pin="2"),
+                    PinEndpoint(ref="J2", pin="1"),
+                ],
+            ),
+        ],
+    )
     assert check_mcu_programming_access(bom).ok
 
 
 def test_prog_access_non_updi_mcu_not_judged_at_wiring(monkeypatch) -> None:
     # A part whose pinout exposes no UPDI pin (or is unresolvable) is skipped
     # by the reachability half -- SWD-family judgment stays with §9.21.
-    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(
-        {"Fake:STM32F103": [("1", "PA13", "bidirectional")]}))
-    bom = BOM(parts=[
-        _bpart("U1", "Fake:STM32F103"),
-        _jpart("J2", "SWD debug header"),
-    ], connections=[
-        NetConnection(net_name="X", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="1"),
-                                 PinEndpoint(ref="J2", pin="2")]),
-    ])
+    monkeypatch.setattr(
+        _sp, "lookup_pins", _fake_lookup({"Fake:STM32F103": [("1", "PA13", "bidirectional")]})
+    )
+    bom = BOM(
+        parts=[
+            _bpart("U1", "Fake:STM32F103"),
+            _jpart("J2", "SWD debug header"),
+        ],
+        connections=[
+            NetConnection(
+                net_name="X",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="J2", pin="2")],
+            ),
+        ],
+    )
     assert check_mcu_programming_access(bom).ok

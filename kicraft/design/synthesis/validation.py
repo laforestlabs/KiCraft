@@ -8,6 +8,7 @@ lives in its own function so callers can opt in or out.
 The contract doc specifies these as shell one-liners — this is the Python
 equivalent that the synthesis stage runs unconditionally before returning.
 """
+
 from __future__ import annotations
 
 import json
@@ -16,6 +17,7 @@ import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Callable, Iterable
 
 from kicraft.design.models import (
     GND_NET_PATTERNS,
@@ -44,7 +46,7 @@ _SHEETFILE_RE = re.compile(r'\(property\s+"Sheetfile"\s+"([^"]+)"')
 _REFERENCE_RE = re.compile(r'\(property\s+"Reference"\s+"([A-Z]+[0-9]+[A-Z0-9_-]*)"')
 _INSTANCE_REF_RE = re.compile(r'\(property\s+"Reference"\s+"([^"]+)"')
 _INSTANCE_FOOTPRINT_RE = re.compile(r'\(property\s+"Footprint"\s+"([^"]*)"')
-_REAL_REF_RE = re.compile(r'^[A-Z]+[0-9]+[A-Z0-9_-]*$')
+_REAL_REF_RE = re.compile(r"^[A-Z]+[0-9]+[A-Z0-9_-]*$")
 
 
 @dataclass
@@ -242,9 +244,7 @@ def check_autoplacer_is_valid_json(project_dir: Path, project_stem: str) -> Chec
             message=f"JSON parse error: {e}",
             offenders=[str(path)],
         )
-    return CheckResult(
-        name="9.5 autoplacer.json is JSON", ok=True, message=f"{path.name} parses"
-    )
+    return CheckResult(name="9.5 autoplacer.json is JSON", ok=True, message=f"{path.name} parses")
 
 
 def _collect_refs_from_schematics(project_dir: Path) -> set[str]:
@@ -336,7 +336,9 @@ def check_refdes_uniqueness(project_dir: Path, project_stem: str) -> CheckResult
                         refs_by_origin.setdefault(k, []).append(f"ap:{key}")
                     if isinstance(v, list):
                         for item in v:
-                            if isinstance(item, str) and re.match(r"^[A-Z]+[0-9]+[A-Z0-9_-]*$", item):
+                            if isinstance(item, str) and re.match(
+                                r"^[A-Z]+[0-9]+[A-Z0-9_-]*$", item
+                            ):
                                 refs_by_origin.setdefault(item, []).append(f"ap:{key}:member")
         for key in ("thermal_refs", "signal_flow_order"):
             lst = ap.get(key, [])
@@ -357,9 +359,7 @@ def check_refdes_uniqueness(project_dir: Path, project_stem: str) -> CheckResult
             if o.startswith("sch:"):
                 sch_origins_by_ref.setdefault(ref, set()).add(o)
     collisions = [
-        (ref, sorted(origins))
-        for ref, origins in sch_origins_by_ref.items()
-        if len(origins) > 1
+        (ref, sorted(origins)) for ref, origins in sch_origins_by_ref.items() if len(origins) > 1
     ]
     if collisions:
         return CheckResult(
@@ -378,9 +378,7 @@ def check_refdes_uniqueness(project_dir: Path, project_stem: str) -> CheckResult
 # ---------- §9.8 library interface match ----------
 
 
-def check_library_interface_match(
-    project_dir: Path, project_stem: str
-) -> CheckResult:
+def check_library_interface_match(project_dir: Path, project_stem: str) -> CheckResult:
     """§9.8 — every library-backed sheet's hierarchical labels match
     the manifest's declared interface exactly.
 
@@ -423,9 +421,7 @@ def check_library_interface_match(
         )
 
     lib = LeafLibrary.from_env()
-    label_re = re.compile(
-        r'\(hierarchical_label\s+"([A-Z][A-Z0-9_]*)"\s+\(shape\s+(\w+)\)'
-    )
+    label_re = re.compile(r'\(hierarchical_label\s+"([A-Z][A-Z0-9_]*)"\s+\(shape\s+(\w+)\)')
     shape_to_direction = {
         "input": "input",
         "output": "output",
@@ -450,8 +446,7 @@ def check_library_interface_match(
         # the sheet's stem to <stem>.kicad_sch, but we don't have the
         # stem in library_leaves. Scan every leaf .kicad_sch and match.
         leaf_iface = {
-            (lbl.name, lbl.direction)
-            for lbl in leaf.manifest.interface.hierarchical_labels
+            (lbl.name, lbl.direction) for lbl in leaf.manifest.interface.hierarchical_labels
         }
         # Find a sheet whose labels match -- since stems and sheet_uuid
         # are not in library_leaves we accept any leaf .kicad_sch whose
@@ -470,8 +465,7 @@ def check_library_interface_match(
                 break
         if not found:
             mismatches.append(
-                f"{sheet_name}: no leaf .kicad_sch has interface "
-                f"{sorted(leaf_iface)}"
+                f"{sheet_name}: no leaf .kicad_sch has interface {sorted(leaf_iface)}"
             )
 
     if mismatches:
@@ -655,9 +649,7 @@ def check_net_coverage(bom) -> CheckResult:
     return CheckResult(
         name="9.11 net coverage",
         ok=not bad,
-        message=(
-            "every part pin accounted for" if not bad else "uncovered pin(s)"
-        ),
+        message=("every part pin accounted for" if not bad else "uncovered pin(s)"),
         offenders=bad,
     )
 
@@ -670,6 +662,62 @@ def check_net_coverage(bom) -> CheckResult:
 # wiring stage never realizes is caught only by §9.12 ERC at synthesis time --
 # "sheet pin <NET> has no matching hierarchical label inside the sheet" -- which
 # aborts the build with no actionable per-stage feedback.
+
+
+def check_collection_bounds(
+    field: str,
+    items: Iterable,
+    *,
+    total: int,
+    per_group: int | None = None,
+    group_key: Callable | None = None,
+) -> CheckResult:
+    """Check total and optional grouped cardinality for a response collection."""
+    materialized = list(items)
+    offenders: list[str] = []
+    if len(materialized) > total:
+        offenders.append(f"{field} total ({len(materialized)} items, > {total})")
+
+    if per_group is not None:
+        if group_key is None:
+            raise ValueError("group_key is required when per_group is set")
+        group_counts = Counter(str(group_key(item)) for item in materialized)
+        over_groups = [(group, count) for group, count in group_counts.items() if count > per_group]
+        for group, count in sorted(over_groups, key=lambda pair: (-pair[1], pair[0])):
+            offenders.append(f"{group} ({count} items, > {per_group})")
+
+    return CheckResult(
+        name=f"collection bounds: {field}",
+        ok=not offenders,
+        message=(
+            f"{field} cardinality is within configured bounds"
+            if not offenders
+            else f"{field} exceeds configured cardinality bounds"
+        ),
+        offenders=offenders,
+    )
+
+
+def check_bom_size(bom) -> CheckResult:
+    """§9.35 — reject BOM cardinality that exceeds the response policy."""
+    from kicraft.server.config import STAGE_COLLECTION_BOUNDS
+
+    bound = next(item for item in STAGE_COLLECTION_BOUNDS["bom"] if item.field == "parts")
+    result = check_collection_bounds(
+        "parts",
+        bom.parts,
+        total=bound.total,
+        per_group=bound.per_group,
+        group_key=(
+            (lambda part: getattr(part, bound.group_key)) if bound.group_key is not None else None
+        ),
+    )
+    return CheckResult(
+        name="9.35 BOM emission bounds",
+        ok=result.ok,
+        message=result.message,
+        offenders=result.offenders,
+    )
 
 
 def check_sheets_have_parts(architecture, bom) -> CheckResult:
@@ -699,14 +747,11 @@ def check_sheets_have_parts(architecture, bom) -> CheckResult:
         offenders=bad,
     )
 
+
 def bom_parts_on_unknown_sheets(architecture, bom) -> list[tuple[str, str]]:
     """Return BOM parts whose sheet is absent from the architecture."""
     sheet_names = {sheet.name for sheet in architecture.sheets}
-    return [
-        (part.ref, part.sheet)
-        for part in bom.parts
-        if part.sheet not in sheet_names
-    ]
+    return [(part.ref, part.sheet) for part in bom.parts if part.sheet not in sheet_names]
 
 
 def check_bom_parts_reference_architecture_sheets(architecture, bom) -> CheckResult:
@@ -728,17 +773,12 @@ def _reconciled_endpoints(sheets: set[str], declared) -> list[SheetPin]:
     """Endpoints for a reconciled inter-sheet net: declared sheets first (so
     their direction hints survive), then any newly-realized sheet as
     ``bidirectional`` (we have no per-sheet direction to infer)."""
-    dir_by_sheet = (
-        {e.sheet: e.direction for e in declared.endpoints} if declared else {}
-    )
+    dir_by_sheet = {e.sheet: e.direction for e in declared.endpoints} if declared else {}
     ordered: list[str] = []
     if declared:
         ordered += [e.sheet for e in declared.endpoints if e.sheet in sheets]
     ordered += [s for s in sorted(sheets) if s not in ordered]
-    return [
-        SheetPin(sheet=s, direction=dir_by_sheet.get(s, "bidirectional"))
-        for s in ordered
-    ]
+    return [SheetPin(sheet=s, direction=dir_by_sheet.get(s, "bidirectional")) for s in ordered]
 
 
 def split_cross_sheet_connections(bom) -> list[str]:
@@ -792,13 +832,9 @@ def split_cross_sheet_connections(bom) -> list[str]:
                 NetConnection(net_name=c.net_name, endpoints=by_sheet[s], sheet=s)
             )
         if len(by_sheet) > 1:
-            changes.append(
-                f"{c.net_name} {sorted(by_sheet)} (was tagged {c.sheet})"
-            )
+            changes.append(f"{c.net_name} {sorted(by_sheet)} (was tagged {c.sheet})")
         else:
-            changes.append(
-                f"{c.net_name} retagged {c.sheet}->{next(iter(by_sheet))}"
-            )
+            changes.append(f"{c.net_name} retagged {c.sheet}->{next(iter(by_sheet))}")
     if mutated:
         bom.connections = new_connections
     return changes
@@ -849,9 +885,7 @@ def reconcile_inter_sheet_nets(architecture, bom) -> list[str]:
             realized[c.net_name].add(c.sheet)
 
     declared = {n.name: n for n in architecture.inter_sheet_nets}
-    power = [
-        n for n in architecture.inter_sheet_nets if is_power_or_ground_name(n.name)
-    ]
+    power = [n for n in architecture.inter_sheet_nets if is_power_or_ground_name(n.name)]
     kept: set[str] = {n.name for n in power}
 
     signal: list[InterSheetNet] = []
@@ -863,9 +897,7 @@ def reconcile_inter_sheet_nets(architecture, bom) -> list[str]:
         if len(sheets) < 2:
             continue
         signal.append(
-            InterSheetNet(
-                name=name, endpoints=_reconciled_endpoints(sheets, declared.get(name))
-            )
+            InterSheetNet(name=name, endpoints=_reconciled_endpoints(sheets, declared.get(name)))
         )
         kept.add(name)
         if name not in declared:
@@ -923,8 +955,7 @@ def check_inter_sheet_nets_realized(architecture, bom) -> CheckResult:
         message=(
             "every signal inter-sheet net is wired on both sides"
             if not bad
-            else f"{len(bad)} inter-sheet endpoint(s) have a sheet pin but no "
-            "hierarchical label"
+            else f"{len(bad)} inter-sheet endpoint(s) have a sheet pin but no hierarchical label"
         ),
         offenders=bad,
     )
@@ -1004,15 +1035,15 @@ def check_no_dangling_signal_nets(architecture, bom) -> CheckResult:
 # *ground* common on DC-DC modules) are intentionally excluded; only unambiguous
 # supply names match, so the polarity check never trips on a correct connection.
 _POS_SUPPLY_PIN_RE = re.compile(
-    r"VDD(?!-)|VCC(?!-)"             # positive VDD/VCC + AVDD/DVDD/VDDA/VDDIO/VCCIO
-    r"|^V(?:BAT|BUS|SYS|AA|IN|IO)$"   # exact supplies (VIN exact, not VIN-/VINP)
+    r"VDD(?!-)|VCC(?!-)"  # positive VDD/VCC + AVDD/DVDD/VDDA/VDDIO/VCCIO
+    r"|^V(?:BAT|BUS|SYS|AA|IN|IO)$"  # exact supplies (VIN exact, not VIN-/VINP)
     r"|^V\+$|^VPLUS$",
     re.IGNORECASE,
 )
 # Pin NAMES that denote ground or the negative-most rail. "0V"/"0.0V" is the
 # 0-volt common used by isolated DC-DC modules and is ground, not a rail.
 _GND_PIN_RE = re.compile(
-    r"GND|VSS"                        # GND/AGND/DGND/PGND + VSS/AVSS/VSSA (substring)
+    r"GND|VSS"  # GND/AGND/DGND/PGND + VSS/AVSS/VSSA (substring)
     r"|^V(?:CC|DD)-$|^V-$|^VMINUS$|^VEE$|^0V$|^0\.0+V$",
     re.IGNORECASE,
 )
@@ -1027,15 +1058,30 @@ _NEGATIVE_RAIL_NET_RE = re.compile(
 
 # Reference-designator prefixes of genuinely two-terminal parts: a 2-pin part of
 # one of these classes with both pins on one net is shorted out / dead.
-_TWO_TERMINAL_REF_PREFIXES = frozenset({
-    "R", "RV", "RT", "RP", "VR",      # resistors / pots / thermistors
-    "C",                              # capacitors
-    "L", "FB", "FL",                  # inductors / ferrite beads
-    "D", "LED", "CR", "DZ", "TVS",    # diodes / LEDs / zeners / TVS
-    "F", "FU",                        # fuses
-    "Y", "XTAL",                      # 2-pin crystals / resonators
-    "ANT", "AE",                      # antennas
-})
+_TWO_TERMINAL_REF_PREFIXES = frozenset(
+    {
+        "R",
+        "RV",
+        "RT",
+        "RP",
+        "VR",  # resistors / pots / thermistors
+        "C",  # capacitors
+        "L",
+        "FB",
+        "FL",  # inductors / ferrite beads
+        "D",
+        "LED",
+        "CR",
+        "DZ",
+        "TVS",  # diodes / LEDs / zeners / TVS
+        "F",
+        "FU",  # fuses
+        "Y",
+        "XTAL",  # 2-pin crystals / resonators
+        "ANT",
+        "AE",  # antennas
+    }
+)
 
 _ANTENNA_REF_PREFIXES = frozenset({"ANT", "AE"})
 # Antenna pin names that carry RF (must reach the feed line, never a rail/GND).
@@ -1233,9 +1279,7 @@ _REGULATOR_VREF: dict[str, float] = {
 
 _GND_NET_NAMES = frozenset({"GND", "AGND", "PGND", "DGND", "0V", "GNDA"})
 
-_R_VALUE_RE = re.compile(
-    r"^(\d+(?:\.\d+)?)\s*([kKmMrR]?)(?:\s*(?:Ω|ohm|Ohm|OHM))?\s*$"
-)
+_R_VALUE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kKmMrR]?)(?:\s*(?:Ω|ohm|Ohm|OHM))?\s*$")
 _R_INFIX_RE = re.compile(r"^(\d+)([kKmMrR])(\d+)$")  # 4k7 style
 # '3V3' / '1V25' (digits around V) or '3.3V' / '12V' / '+5V' (decimal + V).
 _NET_VOLTAGE_RE = re.compile(
@@ -1246,8 +1290,7 @@ _NET_VOLTAGE_RE = re.compile(
 # EIA/KiCad convention: lowercase m is milli (a 100m current-sense shunt),
 # uppercase M is mega. Milli-ohm parts can never form a sane feedback divider,
 # but mis-reading one as 10^8 ohms picks WRONG dividers.
-_R_SCALE = {"k": 1e3, "K": 1e3, "m": 1e-3, "M": 1e6, "r": 1.0, "R": 1.0,
-            "": 1.0}
+_R_SCALE = {"k": 1e3, "K": 1e3, "m": 1e-3, "M": 1e6, "r": 1.0, "R": 1.0, "": 1.0}
 
 
 def _resistance_ohms(value: str) -> float | None:
@@ -1296,19 +1339,21 @@ def regulator_vout_facts(parts: list[dict], connections: list[dict]) -> list[dic
     nets: dict[str, dict[str, str]] = defaultdict(dict)
     for c in connections:
         for ep in c.get("endpoints") or []:
-            nets[str(ep.get("ref"))][str(ep.get("pin"))] = str(
-                c.get("net_name"))
+            nets[str(ep.get("ref"))][str(ep.get("pin"))] = str(c.get("net_name"))
     r_ohms = {
         str(p.get("ref")): _resistance_ohms(str(p.get("value") or ""))
-        for p in parts if str(p.get("ref", "")).startswith("R")
+        for p in parts
+        if str(p.get("ref", "")).startswith("R")
     }
     facts: list[dict] = []
     for p in parts:
         mpn = str(p.get("mpn") or p.get("value") or "").upper()
         vref = next(
-            (v for prefix, v in sorted(_REGULATOR_VREF.items(),
-                                       key=lambda kv: -len(kv[0]))
-             if mpn.startswith(prefix)),
+            (
+                v
+                for prefix, v in sorted(_REGULATOR_VREF.items(), key=lambda kv: -len(kv[0]))
+                if mpn.startswith(prefix)
+            ),
             None,
         )
         if vref is None:
@@ -1320,20 +1365,15 @@ def regulator_vout_facts(parts: list[dict], connections: list[dict]) -> list[dic
             if mid.upper() in _GND_NET_NAMES:
                 continue
             # Resistors with one pin on the mid net.
-            on_mid = [
-                r for r, pins in nets.items()
-                if r in r_ohms and mid in pins.values()
-            ]
+            on_mid = [r for r, pins in nets.items() if r in r_ohms and mid in pins.values()]
             for r_top in on_mid:
                 for r_bot in on_mid:
                     if r_top == r_bot:
                         continue
                     if r_ohms.get(r_top) is None or r_ohms.get(r_bot) is None:
                         continue
-                    top_other = [n for pin, n in nets[r_top].items()
-                                 if n != mid]
-                    bot_other = [n for pin, n in nets[r_bot].items()
-                                 if n != mid]
+                    top_other = [n for pin, n in nets[r_top].items() if n != mid]
+                    bot_other = [n for pin, n in nets[r_bot].items() if n != mid]
                     if len(top_other) != 1 or len(bot_other) != 1:
                         continue
                     if bot_other[0].upper() not in _GND_NET_NAMES:
@@ -1342,20 +1382,26 @@ def regulator_vout_facts(parts: list[dict], connections: list[dict]) -> list[dic
                         continue
                     rail = top_other[0]
                     vout = vref * (1.0 + r_ohms[r_top] / r_ohms[r_bot])
-                    candidates.append({
-                        "ref": ref, "mpn": str(p.get("mpn") or ""),
-                        "vref": vref,
-                        "r_top_ref": r_top, "r_top": r_ohms[r_top],
-                        "r_bot_ref": r_bot, "r_bot": r_ohms[r_bot],
-                        "vout": round(vout, 3),
-                        "rail_net": rail,
-                        "rail_v": _net_voltage(rail),
-                    })
+                    candidates.append(
+                        {
+                            "ref": ref,
+                            "mpn": str(p.get("mpn") or ""),
+                            "vref": vref,
+                            "r_top_ref": r_top,
+                            "r_top": r_ohms[r_top],
+                            "r_bot_ref": r_bot,
+                            "r_bot": r_ohms[r_bot],
+                            "vout": round(vout, 3),
+                            "rail_net": rail,
+                            "rail_v": _net_voltage(rail),
+                        }
+                    )
         if len(candidates) != 1:
             continue  # none found, or ambiguous -- never guess
         fact = candidates[0]
         fact["ok"] = (
-            None if fact["rail_v"] is None
+            None
+            if fact["rail_v"] is None
             else abs(fact["vout"] - fact["rail_v"]) <= 0.10 * fact["rail_v"]
         )
         facts.append(fact)
@@ -1367,13 +1413,12 @@ def check_regulator_feedback_vout(bom) -> CheckResult:
     rail its output net names. Deterministic: known Vref x the wired divider.
     Only flags an UNAMBIGUOUS divider whose computed Vout misses a parseable
     rail-net voltage by >10% -- everything uncertain passes silently."""
-    parts = [
-        {"ref": p.ref, "mpn": getattr(p, "mpn", None), "value": p.value}
-        for p in bom.parts
-    ]
+    parts = [{"ref": p.ref, "mpn": getattr(p, "mpn", None), "value": p.value} for p in bom.parts]
     connections = [
-        {"net_name": c.net_name,
-         "endpoints": [{"ref": ep.ref, "pin": ep.pin} for ep in c.endpoints]}
+        {
+            "net_name": c.net_name,
+            "endpoints": [{"ref": ep.ref, "pin": ep.pin} for ep in c.endpoints],
+        }
         for c in bom.connections
     ]
     facts = regulator_vout_facts(parts, connections)
@@ -1385,7 +1430,8 @@ def check_regulator_feedback_vout(bom) -> CheckResult:
         f"{f['rail_v']}V -- fix the divider (R_top ~= "
         f"{f['r_bot'] * (f['rail_v'] / f['vref'] - 1.0):.0f} ohm for "
         f"{f['rail_v']}V)"
-        for f in facts if f["ok"] is False
+        for f in facts
+        if f["ok"] is False
     ]
     return CheckResult(
         name="9.32 regulator feedback divider",
@@ -1523,8 +1569,22 @@ def check_single_net_per_pin(bom) -> CheckResult:
 # power-ish / ground-ish *name* (not just canonical rails), so a filtered or
 # locally-named rail never trips it. Append-only -- add a family by adding a row.
 
-_PWR_NET_TOKENS = ("VDD", "VCC", "VBAT", "VBUS", "VSYS", "VIN", "VOUT",
-                   "VREG", "VPP", "3V3", "5V", "1V8", "2V5", "12V")
+_PWR_NET_TOKENS = (
+    "VDD",
+    "VCC",
+    "VBAT",
+    "VBUS",
+    "VSYS",
+    "VIN",
+    "VOUT",
+    "VREG",
+    "VPP",
+    "3V3",
+    "5V",
+    "1V8",
+    "2V5",
+    "12V",
+)
 
 
 def _net_looks_power(name: str) -> bool:
@@ -1557,7 +1617,10 @@ _FAMILY_CONTRACTS: tuple[_FamilyContract, ...] = (
             # IO0/IO1 (DI/DO), CLK and CS are data/clock/select in BOTH SPI and
             # QSPI modes; WP/HOLD (IO2/IO3) are excluded -- they are legitimately
             # tied to VCC in plain SPI mode.
-            (re.compile(r"(^|[^0-9])IO[01]([^0-9]|$)|^DI$|^DO$|/IO[01]$|^CLK$|^SCK$|CS", re.I), "signal"),
+            (
+                re.compile(r"(^|[^0-9])IO[01]([^0-9]|$)|^DI$|^DO$|/IO[01]$|^CLK$|^SCK$|CS", re.I),
+                "signal",
+            ),
         ),
     ),
     _FamilyContract(
@@ -1675,9 +1738,11 @@ def _esp_boot_problem(pins, wired):
         if net is None:
             continue  # NC handled by the family default; an unwired strap is rare
         if _net_is_positive_rail(net):
-            return (f"IO0/GPIO0 (download-mode strap) is hard-tied to rail {net!r}; it "
-                    "cannot be pulled LOW to enter the ROM bootloader (needs a boot "
-                    "button/strap to GND)")
+            return (
+                f"IO0/GPIO0 (download-mode strap) is hard-tied to rail {net!r}; it "
+                "cannot be pulled LOW to enter the ROM bootloader (needs a boot "
+                "button/strap to GND)"
+            )
     return None
 
 
@@ -1689,8 +1754,10 @@ def _rp2040_boot_problem(pins, wired, nc, ref, bom):
     has_button = any(_ref_prefix(p.ref) == "SW" for p in bom.parts)
     if swd_wired or has_button:
         return None
-    return ("no programming path: SWD (SWCLK/SWDIO) is not broken out and there is no "
-            "BOOTSEL button to ground QSPI_CS")
+    return (
+        "no programming path: SWD (SWCLK/SWDIO) is not broken out and there is no "
+        "BOOTSEL button to ground QSPI_CS"
+    )
 
 
 def _generic_mcu_problem(pins, wired, nc, ref):
@@ -1702,8 +1769,10 @@ def _generic_mcu_problem(pins, wired, nc, ref):
         return None
     if any(wired.get(num) is not None and (ref, num) not in nc for num in swd):
         return None
-    return ("the SWD/JTAG debug interface is left unconnected and no programming "
-            "header is provided -- the MCU cannot be flashed")
+    return (
+        "the SWD/JTAG debug interface is left unconnected and no programming "
+        "header is provided -- the MCU cannot be flashed"
+    )
 
 
 def check_mcu_programming_path(bom) -> CheckResult:
@@ -1793,6 +1862,7 @@ def _family_strap_gaps(bom, mcus, access) -> list[str]:
     still ADD the missing button/header (wiring-level strap analysis stays
     §9.21's job).
     """
+
     def _ident(p) -> str:
         return f"{p.symbol} {p.value} {getattr(p, 'sourcing_note', None) or ''}"
 
@@ -1878,9 +1948,7 @@ def check_mcu_programming_access(bom) -> CheckResult:
     """
     mcus = [p for p in bom.parts if _is_mcu_part(p)]
     if not mcus:
-        return CheckResult(
-            name="9.29 MCU programming access", ok=True, message="no MCU in BOM"
-        )
+        return CheckResult(name="9.29 MCU programming access", ok=True, message="no MCU in BOM")
     access = _programming_access_parts(bom)
     if not access:
         return CheckResult(
@@ -1916,8 +1984,7 @@ def check_mcu_programming_access(bom) -> CheckResult:
                 continue  # not a UPDI part (or pinout unresolvable) -- skip
             wired = nets.get(part.ref, {})
             reachable = any(
-                wired.get(n) and (refs_on_net.get(wired[n], set()) & access_refs)
-                for n in updi
+                wired.get(n) and (refs_on_net.get(wired[n], set()) & access_refs) for n in updi
             )
             if not reachable:
                 bad.append(
@@ -1934,7 +2001,7 @@ def check_mcu_programming_access(bom) -> CheckResult:
             "every MCU has a physical programming path"
             if not bad
             else f"{len(bad)} MCU(s) missing a workable programming/recovery "
-                 f"path (strap buttons, debug access, or reachability)"
+            f"path (strap buttons, debug access, or reachability)"
         ),
         offenders=bad,
     )
@@ -1958,9 +2025,7 @@ def mcu_programming_facts(bom) -> dict | None:
     path = check_mcu_programming_path(bom)
     return {
         "mcus": [f"{p.ref} ({p.symbol} {p.value})".strip() for p in mcus],
-        "access_parts": [
-            f"{p.ref} ({(p.value or p.symbol).strip()})" for p in access
-        ],
+        "access_parts": [f"{p.ref} ({(p.value or p.symbol).strip()})" for p in access],
         "access_ok": acc.ok,
         "access_problems": list(acc.offenders),
         "path_ok": path.ok,
@@ -1982,7 +2047,8 @@ def mcu_programming_facts(bom) -> dict | None:
 # brief with >=2 connectors, so a normal multi-connector board never trips it.
 
 _BREAKOUT_RE = re.compile(
-    r"break[- ]?out|breakout|adapter|adaptor|pass[- ]?through|fan[- ]?out", re.I)
+    r"break[- ]?out|breakout|adapter|adaptor|pass[- ]?through|fan[- ]?out", re.I
+)
 _CONNECTOR_PREFIXES = frozenset({"J", "P", "CN", "CONN", "X"})
 
 
@@ -1998,18 +2064,21 @@ def check_breakout_connectivity(intent, bom) -> CheckResult:
     conns = {p.ref for p in bom.parts if _ref_prefix(p.ref) in _CONNECTOR_PREFIXES}
     if len(conns) < 2:
         return CheckResult(name=name, ok=True, message="fewer than two connectors")
-    bridging = sum(1 for c in bom.connections
-                   if len({ep.ref for ep in c.endpoints if ep.ref in conns}) >= 2)
+    bridging = sum(
+        1 for c in bom.connections if len({ep.ref for ep in c.endpoints if ep.ref in conns}) >= 2
+    )
     if bridging == 0:
         return CheckResult(
-            name=name, ok=False,
+            name=name,
+            ok=False,
             message="breakout/adapter brief but no net bridges the connectors",
-            offenders=[f"connectors {sorted(conns)} share zero bridging nets -- the "
-                       "breakout's job (mapping one connector's pins to the other) is "
-                       "undone"],
+            offenders=[
+                f"connectors {sorted(conns)} share zero bridging nets -- the "
+                "breakout's job (mapping one connector's pins to the other) is "
+                "undone"
+            ],
         )
-    return CheckResult(name=name, ok=True,
-                       message=f"{bridging} net(s) bridge the connectors")
+    return CheckResult(name=name, ok=True, message=f"{bridging} net(s) bridge the connectors")
 
 
 # ---------- §9.9 connectivity (Stage B) ----------
@@ -2045,10 +2114,7 @@ def check_connectivity(project_dir: Path, project_stem: str) -> CheckResult:
         # lib_symbols).
         wire_count = text.count("(wire")
         if wire_count == 0 and power_symbols == 0:
-            bad.append(
-                f"{sch.name}: {non_power_components} components, "
-                f"0 wires, 0 power symbols"
-            )
+            bad.append(f"{sch.name}: {non_power_components} components, 0 wires, 0 power symbols")
     return CheckResult(
         name="9.9 connectivity",
         ok=not bad,
@@ -2073,34 +2139,42 @@ def check_erc(project_dir: Path, project_stem: str) -> CheckResult:
     """
     root_sch = project_dir / f"{project_stem}.kicad_sch"
     if not root_sch.is_file():
-        return CheckResult(
-            name="9.12 ERC", ok=False, message=f"{root_sch.name} missing"
-        )
+        return CheckResult(name="9.12 ERC", ok=False, message=f"{root_sch.name} missing")
     out_path = project_dir / f"{project_stem}_erc.rpt"
     try:
         proc = subprocess.run(
-            ["kicad-cli", "sch", "erc",
-             "--format", "json",
-             "--output", str(out_path), str(root_sch)],
-            capture_output=True, text=True, timeout=60.0,
+            [
+                "kicad-cli",
+                "sch",
+                "erc",
+                "--format",
+                "json",
+                "--output",
+                str(out_path),
+                str(root_sch),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60.0,
         )
     except FileNotFoundError:
         return CheckResult(
-            name="9.12 ERC", ok=True,
+            name="9.12 ERC",
+            ok=True,
             message="kicad-cli not available; ERC skipped",
         )
     except subprocess.TimeoutExpired:
         return CheckResult(
-            name="9.12 ERC", ok=False, message="kicad-cli timed out after 60s",
+            name="9.12 ERC",
+            ok=False,
+            message="kicad-cli timed out after 60s",
         )
 
     if not out_path.exists():
         return CheckResult(
-            name="9.12 ERC", ok=False,
-            message=(
-                f"kicad-cli sch erc exit {proc.returncode}; no report at "
-                f"{out_path.name}"
-            ),
+            name="9.12 ERC",
+            ok=False,
+            message=(f"kicad-cli sch erc exit {proc.returncode}; no report at {out_path.name}"),
         )
     report_text = out_path.read_text()
     error_lines: list[str] = []
@@ -2119,7 +2193,8 @@ def check_erc(project_dir: Path, project_stem: str) -> CheckResult:
 
     if error_lines:
         return CheckResult(
-            name="9.12 ERC", ok=False,
+            name="9.12 ERC",
+            ok=False,
             message=f"{len(error_lines)} ERC error(s)",
             offenders=error_lines[:20],
         )
@@ -2165,11 +2240,7 @@ def _extract_netlist_groups(netlist_text: str) -> list[set[tuple[str, str]]]:
                     break
             j += 1
         block = netlist_text[start : j + 1]
-        pins = {
-            (ref, pin)
-            for ref, pin in node_re.findall(block)
-            if not ref.startswith("#")
-        }
+        pins = {(ref, pin) for ref, pin in node_re.findall(block) if not ref.startswith("#")}
         if pins:
             groups.append(pins)
         i = j + 1
@@ -2254,17 +2325,13 @@ def _compare_netlist_to_bom(
         if len(idxs) > 1:
             name = root.split("//", 1)[1]
             sample = sorted(f"{r}.{p}" for r, p in group_pins[root])[:8]
-            splits.append(
-                f"net {name!r} split across {len(idxs)} nets at pins {sample}"
-            )
+            splits.append(f"net {name!r} split across {len(idxs)} nets at pins {sample}")
 
     lost = sorted(f"{r}.{p}" for (r, p) in wired - seen if r in bom_refs)
     return merges, sorted(splits), lost
 
 
-def check_netlist_faithfulness(
-    project_dir: Path, project_stem: str, bom
-) -> CheckResult:
+def check_netlist_faithfulness(project_dir: Path, project_stem: str, bom) -> CheckResult:
     """§9.13 — the KiCad-extracted netlist matches ``bom.connections``.
 
     ERC misses two classes of wiring corruption this catches directly:
@@ -2289,30 +2356,44 @@ def check_netlist_faithfulness(
     root_sch = project_dir / f"{project_stem}.kicad_sch"
     if not root_sch.is_file():
         return CheckResult(
-            name="9.13 netlist faithfulness", ok=False,
+            name="9.13 netlist faithfulness",
+            ok=False,
             message=f"{root_sch.name} missing",
         )
     out_path = project_dir / f"{project_stem}_netlist_check.net"
     try:
         subprocess.run(
-            ["kicad-cli", "sch", "export", "netlist",
-             "--format", "kicadsexpr",
-             "--output", str(out_path), str(root_sch)],
-            capture_output=True, text=True, timeout=60.0,
+            [
+                "kicad-cli",
+                "sch",
+                "export",
+                "netlist",
+                "--format",
+                "kicadsexpr",
+                "--output",
+                str(out_path),
+                str(root_sch),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60.0,
         )
     except FileNotFoundError:
         return CheckResult(
-            name="9.13 netlist faithfulness", ok=True,
+            name="9.13 netlist faithfulness",
+            ok=True,
             message="kicad-cli not available; netlist check skipped",
         )
     except subprocess.TimeoutExpired:
         return CheckResult(
-            name="9.13 netlist faithfulness", ok=False,
+            name="9.13 netlist faithfulness",
+            ok=False,
             message="kicad-cli timed out after 60s",
         )
     if not out_path.exists():
         return CheckResult(
-            name="9.13 netlist faithfulness", ok=False,
+            name="9.13 netlist faithfulness",
+            ok=False,
             message="kicad-cli produced no netlist",
         )
     try:
@@ -2321,14 +2402,11 @@ def check_netlist_faithfulness(
         out_path.unlink(missing_ok=True)
 
     merges, splits, lost = _compare_netlist_to_bom(extracted, bom)
-    offenders = (
-        merges
-        + splits
-        + [f"pin missing from netlist: {e}" for e in lost]
-    )
+    offenders = merges + splits + [f"pin missing from netlist: {e}" for e in lost]
     if offenders:
         return CheckResult(
-            name="9.13 netlist faithfulness", ok=False,
+            name="9.13 netlist faithfulness",
+            ok=False,
             message=(
                 f"{len(merges)} unexpected net merge(s), "
                 f"{len(splits)} dropped-stub split(s), "
@@ -2336,11 +2414,10 @@ def check_netlist_faithfulness(
             ),
             offenders=offenders[:20],
         )
-    n_wired = len({
-        (ep.ref, str(ep.pin)) for c in bom.connections for ep in c.endpoints
-    })
+    n_wired = len({(ep.ref, str(ep.pin)) for c in bom.connections for ep in c.endpoints})
     return CheckResult(
-        name="9.13 netlist faithfulness", ok=True,
+        name="9.13 netlist faithfulness",
+        ok=True,
         message=f"netlist matches bom.connections ({n_wired} wired pins)",
     )
 
@@ -2448,9 +2525,7 @@ def run_solve_subcircuits_smoke(
             message=f"exit {proc.returncode}",
             offenders=tail,
         )
-    return CheckResult(
-        name="9.7 solve-subcircuits smoke", ok=True, message="exit 0"
-    )
+    return CheckResult(name="9.7 solve-subcircuits smoke", ok=True, message="exit 0")
 
 
 # ---------------------------------------------------------------------------
@@ -2458,6 +2533,7 @@ def run_solve_subcircuits_smoke(
 # class substitution of what the brief named (e.g. "binding-post terminals"
 # → screw-terminal-5mm-2p), surface it rather than silently committing.
 # ---------------------------------------------------------------------------
+
 
 def check_named_part_substitutions(intent, bom) -> CheckResult:
     """§9.23 (advisory) — detect BOM parts that silently substituted a named
@@ -2475,8 +2551,7 @@ def check_named_part_substitutions(intent, bom) -> CheckResult:
     if not named:
         return CheckResult(name=name, ok=True, message="no named parts in intent")
     parts_text = " ".join(
-        f"{p.value} {p.mpn or ''} {p.sourcing_note or ''}"
-        for p in (bom.parts or [])
+        f"{p.value} {p.mpn or ''} {p.sourcing_note or ''}" for p in (bom.parts or [])
     ).lower()
     offenders: list[str] = []
     for np in named:
@@ -2486,17 +2561,18 @@ def check_named_part_substitutions(intent, bom) -> CheckResult:
             # should appear somewhere in the parts corpus (e.g. "binding post"
             # tokens "binding" + "post" both appear, but "binding-post terminals"
             # vs "screw-terminal" — "terminals" appears but "binding" does not).
-            tokens = [t for t in np_lower.replace("-", " ").replace("_", " ").split()
-                      if len(t) > 2]  # skip short tokens like "a", "1u"
+            tokens = [
+                t for t in np_lower.replace("-", " ").replace("_", " ").split() if len(t) > 2
+            ]  # skip short tokens like "a", "1u"
             missing = [t for t in tokens if t not in parts_text]
             if len(missing) >= len(tokens) // 2:
                 offenders.append(
-                    f"named part {np!r} not found in BOM values/notes "
-                    f"(missing tokens: {missing})"
+                    f"named part {np!r} not found in BOM values/notes (missing tokens: {missing})"
                 )
     if offenders:
         return CheckResult(
-            name=name, ok=False,
+            name=name,
+            ok=False,
             message=f"{len(offenders)} named part(s) may have been substituted",
             offenders=offenders,
         )
@@ -2560,15 +2636,12 @@ def check_spec_named_mpn_substitutions(functional_spec, architecture, bom) -> Ch
         return CheckResult(name=name, ok=True, message="not applicable")
     tokens = _spec_named_tokens(functional_spec, architecture)
     if not tokens:
-        return CheckResult(name=name, ok=True,
-                           message="no spec-named MPNs to account for")
+        return CheckResult(name=name, ok=True, message="no spec-named MPNs to account for")
     parts_text = " ".join(
-        f"{p.value} {p.mpn or ''} {p.sourcing_note or ''}"
-        for p in (bom.parts or [])
+        f"{p.value} {p.mpn or ''} {p.sourcing_note or ''}" for p in (bom.parts or [])
     ).lower()
     surfaced = " ".join(
-        [f"{s.wanted} {s.got} {s.reason}"
-         for s in (getattr(bom, "substitutions", None) or [])]
+        [f"{s.wanted} {s.got} {s.reason}" for s in (getattr(bom, "substitutions", None) or [])]
         + list(bom.assumptions or [])
     ).lower()
     offenders = [
@@ -2579,7 +2652,8 @@ def check_spec_named_mpn_substitutions(functional_spec, architecture, bom) -> Ch
     ]
     if offenders:
         return CheckResult(
-            name=name, ok=False,
+            name=name,
+            ok=False,
             message=(
                 f"{len(offenders)} spec-named part(s) silently missing from "
                 "the BOM -- either use the named part, or add a "
@@ -2589,8 +2663,7 @@ def check_spec_named_mpn_substitutions(functional_spec, architecture, bom) -> Ch
             ),
             offenders=offenders,
         )
-    return CheckResult(name=name, ok=True,
-                       message="all spec-named parts shipped or ledgered")
+    return CheckResult(name=name, ok=True, message="all spec-named parts shipped or ledgered")
 
 
 # ---------- §9.34 brief-stated mount type (hard) ----------
@@ -2617,16 +2690,41 @@ _SMD_FOOTPRINT_RE = re.compile(
     r"QFN|LQFP|TQFP|SOT|SSOP|TSSOP|MSOP|BGA|WLCSP|PLCC",
     re.IGNORECASE,
 )
-_MOUNT_NOUN_STOPWORDS = frozenset({
-    "the", "and", "with", "for", "from", "into", "that", "this", "over",
-    "under", "onto", "plus", "component", "components", "part", "parts",
-    "device", "devices", "package", "packages", "only", "all", "version",
-    "variant", "where", "possible", "preferred",
-})
+_MOUNT_NOUN_STOPWORDS = frozenset(
+    {
+        "the",
+        "and",
+        "with",
+        "for",
+        "from",
+        "into",
+        "that",
+        "this",
+        "over",
+        "under",
+        "onto",
+        "plus",
+        "component",
+        "components",
+        "part",
+        "parts",
+        "device",
+        "devices",
+        "package",
+        "packages",
+        "only",
+        "all",
+        "version",
+        "variant",
+        "where",
+        "possible",
+        "preferred",
+    }
+)
 
 
 def _mount_class(footprint: str) -> str | None:
-    """"th" / "smd" / None (unclassifiable -- never judged)."""
+    """ "th" / "smd" / None (unclassifiable -- never judged)."""
     th = bool(_TH_FOOTPRINT_RE.search(footprint or ""))
     smd = bool(_SMD_FOOTPRINT_RE.search(footprint or ""))
     if th == smd:
@@ -2646,22 +2744,21 @@ def check_mount_type_consistency(intent, bom) -> CheckResult:
         + list(getattr(intent, "named_parts", None) or [])
     )
     surfaced = " ".join(
-        [f"{s.wanted} {s.got} {s.reason}"
-         for s in (getattr(bom, "substitutions", None) or [])]
+        [f"{s.wanted} {s.got} {s.reason}" for s in (getattr(bom, "substitutions", None) or [])]
         + list(bom.assumptions or [])
     ).lower()
     offenders: list[str] = []
     for m in _MOUNT_ASK_RE.finditer(text):
-        wanted = ("smd" if m.group("mount")[:1].lower() == "s" else "th")
+        wanted = "smd" if m.group("mount")[:1].lower() == "s" else "th"
         nouns = [
-            w.lower() for w in m.group("noun").split()
+            w.lower()
+            for w in m.group("noun").split()
             if len(w) >= 3 and w.lower() not in _MOUNT_NOUN_STOPWORDS
         ]
         if not nouns:
             continue
-        for p in (bom.parts or []):
-            ident = (f"{p.value} {p.symbol} {p.footprint} "
-                     f"{p.sourcing_note or ''}").lower()
+        for p in bom.parts or []:
+            ident = (f"{p.value} {p.symbol} {p.footprint} {p.sourcing_note or ''}").lower()
             hit = [n for n in nouns if n in ident]
             if not hit:
                 continue
@@ -2680,13 +2777,14 @@ def check_mount_type_consistency(intent, bom) -> CheckResult:
             )
     if offenders:
         return CheckResult(
-            name=name, ok=False,
-            message=(f"{len(offenders)} part(s) contradict a mount type the "
-                     "brief states explicitly"),
+            name=name,
+            ok=False,
+            message=(
+                f"{len(offenders)} part(s) contradict a mount type the brief states explicitly"
+            ),
             offenders=offenders,
         )
-    return CheckResult(name=name, ok=True,
-                       message="no brief-stated mount-type contradictions")
+    return CheckResult(name=name, ok=True, message="no brief-stated mount-type contradictions")
 
 
 # ---------- §9.24 opposite-edge connector conflict ----------
@@ -2704,7 +2802,7 @@ def check_sheet_connector_edge_conflicts(bom) -> CheckResult:
     the auto-split doesn't cover (e.g. sheet-name collisions).
     """
     ref_sheet: dict[str, str] = {}
-    for p in (bom.parts or []):
+    for p in bom.parts or []:
         if p.sheet and p.ref:
             ref_sheet[p.ref] = p.sheet
 
@@ -2720,7 +2818,8 @@ def check_sheet_connector_edge_conflicts(bom) -> CheckResult:
         for pair in _OPPOSITE_EDGES:
             if pair.issubset(edges):
                 conflicting = sorted(
-                    ref for ref, zone in (bom.component_zones or {}).items()
+                    ref
+                    for ref, zone in (bom.component_zones or {}).items()
                     if isinstance(zone, dict)
                     and zone.get("edge") in pair
                     and ref_sheet.get(ref) == sheet
@@ -2761,7 +2860,7 @@ def check_sheet_connector_edge_conflicts(bom) -> CheckResult:
 
 
 def _cap_symbol_polarity(symbol: str) -> str | None:
-    """"polarized" / "nonpolarized" for a KiCad capacitor symbol, else None.
+    """ "polarized" / "nonpolarized" for a KiCad capacitor symbol, else None.
 
     Classifies by the symbol NAME (the part after ``:``) using the C/CP
     convention. Returns None for anything that is not clearly a capacitor
@@ -2777,7 +2876,7 @@ def _cap_symbol_polarity(symbol: str) -> str | None:
 
 
 def _cap_footprint_polarity(footprint: str) -> str | None:
-    """"polarized" / "nonpolarized" for a capacitor footprint, else None."""
+    """ "polarized" / "nonpolarized" for a capacitor footprint, else None."""
     lib, _, name = footprint.partition(":")
     if "Tantalum" in lib:
         return "polarized"
@@ -2797,7 +2896,7 @@ def check_capacitor_polarity_consistency(bom) -> CheckResult:
     so a correctly-paired part never trips and custom/odd names are skipped.
     """
     bad: list[str] = []
-    for p in (bom.parts or []):
+    for p in bom.parts or []:
         sym_pol = _cap_symbol_polarity(p.symbol or "")
         if sym_pol is None:
             continue  # not a recognized capacitor symbol
@@ -2832,10 +2931,7 @@ def check_capacitor_polarity_consistency(bom) -> CheckResult:
     )
 
 
-
-def check_every_block_has_sheet(
-    functional_spec: FunctionalSpec, architecture
-) -> CheckResult:
+def check_every_block_has_sheet(functional_spec: FunctionalSpec, architecture) -> CheckResult:
     """Architecture-stage gate: the architecture must have enough sheets to
     cover every functional_spec block (with count expansion).
 
@@ -2865,9 +2961,7 @@ def check_every_block_has_sheet(
     )
 
 
-def check_fs_connections_mapped(
-    functional_spec: FunctionalSpec, architecture
-) -> CheckResult:
+def check_fs_connections_mapped(functional_spec: FunctionalSpec, architecture) -> CheckResult:
     """Architecture-stage gate: every non-power/ground functional_spec connection
     is either intra-sheet (both blocks on the same sheet) or declared in
     ``architecture.inter_sheet_nets``.
@@ -2889,9 +2983,7 @@ def check_fs_connections_mapped(
     # Build a map: inter_sheet_net name → set of endpoint sheet names (uppercased)
     isn_by_sheets: dict[frozenset[str], list[str]] = {}
     for net in architecture.inter_sheet_nets:
-        endpoint_sheets = frozenset(
-            ep.sheet.upper() for ep in net.endpoints
-        )
+        endpoint_sheets = frozenset(ep.sheet.upper() for ep in net.endpoints)
         isn_by_sheets.setdefault(endpoint_sheets, []).append(net.name)
 
     bad: list[str] = []
@@ -2913,9 +3005,9 @@ def check_fs_connections_mapped(
         # functional-spec connection between its endpoints; requiring an exact
         # 2-sheet match would bounce that correct architecture forever.
         cross_pairs = {frozenset({f, t}) for f in from_sheets for t in to_sheets if f != t}
-        covered = any(pair <= endpoint_sheets
-                      for pair in cross_pairs
-                      for endpoint_sheets in isn_by_sheets)
+        covered = any(
+            pair <= endpoint_sheets for pair in cross_pairs for endpoint_sheets in isn_by_sheets
+        )
         if not covered:
             bad.append(
                 f"connection {conn.from_block!r}→{conn.to_block!r} "

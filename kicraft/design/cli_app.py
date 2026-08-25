@@ -16,6 +16,7 @@ Subcommands:
 - ``synthesize STATE.json OUT_DIR [--smoke]`` -- run the mechanical
   synthesizer. Wraps ``kicraft.design.synthesize.run``.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,10 +38,12 @@ from pydantic import ValidationError
 from kicraft.cli import artifact_paths
 from kicraft.fsutil import atomic_write_text
 from kicraft.parts_library import jlcparts, lcsc_retail
+
 # Pure candidate predicates, imported directly (not via the swappable
 # `jlcparts` module attribute): no I/O, so tests never need to fake them.
 from kicraft.parts_library.jlcparts import (
-    chip_value_matches, is_multi_element_array,
+    chip_value_matches,
+    is_multi_element_array,
 )
 
 from .library import (
@@ -90,6 +93,7 @@ from .synthesis.validation import (
     check_capacitor_polarity_consistency,
     check_sheet_connector_edge_conflicts,
     check_bom_parts_reference_architecture_sheets,
+    check_bom_size,
     check_named_part_substitutions,
     check_family_wiring_contracts,
     check_inter_sheet_nets_realized,
@@ -116,8 +120,7 @@ from kicraft.parts_library.query_log import record as _log_query
 
 # `placement` is deterministic (user placement rules, no LLM); committing it
 # invalidates nothing upstream and merely requires a rebuild to take effect.
-KNOWN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring",
-                "placement")
+KNOWN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring", "placement")
 
 
 _SAFE_STEM_RE = re.compile(r"[^A-Z0-9_]")
@@ -153,16 +156,16 @@ def _resemble_candidates(ident: str, search_fn, limit: int = 6) -> list[str]:
         # AWAY from the right family (self-eval 2026-07-07 run_19).
         queries.append(" ".join([lib_fam] + name_toks))
     if name_toks:
-        queries.append(" ".join(name_toks))               # exact-ish: truncation / pin-count
+        queries.append(" ".join(name_toks))  # exact-ish: truncation / pin-count
     if lib_fam and alpha:
-        queries.append(" ".join([lib_fam] + alpha[:2]))   # category + family word
+        queries.append(" ".join([lib_fam] + alpha[:2]))  # category + family word
     if library:
         # The exact claimed library, any name: when the library is real but the
         # name is invented (Package_SIP:SIP7_22.0x9.5mm), same-library options
         # beat whatever alphabetically shares the family word (Package_BGA:...).
         queries.append(library)
     if lib_fam:
-        queries.append(lib_fam)                           # category only
+        queries.append(lib_fam)  # category only
     if alpha:
         queries.append(" ".join(alpha[:2]))
     for q in queries:
@@ -216,18 +219,24 @@ def _unresolved_footprints(bom, project_root: Path) -> list[str]:
         fp = part.footprint or ""
         library, _, name = fp.partition(":")
         if not library or not name:
-            bad.append(f"{part.ref}: footprint {fp!r} is not 'Library:Name'"
-                       + _candidate_hint(_footprint_candidates(fp)))
+            bad.append(
+                f"{part.ref}: footprint {fp!r} is not 'Library:Name'"
+                + _candidate_hint(_footprint_candidates(fp))
+            )
             continue
         try:
             pretty = resolve_footprint_library_path(library, project_root=project_root)
         except LibraryNotFoundError:
-            bad.append(f"{part.ref}: footprint library {library!r} not found (footprint {fp!r})"
-                       + _candidate_hint(_footprint_candidates(fp)))
+            bad.append(
+                f"{part.ref}: footprint library {library!r} not found (footprint {fp!r})"
+                + _candidate_hint(_footprint_candidates(fp))
+            )
             continue
         if not (pretty / f"{name}.kicad_mod").is_file():
-            bad.append(f"{part.ref}: no '{name}.kicad_mod' in {pretty} (footprint {fp!r})"
-                       + _candidate_hint(_footprint_candidates(fp)))
+            bad.append(
+                f"{part.ref}: no '{name}.kicad_mod' in {pretty} (footprint {fp!r})"
+                + _candidate_hint(_footprint_candidates(fp))
+            )
     return bad
 
 
@@ -250,8 +259,10 @@ def _unresolved_symbols(bom) -> list[str]:
         try:
             info = lookup_pins(sym)
         except (SymbolNotFoundError, ValueError) as e:
-            bad.append(f"{part.ref}: symbol {sym!r} did not resolve ({e})"
-                       + _candidate_hint(_symbol_candidates(sym)))
+            bad.append(
+                f"{part.ref}: symbol {sym!r} did not resolve ({e})"
+                + _candidate_hint(_symbol_candidates(sym))
+            )
             continue
         if not info.get("pins"):
             # A RESOLVED zero-pin symbol from the Mechanical library is a
@@ -339,13 +350,15 @@ def _symbol_footprint_pin_mismatches(bom, project_root: Path) -> list[str]:
         # PadBindingError (live board 627; 2026-07-19 review §4.2).
         if pads is None:
             continue
-        missing = sorted({
-            str(pin.get("number"))
-            for pin in info.get("pins", [])
-            if pin.get("number")
-            and pin.get("electrical_type") not in _UNWIREABLE_PIN_TYPES
-            and str(pin.get("number")) not in pads
-        })
+        missing = sorted(
+            {
+                str(pin.get("number"))
+                for pin in info.get("pins", [])
+                if pin.get("number")
+                and pin.get("electrical_type") not in _UNWIREABLE_PIN_TYPES
+                and str(pin.get("number")) not in pads
+            }
+        )
         if missing:
             bad.append(
                 f"{part.ref}: symbol {sym!r} pin number(s) "
@@ -374,7 +387,7 @@ def _unresolved_lcsc(bom, project_root: Path) -> list[str]:
     active, _broken = _load_library_parts(project_root)
     manifest_by_name = {p.manifest.name: p.manifest for p in active}
     bad: list[str] = []
-    for part in (bom.parts or []):
+    for part in bom.parts or []:
         # Resolve the library name from the symbol or footprint prefix.
         lib = _lib_prefix(part.symbol) or _lib_prefix(part.footprint or "")
         if not lib:
@@ -420,8 +433,7 @@ def _bom_stock_floor() -> int:
     read this same value, so a part the model is allowed to pick is a part the
     gate will accept — no adopt-then-reject retry."""
     try:
-        return int(os.environ.get("KICRAFT_BOM_STOCK_FLOOR", "")
-                   or _BOM_STOCK_FLOOR)
+        return int(os.environ.get("KICRAFT_BOM_STOCK_FLOOR", "") or _BOM_STOCK_FLOOR)
     except ValueError:
         return _BOM_STOCK_FLOOR
 
@@ -470,7 +482,7 @@ def _check_passive_array_mismatch(bom, project_root: Path) -> list[str]:
     active, _ = _load_library_parts(project_root)
     manifest_by_name = {p.manifest.name: p.manifest for p in active}
     bad: list[str] = []
-    for part in (bom.parts or []):
+    for part in bom.parts or []:
         if not _is_single_passive_footprint(part.footprint or ""):
             continue
         cid = _resolve_part_lcsc(part, manifest_by_name)
@@ -523,15 +535,17 @@ def bom_position_mismatches(bom_parts, project_root: Path) -> list[dict]:
         joints = hit.get("joints") or 0
         if joints > len(pads):
             ref = getattr(part, "ref", "?")
-            out.append({
-                "ref": ref,
-                "message": (
-                    f"{ref}: footprint {fp!r} has {len(pads)} pad(s) but LCSC "
-                    f"{cid} is a {joints}-pin part ({hit.get('package') or ''}) "
-                    "-- the ordered part will not land; pick a part matching "
-                    "the footprint's pad count"
-                ),
-            })
+            out.append(
+                {
+                    "ref": ref,
+                    "message": (
+                        f"{ref}: footprint {fp!r} has {len(pads)} pad(s) but LCSC "
+                        f"{cid} is a {joints}-pin part ({hit.get('package') or ''}) "
+                        "-- the ordered part will not land; pick a part matching "
+                        "the footprint's pad count"
+                    ),
+                }
+            )
     return out
 
 
@@ -543,12 +557,11 @@ def bom_position_mismatches(bom_parts, project_root: Path) -> list[dict]:
 # elbow BNC. Existence/stock/retail all passed because nothing compared what
 # the catalog says the part IS against what the BOM says it is. The checks
 # are deliberately few and one-sided: only a CONFIDENT contradiction bounces.
-_SMD_CHIP_PKG_RE = re.compile(
-    r"^(01005|0201|0402|0603|0805|1206|1210|1806|1812|2010|2512)$")
+_SMD_CHIP_PKG_RE = re.compile(r"^(01005|0201|0402|0603|0805|1206|1210|1806|1812|2010|2512)$")
 _POT_PART_RE = re.compile(r"potentiometer|trimmer|trimpot", re.IGNORECASE)
 _POT_DESC_RE = re.compile(
-    r"potentiometer|trimmer|trimpot|variable|adjustable|rheostat",
-    re.IGNORECASE)
+    r"potentiometer|trimmer|trimpot|variable|adjustable|rheostat", re.IGNORECASE
+)
 _RIGHT_ANGLE_DESC_RE = re.compile(r"elbow|right[ -]?angle", re.IGNORECASE)
 
 
@@ -566,16 +579,15 @@ def _lcsc_identity_conflict(part, hit: dict) -> str | None:
     pkg = (hit.get("package") or "").strip()
     fp_lib = _lib_prefix(part.footprint or "") or ""
     fp_name = (part.footprint or "").split(":", 1)[-1]
-    if (_POT_PART_RE.search(ident) and "resistor" in desc.lower()
-            and not _POT_DESC_RE.search(desc)):
-        return ("the catalog part is a fixed resistor, not a "
-                "potentiometer/trimmer")
+    if _POT_PART_RE.search(ident) and "resistor" in desc.lower() and not _POT_DESC_RE.search(desc):
+        return "the catalog part is a fixed resistor, not a potentiometer/trimmer"
     if "_THT" in fp_lib and _SMD_CHIP_PKG_RE.match(pkg):
-        return (f"the catalog part is an SMD {pkg} chip package but the "
-                f"footprint is through-hole")
+        return f"the catalog part is an SMD {pkg} chip package but the footprint is through-hole"
     if "vertical" in fp_name.lower() and _RIGHT_ANGLE_DESC_RE.search(desc):
-        return ("the catalog part is a right-angle/elbow variant but the "
-                "footprint is the vertical/straight one")
+        return (
+            "the catalog part is a right-angle/elbow variant but the "
+            "footprint is the vertical/straight one"
+        )
     return None
 
 
@@ -647,23 +659,23 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
     unverified: list[str] = []
 
     def _retail_verdict(cid: str, *, picky: bool) -> tuple[str, dict | None]:
-        """"ok"/"dry"/"unverified"/"off" for one C#. One live hit per C# per
+        """ "ok"/"dry"/"unverified"/"off" for one C#. One live hit per C# per
         gate pass (memoized here; TTL disk cache spans the commit retries)."""
         if not retail_on:
             return "off", None
         if cid not in retail_info:
             try:
                 retail_info[cid] = lcsc_retail.stock(cid)
-                _log_query("retail_stock", outcome="hit", query=cid,
-                           stock=retail_info[cid]["stock"])
+                _log_query(
+                    "retail_stock", outcome="hit", query=cid, stock=retail_info[cid]["stock"]
+                )
             except lcsc_retail.RetailUnavailable:
                 retail_info[cid] = None
                 _log_query("retail_stock", outcome="error", query=cid)
         info = retail_info[cid]
         if info is None:
             return "unverified", None
-        need = max(info["min_buy"],
-                   lcsc_retail.retail_floor() if picky else 1)
+        need = max(info["min_buy"], lcsc_retail.retail_floor() if picky else 1)
         return ("ok" if info["stock"] >= need else "dry"), info
 
     def _alternates_note(part, cid: str, floor: int) -> str:
@@ -681,21 +693,22 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
             # trap the tier-4 keyword walk filters below).
             _single = _is_single_passive_footprint(part.footprint or "")
             _vtok = (part.value or "").strip().split()[0] if part.value else ""
+
             def _usable(c) -> bool:
-                return (str(c.get("lcsc")) not in seen
-                        and (c.get("stock") or 0) >= floor
-                        and not is_multi_element_array(c)
-                        and (not _single or not _vtok
-                             or chip_value_matches(_vtok, c)))
+                return (
+                    str(c.get("lcsc")) not in seen
+                    and (c.get("stock") or 0) >= floor
+                    and not is_multi_element_array(c)
+                    and (not _single or not _vtok or chip_value_matches(_vtok, c))
+                )
+
             kw = jlcparts.bom_keyword(part.value or "", part.footprint or "")
-            cands = [c for c in jlcparts.search(kw, limit=10)
-                     if _usable(c)] if kw else []
+            cands = [c for c in jlcparts.search(kw, limit=10) if _usable(c)] if kw else []
             if not cands:
                 hit = jlcparts.lookup(cid) or {}
                 probe = " ".join((hit.get("description") or "").split()[:4])
                 if probe:
-                    cands = [c for c in jlcparts.search(probe, limit=10)
-                             if _usable(c)]
+                    cands = [c for c in jlcparts.search(probe, limit=10) if _usable(c)]
             good = []
             for c in cands[:6]:
                 verdict, _ = _retail_verdict(str(c.get("lcsc")), picky=False)
@@ -705,11 +718,12 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                     break
             if not good:
                 return ""
-            return ("; in-stock alternates to consider (verify with "
-                    "lookup_lcsc_id): " + ", ".join(
-                        f"{c.get('lcsc')} "
-                        f"({(c.get('model') or c.get('description') or '?')[:40]}, "
-                        f"stock {c.get('stock')})" for c in good))
+            return "; in-stock alternates to consider (verify with lookup_lcsc_id): " + ", ".join(
+                f"{c.get('lcsc')} "
+                f"({(c.get('model') or c.get('description') or '?')[:40]}, "
+                f"stock {c.get('stock')})"
+                for c in good
+            )
         except Exception:
             return ""
 
@@ -718,7 +732,7 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
     bad: list[str] = []
     best_by_mpn: dict[tuple[str, bool], tuple[dict | None, list[str], bool]] = {}
     best_by_kw: dict[tuple[str, bool], tuple[dict | None, bool, bool]] = {}
-    for part in (bom.parts or []):
+    for part in bom.parts or []:
         mpn = (part.mpn or "").strip()
         note = part.sourcing_note or ""
         cid = extract_lcsc_pin(note)
@@ -736,8 +750,9 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                 # manifest's part, but the fab BOM will order the pinned one.
                 # Warning, not offender: an intentional substitute (same
                 # package, better stock) is legitimate.
-                man_cid = str((manifest_by_name[fp_lib].sourcing or {})
-                              .get("lcsc") or "").strip().upper()
+                man_cid = (
+                    str((manifest_by_name[fp_lib].sourcing or {}).get("lcsc") or "").strip().upper()
+                )
                 if man_cid and man_cid != cid.strip().upper():
                     warnings.append(
                         f"{part.ref} ({label}): sourcing_note pins LCSC {cid} "
@@ -745,8 +760,7 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                         f"LCSC {man_cid} — verify the pinned part matches the "
                         f"footprint's land pattern"
                     )
-            conflict = (None if (hit is None or fp_is_bundle)
-                        else _lcsc_identity_conflict(part, hit))
+            conflict = None if (hit is None or fp_is_bundle) else _lcsc_identity_conflict(part, hit)
             if hit is None:
                 bad.append(
                     f"{part.ref} ({label}): sourcing_note claims LCSC "
@@ -778,8 +792,7 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                         f"assembly but only {info['stock']} at the lcsc.com "
                         f"retail storefront (min buy {info['min_buy']}) — a "
                         f"pick must be in stock at BOTH; find an alternative "
-                        f"with lookup_lcsc_id"
-                        + _alternates_note(part, cid, floor)
+                        f"with lookup_lcsc_id" + _alternates_note(part, cid, floor)
                     )
                 elif verdict == "unverified":
                     unverified.append(f"{part.ref} ({cid})")
@@ -808,8 +821,7 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                         f"storefront ({info['stock']} available, min buy "
                         f"{info['min_buy']}); fetch an in-stock alternative "
                         f"with lookup_lcsc_id + add_part_from_lcsc and point "
-                        f"this part at the new bundle"
-                        + _alternates_note(part, cid, floor)
+                        f"this part at the new bundle" + _alternates_note(part, cid, floor)
                     )
                 elif verdict == "unverified":
                     unverified.append(f"{part.ref} ({cid})")
@@ -831,9 +843,11 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                 continue
             single = _is_single_passive_footprint(part.footprint or "")
             if (kw, single) not in best_by_kw:
+
                 def _kw_candidates(term: str) -> list[dict]:
-                    stocked = [c for c in jlcparts.search(term, limit=10)
-                               if (c.get("stock") or 0) >= floor]
+                    stocked = [
+                        c for c in jlcparts.search(term, limit=10) if (c.get("stock") or 0) >= floor
+                    ]
                     if single:
                         # Never hand a 2-pad passive a multi-element array
                         # (§9.28 would bounce the pin right back — the
@@ -841,13 +855,17 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                         # the substring search let through ("10k" matching
                         # inside "510kΩ").
                         vtok = term.split()[0]
-                        stocked = [c for c in stocked
-                                   if not is_multi_element_array(c)
-                                   and chip_value_matches(vtok, c)]
+                        stocked = [
+                            c
+                            for c in stocked
+                            if not is_multi_element_array(c) and chip_value_matches(vtok, c)
+                        ]
                     # Prefer JLC Basic (the stable no-setup-fee tier;
                     # Extended long-tail rows churn out within weeks).
-                    return ([c for c in stocked if c.get("type") == "Basic"]
-                            + [c for c in stocked if c.get("type") != "Basic"])
+                    return [c for c in stocked if c.get("type") == "Basic"] + [
+                        c for c in stocked if c.get("type") != "Basic"
+                    ]
+
                 cands = _kw_candidates(kw)
                 if not cands:
                     # Voltage/dielectric qualifiers over-constrain the ANDed
@@ -870,9 +888,7 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                 best_by_kw[(kw, single)] = (best, unv, bool(cands))
             best, unv, had_cands = best_by_kw[(kw, single)]
             if best is not None:
-                part.sourcing_note = (
-                    (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
-                )
+                part.sourcing_note = (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
                 if unv:
                     unverified.append(f"{part.ref} ({best['lcsc']})")
             elif had_cands:
@@ -931,10 +947,7 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                     best = cand  # fail open: accept, but say so
                     unv = True
                     break
-                tried.append(
-                    f"{cand.get('model')} ({cand['lcsc']}) retail stock "
-                    f"{info['stock']}"
-                )
+                tried.append(f"{cand.get('model')} ({cand['lcsc']}) retail stock {info['stock']}")
             best_by_mpn[key] = (best, tried, unv)
         best, tried, unv = best_by_mpn[key]
         if best is None and not tried:
@@ -950,10 +963,10 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                 f"{part.ref}: no orderable variant of '{mpn}': "
                 + "; ".join(tried[:4])
                 + " — pick a different part (a pick must be in stock at BOTH "
-                  "JLCPCB assembly and the lcsc.com retail storefront) and "
-                  "record the swap in bom.substitutions "
-                  '({"wanted": "' + str(mpn) + '", "got": "<new pick>", '
-                  '"reason": "not orderable"})'
+                "JLCPCB assembly and the lcsc.com retail storefront) and "
+                "record the swap in bom.substitutions "
+                '({"wanted": "' + str(mpn) + '", "got": "<new pick>", '
+                '"reason": "not orderable"})'
             )
         else:
             part.sourcing_note = (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
@@ -965,7 +978,6 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
             + ", ".join(dict.fromkeys(unverified))
         )
     return bad, warnings
-
 
 
 def _unresolved_architecture_parts(architecture, project_root: Path) -> list[str]:
@@ -986,9 +998,7 @@ def _unresolved_architecture_parts(architecture, project_root: Path) -> list[str
     if not core_names:
         return []
     # Scan architecture text for bundle name references.
-    text_fields = list(architecture.assumptions) + list(
-        architecture.topologies.values()
-    )
+    text_fields = list(architecture.assumptions) + list(architecture.topologies.values())
     combined_text = " ".join(text_fields)
     # Load parts library to get manifests for matched bundles.
     active, _broken = _load_library_parts(project_root)
@@ -1009,13 +1019,11 @@ def _unresolved_architecture_parts(architecture, project_root: Path) -> list[str
             info = lookup_pins(sym)
             if not info.get("pins"):
                 errors.append(
-                    f"architecture references '{name}' but its symbol "
-                    f"{sym!r} exposes no pins"
+                    f"architecture references '{name}' but its symbol {sym!r} exposes no pins"
                 )
         except (SymbolNotFoundError, ValueError) as e:
             errors.append(
-                f"architecture references '{name}' but its symbol "
-                f"{sym!r} did not resolve: {e}"
+                f"architecture references '{name}' but its symbol {sym!r} did not resolve: {e}"
             )
         lcsc = (man.sourcing or {}).get("lcsc")
         if lcsc and jlcparts.available() and not jlcparts.lcsc_exists(lcsc):
@@ -1062,23 +1070,16 @@ def _write_manifest(
         "slots_filled": slots_filled,
         "open_questions": len(state.open_questions),
         "blocking_questions": len(blocking_qs),
-        "synth_ok": (
-            None if synth_results is None else all(r.ok for r in synth_results)
-        ),
+        "synth_ok": (None if synth_results is None else all(r.ok for r in synth_results)),
         "synth_results": (
             None
             if synth_results is None
-            else [
-                {"name": r.name, "ok": r.ok, "message": r.message}
-                for r in synth_results
-            ]
+            else [{"name": r.name, "ok": r.ok, "message": r.message} for r in synth_results]
         ),
         "artifacts_subdir": artifacts_subdir,
         "archived_at": _utc_compact_now(),
     }
-    (archive_dir / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, default=str) + "\n"
-    )
+    (archive_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str) + "\n")
 
 
 def _archive_session(
@@ -1150,9 +1151,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     if state.architecture is not None and state.bom is not None:
         for check in (
             check_sheets_have_parts(state.architecture, state.bom),
-            check_bom_parts_reference_architecture_sheets(
-                state.architecture, state.bom
-            ),
+            check_bom_parts_reference_architecture_sheets(state.architecture, state.bom),
         ):
             if not check.ok:
                 print(f"{check.name}: {check.message}", file=sys.stderr)
@@ -1196,15 +1195,11 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             check_regulator_feedback_vout(state.bom),
         ]
         if state.architecture is not None:
-            checks.append(
-                check_inter_sheet_nets_realized(state.architecture, state.bom)
-            )
+            checks.append(check_inter_sheet_nets_realized(state.architecture, state.bom))
             # §9.15 inverse: a signal net wired to a single pin that was never
             # declared inter-sheet connects to nothing (the SOIL_MOISTURE_BLE
             # USB D+/D- dangle).
-            checks.append(
-                check_no_dangling_signal_nets(state.architecture, state.bom)
-            )
+            checks.append(check_no_dangling_signal_nets(state.architecture, state.bom))
         for check in checks:
             if not check.ok:
                 print(f"{check.name}: {check.message}", file=sys.stderr)
@@ -1245,16 +1240,14 @@ def _cmd_lookup_symbol(args: argparse.Namespace) -> int:
     try:
         info = lookup_pins(args.symbol)
     except SymbolNotFoundError as e:
-        _log_query("lookup_symbol", outcome="miss", query=args.symbol,
-                   lib=_lib_prefix(args.symbol))
+        _log_query("lookup_symbol", outcome="miss", query=args.symbol, lib=_lib_prefix(args.symbol))
         print(str(e), file=sys.stderr)
         return 2
     except ValueError as e:
         _log_query("lookup_symbol", outcome="error", query=args.symbol)
         print(str(e), file=sys.stderr)
         return 2
-    _log_query("lookup_symbol", outcome="hit", query=args.symbol,
-               lib=_lib_prefix(args.symbol))
+    _log_query("lookup_symbol", outcome="hit", query=args.symbol, lib=_lib_prefix(args.symbol))
     print(json.dumps(info, indent=2))
     return 0
 
@@ -1269,21 +1262,28 @@ def _print_curated_part_matches(curated: list) -> None:
     print("curated bundles (use the symbol+footprint PAIR verbatim):")
     for part in curated:
         m = part.manifest
-        print(f"  symbol {m.name}:{m.symbol_name}  "
-              f"footprint {m.name}:{m.footprint_name}  "
-              f"— {m.mpn}; {m.description} [{m.maturity}]")
+        print(
+            f"  symbol {m.name}:{m.symbol_name}  "
+            f"footprint {m.name}:{m.footprint_name}  "
+            f"— {m.mpn}; {m.description} [{m.maturity}]"
+        )
 
 
 def _cmd_search_symbols(args: argparse.Namespace) -> int:
     curated = search_library_parts(args.query, Path.cwd())
     matches = search_symbols(args.query, limit=args.limit)
-    _log_query("search_symbols",
-               outcome=("hit" if (curated or matches) else "miss"),
-               query=args.query, n_matches=len(curated) + len(matches))
+    _log_query(
+        "search_symbols",
+        outcome=("hit" if (curated or matches) else "miss"),
+        query=args.query,
+        n_matches=len(curated) + len(matches),
+    )
     if not curated and not matches:
-        print(f"no curated bundles or stock KiCad symbols match "
-              f"{args.query!r}; try fewer or broader terms",
-              file=sys.stderr)
+        print(
+            f"no curated bundles or stock KiCad symbols match "
+            f"{args.query!r}; try fewer or broader terms",
+            file=sys.stderr,
+        )
         return 0
     if curated:
         _print_curated_part_matches(curated)
@@ -1306,16 +1306,21 @@ def _cmd_lookup_footprint(args: argparse.Namespace) -> int:
     try:
         info = lookup_footprint(args.footprint)
     except FootprintNotFoundError as e:
-        _log_query("lookup_footprint", outcome="miss", query=args.footprint,
-                   lib=_lib_prefix(args.footprint))
+        _log_query(
+            "lookup_footprint",
+            outcome="miss",
+            query=args.footprint,
+            lib=_lib_prefix(args.footprint),
+        )
         print(str(e), file=sys.stderr)
         return 2
     except ValueError as e:
         _log_query("lookup_footprint", outcome="error", query=args.footprint)
         print(str(e), file=sys.stderr)
         return 2
-    _log_query("lookup_footprint", outcome="hit", query=args.footprint,
-               lib=_lib_prefix(args.footprint))
+    _log_query(
+        "lookup_footprint", outcome="hit", query=args.footprint, lib=_lib_prefix(args.footprint)
+    )
     print(json.dumps(info, indent=2))
     return 0
 
@@ -1323,13 +1328,18 @@ def _cmd_lookup_footprint(args: argparse.Namespace) -> int:
 def _cmd_search_footprints(args: argparse.Namespace) -> int:
     curated = search_library_parts(args.query, Path.cwd())
     matches = search_footprints(args.query, limit=args.limit)
-    _log_query("search_footprints",
-               outcome=("hit" if (curated or matches) else "miss"),
-               query=args.query, n_matches=len(curated) + len(matches))
+    _log_query(
+        "search_footprints",
+        outcome=("hit" if (curated or matches) else "miss"),
+        query=args.query,
+        n_matches=len(curated) + len(matches),
+    )
     if not curated and not matches:
-        print(f"no curated bundles or stock KiCad footprints match "
-              f"{args.query!r}; try fewer or broader terms",
-              file=sys.stderr)
+        print(
+            f"no curated bundles or stock KiCad footprints match "
+            f"{args.query!r}; try fewer or broader terms",
+            file=sys.stderr,
+        )
         return 0
     if curated:
         _print_curated_part_matches(curated)
@@ -1356,11 +1366,9 @@ def _cmd_list_parts(args: argparse.Namespace) -> int:
         # Filtered view: the full table has grown past what a tool round
         # can carry (~55KB); a keyword slice keeps every bundle reachable.
         active = search_library_parts(query, Path.cwd(), limit=64)
-        _log_query("list_parts", outcome="listed", n_active=len(active),
-                   query=query)
+        _log_query("list_parts", outcome="listed", n_active=len(active), query=query)
         if not active:
-            print(f"(no library parts match {query!r}; run without a "
-                  f"query for the full table)")
+            print(f"(no library parts match {query!r}; run without a query for the full table)")
             return 0
     else:
         active, _broken = _load_library_parts(Path.cwd())
@@ -1384,8 +1392,10 @@ _EASYEDA_SEARCH_URL = "https://easyeda.com/api/components/search"
 # get a WAF 403, a normal browser string does not. Same host the by-C# symbol/
 # footprint/price fetches already rely on (jlcpcb.com's own search API is
 # hard-blocked from datacenter IPs).
-_BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+_BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 def _parse_easyeda_search(payload: dict) -> list[dict]:
@@ -1397,21 +1407,25 @@ def _parse_easyeda_search(payload: dict) -> list[dict]:
     seen: set[str] = set()
     for source in ("lcsc", "SMT"):
         for r in lists.get(source) or []:
-            number = ((r.get("lcsc") or {}).get("number")
-                      or (r.get("szlcsc") or {}).get("number"))
+            number = (r.get("lcsc") or {}).get("number") or (r.get("szlcsc") or {}).get("number")
             if not number or number in seen:
                 continue
             seen.add(number)
             data_str = r.get("dataStr")
-            c_para = ((data_str.get("head") or {}).get("c_para") or {}
-                      if isinstance(data_str, dict) else {})
-            rows.append({
-                "lcsc": number,
-                "model": r.get("title") or c_para.get("name"),
-                "brand": c_para.get("Manufacturer"),
-                "package": c_para.get("package"),
-                "description": (r.get("description") or "")[:120] or None,
-            })
+            c_para = (
+                (data_str.get("head") or {}).get("c_para") or {}
+                if isinstance(data_str, dict)
+                else {}
+            )
+            rows.append(
+                {
+                    "lcsc": number,
+                    "model": r.get("title") or c_para.get("name"),
+                    "brand": c_para.get("Manufacturer"),
+                    "package": c_para.get("package"),
+                    "description": (r.get("description") or "")[:120] or None,
+                }
+            )
     return rows
 
 
@@ -1422,14 +1436,24 @@ def _search_easyeda_components(keyword: str, page_size: int = 10) -> list[dict] 
     callers must distinguish that from [] (a genuine no-match) so the BOM
     agent stops burning retries on keyword variants when the network is down.
     """
-    data = urllib.parse.urlencode({
-        "wd": keyword, "type": "3", "doctype[]": "2",
-        "page": "1", "pageSize": str(page_size),
-    }).encode()
+    data = urllib.parse.urlencode(
+        {
+            "wd": keyword,
+            "type": "3",
+            "doctype[]": "2",
+            "page": "1",
+            "pageSize": str(page_size),
+        }
+    ).encode()
     req = urllib.request.Request(
-        _EASYEDA_SEARCH_URL, data=data,
-        headers={"User-Agent": _BROWSER_UA, "Accept": "application/json",
-                 "Content-Type": "application/x-www-form-urlencoded"})
+        _EASYEDA_SEARCH_URL,
+        data=data,
+        headers={
+            "User-Agent": _BROWSER_UA,
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
@@ -1492,15 +1516,16 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     m = _LCSC_ID_RE.search(mpn)
     if m:
         lcsc = m.group(0).upper()
-        _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
-                   source="explicit-id")
+        _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc, source="explicit-id")
         mpn_cache.put(mpn, lcsc, "explicit-id")
-        print(json.dumps(
-            _attach_retail(
-                {"ok": True, "mpn": mpn, "lcsc": lcsc, "source": "explicit-id"},
-                lcsc),
-            indent=2,
-        ))
+        print(
+            json.dumps(
+                _attach_retail(
+                    {"ok": True, "mpn": mpn, "lcsc": lcsc, "source": "explicit-id"}, lcsc
+                ),
+                indent=2,
+            )
+        )
         return 0
 
     # 1. Parts-library manifests — authoritative and offline. Runs BEFORE the
@@ -1515,22 +1540,41 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
                 # Validate against offline catalog before trusting the manifest.
                 # A fabricated C# from a bad bundle must never propagate.
                 if jlcparts.available() and not jlcparts.lcsc_exists(lcsc):
-                    _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
-                               lcsc=lcsc, source="parts-library",
-                               error="lcsc-not-in-catalog")
+                    _log_query(
+                        "lookup_lcsc_id",
+                        outcome="miss",
+                        query=mpn,
+                        lcsc=lcsc,
+                        source="parts-library",
+                        error="lcsc-not-in-catalog",
+                    )
                     # Fall through — do NOT return a fabricated LCSC
                 else:
                     # Catalog absent (degraded) OR LCSC exists → trust the manifest
-                    _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=lcsc,
-                               source="parts-library", library_name=man.name)
+                    _log_query(
+                        "lookup_lcsc_id",
+                        outcome="hit",
+                        query=mpn,
+                        lcsc=lcsc,
+                        source="parts-library",
+                        library_name=man.name,
+                    )
                     mpn_cache.put(mpn, lcsc, "parts-library")
-                    print(json.dumps(
-                        _attach_retail(
-                            {"ok": True, "mpn": mpn, "lcsc": lcsc,
-                             "source": "parts-library", "name": man.name},
-                            lcsc),
-                        indent=2,
-                    ))
+                    print(
+                        json.dumps(
+                            _attach_retail(
+                                {
+                                    "ok": True,
+                                    "mpn": mpn,
+                                    "lcsc": lcsc,
+                                    "source": "parts-library",
+                                    "name": man.name,
+                                },
+                                lcsc,
+                            ),
+                            indent=2,
+                        )
+                    )
                     return 0
 
     # 1b. Persistent MPN->LCSC resolution cache: a part resolved once on this
@@ -1546,20 +1590,33 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
         # A previously-resolved LCSC might be fabricated (from a bad library
         # bundle that has since been replaced). Validate before returning.
         if jlcparts.available() and not jlcparts.lcsc_exists(cached_lcsc):
-            _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
-                       lcsc=cached_lcsc, source="mpn-cache",
-                       error="lcsc-not-in-catalog")
+            _log_query(
+                "lookup_lcsc_id",
+                outcome="miss",
+                query=mpn,
+                lcsc=cached_lcsc,
+                source="mpn-cache",
+                error="lcsc-not-in-catalog",
+            )
             # Fall through — stale cache; let later tiers resolve it fresh
         else:
-            _log_query("lookup_lcsc_id", outcome="hit", query=mpn, lcsc=cached_lcsc,
-                       source="mpn-cache")
-            print(json.dumps(
-                _attach_retail(
-                    {"ok": True, "mpn": mpn, "lcsc": cached_lcsc,
-                     "source": f"mpn-cache(via {cached.get('source', '?')})"},
-                    cached_lcsc),
-                indent=2,
-            ))
+            _log_query(
+                "lookup_lcsc_id", outcome="hit", query=mpn, lcsc=cached_lcsc, source="mpn-cache"
+            )
+            print(
+                json.dumps(
+                    _attach_retail(
+                        {
+                            "ok": True,
+                            "mpn": mpn,
+                            "lcsc": cached_lcsc,
+                            "source": f"mpn-cache(via {cached.get('source', '?')})",
+                        },
+                        cached_lcsc,
+                    ),
+                    indent=2,
+                )
+            )
             return 0
 
     # 2. Offline JLC catalog (jlcparts dump) — richer than the network search
@@ -1568,8 +1625,7 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     if jlcparts.available():
         results = jlcparts.search(mpn)
         if results:
-            fields = ("lcsc", "model", "brand", "package", "stock", "type",
-                      "price", "description")
+            fields = ("lcsc", "model", "brand", "package", "stock", "type", "price", "description")
             best = _pick_lcsc(mpn, results)
             if best and best.get("lcsc"):
                 # Veto a winner the §9.26 commit gate would reject anyway, so
@@ -1584,77 +1640,108 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
                 best_stock = best.get("stock") or 0
                 veto_reason = None
                 if floor and best_stock < floor:
-                    veto_reason = (f"exact match {best['lcsc']} has only "
-                                   f"{best_stock} in stock for JLCPCB assembly "
-                                   f"(< {floor} floor)")
+                    veto_reason = (
+                        f"exact match {best['lcsc']} has only "
+                        f"{best_stock} in stock for JLCPCB assembly "
+                        f"(< {floor} floor)"
+                    )
                 elif lcsc_retail.enabled():
                     try:
-                        ok_retail, _info = lcsc_retail.in_stock(
-                            best["lcsc"], picky=False)
+                        ok_retail, _info = lcsc_retail.in_stock(best["lcsc"], picky=False)
                         if not ok_retail:
-                            veto_reason = (f"exact match {best['lcsc']} is out "
-                                           f"of stock at the lcsc.com retail "
-                                           f"storefront")
+                            veto_reason = (
+                                f"exact match {best['lcsc']} is out "
+                                f"of stock at the lcsc.com retail "
+                                f"storefront"
+                            )
                     except lcsc_retail.RetailUnavailable:
                         pass
                 if veto_reason:
-                    _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
-                               lcsc=best["lcsc"], error="below-stock-floor")
+                    _log_query(
+                        "lookup_lcsc_id",
+                        outcome="miss",
+                        query=mpn,
+                        lcsc=best["lcsc"],
+                        error="below-stock-floor",
+                    )
                     # Sort the candidate list best-JLC-stock-first so the
                     # model's next pick clears the floor on the first try.
-                    ranked = sorted(results,
-                                    key=lambda r: (r.get("stock") or 0),
-                                    reverse=True)
-                    print(json.dumps(
-                        {"ok": False, "mpn": mpn,
-                         "candidates": [{k: r.get(k) for k in fields}
-                                        for r in ranked],
-                         "hint": f"{veto_reason}; a pick must clear {floor} "
-                                 f"JLCPCB-assembly stock AND be orderable at "
-                                 f"retail. Candidates are sorted by stock — "
-                                 f"pick the best-stocked one that fits and pass "
-                                 f"it to add_part_from_lcsc, or choose a "
-                                 f"different part."},
-                        indent=2,
-                    ))
+                    ranked = sorted(results, key=lambda r: r.get("stock") or 0, reverse=True)
+                    print(
+                        json.dumps(
+                            {
+                                "ok": False,
+                                "mpn": mpn,
+                                "candidates": [{k: r.get(k) for k in fields} for r in ranked],
+                                "hint": f"{veto_reason}; a pick must clear {floor} "
+                                f"JLCPCB-assembly stock AND be orderable at "
+                                f"retail. Candidates are sorted by stock — "
+                                f"pick the best-stocked one that fits and pass "
+                                f"it to add_part_from_lcsc, or choose a "
+                                f"different part.",
+                            },
+                            indent=2,
+                        )
+                    )
                     return 4
-                _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
-                           lcsc=best["lcsc"], source="jlcparts")
+                _log_query(
+                    "lookup_lcsc_id",
+                    outcome="resolved",
+                    query=mpn,
+                    lcsc=best["lcsc"],
+                    source="jlcparts",
+                )
                 mpn_cache.put(mpn, best["lcsc"], "jlcparts")
-                print(json.dumps(
-                    _attach_retail(
-                        {"ok": True, "mpn": mpn, "lcsc": best["lcsc"],
-                         "source": "jlcparts",
-                         "match": {k: best.get(k) for k in fields}},
-                        best["lcsc"]),
-                    indent=2,
-                ))
+                print(
+                    json.dumps(
+                        _attach_retail(
+                            {
+                                "ok": True,
+                                "mpn": mpn,
+                                "lcsc": best["lcsc"],
+                                "source": "jlcparts",
+                                "match": {k: best.get(k) for k in fields},
+                            },
+                            best["lcsc"],
+                        ),
+                        indent=2,
+                    )
+                )
                 return 0
-            _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
-                       n_candidates=len(results))
-            print(json.dumps(
-                {"ok": False, "mpn": mpn,
-                 "candidates": [{k: r.get(k) for k in fields} for r in results],
-                 "hint": "no single exact match; pick the candidate that fits "
-                         "(prefer in-stock) and pass it to add_part_from_lcsc"},
-                indent=2,
-            ))
+            _log_query("lookup_lcsc_id", outcome="miss", query=mpn, n_candidates=len(results))
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "mpn": mpn,
+                        "candidates": [{k: r.get(k) for k in fields} for r in results],
+                        "hint": "no single exact match; pick the candidate that fits "
+                        "(prefer in-stock) and pass it to add_part_from_lcsc",
+                    },
+                    indent=2,
+                )
+            )
             return 4
 
     # 3. easyeda.com keyword search — network, best-effort.
     results = _search_easyeda_components(mpn)
     if results is None:
-        _log_query("lookup_lcsc_id", outcome="error", query=mpn,
-                   error="search-backend-unreachable")
-        print(json.dumps(
-            {"ok": False, "mpn": mpn, "candidates": [],
-             "error": "part search backend unreachable",
-             "hint": "Do NOT retry other keywords — searches will keep failing "
-                     "this session. Ask the user for an LCSC C-number (C#####) "
-                     "or use the closest stock KiCad part and record the "
-                     "substitution in assumptions."},
-            indent=2,
-        ))
+        _log_query("lookup_lcsc_id", outcome="error", query=mpn, error="search-backend-unreachable")
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "mpn": mpn,
+                    "candidates": [],
+                    "error": "part search backend unreachable",
+                    "hint": "Do NOT retry other keywords — searches will keep failing "
+                    "this session. Ask the user for an LCSC C-number (C#####) "
+                    "or use the closest stock KiCad part and record the "
+                    "substitution in assumptions.",
+                },
+                indent=2,
+            )
+        )
         return 4
 
     fields = ("lcsc", "model", "brand", "package", "description")
@@ -1664,38 +1751,56 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     if jlcparts.available() and results:
         valid = [r for r in results if jlcparts.lcsc_exists(r.get("lcsc", ""))]
         if not valid and results:
-            _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
-                       n_candidates=len(results),
-                       error="all-easyeda-results-fabricated")
+            _log_query(
+                "lookup_lcsc_id",
+                outcome="miss",
+                query=mpn,
+                n_candidates=len(results),
+                error="all-easyeda-results-fabricated",
+            )
         results = valid
     best = _pick_lcsc(mpn, results)
     if best and best.get("lcsc"):
-        _log_query("lookup_lcsc_id", outcome="resolved", query=mpn,
-                   lcsc=best["lcsc"], source="easyeda")
+        _log_query(
+            "lookup_lcsc_id", outcome="resolved", query=mpn, lcsc=best["lcsc"], source="easyeda"
+        )
         mpn_cache.put(mpn, best["lcsc"], "easyeda")
-        print(json.dumps(
-            _attach_retail(
-                {"ok": True, "mpn": mpn, "lcsc": best["lcsc"],
-                 "source": "easyeda",
-                 "match": {k: best.get(k) for k in fields}},
-                best["lcsc"]),
-            indent=2,
-        ))
+        print(
+            json.dumps(
+                _attach_retail(
+                    {
+                        "ok": True,
+                        "mpn": mpn,
+                        "lcsc": best["lcsc"],
+                        "source": "easyeda",
+                        "match": {k: best.get(k) for k in fields},
+                    },
+                    best["lcsc"],
+                ),
+                indent=2,
+            )
+        )
         return 0
 
-    _log_query("lookup_lcsc_id", outcome="miss", query=mpn,
-               n_candidates=len(results))
-    print(json.dumps(
-        {"ok": False, "mpn": mpn,
-         "candidates": [{k: r.get(k) for k in fields} for r in results[:10]],
-         "hint": ("pick a candidate and pass it to add-part --from-lcsc C<NNNNN>"
-                  if results else
-                  "no LCSC match; retry at most ONCE with the bare part family "
-                  "(strip suffixes and descriptive words). If that misses too, "
-                  "ask the user for a C-number or use the closest stock KiCad "
-                  "part and record the substitution in assumptions.")},
-        indent=2,
-    ))
+    _log_query("lookup_lcsc_id", outcome="miss", query=mpn, n_candidates=len(results))
+    print(
+        json.dumps(
+            {
+                "ok": False,
+                "mpn": mpn,
+                "candidates": [{k: r.get(k) for k in fields} for r in results[:10]],
+                "hint": (
+                    "pick a candidate and pass it to add-part --from-lcsc C<NNNNN>"
+                    if results
+                    else "no LCSC match; retry at most ONCE with the bare part family "
+                    "(strip suffixes and descriptive words). If that misses too, "
+                    "ask the user for a C-number or use the closest stock KiCad "
+                    "part and record the substitution in assumptions."
+                ),
+            },
+            indent=2,
+        )
+    )
     return 4
 
 
@@ -1727,6 +1832,7 @@ def _slugify_libname(s: str) -> str:
 
     out = _re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
     from kicraft.parts_library import PART_NAME_RE
+
     return out if PART_NAME_RE.match(out) else ""
 
 
@@ -1758,7 +1864,7 @@ def _scan_symbol_name(text: str) -> str | None:
         # Top-level symbols are followed by other top-level forms, not by an
         # immediate sub-symbol "<name>_<unit>_<style>" form. Skip sub-symbol
         # entries by detecting their numeric "<name>_<unit>_<style>" suffix.
-        if _re.match(r'^.+_\d+_\d+$', raw):
+        if _re.match(r"^.+_\d+_\d+$", raw):
             continue
         return raw
     return None
@@ -1781,9 +1887,7 @@ def _normalize_symbol_text(text: str, original_name: str, target_name: str) -> s
     """
     if original_name == target_name:
         return text
-    text = text.replace(
-        f'(symbol "{original_name}"', f'(symbol "{target_name}"', 1
-    )
+    text = text.replace(f'(symbol "{original_name}"', f'(symbol "{target_name}"', 1)
     # Rename sub-symbol entries (`(symbol "Old_1_1" ...)`) so units stay
     # tied to their parent. Limit to forms that look like real units.
     import re as _re
@@ -1820,9 +1924,7 @@ def _sanitize_kicad_name(name: str) -> str:
 # meaningless on electromechanical parts, so retyping them is a pure fix; the
 # power_* / no_connect / free types are left alone (they carry deliberate ERC
 # semantics a normalizer must not invent or destroy).
-_PASSIVE_PIN_REF_PREFIXES = frozenset(
-    {"J", "P", "X", "CN", "K", "S", "SW", "BT", "TB"}
-)
+_PASSIVE_PIN_REF_PREFIXES = frozenset({"J", "P", "X", "CN", "K", "S", "SW", "BT", "TB"})
 _MISTYPED_EMECH_PIN_RE = re.compile(r"\(pin (?:input|unspecified)(\s)")
 
 
@@ -1883,9 +1985,7 @@ def _rewrite_model_stanza(fp_text: str, new_path: str) -> tuple[str, int]:
     appended before the closing paren so a freshly fetched model still gets
     referenced. Returns ``(new_text, stanza_count)``.
     """
-    rewritten, n = _MODEL_STANZA_RE.subn(
-        lambda m: m.group(1) + new_path + m.group(3), fp_text
-    )
+    rewritten, n = _MODEL_STANZA_RE.subn(lambda m: m.group(1) + new_path + m.group(3), fp_text)
     if n:
         return rewritten, n
     trimmed = fp_text.rstrip()
@@ -1895,9 +1995,7 @@ def _rewrite_model_stanza(fp_text: str, new_path: str) -> tuple[str, int]:
     return trimmed[:-1] + stanza + ")\n", 1
 
 
-def _check_3d_model_paths(
-    part_dir: Path, part_name: str, fp_text: str
-) -> list[str]:
+def _check_3d_model_paths(part_dir: Path, part_name: str, fp_text: str) -> list[str]:
     """Problems with the footprint's 3D model references; empty if clean.
 
     Accepted forms: a stock ``${KICAD9_3DMODEL_DIR}/...`` reference
@@ -1913,16 +2011,14 @@ def _check_3d_model_paths(
         if path.startswith(_STOCK_3D_PREFIX):
             continue
         if path.startswith(expected_prefix):
-            basename = path[len(expected_prefix):]
+            basename = path[len(expected_prefix) :]
             if not basename or "/" in basename:
                 problems.append(
-                    f"3D model path {path!r} must be a flat file directly "
-                    f"under {expected_prefix}"
+                    f"3D model path {path!r} must be a flat file directly under {expected_prefix}"
                 )
             elif not (part_dir / "3d" / basename).is_file():
                 problems.append(
-                    f"3D model path {path!r} has no backing file "
-                    f"{part_dir / '3d' / basename}"
+                    f"3D model path {path!r} has no backing file {part_dir / '3d' / basename}"
                 )
             continue
         problems.append(
@@ -1951,9 +2047,7 @@ def _parse_sourcing_args(entries: list[str]) -> dict[str, str]:
         if not value:
             raise ValueError(f"--sourcing entry {entry!r} has empty value")
         if not SOURCING_KEY_RE.match(key):
-            raise ValueError(
-                f"--sourcing vendor key {key!r} must be lowercase alphanumeric/dashes"
-            )
+            raise ValueError(f"--sourcing vendor key {key!r} must be lowercase alphanumeric/dashes")
         out[key] = value
     return out
 
@@ -2033,8 +2127,7 @@ def _ensure_vendored_courtyard_clearance(
                 )
     except Exception as exc:  # noqa: BLE001 - hygiene check, never fatal
         print(
-            f"add-part: courtyard clearance check skipped "
-            f"({type(exc).__name__}: {exc})",
+            f"add-part: courtyard clearance check skipped ({type(exc).__name__}: {exc})",
             file=sys.stderr,
         )
 
@@ -2071,7 +2164,7 @@ def _add_part_from_files(args: argparse.Namespace) -> int:
     raw_symbol_name = _scan_symbol_name(sym_text)
     if raw_symbol_name is None:
         print(
-            f"no top-level (symbol \"...\") found in {sym_src}",
+            f'no top-level (symbol "...") found in {sym_src}',
             file=sys.stderr,
         )
         return 2
@@ -2083,7 +2176,7 @@ def _add_part_from_files(args: argparse.Namespace) -> int:
     footprint_name = _scan_footprint_name(fp_text)
     if footprint_name is None:
         print(
-            f"no (footprint \"...\") found in {fp_src}",
+            f'no (footprint "...") found in {fp_src}',
             file=sys.stderr,
         )
         return 2
@@ -2256,8 +2349,7 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
         return _add_part_from_files(args)
     if not using_lcsc:
         print(
-            "add-part requires either --from-lcsc <ID> OR "
-            "--symbol PATH --footprint PATH --mpn MPN",
+            "add-part requires either --from-lcsc <ID> OR --symbol PATH --footprint PATH --mpn MPN",
             file=sys.stderr,
         )
         return 2
@@ -2283,7 +2375,6 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
     from kicraft.parts_library import PartManifest, Provenance
 
     lcsc_id = args.from_lcsc
-
 
     # Validate LCSC ID exists in offline catalog before fetching.
     # A fabricated C# (e.g. EasyEDA-internal placeholder) slips through the
@@ -2311,9 +2402,7 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
         return 2
 
     ee_symbol = EasyedaSymbolImporter(easyeda_cp_cad_data=cad_data).get_symbol()
-    ee_footprint = EasyedaFootprintImporter(
-        easyeda_cp_cad_data=cad_data
-    ).get_footprint()
+    ee_footprint = EasyedaFootprintImporter(easyeda_cp_cad_data=cad_data).get_footprint()
 
     # Derive the library name from --name, then MPN, then symbol info name.
     libname = (
@@ -2349,9 +2438,7 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
 
     # Symbol: write to <libname>.kicad_sym (fresh file).
     sym_path = part_dir / f"{libname}.kicad_sym"
-    sym_exporter = ExporterSymbolKicad(
-        symbol=ee_symbol, lib_path=str(sym_path), custom_fields={}
-    )
+    sym_exporter = ExporterSymbolKicad(symbol=ee_symbol, lib_path=str(sym_path), custom_fields={})
     if not sym_exporter.save_to_lib(
         lib_path=str(sym_path), footprint_lib_name=libname, overwrite=True
     ):
@@ -2377,8 +2464,7 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
     if retyped:
         sym_path.write_text(sym_text)
         print(
-            f"normalized {retyped} mistyped pin(s) to passive "
-            f"(electromechanical symbol, ERC-safe)"
+            f"normalized {retyped} mistyped pin(s) to passive (electromechanical symbol, ERC-safe)"
         )
 
     # 3D model: fetched by default so the bundle renders with a body in the
@@ -2475,9 +2561,7 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
         or f"part {symbol_name}"
     )
     datasheet = args.datasheet_url or ee_symbol.info.datasheet or None
-    if datasheet and not (
-        datasheet.startswith("http://") or datasheet.startswith("https://")
-    ):
+    if datasheet and not (datasheet.startswith("http://") or datasheet.startswith("https://")):
         datasheet = None
 
     import datetime as _dt
@@ -2509,8 +2593,15 @@ def _cmd_add_part(args: argparse.Namespace) -> int:
     )
     _finalize_part_bundle(part_dir, manifest)
     _warn_undetectable_mouth(part_dir, libname, footprint_name)
-    _log_query("add_part_from_lcsc", outcome="fetched", query=lcsc_id, lcsc=lcsc_id,
-               library_name=libname, into=args.into, maturity=manifest.maturity)
+    _log_query(
+        "add_part_from_lcsc",
+        outcome="fetched",
+        query=lcsc_id,
+        lcsc=lcsc_id,
+        library_name=libname,
+        into=args.into,
+        maturity=manifest.maturity,
+    )
 
     print(
         f"OK added {libname}@0.1.0 -> {part_dir}\n"
@@ -2705,8 +2796,7 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
 
     if part_dir.name != manifest.name:
         print(
-            f"directory name {part_dir.name!r} does not match manifest "
-            f"name {manifest.name!r}",
+            f"directory name {part_dir.name!r} does not match manifest name {manifest.name!r}",
             file=sys.stderr,
         )
         return 2
@@ -2731,8 +2821,7 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
     fp_text = fp.read_text()
     if "(footprint " not in fp_text and "(module " not in fp_text:
         print(
-            f"footprint file {fp} does not contain a (footprint ...) or "
-            f"(module ...) block",
+            f"footprint file {fp} does not contain a (footprint ...) or (module ...) block",
             file=sys.stderr,
         )
         return 2
@@ -2764,9 +2853,7 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
         loaded_fp = _pcbnew.FootprintLoad(str(fp.parent), manifest.footprint_name)
         bad_layers = malformed_courtyard_layers(loaded_fp) if loaded_fp else []
         if bad_layers:
-            names = ", ".join(
-                _pcbnew.BOARD.GetStandardLayerName(layer) for layer in bad_layers
-            )
+            names = ", ".join(_pcbnew.BOARD.GetStandardLayerName(layer) for layer in bad_layers)
             print(
                 f"malformed courtyard on {names}: the drawn segments do not "
                 f"form a closed keep-out (placement would read the part as a "
@@ -2852,9 +2939,7 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
     _3d_dir = part_dir / "3d"
     _wrls = sorted(_3d_dir.glob("*.wrl")) if _3d_dir.is_dir() else []
     _steps = (
-        sorted(_3d_dir.glob("*.step")) + sorted(_3d_dir.glob("*.stp"))
-        if _3d_dir.is_dir()
-        else []
+        sorted(_3d_dir.glob("*.step")) + sorted(_3d_dir.glob("*.stp")) if _3d_dir.is_dir() else []
     )
     if _wrls and _steps:
         from kicraft.parts_library.model_frames import frame_mismatch
@@ -2928,8 +3013,7 @@ def _cmd_fetch_3d(args: argparse.Namespace) -> int:
 
         base = vendored_parts_dir()
         part_dirs = sorted(
-            d for d in base.iterdir()
-            if d.is_dir() and (d / "manifest.json").is_file()
+            d for d in base.iterdir() if d.is_dir() and (d / "manifest.json").is_file()
         )
     else:
         part_dirs = [Path(p).resolve() for p in args.paths]
@@ -2959,7 +3043,11 @@ def _cmd_fetch_3d(args: argparse.Namespace) -> int:
 
     _MODEL_EXTS = {".step", ".stp", ".wrl"}
     buckets: dict[str, list[str]] = {
-        "fetched": [], "already": [], "stock": [], "no-3d": [], "failed": [],
+        "fetched": [],
+        "already": [],
+        "stock": [],
+        "no-3d": [],
+        "failed": [],
     }
 
     for part_dir in part_dirs:
@@ -2997,9 +3085,7 @@ def _cmd_fetch_3d(args: argparse.Namespace) -> int:
         if args.report:
             lcsc = (manifest.sourcing or {}).get("lcsc")
             why = "needs fetch" if lcsc else "no lcsc id in sourcing"
-            buckets["no-3d" if not lcsc else "fetched"].append(
-                f"{label}: {why}"
-            )
+            buckets["no-3d" if not lcsc else "fetched"].append(f"{label}: {why}")
             continue
 
         lcsc = (manifest.sourcing or {}).get("lcsc")
@@ -3009,9 +3095,7 @@ def _cmd_fetch_3d(args: argparse.Namespace) -> int:
 
         print(f"fetching 3D model for {label} ({lcsc})...", file=sys.stderr)
         try:
-            cad_data = EasyedaApi(use_cache=False).get_cad_data_of_component(
-                lcsc_id=lcsc
-            )
+            cad_data = EasyedaApi(use_cache=False).get_cad_data_of_component(lcsc_id=lcsc)
             if not cad_data:
                 buckets["failed"].append(f"{label}: EasyEDA returned no data")
                 continue
@@ -3060,9 +3144,7 @@ def _cmd_fetch_3d(args: argparse.Namespace) -> int:
             )
 
         dump_manifest(
-            manifest.model_copy(
-                update={"content_hash": compute_content_hash(part_dir)}
-            ),
+            manifest.model_copy(update={"content_hash": compute_content_hash(part_dir)}),
             part_dir,
         )
         buckets["fetched"].append(label)
@@ -3204,8 +3286,7 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
             parts = [p for p in parts if p.manifest.name in _core_names]
         except Exception:  # noqa: BLE001
             pass  # catalog unavailable — don't filter
-        extras["parts_block"] = _format_available_parts_block(
-            parts, stock_floor=_bom_stock_floor())
+        extras["parts_block"] = _format_available_parts_block(parts, stock_floor=_bom_stock_floor())
 
     elif stage == "wiring":
         if state.bom is None:
@@ -3286,9 +3367,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     """
     stage = args.stage
     if stage not in KNOWN_STAGES:
-        print(
-            json.dumps({"ok": False, "errors": [f"unknown stage {stage!r}"]}, indent=2)
-        )
+        print(json.dumps({"ok": False, "errors": [f"unknown stage {stage!r}"]}, indent=2))
         return 2
 
     state_path = Path(args.state)
@@ -3346,10 +3425,17 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     # retries instead of burning a build attempt (self-eval 2026-08-22:
     # KC-RUR8FR committed ``{"connections": [], "no_connect_pins": []}``).
     if stage == "wiring" and state.bom is not None and not state.bom.connections:
-        print(json.dumps({
-            "ok": False,
-            "errors": ["9.11 net coverage: wiring produced no connections — every part pin is uncovered"],
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "errors": [
+                        "9.11 net coverage: wiring produced no connections — every part pin is uncovered"
+                    ],
+                },
+                indent=2,
+            )
+        )
         return 3
 
     # Intent form-factor capture (deterministic; a safety net for the LLM). When
@@ -3391,12 +3477,8 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     #     (KC-WFFXZ3 DTR/RTS-into-ESP32; the proto-shield PROTO AREA orphans).
     wiring_normalizations: list[str] = []
     if stage == "wiring" and state.bom is not None and state.bom.connections:
-        wiring_normalizations += [
-            f"bridge {b}" for b in bridge_duplicate_pins(state.bom)
-        ]
-        wiring_normalizations += [
-            f"split {c}" for c in split_cross_sheet_connections(state.bom)
-        ]
+        wiring_normalizations += [f"bridge {b}" for b in bridge_duplicate_pins(state.bom)]
+        wiring_normalizations += [f"split {c}" for c in split_cross_sheet_connections(state.bom)]
         if state.architecture is not None:
             wiring_normalizations += [
                 f"inter_sheet {c}"
@@ -3417,9 +3499,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         )
 
         if _ff_enforce_enabled():
-            wiring_normalizations += [
-                f"form_factor {n}" for n in _ff_reconcile(state)
-            ]
+            wiring_normalizations += [f"form_factor {n}" for n in _ff_reconcile(state)]
 
     new_questions: list[Question] = []
     if args.questions_file:
@@ -3446,24 +3526,37 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     if stage == "wiring" and state.bom is not None and state.bom.connections:
         prog = check_mcu_programming_path(state.bom)
         for off in prog.offenders:
-            new_questions.append(Question(
-                text=(f"No guaranteed first-flash path: {off}. Add a programming "
-                      "interface (boot strap + button, or an SWD/UART header) so the "
-                      "MCU can be flashed."),
-                stage="wiring", blocking=False, material=True))
+            new_questions.append(
+                Question(
+                    text=(
+                        f"No guaranteed first-flash path: {off}. Add a programming "
+                        "interface (boot strap + button, or an SWD/UART header) so the "
+                        "MCU can be flashed."
+                    ),
+                    stage="wiring",
+                    blocking=False,
+                    material=True,
+                )
+            )
         if prog.offenders:
-            wiring_normalizations.append(
-                f"programming_path: {len(prog.offenders)} MCU(s) flagged")
+            wiring_normalizations.append(f"programming_path: {len(prog.offenders)} MCU(s) flagged")
 
         # §9.22 (advisory): on a breakout/adapter brief, the connectors must be
         # bridged. Surface a missing bridge as a wiring caveat (#11 fpc-breakout
         # left J1<->J2 entirely disconnected). Detector, not a fab gate.
         breakout = check_breakout_connectivity(state.intent, state.bom)
         for off in breakout.offenders:
-            new_questions.append(Question(
-                text=(f"Breakout/adapter intent unmet: {off}. Wire the intended "
-                      "pin-to-pin mapping between the connectors."),
-                stage="wiring", blocking=False, material=True))
+            new_questions.append(
+                Question(
+                    text=(
+                        f"Breakout/adapter intent unmet: {off}. Wire the intended "
+                        "pin-to-pin mapping between the connectors."
+                    ),
+                    stage="wiring",
+                    blocking=False,
+                    material=True,
+                )
+            )
         if breakout.offenders:
             wiring_normalizations.append("breakout: connectors not bridged")
 
@@ -3476,9 +3569,14 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     if stage == "bom" and state.bom is not None:
         sub = check_named_part_substitutions(state.intent, state.bom)
         for off in sub.offenders:
-            new_questions.append(Question(
-                text=f"Part substitution detected: {off}. Confirm the part class matches your intent, or update the BOM before synthesis.",
-                stage="bom", blocking=False, material=True))
+            new_questions.append(
+                Question(
+                    text=f"Part substitution detected: {off}. Confirm the part class matches your intent, or update the BOM before synthesis.",
+                    stage="bom",
+                    blocking=False,
+                    material=True,
+                )
+            )
 
     state.replace_open_questions_for_stage(stage, new_questions)
 
@@ -3519,26 +3617,18 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         # Self-loop check
         for c in fs.connections:
             if c.from_block == c.to_block:
-                errors.append(
-                    f"self-loop connection: {c.from_block!r} → {c.to_block!r}"
-                )
+                errors.append(f"self-loop connection: {c.from_block!r} → {c.to_block!r}")
         # Isolated block check
-        connected = {c.from_block for c in fs.connections} | {
-            c.to_block for c in fs.connections
-        }
+        connected = {c.from_block for c in fs.connections} | {c.to_block for c in fs.connections}
         block_names = {b.name for b in fs.blocks}
         isolated = block_names - connected
         if isolated and len(fs.blocks) > 1:
-            errors.append(
-                f"isolated block(s) with no connections: {sorted(isolated)}"
-            )
+            errors.append(f"isolated block(s) with no connections: {sorted(isolated)}")
         # Block count check
         if len(fs.blocks) < 1:
             errors.append("functional_spec has zero blocks")
         elif len(fs.blocks) > 12:
-            errors.append(
-                f"functional_spec has {len(fs.blocks)} blocks (max 12)"
-            )
+            errors.append(f"functional_spec has {len(fs.blocks)} blocks (max 12)")
         if errors:
             print(
                 json.dumps(
@@ -3558,9 +3648,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         # R2: Pre-resolve named part families — catches "LCSC not in catalog"
         # / "unresolved symbol" issues early, where the model can still fix the
         # architecture before the BOM stage.
-        bad = _unresolved_architecture_parts(
-            state.architecture, state_path.resolve().parent.parent
-        )
+        bad = _unresolved_architecture_parts(state.architecture, state_path.resolve().parent.parent)
         if bad:
             print(
                 json.dumps(
@@ -3584,12 +3672,8 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         # RESET/D0→PROTO dangling-label cases at architecture commit.
         if state.functional_spec is not None:
             for check in (
-                check_every_block_has_sheet(
-                    state.functional_spec, state.architecture
-                ),
-                check_fs_connections_mapped(
-                    state.functional_spec, state.architecture
-                ),
+                check_every_block_has_sheet(state.functional_spec, state.architecture),
+                check_fs_connections_mapped(state.functional_spec, state.architecture),
             ):
                 if not check.ok:
                     print(
@@ -3654,15 +3738,11 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             # must realize each signal endpoint, or the emitter leaves a sheet
             # pin with no hierarchical label (caught only by §9.12 ERC at
             # synthesis time otherwise).
-            checks.append(
-                check_inter_sheet_nets_realized(state.architecture, state.bom)
-            )
+            checks.append(check_inter_sheet_nets_realized(state.architecture, state.bom))
             # The inverse failure: a signal net wired to a single pin that was
             # never declared inter-sheet dangles ("Label not connected to
             # anything") -- the SOIL_MOISTURE_BLE USB D+/D- build failure.
-            checks.append(
-                check_no_dangling_signal_nets(state.architecture, state.bom)
-            )
+            checks.append(check_no_dangling_signal_nets(state.architecture, state.bom))
         failing = [check for check in checks if not check.ok]
         if failing:
             # ALL failing wiring checks in one rejection: each retry costs one
@@ -3704,6 +3784,20 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     bom_normalizations: list[str] = []
     if stage == "bom" and state.bom is not None:
         project_root = state_path.resolve().parent.parent
+        size_check = check_bom_size(state.bom)
+        if not size_check.ok:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [f"{size_check.name}: {size_check.message}"],
+                        "offenders": list(size_check.offenders[:20]),
+                        "offenders_total": len(size_check.offenders),
+                    },
+                    indent=2,
+                )
+            )
+            return 3
         if state.architecture is not None:
             # §9.24 normalizer (the KC-WFFXZ3 shape): the BOM model cannot edit
             # architecture.sheets, so a single declared sheet whose connectors
@@ -3717,47 +3811,38 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             )
 
             n_assumptions = len(state.bom.assumptions)
-            if isolate_opposite_edge_connectors(
-                state.bom, state.architecture, verbose=False
-            ):
+            if isolate_opposite_edge_connectors(state.bom, state.architecture, verbose=False):
                 bom_normalizations = list(state.bom.assumptions[n_assumptions:])
-        identity_checks = [check_capacitor_polarity_consistency(state.bom),
-                           check_sheet_connector_edge_conflicts(state.bom),
-                           # §9.29 part-presence half: an MCU BOM must carry a
-                           # programming-access part (header / test pads / USB).
-                           # connections are empty at BOM commit, so only the
-                           # part check runs here; UPDI reachability gates the
-                           # wiring commit below.
-                           check_mcu_programming_access(state.bom),
-                           # §9.33/§9.34 (2026-07-27 fix-plan P2): a
-                           # spec-named MPN or brief-stated mount type the BOM
-                           # walks away from must be recorded in
-                           # bom.substitutions -- the silent_substitution gate
-                           # fires on the silence, not the swap.
-                           check_spec_named_mpn_substitutions(
-                               state.functional_spec, state.architecture,
-                               state.bom),
-                           check_mount_type_consistency(
-                               state.intent, state.bom)]
+        identity_checks = [
+            check_capacitor_polarity_consistency(state.bom),
+            check_sheet_connector_edge_conflicts(state.bom),
+            # §9.29 part-presence half: an MCU BOM must carry a
+            # programming-access part (header / test pads / USB).
+            # connections are empty at BOM commit, so only the
+            # part check runs here; UPDI reachability gates the
+            # wiring commit below.
+            check_mcu_programming_access(state.bom),
+            # §9.33/§9.34 (2026-07-27 fix-plan P2): a
+            # spec-named MPN or brief-stated mount type the BOM
+            # walks away from must be recorded in
+            # bom.substitutions -- the silent_substitution gate
+            # fires on the silence, not the swap.
+            check_spec_named_mpn_substitutions(
+                state.functional_spec, state.architecture, state.bom
+            ),
+            check_mount_type_consistency(state.intent, state.bom),
+        ]
         if state.architecture is not None:
+            identity_checks.append(check_sheets_have_parts(state.architecture, state.bom))
             identity_checks.append(
-                check_sheets_have_parts(state.architecture, state.bom)
-            )
-            identity_checks.append(
-                check_bom_parts_reference_architecture_sheets(
-                    state.architecture, state.bom
-                )
+                check_bom_parts_reference_architecture_sheets(state.architecture, state.bom)
             )
         failures: list[tuple[str, list[str]]] = [
-            (f"{c.name}: {c.message}", list(c.offenders))
-            for c in identity_checks
-            if not c.ok
+            (f"{c.name}: {c.message}", list(c.offenders)) for c in identity_checks if not c.ok
         ]
         bad_fps = _unresolved_footprints(state.bom, project_root)
         if bad_fps:
-            failures.append(
-                ("footprint(s) do not resolve to a real .kicad_mod", bad_fps)
-            )
+            failures.append(("footprint(s) do not resolve to a real .kicad_mod", bad_fps))
         bad_syms = _unresolved_symbols(state.bom)
         if bad_syms:
             failures.append(
@@ -3793,9 +3878,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                     {
                         "ok": False,
                         "errors": [msg for msg, _ in failures],
-                        "offenders": [
-                            o for _, offs in failures for o in offs[:20]
-                        ],
+                        "offenders": [o for _, offs in failures for o in offs[:20]],
                         "offenders_total": sum(len(offs) for _, offs in failures),
                     },
                     indent=2,
@@ -3835,9 +3918,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     # §9.28: an array LCSC on a single-passive footprint can't land — an
     # 8-pin 0603x4 resistor array on a 2-pad R_0603 has fewer pads than pins.
     if stage == "bom" and state.bom is not None:
-        bad_arrays = _check_passive_array_mismatch(
-            state.bom, state_path.resolve().parent.parent
-        )
+        bad_arrays = _check_passive_array_mismatch(state.bom, state_path.resolve().parent.parent)
         if bad_arrays:
             print(
                 json.dumps(
@@ -3860,9 +3941,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     # footprint's pad count can't land — a 40-position strip on a 2-pad jumper
     # (KC-6DCV66 J3/J4). Surfaced on the BOM tab, not a build blocker.
     if stage == "bom" and state.bom is not None:
-        for m in bom_position_mismatches(
-            state.bom.parts, state_path.resolve().parent.parent
-        ):
+        for m in bom_position_mismatches(state.bom.parts, state_path.resolve().parent.parent):
             bom_warnings.append(m["message"])
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3909,8 +3988,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     if stage == "placement" and state.placement is not None and state.bom is not None:
         known = {p.ref for p in state.bom.parts}
         stale = sorted(
-            (set(state.placement.component_zones) | set(state.placement.thermal_refs))
-            - known
+            (set(state.placement.component_zones) | set(state.placement.thermal_refs)) - known
         )
         if stale:
             summary["warnings"] = [
@@ -4020,12 +4098,9 @@ _QUALITY_PRESETS = {
     # "draft" validated by the 2026-06-12 sweep (logs/draft_sweep/
     # 20260612T025445Z): ~1.8x faster than "good" at an equal-or-better
     # fab-ready rate; KICRAFT_QUALITY_PRESETS can override per-process.
-    "draft": {"engine": "autoexperiment", "leaf_rounds": 2, "leaf_attempts": 2,
-              "parent_rounds": 2},
-    "good": {"engine": "autoexperiment", "leaf_rounds": 3, "leaf_attempts": 3,
-             "parent_rounds": 3},
-    "best": {"engine": "autoexperiment", "leaf_rounds": 6, "leaf_attempts": 3,
-             "parent_rounds": 6},
+    "draft": {"engine": "autoexperiment", "leaf_rounds": 2, "leaf_attempts": 2, "parent_rounds": 2},
+    "good": {"engine": "autoexperiment", "leaf_rounds": 3, "leaf_attempts": 3, "parent_rounds": 3},
+    "best": {"engine": "autoexperiment", "leaf_rounds": 6, "leaf_attempts": 3, "parent_rounds": 6},
 }
 
 
@@ -4048,8 +4123,9 @@ def _quality_presets() -> dict:
     return presets
 
 
-def _run_layout(quality: str, root_sch: Path, pcb: Path,
-                *, seed: int | None = None, route: bool = True) -> int:
+def _run_layout(
+    quality: str, root_sch: Path, pcb: Path, *, seed: int | None = None, route: bool = True
+) -> int:
     """Run the placement+routing engine in-process (inherits this env's pcbnew).
 
     ``seed`` pins the placement RNG so two runs of the same workspace produce the
@@ -4117,9 +4193,11 @@ def _run_layout(quality: str, root_sch: Path, pcb: Path,
     from kicraft.cli.autoexperiment import main as _autoexperiment_main
 
     if not route:
-        print("[build]   note: --no-route is honored only by the fast "
-              "(solve-hierarchy) engine; this quality always routes.",
-              file=sys.stderr)
+        print(
+            "[build]   note: --no-route is honored only by the fast "
+            "(solve-hierarchy) engine; this quality always routes.",
+            file=sys.stderr,
+        )
     common = [str(pcb), "--schematic", str(root_sch), *seed_args]
 
     # WS2 wall budgets: a build under a harness watchdog (self-eval) exports
@@ -4145,16 +4223,27 @@ def _run_layout(quality: str, root_sch: Path, pcb: Path,
             "KICRAFT_LEAF_SOLVE_MAX_WALL_S", f"{max(180.0, _leaf_budget / 3.0):.0f}"
         )
 
-    print(f"[build]   leaf phase: {preset['leaf_rounds']}x{preset['leaf_attempts']} "
-          f"designs/leaf + auto-pin best ...")
-    leaf_rc = _autoexperiment_main(common + [
-        "--leaves-only", "--rounds", str(preset["leaf_rounds"]),
-        "--leaf-rounds", str(preset["leaf_attempts"]), *leaf_wall_args])
+    print(
+        f"[build]   leaf phase: {preset['leaf_rounds']}x{preset['leaf_attempts']} "
+        f"designs/leaf + auto-pin best ..."
+    )
+    leaf_rc = _autoexperiment_main(
+        common
+        + [
+            "--leaves-only",
+            "--rounds",
+            str(preset["leaf_rounds"]),
+            "--leaf-rounds",
+            str(preset["leaf_attempts"]),
+            *leaf_wall_args,
+        ]
+    )
     if leaf_rc != 0:
         return leaf_rc
     print(f"[build]   parent phase: {preset['parent_rounds']} round(s) from pinned leaves ...")
-    return _autoexperiment_main(common + [
-        "--parents-only", "--rounds", str(preset["parent_rounds"]), *parent_wall_args])
+    return _autoexperiment_main(
+        common + ["--parents-only", "--rounds", str(preset["parent_rounds"]), *parent_wall_args]
+    )
 
 
 def _find_routed_parent(project_dir: Path) -> Path | None:
@@ -4239,19 +4328,20 @@ def _effective_connector_zones(pcb: Path) -> dict:
     if zone_files:
         payload = json.loads(Path(zone_files[0]).read_text(encoding="utf-8"))
         zones = payload.get("component_zones", payload.get("zones", {})) or {}
-    for sidecar in sorted(glob.glob(str(
-        pcb.parent / ".experiments" / "subcircuits" / "*"
-        / "edge_pins_demoted.json"
-    ))):
+    for sidecar in sorted(
+        glob.glob(str(pcb.parent / ".experiments" / "subcircuits" / "*" / "edge_pins_demoted.json"))
+    ):
         try:
             demoted = json.loads(Path(sidecar).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         for ref in demoted.get("refs") or []:
             if zones.pop(str(ref), None) is not None:
-                print(f"[build]     connector-edge gate: skipping "
-                      f"{ref} (edge pin demoted at compose for the "
-                      f"requested outline shape)")
+                print(
+                    f"[build]     connector-edge gate: skipping "
+                    f"{ref} (edge pin demoted at compose for the "
+                    f"requested outline shape)"
+                )
     return zones
 
 
@@ -4444,14 +4534,12 @@ def _check_outline_shape_conformance(state, pcb: Path) -> dict | None:
                     # Scalar request ("60 mm"): the limiting dimension must hit
                     # it; a named shape's intrinsic aspect may keep the other
                     # axis below (hexagon height < width).
-                    size_ok = (
-                        abs(max(w, h) - max(tw, th)) <= max(tw, th) * _SHAPE_SIZE_TOL
-                        and min(w, h) <= max(tw, th) * (1.0 + _SHAPE_SIZE_TOL)
-                    )
+                    size_ok = abs(max(w, h) - max(tw, th)) <= max(tw, th) * _SHAPE_SIZE_TOL and min(
+                        w, h
+                    ) <= max(tw, th) * (1.0 + _SHAPE_SIZE_TOL)
                 else:
                     size_ok = (
-                        abs(w - tw) <= tw * _SHAPE_SIZE_TOL
-                        and abs(h - th) <= th * _SHAPE_SIZE_TOL
+                        abs(w - tw) <= tw * _SHAPE_SIZE_TOL and abs(h - th) <= th * _SHAPE_SIZE_TOL
                     )
                 size_note = f" vs requested {tw:.0f}x{th:.0f}mm"
 
@@ -4586,20 +4674,24 @@ def build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
     """
     raw = summary if isinstance(summary, dict) else {}
     drc = raw.get("drc") if isinstance(raw.get("drc"), dict) else {}
-    reasons = _unique_bounded(
-        raw.get("reasons") or raw.get("rejection_reasons") or [], 30
-    )
+    reasons = _unique_bounded(raw.get("reasons") or raw.get("rejection_reasons") or [], 30)
     counts: dict[str, int] = {}
-    for key in ("shorts", "unconnected", "courtyard", "keepout", "clearance",
-                "copper_edge_clearance", "tracks_crossing"):
+    for key in (
+        "shorts",
+        "unconnected",
+        "courtyard",
+        "keepout",
+        "clearance",
+        "copper_edge_clearance",
+        "tracks_crossing",
+    ):
         value = raw.get(key, drc.get(key, 0))
         try:
             counts[key] = max(0, int(value or 0))
         except (TypeError, ValueError):
             counts[key] = 0
     nets = _unique_bounded(
-        raw.get("unconnected_nets") or drc.get("unconnected_nets") or
-        raw.get("nets") or [], 12
+        raw.get("unconnected_nets") or drc.get("unconnected_nets") or raw.get("nets") or [], 12
     )
     missing_refs = _unique_bounded(
         raw.get("missing_refs") or raw.get("missing_component_refs") or [], 40
@@ -4613,30 +4705,39 @@ def build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
         if violation is not None:
             violations.append(violation)
     footprint_refs = _unique_bounded(
-        list(raw.get("footprint_refs") or []) +
-        [ref for v in violations for ref in v.footprint_refs] + missing_refs,
+        list(raw.get("footprint_refs") or [])
+        + [ref for v in violations for ref in v.footprint_refs]
+        + missing_refs,
         40,
     )
     errors: list[PcbError] = []
 
-    def add(code: str, title: str, explanation: str, details: list[str],
-            next_action: str, *, wanted_types: set[str] | None = None) -> None:
+    def add(
+        code: str,
+        title: str,
+        explanation: str,
+        details: list[str],
+        next_action: str,
+        *,
+        wanted_types: set[str] | None = None,
+    ) -> None:
         selected = (
-            [v for v in violations if v.type in wanted_types]
-            if wanted_types else list(violations)
+            [v for v in violations if v.type in wanted_types] if wanted_types else list(violations)
         )
-        errors.append(PcbError(
-            stage=stage if stage in ("place_route", "verify") else "verify",
-            code=code,
-            title=title,
-            explanation=_bounded_text(explanation, 500),
-            details=_unique_bounded(details, 12),
-            counts={k: v for k, v in counts.items() if v},
-            nets=nets,
-            footprint_refs=footprint_refs,
-            violations=selected[:120],
-            next_action=_bounded_text(next_action, 300),
-        ))
+        errors.append(
+            PcbError(
+                stage=stage if stage in ("place_route", "verify") else "verify",
+                code=code,
+                title=title,
+                explanation=_bounded_text(explanation, 500),
+                details=_unique_bounded(details, 12),
+                counts={k: v for k, v in counts.items() if v},
+                nets=nets,
+                footprint_refs=footprint_refs,
+                violations=selected[:120],
+                next_action=_bounded_text(next_action, 300),
+            )
+        )
 
     if counts["unconnected"] or nets:
         net_text = ", ".join(nets) if nets else "the affected nets"
@@ -4644,20 +4745,18 @@ def build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
             "unconnected",
             "Open connections remain",
             f"Routing left {counts['unconnected'] or 1} open connection(s), so the board is not electrically complete.",
-            [f"Unconnected item(s): {counts['unconnected'] or 1}",
-             f"Nets: {net_text}"],
+            [f"Unconnected item(s): {counts['unconnected'] or 1}", f"Nets: {net_text}"],
             "Add routing room or spread the affected blocks, then route again.",
             wanted_types={"unconnected_items"},
         )
     if counts["shorts"] or "shorts" in reasons or "tracks_crossing" in reasons:
-        net_pairs = [f"{v.net1} / {v.net2}" for v in violations
-                     if v.net1 and v.net2]
+        net_pairs = [f"{v.net1} / {v.net2}" for v in violations if v.net1 and v.net2]
         add(
             "shorts",
             "Different nets touch",
             f"The routed copper contains {counts['shorts'] or 1} short(s): different nets touch and cannot be fabricated safely.",
-            [f"Short(s): {counts['shorts'] or 1}"] +
-            ([f"Nets: {', '.join(_unique_bounded(net_pairs, 12))}"] if net_pairs else []),
+            [f"Short(s): {counts['shorts'] or 1}"]
+            + ([f"Nets: {', '.join(_unique_bounded(net_pairs, 12))}"] if net_pairs else []),
             "Increase clearance or reroute the touching nets before retrying.",
             wanted_types={"shorting_items", "tracks_crossing", "clearance", "hole_clearance"},
         )
@@ -4666,8 +4765,8 @@ def build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
             "courtyards_overlap",
             "Footprint courtyards overlap",
             "Footprint assembly courtyards overlap, so the components cannot be assembled in the produced placement.",
-            [f"Overlaps: {counts['courtyard'] or 1}"] +
-            ([f"Footprints: {', '.join(footprint_refs[:20])}"] if footprint_refs else []),
+            [f"Overlaps: {counts['courtyard'] or 1}"]
+            + ([f"Footprints: {', '.join(footprint_refs[:20])}"] if footprint_refs else []),
             "Spread the referenced footprints apart and run place/route again.",
             wanted_types={"courtyards_overlap"},
         )
@@ -4690,24 +4789,42 @@ def build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
         )
 
     explicit = [
-        ("drc_timeout", "DRC timed out",
-         "KiCad's design-rule check timed out, so no trustworthy clean-board verdict or location is available.",
-         "Retry verification after confirming the board and KiCad toolchain are responsive."),
-        ("drc_unavailable", "DRC tooling unavailable",
-         "The KiCad DRC tool was unavailable, so this board cannot be treated as verified.",
-         "Install or repair the KiCad CLI, then rerun verification."),
-        ("drc_failed", "DRC tooling failed",
-         "KiCad's DRC command failed before producing trustworthy violation evidence.",
-         "Check the KiCad CLI error and board file, then rerun verification."),
-        ("malformed_board_geometry", "Board geometry is malformed",
-         "The produced board contains geometry that cannot be validated safely.",
-         "Fix the board outline or routed geometry and rerun place/route."),
-        ("empty_board", "Board contains no footprints",
-         "The produced PCB is empty, so it is not a usable routed board.",
-         "Rebuild the placement and confirm all design components are emitted."),
-        ("board_missing", "Routed board is missing",
-         "No current PCB file was produced, so there is no board to verify or inspect.",
-         "Retry place/route and inspect the routing toolchain output if it fails again."),
+        (
+            "drc_timeout",
+            "DRC timed out",
+            "KiCad's design-rule check timed out, so no trustworthy clean-board verdict or location is available.",
+            "Retry verification after confirming the board and KiCad toolchain are responsive.",
+        ),
+        (
+            "drc_unavailable",
+            "DRC tooling unavailable",
+            "The KiCad DRC tool was unavailable, so this board cannot be treated as verified.",
+            "Install or repair the KiCad CLI, then rerun verification.",
+        ),
+        (
+            "drc_failed",
+            "DRC tooling failed",
+            "KiCad's DRC command failed before producing trustworthy violation evidence.",
+            "Check the KiCad CLI error and board file, then rerun verification.",
+        ),
+        (
+            "malformed_board_geometry",
+            "Board geometry is malformed",
+            "The produced board contains geometry that cannot be validated safely.",
+            "Fix the board outline or routed geometry and rerun place/route.",
+        ),
+        (
+            "empty_board",
+            "Board contains no footprints",
+            "The produced PCB is empty, so it is not a usable routed board.",
+            "Rebuild the placement and confirm all design components are emitted.",
+        ),
+        (
+            "board_missing",
+            "Routed board is missing",
+            "No current PCB file was produced, so there is no board to verify or inspect.",
+            "Retry place/route and inspect the routing toolchain output if it fails again.",
+        ),
     ]
     for code, title, explanation, next_action in explicit:
         if code in reasons:
@@ -4715,10 +4832,12 @@ def build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
 
     if not errors:
         evidence = raw.get("evidence") if isinstance(raw.get("evidence"), dict) else {}
-        evidence_texts = (
-            list(evidence.values()) + [raw.get("report_excerpt"), raw.get("build_log_tail"),
-                                       raw.get("parent_route_stderr_tail"), raw.get("solve_stderr_tail")]
-        )
+        evidence_texts = list(evidence.values()) + [
+            raw.get("report_excerpt"),
+            raw.get("build_log_tail"),
+            raw.get("parent_route_stderr_tail"),
+            raw.get("solve_stderr_tail"),
+        ]
         # Never attach foreign or warn-only violations to a failure card.
         # Never attach foreign or warn-only violations to a failure card:
         # silk_* / minor courtyard clips cannot fail a build, and a
@@ -4726,51 +4845,52 @@ def build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
         # violation belongs to a different board frame (KC-Z879KB: two silk
         # clips on LED D1 at (145, 118) mm, physically off a 24x59 mm board).
         outline = _failure_board_outline_mm(raw)
-        fallback_violations = [
-            v for v in violations if _fallback_violation_ok(v, outline)
-        ]
+        fallback_violations = [v for v in violations if _fallback_violation_ok(v, outline)]
         fallback_footprint_refs = _unique_bounded(
-            [ref for v in fallback_violations for ref in v.footprint_refs]
-            + missing_refs,
+            [ref for v in fallback_violations for ref in v.footprint_refs] + missing_refs,
             40,
         )
         explanation = (
             "The place/route pipeline failed before it produced a trustworthy DRC location. "
             "No precise PCB location is available from the recorded evidence."
-            if stage == "place_route" else
-            "PCB verification rejected the produced board, but the recorded evidence has no specific DRC category. "
+            if stage == "place_route"
+            else "PCB verification rejected the produced board, but the recorded evidence has no specific DRC category. "
             "No precise PCB location is available."
         )
         evidence_lines = _unique_evidence_lines(evidence_texts, 8)
         details = evidence_lines or ["No bounded DRC location was recorded."]
         next_action = (
             "Inspect the routing evidence and retry place/route."
-            if stage == "place_route" else
-            "Inspect the board and rerun verification after correcting the reported failure."
+            if stage == "place_route"
+            else "Inspect the board and rerun verification after correcting the reported failure."
         )
         if violations and not fallback_violations:
             # The only recorded violations were warn-only or off-board -- a
             # foreign frame. Say so instead of showing a fake location.
             details.append("No board location exists for this failure.")
-        errors.append(PcbError(
-            stage=stage if stage in ("place_route", "verify") else "verify",
-            code="layout_failure" if stage == "place_route" else "verification_failed",
-            title=("Routing/layout failed" if stage == "place_route"
-                   else "PCB verification failed"),
-            explanation=_bounded_text(explanation, 500),
-            details=_unique_bounded(details, 12),
-            counts={k: v for k, v in counts.items() if v},
-            nets=nets,
-            footprint_refs=fallback_footprint_refs,
-            violations=fallback_violations[:120],
-            next_action=_bounded_text(next_action, 300),
-        ))
+        errors.append(
+            PcbError(
+                stage=stage if stage in ("place_route", "verify") else "verify",
+                code="layout_failure" if stage == "place_route" else "verification_failed",
+                title=(
+                    "Routing/layout failed" if stage == "place_route" else "PCB verification failed"
+                ),
+                explanation=_bounded_text(explanation, 500),
+                details=_unique_bounded(details, 12),
+                counts={k: v for k, v in counts.items() if v},
+                nets=nets,
+                footprint_refs=fallback_footprint_refs,
+                violations=fallback_violations[:120],
+                next_action=_bounded_text(next_action, 300),
+            )
+        )
     return errors
 
 
 def _build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
     """Private spelling for build-tail callers and tests."""
     return build_pcb_errors(summary, stage=stage)
+
 
 def _persist_pcb_diagnostics(
     state,
@@ -4814,24 +4934,29 @@ def _persist_pcb_diagnostics(
                         f"ERROR: PCB failure-location overlay skipped: {message}",
                         file=sys.stderr,
                     )
-                    errors.append(PcbError(
-                        stage=stage if stage in ("place_route", "verify") else "verify",
-                        code="overlay_unavailable",
-                        title="Failure-location overlay could not be rendered",
-                        explanation=(
-                            "The board has located failures, but the overlay "
-                            f"that marks them was skipped: {message}"
-                        ),
-                        details=[message],
-                        next_action=(
-                            "Install the missing external tool (kicad-cli and "
-                            "ImageMagick 6 or 7) and re-run the build so "
-                            "failure locations are annotated."
-                        ),
-                    ))
+                    errors.append(
+                        PcbError(
+                            stage=stage if stage in ("place_route", "verify") else "verify",
+                            code="overlay_unavailable",
+                            title="Failure-location overlay could not be rendered",
+                            explanation=(
+                                "The board has located failures, but the overlay "
+                                f"that marks them was skipped: {message}"
+                            ),
+                            details=[message],
+                            next_action=(
+                                "Install the missing external tool (kicad-cli and "
+                                "ImageMagick 6 or 7) and re-run the build so "
+                                "failure locations are annotated."
+                            ),
+                        )
+                    )
                 else:
-                    if (rendered and output.is_file()
-                            and output.is_relative_to(project_dir.resolve())):
+                    if (
+                        rendered
+                        and output.is_file()
+                        and output.is_relative_to(project_dir.resolve())
+                    ):
                         overlay = output
         except Exception as exc:  # noqa: BLE001 - diagnostic rendering is best effort
             print(f"warning: PCB error overlay render failed: {exc}", file=sys.stderr)
@@ -4847,7 +4972,6 @@ def _persist_pcb_diagnostics(
     return errors
 
 
-
 def _latest_layout_failure_summary(project_dir: Path, state_path: Path | None = None) -> dict:
     """Read newest bounded run snapshots without persisting raw report text."""
     experiments = project_dir / ".experiments"
@@ -4857,21 +4981,34 @@ def _latest_layout_failure_summary(project_dir: Path, state_path: Path | None = 
     ]
     candidates.extend(experiments.glob("**/round_*.json"))
     candidates.extend(experiments.glob("**/parent_pipeline.json"))
-    files = sorted({p for p in candidates if p.is_file()},
-                   key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted(
+        {p for p in candidates if p.is_file()}, key=lambda p: p.stat().st_mtime, reverse=True
+    )
     summary: dict = {"evidence": {}}
 
     def absorb(obj: object) -> None:
         if not isinstance(obj, dict):
             return
-        for key in ("shorts", "unconnected", "courtyard", "keepout",
-                    "unconnected_nets", "missing_refs", "missing_component_refs",
-                    "footprint_refs", "violations", "reasons", "rejection_reasons"):
+        for key in (
+            "shorts",
+            "unconnected",
+            "courtyard",
+            "keepout",
+            "unconnected_nets",
+            "missing_refs",
+            "missing_component_refs",
+            "footprint_refs",
+            "violations",
+            "reasons",
+            "rejection_reasons",
+        ):
             if key in obj and obj[key] not in (None, [], {}):
                 if isinstance(obj[key], list):
                     summary[key] = obj[key]
                 elif key in ("reasons", "rejection_reasons"):
-                    summary.setdefault("reasons", []).extend(obj[key] if isinstance(obj[key], list) else [obj[key]])
+                    summary.setdefault("reasons", []).extend(
+                        obj[key] if isinstance(obj[key], list) else [obj[key]]
+                    )
                 else:
                     summary[key] = obj[key]
         for key in ("drc", "parent_routed_validation", "routed_validation", "validation"):
@@ -4883,8 +5020,12 @@ def _latest_layout_failure_summary(project_dir: Path, state_path: Path | None = 
                     absorb(value)
         logs = obj.get("logs")
         if isinstance(logs, dict):
-            for key in ("parent_route_stderr_tail", "solve_stderr_tail",
-                        "parent_route_stdout_tail", "solve_stdout_tail"):
+            for key in (
+                "parent_route_stderr_tail",
+                "solve_stderr_tail",
+                "parent_route_stdout_tail",
+                "solve_stdout_tail",
+            ):
                 if logs.get(key):
                     summary["evidence"][key] = _bounded_text(logs[key], 1200)
         for key in ("parent_route_stderr_tail", "solve_stderr_tail", "stderr_tail"):
@@ -4909,6 +5050,8 @@ def _latest_layout_failure_summary(project_dir: Path, state_path: Path | None = 
         except OSError:
             pass
     return summary
+
+
 def _verify_routed_board(pcb: Path) -> dict:
     """Acceptance gate: no shorts, no unconnected (connector-shield items waived),
     no physical-assembly blocker (courtyard overlap / antenna keep-out intrusion),
@@ -4952,9 +5095,7 @@ def _verify_routed_board(pcb: Path) -> dict:
             max_penetration_mm=float(
                 DEFAULT_CONFIG.get("courtyard_overlap_warn_penetration_mm", 0.5)
             ),
-            max_area_mm2=float(
-                DEFAULT_CONFIG.get("courtyard_overlap_warn_area_mm2", 0.5)
-            ),
+            max_area_mm2=float(DEFAULT_CONFIG.get("courtyard_overlap_warn_area_mm2", 0.5)),
         )
         courtyard_overlaps = [o.to_dict() for o in measured]
         # Downgrade to a warning ONLY with positive evidence: the measurement
@@ -5001,24 +5142,16 @@ def _verify_routed_board(pcb: Path) -> dict:
             if reason not in reasons:
                 reasons.append(reason)
         warnings.extend(
-            f"connector stranded {s} -- board is electrically clean; "
-            "flagged for visual review"
+            f"connector stranded {s} -- board is electrically clean; flagged for visual review"
             for s in strand
         )
     # Hard fab-blockers only. A minor-courtyard-only or strand-only board is
     # NOT "ok" (it carries warnings) but it is fab-acceptable; the caller decides.
     blocking_courtyard = courtyard > 0 and not courtyard_minor_only
     return {
-        "ok": accepted
-        and shorts == 0
-        and unconnected == 0
-        and courtyard == 0
-        and keepout == 0,
+        "ok": accepted and shorts == 0 and unconnected == 0 and courtyard == 0 and keepout == 0,
         "fab_acceptable": (
-            shorts == 0
-            and unconnected == 0
-            and keepout == 0
-            and not blocking_courtyard
+            shorts == 0 and unconnected == 0 and keepout == 0 and not blocking_courtyard
         ),
         "shorts": shorts,
         "unconnected": unconnected,
@@ -5031,11 +5164,13 @@ def _verify_routed_board(pcb: Path) -> dict:
         "tracks": v.get("track_summary", {}) or {},
         # Positioned diagnosis for the manual-layout editor and PCB overlay.
         "unconnected_nets": list(drc.get("unconnected_nets", []) or [])[:40],
-        "footprint_refs": sorted({
-            ref
-            for item in (drc.get("violations") or [])[:120]
-            for ref in (item.get("footprint_refs") or [])
-        })[:40],
+        "footprint_refs": sorted(
+            {
+                ref
+                for item in (drc.get("violations") or [])[:120]
+                for ref in (item.get("footprint_refs") or [])
+            }
+        )[:40],
         "violations": [
             {
                 "type": x.get("type"),
@@ -5070,8 +5205,6 @@ def _missing_component_refs(expected_refs, board_refs) -> list[str]:
     return sorted(r for r in expected_refs if r not in board)
 
 
-
-
 def _maybe_electrical_review(state, project_dir: Path) -> dict:
     """Layer 4: optional LLM electrical-review fab gate.
 
@@ -5090,7 +5223,10 @@ def _maybe_electrical_review(state, project_dir: Path) -> dict:
     if state is None or state.bom is None or not state.bom.connections:
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
     if os.environ.get("KICRAFT_ELECTRICAL_REVIEW", "").strip().lower() in (
-        "0", "false", "no", "off"
+        "0",
+        "false",
+        "no",
+        "off",
     ):
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
     try:
@@ -5108,15 +5244,25 @@ def _maybe_electrical_review(state, project_dir: Path) -> dict:
         model = s.review_model or s.model
         reasoning = s.review_reasoning()
         res = review_design_corroborated(
-            client, digest, model=model, reasoning=reasoning,
-            max_tokens=s.review_max_tokens, temperature=s.review_temperature,
-            corroboration=s.review_corroboration)
+            client,
+            digest,
+            model=model,
+            reasoning=reasoning,
+            max_tokens=s.review_max_tokens,
+            temperature=s.review_temperature,
+            corroboration=s.review_corroboration,
+        )
         if not res["ok"]:
-            print(f"[build] electrical review skipped (model error: {res['error']})",
-                  file=sys.stderr)
+            print(
+                f"[build] electrical review skipped (model error: {res['error']})", file=sys.stderr
+            )
             return {"ran": False, "findings": [], "blocked": False, "cost_usd": res["cost_usd"]}
-        return {"ran": True, "findings": res["findings"],
-                "blocked": res["blocked"], "cost_usd": res["cost_usd"]}
+        return {
+            "ran": True,
+            "findings": res["findings"],
+            "blocked": res["blocked"],
+            "cost_usd": res["cost_usd"],
+        }
     except (Exception, SystemExit) as e:  # Settings.from_env raises SystemExit w/o a key
         print(f"[build] electrical review skipped ({type(e).__name__}: {e})", file=sys.stderr)
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
@@ -5131,12 +5277,15 @@ def _emit_review_findings(progress, findings: list[dict]) -> None:
         issue = f.get("issue", "")
         if f.get("demoted_from"):  # blocker that a 2nd pass did not corroborate
             issue = f"{issue} [demoted to warning: not corroborated by a 2nd pass]"
-        progress({"kind": "build_log",
-                  "text": f"[build]     review {sev}: [{f.get('area', '')}] {issue}"})
+        progress(
+            {
+                "kind": "build_log",
+                "text": f"[build]     review {sev}: [{f.get('area', '')}] {issue}",
+            }
+        )
 
 
-def run_post_wiring_review(state_path: Path, project_dir: Path,
-                           progress, rewire=None) -> dict:
+def run_post_wiring_review(state_path: Path, project_dir: Path, progress, rewire=None) -> dict:
     """R3 driver: LLM electrical review between the wiring commit and the build.
 
     Owns the whole review lifecycle so the web layer stays thin:
@@ -5155,7 +5304,10 @@ def run_post_wiring_review(state_path: Path, project_dir: Path,
     """
     skipped = {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
     if os.environ.get("KICRAFT_ELECTRICAL_REVIEW", "").strip().lower() in (
-        "0", "false", "no", "off"
+        "0",
+        "false",
+        "no",
+        "off",
     ):
         return skipped  # explicit opt-out: don't even paint the tab
     state = _load_state(state_path) if state_path.exists() else None
@@ -5173,37 +5325,53 @@ def run_post_wiring_review(state_path: Path, project_dir: Path,
     total_cost = 0.0
     progress({"kind": "stage_start", "stage": "electrical_review", "model": model})
     try:
-        progress({"kind": "build_log", "text": "[build]     electrical review: "
-                  "scanning design for electrical defects ..."})
+        progress(
+            {
+                "kind": "build_log",
+                "text": "[build]     electrical review: scanning design for electrical defects ...",
+            }
+        )
         review = _maybe_electrical_review(state, project_dir)
         total_cost += review.get("cost_usd") or 0.0
         if not review["ran"]:
-            progress({"kind": "build_log",
-                      "text": "[build]     electrical review skipped "
-                              "(no result; see server log)"})
+            progress(
+                {
+                    "kind": "build_log",
+                    "text": "[build]     electrical review skipped (no result; see server log)",
+                }
+            )
             progress({"kind": "stage_done", "stage": "electrical_review", "ok": True})
             return review
         _emit_review_findings(progress, review["findings"])
         findings = review["findings"]
         if review["blocked"] and rewire is not None:
-            blockers = "; ".join(f["issue"] for f in findings
-                                 if f.get("severity") == "blocker")
-            progress({"kind": "build_log",
-                      "text": "[build]     electrical review found a blocker; "
-                              "re-driving wiring once to fix"})
+            blockers = "; ".join(f["issue"] for f in findings if f.get("severity") == "blocker")
+            progress(
+                {
+                    "kind": "build_log",
+                    "text": "[build]     electrical review found a blocker; "
+                    "re-driving wiring once to fix",
+                }
+            )
             # Close this review segment: the wiring re-drive emits its own
             # stage events, then a fresh stage_start reopens this tab for
             # the (minutes-long) second pass.
-            progress({"kind": "stage_done", "stage": "electrical_review",
-                      "ok": True, "cost": total_cost})
-            rewire(f"The electrical review found a blocker: {blockers}. "
-                   "Adjust the BOM/wiring to resolve it, keeping "
-                   "everything else consistent.")
+            progress(
+                {"kind": "stage_done", "stage": "electrical_review", "ok": True, "cost": total_cost}
+            )
+            rewire(
+                f"The electrical review found a blocker: {blockers}. "
+                "Adjust the BOM/wiring to resolve it, keeping "
+                "everything else consistent."
+            )
             state = _load_state(state_path)  # wiring commit rewrote state.json
-            progress({"kind": "stage_start", "stage": "electrical_review",
-                      "model": model})
-            progress({"kind": "build_log", "text": "[build]     electrical review: "
-                      "re-reviewing after the wiring fix ..."})
+            progress({"kind": "stage_start", "stage": "electrical_review", "model": model})
+            progress(
+                {
+                    "kind": "build_log",
+                    "text": "[build]     electrical review: re-reviewing after the wiring fix ...",
+                }
+            )
             review = _maybe_electrical_review(state, project_dir)
             total_cost += review.get("cost_usd") or 0.0
             if review["ran"]:
@@ -5224,28 +5392,35 @@ def run_post_wiring_review(state_path: Path, project_dir: Path,
             for f in findings
         ]
         state.stage_status["electrical_review"] = StageStatus(
-            ok=True, cost_usd=round(total_cost, 6),
+            ok=True,
+            cost_usd=round(total_cost, 6),
             finished_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
-            wall_s=round(time.monotonic() - t0, 3))
+            wall_s=round(time.monotonic() - t0, 3),
+        )
         try:
             _surface_review_findings(state, state_path, findings)
         except Exception as e:  # noqa: BLE001 - surfacing must never break the run
             print(f"[review] could not surface findings: {e}", file=sys.stderr)
         state_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
-        progress({"kind": "stage_done", "stage": "electrical_review",
-                  "ok": True, "cost": total_cost})
+        progress(
+            {"kind": "stage_done", "stage": "electrical_review", "ok": True, "cost": total_cost}
+        )
         return review
     except Exception as e:  # noqa: BLE001 - fail-soft: never block a sound build
-        progress({"kind": "build_log",
-                  "text": f"[build]     electrical review skipped "
-                          f"({type(e).__name__}: {e})"})
+        progress(
+            {
+                "kind": "build_log",
+                "text": f"[build]     electrical review skipped ({type(e).__name__}: {e})",
+            }
+        )
         progress({"kind": "stage_done", "stage": "electrical_review", "ok": True})
         return skipped
 
 
-def run_silk_plan_authoring(state_path: Path, project_dir: Path, progress,
-                            *, board_code: str | None = None) -> dict:
+def run_silk_plan_authoring(
+    state_path: Path, project_dir: Path, progress, *, board_code: str | None = None
+) -> dict:
     """Author the silkscreen content plan (web process, post-wiring).
 
     Same lifecycle slot as ``run_post_wiring_review``: runs after the wiring
@@ -5269,7 +5444,10 @@ def run_silk_plan_authoring(state_path: Path, project_dir: Path, progress,
     t0 = time.monotonic()
     total_cost = 0.0
     llm_enabled = os.environ.get("KICRAFT_SILK_PLAN", "").strip().lower() not in (
-        "0", "false", "no", "off"
+        "0",
+        "false",
+        "no",
+        "off",
     )
     try:
         title = ""
@@ -5277,8 +5455,9 @@ def run_silk_plan_authoring(state_path: Path, project_dir: Path, progress,
         dropped: list[str] = []
         author_model = None
         if llm_enabled:
-            progress({"kind": "build_log",
-                      "text": "[build]     silk plan: authoring board labels ..."})
+            progress(
+                {"kind": "build_log", "text": "[build]     silk plan: authoring board labels ..."}
+            )
             from kicraft.server.client import make_client
             from kicraft.server.config import Settings
 
@@ -5293,51 +5472,71 @@ def run_silk_plan_authoring(state_path: Path, project_dir: Path, progress,
             # review models burn 10-23k thinking tokens before the JSON
             # answer; a small cap truncates (finish=length) with EMPTY text
             # (see the review_max_tokens note in server/config.py).
-            res = author_labels(client, digest, model=author_model,
-                                reasoning=s.review_reasoning(),
-                                max_tokens=s.review_max_tokens)
+            res = author_labels(
+                client,
+                digest,
+                model=author_model,
+                reasoning=s.review_reasoning(),
+                max_tokens=s.review_max_tokens,
+            )
             total_cost = res["cost_usd"]
             if not res["ok"]:
-                progress({"kind": "build_log",
-                          "text": f"[build]     silk plan: authoring failed "
-                                  f"({res['error']}); legend-only fallback"})
+                progress(
+                    {
+                        "kind": "build_log",
+                        "text": f"[build]     silk plan: authoring failed "
+                        f"({res['error']}); legend-only fallback",
+                    }
+                )
             else:
                 title = res["title"]
-                kept, dropped = lint_labels(res["labels"], state,
-                                            project_root=project_dir)
+                kept, dropped = lint_labels(res["labels"], state, project_root=project_dir)
         uncovered = uncovered_connectors(kept, state)
         state.silk_plan = SilkPlan(
-            title=title or None, board_code=board_code, labels=kept,
-            dropped_at_lint=dropped, uncovered_connectors=uncovered,
+            title=title or None,
+            board_code=board_code,
+            labels=kept,
+            dropped_at_lint=dropped,
+            uncovered_connectors=uncovered,
             author_model=author_model,
             cost_usd=round(total_cost, 6),
         )
         state.stage_status["silk_plan"] = StageStatus(
-            ok=True, cost_usd=round(total_cost, 6),
+            ok=True,
+            cost_usd=round(total_cost, 6),
             finished_at=_dt.datetime.now(_dt.timezone.utc).isoformat(),
-            wall_s=round(time.monotonic() - t0, 3))
+            wall_s=round(time.monotonic() - t0, 3),
+        )
         state_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
-        progress({"kind": "build_log",
-                  "text": f"[build]     silk plan: {len(kept)} label(s) committed"
-                          + (f", {len(dropped)} dropped at lint" if dropped else "")})
+        progress(
+            {
+                "kind": "build_log",
+                "text": f"[build]     silk plan: {len(kept)} label(s) committed"
+                + (f", {len(dropped)} dropped at lint" if dropped else ""),
+            }
+        )
         for reason in dropped:
-            progress({"kind": "build_log",
-                      "text": f"[build]     silk plan lint dropped {reason}"})
+            progress({"kind": "build_log", "text": f"[build]     silk plan lint dropped {reason}"})
         for ref in uncovered:
-            progress({"kind": "build_log",
-                      "text": f"[build]     silk plan: connector {ref} has no label"})
+            progress(
+                {
+                    "kind": "build_log",
+                    "text": f"[build]     silk plan: connector {ref} has no label",
+                }
+            )
         return {"ran": llm_enabled, "labels": len(kept), "cost_usd": total_cost}
     except (Exception, SystemExit) as e:  # noqa: BLE001 - never block the build
-        progress({"kind": "build_log",
-                  "text": f"[build]     silk plan skipped "
-                          f"({type(e).__name__}: {e})"})
+        progress(
+            {
+                "kind": "build_log",
+                "text": f"[build]     silk plan skipped ({type(e).__name__}: {e})",
+            }
+        )
         return skipped
 
 
-def _surface_build_warnings(
-    state, state_path: Path, artifacts, warnings: list[str]
-) -> None:
+def _surface_build_warnings(state, state_path: Path, artifacts, warnings: list[str]) -> None:
     """Record non-blocking fab warnings so the UI and eval digest see them.
 
     A minor courtyard clip leaves the board fab-acceptable (exported + 3D-
@@ -5376,8 +5575,9 @@ def _surface_review_findings(state, state_path: Path, findings: list[dict]) -> N
     text so a rebuild does not pile up duplicates."""
     if state is None or state.bom is None:
         return
-    surfaced = [f for f in findings
-                if f.get("severity") in ("warning", "blocker") and f.get("issue")]
+    surfaced = [
+        f for f in findings if f.get("severity") in ("warning", "blocker") and f.get("issue")
+    ]
     if not surfaced:
         return
 
@@ -5396,12 +5596,16 @@ def _surface_review_findings(state, state_path: Path, findings: list[dict]) -> N
 
     # Escalate the fab-readiness caveats (programming path, or any blocker) into
     # an open question so they surface as an unresolved gap, not a quiet note.
-    caveats = [f for f in surfaced
-               if f.get("category") == "programming-path" or f.get("severity") == "blocker"]
+    caveats = [
+        f
+        for f in surfaced
+        if f.get("category") == "programming-path" or f.get("severity") == "blocker"
+    ]
     if caveats:
         kept = [q for q in state.open_questions if q.stage != "review"]
-        new_q = [Question(text=_line(f), stage="review", blocking=False, material=True)
-                 for f in caveats]
+        new_q = [
+            Question(text=_line(f), stage="review", blocking=False, material=True) for f in caveats
+        ]
         # dedup caveat questions by text against what we keep
         seen = {q.text for q in kept}
         state.open_questions = kept + [q for q in new_q if not (q.text in seen or seen.add(q.text))]
@@ -5410,11 +5614,18 @@ def _surface_review_findings(state, state_path: Path, findings: list[dict]) -> N
     atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
 
 
-def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
-                        project_dir: Path, pcb: Path,
-                        *, done_label: str = "BUILD COMPLETE",
-                        do_fab: bool = True,
-                        verify_summary_out: dict | None = None) -> int:
+def _promote_verify_fab(
+    state,
+    state_path: Path,
+    artifacts,
+    stem: str,
+    project_dir: Path,
+    pcb: Path,
+    *,
+    done_label: str = "BUILD COMPLETE",
+    do_fab: bool = True,
+    verify_summary_out: dict | None = None,
+) -> int:
     """Steps 3-5 of the build tail: promote the routed parent to the
     project's main PCB, gate it (no shorts, no unconnected), and export
     the fab package. Shared by `build` and `manual-route`.
@@ -5481,8 +5692,12 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
             )
             shutil.copy(partial, pcb)
             artifact_paths.write_promote_provenance(
-                pcb, run_id=run_id, run_started_at=run_started_at,
-                source_board=partial, source_kind="partial", fresh=partial_fresh,
+                pcb,
+                run_id=run_id,
+                run_started_at=run_started_at,
+                source_board=partial,
+                source_kind="partial",
+                fresh=partial_fresh,
             )
             if not partial_fresh:
                 print(
@@ -5496,8 +5711,7 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
             )
         else:
             print(
-                f"[build] 3/5 no parent or leaf board produced; "
-                f"leaving {pcb.name} as-is",
+                f"[build] 3/5 no parent or leaf board produced; leaving {pcb.name} as-is",
                 file=sys.stderr,
             )
         print(
@@ -5511,18 +5725,26 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         if partial is not None and pcb.is_file():
             failure_summary["board_path"] = str(pcb.resolve())
         _persist_pcb_diagnostics(
-            state, state_path, artifacts, stem, project_dir,
-            stage="place_route", summary=failure_summary,
+            state,
+            state_path,
+            artifacts,
+            stem,
+            project_dir,
+            stage="place_route",
+            summary=failure_summary,
             pcb=pcb if partial is not None and pcb.is_file() else None,
         )
         return 6
     shutil.copy(routed, pcb)  # copy (not copy2) -> honest promote-time mtime
     artifact_paths.write_promote_provenance(
-        pcb, run_id=run_id, run_started_at=run_started_at,
-        source_board=routed, source_kind="routed", fresh=True,
+        pcb,
+        run_id=run_id,
+        run_started_at=run_started_at,
+        source_board=routed,
+        source_kind="routed",
+        fresh=True,
     )
     print(f"[build] 3/5 promoted routed parent -> {pcb.name}")
-
 
     # 3a. Silkscreen legend + authored labels. Runs on the promoted board
     # AFTER routing/pour are final and BEFORE the verify gate, so the DRC
@@ -5538,14 +5760,15 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         print(
             f"[build]     silk legend: placed={len(_placed)} "
             f"dropped={len(_dropped)}"
-            + ("" if not _dropped else " ("
-               + "; ".join(f"{d['id']}: {d['reason']}" for d in _dropped) + ")")
+            + (
+                ""
+                if not _dropped
+                else " (" + "; ".join(f"{d['id']}: {d['reason']}" for d in _dropped) + ")"
+            )
         )
         if artifacts is not None:
             artifacts.silk_placed = [str(p["id"]) for p in _placed]
-            artifacts.silk_dropped = [
-                f"{d['id']}: {d['reason']}" for d in _dropped
-            ]
+            artifacts.silk_dropped = [f"{d['id']}: {d['reason']}" for d in _dropped]
     except Exception as _silk_err:  # noqa: BLE001 - cosmetic, never a gate
         print(f"[build]     silk legend skipped ({_silk_err})", file=sys.stderr)
 
@@ -5621,8 +5844,9 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         for reason in mis_facing:
             if reason not in gate.setdefault("reasons", []):
                 gate["reasons"].append(reason)
-        print(f"[build]     connector-facing: {len(mis_facing)} misoriented "
-              f"({'; '.join(mis_facing)})")
+        print(
+            f"[build]     connector-facing: {len(mis_facing)} misoriented ({'; '.join(mis_facing)})"
+        )
     if mouth_warnings:
         gate.setdefault("warnings", []).extend(mouth_warnings)
         for w in mouth_warnings:
@@ -5712,14 +5936,33 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         # in the GUI.  Never let a render failure change the exit code.
         try:
             import subprocess as _sp
+
             render_path = project_dir / f"{stem}_3d.png"
             render_path.unlink(missing_ok=True)
             _sp.run(
-                ["kicad-cli", "pcb", "render", "-o", str(render_path),
-                 "--quality", "high", "--background", "opaque",
-                 "--rotate", "-30,0,30", "--zoom", "0.9",
-                 "-w", "1600", "-h", "1200", str(pcb)],
-                capture_output=True, text=True, timeout=120,
+                [
+                    "kicad-cli",
+                    "pcb",
+                    "render",
+                    "-o",
+                    str(render_path),
+                    "--quality",
+                    "high",
+                    "--background",
+                    "opaque",
+                    "--rotate",
+                    "-30,0,30",
+                    "--zoom",
+                    "0.9",
+                    "-w",
+                    "1600",
+                    "-h",
+                    "1200",
+                    str(pcb),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
             if render_path.exists():
                 artifacts.board_3d_png = render_path
@@ -5728,8 +5971,14 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
         except Exception:
             pass
         _persist_pcb_diagnostics(
-            state, state_path, artifacts, stem, project_dir,
-            stage="verify", summary=verify_summary, pcb=pcb,
+            state,
+            state_path,
+            artifacts,
+            stem,
+            project_dir,
+            stage="verify",
+            summary=verify_summary,
+            pcb=pcb,
         )
         return 7
 
@@ -5772,9 +6021,7 @@ def _promote_verify_fab(state, state_path: Path, artifacts, stem: str,
     artifacts.routed_pcb = pcb
     artifacts.fab_zip = Path(fab["zip"])
     artifacts.step_file = Path(fab["step"]) if fab.get("step") else None
-    artifacts.board_3d_png = (
-        Path(fab["board_3d_png"]) if fab.get("board_3d_png") else None
-    )
+    artifacts.board_3d_png = Path(fab["board_3d_png"]) if fab.get("board_3d_png") else None
     _persist_artifacts(state, state_path, artifacts)
 
     print()
@@ -5843,8 +6090,7 @@ def _cmd_manual_route(args: argparse.Namespace) -> int:
         return 2
 
     if state.bom is None:
-        print("error: manual-route needs a staged state with a BOM.",
-              file=sys.stderr)
+        print("error: manual-route needs a staged state with a BOM.", file=sys.stderr)
         return 3
     if state.project_stem and out_dir.name != state.project_stem:
         out_dir = out_dir / state.project_stem
@@ -5853,12 +6099,13 @@ def _cmd_manual_route(args: argparse.Namespace) -> int:
     pcb = project_dir / f"{stem}.kicad_pcb"
     manual_layout = project_dir / ".experiments" / "manual" / "manual_layout.json"
     if not manual_layout.is_file():
-        print(f"error: no saved manual layout at {manual_layout}; save a "
-              "layout in the editor first.", file=sys.stderr)
+        print(
+            f"error: no saved manual layout at {manual_layout}; save a layout in the editor first.",
+            file=sys.stderr,
+        )
         return 3
     if not pcb.is_file():
-        print(f"error: no synthesized board at {pcb}; run a build first.",
-              file=sys.stderr)
+        print(f"error: no synthesized board at {pcb}; run a build first.", file=sys.stderr)
         return 3
 
     # Persisted artifact paths come from the ORIGINAL build's workspace;
@@ -5869,9 +6116,7 @@ def _cmd_manual_route(args: argparse.Namespace) -> int:
             project_dir=project_dir,
             project_stem=stem,
             root_sch=project_dir / f"{stem}.kicad_sch",
-            leaf_schs=sorted(
-                p for p in project_dir.glob("*.kicad_sch") if p.stem != stem
-            ),
+            leaf_schs=sorted(p for p in project_dir.glob("*.kicad_sch") if p.stem != stem),
             kicad_pro=project_dir / f"{stem}.kicad_pro",
             autoplacer_json=project_dir / f"{stem}_autoplacer.json",
         )
@@ -5883,16 +6128,21 @@ def _cmd_manual_route(args: argparse.Namespace) -> int:
         return 6
 
     with build_slot(echo=lambda line: print(line, flush=True)):
-        print("[build] 2/5 autoroute the saved manual layout (KRT) -- "
-              "may take minutes ...")
+        print("[build] 2/5 autoroute the saved manual layout (KRT) -- may take minutes ...")
         cmd = [
-            sys.executable, "-m", "kicraft.cli.compose_subcircuits",
-            "--project", str(project_dir),
-            "--parent", "/",
-            "--pcb", str(pcb),
-            "--manual-layout", str(manual_layout),
-            "--output", str(project_dir / ".experiments" / "manual"
-                            / "manual_routed.json"),
+            sys.executable,
+            "-m",
+            "kicraft.cli.compose_subcircuits",
+            "--project",
+            str(project_dir),
+            "--parent",
+            "/",
+            "--pcb",
+            str(pcb),
+            "--manual-layout",
+            str(manual_layout),
+            "--output",
+            str(project_dir / ".experiments" / "manual" / "manual_routed.json"),
             "--route",
         ]
         rc = subprocess.run(cmd, cwd=str(project_dir)).returncode
@@ -5901,20 +6151,28 @@ def _cmd_manual_route(args: argparse.Namespace) -> int:
             _write_manual_route_result(project_dir, rc=6, stage="route")
             return 6
         verify_summary: dict = {}
-        rc = _promote_verify_fab(state, state_path, artifacts, stem,
-                                 project_dir, pcb,
-                                 done_label="MANUAL ROUTE COMPLETE",
-                                 verify_summary_out=verify_summary)
+        rc = _promote_verify_fab(
+            state,
+            state_path,
+            artifacts,
+            stem,
+            project_dir,
+            pcb,
+            done_label="MANUAL ROUTE COMPLETE",
+            verify_summary_out=verify_summary,
+        )
         _write_manual_route_result(
-            project_dir, rc=rc,
+            project_dir,
+            rc=rc,
             stage="ok" if rc == 0 else "verify",
             verify=verify_summary or None,
         )
         return rc
 
 
-def _write_manual_route_result(project_dir: Path, *, rc: int, stage: str,
-                               verify: dict | None = None) -> None:
+def _write_manual_route_result(
+    project_dir: Path, *, rc: int, stage: str, verify: dict | None = None
+) -> None:
     """Persist the manual-route outcome where the layout editor reads it
     (.experiments/manual/last_route_result.json), so a failed attempt
     reopens the editor WITH its diagnosis instead of dead-ending in the
@@ -5935,8 +6193,7 @@ def _write_manual_route_result(project_dir: Path, *, rc: int, stage: str,
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError as exc:
-        print(f"warning: could not persist manual-route result: {exc}",
-              file=sys.stderr)
+        print(f"warning: could not persist manual-route result: {exc}", file=sys.stderr)
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
@@ -5960,15 +6217,28 @@ def _build_meta(args: argparse.Namespace) -> dict:
     so cross-run scans could not tell stale evidence (a mode fixed since the
     run) from a live gap; triage/scan read this back."""
     import subprocess
+
     repo = Path(__file__).resolve().parents[2]
     sha = branch = None
     try:
-        sha = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5).stdout.strip() or None
-        branch = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=5).stdout.strip() or None
+        sha = (
+            subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+            or None
+        )
+        branch = (
+            subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+            or None
+        )
     except (OSError, subprocess.SubprocessError):
         pass
     return {
@@ -5992,11 +6262,14 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
         return 2
 
     meta = _build_meta(args)
-    print(f"[build] code={(meta.get('git_sha') or '?')[:12]} "
-          f"branch={meta.get('git_branch') or '?'} quality={meta.get('quality')}")
+    print(
+        f"[build] code={(meta.get('git_sha') or '?')[:12]} "
+        f"branch={meta.get('git_branch') or '?'} quality={meta.get('quality')}"
+    )
     try:
         (state_path.parent / "build_meta.json").write_text(
-            json.dumps(meta, indent=2), encoding="utf-8")
+            json.dumps(meta, indent=2), encoding="utf-8"
+        )
     except OSError:
         pass  # stamp is diagnostics-only; never fail a build over it
 
@@ -6025,9 +6298,12 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
         # gate), so they remain viewable in the Synthesize tab. List each failed
         # check and its offenders so the exact problem (which pin/wire/net) is
         # visible in the live build log, not just a pass/fail count.
-        print("synthesis checks failed (schematics were written and are viewable "
-              "in the Synthesize tab):", file=sys.stderr)
-        for r in (e.results or []):
+        print(
+            "synthesis checks failed (schematics were written and are viewable "
+            "in the Synthesize tab):",
+            file=sys.stderr,
+        )
+        for r in e.results or []:
             if not r.ok:
                 print(f"  [{r.name}] {r.message}", file=sys.stderr)
                 for o in (r.offenders or [])[:20]:
@@ -6048,10 +6324,13 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
     if degenerate:
         print(f"error: {degenerate}", file=sys.stderr)
         _persist_pcb_diagnostics(
-            state, state_path, artifacts, stem, project_dir,
+            state,
+            state_path,
+            artifacts,
+            stem,
+            project_dir,
             stage="place_route",
-            summary={"reasons": ["empty_board"],
-                     "evidence": {"layout": degenerate}},
+            summary={"reasons": ["empty_board"], "evidence": {"layout": degenerate}},
         )
         return 6
 
@@ -6060,10 +6339,13 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         _persist_pcb_diagnostics(
-            state, state_path, artifacts, stem, project_dir,
+            state,
+            state_path,
+            artifacts,
+            stem,
+            project_dir,
             stage="place_route",
-            summary={"reasons": ["drc_unavailable"],
-                     "evidence": {"toolchain": str(exc)}},
+            summary={"reasons": ["drc_unavailable"], "evidence": {"toolchain": str(exc)}},
         )
         return 6
 
@@ -6073,12 +6355,22 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
     from kicraft.build_slots import build_slot
 
     with build_slot(echo=lambda line: print(line, flush=True)):
-        return _layout_route_fab(args, state, state_path, artifacts, results,
-                                 stem, project_dir, root_sch, pcb)
+        return _layout_route_fab(
+            args, state, state_path, artifacts, results, stem, project_dir, root_sch, pcb
+        )
 
 
-def _layout_route_fab(args, state, state_path, artifacts, results,
-                      stem: str, project_dir: Path, root_sch: Path, pcb: Path) -> int:
+def _layout_route_fab(
+    args,
+    state,
+    state_path,
+    artifacts,
+    results,
+    stem: str,
+    project_dir: Path,
+    root_sch: Path,
+    pcb: Path,
+) -> int:
     """The heavy tail of `build` (place+route, verify gate, fab export, archive),
     split out so _cmd_build can hold a host-wide build slot across exactly this.
 
@@ -6100,8 +6392,9 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
     # 2. Optimize placement (+ route) via the layout engine.
     action = "place + route" if route else "place (no route)"
     seed_label = seed if seed is not None else "auto"
-    print(f"[build] 2/5 {action} (quality={args.quality}, seed={seed_label}) "
-          "-- may take minutes ...")
+    print(
+        f"[build] 2/5 {action} (quality={args.quality}, seed={seed_label}) -- may take minutes ..."
+    )
     rc = _run_layout(args.quality, root_sch, pcb, seed=seed, route=route)
 
     # Pre-render the manual-layout canvas PNG for every solved leaf while
@@ -6112,6 +6405,7 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
     # editor gets offered.
     try:
         from kicraft.layout_editor import prerender_leaf_canvases
+
         n_prerendered = prerender_leaf_canvases(project_dir / ".experiments")
         if n_prerendered:
             print(f"[build]     pre-rendered {n_prerendered} leaf canvas preview(s)")
@@ -6122,8 +6416,13 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
         failure_summary = _latest_layout_failure_summary(project_dir, state_path)
         failure_summary.setdefault("evidence", {})["layout_exit_code"] = f"rc={rc}"
         _persist_pcb_diagnostics(
-            state, state_path, artifacts, stem, project_dir,
-            stage="place_route", summary=failure_summary,
+            state,
+            state_path,
+            artifacts,
+            stem,
+            project_dir,
+            stage="place_route",
+            summary=failure_summary,
             pcb=pcb if pcb.is_file() else None,
         )
         print(f"error: layout/route engine exited {rc}", file=sys.stderr)
@@ -6134,13 +6433,20 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
         # positions are inspectable, but skip the routed-board verify/fab tail.
         placed = _find_placed_parent(project_dir)
         if placed is None:
-            print("error: the layout engine produced no placed parent board "
-                  "(parent compose failed).", file=sys.stderr)
+            print(
+                "error: the layout engine produced no placed parent board (parent compose failed).",
+                file=sys.stderr,
+            )
             summary = _latest_layout_failure_summary(project_dir, state_path)
             summary.setdefault("evidence", {})["placement_only"] = "no placed parent board"
             _persist_pcb_diagnostics(
-                state, state_path, artifacts, stem, project_dir,
-                stage="place_route", summary=summary,
+                state,
+                state_path,
+                artifacts,
+                stem,
+                project_dir,
+                stage="place_route",
+                summary=summary,
             )
             return 6
         # Freshness gate: the placed board is freshly re-stamped on every run, so
@@ -6153,24 +6459,40 @@ def _layout_route_fab(args, state, state_path, artifacts, results,
             summary = _latest_layout_failure_summary(project_dir, state_path)
             summary.setdefault("evidence", {})["placement_only"] = "placed board was stale"
             _persist_pcb_diagnostics(
-                state, state_path, artifacts, stem, project_dir,
-                stage="place_route", summary=summary,
+                state,
+                state_path,
+                artifacts,
+                stem,
+                project_dir,
+                stage="place_route",
+                summary=summary,
                 pcb=pcb if pcb.is_file() else None,
             )
             return 6
         shutil.copy(placed, pcb)  # copy (not copy2) -> honest promote-time mtime
         artifact_paths.write_promote_provenance(
-            pcb, run_id=run_id, run_started_at=run_started_at,
-            source_board=placed, source_kind="placed", fresh=True,
+            pcb,
+            run_id=run_id,
+            run_started_at=run_started_at,
+            source_board=placed,
+            source_kind="placed",
+            fresh=True,
         )
-        print(f"[build] 3/5 promoted placed parent -> {pcb.name} "
-              "(placement only; no verify/fab)")
+        print(f"[build] 3/5 promoted placed parent -> {pcb.name} (placement only; no verify/fab)")
         print()
         print(f"{done_label}: {stem}")
         print(f"  placed PCB : {pcb}")
     else:
-        rc = _promote_verify_fab(state, state_path, artifacts, stem, project_dir,
-                                 pcb, done_label=done_label, do_fab=do_fab)
+        rc = _promote_verify_fab(
+            state,
+            state_path,
+            artifacts,
+            stem,
+            project_dir,
+            pcb,
+            done_label=done_label,
+            do_fab=do_fab,
+        )
         if rc != 0:
             return rc
 
@@ -6206,8 +6528,12 @@ def _pin_deterministic_placement_env() -> None:
     these at startup, so setting them on the parent here is sufficient; routing
     (KiCad Routing Tools) remains best-effort-stable regardless."""
     os.environ.setdefault("PYTHONHASHSEED", "0")
-    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    for var in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
         os.environ.setdefault(var, "1")
 
 
@@ -6267,13 +6593,15 @@ def _resolve_synthesized_workspace(args: argparse.Namespace):
             raise _ReplayInputError(
                 f"could not identify a single synthesized project in {project_dir} "
                 "(need exactly one <stem>.kicad_pro with sibling .kicad_pcb + "
-                ".kicad_sch). Use the `replay STATE.json OUT_DIR` form instead.")
+                ".kicad_sch). Use the `replay STATE.json OUT_DIR` form instead."
+            )
         state_path = _find_state_json(project_dir, stem)
         state = _load_state(state_path) if state_path is not None else None
     else:
         if not getattr(args, "state", None) or not getattr(args, "out_dir", None):
             raise _ReplayInputError(
-                "provide either `--project DIR` or positional `STATE.json OUT_DIR`")
+                "provide either `--project DIR` or positional `STATE.json OUT_DIR`"
+            )
         state_path = Path(args.state)
         try:
             state = _load_state(state_path)
@@ -6287,8 +6615,7 @@ def _resolve_synthesized_workspace(args: argparse.Namespace):
         project_dir = out_dir.resolve()
         stem = state.project_stem
         if not stem:
-            raise _ReplayInputError(
-                "state has no project_stem; cannot locate artifacts")
+            raise _ReplayInputError("state has no project_stem; cannot locate artifacts")
 
     root_sch = project_dir / f"{stem}.kicad_sch"
     pcb = project_dir / f"{stem}.kicad_pcb"
@@ -6303,10 +6630,14 @@ def _resolve_synthesized_workspace(args: argparse.Namespace):
         raise _ReplayInputError(
             "missing required synthesized artifact(s):\n  "
             + "\n  ".join(str(p) for p in missing)
-            + "\n(run synthesis / `kicraft build` first to produce them)")
+            + "\n(run synthesis / `kicraft build` first to produce them)"
+        )
     if not autoplacer_json.is_file():
-        print(f"warning: {autoplacer_json.name} absent (UI seed file; not needed "
-              "for placement) -- continuing", file=sys.stderr)
+        print(
+            f"warning: {autoplacer_json.name} absent (UI seed file; not needed "
+            "for placement) -- continuing",
+            file=sys.stderr,
+        )
 
     if state is None:
         state = ConversationState(project_stem=stem)
@@ -6319,9 +6650,7 @@ def _resolve_synthesized_workspace(args: argparse.Namespace):
             project_dir=project_dir,
             project_stem=stem,
             root_sch=root_sch,
-            leaf_schs=sorted(
-                p for p in project_dir.glob("*.kicad_sch") if p.stem != stem
-            ),
+            leaf_schs=sorted(p for p in project_dir.glob("*.kicad_sch") if p.stem != stem),
             kicad_pro=kicad_pro,
             autoplacer_json=autoplacer_json,
         )
@@ -6379,8 +6708,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     _pin_deterministic_placement_env()
 
     try:
-        (state, state_path, artifacts, stem,
-         project_dir, root_sch, pcb) = _resolve_synthesized_workspace(args)
+        (state, state_path, artifacts, stem, project_dir, root_sch, pcb) = (
+            _resolve_synthesized_workspace(args)
+        )
         _restore_pre_promote_seed(project_dir, pcb)
     except _ReplayInputError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -6396,9 +6726,11 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     # or a session archive; downgrade loudly instead of crashing deep in the tail.
     if state_path is None:
         if not getattr(args, "no_fab", False):
-            print("note: no state.json near --project; skipping fab export (needs "
-                  "the BOM). Use `replay STATE.json OUT_DIR` to export a package.",
-                  file=sys.stderr)
+            print(
+                "note: no state.json near --project; skipping fab export (needs "
+                "the BOM). Use `replay STATE.json OUT_DIR` to export a package.",
+                file=sys.stderr,
+            )
             args.no_fab = True
         args.no_archive = True
 
@@ -6414,16 +6746,22 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             return 6
 
     args.done_label = "REPLAY COMPLETE"
-    print(f"[replay] re-running place{'+route' if args.route else ''} on "
-          f"{project_dir} (quality={args.quality}, seed={args.seed}) "
-          "-- no synthesis")
+    print(
+        f"[replay] re-running place{'+route' if args.route else ''} on "
+        f"{project_dir} (quality={args.quality}, seed={args.seed}) "
+        "-- no synthesis"
+    )
     with build_slot(echo=lambda line: print(line, flush=True)):
-        rc = _layout_route_fab(args, state, state_path, artifacts, [],
-                               stem, project_dir, root_sch, pcb)
+        rc = _layout_route_fab(
+            args, state, state_path, artifacts, [], stem, project_dir, root_sch, pcb
+        )
 
     if root_sch.read_bytes() != sch_before:
-        print("error: replay mutated the root schematic -- synthesis must not run "
-              "during replay (determinism violated).", file=sys.stderr)
+        print(
+            "error: replay mutated the root schematic -- synthesis must not run "
+            "during replay (determinism violated).",
+            file=sys.stderr,
+        )
         return 8
     return rc
 
@@ -6468,29 +6806,36 @@ def _cmd_artifacts(args: argparse.Namespace) -> int:
             "mtime": _iso(board.stat().st_mtime) if board.exists() else None,
             "md5": artifact_paths.file_md5(board),
             # drift signal: does this artifact's run match what was last promoted?
-            "matches_promoted": (rid == promoted_run_id)
-            if (rid and promoted_run_id) else None,
+            "matches_promoted": (rid == promoted_run_id) if (rid and promoted_run_id) else None,
         }
 
     if args.json:
-        print(json.dumps({
-            "project": str(project_dir),
-            "promoted": str(promoted[0]) if promoted else None,
-            "promoted_provenance": prov,
-            "artifacts": entries,
-        }, indent=2, sort_keys=True, default=str))
+        print(
+            json.dumps(
+                {
+                    "project": str(project_dir),
+                    "promoted": str(promoted[0]) if promoted else None,
+                    "promoted_provenance": prov,
+                    "artifacts": entries,
+                },
+                indent=2,
+                sort_keys=True,
+                default=str,
+            )
+        )
         return 0
 
     print(f"project : {project_dir}")
     if promoted:
         print(f"promoted: {promoted[0].name}")
         if prov:
-            print(f"  provenance: run_id={prov.get('run_id')} "
-                  f"source_kind={prov.get('source_kind')} fresh={prov.get('fresh')} "
-                  f"promoted_at={_iso(prov.get('promoted_at'))}")
+            print(
+                f"  provenance: run_id={prov.get('run_id')} "
+                f"source_kind={prov.get('source_kind')} fresh={prov.get('fresh')} "
+                f"promoted_at={_iso(prov.get('promoted_at'))}"
+            )
         else:
-            print("  provenance: (none -- promoted by a pre-provenance build, or "
-                  "not yet promoted)")
+            print("  provenance: (none -- promoted by a pre-provenance build, or not yet promoted)")
     else:
         print("promoted: (no top-level <stem>.kicad_pcb yet)")
     print("artifacts (resolved via kicraft/cli/artifact_paths.py):")
@@ -6499,11 +6844,12 @@ def _cmd_artifacts(args: argparse.Namespace) -> int:
         if e is None:
             print(f"  {kind:7}: (none)")
             continue
-        drift = "  [!] run_id differs from promoted board" \
-            if e["matches_promoted"] is False else ""
+        drift = "  [!] run_id differs from promoted board" if e["matches_promoted"] is False else ""
         print(f"  {kind:7}: {e['path']}")
-        print(f"           run_id={e['run_id'] or '(unrecorded)'}  "
-              f"mtime={e['mtime']}  md5={e['md5']}{drift}")
+        print(
+            f"           run_id={e['run_id'] or '(unrecorded)'}  "
+            f"mtime={e['mtime']}  md5={e['md5']}{drift}"
+        )
     return 0
 
 
@@ -6527,8 +6873,7 @@ def _hoist_positionals(parser: argparse.ArgumentParser, argv: list[str]) -> list
     """
     if not argv:
         return argv
-    subs = next((a for a in parser._actions
-                 if isinstance(a, argparse._SubParsersAction)), None)
+    subs = next((a for a in parser._actions if isinstance(a, argparse._SubParsersAction)), None)
     if subs is None or argv[0] not in subs.choices:
         return argv  # not a subcommand we own (e.g. -h, or bare prog)
     sub = subs.choices[argv[0]]
@@ -6682,7 +7027,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p_list_parts.add_argument(
-        "query", nargs="?", default=None,
+        "query",
+        nargs="?",
+        default=None,
         help="optional keywords to filter the table (e.g. 'bnc' or 'trimmer 3296')",
     )
     p_list_parts.set_defaults(func=_cmd_list_parts)
@@ -6705,14 +7052,22 @@ def main(argv: list[str] | None = None) -> int:
             "nightly dump: ~650 MB download; in-stock-pruned by default)"
         ),
     )
-    p_jlc.add_argument("--base-url", default=jlcparts.DATA_URL,
-                       help="override the dataset URL (testing)")
-    p_jlc.add_argument("--dest", default=None,
-                       help="override the catalog path (default: "
-                            "~/.kicraft/jlcparts/cache.sqlite3 or $KICRAFT_JLCPARTS_DB)")
-    p_jlc.add_argument("--min-stock", type=int, default=5,
-                       help="prune rows below this stock to shrink the catalog "
-                            "(default 5; 0 keeps everything, ~5.6 GB)")
+    p_jlc.add_argument(
+        "--base-url", default=jlcparts.DATA_URL, help="override the dataset URL (testing)"
+    )
+    p_jlc.add_argument(
+        "--dest",
+        default=None,
+        help="override the catalog path (default: "
+        "~/.kicraft/jlcparts/cache.sqlite3 or $KICRAFT_JLCPARTS_DB)",
+    )
+    p_jlc.add_argument(
+        "--min-stock",
+        type=int,
+        default=5,
+        help="prune rows below this stock to shrink the catalog "
+        "(default 5; 0 keeps everything, ~5.6 GB)",
+    )
     p_jlc.set_defaults(func=_cmd_jlcparts_update)
 
     p_add_part = sub.add_parser(
@@ -6971,9 +7326,7 @@ def main(argv: list[str] | None = None) -> int:
         help="one shot: synthesize + place + route + verify + export fab package",
     )
     p_build.add_argument("state", help="path to state.json")
-    p_build.add_argument(
-        "out_dir", help="output directory (project_stem appended if absent)"
-    )
+    p_build.add_argument("out_dir", help="output directory (project_stem appended if absent)")
     p_build.add_argument(
         "--quality",
         choices=["fast", "draft", "good", "best"],
@@ -7012,45 +7365,58 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p_replay.add_argument(
-        "state", nargs="?",
+        "state",
+        nargs="?",
         help="path to state.json (omit when using --project)",
     )
     p_replay.add_argument(
-        "out_dir", nargs="?",
+        "out_dir",
+        nargs="?",
         help="output directory (project_stem appended if absent)",
     )
     p_replay.add_argument(
-        "--project", default=None,
+        "--project",
+        default=None,
         help="discover artifacts on disk under this synthesized project dir "
-             "(no state.json needed; preferred for testing)",
+        "(no state.json needed; preferred for testing)",
     )
     p_replay.add_argument(
         "--quality",
         choices=["fast", "draft", "good", "best"],
         default="fast",
         help="fast=deterministic single-pass solve-hierarchy (default; honors "
-             "--no-route); draft/good/best=autoexperiment search (always routes)",
+        "--no-route); draft/good/best=autoexperiment search (always routes)",
     )
     p_replay.add_argument(
-        "--seed", type=int, default=0,
-        help="placement RNG seed (default 0). Same seed + same workspace => "
-             "same placement",
+        "--seed",
+        type=int,
+        default=0,
+        help="placement RNG seed (default 0). Same seed + same workspace => same placement",
     )
     p_replay.add_argument(
-        "--route", dest="route", action="store_true", default=True,
+        "--route",
+        dest="route",
+        action="store_true",
+        default=True,
         help="route after placement (default)",
     )
     p_replay.add_argument(
-        "--no-route", dest="route", action="store_false",
+        "--no-route",
+        dest="route",
+        action="store_false",
         help="placement only -- promote the placed board and skip "
-             "routing/verify/fab (fast determinism check; fast engine only)",
+        "routing/verify/fab (fast determinism check; fast engine only)",
     )
     p_replay.add_argument(
-        "--no-fab", action="store_true",
+        "--no-fab",
+        action="store_true",
         help="skip the fab-package export (stop after the verify gate)",
     )
     p_replay.add_argument(
-        "--archive", dest="no_archive", action="store_false", default=True,
+        "--archive",
+        dest="no_archive",
+        action="store_false",
+        default=True,
         help="archive a session snapshot (replay skips this by default)",
     )
     p_replay.set_defaults(func=_cmd_replay)
@@ -7064,9 +7430,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p_mroute.add_argument("state", help="path to state.json")
-    p_mroute.add_argument(
-        "out_dir", help="output directory (project_stem appended if absent)"
-    )
+    p_mroute.add_argument("out_dir", help="output directory (project_stem appended if absent)")
     p_mroute.set_defaults(func=_cmd_manual_route)
 
     p_artifacts = sub.add_parser(
@@ -7086,15 +7450,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p_artifacts.add_argument(
-        "--project", required=True,
+        "--project",
+        required=True,
         help="synthesized project dir (the one containing .experiments/)",
     )
     p_artifacts.add_argument(
-        "--kind", choices=["routed", "placed", "leaf", "all"], default="all",
+        "--kind",
+        choices=["routed", "placed", "leaf", "all"],
+        default="all",
         help="which board to resolve (default: all)",
     )
     p_artifacts.add_argument(
-        "--json", action="store_true", help="emit machine-readable JSON",
+        "--json",
+        action="store_true",
+        help="emit machine-readable JSON",
     )
     p_artifacts.set_defaults(func=_cmd_artifacts)
 

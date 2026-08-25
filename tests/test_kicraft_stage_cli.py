@@ -7,6 +7,7 @@ exercise the happy path for each stage, the slot-shape validation
 errors the LLM is expected to recover from, and the special wiring
 merge-into-bom behavior.
 """
+
 from __future__ import annotations
 
 import json
@@ -149,8 +150,11 @@ def _valid_bom() -> dict:
         # deliberately ships no LDO IC -- ledger the deviation the same way a
         # real BOM must, so the accountability gate stays exercised end-to-end.
         "substitutions": [
-            {"wanted": "AP2112K", "got": "no LDO IC in this minimal fixture",
-             "reason": "test fixture"},
+            {
+                "wanted": "AP2112K",
+                "got": "no LDO IC in this minimal fixture",
+                "reason": "test fixture",
+            },
         ],
     }
 
@@ -493,6 +497,56 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys):
     assert {p["ref"] for p in written["bom"]["parts"]} == {"U1", "C1", "J3", "U2"}
 
 
+def test_stage_commit_bom_rejects_per_sheet_overflow(tmp_path, capsys, monkeypatch):
+    import kicraft.design.cli_app as cli_app
+
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "project_stem": "BOUNDS_TEST",
+                "intent": _valid_intent(),
+                "functional_spec": _valid_functional_spec(),
+                "architecture": _valid_architecture(),
+            }
+        )
+    )
+    parts = [
+        {
+            "ref": f"R{index}",
+            "value": "10k",
+            "symbol": "Device:R",
+            "footprint": "Resistor_SMD:R_0402_1005Metric",
+            "sheet": "MCU",
+        }
+        for index in range(1, 452)
+    ]
+    slot = _write_slot(tmp_path, "oversize_bom", {"parts": parts})
+
+    def fail_if_called(*_):
+        raise AssertionError("oversize BOM must be rejected before identity resolution")
+
+    monkeypatch.setattr(cli_app, "_unresolved_footprints", fail_if_called)
+    monkeypatch.setattr(cli_app, "_unresolved_symbols", fail_if_called)
+    monkeypatch.setattr(cli_app, "_symbol_footprint_pin_mismatches", fail_if_called)
+    monkeypatch.setattr(cli_app, "_unresolved_lcsc", fail_if_called)
+    monkeypatch.setattr(cli_app, "_resolve_bom_mpn_sourcing", fail_if_called)
+
+    rc, payload = _run(
+        capsys,
+        "stage-commit",
+        "bom",
+        "--slot-file",
+        str(slot),
+        "--no-archive",
+        str(state_path),
+    )
+
+    assert rc == 3
+    assert any("9.35 BOM emission bounds" in error for error in payload["errors"])
+    assert "MCU (451 items, > 450)" in payload["offenders"]
+
+
 def test_stage_commit_bom_accepts_pinless_mechanical_symbol(tmp_path, capsys):
     """A RESOLVED zero-pin Mechanical symbol (MountingHole) is a deliberate
     pin-less part, not a hallucination -- rejecting it burned BOM retries on
@@ -576,18 +630,12 @@ def test_stage_commit_wiring_rejects_inert_duplicate_connector(tmp_path, capsys)
         "wiring",
         {
             "connections": [
-                {"net_name": "+3V3",
-                 "endpoints": [{"ref": "U1", "pin": "1"}], "sheet": "MCU"},
-                {"net_name": "GND",
-                 "endpoints": [{"ref": "U1", "pin": "2"}], "sheet": "MCU"},
-                {"net_name": "+3V3",
-                 "endpoints": [{"ref": "C1", "pin": "1"}], "sheet": "LDO"},
-                {"net_name": "GND",
-                 "endpoints": [{"ref": "C1", "pin": "2"}], "sheet": "LDO"},
-                {"net_name": "+3V3",
-                 "endpoints": [{"ref": "J4", "pin": "1"}], "sheet": "MCU"},
-                {"net_name": "GND",
-                 "endpoints": [{"ref": "J4", "pin": "2"}], "sheet": "MCU"},
+                {"net_name": "+3V3", "endpoints": [{"ref": "U1", "pin": "1"}], "sheet": "MCU"},
+                {"net_name": "GND", "endpoints": [{"ref": "U1", "pin": "2"}], "sheet": "MCU"},
+                {"net_name": "+3V3", "endpoints": [{"ref": "C1", "pin": "1"}], "sheet": "LDO"},
+                {"net_name": "GND", "endpoints": [{"ref": "C1", "pin": "2"}], "sheet": "LDO"},
+                {"net_name": "+3V3", "endpoints": [{"ref": "J4", "pin": "1"}], "sheet": "MCU"},
+                {"net_name": "GND", "endpoints": [{"ref": "J4", "pin": "2"}], "sheet": "MCU"},
             ],
             "no_connect_pins": [
                 {"ref": "J3", "pin": "1"},
@@ -674,8 +722,15 @@ def _commit_chain_through_arch(tmp_path, capsys) -> Path:
     ):
         slot = _write_slot(tmp_path, slot_name, data)
         rc, payload = _run(
-            capsys, "stage-commit", stage, "--slot-file", str(slot),
-            "--project-stem", "TEST", "--no-archive", str(state_path),
+            capsys,
+            "stage-commit",
+            stage,
+            "--slot-file",
+            str(slot),
+            "--project-stem",
+            "TEST",
+            "--no-archive",
+            str(state_path),
         )
         assert rc == 0, payload
     return state_path
@@ -696,16 +751,18 @@ def test_stage_commit_bom_rejects_unknown_architecture_sheet(tmp_path, capsys):
     bom_slot = _write_slot(tmp_path, "bom", bom)
 
     rc, payload = _run(
-        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
-        "--no-archive", str(state_path),
+        capsys,
+        "stage-commit",
+        "bom",
+        "--slot-file",
+        str(bom_slot),
+        "--no-archive",
+        str(state_path),
     )
 
     assert rc == 3
     assert payload["ok"] is False
-    assert any(
-        "9.13 BOM sheet references" in error
-        for error in payload["errors"]
-    )
+    assert any("9.13 BOM sheet references" in error for error in payload["errors"])
     assert "H1 -> 'MOUNTING HOLES'" in payload["offenders"]
     assert json.loads(state_path.read_text())["bom"] is None
 
@@ -724,15 +781,18 @@ def test_validate_rejects_persisted_unknown_architecture_sheet(tmp_path, capsys)
     )
     bom_slot = _write_slot(tmp_path, "bom", bom)
     rc, payload = _run(
-        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
-        "--no-archive", str(state_path),
+        capsys,
+        "stage-commit",
+        "bom",
+        "--slot-file",
+        str(bom_slot),
+        "--no-archive",
+        str(state_path),
     )
     assert rc == 0, payload
 
     data = json.loads(state_path.read_text())
-    next(p for p in data["bom"]["parts"] if p["ref"] == "H1")["sheet"] = (
-        "MOUNTING HOLES"
-    )
+    next(p for p in data["bom"]["parts"] if p["ref"] == "H1")["sheet"] = "MOUNTING HOLES"
     state_path.write_text(json.dumps(data))
 
     rc = main(["validate", str(state_path)])
@@ -752,8 +812,13 @@ def test_stage_commit_bom_rejects_unresolvable_footprint(tmp_path, capsys):
     bad["parts"][0]["footprint"] = "Button_Switch_SMD:SW_SPST_PTS645"
     bom_slot = _write_slot(tmp_path, "bom", bad)
     rc, payload = _run(
-        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
-        "--no-archive", str(state_path),
+        capsys,
+        "stage-commit",
+        "bom",
+        "--slot-file",
+        str(bom_slot),
+        "--no-archive",
+        str(state_path),
     )
     assert rc == 3
     assert payload["ok"] is False
@@ -765,8 +830,13 @@ def test_stage_commit_bom_accepts_resolvable_footprints(tmp_path, capsys):
     state_path = _commit_chain_through_arch(tmp_path, capsys)
     bom_slot = _write_slot(tmp_path, "bom", _valid_bom())
     rc, payload = _run(
-        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
-        "--no-archive", str(state_path),
+        capsys,
+        "stage-commit",
+        "bom",
+        "--slot-file",
+        str(bom_slot),
+        "--no-archive",
+        str(state_path),
     )
     assert rc == 0, payload
     assert payload["ok"] is True
@@ -781,8 +851,13 @@ def test_stage_commit_bom_rejects_unresolvable_symbol(tmp_path, capsys):
     bom["parts"][0]["symbol"] = "NoSuchLib:DefinitelyMissing"
     bom_slot = _write_slot(tmp_path, "bom", bom)
     rc, payload = _run(
-        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
-        "--no-archive", str(state_path),
+        capsys,
+        "stage-commit",
+        "bom",
+        "--slot-file",
+        str(bom_slot),
+        "--no-archive",
+        str(state_path),
     )
     assert rc == 3
     assert payload["ok"] is False
@@ -798,8 +873,13 @@ def test_stage_prep_wiring_fails_loudly_on_unresolved_symbol(tmp_path, capsys):
     state_path = _commit_chain_through_arch(tmp_path, capsys)
     bom_slot = _write_slot(tmp_path, "bom", _valid_bom())
     rc, _ = _run(
-        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
-        "--no-archive", str(state_path),
+        capsys,
+        "stage-commit",
+        "bom",
+        "--slot-file",
+        str(bom_slot),
+        "--no-archive",
+        str(state_path),
     )
     assert rc == 0
     # Inject a bogus symbol directly into committed state, bypassing the
@@ -825,8 +905,13 @@ def test_stage_commit_bom_aggregates_identity_failures(tmp_path, capsys):
     bad["parts"][1]["symbol"] = "NoSuchLib:DefinitelyMissing"
     bom_slot = _write_slot(tmp_path, "bom", bad)
     rc, payload = _run(
-        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
-        "--no-archive", str(state_path),
+        capsys,
+        "stage-commit",
+        "bom",
+        "--slot-file",
+        str(bom_slot),
+        "--no-archive",
+        str(state_path),
     )
     assert rc == 3
     errors = " ".join(payload["errors"])
@@ -845,15 +930,25 @@ def test_stage_commit_bom_normalizes_opposite_edge_connectors(tmp_path, capsys):
     state_path = _commit_chain_through_arch(tmp_path, capsys)
     bom = _valid_bom()
     for ref, edge in (("J1", "top"), ("J2", "bottom")):
-        bom["parts"].append({
-            "ref": ref, "value": "header", "symbol": "Device:R",
-            "footprint": "Resistor_SMD:R_0402_1005Metric", "sheet": "MCU",
-        })
+        bom["parts"].append(
+            {
+                "ref": ref,
+                "value": "header",
+                "symbol": "Device:R",
+                "footprint": "Resistor_SMD:R_0402_1005Metric",
+                "sheet": "MCU",
+            }
+        )
         bom["component_zones"][ref] = {"edge": edge}
     bom_slot = _write_slot(tmp_path, "bom", bom)
     rc, payload = _run(
-        capsys, "stage-commit", "bom", "--slot-file", str(bom_slot),
-        "--no-archive", str(state_path),
+        capsys,
+        "stage-commit",
+        "bom",
+        "--slot-file",
+        str(bom_slot),
+        "--no-archive",
+        str(state_path),
     )
     assert rc == 0, payload
     assert payload.get("bom_normalizations"), payload

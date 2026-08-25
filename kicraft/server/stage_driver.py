@@ -13,6 +13,7 @@ footprints (or fetches them from LCSC) instead of guessing.
         --workspace /tmp/lamp --stages intent,functional_spec,architecture,bom \\
         --brief "a USB-C powered LED night light, no microcontroller"
 """
+
 from __future__ import annotations
 
 import argparse
@@ -35,7 +36,13 @@ from kicraft.fsutil import atomic_write_text
 from kicraft.parts_library import jlcparts, lcsc_retail
 
 from .client import CappedOpenRouterClient, make_client
-from .config import STAGE_SERIALIZATION_MAX_TOKENS, Settings, StageResponsePolicy
+from .config import (
+    STAGE_COLLECTION_BOUNDS,
+    STAGE_SERIALIZATION_MAX_TOKENS,
+    CollectionBound,
+    Settings,
+    StageResponsePolicy,
+)
 from .pricing import _stock_floor
 from .spend_guard import BudgetExceeded, SpendGuard
 
@@ -56,13 +63,12 @@ _PROVIDER_FAILURE_EXC = (requests.exceptions.HTTPError,)
 def _bundle_sourcing_lcsc(bundle: str) -> str:
     """The vendored bundle's pinned sourcing C#, or '' (best-effort, offline)."""
     try:
-        manifest = (
-            _REPO / "kicraft" / "parts_library" / bundle / "manifest.json"
-        )
+        manifest = _REPO / "kicraft" / "parts_library" / bundle / "manifest.json"
         data = json.loads(manifest.read_text(encoding="utf-8"))
         return str((data.get("sourcing") or {}).get("lcsc") or "").strip()
     except Exception:
         return ""
+
 
 # The repo venv has no `kicraft` console script; cli_app.py has a __main__ guard.
 KICRAFT = [sys.executable, "-m", "kicraft.design.cli_app"]
@@ -103,10 +109,11 @@ def _record_stage_ledger(client, *, run_id, stage, **kw) -> None:
     except Exception:  # ledger trouble must never fail a design run
         pass
 
+
 _REPO = Path(__file__).resolve().parents[2]
 _SPEC_DIRS = [
-    _REPO / "kicraft" / "skill_assets" / "skill" / "stages",   # packaged (preferred)
-    _REPO / ".claude" / "skills" / "kicraft" / "stages",       # current dev location
+    _REPO / "kicraft" / "skill_assets" / "skill" / "stages",  # packaged (preferred)
+    _REPO / ".claude" / "skills" / "kicraft" / "stages",  # current dev location
 ]
 
 # Canonical stage -> slot model, mirroring cli_app._apply_slot's owned-field map.
@@ -123,64 +130,139 @@ DESIGN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
 
 # Tools exposed to the model during the BOM stage (OpenAI tool-spec form).
 BOM_TOOLS = [
-    {"type": "function", "function": {
-        "name": "list_parts",
-        "description": "List curated parts-library bundles available to this project "
-                       "(vendored + any fetched). Returns a table with the exact symbol and "
-                       "footprint strings to use verbatim in the BOM. The full table is "
-                       "large — pass 'query' keywords to filter it.",
-        "parameters": {"type": "object", "properties": {
-            "query": {"type": "string", "description": "optional keywords to filter the "
-                      "table, e.g. 'bnc' or 'trimmer 3296'"}}}}},
-    {"type": "function", "function": {
-        "name": "lookup_symbol",
-        "description": "Verify a KiCad symbol in 'Library:Name' form exists and list its pins.",
-        "parameters": {"type": "object", "properties": {
-            "symbol": {"type": "string", "description": "e.g. 'Device:R' or "
-                       "'usb-c-16p:TYPE-C-31-M-12'"}}, "required": ["symbol"]}}},
-    {"type": "function", "function": {
-        "name": "search_symbols",
-        "description": "Find the correct symbol id by keyword when you do not know the exact "
-                       "'Library:Name'. Searches curated parts-library bundles first (returned "
-                       "as symbol+footprint pairs — adopt the pair), then stock KiCad symbols. "
-                       "Returns ids to use verbatim. Use this instead of guessing a symbol name.",
-        "parameters": {"type": "object", "properties": {
-            "query": {"type": "string", "description": "keywords, e.g. 'conn 02x08', 'crystal', "
-                      "'n-channel mosfet'"}}, "required": ["query"]}}},
-    {"type": "function", "function": {
-        "name": "search_footprints",
-        "description": "Find the correct footprint id by keyword when you do not know the exact "
-                       "'Library:Name'. Searches curated parts-library bundles first (returned "
-                       "as symbol+footprint pairs — adopt the pair), then stock KiCad footprints. "
-                       "Returns ids to use verbatim. Use this instead of guessing a footprint name.",
-        "parameters": {"type": "object", "properties": {
-            "query": {"type": "string", "description": "keywords, e.g. 'pinheader 2x08', "
-                      "'barreljack', 'sot-23'"}}, "required": ["query"]}}},
-    {"type": "function", "function": {
-        "name": "lookup_footprint",
-        "description": "Verify a KiCad footprint in 'Library:Name' form exists and report its "
-                       "pad count.",
-        "parameters": {"type": "object", "properties": {
-            "footprint": {"type": "string", "description": "e.g. "
-                          "'Resistor_SMD:R_0603_1608Metric'"}}, "required": ["footprint"]}}},
-    {"type": "function", "function": {
-        "name": "lookup_lcsc_id",
-        "description": "Resolve a manufacturer part number, search keyword, or pasted LCSC "
-                       "id / product URL to an LCSC part number (C#####). Returns {ok, lcsc} "
-                       "or a candidates list.",
-        "parameters": {"type": "object", "properties": {
-            "mpn": {"type": "string", "description": "MPN or keyword, e.g. 'SK-12D07VG4' or "
-                    "'SPDT slide switch SMD'"}}, "required": ["mpn"]}}},
-    {"type": "function", "function": {
-        "name": "add_part_from_lcsc",
-        "description": "Fetch a real symbol+footprint bundle from LCSC into the project parts "
-                       "library. Afterwards call list_parts to get the exact '<name>:<symbol>' "
-                       "and '<name>:<footprint>' strings. Not needed for core-default rows "
-                       "that name a bundle: those are already in the library.",
-        "parameters": {"type": "object", "properties": {
-            "lcsc_id": {"type": "string", "description": "LCSC part number like C2837270"},
-            "name": {"type": "string", "description": "optional library slug"}},
-            "required": ["lcsc_id"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "list_parts",
+            "description": "List curated parts-library bundles available to this project "
+            "(vendored + any fetched). Returns a table with the exact symbol and "
+            "footprint strings to use verbatim in the BOM. The full table is "
+            "large — pass 'query' keywords to filter it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "optional keywords to filter the "
+                        "table, e.g. 'bnc' or 'trimmer 3296'",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_symbol",
+            "description": "Verify a KiCad symbol in 'Library:Name' form exists and list its pins.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "e.g. 'Device:R' or 'usb-c-16p:TYPE-C-31-M-12'",
+                    }
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_symbols",
+            "description": "Find the correct symbol id by keyword when you do not know the exact "
+            "'Library:Name'. Searches curated parts-library bundles first (returned "
+            "as symbol+footprint pairs — adopt the pair), then stock KiCad symbols. "
+            "Returns ids to use verbatim. Use this instead of guessing a symbol name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "keywords, e.g. 'conn 02x08', 'crystal', 'n-channel mosfet'",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_footprints",
+            "description": "Find the correct footprint id by keyword when you do not know the exact "
+            "'Library:Name'. Searches curated parts-library bundles first (returned "
+            "as symbol+footprint pairs — adopt the pair), then stock KiCad footprints. "
+            "Returns ids to use verbatim. Use this instead of guessing a footprint name.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "keywords, e.g. 'pinheader 2x08', 'barreljack', 'sot-23'",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_footprint",
+            "description": "Verify a KiCad footprint in 'Library:Name' form exists and report its "
+            "pad count.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "footprint": {
+                        "type": "string",
+                        "description": "e.g. 'Resistor_SMD:R_0603_1608Metric'",
+                    }
+                },
+                "required": ["footprint"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_lcsc_id",
+            "description": "Resolve a manufacturer part number, search keyword, or pasted LCSC "
+            "id / product URL to an LCSC part number (C#####). Returns {ok, lcsc} "
+            "or a candidates list.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mpn": {
+                        "type": "string",
+                        "description": "MPN or keyword, e.g. 'SK-12D07VG4' or "
+                        "'SPDT slide switch SMD'",
+                    }
+                },
+                "required": ["mpn"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_part_from_lcsc",
+            "description": "Fetch a real symbol+footprint bundle from LCSC into the project parts "
+            "library. Afterwards call list_parts to get the exact '<name>:<symbol>' "
+            "and '<name>:<footprint>' strings. Not needed for core-default rows "
+            "that name a bundle: those are already in the library.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "lcsc_id": {"type": "string", "description": "LCSC part number like C2837270"},
+                    "name": {"type": "string", "description": "optional library slug"},
+                },
+                "required": ["lcsc_id"],
+            },
+        },
+    },
 ]
 
 
@@ -198,13 +280,15 @@ def _stage_extra(stage: str) -> str:
         # block shows '"intent": null' as a top-level state key, and 4 of 9
         # recent boards wrapped the slot under an "intent" key to match it --
         # a guaranteed "goal: Field required" bounce (2026-07-19 review §5.1).
-        return ('\n- Output the slot\'s fields directly at the JSON top level -- '
-                'do NOT wrap them under an "intent" (or any other) key. '
-                'Also include a top-level "project_stem" string (2-3 significant words, '
-                'UPPER_SNAKE_CASE, <=32 chars) as a SIBLING key in that same flat '
-                'object, e.g. {"project_stem": "LED_RING", "goal": "...", '
-                '"constraints": [...], ...}. It is stripped from the slot and passed '
-                'separately, per the spec.')
+        return (
+            "\n- Output the slot's fields directly at the JSON top level -- "
+            'do NOT wrap them under an "intent" (or any other) key. '
+            'Also include a top-level "project_stem" string (2-3 significant words, '
+            "UPPER_SNAKE_CASE, <=32 chars) as a SIBLING key in that same flat "
+            'object, e.g. {"project_stem": "LED_RING", "goal": "...", '
+            '"constraints": [...], ...}. It is stripped from the slot and passed '
+            "separately, per the spec."
+        )
     if stage == "bom":
         return (
             "\n- TOOLS available this stage: list_parts (curated bundles + exact symbol/"
@@ -284,7 +368,8 @@ def _stage_extra(stage: str) -> str:
             "with only the fields that differ (ref) plus value/symbol/footprint/sheet. The "
             "output token budget is finite; verbose JSON truncates and fails.\n"
             "- Every symbol AND footprint MUST resolve to a real file. When finished, output "
-            "ONLY the BOM slot JSON.")
+            "ONLY the BOM slot JSON."
+        )
     if stage == "wiring":
         return (
             "\n- NET COVERAGE IS ENFORCED: every (ref, pin) of every part listed in "
@@ -297,8 +382,8 @@ def _stage_extra(stage: str) -> str:
             "- PULL-UP / PULL-DOWN: a pull resistor has TWO pins. Wire its signal-side pin "
             "on a signal net alongside the IC pin it serves, and its rail-side pin on the "
             "power/ground net (use +3V3/GND/... as connection.net_name). A power/ground "
-            "connection MAY hold a single endpoint -- that lone rail pin is NOT \"dangling\". "
-            "Never write a rail name into an endpoint.ref (refs are part refs like \"R1\").\n"
+            'connection MAY hold a single endpoint -- that lone rail pin is NOT "dangling". '
+            'Never write a rail name into an endpoint.ref (refs are part refs like "R1").\n'
             "- BOM SHORTFALL = SELF-REPAIR, NOT A USER QUESTION: if the ONLY thing preventing "
             "full net coverage is that the BOM lacks a supporting passive an IC requires (a "
             "decoupling/bypass cap for a dedicated DEC/VDD/AVDD/bypass pin, a mandatory pull-up, "
@@ -312,7 +397,8 @@ def _stage_extra(stage: str) -> str:
             "- COMPACT OUTPUT: for a board with many repeated parts (an LED array, a channel "
             "bank), use COMPACT single-line JSON per connection -- no pretty-printing, no "
             "indentation. The output token budget is finite; verbose JSON truncates and the "
-            "whole draft fails as 'no JSON in reply'.")
+            "whole draft fails as 'no JSON in reply'."
+        )
     return ""
 
 
@@ -347,8 +433,7 @@ def _format_core_defaults_block(rows) -> str | None:
                 # parts, so absence means effectively dry) — same fate as a
                 # sub-floor row.
                 if hit is None or (hit.get("stock") or 0) < floor:
-                    dropped.append(
-                        f"{r.get('function_key')} ({r.get('default_mpn')})")
+                    dropped.append(f"{r.get('function_key')} ({r.get('default_mpn')})")
                     continue
                 # Retail: act only on a FRESH cached storefront reading (the
                 # BOM tools populate the cache during normal runs); no
@@ -359,9 +444,7 @@ def _format_core_defaults_block(rows) -> str | None:
                     and retail is not None
                     and retail < lcsc_retail.retail_floor()
                 ):
-                    dropped.append(
-                        f"{r.get('function_key')} ({r.get('default_mpn')}; "
-                        "retail-dry)")
+                    dropped.append(f"{r.get('function_key')} ({r.get('default_mpn')}; retail-dry)")
                     continue
             kept.append(r)
         live = kept
@@ -385,36 +468,52 @@ def _format_core_defaults_block(rows) -> str | None:
     ]
     caveats = []
     for r in live:
-        cells = (r.get("function_key"), r.get("display_name"), r.get("qualifier"),
-                 r.get("default_mpn"), r.get("default_lcsc"), r.get("package"),
-                 r.get("bundle"))
+        cells = (
+            r.get("function_key"),
+            r.get("display_name"),
+            r.get("qualifier"),
+            r.get("default_mpn"),
+            r.get("default_lcsc"),
+            r.get("package"),
+            r.get("bundle"),
+        )
         lines.append("| " + " | ".join(str(c) if c else "-" for c in cells) + " |")
         if re.search(r"\b(WLP|CSP|BGA)\b", r.get("package") or ""):
             caveats.append(
                 f"- {r.get('function_key')} ({r.get('default_mpn')}): "
                 f"{r.get('package')} is machine-assembly-only; if hand assembly "
-                "is required, research an alternative instead of adopting it.")
+                "is required, research an alternative instead of adopting it."
+            )
     if caveats:
         lines += ["", "### Package caveats", *caveats]
     if dropped:
-        lines += ["", f"({len(dropped)} core default(s) omitted — below the "
-                      f"JLC stock floor in the current catalog: "
-                      f"{', '.join(dropped)})"]
+        lines += [
+            "",
+            f"({len(dropped)} core default(s) omitted — below the "
+            f"JLC stock floor in the current catalog: "
+            f"{', '.join(dropped)})",
+        ]
     return "\n".join(lines)
 
 
 def _schema_for(stage: str) -> str:
     if stage == "wiring":
-        return json.dumps({
-            "type": "object",
-            "properties": {
-                "connections": {"type": "array",
-                                "items": models.NetConnection.model_json_schema()},
-                "no_connect_pins": {"type": "array",
-                                    "items": models.PinEndpoint.model_json_schema()},
-            },
-            "required": ["connections", "no_connect_pins"],
-        })
+        return json.dumps(
+            {
+                "type": "object",
+                "properties": {
+                    "connections": {
+                        "type": "array",
+                        "items": models.NetConnection.model_json_schema(),
+                    },
+                    "no_connect_pins": {
+                        "type": "array",
+                        "items": models.PinEndpoint.model_json_schema(),
+                    },
+                },
+                "required": ["connections", "no_connect_pins"],
+            }
+        )
     return json.dumps(SLOT_MODEL[stage].model_json_schema())
 
 
@@ -483,7 +582,31 @@ def _worked_example(stage: str) -> str:
     )
 
 
-def build_system(stage: str) -> str:
+def _collection_bounds_sentence(bounds: tuple[CollectionBound, ...]) -> str:
+    """Render collection policies once for both normal and recovery prompts."""
+    clauses: list[str] = []
+    for bound in bounds:
+        clause = f"The `{bound.field}` collection must contain at most {bound.total} items total"
+        if bound.per_group is not None and bound.group_key is not None:
+            clause += f" and at most {bound.per_group} items per `{bound.group_key}`"
+        clauses.append(clause + ".")
+    return " ".join(clauses)
+
+
+def _bounded_output_contract(stage: str, bounds: tuple[CollectionBound, ...] | None = None) -> str:
+    configured = STAGE_COLLECTION_BOUNDS.get(stage, ()) if bounds is None else bounds
+    sentence = _collection_bounds_sentence(configured)
+    if not sentence:
+        return ""
+    return (
+        "\n\n=== BOUNDED OUTPUT POLICY ===\n"
+        f"{sentence} Emit only components required by the architecture and intent; "
+        "do not pad the collection with speculative or repeated parts."
+        "\n=== END BOUNDED OUTPUT POLICY ==="
+    )
+
+
+def build_system(stage: str, collection_bounds: tuple[CollectionBound, ...] | None = None) -> str:
     spec = _spec_text(stage)
     schema = _schema_for(stage)
     return (
@@ -492,7 +615,8 @@ def build_system(stage: str) -> str:
         "Output ONLY a single JSON object: no prose, no markdown fences.\n\n"
         "Follow this stage specification (ignore references to SKILL.md or sub-agents; you "
         "produce the slot JSON and may use the listed tools):\n"
-        f"=== SPEC ===\n{spec}\n=== END SPEC ===\n\n"
+        f"=== SPEC ===\n{spec}\n=== END SPEC ==="
+        f"{_bounded_output_contract(stage, collection_bounds)}\n\n"
         "The JSON MUST validate against this Pydantic JSON schema (enums, required fields, and "
         f"string patterns are strict):\n{schema}\n"
         f"{_worked_example(stage)}\n"
@@ -507,7 +631,7 @@ def build_system(stage: str) -> str:
         '  {"questions": [{"text": "...", "options": ["a suggested answer", "..."], '
         '"blocking": true}]}\n'
         "Ask at most 3 genuinely blocking questions, and only when a wrong guess would waste "
-        "a real board; otherwise choose a sensible default, record it in \"assumptions\", and "
+        'a real board; otherwise choose a sensible default, record it in "assumptions", and '
         "output the slot."
         f"{_stage_extra(stage)}"
     )
@@ -530,9 +654,8 @@ def _extract_json(text: str) -> dict:
     if a == -1:
         raise json.JSONDecodeError("no JSON object in reply", text, 0)
     obj, end = json.JSONDecoder().raw_decode(text[a:])
-    if text[a + end:].strip():
-        raise json.JSONDecodeError(
-            "trailing content after JSON object", text, a + end)
+    if text[a + end :].strip():
+        raise json.JSONDecodeError("trailing content after JSON object", text, a + end)
     return obj
 
 
@@ -553,15 +676,16 @@ def _bom_part_hints(*texts: str) -> str:
     lets the BOM model fetch it directly instead of keyword-searching for the
     part (the dominant source of wasted tool calls and clarifying questions).
     """
-    ids = sorted({m.group(0).upper()
-                  for t in texts if t for m in _LCSC_ID_RE.finditer(t)})
+    ids = sorted({m.group(0).upper() for t in texts if t for m in _LCSC_ID_RE.finditer(t)})
     if not ids:
         return ""
-    return ("\n\nUSER-SUPPLIED LCSC PART NUMBERS (found in the brief/answers): "
-            + ", ".join(ids)
-            + "\nThese are explicit part choices: call add_part_from_lcsc for each "
-            "FIRST and use the fetched bundle for the matching BOM line instead "
-            "of searching for alternatives.")
+    return (
+        "\n\nUSER-SUPPLIED LCSC PART NUMBERS (found in the brief/answers): "
+        + ", ".join(ids)
+        + "\nThese are explicit part choices: call add_part_from_lcsc for each "
+        "FIRST and use the fetched bundle for the matching BOM line instead "
+        "of searching for alternatives."
+    )
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -569,8 +693,9 @@ def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess
     # hosted vs offline usage (query_log reads $KICRAFT_CALLER). Honors an
     # explicit override if the environment already set one.
     env = {**os.environ, "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web")}
-    return subprocess.run(cmd, capture_output=True, text=True, env=env,
-                          cwd=(str(cwd) if cwd else None))
+    return subprocess.run(
+        cmd, capture_output=True, text=True, env=env, cwd=(str(cwd) if cwd else None)
+    )
 
 
 # A part's MPN spelling variants all mean the same lookup: normalize before the
@@ -600,7 +725,8 @@ _BOM_MPN_QUERY_CAP = 2
 # library mutates when a part is fetched), and lookup_lcsc_id is excluded (it
 # owns the per-MPN cap + the network resolution cache).
 _MEMOIZED_BOM_TOOLS = frozenset(
-    {"lookup_symbol", "lookup_footprint", "search_symbols", "search_footprints"})
+    {"lookup_symbol", "lookup_footprint", "search_symbols", "search_footprints"}
+)
 
 
 def _new_bundle_rows(list_parts_stdout: str, lcsc_id: str, name: str | None) -> str:
@@ -613,18 +739,19 @@ def _new_bundle_rows(list_parts_stdout: str, lcsc_id: str, name: str | None) -> 
     back to a bounded slice if the row can't be located (e.g. add-part failed),
     so the model always gets something actionable."""
     lines = (list_parts_stdout or "").splitlines()
-    sep = next((i for i, ln in enumerate(lines)
-                if re.match(r"\s*\|\s*-{2,}", ln)), None)
+    sep = next((i for i, ln in enumerate(lines) if re.match(r"\s*\|\s*-{2,}", ln)), None)
     if sep is None:  # unexpected format -> don't silently hide it, just bound it
         return (list_parts_stdout or "")[:8000]
     m = _LCSC_ID_RE.search(lcsc_id or "")
     cnum = m.group(0).upper() if m else ""
     slug = (name or "").strip().lower()
-    rows = [ln for ln in lines[sep + 1:]
-            if ln.lstrip().startswith("|")
-            and ((cnum and cnum in ln.upper())
-                 or (slug and f"`{slug}`" in ln.lower()))]
-    header = "\n".join(lines[:sep + 1])
+    rows = [
+        ln
+        for ln in lines[sep + 1 :]
+        if ln.lstrip().startswith("|")
+        and ((cnum and cnum in ln.upper()) or (slug and f"`{slug}`" in ln.lower()))
+    ]
+    header = "\n".join(lines[: sep + 1])
     if not rows:  # couldn't pin the new row; give the model the header + a hint
         return header + "\n(new row not located; call list_parts for the full table)"
     return (header + "\n" + "\n".join(rows))[:8000]
@@ -634,11 +761,13 @@ def _bom_executor(workspace: Path):
     """Return an executor(name, args) -> str backed by the kicraft CLI (cwd=workspace)."""
     lcsc_calls: dict[str, int] = {}  # normalized MPN -> attempts this stage (search budget)
     memo: dict[tuple[str, str], str] = {}  # read-only lookups, deduped per stage
+
     def execute(name: str, args: dict) -> str:
         ckey: tuple[str, str] | None = None
         if name in _MEMOIZED_BOM_TOOLS:
-            arg = str(args.get("symbol") or args.get("footprint")
-                      or args.get("query") or "").strip()
+            arg = str(
+                args.get("symbol") or args.get("footprint") or args.get("query") or ""
+            ).strip()
             ckey = (name, arg)
             if ckey in memo:  # identical lookup already answered this stage
                 return memo[ckey]
@@ -658,7 +787,7 @@ def _bom_executor(workspace: Path):
                 cut = out.rfind("\n", 0, 40000)
                 out = out[: cut if cut > 0 else 40000] + (
                     "\n… TABLE TRUNCATED — call list_parts again with a "
-                    "'query' (e.g. {\"query\": \"bnc\"}) to see the rest."
+                    '\'query\' (e.g. {"query": "bnc"}) to see the rest.'
                 )
             return out
         if name == "lookup_symbol":
@@ -681,14 +810,16 @@ def _bom_executor(workspace: Path):
                 # SEARCH BUDGET exceeded for this MPN: the result cannot change
                 # by retrying, so stop the wasted subprocess + the LLM round it
                 # triggers. Tell the model to stop retrying this part.
-                return (f"Resolution for '{mpn}' has already been attempted "
-                        f"{_BOM_MPN_QUERY_CAP} times; repeating it cannot change "
-                        "the answer. STOP retrying this part: use the result from "
-                        "the first lookup above, ask the user for an exact LCSC "
-                        "C-number (C#####), or use the closest stock KiCad "
-                        "symbol/footprint and record the substitution in "
-                        "assumptions. Do NOT call lookup_lcsc_id for this MPN "
-                        "again this stage.")
+                return (
+                    f"Resolution for '{mpn}' has already been attempted "
+                    f"{_BOM_MPN_QUERY_CAP} times; repeating it cannot change "
+                    "the answer. STOP retrying this part: use the result from "
+                    "the first lookup above, ask the user for an exact LCSC "
+                    "C-number (C#####), or use the closest stock KiCad "
+                    "symbol/footprint and record the substitution in "
+                    "assumptions. Do NOT call lookup_lcsc_id for this MPN "
+                    "again this stage."
+                )
             r = _run(KICRAFT + ["lookup-lcsc-id", mpn], workspace)
             return (r.stdout or r.stderr)[:3000]
         if name == "add_part_from_lcsc":
@@ -706,11 +837,14 @@ def _bom_executor(workspace: Path):
             # Return ONLY the freshly-fetched bundle's row(s), not the whole
             # ~42 KB table: the dump would otherwise persist in context for every
             # later round. The model can still call list_parts for the full table.
-            return (f"add-part exit={r.returncode}\n{(r.stdout + chr(10) + r.stderr).strip()[:1500]}"
-                    f"\n\nNEWLY ADDED BUNDLE (use these strings verbatim; call "
-                    f"list_parts for the full library):\n"
-                    f"{_new_bundle_rows(lp.stdout, lcsc_id, name)}")
+            return (
+                f"add-part exit={r.returncode}\n{(r.stdout + chr(10) + r.stderr).strip()[:1500]}"
+                f"\n\nNEWLY ADDED BUNDLE (use these strings verbatim; call "
+                f"list_parts for the full library):\n"
+                f"{_new_bundle_rows(lp.stdout, lcsc_id, name)}"
+            )
         return f"unknown tool: {name}"
+
     return execute
 
 
@@ -732,10 +866,20 @@ def _commit(stage, slot, state_path, brief, project_stem=None, workspace=None) -
     return (proc.returncode == 0 and bool(out.get("ok"))), out
 
 
-def _stamp_stage_status(state_path, stage: str, ok: bool, *,
-                        cost_usd=None, attempts=None, rounds=None,
-                        tool_calls=None, wall_s=None, cpu_s=None, error=None,
-                        failure_kind=None) -> None:
+def _stamp_stage_status(
+    state_path,
+    stage: str,
+    ok: bool,
+    *,
+    cost_usd=None,
+    attempts=None,
+    rounds=None,
+    tool_calls=None,
+    wall_s=None,
+    cpu_s=None,
+    error=None,
+    failure_kind=None,
+) -> None:
     """Record a stage's durable outcome in state.json's stage_status block (a real
     ConversationState field, so the CLI's load/validate/dump round-trip preserves
     it). This is what lets a reopened project restore its pipeline progress
@@ -752,8 +896,7 @@ def _stamp_stage_status(state_path, stage: str, ok: bool, *,
         sj = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         sj = {}
-    entry: dict = {"ok": bool(ok),
-                   "finished_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    entry: dict = {"ok": bool(ok), "finished_at": dt.datetime.now(dt.timezone.utc).isoformat()}
     if cost_usd is not None:
         entry["cost_usd"] = round(float(cost_usd), 6)
     if attempts is not None:
@@ -824,8 +967,9 @@ def _committed_bom_refs(state_path) -> list[str]:
         return []
 
 
-def _retry_feedback(out: dict, *, stage: str | None = None,
-                    valid_refs: list[str] | None = None) -> str:
+def _retry_feedback(
+    out: dict, *, stage: str | None = None, valid_refs: list[str] | None = None
+) -> str:
     """Self-correction message fed back to the model after a rejected commit.
 
     Names the exact errors and offending pins, then instructs a *preserving patch*
@@ -843,27 +987,33 @@ def _retry_feedback(out: dict, *, stage: str | None = None,
             # Without the total, the model fixed the visible slice, got
             # bounced with a DIFFERENT slice, and burned the retry budget
             # chasing a moving target (2026-07-19 review §5.5).
-            msg += (f"  NOTE: only {shown} of {total} offenders are shown -- "
-                    "fix ALL instances of this defect class across the whole "
-                    "slot, not just the ones listed.")
-    msg += (". Return the COMPLETE corrected slot JSON, preserving every entry that was "
-            "already valid and changing ONLY the items listed above. When an offender lists "
-            "'real options: ...', replace the bad id with ONE of those exact ids verbatim "
-            "(do not invent or abbreviate); otherwise call search_symbols / search_footprints "
-            "to find a real id. Do not drop or alter parts of the slot that were not flagged. "
-            "Use COMPACT single-line JSON per part (omit null fields) so the output fits the "
-            "token budget — verbose pretty-printed JSON truncates and fails. "
-            "Output ONLY the slot JSON.")
+            msg += (
+                f"  NOTE: only {shown} of {total} offenders are shown -- "
+                "fix ALL instances of this defect class across the whole "
+                "slot, not just the ones listed."
+            )
+    msg += (
+        ". Return the COMPLETE corrected slot JSON, preserving every entry that was "
+        "already valid and changing ONLY the items listed above. When an offender lists "
+        "'real options: ...', replace the bad id with ONE of those exact ids verbatim "
+        "(do not invent or abbreviate); otherwise call search_symbols / search_footprints "
+        "to find a real id. Do not drop or alter parts of the slot that were not flagged. "
+        "Use COMPACT single-line JSON per part (omit null fields) so the output fits the "
+        "token budget — verbose pretty-printed JSON truncates and fails. "
+        "Output ONLY the slot JSON."
+    )
     # Unknown-ref in wiring means the model tried to wire a part the BOM lacks --
     # it cannot add parts, so retrying with an invented ref just re-fails. Point
     # it at the real refs and the reconcile escape hatch so it stops thrashing and
     # escalates the deficit instead of burning the retry budget (WS6).
     if stage == "wiring" and "unknown ref" in json.dumps(out.get("errors") or ""):
-        msg += (" NOTE: the wiring stage can ONLY connect refs the BOM already contains -- it "
-                "CANNOT add parts. Do not invent a ref. If a part you need is genuinely missing "
-                "from the BOM, do NOT wire a made-up ref: instead PARK with a single blocking "
-                "question whose \"reconcile_target\" is \"bom\", naming the missing part and the "
-                "IC pins it serves; the pipeline will add it and re-run wiring.")
+        msg += (
+            " NOTE: the wiring stage can ONLY connect refs the BOM already contains -- it "
+            "CANNOT add parts. Do not invent a ref. If a part you need is genuinely missing "
+            "from the BOM, do NOT wire a made-up ref: instead PARK with a single blocking "
+            'question whose "reconcile_target" is "bom", naming the missing part and the '
+            "IC pins it serves; the pipeline will add it and re-run wiring."
+        )
         if valid_refs:
             msg += f" The only refs you may reference are: {valid_refs}."
     # A power/ground NAME written as an endpoint ref (the model wiring '+3V3'
@@ -880,13 +1030,16 @@ def _retry_feedback(out: dict, *, stage: str | None = None,
             if models.is_power_or_ground_name(m.group(1))
         }
         if rails:
-            msg += (" NOTE: " + ", ".join(sorted(rails))
-                    + " is a power/ground NET NAME, not a component ref. Wire a "
-                    "rail by setting connection.net_name to it and listing the part "
-                    "pins as endpoints -- never put a rail name in endpoint.ref (refs "
-                    "are part refs like \"R1\"). A power/ground connection MAY hold a "
-                    "single endpoint (a pull-up/pull-down resistor's rail-side pin); "
-                    "it is not dangling.")
+            msg += (
+                " NOTE: "
+                + ", ".join(sorted(rails))
+                + " is a power/ground NET NAME, not a component ref. Wire a "
+                "rail by setting connection.net_name to it and listing the part "
+                "pins as endpoints -- never put a rail name in endpoint.ref (refs "
+                'are part refs like "R1"). A power/ground connection MAY hold a '
+                "single endpoint (a pull-up/pull-down resistor's rail-side pin); "
+                "it is not dangling."
+            )
     return msg
 
 
@@ -900,15 +1053,17 @@ def _normalize_questions(raw_list, stage: str) -> list[dict]:
             # the named stage) rather than a question for the user. Whitelisted so
             # the model can't route a park to an arbitrary/looping target.
             target = q.get("reconcile_target")
-            out.append({
-                "text": str(q["text"]).strip()[:500],
-                "stage": stage,
-                "blocking": bool(q.get("blocking", True)),
-                "material": bool(q.get("material", True)),
-                "options": [str(o)[:200] for o in (q.get("options") or [])][:6],
-                "answer": None,
-                "reconcile_target": (target if target in ("bom",) else None),
-            })
+            out.append(
+                {
+                    "text": str(q["text"]).strip()[:500],
+                    "stage": stage,
+                    "blocking": bool(q.get("blocking", True)),
+                    "material": bool(q.get("material", True)),
+                    "options": [str(o)[:200] for o in (q.get("options") or [])][:6],
+                    "answer": None,
+                    "reconcile_target": (target if target in ("bom",) else None),
+                }
+            )
     return out[:5]
 
 
@@ -936,6 +1091,7 @@ def _design_temperature(client) -> float:
     a client carries no settings, e.g. the mock). Lowering it toward 0 cuts the
     run-to-run variance that makes self-eval regressions hard to read."""
     return float(getattr(getattr(client, "s", None), "design_temperature", 0.2))
+
 
 def _design_reasoning(client, stage: str) -> dict | None:
     """OpenRouter reasoning control for a design stage, from the client settings.
@@ -993,8 +1149,9 @@ _FAILURE_KIND_ERROR = {
 # demand ONE compact slot object, no tools, no markdown, no prose. The reply is
 # bounded by the stage's fixed serialization cap (never doubled dynamically).
 _SERIALIZATION_RETRY_MSG = (
-    "Your previous reply was not a single complete JSON object (it was truncated "
-    "or malformed), so nothing was committed. Do NOT call any tools. Re-emit the "
+    "Your previous reply was not a single complete JSON object (the prior reply "
+    "was about {prior_chars} characters and was truncated or malformed), so "
+    "nothing was committed. {bounds_sentence}Do NOT call any tools. Re-emit the "
     "complete slot as ONE compact JSON object now: no markdown fences, no prose, "
     "no explanations. Omit null fields and keep every item on a single line so "
     "the whole slot fits the output budget."
@@ -1018,12 +1175,24 @@ def _response_policy(client, stage: str, normal_max_tokens: int) -> StageRespons
         normal_reasoning=_design_reasoning(client, stage),
         serialization_max_tokens=STAGE_SERIALIZATION_MAX_TOKENS.get(stage, 8192),
         serialization_retries=1,
+        collection_bounds=STAGE_COLLECTION_BOUNDS.get(stage, ()),
     )
 
 
-def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, max_retries=2,
-                progress=None, answers=None, instruction=None, meta_ctx=None,
-                core_defaults=None) -> dict:
+def drive_stage(
+    client,
+    stage,
+    brief,
+    state_path,
+    workspace,
+    max_tokens=4096,
+    max_retries=2,
+    progress=None,
+    answers=None,
+    instruction=None,
+    meta_ctx=None,
+    core_defaults=None,
+) -> dict:
     run_id = (meta_ctx or {}).get("run_id")
     t0 = time.monotonic()
     cpu0 = _child_cpu_s()
@@ -1035,14 +1204,28 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         _wall = round(time.monotonic() - t0, 3)
         _cpu = round(_child_cpu_s() - cpu0, 3)
         _stamp_stage_status(state_path, stage, False, wall_s=_wall, cpu_s=_cpu)
-        _record_stage_ledger(client, run_id=run_id, stage=stage, ok=False,
-                             attempts=None, rounds=None, tool_calls=None,
-                             wall_s=_wall, cpu_s=_cpu, cost_usd=0.0)
+        _record_stage_ledger(
+            client,
+            run_id=run_id,
+            stage=stage,
+            ok=False,
+            attempts=None,
+            rounds=None,
+            tool_calls=None,
+            wall_s=_wall,
+            cpu_s=_cpu,
+            cost_usd=0.0,
+        )
         if progress:
             progress({"kind": "stage_done", "stage": stage, "ok": False})
-        return {"stage": stage, "commit_ok": False, "cost_usd": 0.0,
-                "wall_s": _wall, "cpu_s": _cpu,
-                "error": f"stage-prep failed: {err}"}
+        return {
+            "stage": stage,
+            "commit_ok": False,
+            "cost_usd": 0.0,
+            "wall_s": _wall,
+            "cpu_s": _cpu,
+            "error": f"stage-prep failed: {err}",
+        }
     prep_json = json.loads(prep.stdout)
     extras = prep_json.get("extras") or {}
 
@@ -1067,15 +1250,18 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         full_bom = prompt_state["bom"]
         prompt_state["bom"] = {
             "parts": [
-                {"ref": p.get("ref"), "sheet": p.get("sheet"),
-                 "symbol": p.get("symbol"), "value": p.get("value")}
+                {
+                    "ref": p.get("ref"),
+                    "sheet": p.get("sheet"),
+                    "symbol": p.get("symbol"),
+                    "value": p.get("value"),
+                }
                 for p in full_bom.get("parts", [])
             ],
             "connections": full_bom.get("connections", []),
             "no_connect_pins": full_bom.get("no_connect_pins", []),
         }
-    user = (f"PROJECT BRIEF:\n{brief}\n\n"
-            f"CURRENT DESIGN STATE (JSON):\n{json.dumps(prompt_state)}")
+    user = f"PROJECT BRIEF:\n{brief}\n\nCURRENT DESIGN STATE (JSON):\n{json.dumps(prompt_state)}"
     if extras:
         # bom carries the full parts table + core defaults (the adoption rule
         # depends on both being complete), wiring carries symbol_pinouts.
@@ -1085,15 +1271,25 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         qa = "\n".join(f"Q: {a.get('text', '')}\nA: {a.get('answer', '')}" for a in answers)
         user += f"\n\nThe user answered your earlier clarifying question(s):\n{qa}"
     if instruction:
-        user += (f"\n\nThe user requests this change to the {stage}: {instruction}\n"
-                 "Re-draft the slot to honor it, keeping everything else consistent.")
+        user += (
+            f"\n\nThe user requests this change to the {stage}: {instruction}\n"
+            "Re-draft the slot to honor it, keeping everything else consistent."
+        )
     if stage == "bom":
-        user += _bom_part_hints(brief, instruction or "",
-                                *(str(a.get("answer", "")) for a in (answers or [])))
+        user += _bom_part_hints(
+            brief, instruction or "", *(str(a.get("answer", "")) for a in (answers or []))
+        )
     user += f"\n\nProduce the {stage} slot JSON now."
 
-    messages = [{"role": "system", "content": build_system(stage)},
-                {"role": "user", "content": user}]
+    policy = _response_policy(client, stage, max_tokens)
+
+    messages = [
+        {
+            "role": "system",
+            "content": build_system(stage, policy.collection_bounds),
+        },
+        {"role": "user", "content": user},
+    ]
     tools = BOM_TOOLS if stage == "bom" else None
     executor = _bom_executor(workspace) if stage == "bom" else None
 
@@ -1116,7 +1312,8 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
 
     total_cost = 0.0
     last: dict = {}
-    policy = _response_policy(client, stage, max_tokens)
+    # Policy was resolved before prompt construction so the first attempt and
+    # serialization retry consume the same immutable collection bounds.
     normal_cap = int(policy.normal_max_tokens)
     serialization_cap = int(policy.serialization_max_tokens)
     serialization_budget = max(0, int(policy.serialization_retries))
@@ -1143,18 +1340,31 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         attempts += 1  # a call IS attempted even when it raises below
         try:
             if tools:
-                r = client.chat_with_tools(messages, tools, executor, max_tokens=normal_cap,
-                                           temperature=temperature,
-                                           max_rounds=_BOM_MAX_ROUNDS, progress=progress,
-                                           meta_ctx=ctx, reasoning=reasoning)
+                r = client.chat_with_tools(
+                    messages,
+                    tools,
+                    executor,
+                    max_tokens=normal_cap,
+                    temperature=temperature,
+                    max_rounds=_BOM_MAX_ROUNDS,
+                    progress=progress,
+                    meta_ctx=ctx,
+                    reasoning=reasoning,
+                )
                 raw, rounds = r["text"], r.get("rounds")
                 tool_calls_ct = r.get("tool_calls")
                 finish = r.get("finish_reason")
                 had_content = bool(r["text"])
                 loop_detected = bool(r.get("loop_detected"))
             else:
-                res = client.chat(messages, max_tokens=normal_cap, temperature=temperature,
-                                  progress=progress, meta_ctx=ctx, reasoning=reasoning)
+                res = client.chat(
+                    messages,
+                    max_tokens=normal_cap,
+                    temperature=temperature,
+                    progress=progress,
+                    meta_ctx=ctx,
+                    reasoning=reasoning,
+                )
                 content_text = res.get("text") or ""
                 raw = content_text or res.get("reasoning") or ""
                 finish = res.get("finish_reason")
@@ -1166,14 +1376,22 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
             # Transport retries exhausted: terminal, never sent through JSON
             # recovery (BudgetExceeded is NOT caught — it propagates to the
             # guard/caller path).
-            last = {"failure_kind": "transport_error", "error": "transport error",
-                    "reply_head": (raw or "")[:200], "rounds": rounds,
-                    "tool_calls": tool_calls_ct}
+            last = {
+                "failure_kind": "transport_error",
+                "error": "transport error",
+                "reply_head": (raw or "")[:200],
+                "rounds": rounds,
+                "tool_calls": tool_calls_ct,
+            }
             break
         except _PROVIDER_FAILURE_EXC:
-            last = {"failure_kind": "provider_error", "error": "provider error",
-                    "reply_head": (raw or "")[:200], "rounds": rounds,
-                    "tool_calls": tool_calls_ct}
+            last = {
+                "failure_kind": "provider_error",
+                "error": "provider error",
+                "reply_head": (raw or "")[:200],
+                "rounds": rounds,
+                "tool_calls": tool_calls_ct,
+            }
             break
 
         # Reasoning recovery: the in-stream loop detector aborted, the client
@@ -1182,14 +1400,22 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         # truncated JSON answer and must never be labeled invalid_json). Retry
         # once with reasoning disabled + a higher temperature to escape the
         # deterministic cycle, then fail honestly as reasoning_loop.
-        if loop_detected or finish == "reasoning_loop" \
-                or (finish == "length" and not had_content):
-            last = {"error": "reasoning_loop", "failure_kind": "reasoning_loop",
-                    "reply_head": (raw or "")[:200], "rounds": rounds,
-                    "tool_calls": tool_calls_ct}
+        if loop_detected or finish == "reasoning_loop" or (finish == "length" and not had_content):
+            last = {
+                "error": "reasoning_loop",
+                "failure_kind": "reasoning_loop",
+                "reply_head": (raw or "")[:200],
+                "rounds": rounds,
+                "tool_calls": tool_calls_ct,
+            }
             if progress:
-                progress({"kind": "retry", "stage": stage,
-                          "errors": ["reasoning loop detected — retrying with reasoning disabled"]})
+                progress(
+                    {
+                        "kind": "retry",
+                        "stage": stage,
+                        "errors": ["reasoning loop detected — retrying with reasoning disabled"],
+                    }
+                )
             if loop_retries >= _MAX_LOOP_RETRIES:
                 break
             loop_retries += 1
@@ -1202,12 +1428,22 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
             obj = _extract_json(raw)
         except (json.JSONDecodeError, ValueError):
             kind = _classify_parse_failure(finish, had_content)
-            last = {"failure_kind": kind, "reply_head": (raw or "")[:200],
-                    "rounds": rounds, "tool_calls": tool_calls_ct,
-                    "error": _FAILURE_KIND_ERROR.get(kind, kind)}
+            last = {
+                "failure_kind": kind,
+                "reply_head": (raw or "")[:200],
+                "rounds": rounds,
+                "tool_calls": tool_calls_ct,
+                "error": _FAILURE_KIND_ERROR.get(kind, kind),
+            }
             if progress:
-                progress({"kind": "retry", "stage": stage, "errors": [last["error"]],
-                          "failure_kind": kind})
+                progress(
+                    {
+                        "kind": "retry",
+                        "stage": stage,
+                        "errors": [last["error"]],
+                        "failure_kind": kind,
+                    }
+                )
             if serialization_calls >= serialization_budget:
                 break  # serialization budget exhausted -> terminal
             # Serialization recovery: exactly ONE plain, tool-free,
@@ -1218,21 +1454,39 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
             attempts += 1  # the serialization completion is a provider call too
             sctx = {**ctx, "serialization": True}
             smessages = list(base_messages)
-            smessages.append({"role": "user", "content": _SERIALIZATION_RETRY_MSG})
+            bounds_sentence = _collection_bounds_sentence(policy.collection_bounds)
+            retry_message = _SERIALIZATION_RETRY_MSG.format(
+                prior_chars=len(raw or ""),
+                bounds_sentence=(bounds_sentence + " ") if bounds_sentence else "",
+            )
+            smessages.append({"role": "user", "content": retry_message})
             try:
-                sres = client.chat(smessages, max_tokens=serialization_cap,
-                                   temperature=temperature, progress=progress,
-                                   meta_ctx=sctx, reasoning={"enabled": False})
+                sres = client.chat(
+                    smessages,
+                    max_tokens=serialization_cap,
+                    temperature=temperature,
+                    progress=progress,
+                    meta_ctx=sctx,
+                    reasoning={"enabled": False},
+                )
                 total_cost += sres["cost_usd"]
             except _TRANSPORT_FAILURE_EXC:
-                last = {"failure_kind": "transport_error", "error": "transport error",
-                        "reply_head": (raw or "")[:200], "rounds": rounds,
-                        "tool_calls": tool_calls_ct}
+                last = {
+                    "failure_kind": "transport_error",
+                    "error": "transport error",
+                    "reply_head": (raw or "")[:200],
+                    "rounds": rounds,
+                    "tool_calls": tool_calls_ct,
+                }
                 break
             except _PROVIDER_FAILURE_EXC:
-                last = {"failure_kind": "provider_error", "error": "provider error",
-                        "reply_head": (raw or "")[:200], "rounds": rounds,
-                        "tool_calls": tool_calls_ct}
+                last = {
+                    "failure_kind": "provider_error",
+                    "error": "provider error",
+                    "reply_head": (raw or "")[:200],
+                    "rounds": rounds,
+                    "tool_calls": tool_calls_ct,
+                }
                 break
             sraw = sres.get("text") or ""
             sfinish = sres.get("finish_reason")
@@ -1243,12 +1497,18 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                 # the serialization result's OWN signature (a second truncation
                 # is truncated_json; an empty length after reasoning was disabled
                 # is reasoning_loop). Never re-serialized.
-                skind = ("reasoning_loop" if sres.get("loop_detected")
-                         else _classify_parse_failure(sfinish, bool(sraw)))
-                last = {"failure_kind": skind,
-                        "error": _FAILURE_KIND_ERROR.get(skind, skind),
-                        "reply_head": (sraw or "")[:200], "rounds": rounds,
-                        "tool_calls": tool_calls_ct}
+                skind = (
+                    "reasoning_loop"
+                    if sres.get("loop_detected")
+                    else _classify_parse_failure(sfinish, bool(sraw))
+                )
+                last = {
+                    "failure_kind": skind,
+                    "error": _FAILURE_KIND_ERROR.get(skind, skind),
+                    "reply_head": (sraw or "")[:200],
+                    "rounds": rounds,
+                    "tool_calls": tool_calls_ct,
+                }
                 break
             # Parseable serialization output: the commit path owns it from here.
             # A commit rejection may still use remaining commit-correction
@@ -1271,12 +1531,20 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
                 _attach_questions(state_path, stage, qs)
                 if progress:
                     progress({"kind": "question", "stage": stage, "questions": qs})
-                return {"stage": stage, "commit_ok": False, "needs_input": True,
-                        "questions": qs, "cost_usd": total_cost, "attempts": attempts}
-            messages = _lean_retry(None,
-                                   "Do not ask more questions. Apply sensible defaults (record each "
-                                   "in assumptions, ending '(defaulted)') and output ONLY the slot "
-                                   "JSON now.")
+                return {
+                    "stage": stage,
+                    "commit_ok": False,
+                    "needs_input": True,
+                    "questions": qs,
+                    "cost_usd": total_cost,
+                    "attempts": attempts,
+                }
+            messages = _lean_retry(
+                None,
+                "Do not ask more questions. Apply sensible defaults (record each "
+                "in assumptions, ending '(defaulted)') and output ONLY the slot "
+                "JSON now.",
+            )
             continue
 
         project_stem = obj.pop("project_stem", None)
@@ -1284,24 +1552,61 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         if ok:
             _wall = round(time.monotonic() - t0, 3)
             _cpu = round(_child_cpu_s() - cpu0, 3)
-            _stamp_stage_status(state_path, stage, True,
-                                cost_usd=total_cost, attempts=attempts,
-                                rounds=rounds, tool_calls=tool_calls_ct,
-                                wall_s=_wall, cpu_s=_cpu)
-            _record_stage_ledger(client, run_id=run_id, stage=stage, ok=True,
-                                 attempts=attempts, rounds=rounds,
-                                 tool_calls=tool_calls_ct, wall_s=_wall,
-                                 cpu_s=_cpu, cost_usd=total_cost)
+            _stamp_stage_status(
+                state_path,
+                stage,
+                True,
+                cost_usd=total_cost,
+                attempts=attempts,
+                rounds=rounds,
+                tool_calls=tool_calls_ct,
+                wall_s=_wall,
+                cpu_s=_cpu,
+            )
+            _record_stage_ledger(
+                client,
+                run_id=run_id,
+                stage=stage,
+                ok=True,
+                attempts=attempts,
+                rounds=rounds,
+                tool_calls=tool_calls_ct,
+                wall_s=_wall,
+                cpu_s=_cpu,
+                cost_usd=total_cost,
+            )
             if progress:
-                progress({"kind": "stage_done", "stage": stage, "ok": True,
-                          "cost": total_cost, "attempts": attempts})
-            return {"stage": stage, "commit_ok": True, "cost_usd": total_cost,
-                    "attempts": attempts, "rounds": rounds, "tool_calls": tool_calls_ct,
-                    "wall_s": _wall, "cpu_s": _cpu, "commit": out, "slot": obj}
+                progress(
+                    {
+                        "kind": "stage_done",
+                        "stage": stage,
+                        "ok": True,
+                        "cost": total_cost,
+                        "attempts": attempts,
+                    }
+                )
+            return {
+                "stage": stage,
+                "commit_ok": True,
+                "cost_usd": total_cost,
+                "attempts": attempts,
+                "rounds": rounds,
+                "tool_calls": tool_calls_ct,
+                "wall_s": _wall,
+                "cpu_s": _cpu,
+                "commit": out,
+                "slot": obj,
+            }
         last = {"commit": out}
         if progress:
-            progress({"kind": "retry", "stage": stage, "errors": out.get("errors"),
-                      "offenders": out.get("offenders")})
+            progress(
+                {
+                    "kind": "retry",
+                    "stage": stage,
+                    "errors": out.get("errors"),
+                    "offenders": out.get("offenders"),
+                }
+            )
         # Echo the FULL slot the model just emitted (raw) so the preserving-patch
         # instruction in _retry_feedback can change only the flagged parts; the
         # slot is bounded by max_tokens and is far smaller than the tool transcript
@@ -1317,25 +1622,61 @@ def drive_stage(client, stage, brief, state_path, workspace, max_tokens=4096, ma
         last["failure_kind"] = "commit_rejected"
     _wall = round(time.monotonic() - t0, 3)
     _cpu = round(_child_cpu_s() - cpu0, 3)
-    _stamp_stage_status(state_path, stage, False,
-                        cost_usd=total_cost, attempts=attempts,
-                        rounds=rounds, tool_calls=tool_calls_ct,
-                        wall_s=_wall, cpu_s=_cpu, error=last.get("error"),
-                        failure_kind=last.get("failure_kind"))
-    _record_stage_ledger(client, run_id=run_id, stage=stage, ok=False,
-                         attempts=attempts, rounds=rounds,
-                         tool_calls=tool_calls_ct, wall_s=_wall, cpu_s=_cpu,
-                         cost_usd=total_cost, failure_kind=last.get("failure_kind"))
+    _stamp_stage_status(
+        state_path,
+        stage,
+        False,
+        cost_usd=total_cost,
+        attempts=attempts,
+        rounds=rounds,
+        tool_calls=tool_calls_ct,
+        wall_s=_wall,
+        cpu_s=_cpu,
+        error=last.get("error"),
+        failure_kind=last.get("failure_kind"),
+    )
+    _record_stage_ledger(
+        client,
+        run_id=run_id,
+        stage=stage,
+        ok=False,
+        attempts=attempts,
+        rounds=rounds,
+        tool_calls=tool_calls_ct,
+        wall_s=_wall,
+        cpu_s=_cpu,
+        cost_usd=total_cost,
+        failure_kind=last.get("failure_kind"),
+    )
     if progress:
         progress({"kind": "stage_done", "stage": stage, "ok": False, "cost": total_cost})
-    return {"stage": stage, "commit_ok": False, "cost_usd": total_cost,
-            "attempts": attempts, "rounds": rounds, "tool_calls": tool_calls_ct,
-            "wall_s": _wall, "cpu_s": _cpu, **last}
+    return {
+        "stage": stage,
+        "commit_ok": False,
+        "cost_usd": total_cost,
+        "attempts": attempts,
+        "rounds": rounds,
+        "tool_calls": tool_calls_ct,
+        "wall_s": _wall,
+        "cpu_s": _cpu,
+        **last,
+    }
 
 
-def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_stage=None,
-                progress=None, client=None, answers=None, instruction=None, run_id=None,
-                core_defaults=None):
+def drive_chain(
+    stages,
+    brief,
+    workspace,
+    max_tokens=4096,
+    max_retries=2,
+    on_stage=None,
+    progress=None,
+    client=None,
+    answers=None,
+    instruction=None,
+    run_id=None,
+    core_defaults=None,
+):
     ws = Path(workspace)
     (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
     state_path = ws / ".kicraft" / "state.json"
@@ -1348,12 +1689,20 @@ def drive_chain(stages, brief, workspace, max_tokens=4096, max_retries=2, on_sta
     for i, stage in enumerate(stages):
         # answers/instruction belong to the stage being resumed or edited, which
         # is the first stage of this chain; downstream stages re-draft cleanly.
-        r = drive_stage(client, stage, brief, state_path, ws,
-                        _stage_max_tokens(stage, max_tokens),
-                        _stage_max_retries(stage, max_retries), progress=progress,
-                        answers=(answers if i == 0 else None),
-                        instruction=(instruction if i == 0 else None),
-                        meta_ctx=base_ctx, core_defaults=core_defaults)
+        r = drive_stage(
+            client,
+            stage,
+            brief,
+            state_path,
+            ws,
+            _stage_max_tokens(stage, max_tokens),
+            _stage_max_retries(stage, max_retries),
+            progress=progress,
+            answers=(answers if i == 0 else None),
+            instruction=(instruction if i == 0 else None),
+            meta_ctx=base_ctx,
+            core_defaults=core_defaults,
+        )
         results.append(r)
         if on_stage:
             on_stage(r)
@@ -1397,8 +1746,7 @@ class _BudgetGuard:
         self._base.preflight()
         if self._delta() >= self._budget:
             raise BudgetExceeded(
-                f"run budget ${self._budget:.2f} exhausted "
-                f"(spent ${self._delta():.4f})"
+                f"run budget ${self._budget:.2f} exhausted (spent ${self._delta():.4f})"
             )
 
     def __getattr__(self, name):
@@ -1418,26 +1766,39 @@ def make_budget_client(budget_usd: float = 0.25):
     return CappedOpenRouterClient(settings, guard=guard)
 
 
-def run_pipeline(brief, workspace, stages=DESIGN_STAGES, budget_usd=0.25,
-                 max_tokens=4096, max_retries=2, build=True, quality="good",
-                 progress=None, core_defaults=None, client=None) -> dict:
+def run_pipeline(
+    brief,
+    workspace,
+    stages=DESIGN_STAGES,
+    budget_usd=0.25,
+    max_tokens=4096,
+    max_retries=2,
+    build=True,
+    quality="good",
+    progress=None,
+    core_defaults=None,
+    client=None,
+) -> dict:
     """Full end-to-end run: drive the LLM design stages (budget-capped), then —
     if every stage committed — run the deterministic build. This is the harness
     for testing LLM-prompt / guardrail changes against a real board."""
     client = client or make_budget_client(budget_usd)
     results, guard, state_path = drive_chain(
-        list(stages), brief, workspace, max_tokens=max_tokens,
-        max_retries=max_retries, client=client, progress=progress,
-        core_defaults=core_defaults)
-    all_committed = (
-        len(results) == len(stages)
-        and all(r.get("commit_ok") for r in results)
+        list(stages),
+        brief,
+        workspace,
+        max_tokens=max_tokens,
+        max_retries=max_retries,
+        client=client,
+        progress=progress,
+        core_defaults=core_defaults,
     )
+    all_committed = len(results) == len(stages) and all(r.get("commit_ok") for r in results)
     build_rc = None
     if build and all_committed:
         build_rc = _run(
-            KICRAFT + ["build", ".kicraft/state.json", "generated",
-                       "--no-archive", "--quality", quality],
+            KICRAFT
+            + ["build", ".kicraft/state.json", "generated", "--no-archive", "--quality", quality],
             cwd=Path(workspace),
         ).returncode
     return {
@@ -1449,8 +1810,15 @@ def run_pipeline(brief, workspace, stages=DESIGN_STAGES, budget_usd=0.25,
     }
 
 
-def drive_replay(state_path, stage, budget_usd=0.25, max_retries=2,
-                 progress=None, core_defaults=None, client=None) -> dict:
+def drive_replay(
+    state_path,
+    stage,
+    budget_usd=0.25,
+    max_retries=2,
+    progress=None,
+    core_defaults=None,
+    client=None,
+) -> dict:
     """Re-run ONE design stage from a frozen, already-committed state.json — the
     LLM-side repro harness for prompt/guardrail changes (mirrors ``cli_app
     replay`` for the deterministic place/route stages). Copies the state into a
@@ -1479,8 +1847,14 @@ def drive_replay(state_path, stage, budget_usd=0.25, max_retries=2,
 
     client = client or make_budget_client(budget_usd)
     results, guard, spath = drive_chain(
-        [stage], brief, tmp, max_retries=max_retries,
-        client=client, progress=progress, core_defaults=core_defaults)
+        [stage],
+        brief,
+        tmp,
+        max_retries=max_retries,
+        client=client,
+        progress=progress,
+        core_defaults=core_defaults,
+    )
     return {
         "brief": brief,
         "workspace": str(tmp),
@@ -1499,29 +1873,38 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="command", required=True)
 
     p_run = sub.add_parser(
-        "run", help="drive the LLM design stages (optionally + build) from a brief")
+        "run", help="drive the LLM design stages (optionally + build) from a brief"
+    )
     p_run.add_argument("--brief", required=True, help="the user's project description")
-    p_run.add_argument("--workspace", required=True,
-                       help="project dir (holds .kicraft/state.json)")
-    p_run.add_argument("--stages", default=",".join(DESIGN_STAGES),
-                       help="comma-separated stages in order")
+    p_run.add_argument("--workspace", required=True, help="project dir (holds .kicraft/state.json)")
+    p_run.add_argument(
+        "--stages", default=",".join(DESIGN_STAGES), help="comma-separated stages in order"
+    )
     p_run.add_argument("--max-tokens", type=int, default=4096)
-    p_run.add_argument("--max-retries", type=int, default=2,
-                       help="self-correction attempts per stage after a rejected commit")
-    p_run.add_argument("--budget", type=float, default=0.25,
-                       help="per-run USD cap on LLM spend (default $0.25)")
-    p_run.add_argument("--no-build", action="store_true",
-                       help="stop after the LLM stages (skip the deterministic build)")
-    p_run.add_argument("--quality", choices=["fast", "draft", "good", "best"],
-                       default="good")
+    p_run.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="self-correction attempts per stage after a rejected commit",
+    )
+    p_run.add_argument(
+        "--budget", type=float, default=0.25, help="per-run USD cap on LLM spend (default $0.25)"
+    )
+    p_run.add_argument(
+        "--no-build",
+        action="store_true",
+        help="stop after the LLM stages (skip the deterministic build)",
+    )
+    p_run.add_argument("--quality", choices=["fast", "draft", "good", "best"], default="good")
     p_run.set_defaults(func=_cmd_run)
 
     p_replay = sub.add_parser(
-        "replay", help="re-run ONE LLM stage from a frozen, committed state.json")
-    p_replay.add_argument("--state", required=True,
-                          help="path to a committed state.json")
-    p_replay.add_argument("--stage", required=True,
-                          help=f"stage to re-drive; one of {list(SUPPORTED_STAGES)}")
+        "replay", help="re-run ONE LLM stage from a frozen, committed state.json"
+    )
+    p_replay.add_argument("--state", required=True, help="path to a committed state.json")
+    p_replay.add_argument(
+        "--stage", required=True, help=f"stage to re-drive; one of {list(SUPPORTED_STAGES)}"
+    )
     p_replay.add_argument("--max-retries", type=int, default=2)
     p_replay.add_argument("--budget", type=float, default=0.25)
     p_replay.set_defaults(func=_cmd_replay)
@@ -1534,29 +1917,33 @@ def _cmd_run(args) -> int:
     stages = [s.strip() for s in args.stages.split(",") if s.strip()]
     bad = [s for s in stages if s not in SUPPORTED_STAGES]
     if bad:
-        print(f"unsupported stage(s): {bad}; supported: {list(SUPPORTED_STAGES)}",
-              file=sys.stderr)
+        print(f"unsupported stage(s): {bad}; supported: {list(SUPPORTED_STAGES)}", file=sys.stderr)
         return 2
     print(f"driving {stages} (LLM budget ${args.budget:.2f}) for: {args.brief!r}\n")
     out = run_pipeline(
-        args.brief, Path(args.workspace), stages=stages,
-        budget_usd=args.budget, max_tokens=args.max_tokens,
-        max_retries=args.max_retries, build=not args.no_build,
-        quality=args.quality)
+        args.brief,
+        Path(args.workspace),
+        stages=stages,
+        budget_usd=args.budget,
+        max_tokens=args.max_tokens,
+        max_retries=args.max_retries,
+        build=not args.no_build,
+        quality=args.quality,
+    )
     guard = out["guard"]
     print(f"\ncommitted stages: {'all' if out['all_committed'] else 'partial/failed'}")
     print(f"build rc: {out['build_rc'] if out['build_rc'] is not None else 'skipped'}")
-    print(f"total spent: ${guard['spent_total_usd']:.6f}  "
-          f"(today remaining ${guard['daily_remaining_usd']:.4f})")
+    print(
+        f"total spent: ${guard['spent_total_usd']:.6f}  "
+        f"(today remaining ${guard['daily_remaining_usd']:.4f})"
+    )
     print(f"state: {out['state_path']}")
     return 0 if out["all_committed"] else 1
 
 
 def _cmd_replay(args) -> int:
-    print(f"replaying stage {args.stage!r} from {args.state!r} "
-          f"(LLM budget ${args.budget:.2f})\n")
-    out = drive_replay(args.state, args.stage,
-                       budget_usd=args.budget, max_retries=args.max_retries)
+    print(f"replaying stage {args.stage!r} from {args.state!r} (LLM budget ${args.budget:.2f})\n")
+    out = drive_replay(args.state, args.stage, budget_usd=args.budget, max_retries=args.max_retries)
     if "error" in out:
         print(f"replay failed: {out['error']}", file=sys.stderr)
         return 2

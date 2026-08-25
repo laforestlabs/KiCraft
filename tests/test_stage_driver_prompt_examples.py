@@ -2,6 +2,7 @@
 real slot models (2026-07-19 review §7.1) — a schema change that breaks an
 example must fail here, not teach the production model a guaranteed bounce.
 """
+
 from __future__ import annotations
 
 import json
@@ -33,3 +34,11 @@ def test_examples_ride_the_system_prompt():
     assert _WORKED_EXAMPLES["bom"] in build_system("bom")
     assert _WORKED_EXAMPLES["wiring"] in build_system("wiring")
     assert "Worked example" not in build_system("intent")
+
+
+def test_bom_system_prompt_carries_collection_bounds() -> None:
+    prompt = build_system("bom")
+    assert "`parts` collection must contain at most 500 items total" in prompt
+    assert "at most 450 items per `sheet`" in prompt
+    assert "BOUNDED OUTPUT POLICY" not in build_system("wiring")
+    assert "BOUNDED OUTPUT POLICY" not in build_system("bom", ())
