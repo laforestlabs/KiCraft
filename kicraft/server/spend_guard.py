@@ -6,6 +6,7 @@ persistent SQLite ledger, so the limit survives restarts and is shared across
 worker processes. Combined with a bounded `max_tokens` per call, the worst case
 is a single small overshoot past a ceiling, never an unbounded bill.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -76,7 +77,10 @@ class SpendGuard:
                 "wall_s REAL,"
                 "cpu_s REAL,"
                 "cost_usd REAL,"
-                "failure_kind TEXT)"
+                "failure_kind TEXT,"
+                "emitted_collection_count INTEGER,"
+                "compact_run_expanded_count INTEGER,"
+                "wiring_patch_operations INTEGER)"
             )
             # Backward-compatible migration: ledgers created before failure_kind
             # existed keep their rows and gain the column via ALTER TABLE --
@@ -85,6 +89,14 @@ class SpendGuard:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(stage_runs)")}
             if "failure_kind" not in cols:
                 conn.execute("ALTER TABLE stage_runs ADD COLUMN failure_kind TEXT")
+            for column in (
+                "emitted_collection_count INTEGER",
+                "compact_run_expanded_count INTEGER",
+                "wiring_patch_operations INTEGER",
+            ):
+                name = column.split()[0]
+                if name not in cols:
+                    conn.execute(f"ALTER TABLE stage_runs ADD COLUMN {column}")
 
     def _sum(self, where: str = "", params: tuple = ()) -> float:
         with self._conn() as conn:
@@ -111,7 +123,8 @@ class SpendGuard:
             return 0.0
         return self._sum(
             "WHERE json_valid(meta) AND json_extract(meta, '$.run_id') LIKE ?",
-            (f"p{int(project_id)}-%",))
+            (f"p{int(project_id)}-%",),
+        )
 
     def spent_by_day(self, days: int = 30) -> list[tuple[str, float]]:
         """(YYYY-MM-DD, cost) for the trailing `days`, summing EVERY ledger call
@@ -119,13 +132,13 @@ class SpendGuard:
         spend and matches the OpenRouter dashboard; contrast
         AccountStore.spend_per_day, which counts only project-attributed spend.
         ts is ISO-8601 UTC, so substr(ts,1,10) slices to a calendar day."""
-        cutoff = (dt.datetime.now(dt.timezone.utc)
-                  - dt.timedelta(days=days)).date().isoformat()
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).date().isoformat()
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT substr(ts, 1, 10) AS d, COALESCE(SUM(cost_usd), 0) AS c "
                 "FROM spend WHERE substr(ts, 1, 10) >= ? GROUP BY d ORDER BY d",
-                (cutoff,)).fetchall()
+                (cutoff,),
+            ).fetchall()
         return [(r[0], float(r[1] or 0.0)) for r in rows]
 
     def status(self) -> dict:
@@ -148,15 +161,16 @@ class SpendGuard:
         if total >= self.s.total_usd_ceiling:
             raise BudgetExceeded(
                 f"total spend ${total:.4f} has reached the ceiling "
-                f"${self.s.total_usd_ceiling:.2f}; refusing.")
+                f"${self.s.total_usd_ceiling:.2f}; refusing."
+            )
         day = self.spent_today()
         if day >= self.s.daily_usd_ceiling:
             raise BudgetExceeded(
                 f"today's spend ${day:.4f} has reached the daily ceiling "
-                f"${self.s.daily_usd_ceiling:.2f}; refusing.")
+                f"${self.s.daily_usd_ceiling:.2f}; refusing."
+            )
 
-    def record(self, model: str, input_tokens, output_tokens, cost_usd: float,
-               meta="") -> None:
+    def record(self, model: str, input_tokens, output_tokens, cost_usd: float, meta="") -> None:
         """Append one billed call. `meta` may be a bare phase string (legacy) or a
         dict of structured context (run_id/stage/attempt/provider/cached_tokens/
         finish_reason); a dict is stored as a compact JSON blob so the cost report
@@ -167,22 +181,42 @@ class SpendGuard:
             conn.execute(
                 "INSERT INTO spend (ts, model, input_tokens, output_tokens, cost_usd, meta) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (_utcnow_iso(), model, int(input_tokens or 0), int(output_tokens or 0),
-                 float(cost_usd or 0.0), meta_str),
+                (
+                    _utcnow_iso(),
+                    model,
+                    int(input_tokens or 0),
+                    int(output_tokens or 0),
+                    float(cost_usd or 0.0),
+                    meta_str,
+                ),
             )
 
-    def record_stage(self, *, run_id: str | None, stage: str, ok: bool,
-                     attempts: int | None, rounds: int | None, tool_calls: int | None,
-                     wall_s: float | None, cpu_s: float | None, cost_usd: float,
-                     failure_kind: str | None = None) -> None:
+    def record_stage(
+        self,
+        *,
+        run_id: str | None,
+        stage: str,
+        ok: bool,
+        attempts: int | None,
+        rounds: int | None,
+        tool_calls: int | None,
+        wall_s: float | None,
+        cpu_s: float | None,
+        cost_usd: float,
+        failure_kind: str | None = None,
+        emitted_collection_count: int | None = None,
+        compact_run_expanded_count: int | None = None,
+        wiring_patch_operations: int | None = None,
+    ) -> None:
         """Append one completed stage to ``stage_runs`` — the durable per-stage
         resource record. ``wall_s``/``cpu_s`` are the gap metrics: a stage's
         wall-clock duration and child-CPU seconds (LLM latency + subprocess tool
         calls). ``cost_usd`` mirrors the summed LLM spend for the side-by-side
         report; it is intentionally NOT added to the ``spend`` ceiling (the
         per-call rows there already enforce it). ``failure_kind`` is the terminal
-        classification of a failed stage (reasoning_loop / truncated_json /
-        invalid_json / commit_rejected / provider_error / transport_error);
+        classification of a failed stage (collection_limit / reasoning_loop /
+        truncated_json / invalid_json / commit_rejected / provider_error /
+        transport_error);
         None for a committed stage or a legacy row.
 
         Note: ``cpu_s`` comes from RUSAGE_CHILDREN, which is per-process, so it
@@ -192,14 +226,25 @@ class SpendGuard:
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO stage_runs (ts, run_id, stage, ok, attempts, rounds, "
-                "tool_calls, wall_s, cpu_s, cost_usd, failure_kind) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (_utcnow_iso(), run_id, stage, int(bool(ok)),
-                 int(attempts) if attempts is not None else None,
-                 int(rounds) if rounds is not None else None,
-                 int(tool_calls) if tool_calls is not None else None,
-                 float(wall_s) if wall_s is not None else None,
-                 float(cpu_s) if cpu_s is not None else None,
-                 float(cost_usd or 0.0),
-                 str(failure_kind) if failure_kind is not None else None),
+                "tool_calls, wall_s, cpu_s, cost_usd, failure_kind, "
+                "emitted_collection_count, compact_run_expanded_count, "
+                "wiring_patch_operations) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    _utcnow_iso(),
+                    run_id,
+                    stage,
+                    int(bool(ok)),
+                    int(attempts) if attempts is not None else None,
+                    int(rounds) if rounds is not None else None,
+                    int(tool_calls) if tool_calls is not None else None,
+                    float(wall_s) if wall_s is not None else None,
+                    float(cpu_s) if cpu_s is not None else None,
+                    float(cost_usd or 0.0),
+                    str(failure_kind) if failure_kind is not None else None,
+                    int(emitted_collection_count) if emitted_collection_count is not None else None,
+                    int(compact_run_expanded_count)
+                    if compact_run_expanded_count is not None
+                    else None,
+                    int(wiring_patch_operations) if wiring_patch_operations is not None else None,
+                ),
             )

@@ -22,12 +22,41 @@ server, and a fake client makes it testable offline.
 Fail-closed: on malformed model output it retries once with the concrete defect,
 then returns ``ok=False`` with no findings rather than inventing a verdict.
 """
+
 from __future__ import annotations
 
 import json
 import re
 
 _SEVERITIES = ("blocker", "warning", "note")
+_REVIEW_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "kicraft_electrical_review_v1",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "severity": {"type": "string", "enum": list(_SEVERITIES)},
+                            "area": {"type": "string"},
+                            "issue": {"type": "string"},
+                            "suggestion": {"type": "string"},
+                        },
+                        "required": ["severity", "area", "issue", "suggestion"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["findings"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 # --------------------------------------------------------------------------- #
 # severity taxonomy: a deterministic category -> severity ceiling
@@ -45,11 +74,20 @@ _SEVERITIES = ("blocker", "warning", "note")
 # logs/bakeoff/20260618T200126Z/labels.json.
 _SEV_RANK = {"note": 0, "warning": 1, "blocker": 2}
 
-_BLOCKER_ELIGIBLE = frozenset({
-    "current-limit", "regulator-feedback", "ladder-topology", "missing-input",
-    "programming-path", "isolation", "power-polarity", "self-short",
-    "family-contract", "rf-feed",
-})
+_BLOCKER_ELIGIBLE = frozenset(
+    {
+        "current-limit",
+        "regulator-feedback",
+        "ladder-topology",
+        "missing-input",
+        "programming-path",
+        "isolation",
+        "power-polarity",
+        "self-short",
+        "family-contract",
+        "rf-feed",
+    }
+)
 
 _DEFAULT_CATEGORY = "other"
 
@@ -60,31 +98,112 @@ _DEFAULT_CATEGORY = "other"
 # from demoting; the model's own severity (then corroboration) still gates a block.
 _BE_PATTERNS = (
     ("ladder-topology", ("r-2r", "r2r", "r 2r", "ladder")),
-    ("current-limit", ("current-limit", "current limit", "current-sens",
-                       "current sens", "sense-resist", "sense resistor", "rsense",
-                       "overcurrent", "over-current", "current-set", "current set")),
-    ("regulator-feedback", ("regulator-feedback", "feedback divider",
-                            "feedback-divider", "feedback resistor", "vfb",
-                            "vsense", "vref", "feedback")),
-    ("programming-path", ("programming", "program path", "first-flash",
-                          "first flash", "firmware-flash", "flash path", "bootloader",
-                          "download mode", "download-mode", "swd", "no firmware",
-                          "cannot be programmed", "no programming")),
+    (
+        "current-limit",
+        (
+            "current-limit",
+            "current limit",
+            "current-sens",
+            "current sens",
+            "sense-resist",
+            "sense resistor",
+            "rsense",
+            "overcurrent",
+            "over-current",
+            "current-set",
+            "current set",
+        ),
+    ),
+    (
+        "regulator-feedback",
+        (
+            "regulator-feedback",
+            "feedback divider",
+            "feedback-divider",
+            "feedback resistor",
+            "vfb",
+            "vsense",
+            "vref",
+            "feedback",
+        ),
+    ),
+    (
+        "programming-path",
+        (
+            "programming",
+            "program path",
+            "first-flash",
+            "first flash",
+            "firmware-flash",
+            "flash path",
+            "bootloader",
+            "download mode",
+            "download-mode",
+            "swd",
+            "no firmware",
+            "cannot be programmed",
+            "no programming",
+        ),
+    ),
     ("isolation", ("isolation", "isolated", "opto")),
-    ("missing-input", ("missing input", "missing-input", "input connector",
-                       "input-connector", "control input", "control-input",
-                       "input header", "cannot be driven", "cannot command",
-                       "inputs have no", "no input header", "floating input")),
-    ("family-contract", ("family-contract", "transceiver mode", "transceiver-mode",
-                         "can transceiver", "can-transceiver", "rs pin", "de_re",
-                         "de-re", "standby mode", "slope mode")),
-    ("power-polarity", ("power-polarity", "reverse polarity", "reverse-polarity",
-                        "reversed power", "reversed supply", "vdd tied to gnd",
-                        "vcc tied to gnd", "supply polarity")),
-    ("self-short", ("self-short", "self short", "short-circuit", "short circuit",
-                    "shorted out", "both terminals", "both pins on")),
-    ("rf-feed", ("rf-feed", "rf feed", "antenna feed", "rf match", "rf-match",
-                 "antenna matching")),
+    (
+        "missing-input",
+        (
+            "missing input",
+            "missing-input",
+            "input connector",
+            "input-connector",
+            "control input",
+            "control-input",
+            "input header",
+            "cannot be driven",
+            "cannot command",
+            "inputs have no",
+            "no input header",
+            "floating input",
+        ),
+    ),
+    (
+        "family-contract",
+        (
+            "family-contract",
+            "transceiver mode",
+            "transceiver-mode",
+            "can transceiver",
+            "can-transceiver",
+            "rs pin",
+            "de_re",
+            "de-re",
+            "standby mode",
+            "slope mode",
+        ),
+    ),
+    (
+        "power-polarity",
+        (
+            "power-polarity",
+            "reverse polarity",
+            "reverse-polarity",
+            "reversed power",
+            "reversed supply",
+            "vdd tied to gnd",
+            "vcc tied to gnd",
+            "supply polarity",
+        ),
+    ),
+    (
+        "self-short",
+        (
+            "self-short",
+            "self short",
+            "short-circuit",
+            "short circuit",
+            "shorted out",
+            "both terminals",
+            "both pins on",
+        ),
+    ),
+    ("rf-feed", ("rf-feed", "rf feed", "antenna feed", "rf match", "rf-match", "antenna matching")),
 )
 
 _SYSTEM = (
@@ -139,7 +258,9 @@ def _pin_names(symbol, project_root):
     from .symbol_pinout import SymbolNotFoundError, lookup_pins
 
     try:
-        info = lookup_pins(symbol, project_root=project_root) if project_root else lookup_pins(symbol)
+        info = (
+            lookup_pins(symbol, project_root=project_root) if project_root else lookup_pins(symbol)
+        )
     except (SymbolNotFoundError, ValueError, TypeError):
         return {}
     return {p["number"]: (p.get("name") or "") for p in info["pins"]}
@@ -162,7 +283,9 @@ def build_design_digest(state, *, project_root=None, budget: int = 14000) -> str
         if intent.named_parts:
             lines.append("NAMED PARTS: " + ", ".join(intent.named_parts))
         if intent.assumptions:
-            lines.append("INTENT ASSUMPTIONS:\n" + "\n".join(f"  - {a}" for a in intent.assumptions))
+            lines.append(
+                "INTENT ASSUMPTIONS:\n" + "\n".join(f"  - {a}" for a in intent.assumptions)
+            )
         parts.append("INTENT (what the user asked for):\n" + "\n".join(lines))
 
     fs = state.functional_spec
@@ -190,9 +313,11 @@ def build_design_digest(state, *, project_root=None, budget: int = 14000) -> str
         rows = []
         for p in bom.parts:
             mpn = getattr(p, "mpn", None) or getattr(p, "lcsc", None) or ""
-            rows.append(f"  {p.ref:<6} {p.value:<16} {p.symbol}"
-                        + (f"  [{mpn}]" if mpn else "")
-                        + (f"  sheet={p.sheet}" if getattr(p, 'sheet', None) else ""))
+            rows.append(
+                f"  {p.ref:<6} {p.value:<16} {p.symbol}"
+                + (f"  [{mpn}]" if mpn else "")
+                + (f"  sheet={p.sheet}" if getattr(p, "sheet", None) else "")
+            )
         parts.append(f"BOM PARTS ({len(bom.parts)}):\n" + "\n".join(rows))
 
         # netlist with pin function names
@@ -206,16 +331,22 @@ def build_design_digest(state, *, project_root=None, budget: int = 14000) -> str
             net_lines.append(f"  {c.net_name}: " + ", ".join(eps))
         if bom.no_connect_pins:
             nc = ", ".join(
-                f"{ep.ref}.{ep.pin}" + (f"({names_by_ref.get(ep.ref, {}).get(ep.pin)})"
-                                        if names_by_ref.get(ep.ref, {}).get(ep.pin) else "")
+                f"{ep.ref}.{ep.pin}"
+                + (
+                    f"({names_by_ref.get(ep.ref, {}).get(ep.pin)})"
+                    if names_by_ref.get(ep.ref, {}).get(ep.pin)
+                    else ""
+                )
                 for ep in bom.no_connect_pins
             )
             net_lines.append(f"  (no-connect: {nc})")
-        parts.append(f"NETLIST (net: pins, with pin function names):\n" + "\n".join(net_lines))
+        parts.append("NETLIST (net: pins, with pin function names):\n" + "\n".join(net_lines))
 
     if state.open_questions:
-        parts.append("OPEN QUESTIONS (already surfaced):\n"
-                     + "\n".join(f"  - {q.text}" for q in state.open_questions))
+        parts.append(
+            "OPEN QUESTIONS (already surfaced):\n"
+            + "\n".join(f"  - {q.text}" for q in state.open_questions)
+        )
 
     digest = "\n\n".join(parts)
     return digest[:budget]
@@ -229,8 +360,7 @@ def _build_messages(digest: str) -> list[dict]:
         f"{'=' * 60}\nDESIGN DIGEST (the only evidence; review strictly from it):\n"
         f"{'=' * 60}\n{digest}\n\n{_OUTPUT_CONTRACT}"
     )
-    return [{"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": user}]
+    return [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}]
 
 
 def _extract_json(text: str):
@@ -243,7 +373,7 @@ def _extract_json(text: str):
         if t[:4].lower() == "json":
             t = t[4:]
         if "```" in t:
-            t = t[:t.rfind("```")]
+            t = t[: t.rfind("```")]
         t = t.strip()
     try:
         return json.loads(t)
@@ -260,7 +390,7 @@ def _extract_json(text: str):
             depth -= 1
             if depth == 0:
                 try:
-                    return json.loads(t[start:i + 1])
+                    return json.loads(t[start : i + 1])
                 except json.JSONDecodeError:
                     return None
     return None
@@ -283,12 +413,14 @@ def _validate(obj):
         issue = f.get("issue")
         if not issue:
             return False, [], f"finding {i} missing 'issue'"
-        out.append({
-            "severity": sev,
-            "area": str(f.get("area") or "").strip(),
-            "issue": str(issue).strip(),
-            "suggestion": str(f.get("suggestion") or "").strip(),
-        })
+        out.append(
+            {
+                "severity": sev,
+                "area": str(f.get("area") or "").strip(),
+                "issue": str(issue).strip(),
+                "suggestion": str(f.get("suggestion") or "").strip(),
+            }
+        )
     return True, out, None
 
 
@@ -352,9 +484,16 @@ def clamp_findings(findings: list[dict]) -> list[dict]:
     return out
 
 
-def review_design(client, digest: str, *, model: str | None = None,
-                  max_tokens: int = 24000, temperature: float = 0.0,
-                  max_attempts: int = 2, reasoning: dict | None = None) -> dict:
+def review_design(
+    client,
+    digest: str,
+    *,
+    model: str | None = None,
+    max_tokens: int = 24000,
+    temperature: float = 0.0,
+    max_attempts: int = 2,
+    reasoning: dict | None = None,
+) -> dict:
     """Run the electrical review against a design digest.
 
     ``reasoning`` is the optional OpenRouter thinking-budget control (e.g.
@@ -373,25 +512,51 @@ def review_design(client, digest: str, *, model: str | None = None,
     total_cost = 0.0
     last_text = ""
     error = None
+    guard_factory = getattr(getattr(client, "s", None), "review_reasoning_guard", None)
+    reasoning_guard = guard_factory() if callable(guard_factory) else None
     for attempt in range(max_attempts):
-        res = client.chat(messages, model=model, max_tokens=max_tokens,
-                          temperature=temperature, reasoning=reasoning,
-                          meta_ctx={"phase": "electrical_review", "stage": "review",
-                                    "attempt": attempt})
+        res = client.chat(
+            messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning=reasoning,
+            reasoning_guard=reasoning_guard,
+            response_format=_REVIEW_RESPONSE_FORMAT,
+            meta_ctx={
+                "phase": "electrical_review",
+                "stage": "review",
+                "attempt": attempt,
+            },
+        )
         last_text = res.get("text") or ""
         total_cost += float(res.get("cost_usd") or 0.0)
         ok, findings, error = _validate(_extract_json(last_text))
         if ok:
-            return {"ok": True, "findings": clamp_findings(findings),
-                    "cost_usd": total_cost, "error": None, "raw": last_text}
+            return {
+                "ok": True,
+                "findings": clamp_findings(findings),
+                "cost_usd": total_cost,
+                "error": None,
+                "raw": last_text,
+            }
         messages.append({"role": "assistant", "content": last_text})
-        messages.append({"role": "user", "content":
-                         f"That response was not acceptable: {error}. Return ONLY the JSON "
-                         "object with a 'findings' array; each finding needs a severity "
-                         "(blocker|warning|note), area, issue, and suggestion."})
+        messages.append(
+            {
+                "role": "user",
+                "content": f"That response was not acceptable: {error}. Return ONLY the JSON "
+                "object with a 'findings' array; each finding needs a severity "
+                "(blocker|warning|note), area, issue, and suggestion.",
+            }
+        )
 
-    return {"ok": False, "findings": [], "cost_usd": total_cost,
-            "error": error or "review produced no valid verdict", "raw": last_text}
+    return {
+        "ok": False,
+        "findings": [],
+        "cost_usd": total_cost,
+        "error": error or "review produced no valid verdict",
+        "raw": last_text,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -416,10 +581,17 @@ def _findings_agree(a: dict, b: dict) -> bool:
     return a.get("category") == b.get("category")
 
 
-def review_design_corroborated(client, digest: str, *, model: str | None = None,
-                               max_tokens: int = 24000, temperature: float = 0.5,
-                               max_attempts: int = 2, reasoning: dict | None = None,
-                               corroboration: int = 2) -> dict:
+def review_design_corroborated(
+    client,
+    digest: str,
+    *,
+    model: str | None = None,
+    max_tokens: int = 24000,
+    temperature: float = 0.5,
+    max_attempts: int = 2,
+    reasoning: dict | None = None,
+    corroboration: int = 2,
+) -> dict:
     """Electrical review with lazy N-pass corroboration of blocker-eligible blockers.
 
     Pass 1 always runs (its findings are already severity-clamped by
@@ -433,22 +605,39 @@ def review_design_corroborated(client, digest: str, *, model: str | None = None,
     Returns ``{ok, findings, blocked, cost_usd, error}``. Fail-soft: an unparseable
     pass 1 -> ``ok=False`` (gate skips, never blocks); an unparseable later pass ->
     the candidate cannot corroborate and demotes (fail-open toward shipping)."""
+
     def _run(temp):
-        return review_design(client, digest, model=model, max_tokens=max_tokens,
-                             temperature=temp, max_attempts=max_attempts,
-                             reasoning=reasoning)
+        return review_design(
+            client,
+            digest,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temp,
+            max_attempts=max_attempts,
+            reasoning=reasoning,
+        )
 
     p1 = _run(temperature)
     cost = p1["cost_usd"]
     if not p1["ok"]:
-        return {"ok": False, "findings": [], "blocked": False,
-                "cost_usd": cost, "error": p1["error"]}
+        return {
+            "ok": False,
+            "findings": [],
+            "blocked": False,
+            "cost_usd": cost,
+            "error": p1["error"],
+        }
 
     findings = p1["findings"]
     candidates = [f for f in findings if f.get("severity") == "blocker"]
     if not candidates or corroboration <= 1:
-        return {"ok": True, "findings": findings,
-                "blocked": bool(candidates), "cost_usd": cost, "error": None}
+        return {
+            "ok": True,
+            "findings": findings,
+            "blocked": bool(candidates),
+            "cost_usd": cost,
+            "error": None,
+        }
 
     # Lazily run the remaining passes; tally agreeing votes per distinct candidate.
     votes: dict = {}
@@ -456,13 +645,13 @@ def review_design_corroborated(client, digest: str, *, model: str | None = None,
     for c in candidates:
         k = _agreement_key(c)
         if k not in votes:
-            votes[k] = 1                      # seen once, in pass 1
+            votes[k] = 1  # seen once, in pass 1
             uniq.append(c)
     for _ in range(corroboration - 1):
         p = _run(temperature)
         cost += p["cost_usd"]
         if not p["ok"]:
-            break                             # can't corroborate -> demote (fail-open)
+            break  # can't corroborate -> demote (fail-open)
         pblk = [f for f in p["findings"] if f.get("severity") == "blocker"]
         for c in uniq:
             if any(_findings_agree(c, o) for o in pblk):
@@ -477,8 +666,7 @@ def review_design_corroborated(client, digest: str, *, model: str | None = None,
             f["severity"] = "warning"
             f["demoted_from"] = "blocker"
             f["corroborated"] = False
-    return {"ok": True, "findings": findings, "blocked": blocked,
-            "cost_usd": cost, "error": None}
+    return {"ok": True, "findings": findings, "blocked": blocked, "cost_usd": cost, "error": None}
 
 
 def has_blocker(findings) -> bool:

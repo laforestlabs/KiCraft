@@ -57,7 +57,10 @@ Create `~/KiCraft/.env` (mode 600). Use `.env.example` as the template and fill 
 umask 077
 cat > .env <<'ENV'
 OPENROUTER_API_KEY=sk-or-...your key...
-KICRAFT_MODEL=deepseek/deepseek-v4-flash
+KICRAFT_DESIGN_PROFILE=flash
+KICRAFT_MODEL=deepseek/deepseek-v4-flash-0731
+KICRAFT_REVIEW_MODEL=minimax/minimax-m3
+KICRAFT_EVAL_JUDGE_MODEL=minimax/minimax-m3
 KICRAFT_DAILY_USD_CEILING=5
 KICRAFT_TOTAL_USD_CEILING=50
 KICRAFT_MAX_TOKENS_PER_CALL=4096

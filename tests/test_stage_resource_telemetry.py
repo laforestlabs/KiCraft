@@ -7,6 +7,7 @@ garbage so every stage ends on the fail path, which is exactly where the
 driver records its final timing; a real SpendGuard is attached so the
 ledger write is exercised (not the spend ceiling).
 """
+
 from __future__ import annotations
 
 import json
@@ -24,16 +25,42 @@ class _FailingClient:
     def __init__(self, guard):
         self.guard = guard
 
-    def chat(self, messages, max_tokens=4096, temperature=0.2, progress=None, meta_ctx=None,
-             reasoning=None):
-        return {"text": "not json", "cost_usd": 0.0, "reasoning": "",
-                "finish_reason": "stop"}
+    def chat(
+        self,
+        messages,
+        max_tokens=4096,
+        temperature=0.2,
+        progress=None,
+        meta_ctx=None,
+        reasoning=None,
+        reasoning_guard=None,
+        collection_bounds=(),
+        response_format=None,
+    ):
+        return {"text": "not json", "cost_usd": 0.0, "reasoning": "", "finish_reason": "stop"}
 
-    def chat_with_tools(self, messages, tools, executor, max_tokens=4096,
-                        temperature=0.2, max_rounds=6, progress=None, meta_ctx=None,
-                        reasoning=None):
-        return {"text": "not json", "cost_usd": 0.0, "rounds": 1,
-                "tool_calls": 0, "finish_reason": "stop"}
+    def chat_with_tools(
+        self,
+        messages,
+        tools,
+        executor,
+        max_tokens=4096,
+        temperature=0.2,
+        max_rounds=6,
+        progress=None,
+        meta_ctx=None,
+        reasoning=None,
+        reasoning_guard=None,
+        collection_bounds=(),
+        response_format=None,
+    ):
+        return {
+            "text": "not json",
+            "cost_usd": 0.0,
+            "rounds": 1,
+            "tool_calls": 0,
+            "finish_reason": "stop",
+        }
 
 
 def _guard(tmp_path) -> SpendGuard:
@@ -46,13 +73,15 @@ def _drive(tmp_path, stage):
     sp.write_text("{}", encoding="utf-8")
     g = _guard(tmp_path)
     client = _FailingClient(g)
-    r = drive_stage(client, stage, "a USB-powered LED", sp, tmp_path,
-                    max_retries=0, meta_ctx={"run_id": "p7-1"})
+    r = drive_stage(
+        client, stage, "a USB-powered LED", sp, tmp_path, max_retries=0, meta_ctx={"run_id": "p7-1"}
+    )
     return r, g, sp
 
 
 def test_stage_status_model_carries_resource_fields():
     from kicraft.design.models import StageStatus
+
     ss = StageStatus(ok=True, wall_s=33.7, cpu_s=1.8, rounds=4, tool_calls=12)
     d = ss.model_dump()
     assert d["wall_s"] == 33.7 and d["cpu_s"] == 1.8
@@ -79,8 +108,10 @@ def test_failed_bom_records_wall_cpu_rounds_to_all_three_sinks(tmp_path):
     assert e["failure_kind"] == "invalid_json" and e["attempts"] == 2
     # ledger stage_runs
     with sqlite3.connect(g.path) as c:
-        row = c.execute("SELECT stage, ok, rounds, tool_calls, wall_s, cpu_s, "
-                        "cost_usd, run_id, failure_kind FROM stage_runs").fetchone()
+        row = c.execute(
+            "SELECT stage, ok, rounds, tool_calls, wall_s, cpu_s, "
+            "cost_usd, run_id, failure_kind FROM stage_runs"
+        ).fetchone()
     assert row[0] == "bom" and row[1] == 0 and row[2] == 1 and row[3] == 0
     assert row[4] == r["wall_s"] and row[6] == 0.0 and row[7] == "p7-1"
     assert row[8] == "invalid_json"
@@ -98,13 +129,38 @@ def test_failed_intent_records_wall_cpu_but_null_rounds(tmp_path):
 
 def test_web_cost_report_aggregates_stage_resources():
     from kicraft.cli.web_cost_report import format_stage_runs, summarize_stage_runs
+
     rows = [
-        {"stage": "bom", "ok": True, "wall_s": 40.0, "cpu_s": 1.0, "cost_usd": 0.05,
-         "rounds": 6, "tool_calls": 12, "attempts": 1},
-        {"stage": "bom", "ok": False, "wall_s": 20.0, "cpu_s": 0.5, "cost_usd": 0.02,
-         "rounds": 6, "tool_calls": 8, "attempts": 5},
-        {"stage": "wiring", "ok": True, "wall_s": 5.0, "cpu_s": 0.1, "cost_usd": 0.01,
-         "rounds": None, "tool_calls": None, "attempts": 1},
+        {
+            "stage": "bom",
+            "ok": True,
+            "wall_s": 40.0,
+            "cpu_s": 1.0,
+            "cost_usd": 0.05,
+            "rounds": 6,
+            "tool_calls": 12,
+            "attempts": 1,
+        },
+        {
+            "stage": "bom",
+            "ok": False,
+            "wall_s": 20.0,
+            "cpu_s": 0.5,
+            "cost_usd": 0.02,
+            "rounds": 6,
+            "tool_calls": 8,
+            "attempts": 5,
+        },
+        {
+            "stage": "wiring",
+            "ok": True,
+            "wall_s": 5.0,
+            "cpu_s": 0.1,
+            "cost_usd": 0.01,
+            "rounds": None,
+            "tool_calls": None,
+            "attempts": 1,
+        },
     ]
     agg = summarize_stage_runs(rows)
     assert agg["bom"]["n"] == 2

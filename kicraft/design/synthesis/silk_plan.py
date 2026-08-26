@@ -370,11 +370,18 @@ def author_labels(
                 {"role": "user", "content": user}]
     total_cost = 0.0
     error = None
+    guard_factory = getattr(getattr(client, "s", None), "review_reasoning_guard", None)
+    reasoning_guard = guard_factory() if callable(guard_factory) else None
     for attempt in range(max_attempts):
-        res = client.chat(messages, model=model, max_tokens=max_tokens,
-                          temperature=temperature, reasoning=reasoning,
-                          meta_ctx={"phase": "silk_plan", "stage": "silk_plan",
-                                    "attempt": attempt})
+        res = client.chat(
+            messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning=reasoning,
+            reasoning_guard=reasoning_guard,
+            meta_ctx={"phase": "silk_plan", "stage": "silk_plan", "attempt": attempt},
+        )
         text = res.get("text") or ""
         total_cost += float(res.get("cost_usd") or 0.0)
         obj = _extract_json(text)

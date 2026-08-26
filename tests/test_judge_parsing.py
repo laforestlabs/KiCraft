@@ -6,7 +6,7 @@ previously only exercised indirectly through FakeClient fixtures.
 """
 from __future__ import annotations
 
-from kicraft.eval.judge import _coerce_level, _extract_json, _validate
+from kicraft.eval.judge import _coerce_level, _extract_json, _validate, grade_class_j
 
 JDIMS = [{"id": "spec_compliance"}, {"id": "intent_fidelity"}]
 OGATES = [{"id": "wrong_board", "cap": 39}]
@@ -22,6 +22,18 @@ def _verdict(levels=(3, 4), gates=None):
     if gates is not None:
         v["triggered_gates"] = gates
     return v
+
+def _rubric():
+    dims = [
+        {
+            "id": item["id"],
+            "class": "J",
+            "weight": 1,
+            "anchors": {"0": "bad", "1": "weak", "2": "ok", "3": "good", "4": "great"},
+        }
+        for item in JDIMS
+    ]
+    return {"dimensions": dims, "gates": []}
 
 
 # --- _extract_json ---------------------------------------------------------
@@ -211,3 +223,24 @@ def test_validate_explicit_true_with_negative_sounding_evidence_applies():
     ok, _, gates, rejected, _ = _validate(v, JDIMS, SUB_GATES)
     assert ok and rejected == []
     assert [g["id"] for g in gates] == ["silent_substitution"]
+
+
+def test_grade_reports_client_reasoning_abort_as_distinct_retry_defect():
+    class AbortClient:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, messages, **kwargs):
+            self.calls += 1
+            return {
+                "text": "",
+                "finish_reason": "reasoning_loop",
+                "loop_abort_reason": "hard_ceiling",
+                "cost_usd": 0.01,
+            }
+
+    client = AbortClient()
+    result = grade_class_j(client, "digest", _rubric(), max_attempts=2)
+    assert result["ok"] is False
+    assert result["error"] == "client aborted judge reasoning (hard_ceiling)"
+    assert client.calls == 2

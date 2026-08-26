@@ -28,8 +28,10 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Annotated, Literal
 
 import requests
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from kicraft.design import models
 from kicraft.fsutil import atomic_write_text
@@ -127,6 +129,220 @@ SLOT_MODEL = {
 SUPPORTED_STAGES = (*SLOT_MODEL.keys(), "wiring")
 # Full design order from a brief to a synthesizable state.
 DESIGN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
+
+
+class WiringSlotResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    connections: list[models.NetConnection]
+    no_connect_pins: list[models.PinEndpoint]
+
+
+class IntentStageResponse(models.IntentSlot):
+    model_config = ConfigDict(extra="forbid")
+
+    project_stem: str = Field(pattern=r"^[A-Z0-9_]{1,32}$")
+
+
+class StageQuestionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    questions: list[models.Question] = Field(min_length=1, max_length=5)
+
+
+class BomPartRun(BaseModel):
+    """Compact stage-only declaration for identical BOM members."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    refs: list[str] | None = Field(default=None, min_length=1, max_length=450)
+    ref_prefix: str | None = None
+    start: int | None = Field(default=None, ge=1)
+    end: int | None = Field(default=None, ge=1)
+    value: str
+    symbol: str
+    footprint: str
+    sheet: str
+    mpn: str | None = None
+    datasheet: str | None = None
+    sourcing_note: str | None = None
+    side: str | None = None
+
+    @model_validator(mode="after")
+    def _one_reference_form(self):
+        explicit = self.refs is not None
+        ranged = self.ref_prefix is not None or self.start is not None or self.end is not None
+        if explicit == ranged:
+            raise ValueError("part run requires exactly one of refs or ref_prefix/start/end")
+        if ranged:
+            if not self.ref_prefix or self.start is None or self.end is None:
+                raise ValueError("part run range requires ref_prefix, start, and end")
+            if not re.fullmatch(r"[A-Z]+", self.ref_prefix):
+                raise ValueError("part run ref_prefix must contain uppercase letters only")
+            if self.end < self.start:
+                raise ValueError("part run end must be greater than or equal to start")
+            if self.end - self.start + 1 > 450:
+                raise ValueError("part run may contain at most 450 references")
+        return self
+
+    def reference_count(self) -> int:
+        if self.refs is not None:
+            return len(self.refs)
+        assert self.start is not None and self.end is not None
+        return self.end - self.start + 1
+
+    def iter_refs(self):
+        if self.refs is not None:
+            yield from self.refs
+            return
+        assert self.ref_prefix is not None and self.start is not None and self.end is not None
+        for number in range(self.start, self.end + 1):
+            yield f"{self.ref_prefix}{number}"
+
+
+class BomStageResponse(BaseModel):
+    """Schema-bound BOM response; expanded into canonical ``BOM.parts``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    parts: list[models.BomPart] = Field(default_factory=list, max_length=500)
+    part_runs: list[BomPartRun] = Field(default_factory=list, max_length=500)
+    ic_groups: dict[str, list[str]] = Field(default_factory=dict)
+    group_labels: dict[str, str] = Field(default_factory=dict)
+    thermal_refs: list[str] = Field(default_factory=list)
+    signal_flow_order: list[str] = Field(default_factory=list)
+    component_zones: dict[str, dict[str, str]] = Field(default_factory=dict)
+    arrays: list[models.ArraySpec] = Field(default_factory=list)
+    placement_hints: list[models.PlacementHint] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    substitutions: list[models.Substitution] = Field(default_factory=list)
+    connections: list[models.NetConnection] = Field(default_factory=list)
+    no_connect_pins: list[models.PinEndpoint] = Field(default_factory=list)
+
+
+class _AddEndpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    op: Literal["add_endpoint"]
+    ref: str
+    pin: str
+    sheet: str
+    net: str
+    expected_net: None = Field(...)
+
+
+class _RemoveEndpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    op: Literal["remove_endpoint"]
+    ref: str
+    pin: str
+    expected_net: str
+
+
+class _SetPinNet(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    op: Literal["set_pin_net"]
+    ref: str
+    pin: str
+    sheet: str
+    expected_net: str | None = Field(...)
+    net: str
+
+
+class _AddConnection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    op: Literal["add_connection"]
+    connection: models.NetConnection
+    expected_absent: Literal[True]
+
+
+class _RemoveConnection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    op: Literal["remove_connection"]
+    sheet: str
+    net: str
+    expected_endpoints: list[models.PinEndpoint]
+
+
+class _MarkNoConnect(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    op: Literal["mark_no_connect"]
+    endpoint: models.PinEndpoint
+    expected_net: None = Field(...)
+    expected_no_connect: Literal[False]
+
+
+class _UnmarkNoConnect(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    op: Literal["unmark_no_connect"]
+    endpoint: models.PinEndpoint
+    expected_no_connect: Literal[True]
+
+
+WiringPatchOperation = Annotated[
+    (
+        _AddEndpoint
+        | _RemoveEndpoint
+        | _SetPinNet
+        | _AddConnection
+        | _RemoveConnection
+        | _MarkNoConnect
+        | _UnmarkNoConnect
+    ),
+    Field(discriminator="op"),
+]
+_WIRING_PATCH_OPERATION = TypeAdapter(WiringPatchOperation)
+
+
+class WiringPatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operations: list[WiringPatchOperation] = Field(min_length=1, max_length=24)
+
+
+def _expand_bom_stage_response(payload: dict) -> tuple[dict, int]:
+    """Validate compact runs and return the unchanged canonical BOM shape."""
+    response = BomStageResponse.model_validate(payload)
+    total = len(response.parts) + sum(run.reference_count() for run in response.part_runs)
+    if total > 500:
+        raise ValueError(f"BOM has {total} parts; maximum is 500")
+
+    seen = {part.ref for part in response.parts}
+    if len(seen) != len(response.parts):
+        raise ValueError("BOM ordinary parts contain duplicate references")
+    per_sheet: dict[str, int] = {}
+    for part in response.parts:
+        per_sheet[part.sheet] = per_sheet.get(part.sheet, 0) + 1
+    run_refs: list[tuple[BomPartRun, list[str]]] = []
+    for run in response.part_runs:
+        refs = list(run.iter_refs())
+        for ref in refs:
+            if not models.REF_RE.fullmatch(ref):
+                raise ValueError(f"invalid part run reference {ref!r}")
+            if ref in seen:
+                raise ValueError(f"duplicate or overlapping part run reference {ref!r}")
+            seen.add(ref)
+        per_sheet[run.sheet] = per_sheet.get(run.sheet, 0) + len(refs)
+        run_refs.append((run, refs))
+    oversized = {sheet: count for sheet, count in per_sheet.items() if count > 450}
+    if oversized:
+        raise ValueError(f"BOM exceeds 450 parts on a sheet: {oversized}")
+
+    expanded = list(response.parts)
+    for run, refs in run_refs:
+        shared = run.model_dump(exclude={"refs", "ref_prefix", "start", "end"}, exclude_none=True)
+        expanded.extend(models.BomPart.model_validate({"ref": ref, **shared}) for ref in refs)
+    canonical = response.model_dump(exclude={"part_runs"})
+    canonical["parts"] = [part.model_dump(exclude_none=True) for part in expanded]
+    return models.BOM.model_validate(canonical).model_dump(exclude_none=True), total - len(
+        response.parts
+    )
+
+
+def _json_response_format(name: str, schema: dict) -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": name, "strict": True, "schema": schema},
+    }
+
 
 # Tools exposed to the model during the BOM stage (OpenAI tool-spec form).
 BOM_TOOLS = [
@@ -266,6 +482,170 @@ BOM_TOOLS = [
 ]
 
 
+def _endpoint_key(endpoint: dict | models.PinEndpoint) -> tuple[str, str]:
+    if isinstance(endpoint, models.PinEndpoint):
+        return endpoint.ref, endpoint.pin
+    return str(endpoint["ref"]), str(endpoint["pin"])
+
+
+def _canonical_wiring(candidate: dict) -> dict:
+    connections = []
+    for connection in candidate.get("connections") or []:
+        row = dict(connection)
+        row["endpoints"] = sorted(
+            [dict(endpoint) for endpoint in row.get("endpoints") or []],
+            key=lambda endpoint: (endpoint["ref"], endpoint["pin"]),
+        )
+        connections.append(row)
+    return {
+        "connections": sorted(
+            connections, key=lambda connection: (connection["sheet"], connection["net_name"])
+        ),
+        "no_connect_pins": sorted(
+            [dict(endpoint) for endpoint in candidate.get("no_connect_pins") or []],
+            key=lambda endpoint: (endpoint["ref"], endpoint["pin"]),
+        ),
+    }
+
+
+def _apply_wiring_patch(
+    candidate: dict,
+    patch_payload: dict,
+    *,
+    allowed_refs: set[str],
+    allowed_pins: dict[str, set[str]] | None = None,
+    allowed_nets: set[str] | None = None,
+) -> tuple[dict, int]:
+    """Apply a typed patch to a copy; stale preconditions fail without mutation."""
+    current = WiringSlotResponse.model_validate(candidate).model_dump(exclude_none=True)
+    patch = WiringPatchResponse.model_validate(patch_payload)
+    assignments: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    connection_by_key: dict[tuple[str, str], dict] = {}
+    for connection in current["connections"]:
+        ckey = (connection["sheet"], connection["net_name"])
+        if ckey in connection_by_key:
+            raise ValueError(f"duplicate connection {ckey}")
+        connection_by_key[ckey] = connection
+        for endpoint in connection["endpoints"]:
+            key = _endpoint_key(endpoint)
+            assignments.setdefault(key, set()).add(ckey)
+    no_connect = {_endpoint_key(endpoint) for endpoint in current["no_connect_pins"]}
+
+    def validate_endpoint(key: tuple[str, str]) -> None:
+        ref, pin = key
+        if ref not in allowed_refs:
+            raise ValueError(f"unknown reference {ref!r}")
+        if allowed_pins is not None and pin not in allowed_pins.get(ref, set()):
+            raise ValueError(f"unknown pin {ref}.{pin}")
+
+    def validate_net(net: str) -> None:
+        if allowed_nets is not None and net not in allowed_nets:
+            raise ValueError(f"unknown net {net!r}")
+
+    for raw_operation in patch.operations:
+        operation = _WIRING_PATCH_OPERATION.validate_python(raw_operation)
+        op = operation.op
+        if op in {"add_endpoint", "remove_endpoint", "set_pin_net"}:
+            key = (operation.ref, operation.pin)
+            validate_endpoint(key)
+            actual = assignments.get(key, set())
+            expected_net = operation.expected_net
+            matching = {ckey for ckey in actual if ckey[1] == expected_net}
+            if expected_net is None:
+                precondition_ok = not actual
+            else:
+                precondition_ok = len(matching) == 1 and (
+                    op == "remove_endpoint" or len(actual) == 1
+                )
+            if not precondition_ok:
+                found = sorted(ckey[1] for ckey in actual)
+                raise ValueError(
+                    f"stale precondition for {key}: expected {expected_net!r}, found {found!r}"
+                )
+            if op in {"remove_endpoint", "set_pin_net"}:
+                actual_connection = next(iter(matching))
+                connection = connection_by_key[actual_connection]
+                connection["endpoints"] = [
+                    endpoint
+                    for endpoint in connection["endpoints"]
+                    if _endpoint_key(endpoint) != key
+                ]
+                assignments[key].remove(actual_connection)
+                if not assignments[key]:
+                    del assignments[key]
+                if not connection["endpoints"]:
+                    current["connections"].remove(connection)
+                    del connection_by_key[actual_connection]
+            if op in {"add_endpoint", "set_pin_net"}:
+                if key in no_connect:
+                    raise ValueError(f"endpoint {key} is marked no-connect")
+                validate_net(operation.net)
+                ckey = (operation.sheet, operation.net)
+                connection = connection_by_key.get(ckey)
+                if connection is None:
+                    raise ValueError(f"unknown connection {ckey}; add it explicitly first")
+                connection["endpoints"].append({"ref": key[0], "pin": key[1]})
+                assignments.setdefault(key, set()).add(ckey)
+        elif op == "add_connection":
+            connection = operation.connection.model_dump(exclude_none=True)
+            ckey = (connection["sheet"], connection["net_name"])
+            validate_net(connection["net_name"])
+            if ckey in connection_by_key:
+                raise ValueError(f"connection {ckey} already exists")
+            for endpoint in connection["endpoints"]:
+                key = _endpoint_key(endpoint)
+                validate_endpoint(key)
+                if assignments.get(key) or key in no_connect:
+                    raise ValueError(f"endpoint {key} is already assigned")
+            current["connections"].append(connection)
+            connection_by_key[ckey] = connection
+            for endpoint in connection["endpoints"]:
+                assignments.setdefault(_endpoint_key(endpoint), set()).add(ckey)
+        elif op == "remove_connection":
+            ckey = (operation.sheet, operation.net)
+            connection = connection_by_key.get(ckey)
+            if connection is None:
+                raise ValueError(f"connection {ckey} does not exist")
+            expected = {_endpoint_key(endpoint) for endpoint in operation.expected_endpoints}
+            actual_endpoints = {_endpoint_key(endpoint) for endpoint in connection["endpoints"]}
+            if expected != actual_endpoints:
+                raise ValueError(f"stale endpoint set for connection {ckey}")
+            current["connections"].remove(connection)
+            del connection_by_key[ckey]
+            for key in actual_endpoints:
+                assignments[key].discard(ckey)
+                if not assignments[key]:
+                    del assignments[key]
+        elif op == "mark_no_connect":
+            key = _endpoint_key(operation.endpoint)
+            validate_endpoint(key)
+            if assignments.get(key) or key in no_connect:
+                raise ValueError(f"stale no-connect precondition for {key}")
+            current["no_connect_pins"].append({"ref": key[0], "pin": key[1]})
+            no_connect.add(key)
+        elif op == "unmark_no_connect":
+            key = _endpoint_key(operation.endpoint)
+            validate_endpoint(key)
+            if key not in no_connect:
+                raise ValueError(f"stale no-connect precondition for {key}")
+            current["no_connect_pins"] = [
+                endpoint
+                for endpoint in current["no_connect_pins"]
+                if _endpoint_key(endpoint) != key
+            ]
+            no_connect.remove(key)
+    duplicates = {key: sorted(value) for key, value in assignments.items() if len(value) > 1}
+    if duplicates:
+        raise ValueError(f"patch left duplicate endpoint assignments: {duplicates}")
+    overlap = no_connect & assignments.keys()
+    if overlap:
+        raise ValueError(f"patch left net/no-connect overlap: {sorted(overlap)}")
+
+    canonical = _canonical_wiring(current)
+    WiringSlotResponse.model_validate(canonical)
+    return canonical, len(patch.operations)
+
+
 def _spec_text(stage: str) -> str:
     for d in _SPEC_DIRS:
         p = d / f"{stage}.md"
@@ -345,11 +725,6 @@ def _stage_extra(stage: str) -> str:
             "with the bare part family, no descriptive words). If it still misses — or reports "
             "the backend unreachable — STOP searching for that part: either ask the user for "
             "the LCSC C-number (one clarifying question can cover several parts) or use the "
-            "closest stock KiCad symbol/footprint and record the substitution in assumptions.\n"
-            "- NEVER SILENTLY SWAP A BRIEF-NAMED PART CLASS. When the brief itself names a "
-            "specific part class or technology (e.g. 'air-core inductor', 'film capacitors', "
-            "'1 A power LED', 'SMT I2C OLED module') and neither a curated bundle nor a "
-            "faithful in-stock part matches that class, do NOT quietly substitute a different "
             "class (ferrite-core, ceramic, an 0805 indicator LED, a pin header). Either ask "
             "ONE clarifying question offering the concrete substitute, or — if proceeding — "
             "add an assumptions entry naming BOTH the asked-for class and the substitute "
@@ -361,12 +736,11 @@ def _stage_extra(stage: str) -> str:
             "request them TOGETHER in a single turn (emit multiple tool calls at once) "
             "instead of one per turn -- running out of rounds forces an immediate final "
             "answer with whatever resolved so far.\n"
-            "- COMPACT OUTPUT: when the BOM has many parts (e.g. a 200-LED array + decoupling "
-            "caps = 400+ parts), use COMPACT single-line JSON per part — no pretty-printing, "
-            "no indentation. OMIT null fields (datasheet, mpn, sourcing_note, side, source_leaf "
-            "when null). For array members that are identical except ref, emit each on one line "
-            "with only the fields that differ (ref) plus value/symbol/footprint/sheet. The "
-            "output token budget is finite; verbose JSON truncates and fails.\n"
+            "- COMPACT OUTPUT: keep heterogeneous components in `parts`. Put repeated "
+            "identical components in `part_runs`: either `refs` with an explicit ordered "
+            "reference list, or `ref_prefix` + integer `start`/`end`, plus one shared "
+            "value/symbol/footprint/sheet payload. Omit null fields. Canonical expansion "
+            "is deterministic and still enforces 500 total and 450 per sheet before commit.\n"
             "- Every symbol AND footprint MUST resolve to a real file. When finished, output "
             "ONLY the BOM slot JSON."
         )
@@ -496,25 +870,65 @@ def _format_core_defaults_block(rows) -> str | None:
     return "\n".join(lines)
 
 
-def _schema_for(stage: str) -> str:
+def _slot_response_schema(stage: str) -> dict:
+    if stage == "intent":
+        return IntentStageResponse.model_json_schema()
+    if stage == "bom":
+        return BomStageResponse.model_json_schema()
     if stage == "wiring":
-        return json.dumps(
-            {
-                "type": "object",
-                "properties": {
-                    "connections": {
-                        "type": "array",
-                        "items": models.NetConnection.model_json_schema(),
-                    },
-                    "no_connect_pins": {
-                        "type": "array",
-                        "items": models.PinEndpoint.model_json_schema(),
-                    },
-                },
-                "required": ["connections", "no_connect_pins"],
-            }
-        )
-    return json.dumps(SLOT_MODEL[stage].model_json_schema())
+        return WiringSlotResponse.model_json_schema()
+    return SLOT_MODEL[stage].model_json_schema()
+
+
+def _response_schema(stage: str) -> dict:
+    slot = dict(_slot_response_schema(stage))
+    question = dict(StageQuestionResponse.model_json_schema())
+    definitions = {
+        **(slot.pop("$defs", {}) or {}),
+        **(question.pop("$defs", {}) or {}),
+    }
+    schema = {"anyOf": [slot, question]}
+    if definitions:
+        schema["$defs"] = definitions
+    return schema
+
+
+def _schema_for(stage: str) -> str:
+    return json.dumps(_response_schema(stage))
+
+
+def _stage_response_format(stage: str) -> dict:
+    return _json_response_format(f"kicraft_{stage}_response_v1", _response_schema(stage))
+
+
+def _wiring_patch_response_format() -> dict:
+    return _json_response_format("kicraft_wiring_patch_v1", WiringPatchResponse.model_json_schema())
+
+
+class PatchApplicationError(ValueError):
+    pass
+
+
+class StageSchemaError(ValueError):
+    pass
+
+
+def _normalize_stage_response(stage: str, payload: dict) -> tuple[dict, int]:
+    try:
+        if isinstance(payload.get("questions"), list):
+            return StageQuestionResponse.model_validate(payload).model_dump(exclude_none=True), 0
+        if stage == "intent":
+            return IntentStageResponse.model_validate(payload).model_dump(exclude_none=True), 0
+        if stage == "bom":
+            return _expand_bom_stage_response(payload)
+        if stage == "wiring":
+            return (
+                WiringSlotResponse.model_validate(payload).model_dump(exclude_none=True),
+                0,
+            )
+        return SLOT_MODEL[stage].model_validate(payload).model_dump(exclude_none=True), 0
+    except (TypeError, ValueError) as exc:
+        raise StageSchemaError(str(exc)) from exc
 
 
 # Hand-written compact example instance per stage. A mid-tier model pattern-
@@ -761,6 +1175,7 @@ def _bom_executor(workspace: Path):
     """Return an executor(name, args) -> str backed by the kicraft CLI (cwd=workspace)."""
     lcsc_calls: dict[str, int] = {}  # normalized MPN -> attempts this stage (search budget)
     memo: dict[tuple[str, str], str] = {}  # read-only lookups, deduped per stage
+    resolution_ledger: dict[str, dict[str, str]] = {}
 
     def execute(name: str, args: dict) -> str:
         ckey: tuple[str, str] | None = None
@@ -821,7 +1236,20 @@ def _bom_executor(workspace: Path):
                     "again this stage."
                 )
             r = _run(KICRAFT + ["lookup-lcsc-id", mpn], workspace)
-            return (r.stdout or r.stderr)[:3000]
+            out = (r.stdout or r.stderr)[:3000]
+            try:
+                resolved = json.loads(out)
+            except (TypeError, json.JSONDecodeError):
+                resolved = {}
+            if resolved.get("ok") and resolved.get("lcsc"):
+                resolution_ledger[key] = {
+                    "requested_part": mpn,
+                    "accepted_lcsc_id": str(resolved["lcsc"]),
+                    "exact_symbol": "",
+                    "exact_footprint": "",
+                    "source_tool": "lookup_lcsc_id",
+                }
+            return out
         if name == "add_part_from_lcsc":
             # Persist fetched parts to the shared HOME tier (not project): a part
             # the model needs once is then reused by every later design as a
@@ -834,16 +1262,36 @@ def _bom_executor(workspace: Path):
                 cmd += ["--name", name]
             r = _run(KICRAFT + cmd, workspace)
             lp = _run(KICRAFT + ["list-parts"], workspace)
-            # Return ONLY the freshly-fetched bundle's row(s), not the whole
-            # ~42 KB table: the dump would otherwise persist in context for every
-            # later round. The model can still call list_parts for the full table.
+            new_rows = _new_bundle_rows(lp.stdout, lcsc_id, name)
+            for line in new_rows.splitlines():
+                columns = [column.strip().strip("`") for column in line.split("|")[1:-1]]
+                if len(columns) >= 7 and lcsc_id.upper() in columns[2].upper():
+                    ledger_key = next(
+                        (
+                            key
+                            for key, row in resolution_ledger.items()
+                            if row["accepted_lcsc_id"].upper() == lcsc_id.upper()
+                        ),
+                        _normalize_mpn(lcsc_id),
+                    )
+                    resolution_ledger[ledger_key] = {
+                        "requested_part": resolution_ledger.get(ledger_key, {}).get(
+                            "requested_part", lcsc_id
+                        ),
+                        "accepted_lcsc_id": lcsc_id.upper(),
+                        "exact_symbol": columns[5],
+                        "exact_footprint": columns[6],
+                        "source_tool": "add_part_from_lcsc",
+                    }
+                    break
             return (
                 f"add-part exit={r.returncode}\n{(r.stdout + chr(10) + r.stderr).strip()[:1500]}"
                 f"\n\nNEWLY ADDED BUNDLE (use these strings verbatim; call "
-                f"list_parts for the full library):\n"
-                f"{_new_bundle_rows(lp.stdout, lcsc_id, name)}"
+                f"list_parts for the full library):\n{new_rows}"
             )
         return f"unknown tool: {name}"
+
+    execute.resolution_ledger = resolution_ledger
 
     return execute
 
@@ -967,6 +1415,128 @@ def _committed_bom_refs(state_path) -> list[str]:
         return []
 
 
+def _wiring_patch_constraints(
+    prompt_state: dict, extras: dict, candidate: dict, rejection: dict
+) -> tuple[set[str], dict[str, set[str]], set[str]]:
+    parts = (prompt_state.get("bom") or {}).get("parts") or []
+    allowed_refs = {str(part.get("ref")) for part in parts if part.get("ref")}
+    pinouts = extras.get("symbol_pinouts") or {}
+    allowed_pins: dict[str, set[str]] = {}
+    for part in parts:
+        ref, symbol = str(part.get("ref") or ""), str(part.get("symbol") or "")
+        pins = (pinouts.get(symbol) or {}).get("pins") or []
+        allowed_pins[ref] = {
+            str(pin.get("number")) for pin in pins if isinstance(pin, dict) and pin.get("number")
+        }
+    architecture = prompt_state.get("architecture") or {}
+    allowed_nets = {str(net) for net in architecture.get("power_nets") or []}
+    for net in architecture.get("inter_sheet_nets") or []:
+        if isinstance(net, dict) and net.get("name"):
+            allowed_nets.add(str(net["name"]))
+    allowed_nets.update(
+        str(connection.get("net_name"))
+        for connection in candidate.get("connections") or []
+        if connection.get("net_name")
+    )
+    feedback = json.dumps(rejection, ensure_ascii=False)
+    allowed_nets.update(
+        match.group(1)
+        for match in re.finditer(r"\bnet\s+['\"]([^'\"]+)['\"]", feedback, re.IGNORECASE)
+    )
+    return allowed_refs, allowed_pins, allowed_nets
+
+
+def _wiring_patch_messages(
+    candidate: dict, rejection: dict, prompt_state: dict, extras: dict, *, clean_slate: bool
+) -> list[dict]:
+    offender_text = json.dumps(
+        {
+            "errors": rejection.get("errors") or [],
+            "offenders": rejection.get("offenders") or [],
+        },
+        ensure_ascii=False,
+    )
+    known_refs = {
+        str(part.get("ref"))
+        for part in ((prompt_state.get("bom") or {}).get("parts") or [])
+        if part.get("ref")
+    }
+    refs = {
+        match.group(1).upper()
+        for match in re.finditer(r"\b([A-Za-z]+[0-9]+[A-Za-z0-9_-]*)\b", offender_text)
+        if match.group(1).upper() in known_refs
+    }
+    named_nets = {
+        match.group(1)
+        for match in re.finditer(r"\bnet\s+['\"]([^'\"]+)['\"]", offender_text, re.IGNORECASE)
+    }
+    parts = [
+        part
+        for part in ((prompt_state.get("bom") or {}).get("parts") or [])
+        if part.get("ref") in refs
+    ]
+    symbols = {part.get("symbol") for part in parts}
+    pinouts = {
+        symbol: info
+        for symbol, info in (extras.get("symbol_pinouts") or {}).items()
+        if symbol in symbols
+    }
+    relevant_connections = [
+        connection
+        for connection in candidate.get("connections") or []
+        if connection.get("net_name") in named_nets
+        or any(endpoint.get("ref") in refs for endpoint in connection.get("endpoints") or [])
+    ]
+    context = {
+        "rejection": {
+            "errors": rejection.get("errors") or [],
+            "offenders": rejection.get("offenders") or [],
+        },
+        "offender_parts": parts,
+        "offender_pinouts": pinouts,
+        "valid_offender_refs": sorted(refs),
+        "architecture_nets": {
+            "power_nets": (prompt_state.get("architecture") or {}).get("power_nets") or [],
+            "inter_sheet_nets": (
+                (prompt_state.get("architecture") or {}).get("inter_sheet_nets") or []
+            ),
+        },
+        "current_connections_touching_offenders": relevant_connections,
+        "existing_connection_keys": sorted(
+            [
+                [connection.get("sheet"), connection.get("net_name")]
+                for connection in candidate.get("connections") or []
+            ]
+        ),
+        "current_no_connects_touching_offenders": [
+            endpoint
+            for endpoint in candidate.get("no_connect_pins") or []
+            if endpoint.get("ref") in refs
+        ],
+    }
+    return [
+        {
+            "role": "system",
+            "content": (
+                "Repair only rejected endpoints with the typed operations in the schema. "
+                "Use add_endpoint/remove_endpoint/set_pin_net for an existing connection. "
+                "Use add_connection only when its [sheet,net] key is absent, and remove it "
+                "before re-adding the same key. Architecture sheet endpoint names are not "
+                "component refs; only valid_offender_refs may appear as endpoint.ref. "
+                "Every operation must state its expected current value. Never change an "
+                "unrelated endpoint or invent a net."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                ("This is the one clean-slate escape correction. " if clean_slate else "")
+                + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+            ),
+        },
+    ]
+
+
 def _retry_feedback(
     out: dict, *, stage: str | None = None, valid_refs: list[str] | None = None
 ) -> str:
@@ -1041,6 +1611,40 @@ def _retry_feedback(
                 "it is not dangling."
             )
     return msg
+
+
+def _offender_identity(raw: object) -> str:
+    text = re.sub(r"\s+", " ", str(raw)).strip()
+    pins = {
+        f"{match.group(1).upper()}.{match.group(2).upper()}"
+        for match in re.finditer(
+            r"\b([A-Za-z]+[0-9]+[A-Za-z0-9_-]*)(?:\.|\s+pin\s+)([A-Za-z0-9~_+-]+)\b",
+            text,
+        )
+    }
+    if pins:
+        return "|".join(sorted(pins))
+    refs = set(re.findall(r"\b[A-Z]+[0-9]+[A-Z0-9_-]*\b", text))
+    if refs:
+        return "|".join(sorted(refs))
+    quoted = {
+        item.strip() for item in re.findall(r"['\"]([^'\"]{1,64})['\"]", text) if item.strip()
+    }
+    return "|".join(sorted(quoted)) if quoted else text
+
+
+def _commit_rejection_signature(out: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Stable ordered gate IDs plus offender identities."""
+    errors = [re.sub(r"\s+", " ", str(item)).strip() for item in (out.get("errors") or [])]
+    gate_ids: list[str] = []
+    for error in errors:
+        for gate_id in re.findall(r"(?:§\s*)?(9\.\d+)", error):
+            if gate_id not in gate_ids:
+                gate_ids.append(gate_id)
+    if not gate_ids:
+        gate_ids = errors
+    offenders = tuple(sorted(_offender_identity(item) for item in (out.get("offenders") or [])))
+    return tuple(gate_ids), offenders
 
 
 def _normalize_questions(raw_list, stage: str) -> list[dict]:
@@ -1138,8 +1742,10 @@ def _classify_parse_failure(finish, had_content) -> str:
 # carries no error string — the `commit` dict names the gate errors.
 _FAILURE_KIND_ERROR = {
     "reasoning_loop": "reasoning_loop",
+    "collection_limit": "collection_limit",
     "truncated_json": "truncated JSON at the output token limit",
     "invalid_json": "no JSON in reply",
+    "invalid_schema": "provider response did not satisfy the required JSON schema",
     "provider_error": "provider error",
     "transport_error": "transport error",
 }
@@ -1155,6 +1761,15 @@ _SERIALIZATION_RETRY_MSG = (
     "complete slot as ONE compact JSON object now: no markdown fences, no prose, "
     "no explanations. Omit null fields and keep every item on a single line so "
     "the whole slot fits the output budget."
+)
+
+_COLLECTION_LIMIT_RETRY_MSG = (
+    "Your previous reply was stopped at observed item {observed_count} of the "
+    "top-level `{field}` collection because its configured {limit_scope} limit is "
+    "{configured_total}; {emitted_content_chars} content characters were emitted "
+    "and nothing was committed. {bounds_sentence}Do NOT call any tools. Start "
+    "again from the project state and emit ONE compact slot JSON within those "
+    "canonical limits. Do not continue or salvage the stopped draft."
 )
 
 
@@ -1176,6 +1791,7 @@ def _response_policy(client, stage: str, normal_max_tokens: int) -> StageRespons
         serialization_max_tokens=STAGE_SERIALIZATION_MAX_TOKENS.get(stage, 8192),
         serialization_retries=1,
         collection_bounds=STAGE_COLLECTION_BOUNDS.get(stage, ()),
+        reasoning_guard=None,
     )
 
 
@@ -1292,6 +1908,7 @@ def drive_stage(
     ]
     tools = BOM_TOOLS if stage == "bom" else None
     executor = _bom_executor(workspace) if stage == "bom" else None
+    response_format = _stage_response_format(stage)
 
     # Retries rebuild the conversation from this pristine base instead of
     # appending to it. chat_with_tools mutates the list it's handed (it appends
@@ -1319,29 +1936,60 @@ def drive_stage(
     serialization_budget = max(0, int(policy.serialization_retries))
     temperature = _design_temperature(client)
     reasoning = policy.normal_reasoning
+    reasoning_guard = policy.reasoning_guard
+    escape_temperature = float(
+        getattr(getattr(client, "s", None), "serialization_escape_temperature", 0.4)
+    )
     # Recovery budgets are independent: reasoning recovery gets ONE
     # reasoning-disabled retry, serialization recovery gets exactly ONE plain
     # tool-free call at the fixed cap, and commit correction gets the normal
     # `max_retries + 1` attempts. `attempts` counts ACTUAL provider calls made
     # (never the configured maximum), and every call carries a finite cap.
     loop_retries = 0
+    prior_rejection_signature = None
+    clean_slate_next = False
     serialization_calls = 0
     attempts = 0
     rounds = None
     tool_calls_ct = None
+    compact_run_expanded_count = 0
+    emitted_collection_count = 0
+    provider_call_budget = 5 if stage == "wiring" else max_retries + 2
+    wiring_candidate: dict | None = None
+    wiring_patch_mode = False
+    wiring_rejection: dict = {}
+    wiring_patch_operations = 0
 
     for attempt in range(max_retries + 1):
+        if attempts >= provider_call_budget:
+            break
         ctx = {**(meta_ctx or {}), "stage": stage, "attempt": attempt}
         tool_calls_ct = None
         raw = ""
         finish = None
         had_content = False
         loop_detected = False
+        collection_limit = None
+        loop_abort_reason = None
+        was_clean_slate = clean_slate_next
+        clean_slate_next = False
+        call_messages = messages
+        call_response_format = response_format
+        if stage == "wiring" and wiring_patch_mode:
+            assert wiring_candidate is not None
+            call_messages = _wiring_patch_messages(
+                wiring_candidate,
+                wiring_rejection,
+                prompt_state,
+                extras,
+                clean_slate=was_clean_slate,
+            )
+            call_response_format = _wiring_patch_response_format()
         attempts += 1  # a call IS attempted even when it raises below
         try:
             if tools:
                 r = client.chat_with_tools(
-                    messages,
+                    call_messages,
                     tools,
                     executor,
                     max_tokens=normal_cap,
@@ -1350,20 +1998,28 @@ def drive_stage(
                     progress=progress,
                     meta_ctx=ctx,
                     reasoning=reasoning,
+                    reasoning_guard=reasoning_guard,
+                    collection_bounds=policy.collection_bounds,
+                    response_format=call_response_format,
                 )
                 raw, rounds = r["text"], r.get("rounds")
                 tool_calls_ct = r.get("tool_calls")
                 finish = r.get("finish_reason")
                 had_content = bool(r["text"])
                 loop_detected = bool(r.get("loop_detected"))
+                collection_limit = r.get("collection_limit")
+                loop_abort_reason = r.get("loop_abort_reason")
             else:
                 res = client.chat(
-                    messages,
+                    call_messages,
                     max_tokens=normal_cap,
                     temperature=temperature,
                     progress=progress,
                     meta_ctx=ctx,
                     reasoning=reasoning,
+                    reasoning_guard=reasoning_guard,
+                    collection_bounds=policy.collection_bounds,
+                    response_format=call_response_format,
                 )
                 content_text = res.get("text") or ""
                 raw = content_text or res.get("reasoning") or ""
@@ -1371,6 +2027,13 @@ def drive_stage(
                 rounds = None
                 had_content = bool(content_text)
                 loop_detected = bool(res.get("loop_detected"))
+                collection_limit = res.get("collection_limit")
+                loop_abort_reason = res.get("loop_abort_reason")
+            call_result = r if tools else res
+            counts = call_result.get("collection_counts") or {}
+            emitted_collection_count = max(
+                emitted_collection_count, max(counts.values(), default=0)
+            )
             total_cost += (r if tools else res)["cost_usd"]
         except _TRANSPORT_FAILURE_EXC:
             # Transport retries exhausted: terminal, never sent through JSON
@@ -1407,13 +2070,18 @@ def drive_stage(
                 "reply_head": (raw or "")[:200],
                 "rounds": rounds,
                 "tool_calls": tool_calls_ct,
+                "loop_abort_reason": loop_abort_reason,
             }
             if progress:
                 progress(
                     {
                         "kind": "retry",
                         "stage": stage,
-                        "errors": ["reasoning loop detected — retrying with reasoning disabled"],
+                        "errors": [
+                            "reasoning loop detected"
+                            + (f" ({loop_abort_reason})" if loop_abort_reason else "")
+                            + " — retrying with reasoning disabled"
+                        ],
                     }
                 )
             if loop_retries >= _MAX_LOOP_RETRIES:
@@ -1424,16 +2092,71 @@ def drive_stage(
             messages = _lean_retry(None, _REASONING_LOOP_RETRY_MSG)
             continue
 
+        schema_error = False
+        schema_error_detail = None
+        patch_error_detail = None
+        kind = None
         try:
-            obj = _extract_json(raw)
+            if finish == "collection_limit":
+                raise ValueError("stream collection limit")
+            parsed = _extract_json(raw)
+            if stage == "wiring" and wiring_patch_mode:
+                assert wiring_candidate is not None
+                constraints = _wiring_patch_constraints(
+                    prompt_state, extras, wiring_candidate, wiring_rejection
+                )
+                try:
+                    obj, applied = _apply_wiring_patch(
+                        wiring_candidate,
+                        parsed,
+                        allowed_refs=constraints[0],
+                        allowed_pins=constraints[1],
+                        allowed_nets=constraints[2],
+                    )
+                except ValueError as exc:
+                    raise PatchApplicationError(str(exc)) from exc
+                wiring_patch_operations += applied
+            else:
+                obj, compact_run_expanded_count = _normalize_stage_response(stage, parsed)
+                if stage == "wiring":
+                    wiring_candidate = obj
+        except PatchApplicationError as exc:
+            patch_error_detail = str(exc)
+        except StageSchemaError as exc:
+            schema_error = True
+            schema_error_detail = str(exc)
+            kind = "invalid_schema"
         except (json.JSONDecodeError, ValueError):
-            kind = _classify_parse_failure(finish, had_content)
+            kind = (
+                "collection_limit"
+                if finish == "collection_limit"
+                else _classify_parse_failure(finish, had_content)
+            )
+        if patch_error_detail is not None:
+            rejection = {
+                "ok": False,
+                "errors": [f"wiring patch rejected: {patch_error_detail}"],
+                "offenders": [],
+            }
+            last = {"commit": rejection, "schema_error": patch_error_detail}
+            signature = _commit_rejection_signature(rejection)
+            if was_clean_slate:
+                break
+            if signature == prior_rejection_signature:
+                clean_slate_next = True
+            prior_rejection_signature = signature
+            wiring_rejection = rejection
+            reasoning = {"enabled": False}
+            temperature = max(escape_temperature, 0.0)
+            continue
+        if schema_error or kind in {"collection_limit", "truncated_json", "invalid_json"}:
             last = {
                 "failure_kind": kind,
                 "reply_head": (raw or "")[:200],
                 "rounds": rounds,
                 "tool_calls": tool_calls_ct,
                 "error": _FAILURE_KIND_ERROR.get(kind, kind),
+                "schema_error": schema_error_detail,
             }
             if progress:
                 progress(
@@ -1444,8 +2167,8 @@ def drive_stage(
                         "failure_kind": kind,
                     }
                 )
-            if serialization_calls >= serialization_budget:
-                break  # serialization budget exhausted -> terminal
+            if serialization_calls >= serialization_budget or attempts >= provider_call_budget:
+                break  # serialization budget or provider-call budget exhausted
             # Serialization recovery: exactly ONE plain, tool-free,
             # reasoning-disabled completion at the fixed serialization cap,
             # rebuilt from the pristine base messages + the serialization
@@ -1453,21 +2176,44 @@ def drive_stage(
             serialization_calls += 1
             attempts += 1  # the serialization completion is a provider call too
             sctx = {**ctx, "serialization": True}
-            smessages = list(base_messages)
+            smessages = list(call_messages)
             bounds_sentence = _collection_bounds_sentence(policy.collection_bounds)
-            retry_message = _SERIALIZATION_RETRY_MSG.format(
+            retry_template = (
+                _COLLECTION_LIMIT_RETRY_MSG
+                if kind == "collection_limit"
+                else _SERIALIZATION_RETRY_MSG
+            )
+            limit_info = collection_limit or {}
+            retry_message = retry_template.format(
                 prior_chars=len(raw or ""),
                 bounds_sentence=(bounds_sentence + " ") if bounds_sentence else "",
+                field=limit_info.get("field", "unknown"),
+                observed_count=limit_info.get("observed_count", "unknown"),
+                configured_total=limit_info.get("configured_total", "unknown"),
+                limit_scope=limit_info.get("limit_scope", "total"),
+                emitted_content_chars=limit_info.get("emitted_content_chars", len(raw or "")),
             )
             smessages.append({"role": "user", "content": retry_message})
+            resolution_ledger = getattr(executor, "resolution_ledger", {}) if executor else {}
+            if resolution_ledger:
+                smessages.append(
+                    {
+                        "role": "user",
+                        "content": "BOUNDED RESOLUTION LEDGER (reuse these exact accepted values):\n"
+                        + json.dumps(list(resolution_ledger.values())[:16], separators=(",", ":")),
+                    }
+                )
             try:
                 sres = client.chat(
                     smessages,
                     max_tokens=serialization_cap,
-                    temperature=temperature,
+                    temperature=max(escape_temperature, 0.0),
                     progress=progress,
                     meta_ctx=sctx,
                     reasoning={"enabled": False},
+                    reasoning_guard=reasoning_guard,
+                    collection_bounds=policy.collection_bounds,
+                    response_format=call_response_format,
                 )
                 total_cost += sres["cost_usd"]
             except _TRANSPORT_FAILURE_EXC:
@@ -1490,24 +2236,62 @@ def drive_stage(
                 break
             sraw = sres.get("text") or ""
             sfinish = sres.get("finish_reason")
+            scollection_limit = sres.get("collection_limit")
+            schema_error = False
+            schema_error_detail = None
+            skind = None
             try:
-                obj = _extract_json(sraw)
+                if sfinish == "collection_limit":
+                    raise ValueError("stream collection limit")
+                parsed = _extract_json(sraw)
+                if stage == "wiring" and wiring_patch_mode:
+                    assert wiring_candidate is not None
+                    constraints = _wiring_patch_constraints(
+                        prompt_state, extras, wiring_candidate, wiring_rejection
+                    )
+                    try:
+                        obj, applied = _apply_wiring_patch(
+                            wiring_candidate,
+                            parsed,
+                            allowed_refs=constraints[0],
+                            allowed_pins=constraints[1],
+                            allowed_nets=constraints[2],
+                        )
+                    except ValueError as exc:
+                        raise StageSchemaError(str(exc)) from exc
+                    wiring_patch_operations += applied
+                else:
+                    obj, compact_run_expanded_count = _normalize_stage_response(stage, parsed)
+                    if stage == "wiring":
+                        wiring_candidate = obj
+            except StageSchemaError as exc:
+                schema_error = True
+                schema_error_detail = str(exc)
+                skind = "invalid_schema"
             except (json.JSONDecodeError, ValueError):
-                # The single serialization retry failed: terminal, classified by
-                # the serialization result's OWN signature (a second truncation
-                # is truncated_json; an empty length after reasoning was disabled
-                # is reasoning_loop). Never re-serialized.
                 skind = (
-                    "reasoning_loop"
-                    if sres.get("loop_detected")
-                    else _classify_parse_failure(sfinish, bool(sraw))
+                    "collection_limit"
+                    if sfinish == "collection_limit"
+                    else (
+                        "reasoning_loop"
+                        if sres.get("loop_detected")
+                        else _classify_parse_failure(sfinish, bool(sraw))
+                    )
                 )
+            if schema_error or skind in {
+                "collection_limit",
+                "reasoning_loop",
+                "truncated_json",
+                "invalid_json",
+            }:
                 last = {
                     "failure_kind": skind,
                     "error": _FAILURE_KIND_ERROR.get(skind, skind),
                     "reply_head": (sraw or "")[:200],
                     "rounds": rounds,
                     "tool_calls": tool_calls_ct,
+                    "collection_limit": scollection_limit,
+                    "schema_error": schema_error_detail,
                 }
                 break
             # Parseable serialization output: the commit path owns it from here.
@@ -1574,6 +2358,9 @@ def drive_stage(
                 wall_s=_wall,
                 cpu_s=_cpu,
                 cost_usd=total_cost,
+                emitted_collection_count=emitted_collection_count,
+                compact_run_expanded_count=compact_run_expanded_count,
+                wiring_patch_operations=wiring_patch_operations,
             )
             if progress:
                 progress(
@@ -1596,6 +2383,9 @@ def drive_stage(
                 "cpu_s": _cpu,
                 "commit": out,
                 "slot": obj,
+                "emitted_collection_count": emitted_collection_count,
+                "compact_run_expanded_count": compact_run_expanded_count,
+                "wiring_patch_operations": wiring_patch_operations,
             }
         last = {"commit": out}
         if progress:
@@ -1607,6 +2397,34 @@ def drive_stage(
                     "offenders": out.get("offenders"),
                 }
             )
+        signature = _commit_rejection_signature(out)
+        if stage == "wiring":
+            wiring_candidate = dict(obj)
+            wiring_rejection = out
+            if was_clean_slate:
+                break
+            if signature == prior_rejection_signature:
+                clean_slate_next = True
+            prior_rejection_signature = signature
+            wiring_patch_mode = True
+            reasoning = {"enabled": False}
+            temperature = max(escape_temperature, 0.0)
+            continue
+        if was_clean_slate:
+            # A repeated rejection already consumed the one clean-slate escape.
+            # Do not resume the invalid-slot history or create another retry path.
+            break
+        if signature == prior_rejection_signature:
+            clean_slate_next = True
+            reasoning = {"enabled": False}
+            temperature = max(escape_temperature, 0.0)
+            _valid_refs = _committed_bom_refs(state_path) if stage == "wiring" else None
+            messages = _lean_retry(
+                None,
+                _retry_feedback(out, stage=stage, valid_refs=_valid_refs),
+            )
+            continue
+        prior_rejection_signature = signature
         # Echo the FULL slot the model just emitted (raw) so the preserving-patch
         # instruction in _retry_feedback can change only the flagged parts; the
         # slot is bounded by max_tokens and is far smaller than the tool transcript
@@ -1647,6 +2465,9 @@ def drive_stage(
         cpu_s=_cpu,
         cost_usd=total_cost,
         failure_kind=last.get("failure_kind"),
+        emitted_collection_count=emitted_collection_count,
+        compact_run_expanded_count=compact_run_expanded_count,
+        wiring_patch_operations=wiring_patch_operations,
     )
     if progress:
         progress({"kind": "stage_done", "stage": stage, "ok": False, "cost": total_cost})
@@ -1659,6 +2480,9 @@ def drive_stage(
         "tool_calls": tool_calls_ct,
         "wall_s": _wall,
         "cpu_s": _cpu,
+        "emitted_collection_count": emitted_collection_count,
+        "compact_run_expanded_count": compact_run_expanded_count,
+        "wiring_patch_operations": wiring_patch_operations,
         **last,
     }
 

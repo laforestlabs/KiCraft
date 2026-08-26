@@ -26,6 +26,7 @@ adds simulated think-time so the concurrency profile resembles real traffic;
 ``KICRAFT_MOCK_BOM_TOOLS=1`` makes the BOM stage actually invoke the parts-lookup
 subprocess once (exercises that load path) before returning the recorded slot.
 """
+
 from __future__ import annotations
 
 import json
@@ -63,10 +64,12 @@ def transcript_from_state(state: dict) -> dict:
     if bom is not None:
         bom_slot = {k: v for k, v in bom.items() if k not in _WIRING_OWNED}
         stages["bom"] = json.dumps(bom_slot)
-        stages["wiring"] = json.dumps({
-            "connections": bom.get("connections") or [],
-            "no_connect_pins": bom.get("no_connect_pins") or [],
-        })
+        stages["wiring"] = json.dumps(
+            {
+                "connections": bom.get("connections") or [],
+                "no_connect_pins": bom.get("no_connect_pins") or [],
+            }
+        )
     return {"stem": stem, "stages": stages}
 
 
@@ -127,8 +130,14 @@ class MockClient:
     ledger is never touched.
     """
 
-    def __init__(self, settings=None, *, transcript: dict | None = None,
-                 latency_ms: int | None = None, run_bom_tools: bool | None = None) -> None:
+    def __init__(
+        self,
+        settings=None,
+        *,
+        transcript: dict | None = None,
+        latency_ms: int | None = None,
+        run_bom_tools: bool | None = None,
+    ) -> None:
         self.s = settings or _StubSettings(os.environ.get("KICRAFT_MODEL", "mock"))
         self.guard = _NullGuard()
         self._transcript = transcript
@@ -137,7 +146,11 @@ class MockClient:
         self._latency_s = max(0.0, latency_ms / 1000.0)
         if run_bom_tools is None:
             run_bom_tools = os.environ.get("KICRAFT_MOCK_BOM_TOOLS", "").strip().lower() in (
-                "1", "true", "yes", "on")
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
         self._run_bom_tools = run_bom_tools
 
     # -- transcript -----------------------------------------------------------
@@ -148,7 +161,8 @@ class MockClient:
                 raise RuntimeError(
                     "MockClient has no transcript: pass transcript=... or set "
                     "KICRAFT_MOCK_TRANSCRIPT to a transcript JSON file "
-                    "(make one with transcript_from_state).")
+                    "(make one with transcript_from_state)."
+                )
             self._transcript = load_transcript(path)
         return self._transcript.get("stages") or {}
 
@@ -170,17 +184,47 @@ class MockClient:
             progress({"kind": "answer_delta", "text": text[:80]})
 
     # -- client surface -------------------------------------------------------
-    def chat(self, messages, model=None, max_tokens=None, temperature=0.2,
-             progress=None, meta_ctx=None, reasoning=None) -> dict:
+    def chat(
+        self,
+        messages,
+        model=None,
+        max_tokens=None,
+        temperature=0.2,
+        progress=None,
+        meta_ctx=None,
+        reasoning=None,
+        reasoning_guard=None,
+        collection_bounds=(),
+        response_format=None,
+    ) -> dict:
         text = self._text_for(meta_ctx)
         self._settle(progress, text)
-        return {"text": text, "reasoning": None, "finish_reason": "stop",
-                "model": getattr(self.s, "model", "mock"), "usage": {},
-                "cost_usd": 0.0, "guard": self.guard.status()}
+        return {
+            "text": text,
+            "reasoning": None,
+            "finish_reason": "stop",
+            "model": getattr(self.s, "model", "mock"),
+            "usage": {},
+            "cost_usd": 0.0,
+            "guard": self.guard.status(),
+        }
 
-    def chat_with_tools(self, messages, tools, executor, model=None, max_tokens=None,
-                        temperature=0.2, max_rounds=12, progress=None, meta_ctx=None,
-                        reasoning=None) -> dict:
+    def chat_with_tools(
+        self,
+        messages,
+        tools,
+        executor,
+        model=None,
+        max_tokens=None,
+        temperature=0.2,
+        max_rounds=12,
+        progress=None,
+        meta_ctx=None,
+        reasoning=None,
+        reasoning_guard=None,
+        collection_bounds=(),
+        response_format=None,
+    ) -> dict:
         text = self._text_for(meta_ctx)
         # Optionally exercise the real parts-lookup subprocess once so the BOM
         # tool path contributes to load (off by default for max throughput).
@@ -190,8 +234,14 @@ class MockClient:
             except Exception:  # pragma: no cover - tool errors are not the SUT here
                 pass
         self._settle(progress, text)
-        return {"text": text, "cost_usd": 0.0, "rounds": 1, "tool_calls": 0,
-                "finish_reason": "stop", "guard": self.guard.status()}
+        return {
+            "text": text,
+            "cost_usd": 0.0,
+            "rounds": 1,
+            "tool_calls": 0,
+            "finish_reason": "stop",
+            "guard": self.guard.status(),
+        }
 
 
 class RecordingClient:

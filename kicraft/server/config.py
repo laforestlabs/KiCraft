@@ -79,6 +79,30 @@ class CollectionBound:
             raise ValueError("collection per-group bound must be positive")
 
 
+@dataclass(frozen=True)
+class ReasoningGuardPolicy:
+    """Client-side limits for one reasoning stream."""
+
+    name: str
+    hard_max_tokens: int
+    repetition_enabled: bool
+    repeat_window: int
+    repeat_threshold: int
+    wall_stall_s: int
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("reasoning policy name must not be empty")
+        if self.hard_max_tokens <= 0:
+            raise ValueError("reasoning hard ceiling must be positive")
+        if self.repeat_window <= 0:
+            raise ValueError("reasoning repeat window must be positive")
+        if self.repeat_threshold < 2:
+            raise ValueError("reasoning repeat threshold must be at least two")
+        if self.wall_stall_s <= 0:
+            raise ValueError("reasoning wall-stall ceiling must be positive")
+
+
 STAGE_COLLECTION_BOUNDS: dict[str, tuple[CollectionBound, ...]] = {
     "bom": (
         CollectionBound(
@@ -106,6 +130,51 @@ STAGE_SERIALIZATION_MAX_TOKENS = {
     "wiring": 32768,
 }
 
+DESIGN_PROFILES: dict[str, dict[str, object]] = {
+    "flash": {
+        "model": "deepseek/deepseek-v4-flash-0731",
+        "provider_order": ["deepinfra/fp8"],
+        "max_price_prompt": 0.11,
+        "max_price_completion": 0.24,
+    },
+    "pro": {
+        "model": "deepseek/deepseek-v4-pro-0813",
+        "provider_order": ["alibaba"],
+        "max_price_prompt": 1.46,
+        "max_price_completion": 4.38,
+    },
+}
+
+
+def _resolved_design_profile() -> tuple[str, dict[str, object]]:
+    """Resolve and validate the operator-selected designer profile."""
+    name = os.environ.get("KICRAFT_DESIGN_PROFILE", "flash").strip().lower()
+    if name not in DESIGN_PROFILES:
+        raise SystemExit(
+            f"KICRAFT_DESIGN_PROFILE must be one of {sorted(DESIGN_PROFILES)}, got {name!r}"
+        )
+    profile = DESIGN_PROFILES[name]
+    checks = {
+        "KICRAFT_MODEL": ("model", str),
+        "KICRAFT_PROVIDER_ORDER": (
+            "provider_order",
+            lambda raw: [part.strip() for part in raw.split(",") if part.strip()],
+        ),
+        "KICRAFT_MAX_PRICE_PROMPT": ("max_price_prompt", float),
+        "KICRAFT_MAX_PRICE_COMPLETION": ("max_price_completion", float),
+    }
+    for env_name, (key, parse) in checks.items():
+        raw = os.environ.get(env_name)
+        if raw is None or not raw.strip():
+            continue
+        actual = parse(raw.strip())
+        if actual != profile[key]:
+            raise SystemExit(
+                f"{env_name}={actual!r} conflicts with design profile {name!r} "
+                f"({profile[key]!r}); select another profile instead of mixing routes"
+            )
+    return name, profile
+
 
 @dataclass(frozen=True)
 class StageResponsePolicy:
@@ -124,6 +193,7 @@ class StageResponsePolicy:
     serialization_max_tokens: int
     serialization_retries: int = 1
     collection_bounds: tuple[CollectionBound, ...] = ()
+    reasoning_guard: ReasoningGuardPolicy | None = None
 
 
 @dataclass
@@ -131,7 +201,8 @@ class Settings:
     """Resolved server configuration. Build with `Settings.from_env()`."""
 
     api_key: str
-    model: str = "deepseek/deepseek-v4-flash"
+    model: str = "deepseek/deepseek-v4-flash-0731"
+    design_profile: str = "custom"
     base_url: str = "https://openrouter.ai/api/v1"
     max_tokens_per_call: int = 1024
     daily_usd_ceiling: float = 5.0
@@ -164,6 +235,9 @@ class Settings:
     # allowed; a second malformed reply is terminal. Fixed at one for design
     # stages. KICRAFT_SERIALIZATION_RETRIES.
     serialization_retries: int = 1
+    # Recovery must escape the deterministic sequence that produced the first
+    # malformed/overflowing serialization while retaining the same finite cap.
+    serialization_escape_temperature: float = 0.4
     # Fixed output cap for that serialization call, per stage (see
     # STAGE_SERIALIZATION_MAX_TOKENS). Never doubled dynamically.
     serialization_max_tokens: dict = field(
@@ -193,6 +267,14 @@ class Settings:
     # KICRAFT_REASONING_REPEAT_THRESHOLD.
     reasoning_repeat_window: int = 256
     reasoning_repeat_threshold: int = 3
+
+    # Judge/review streams legitimately reason far beyond the design ceiling.
+    # Their independent finite ceilings preserve cost safety without applying
+    # the design repetition canary to long-form analysis.
+    eval_judge_reasoning_max_tokens: int = 32768
+    eval_judge_wall_stall_s: int = 360
+    review_reasoning_max_tokens: int = 32768
+    review_wall_stall_s: int = 360
 
     # --- Outbound email + public URL (password-reset delivery) ---------------
     # public_url is the externally reachable origin (e.g. https://kicraft.io); it
@@ -227,22 +309,13 @@ class Settings:
     stripe_price_max: str = ""
 
     # --- OpenRouter provider routing + caching (cost safety) -----------------
-    # The model id is served by ~14 backends at a tight price band, but only some
-    # cache our long, re-sent system prefix (the dominant cost). The DeepSeek
-    # first-party backend is excluded by this account's data policy: pinning
-    # `deepseek` returns 404, so the previous pin silently fell through to
-    # OpenRouter's default, a poorly-caching backend (Baidu, ~46% warm hit). We
-    # instead pin an ordered set of verified fp8 backends that actually cache the
-    # prefix (92-100% warm), benchmarked via `provider-bench` and led by the
-    # lowest-latency ones. `allow_fallbacks` keeps the service up if those are
-    # down, and `max_price` is a hard per-Mtok ceiling that bounds any fallback to
-    # the cheap caching tier. All are USD per million tokens; 0.0 means "omit".
-    provider_order: list[str] = field(
-        default_factory=lambda: ["novita/fp8", "siliconflow/fp8", "streamlake"]
-    )
-    provider_allow_fallbacks: bool = True
-    max_price_prompt: float = 0.18
-    max_price_completion: float = 0.35
+    # ``Settings.from_env`` resolves the selected dated designer profile into
+    # these existing fields before client construction. Direct Settings(...)
+    # construction remains available to tests and one-off admin tools as the
+    provider_order: list[str] = field(default_factory=lambda: ["deepinfra/fp8"])
+    provider_allow_fallbacks: bool = False
+    max_price_prompt: float = 0.11
+    max_price_completion: float = 0.24
     enable_prompt_cache: bool = True
 
     # Surface the core-components registry (admin-curated default part per
@@ -252,19 +325,11 @@ class Settings:
     enable_core_defaults: bool = True
 
     # --- Class-J self-evaluation judge (admin-only web feature) ---------------
-    # The design loop runs a deliberately cheap/weak model; grading a finished run
-    # wants a stronger one. None means "reuse the design model" (`model`), which
-    # always works with the provider routing above. Point KICRAFT_EVAL_JUDGE_MODEL
-    # at a more capable id for better judgments; that is an admin action, since a
-    # different model may need its own provider routing.
-    eval_judge_model: str | None = None
-    # Answer-token budget for the Class-J eval judge. Same trap as
-    # review_max_tokens below: the 2026 reasoning judges (minimax-m3 is the
-    # default, via the review_model fallback) burn 10-23k reasoning tokens before
-    # the JSON answer, so a small cap truncates (finish=length) and the parser
-    # reports "no JSON object found in reply" -- silently dropping the grade.
-    # Cheap judges stop well under this, so the headroom only costs the heavy
-    # reasoners. KICRAFT_EVAL_JUDGE_MAX_TOKENS.
+    # Role identity is explicit and independent from electrical review even
+    # while both production roles use the same incumbent model.
+    eval_judge_model: str = "minimax/minimax-m3"
+    # Answer-token budget for the Class-J eval judge. Reasoning-heavy judges can
+    # consume 10-23k reasoning tokens before the structured answer.
     eval_judge_max_tokens: int = 24000
     # --- Layer-3 electrical-review pass (the in-product design "judge") --------
     # Reviews a committed design for topology/value/completeness defects the
@@ -292,16 +357,15 @@ class Settings:
     # stop naturally well under this, so it costs only the heavy reasoners.
     # KICRAFT_REVIEW_MAX_TOKENS.
     review_max_tokens: int = 24000
-    # Provider routing for the REVIEW call only (the design stages keep the
-    # global cost cap above). Defaults are UNRESTRICTED so a pricier or
-    # closed-weight review_model (Anthropic/Google/Mistral are not on the fp8
-    # caching tier, and reasoning-heavy tiers exceed the $0.18/$0.35 cap) can
-    # actually route. The review is one call per build and the spend guard still
-    # bounds total spend. Empty order = let OpenRouter pick; 0.0 = no price cap.
-    # KICRAFT_REVIEW_PROVIDER_ORDER / _MAX_PRICE_PROMPT / _MAX_PRICE_COMPLETION.
-    review_provider_order: list[str] = field(default_factory=list)
-    review_max_price_prompt: float = 0.0
-    review_max_price_completion: float = 0.0
+    # Provider routing for role calls is independent from the designer profile.
+    # The incumbent reviewer and judge use the same dated service today, but
+    # retain separate fields so either can be promoted independently.
+    review_provider_order: list[str] = field(default_factory=lambda: ["coreweave/fp4"])
+    review_max_price_prompt: float = 0.30
+    review_max_price_completion: float = 1.25
+    judge_provider_order: list[str] = field(default_factory=lambda: ["coreweave/fp4"])
+    judge_max_price_prompt: float = 0.30
+    judge_max_price_completion: float = 1.25
     # Lazy corroboration of the review gate: a blocker-eligible blocker hard-blocks
     # only if `review_corroboration` passes agree on it (same category + refdes),
     # else it demotes to a warning. Pass 2+ runs ONLY when pass 1 proposes such a
@@ -328,9 +392,11 @@ class Settings:
                 "OPENROUTER_API_KEY is not set. Copy .env.example to .env and add your "
                 "key (the .env file is gitignored; never commit it)."
             )
+        profile_name, profile = _resolved_design_profile()
         return cls(
             api_key=key,
-            model=os.environ.get("KICRAFT_MODEL", cls.model).strip() or cls.model,
+            model=str(profile["model"]),
+            design_profile=profile_name,
             max_tokens_per_call=int(
                 os.environ.get("KICRAFT_MAX_TOKENS_PER_CALL", cls.max_tokens_per_call)
             ),
@@ -356,6 +422,12 @@ class Settings:
             serialization_retries=int(
                 os.environ.get("KICRAFT_SERIALIZATION_RETRIES", cls.serialization_retries)
             ),
+            serialization_escape_temperature=float(
+                os.environ.get(
+                    "KICRAFT_SERIALIZATION_ESCAPE_TEMPERATURE",
+                    cls.serialization_escape_temperature,
+                )
+            ),
             serialization_max_tokens=dict(STAGE_SERIALIZATION_MAX_TOKENS),
             collection_bounds=dict(STAGE_COLLECTION_BOUNDS),
             design_reasoning_tokens=int(
@@ -369,6 +441,30 @@ class Settings:
             ),
             reasoning_repeat_threshold=int(
                 os.environ.get("KICRAFT_REASONING_REPEAT_THRESHOLD", cls.reasoning_repeat_threshold)
+            ),
+            eval_judge_reasoning_max_tokens=int(
+                os.environ.get(
+                    "KICRAFT_EVAL_JUDGE_REASONING_MAX_TOKENS",
+                    cls.eval_judge_reasoning_max_tokens,
+                )
+            ),
+            eval_judge_wall_stall_s=int(
+                os.environ.get(
+                    "KICRAFT_EVAL_JUDGE_WALL_STALL_S",
+                    cls.eval_judge_wall_stall_s,
+                )
+            ),
+            review_reasoning_max_tokens=int(
+                os.environ.get(
+                    "KICRAFT_REVIEW_REASONING_MAX_TOKENS",
+                    cls.review_reasoning_max_tokens,
+                )
+            ),
+            review_wall_stall_s=int(
+                os.environ.get(
+                    "KICRAFT_REVIEW_WALL_STALL_S",
+                    cls.review_wall_stall_s,
+                )
             ),
             public_url=os.environ.get("KICRAFT_PUBLIC_URL", cls.public_url).strip().rstrip("/")
             or cls.public_url,
@@ -392,23 +488,15 @@ class Settings:
             stripe_webhook_secret=os.environ.get("KICRAFT_STRIPE_WEBHOOK_SECRET", "").strip(),
             stripe_price_pro=os.environ.get("KICRAFT_STRIPE_PRICE_PRO", "").strip(),
             stripe_price_max=os.environ.get("KICRAFT_STRIPE_PRICE_MAX", "").strip(),
-            provider_order=[
-                p.strip()
-                for p in os.environ.get(
-                    "KICRAFT_PROVIDER_ORDER", "novita/fp8,siliconflow/fp8,streamlake"
-                ).split(",")
-                if p.strip()
-            ],
-            provider_allow_fallbacks=_env_bool_default("KICRAFT_PROVIDER_ALLOW_FALLBACKS", True),
-            max_price_prompt=float(
-                os.environ.get("KICRAFT_MAX_PRICE_PROMPT", cls.max_price_prompt)
-            ),
-            max_price_completion=float(
-                os.environ.get("KICRAFT_MAX_PRICE_COMPLETION", cls.max_price_completion)
-            ),
+            provider_order=list(profile["provider_order"]),
+            provider_allow_fallbacks=False,
+            max_price_prompt=float(profile["max_price_prompt"]),
+            max_price_completion=float(profile["max_price_completion"]),
             enable_prompt_cache=_env_bool_default("KICRAFT_ENABLE_PROMPT_CACHE", True),
             enable_core_defaults=_env_bool_default("KICRAFT_CORE_DEFAULTS", True),
-            eval_judge_model=(os.environ.get("KICRAFT_EVAL_JUDGE_MODEL", "").strip() or None),
+            eval_judge_model=(
+                os.environ.get("KICRAFT_EVAL_JUDGE_MODEL", "").strip() or cls.eval_judge_model
+            ),
             eval_judge_max_tokens=int(
                 os.environ.get("KICRAFT_EVAL_JUDGE_MAX_TOKENS", cls.eval_judge_max_tokens)
             ),
@@ -424,7 +512,7 @@ class Settings:
             ),
             review_provider_order=[
                 p.strip()
-                for p in os.environ.get("KICRAFT_REVIEW_PROVIDER_ORDER", "").split(",")
+                for p in os.environ.get("KICRAFT_REVIEW_PROVIDER_ORDER", "coreweave/fp4").split(",")
                 if p.strip()
             ],
             review_max_price_prompt=float(
@@ -433,6 +521,22 @@ class Settings:
             review_max_price_completion=float(
                 os.environ.get(
                     "KICRAFT_REVIEW_MAX_PRICE_COMPLETION", cls.review_max_price_completion
+                )
+            ),
+            judge_provider_order=[
+                p.strip()
+                for p in os.environ.get("KICRAFT_EVAL_JUDGE_PROVIDER_ORDER", "coreweave/fp4").split(
+                    ","
+                )
+                if p.strip()
+            ],
+            judge_max_price_prompt=float(
+                os.environ.get("KICRAFT_EVAL_JUDGE_MAX_PRICE_PROMPT", cls.judge_max_price_prompt)
+            ),
+            judge_max_price_completion=float(
+                os.environ.get(
+                    "KICRAFT_EVAL_JUDGE_MAX_PRICE_COMPLETION",
+                    cls.judge_max_price_completion,
                 )
             ),
             review_corroboration=int(
@@ -445,27 +549,24 @@ class Settings:
         )
 
     def for_review(self) -> "Settings":
-        """A copy with provider routing relaxed for the electrical-review call.
-        The design stages keep the global cost cap (`max_price_*`,
-        `provider_order`); the once-per-build review is allowed past it so a
-        pricier or closed-weight `review_model` can route. Spend guard still
-        bounds total spend."""
+        """Return the independently capped electrical-review route."""
         return replace(
             self,
             provider_order=self.review_provider_order,
+            provider_allow_fallbacks=False,
             max_price_prompt=self.review_max_price_prompt,
             max_price_completion=self.review_max_price_completion,
         )
 
     def for_judge(self) -> "Settings":
-        """A copy with provider routing relaxed for the Class-J eval judge call.
-        The judge should be a stronger, steadier model than the cheap design
-        model; that model is usually NOT on the fp8 caching tier and may exceed
-        the design price cap, so -- like the review call -- the judge is allowed
-        past the pin (empty provider order = OpenRouter picks; no price cap). The
-        design stages keep the global cap and the spend guard still bounds total
-        spend (the judge is one call per graded run)."""
-        return replace(self, provider_order=[], max_price_prompt=0.0, max_price_completion=0.0)
+        """Return the independently capped Class-J route."""
+        return replace(
+            self,
+            provider_order=self.judge_provider_order,
+            provider_allow_fallbacks=False,
+            max_price_prompt=self.judge_max_price_prompt,
+            max_price_completion=self.judge_max_price_completion,
+        )
 
     def review_reasoning(self) -> dict | None:
         """OpenRouter reasoning control for the review: effort-based when
@@ -477,15 +578,39 @@ class Settings:
             return {"max_tokens": self.review_reasoning_tokens}
         return None
 
-    def design_reasoning(self, stage: str) -> dict | None:
-        """OpenRouter reasoning control for a design stage.
+    def design_reasoning_guard(self) -> ReasoningGuardPolicy:
+        return ReasoningGuardPolicy(
+            name="design",
+            hard_max_tokens=self.reasoning_max_tokens,
+            repetition_enabled=True,
+            repeat_window=self.reasoning_repeat_window,
+            repeat_threshold=self.reasoning_repeat_threshold,
+            wall_stall_s=self.request_timeout_s,
+        )
 
-        Intent and functional_spec are small serialization tasks where the
-        reasoning channel adds only a loop risk (KC-VWW5X7): disable it. The
-        larger stages get a bounded budget; design_reasoning_tokens=0 disables
-        reasoning for ALL design stages.
-        """
-        if stage in ("intent", "functional_spec"):
+    def judge_reasoning_guard(self) -> ReasoningGuardPolicy:
+        return ReasoningGuardPolicy(
+            name="eval_judge",
+            hard_max_tokens=self.eval_judge_reasoning_max_tokens,
+            repetition_enabled=False,
+            repeat_window=self.reasoning_repeat_window,
+            repeat_threshold=self.reasoning_repeat_threshold,
+            wall_stall_s=self.eval_judge_wall_stall_s,
+        )
+
+    def review_reasoning_guard(self) -> ReasoningGuardPolicy:
+        return ReasoningGuardPolicy(
+            name="electrical_review",
+            hard_max_tokens=self.review_reasoning_max_tokens,
+            repetition_enabled=False,
+            repeat_window=self.reasoning_repeat_window,
+            repeat_threshold=self.reasoning_repeat_threshold,
+            wall_stall_s=self.review_wall_stall_s,
+        )
+
+    def design_reasoning(self, stage: str) -> dict | None:
+        """OpenRouter reasoning control for a design stage."""
+        if stage in ("intent", "functional_spec", "wiring"):
             return {"enabled": False}
         if self.design_reasoning_tokens <= 0:
             return {"enabled": False}
@@ -508,6 +633,7 @@ class Settings:
             ),
             serialization_retries=max(0, int(self.serialization_retries)),
             collection_bounds=tuple(self.collection_bounds.get(stage, ())),
+            reasoning_guard=self.design_reasoning_guard(),
         )
 
     @property
@@ -526,6 +652,7 @@ class Settings:
         """Settings safe to display/log (without the secret key)."""
         return {
             "model": self.model,
+            "design_profile": self.design_profile,
             "base_url": self.base_url,
             "max_tokens_per_call": self.max_tokens_per_call,
             "daily_usd_ceiling": self.daily_usd_ceiling,
@@ -551,5 +678,12 @@ class Settings:
             "enable_core_defaults": self.enable_core_defaults,
             "eval_judge_model": self.eval_judge_model,
             "design_temperature": self.design_temperature,
+            "review_model": self.review_model,
+            "review_provider_order": self.review_provider_order,
+            "review_max_price_prompt": self.review_max_price_prompt,
+            "review_max_price_completion": self.review_max_price_completion,
+            "judge_provider_order": self.judge_provider_order,
+            "judge_max_price_prompt": self.judge_max_price_prompt,
+            "judge_max_price_completion": self.judge_max_price_completion,
             "llm_max_retries": self.llm_max_retries,
         }

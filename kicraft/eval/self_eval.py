@@ -41,11 +41,13 @@ sequential baseline. ``summary.json`` is checkpointed after every brief, and
 ``--resume <batch_dir>`` finishes an interrupted batch by reusing completed
 briefs and re-running only errored/missing ones.
 """
+
 from __future__ import annotations
 
 import argparse
 import contextlib
 import datetime as dt
+import hashlib
 import json
 import os
 import shutil
@@ -110,27 +112,48 @@ def _outline_check(entry: dict, rundir: Path, build_rc: int | None) -> dict | No
             "reason": f"no built parent (build rc={build_rc})",
         }
     board = _find_parent_board(rundir)
-    res = evaluate_outline_shape(board, expected) if board else {
-        "level": 0, "partial": False, "detected_family": None,
-        "rationale": "no built board to classify",
-        "expected_shape": expected,
-    }
+    res = (
+        evaluate_outline_shape(board, expected)
+        if board
+        else {
+            "level": 0,
+            "partial": False,
+            "detected_family": None,
+            "rationale": "no built board to classify",
+            "expected_shape": expected,
+        }
+    )
     res["pass"] = res.get("level") == 4
     return res
 
+
 # Deterministic build, mirroring the web worker (kicraft.server.web): relative paths
 # resolved against the run dir, no archive sweep. KICRAFT mirrors stage_driver.
-_BUILD_CMD = [sys.executable, "-m", "kicraft.design.cli_app",
-              "build", ".kicraft/state.json", "generated", "--no-archive"]
+_BUILD_CMD = [
+    sys.executable,
+    "-m",
+    "kicraft.design.cli_app",
+    "build",
+    ".kicraft/state.json",
+    "generated",
+    "--no-archive",
+]
 
 # Only these event kinds belong in the scorable events.jsonl. The capped client
 # streams reasoning_delta / answer_delta / tool / tool_result through the SAME
 # progress callback; writing those would bloat the log and a stray kind could skew
 # the convergence/friction scorers, which key off retry/question/stage_done events.
-_EVENT_KINDS = frozenset({
-    "stage_start", "stage_done", "question", "retry",
-    "build_start", "build_log", "build_done",
-})
+_EVENT_KINDS = frozenset(
+    {
+        "stage_start",
+        "stage_done",
+        "question",
+        "retry",
+        "build_start",
+        "build_log",
+        "build_done",
+    }
+)
 
 # kicraft.design.cli_app._cmd_build exit code -> a short human label, so the report
 # shows routing/fab-readiness distinctly from the rubric grade (which judges the
@@ -182,6 +205,81 @@ def _now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
 
+def _stable_hash(value) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _code_revision() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            timeout=10,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def _write_campaign_manifest(
+    out_dir: Path,
+    *,
+    settings,
+    judge_model: str | None,
+    selected: list[tuple[int, dict]],
+    repeats: int,
+) -> Path:
+    corpus = [
+        {"index": index, "slug": entry["slug"], "brief_hash": _stable_hash(entry["brief"])}
+        for index, entry in selected
+    ]
+    immutable = {
+        "code_revision": _code_revision(),
+        "design_profile": getattr(settings, "design_profile", "custom"),
+        "design_model": settings.model,
+        "design_provider_order": list(settings.provider_order),
+        "design_price_caps_mtok": {
+            "prompt": settings.max_price_prompt,
+            "completion": settings.max_price_completion,
+        },
+        "review_model": settings.review_model,
+        "review_provider_order": list(settings.review_provider_order),
+        "judge_model": judge_model,
+        "judge_provider_order": list(settings.judge_provider_order),
+        "response_policies": {
+            "design": "kicraft_<stage>_response_v1",
+            "wiring_patch": "kicraft_wiring_patch_v1",
+            "review": "kicraft_electrical_review_v1",
+            "judge": "kicraft_eval_judge_v1",
+        },
+        "caps": {
+            "daily_usd": settings.daily_usd_ceiling,
+            "total_usd": settings.total_usd_ceiling,
+            "max_tokens_per_call": settings.max_tokens_per_call,
+            "serialization_retries": settings.serialization_retries,
+        },
+        "repeats": repeats,
+        "corpus_hash": _stable_hash(corpus),
+        "corpus": corpus,
+    }
+    payload = {
+        "schema_version": 1,
+        "created_at": _now_iso(),
+        "immutable": immutable,
+    }
+    path = out_dir / "campaign_manifest.json"
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing.get("immutable") != immutable:
+            raise SystemExit(f"campaign manifest mismatch at {path}; source/model/policy changed")
+        return path
+    with path.open("x", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return path
+
+
 def _stamp() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
@@ -201,8 +299,11 @@ def _build_env() -> dict:
     # into a pipe, so without it the [build] lines sit block-buffered in the
     # child and a watchdog SIGKILL destroys the whole evidence trail (the empty
     # rc=-9 logs of the 2026-07-07 self-eval batch).
-    return {**os.environ, "PYTHONUNBUFFERED": "1",
-            "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web")}
+    return {
+        **os.environ,
+        "PYTHONUNBUFFERED": "1",
+        "KICRAFT_CALLER": os.environ.get("KICRAFT_CALLER", "web"),
+    }
 
 
 def _event_writer(path: Path, *, full: bool = False):
@@ -217,6 +318,7 @@ def _event_writer(path: Path, *, full: bool = False):
     were first tuned on. Either is score-safe: the scorers key off specific kinds
     (stage_done / retry / question), so the extra streaming kinds never skew them
     -- the web app's own delta-laden transcript is scored the same way."""
+
     def progress(ev: dict) -> None:
         if not isinstance(ev, dict):
             return
@@ -224,6 +326,7 @@ def _event_writer(path: Path, *, full: bool = False):
             return
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(ev) + "\n")
+
     return progress
 
 
@@ -234,19 +337,29 @@ def _auto_answers(questions) -> list[dict]:
     out = []
     for q in questions or []:
         opts = q.get("options") or []
-        out.append({
-            "text": q.get("text", ""),
-            "answer": opts[0] if opts else
-            "Use sensible engineering defaults; do not ask further questions.",
-        })
+        out.append(
+            {
+                "text": q.get("text", ""),
+                "answer": opts[0]
+                if opts
+                else "Use sensible engineering defaults; do not ask further questions.",
+            }
+        )
     return out
 
 
 # --------------------------------------------------------------------------- #
 # drive + build one brief
 # --------------------------------------------------------------------------- #
-def run_design(client, brief: str, rundir: Path, progress, *,
-               max_park_rounds: int = 12, run_id: str | None = None) -> dict:
+def run_design(
+    client,
+    brief: str,
+    rundir: Path,
+    progress,
+    *,
+    max_park_rounds: int = 12,
+    run_id: str | None = None,
+) -> dict:
     """Drive the five design stages to completion over ``rundir``, auto-answering
     any parked clarifying question. Returns
     ``{status, cost_usd, questions, rounds, error}`` where status is ``ok`` (every
@@ -272,15 +385,26 @@ def run_design(client, brief: str, rundir: Path, progress, *,
     for round_no in range(max_park_rounds):
         rem = remaining_stages(read_state(rundir))
         if not rem:
-            return {"status": "ok", "cost_usd": cost, "questions": n_questions,
-                    "rounds": round_no, "error": None}
-        res = run_session(rundir, brief, rem, answers=pending, client=client,
-                          progress=progress, run_id=run_id)
+            return {
+                "status": "ok",
+                "cost_usd": cost,
+                "questions": n_questions,
+                "rounds": round_no,
+                "error": None,
+            }
+        res = run_session(
+            rundir, brief, rem, answers=pending, client=client, progress=progress, run_id=run_id
+        )
         _add_cost(res)
         status = res.get("status")
         if status == "ok":
-            return {"status": "ok", "cost_usd": cost, "questions": n_questions,
-                    "rounds": round_no + 1, "error": None}
+            return {
+                "status": "ok",
+                "cost_usd": cost,
+                "questions": n_questions,
+                "rounds": round_no + 1,
+                "error": None,
+            }
         if status == "awaiting_input":
             # A reconcile_target="bom" park is the pipeline's note-to-self, NOT a
             # user question: wiring cannot add the parts it needs, so plain-
@@ -290,51 +414,74 @@ def run_design(client, brief: str, rundir: Path, progress, *,
             # (WS6). Deficit CHAINS are real (each pass can surface the next
             # genuine shortfall -- fix-plan N3), so keep reconciling while the
             # pass budget advances. Never plain-answer a reconcile park.
-            while (res.get("status") == "awaiting_input"
-                   and bom_reconcile_deficits(res)):
+            while res.get("status") == "awaiting_input" and bom_reconcile_deficits(res):
                 prev = bom_passes
                 res, bom_passes = maybe_bom_reconcile(
-                    rundir, brief, res, progress=progress, run_id=run_id,
-                    client=client, reconcile_passes=bom_passes)
+                    rundir,
+                    brief,
+                    res,
+                    progress=progress,
+                    run_id=run_id,
+                    client=client,
+                    reconcile_passes=bom_passes,
+                )
                 if bom_passes == prev:
                     break  # budget exhausted; fail honestly below
                 _add_cost(res)  # count each reconcile pass
             status = res.get("status")
             if status == "ok":
-                return {"status": "ok", "cost_usd": cost,
-                        "questions": n_questions, "rounds": round_no + 1,
-                        "error": None}
+                return {
+                    "status": "ok",
+                    "cost_usd": cost,
+                    "questions": n_questions,
+                    "rounds": round_no + 1,
+                    "error": None,
+                }
             qs = res.get("questions") or []
-            if status == "awaiting_input" and any(
-                q.get("reconcile_target") == "bom" for q in qs
-            ):
+            if status == "awaiting_input" and any(q.get("reconcile_target") == "bom" for q in qs):
                 # A BOM deficit that survived the reconcile budget cannot be
                 # resolved by answering (wiring still can't add parts). Stop
                 # honestly instead of looping the retry budget away.
-                unresolved = "; ".join(
-                    str(q.get("text", "")) for q in qs
-                )[:400]
-                return {"status": "failed", "cost_usd": cost,
-                        "questions": n_questions, "rounds": round_no + 1,
-                        "error": f"unresolved BOM deficit after "
-                                 f"{bom_passes} reconcile pass(es): {unresolved}"}
+                unresolved = "; ".join(str(q.get("text", "")) for q in qs)[:400]
+                return {
+                    "status": "failed",
+                    "cost_usd": cost,
+                    "questions": n_questions,
+                    "rounds": round_no + 1,
+                    "error": f"unresolved BOM deficit after "
+                    f"{bom_passes} reconcile pass(es): {unresolved}",
+                }
             if status != "awaiting_input":
                 # Reconcile turned the park into a hard failure -- report it.
                 last = (res.get("results") or [{}])[-1]
                 err = last.get("error") or last.get("commit") or "stage failed to commit"
-                return {"status": "failed", "cost_usd": cost,
-                        "questions": n_questions, "rounds": round_no + 1,
-                        "error": str(err)[:500]}
+                return {
+                    "status": "failed",
+                    "cost_usd": cost,
+                    "questions": n_questions,
+                    "rounds": round_no + 1,
+                    "error": str(err)[:500],
+                }
             n_questions += len(qs)
             pending = _auto_answers(qs)
             record_answers(rundir, res.get("last_stage"), pending)
             continue
         last = (res.get("results") or [{}])[-1]
         err = last.get("error") or last.get("commit") or "stage failed to commit"
-        return {"status": "failed", "cost_usd": cost, "questions": n_questions,
-                "rounds": round_no + 1, "error": str(err)[:500]}
-    return {"status": "parked", "cost_usd": cost, "questions": n_questions,
-            "rounds": max_park_rounds, "error": "exceeded max park/resume rounds"}
+        return {
+            "status": "failed",
+            "cost_usd": cost,
+            "questions": n_questions,
+            "rounds": round_no + 1,
+            "error": str(err)[:500],
+        }
+    return {
+        "status": "parked",
+        "cost_usd": cost,
+        "questions": n_questions,
+        "rounds": max_park_rounds,
+        "error": "exceeded max park/resume rounds",
+    }
 
 
 def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
@@ -353,9 +500,15 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
     build_env.setdefault("KICRAFT_BUILD_MAX_WALL_S", f"{max(60.0, timeout_s * 0.9):.0f}")
     # start_new_session + kill_tree (not proc.kill): builds fan out to leaf,
     # router, and pcbnew subprocess groups that an outer watchdog must reap.
-    proc = subprocess.Popen(_BUILD_CMD, cwd=str(rundir), text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            env=build_env, start_new_session=True)
+    proc = subprocess.Popen(
+        _BUILD_CMD,
+        cwd=str(rundir),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=build_env,
+        start_new_session=True,
+    )
     timer = threading.Timer(timeout_s, kill_tree, args=(proc.pid,))
     timer.start()
     try:
@@ -370,8 +523,12 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
         timer.cancel()
     rc = proc.returncode
     if rc is not None and rc < 0:
-        progress({"kind": "build_log",
-                  "text": f"[self-eval] build killed (timeout {timeout_s}s or signal {-rc})"})
+        progress(
+            {
+                "kind": "build_log",
+                "text": f"[self-eval] build killed (timeout {timeout_s}s or signal {-rc})",
+            }
+        )
     progress({"kind": "build_done", "ok": rc == 0, "rc": rc})
     return rc if rc is not None else -1
 
@@ -382,17 +539,28 @@ def _make_judge_client(s, judge_model, skip_judge: bool):
     price cap), else None (reuse the design client). Built per-thread by the
     caller -- client instances are not safe to share across threads."""
     from kicraft.server.client import make_client
+
     if skip_judge or not judge_model or judge_model == getattr(s, "model", None):
         return None
     return make_client(s.for_judge())
 
 
-def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
-                 judge_model, skip_judge: bool, judge_client=None,
-                 judge_max_tokens: int | None = None, rep: int | None = None,
-                 max_park_rounds: int = 12,
-                 build_timeout_s: int = 2400, build_gate=None,
-                 full_events: bool = True) -> dict:
+def evaluate_one(
+    client,
+    idx: int,
+    entry: dict,
+    out_dir: Path,
+    *,
+    judge_model,
+    skip_judge: bool,
+    judge_client=None,
+    judge_max_tokens: int | None = None,
+    rep: int | None = None,
+    max_park_rounds: int = 12,
+    build_timeout_s: int = 2400,
+    build_gate=None,
+    full_events: bool = True,
+) -> dict:
     """Drive + build + score one benchmark brief into ``out_dir/<stem>/``. ``entry``
     is a ``{"slug", "archetype", "brief"}`` dict from ``BENCHMARK_PROMPTS``. Never
     raises: any failure is captured in the returned record so the batch continues.
@@ -414,17 +582,28 @@ def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
 
     # ``prompt`` is kept as the record field name (the web admin + report read it) and
     # mirrors entry["brief"]; ``slug``/``archetype`` are the new corpus identity.
-    rec: dict = {"index": idx, "slug": entry["slug"], "repeat": rep,
-                 "archetype": entry["archetype"],
-                 "prompt": prompt, "stem": stem, "rundir": str(rundir)}
+    rec: dict = {
+        "index": idx,
+        "slug": entry["slug"],
+        "repeat": rep,
+        "archetype": entry["archetype"],
+        "prompt": prompt,
+        "stem": stem,
+        "rundir": str(rundir),
+    }
     try:
-        d = run_design(client, prompt, rundir, progress,
-                       max_park_rounds=max_park_rounds, run_id=run_id)
-        rec.update(design_status=d["status"], design_cost_usd=round(d["cost_usd"], 6),
-                   questions=d["questions"], design_error=d["error"])
+        d = run_design(
+            client, prompt, rundir, progress, max_park_rounds=max_park_rounds, run_id=run_id
+        )
+        rec.update(
+            design_status=d["status"],
+            design_cost_usd=round(d["cost_usd"], 6),
+            questions=d["questions"],
+            design_error=d["error"],
+        )
 
         if d["status"] == "ok":
-            with (build_gate or contextlib.nullcontext()):
+            with build_gate or contextlib.nullcontext():
                 build_rc = run_build(rundir, progress, timeout_s=build_timeout_s)
         else:
             build_rc = None
@@ -435,16 +614,25 @@ def evaluate_one(client, idx: int, entry: dict, out_dir: Path, *,
         # measures), so pass it explicitly: the latency dimension's state-history ->
         # synth-checked_at fallback can return None, which leaves latency ungraded and
         # withholds the whole letter grade. An exact window always scores it.
-        report = evaluate_project(rundir, None if skip_judge else client,
-                                  judge_model=judge_model, judge_client=judge_client,
-                                  judge_max_tokens=judge_max_tokens,
-                                  skip_judge=skip_judge,
-                                  started_at=started_at, finished_at=_now_iso())
+        report = evaluate_project(
+            rundir,
+            None if skip_judge else client,
+            judge_model=judge_model,
+            judge_client=judge_client,
+            judge_max_tokens=judge_max_tokens,
+            skip_judge=skip_judge,
+            started_at=started_at,
+            finished_at=_now_iso(),
+        )
         sc, judge = report["score"], report["judge"]
         rec.update(
-            grade=sc.get("grade"), final=sc.get("final"), weighted=sc.get("weighted"),
-            verdict=sc.get("verdict"), note=sc.get("note"),
-            judge_ok=judge.get("ok"), judge_cost_usd=judge.get("cost_usd"),
+            grade=sc.get("grade"),
+            final=sc.get("final"),
+            weighted=sc.get("weighted"),
+            verdict=sc.get("verdict"),
+            note=sc.get("note"),
+            judge_ok=judge.get("ok"),
+            judge_cost_usd=judge.get("cost_usd"),
             gates=[g["id"] for g in report["gates"]["triggered"]],
             dims={k: v.get("level") for k, v in report["dimensions"].items()},
             report_path=str(rundir / "eval" / "report.json"),
@@ -476,8 +664,9 @@ def _archetype_stats(records: list[dict]) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for r in records:
         a = r.get("archetype") or "—"
-        st = out.setdefault(a, {"n": 0, "graded_n": 0, "fab_ready": 0,
-                                "_finals": [], "grade_counts": {}})
+        st = out.setdefault(
+            a, {"n": 0, "graded_n": 0, "fab_ready": 0, "_finals": [], "grade_counts": {}}
+        )
         st["n"] += 1
         if isinstance(r.get("final"), (int, float)):
             st["graded_n"] += 1
@@ -508,8 +697,17 @@ def _per_brief_stats(records: list[dict]) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for r in records:
         slug = r.get("slug") or "—"
-        st = out.setdefault(slug, {"slug": slug, "archetype": r.get("archetype"),
-                                   "n": 0, "_finals": [], "fab_ready": 0, "grades": []})
+        st = out.setdefault(
+            slug,
+            {
+                "slug": slug,
+                "archetype": r.get("archetype"),
+                "n": 0,
+                "_finals": [],
+                "fab_ready": 0,
+                "grades": [],
+            },
+        )
         st["n"] += 1
         if isinstance(r.get("final"), (int, float)):
             st["_finals"].append(r["final"])
@@ -542,8 +740,9 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
     per_brief = _per_brief_stats(records)
     # With repeats, the trustworthy cross-brief signal aggregates each brief's
     # MEDIAN (one vote per brief), so a single noisy run can't sway the headline.
-    brief_medians = [b["median_final"] for b in per_brief.values()
-                     if b.get("median_final") is not None]
+    brief_medians = [
+        b["median_final"] for b in per_brief.values() if b.get("median_final") is not None
+    ]
     repeats = meta.get("repeats", 1)
 
     summary = {
@@ -557,10 +756,19 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         "median_final": round(statistics.median(finals), 1) if finals else None,
         # per-brief-median aggregates (== flat mean/median when repeats == 1)
         "brief_median_mean": round(statistics.fmean(brief_medians), 1) if brief_medians else None,
-        "brief_median_median": round(statistics.median(brief_medians), 1) if brief_medians else None,
-        "median_iqr": (round(statistics.median([b["iqr"] for b in per_brief.values()
-                                                if b.get("iqr") is not None]), 1)
-                       if repeats > 1 and brief_medians else None),
+        "brief_median_median": round(statistics.median(brief_medians), 1)
+        if brief_medians
+        else None,
+        "median_iqr": (
+            round(
+                statistics.median(
+                    [b["iqr"] for b in per_brief.values() if b.get("iqr") is not None]
+                ),
+                1,
+            )
+            if repeats > 1 and brief_medians
+            else None
+        ),
         "grade_counts": grade_counts,
         "gate_counts": gate_counts,
         "archetype_stats": _archetype_stats(records),
@@ -608,18 +816,24 @@ def _render_md(s: dict) -> str:
     L: list[str] = [f"# KiCraft self-eval — {s.get('started_at', '')}", ""]
     repeats = s.get("repeats", 1)
     rep_note = f" ({repeats} repeats, {s['n']} runs)" if repeats > 1 else ""
-    L.append(f"- briefs: **{s.get('n_briefs', s['n'])}**{rep_note}  ·  graded runs: **{s['graded_n']}**  ·  "
-             f"fab-ready builds: **{s['fab_ready']}/{s['n']}**  ·  errored: **{s['n_errored']}**")
+    L.append(
+        f"- briefs: **{s.get('n_briefs', s['n'])}**{rep_note}  ·  graded runs: **{s['graded_n']}**  ·  "
+        f"fab-ready builds: **{s['fab_ready']}/{s['n']}**  ·  errored: **{s['n_errored']}**"
+    )
     if s.get("mean_final") is not None:
         L.append(f"- score (0–100): mean **{s['mean_final']}** · median **{s['median_final']}**")
     if repeats > 1 and s.get("brief_median_mean") is not None:
-        L.append(f"- per-brief median (de-noised, 1 vote/brief): mean **{s['brief_median_mean']}** "
-                 f"· median **{s['brief_median_median']}**  ·  typical IQR **{s.get('median_iqr')}**")
+        L.append(
+            f"- per-brief median (de-noised, 1 vote/brief): mean **{s['brief_median_mean']}** "
+            f"· median **{s['brief_median_median']}**  ·  typical IQR **{s.get('median_iqr')}**"
+        )
     L.append("- grades: " + "  ".join(f"{g}:{n}" for g, n in sorted(s["grade_counts"].items())))
     if s["gate_counts"]:
         L.append("- gates: " + ", ".join(f"{k}×{v}" for k, v in s["gate_counts"].items()))
-    L.append(f"- judge: {(s.get('judge_model') if s.get('judge') else 'off (Class-C only)')}"
-             f"  ·  design model: {s.get('design_model')}")
+    L.append(
+        f"- judge: {(s.get('judge_model') if s.get('judge') else 'off (Class-C only)')}"
+        f"  ·  design model: {s.get('design_model')}"
+    )
     L.append(f"- total spend: **${s['total_cost_usd']}**  ·  report dir: `{s.get('out_dir')}`")
     L.append("")
 
@@ -631,14 +845,20 @@ def _render_md(s: dict) -> str:
         L.append("|-----------|---|--------|------|-----------|--------|")
         for a, st in arche.items():
             grds = " ".join(f"{g}:{n}" for g, n in sorted(st["grade_counts"].items()))
-            L.append("| " + " | ".join([
-                a,
-                str(st["n"]),
-                str(st["graded_n"]),
-                (str(st["mean_final"]) if st["mean_final"] is not None else "—"),
-                f"{st['fab_ready']}/{st['n']}",
-                grds,
-            ]) + " |")
+            L.append(
+                "| "
+                + " | ".join(
+                    [
+                        a,
+                        str(st["n"]),
+                        str(st["graded_n"]),
+                        (str(st["mean_final"]) if st["mean_final"] is not None else "—"),
+                        f"{st['fab_ready']}/{st['n']}",
+                        grds,
+                    ]
+                )
+                + " |"
+            )
         L.append("")
 
     per_brief = s.get("per_brief") or {}
@@ -649,19 +869,24 @@ def _render_md(s: dict) -> str:
         L.append("|------|-----------|---|--------|-----|---------|-----------|--------|")
         for b in per_brief.values():
             med = b.get("median_final")
-            rng = (f"{b['min_final']}–{b['max_final']}"
-                   if b.get("min_final") is not None else "—")
+            rng = f"{b['min_final']}–{b['max_final']}" if b.get("min_final") is not None else "—"
             grds = " ".join(b.get("grades") or [])
-            L.append("| " + " | ".join([
-                b.get("slug") or "—",
-                str(b.get("archetype") or "—"),
-                str(b.get("n", 0)),
-                (str(med) if med is not None else "—"),
-                (str(b.get("iqr")) if b.get("iqr") is not None else "—"),
-                rng,
-                f"{b.get('fab_ready', 0)}/{b.get('n', 0)}",
-                grds,
-            ]) + " |")
+            L.append(
+                "| "
+                + " | ".join(
+                    [
+                        b.get("slug") or "—",
+                        str(b.get("archetype") or "—"),
+                        str(b.get("n", 0)),
+                        (str(med) if med is not None else "—"),
+                        (str(b.get("iqr")) if b.get("iqr") is not None else "—"),
+                        rng,
+                        f"{b.get('fab_ready', 0)}/{b.get('n', 0)}",
+                        grds,
+                    ]
+                )
+                + " |"
+            )
         L.append("")
 
     L.append("## Per run" if repeats > 1 else "## Per brief")
@@ -676,20 +901,31 @@ def _render_md(s: dict) -> str:
         verdict = r.get("verdict") or ("ERROR" if r.get("error") else r.get("design_status") or "—")
         final = r.get("final")
         slug_cell = str(r.get("slug") or "—") + (f" r{r['repeat']}" if r.get("repeat") else "")
-        L.append("| " + " | ".join([
-            str(r["index"]),
-            slug_cell,
-            str(r.get("archetype") or "—"),
-            r.get("grade") or "—",
-            (str(final) if final is not None else "—"),
-            str(verdict),
-            str(build),
-            str(r.get("questions", "—")),
-            f"${_run_cost(r)}",
-        ]) + " |")
+        L.append(
+            "| "
+            + " | ".join(
+                [
+                    str(r["index"]),
+                    slug_cell,
+                    str(r.get("archetype") or "—"),
+                    r.get("grade") or "—",
+                    (str(final) if final is not None else "—"),
+                    str(verdict),
+                    str(build),
+                    str(r.get("questions", "—")),
+                    f"${_run_cost(r)}",
+                ]
+            )
+            + " |"
+        )
 
-    flagged = [r for r in s["runs"] if r.get("error") or r.get("gates")
-               or (isinstance(r.get("final"), (int, float)) and r["final"] < 60)]
+    flagged = [
+        r
+        for r in s["runs"]
+        if r.get("error")
+        or r.get("gates")
+        or (isinstance(r.get("final"), (int, float)) and r["final"] < 60)
+    ]
     if flagged:
         L += ["", "## Needs attention"]
         for r in flagged:
@@ -719,6 +955,7 @@ def _default_out_dir() -> Path:
     if not root:
         try:
             from kicraft.server.config import Settings
+
             root = getattr(Settings.from_env(), "projects_dir", None)
         except Exception:  # noqa: BLE001
             root = None
@@ -776,56 +1013,101 @@ def _reusable(rec: dict | None) -> bool:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Drive every benchmark brief end to end and grade it "
-                    "(the /self-eval regression loop over the 28-brief corpus).")
-    ap.add_argument("--limit", type=int, default=None,
-                    help="run only the first N benchmark briefs")
-    ap.add_argument("--only", default=None,
-                    help="comma-separated slugs to run, e.g. 'usb-pd-trigger,buck-3a' "
-                         "(bare integers are still accepted as 1-based indices)")
-    ap.add_argument("--out", default=None,
-                    help="report root (default: <projects_dir>/../self_eval/<ts> or ./logs/self_eval/<ts>)")
-    ap.add_argument("--no-judge", action="store_true",
-                    help="score Class-C only; skip the LLM judge (cheaper, no A-F grade)")
-    ap.add_argument("--lean-events", action="store_true",
-                    help="persist only structural events (stage/retry/build) instead of "
-                         "the full reasoning/answer stream. Default is full fidelity, so a "
-                         "run replays in the web viewer like a live build (~+0.5-2MB/run)")
+        "(the /self-eval regression loop over the 28-brief corpus)."
+    )
+    ap.add_argument("--limit", type=int, default=None, help="run only the first N benchmark briefs")
+    ap.add_argument(
+        "--only",
+        default=None,
+        help="comma-separated slugs to run, e.g. 'usb-pd-trigger,buck-3a' "
+        "(bare integers are still accepted as 1-based indices)",
+    )
+    ap.add_argument(
+        "--out",
+        default=None,
+        help="report root (default: <projects_dir>/../self_eval/<ts> or ./logs/self_eval/<ts>)",
+    )
+    ap.add_argument(
+        "--no-judge",
+        action="store_true",
+        help="score Class-C only; skip the LLM judge (cheaper, no A-F grade)",
+    )
+    ap.add_argument(
+        "--lean-events",
+        action="store_true",
+        help="persist only structural events (stage/retry/build) instead of "
+        "the full reasoning/answer stream. Default is full fidelity, so a "
+        "run replays in the web viewer like a live build (~+0.5-2MB/run)",
+    )
     ap.add_argument("--judge-model", default=None, help="judge model override")
-    ap.add_argument("--repeats", type=int, default=1,
-                    help="run each brief N times and report per-brief median + IQR "
-                         "(default 1). N>=3 makes the ~12-pt run-to-run noise floor "
-                         "legible: a regression is a drop in the per-brief MEDIAN, not "
-                         "a single noisy run. Cost scales ~N (combine with --parallel).")
-    ap.add_argument("--max-park-rounds", type=int, default=12,
-                    help="cap on park/auto-answer resume rounds per brief")
-    ap.add_argument("--build-timeout", type=int, default=2400,
-                    help="seconds before a stuck build is killed (per brief)")
-    ap.add_argument("--parallel", type=int, default=3,
-                    help="run N briefs concurrently (threads; default 3 — the measured "
-                         "sweet spot on a 2-core box; 1 forces the strictly sequential "
-                         "baseline). Spend ceilings can overshoot by up to N in-flight "
-                         "calls; per-brief semantics are otherwise unchanged.")
-    ap.add_argument("--build-slots", type=int, default=None,
-                    help="max concurrent build subprocesses under --parallel. Default "
-                         "is host-aware (build_slots.resolve_build_slots: max(1, "
-                         "cpus//6), capped at the core count) -- each build saturates "
-                         "the CPU, so a value > cores over-subscribes and trips "
-                         "--build-timeout (the 2026-07-08 rc=-9 kills). An explicit "
-                         "value > cores is rejected at launch, not silently run.")
-    ap.add_argument("--resume", default=None, metavar="BATCH_DIR",
-                    help="finish an existing batch dir: reuse completed briefs from its "
-                         "summary.json, wipe + re-run only errored/missing ones. Combine "
-                         "with --only/--limit to restrict the considered set.")
-    ap.add_argument("--no-shaped", action="store_true",
-                    help="exclude the shaped-outline group (archetype "
-                         "'shaped_outline') — run only the rectangular briefs")
-    ap.add_argument("--shaped-only", action="store_true",
-                    help="run ONLY the shaped-outline group; each board's Edge.Cuts "
-                         "is graded against its requested shape (deterministic, "
-                         "reported as outline_check alongside the rubric score)")
-    ap.add_argument("--include-shaped", action="store_true",
-                    help="deprecated no-op: the shaped-outline group is part of the "
-                         "default corpus now (kept so older invocations still run)")
+    ap.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="run each brief N times and report per-brief median + IQR "
+        "(default 1). N>=3 makes the ~12-pt run-to-run noise floor "
+        "legible: a regression is a drop in the per-brief MEDIAN, not "
+        "a single noisy run. Cost scales ~N (combine with --parallel).",
+    )
+    ap.add_argument(
+        "--max-park-rounds",
+        type=int,
+        default=12,
+        help="cap on park/auto-answer resume rounds per brief",
+    )
+    ap.add_argument(
+        "--build-timeout",
+        type=int,
+        default=2400,
+        help="seconds before a stuck build is killed (per brief)",
+    )
+    ap.add_argument(
+        "--parallel",
+        type=int,
+        default=3,
+        help="run N briefs concurrently (threads; default 3 — the measured "
+        "sweet spot on a 2-core box; 1 forces the strictly sequential "
+        "baseline). Spend ceilings can overshoot by up to N in-flight "
+        "calls; per-brief semantics are otherwise unchanged.",
+    )
+    ap.add_argument(
+        "--build-slots",
+        type=int,
+        default=None,
+        help="max concurrent build subprocesses under --parallel. Default "
+        "is host-aware (build_slots.resolve_build_slots: max(1, "
+        "cpus//6), capped at the core count) -- each build saturates "
+        "the CPU, so a value > cores over-subscribes and trips "
+        "--build-timeout (the 2026-07-08 rc=-9 kills). An explicit "
+        "value > cores is rejected at launch, not silently run.",
+    )
+    ap.add_argument(
+        "--resume",
+        default=None,
+        metavar="BATCH_DIR",
+        help="finish an existing batch dir: reuse completed briefs from its "
+        "summary.json, wipe + re-run only errored/missing ones. Combine "
+        "with --only/--limit to restrict the considered set.",
+    )
+    ap.add_argument(
+        "--no-shaped",
+        action="store_true",
+        help="exclude the shaped-outline group (archetype "
+        "'shaped_outline') — run only the rectangular briefs",
+    )
+    ap.add_argument(
+        "--shaped-only",
+        action="store_true",
+        help="run ONLY the shaped-outline group; each board's Edge.Cuts "
+        "is graded against its requested shape (deterministic, "
+        "reported as outline_check alongside the rubric score)",
+    )
+    ap.add_argument(
+        "--include-shaped",
+        action="store_true",
+        help="deprecated no-op: the shaped-outline group is part of the "
+        "default corpus now (kept so older invocations still run)",
+    )
     args = ap.parse_args(argv)
 
     # Resolve --build-slots to a host-aware, clamped value BEFORE any work: a
@@ -849,14 +1131,14 @@ def main(argv=None) -> int:
 
     from kicraft.server.client import make_client
     from kicraft.server.config import Settings
+
     s = Settings.from_env()
     client = make_client(s)
-    # The judge defaults to a STRONGER, steadier model than the cheap design model
-    # (the review model -- the in-product design judge -- then the design model), so
-    # judge-side sampling noise does not muddy the J dimensions. --judge-model /
-    # KICRAFT_EVAL_JUDGE_MODEL override.
-    judge_model = (args.judge_model or getattr(s, "eval_judge_model", None)
-                   or getattr(s, "review_model", None) or getattr(s, "model", None))
+    # Judge identity is an independent role setting. It never inherits the
+    # electrical-review model implicitly.
+    judge_model = (
+        args.judge_model or getattr(s, "eval_judge_model", None) or getattr(s, "model", None)
+    )
     # Headroom for reasoning judges (minimax-m3 burns 10-23k reasoning tokens
     # before the JSON answer); too small a cap truncates and drops the grade.
     judge_max_tokens = getattr(s, "eval_judge_max_tokens", None)
@@ -865,8 +1147,9 @@ def main(argv=None) -> int:
     # so a relative rundir would make them resolve state/output paths against the
     # wrong base (writing a nested <rundir>/<rundir>/.kicraft tree).
     resume_dir = Path(args.resume).resolve() if args.resume else None
-    out_dir = (resume_dir if resume_dir
-               else (Path(args.out) if args.out else _default_out_dir())).resolve()
+    out_dir = (
+        resume_dir if resume_dir else (Path(args.out) if args.out else _default_out_dir())
+    ).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     repeats = max(1, args.repeats)
@@ -877,18 +1160,30 @@ def main(argv=None) -> int:
         # default a resume to the batch's own brief set, not the whole catalog
         prior_slugs = {r["slug"] for r in prior.values() if r.get("slug")}
         selected = [(i, e) for i, e in selected if e["slug"] in prior_slugs]
+    manifest_path = _write_campaign_manifest(
+        out_dir,
+        settings=s,
+        judge_model=None if args.no_judge else judge_model,
+        selected=selected,
+        repeats=repeats,
+    )
     # Expand to one (idx, entry, rep) per run; reuse / re-run is decided per run.
     all_runs = [(i, e, rep) for i, e in selected for rep in reps]
-    reused = {_run_key(e["slug"], rep): prior[_run_key(e["slug"], rep)]
-              for _, e, rep in all_runs if _reusable(prior.get(_run_key(e["slug"], rep)))}
-    todo = [(i, e, rep) for i, e, rep in all_runs
-            if _run_key(e["slug"], rep) not in reused]
+    reused = {
+        _run_key(e["slug"], rep): prior[_run_key(e["slug"], rep)]
+        for _, e, rep in all_runs
+        if _reusable(prior.get(_run_key(e["slug"], rep)))
+    }
+    todo = [(i, e, rep) for i, e, rep in all_runs if _run_key(e["slug"], rep) not in reused]
     parallel = max(1, min(args.parallel, len(todo) or 1))
 
     meta = {
         "started_at": _now_iso(),
         "out_dir": str(out_dir),
         "design_model": getattr(s, "model", None),
+        "design_profile": getattr(s, "design_profile", "custom"),
+        "design_provider_order": list(getattr(s, "provider_order", [])),
+        "campaign_manifest": str(manifest_path),
         "judge": not args.no_judge,
         "judge_model": None if args.no_judge else judge_model,
         "rubric_version": None,
@@ -901,6 +1196,7 @@ def main(argv=None) -> int:
         meta["resumed_reused_n"] = len(reused)
     try:
         from .rubric import load_rubric
+
         meta["rubric_version"] = load_rubric()["meta"]["version"]
     except Exception:  # noqa: BLE001
         pass
@@ -911,10 +1207,12 @@ def main(argv=None) -> int:
     print(f"self-eval: {len(selected)} brief(s){rep_note} -> {out_dir}", flush=True)
     if resume_dir:
         print(f"  resume: {len(reused)} reused · {len(todo)} to run", flush=True)
-    print(f"  design model={meta['design_model']}  "
-          f"judge={'off (Class-C only)' if args.no_judge else judge_model}"
-          + (f"  parallel={parallel} build_slots={meta['build_slots']}" if parallel > 1 else ""),
-          flush=True)
+    print(
+        f"  design model={meta['design_model']}  "
+        f"judge={'off (Class-C only)' if args.no_judge else judge_model}"
+        + (f"  parallel={parallel} build_slots={meta['build_slots']}" if parallel > 1 else ""),
+        flush=True,
+    )
 
     # A re-run must start from a clean slate: stale .kicraft state would make
     # run_design resume mid-chain and stale events.jsonl would skew the Class-C scorers.
@@ -932,8 +1230,7 @@ def main(argv=None) -> int:
         # Live partial summary after every run: what --resume reads back when a
         # batch is interrupted, and a progress view for the admin GUI. Call with
         # ckpt_lock held. Ordered by (brief, repeat) so the report is stable.
-        recs = [by_run[k] for _, e, rep in all_runs
-                if (k := _run_key(e["slug"], rep)) in by_run]
+        recs = [by_run[k] for _, e, rep in all_runs if (k := _run_key(e["slug"], rep)) in by_run]
         compile_report(recs, out_dir, meta)
 
     if parallel <= 1:
@@ -941,19 +1238,30 @@ def main(argv=None) -> int:
         for n, (idx, entry, rep) in enumerate(todo, start=1):
             label = entry["slug"] + (f" r{rep}" if rep else "")
             print(f"\n[{n}/{len(todo)}] #{idx} {label}: {entry['brief']}", flush=True)
-            rec = evaluate_one(client, idx, entry, out_dir, judge_model=judge_model,
-                               skip_judge=args.no_judge, judge_client=judge_client,
-                               judge_max_tokens=judge_max_tokens, rep=rep,
-                               max_park_rounds=args.max_park_rounds,
-                               build_timeout_s=args.build_timeout,
-                               full_events=not args.lean_events)
+            rec = evaluate_one(
+                client,
+                idx,
+                entry,
+                out_dir,
+                judge_model=judge_model,
+                skip_judge=args.no_judge,
+                judge_client=judge_client,
+                judge_max_tokens=judge_max_tokens,
+                rep=rep,
+                max_park_rounds=args.max_park_rounds,
+                build_timeout_s=args.build_timeout,
+                full_events=not args.lean_events,
+            )
             if rec.get("error"):
                 print(f"   ERROR: {rec['error']}", flush=True)
             else:
-                print(f"   grade={rec.get('grade') or '—'} final="
-                      f"{rec.get('final') if rec.get('final') is not None else '—'} "
-                      f"build={rec.get('build_label')} cost=${_run_cost(rec)} "
-                      f"({rec.get('duration_s')}s)", flush=True)
+                print(
+                    f"   grade={rec.get('grade') or '—'} final="
+                    f"{rec.get('final') if rec.get('final') is not None else '—'} "
+                    f"build={rec.get('build_label')} cost=${_run_cost(rec)} "
+                    f"({rec.get('duration_s')}s)",
+                    flush=True,
+                )
             with ckpt_lock:
                 by_run[_run_key(rec["slug"], rec.get("repeat"))] = rec
                 _checkpoint()
@@ -970,20 +1278,32 @@ def main(argv=None) -> int:
             stem = _stem_for(idx, entry) + (f"__r{rep}" if rep else "")
             with print_lock:
                 print(f"[{stem}] start: {entry['brief']}", flush=True)
-            rec = evaluate_one(wclient, idx, entry, out_dir, judge_model=judge_model,
-                               skip_judge=args.no_judge, judge_client=wjudge,
-                               judge_max_tokens=judge_max_tokens, rep=rep,
-                               max_park_rounds=args.max_park_rounds,
-                               build_timeout_s=args.build_timeout, build_gate=gate,
-                               full_events=not args.lean_events)
+            rec = evaluate_one(
+                wclient,
+                idx,
+                entry,
+                out_dir,
+                judge_model=judge_model,
+                skip_judge=args.no_judge,
+                judge_client=wjudge,
+                judge_max_tokens=judge_max_tokens,
+                rep=rep,
+                max_park_rounds=args.max_park_rounds,
+                build_timeout_s=args.build_timeout,
+                build_gate=gate,
+                full_events=not args.lean_events,
+            )
             with print_lock:
                 if rec.get("error"):
                     print(f"[{stem}] ERROR: {rec['error']}", flush=True)
                 else:
-                    print(f"[{stem}] done grade={rec.get('grade') or '—'} final="
-                          f"{rec.get('final') if rec.get('final') is not None else '—'} "
-                          f"build={rec.get('build_label')} cost=${_run_cost(rec)} "
-                          f"({rec.get('duration_s')}s)", flush=True)
+                    print(
+                        f"[{stem}] done grade={rec.get('grade') or '—'} final="
+                        f"{rec.get('final') if rec.get('final') is not None else '—'} "
+                        f"build={rec.get('build_label')} cost=${_run_cost(rec)} "
+                        f"({rec.get('duration_s')}s)",
+                        flush=True,
+                    )
             return rec
 
         with ThreadPoolExecutor(max_workers=parallel) as ex:
@@ -996,13 +1316,14 @@ def main(argv=None) -> int:
 
     meta["finished_at"] = _now_iso()
     meta["wall_s"] = round(time.monotonic() - t_mono, 1)
-    records = [by_run[k] for _, e, rep in all_runs
-               if (k := _run_key(e["slug"], rep)) in by_run]
+    records = [by_run[k] for _, e, rep in all_runs if (k := _run_key(e["slug"], rep)) in by_run]
     summary = compile_report(records, out_dir, meta)
 
-    print(f"\n=== self-eval complete: {summary['graded_n']}/{summary['n']} graded · "
-          f"mean={summary['mean_final']} · fab-ready={summary['fab_ready']}/{summary['n']} · "
-          f"spend=${summary['total_cost_usd']} ===")
+    print(
+        f"\n=== self-eval complete: {summary['graded_n']}/{summary['n']} graded · "
+        f"mean={summary['mean_final']} · fab-ready={summary['fab_ready']}/{summary['n']} · "
+        f"spend=${summary['total_cost_usd']} ==="
+    )
     if summary["gate_counts"]:
         print("    gates: " + ", ".join(f"{k}×{v}" for k, v in summary["gate_counts"].items()))
     print(f"report: {out_dir / 'summary.md'}")

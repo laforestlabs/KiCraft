@@ -15,6 +15,7 @@ OpenRouter client), so this module imports the server only inside ``main`` (the
 ``kicraft-eval-web`` CLI). ``--no-judge`` scores Class-C only and needs no network
 or API key, which is the headless verification path.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -51,9 +52,10 @@ def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
     state = _load_json(_find_one(pd, "state.json"))
     if isinstance(state, dict):
         trimmed = {k: v for k, v in state.items() if k != "history"}
-        parts.append("COMMITTED DESIGN STATE (intent, spec, architecture, bom, wiring, "
-                     "assumptions, open_questions):\n"
-                     + json.dumps(trimmed, indent=2, default=str)[:budget])
+        parts.append(
+            "COMMITTED DESIGN STATE (intent, spec, architecture, bom, wiring, "
+            "assumptions, open_questions):\n" + json.dumps(trimmed, indent=2, default=str)[:budget]
+        )
 
     synth, erc, tr, gen = m["synth"], m["erc"], m["transcript"], m["generated"]
     # Silk-legend evidence rides as a deterministic line: the state dump above
@@ -66,9 +68,7 @@ def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
         placed = arts.get("silk_placed")
         dropped = arts.get("silk_dropped")
         if placed is not None or dropped is not None:
-            silk_line = (
-                f"\n  silk legend: placed={placed or []} dropped={dropped or []}"
-            )
+            silk_line = f"\n  silk legend: placed={placed or []} dropped={dropped or []}"
     # Regulator feedback math, computed (not judged): the judge model
     # hallucinated a TPS5430 Vref of 0.8 V (real: 1.221 V) and failed a
     # correct 3.3 V design in the 2026-07-17 batch. Handing it the
@@ -76,19 +76,22 @@ def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
     reg_line = ""
     try:
         from kicraft.design.synthesis.validation import regulator_vout_facts
+
         bom = state.get("bom") if isinstance(state, dict) else None
         if isinstance(bom, dict):
-            facts = regulator_vout_facts(
-                bom.get("parts") or [], bom.get("connections") or []
-            )
+            facts = regulator_vout_facts(bom.get("parts") or [], bom.get("connections") or [])
             if facts:
                 reg_line = "\n  regulator feedback (computed, authoritative): " + "; ".join(
                     f"{f['ref']} {f['mpn']} Vref={f['vref']}V divider "
                     f"{f['r_top_ref']}/{f['r_bot_ref']} -> Vout={f['vout']}V "
                     f"on net {f['rail_net']!r}"
-                    + ("" if f["ok"] is None
-                       else (" (matches rail)" if f["ok"]
-                             else f" (MISMATCH vs {f['rail_v']}V rail)"))
+                    + (
+                        ""
+                        if f["ok"] is None
+                        else (
+                            " (matches rail)" if f["ok"] else f" (MISMATCH vs {f['rail_v']}V rail)"
+                        )
+                    )
                     for f in facts
                 )
     except Exception:
@@ -102,13 +105,11 @@ def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
         bom = state.get("bom") if isinstance(state, dict) else None
         subs = (bom or {}).get("substitutions") or []
         if subs:
-            sub_line = (
-                "\n  substitutions (recorded by the design, NOT silent): "
-                + "; ".join(
-                    f"wanted {s.get('wanted')!r} -> shipped {s.get('got')!r}"
-                    + (f" ({s.get('reason')})" if s.get("reason") else "")
-                    for s in subs if isinstance(s, dict)
-                )
+            sub_line = "\n  substitutions (recorded by the design, NOT silent): " + "; ".join(
+                f"wanted {s.get('wanted')!r} -> shipped {s.get('got')!r}"
+                + (f" ({s.get('reason')})" if s.get("reason") else "")
+                for s in subs
+                if isinstance(s, dict)
             )
         elif isinstance(bom, dict):
             sub_line = "\n  substitutions ledger: empty (no recorded deviations)"
@@ -123,19 +124,20 @@ def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
     try:
         from kicraft.design.models import BOM as _BOM
         from kicraft.design.synthesis.validation import mcu_programming_facts
+
         bom = state.get("bom") if isinstance(state, dict) else None
         if isinstance(bom, dict):
             facts = mcu_programming_facts(_BOM.model_validate(bom))
             if facts:
-                verdict = ("PASS -- a workable first-flash path exists"
-                           if facts["access_ok"] and facts["path_ok"]
-                           else "GAPS: " + "; ".join(
-                               facts["access_problems"] + facts["path_problems"]))
+                verdict = (
+                    "PASS -- a workable first-flash path exists"
+                    if facts["access_ok"] and facts["path_ok"]
+                    else "GAPS: " + "; ".join(facts["access_problems"] + facts["path_problems"])
+                )
                 prog_line = (
                     "\n  MCU programming path (computed, authoritative): "
                     f"{verdict}; MCU(s): {', '.join(facts['mcus'])}; "
-                    "programming-access parts: "
-                    + (", ".join(facts["access_parts"]) or "NONE")
+                    "programming-access parts: " + (", ".join(facts["access_parts"]) or "NONE")
                 )
     except Exception:
         prog_line = ""
@@ -154,12 +156,19 @@ def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
     return "\n\n".join(parts)
 
 
-def evaluate_project(project_dir, client, *, rubric: dict | None = None,
-                     judge_model: str | None = None, judge_client=None,
-                     judge_max_tokens: int | None = None,
-                     ledger_path=None,
-                     started_at: str | None = None, finished_at: str | None = None,
-                     skip_judge: bool = False) -> dict:
+def evaluate_project(
+    project_dir,
+    client,
+    *,
+    rubric: dict | None = None,
+    judge_model: str | None = None,
+    judge_client=None,
+    judge_max_tokens: int | None = None,
+    ledger_path=None,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    skip_judge: bool = False,
+) -> dict:
     """Score one finished web project and write ``eval/report.json``.
 
     Class-C is always scored from artifacts. Class-J is graded unless
@@ -172,8 +181,9 @@ def evaluate_project(project_dir, client, *, rubric: dict | None = None,
     rubric = rubric or load_rubric()
     pd = Path(project_dir)
 
-    m = collect_web_metrics(pd, ledger_path=ledger_path,
-                            started_at=started_at, finished_at=finished_at)
+    m = collect_web_metrics(
+        pd, ledger_path=ledger_path, started_at=started_at, finished_at=finished_at
+    )
     dims = score_class_c_dims(m, rubric)
     gates = eval_script_gates(m, rubric)
 
@@ -203,9 +213,11 @@ def evaluate_project(project_dir, client, *, rubric: dict | None = None,
         "target_mode": "web",
         "metrics": metrics_block(m),
         "dimensions": dims,
-        "gates": {"triggered": gates,
-                  "observer_rejected": (judge or {}).get("gates_rejected") or [],
-                  "observer_todo": []},
+        "gates": {
+            "triggered": gates,
+            "observer_rejected": (judge or {}).get("gates_rejected") or [],
+            "observer_todo": [],
+        },
         "judge": {
             "ran": judge is not None,
             "ok": (judge["ok"] if judge else None),
@@ -213,9 +225,14 @@ def evaluate_project(project_dir, client, *, rubric: dict | None = None,
             "error": (judge["error"] if judge else None),
             "cost_usd": (round(judge["cost_usd"], 6) if judge else None),
         },
-        "score": {"weighted": None, "final": None, "grade": None, "verdict": None,
-                  "pending_dimensions": [k for k, v in dims.items() if v["level"] is None],
-                  "note": ""},
+        "score": {
+            "weighted": None,
+            "final": None,
+            "grade": None,
+            "verdict": None,
+            "pending_dimensions": [k for k, v in dims.items() if v["level"] is None],
+            "note": "",
+        },
     }
 
     if judge is not None and judge["ok"]:
@@ -224,8 +241,9 @@ def evaluate_project(project_dir, client, *, rubric: dict | None = None,
         except ValueError as e:  # a Class-C dim came back unscored (e.g. latency)
             report["score"]["note"] = f"not finalized: {e}"
     elif judge is not None and not judge["ok"]:
-        report["score"]["note"] = (f"Class-J judge failed ({judge['error']}); "
-                                   "Class-C scored, final grade withheld.")
+        report["score"]["note"] = (
+            f"Class-J judge failed ({judge['error']}); Class-C scored, final grade withheld."
+        )
     else:
         report["score"]["note"] = "Class-C only (judge skipped); final grade withheld."
 
@@ -248,8 +266,8 @@ def _project_times(project_dir, users_db_path=None) -> tuple[str | None, str | N
         conn = sqlite3.connect(str(db))
         try:
             row = conn.execute(
-                "SELECT created_at, finished_at FROM projects WHERE id=?",
-                (int(pd.name),)).fetchone()
+                "SELECT created_at, finished_at FROM projects WHERE id=?", (int(pd.name),)
+            ).fetchone()
         finally:
             conn.close()
     except sqlite3.Error:
@@ -261,14 +279,21 @@ def _project_times(project_dir, users_db_path=None) -> tuple[str | None, str | N
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        description="Evaluate a finished KiCraft web project (Class-C + automated Class-J).")
+        description="Evaluate a finished KiCraft web project (Class-C + automated Class-J)."
+    )
     ap.add_argument("project_dir", help="projects_dir/<uid>/<pid> of a finished design")
-    ap.add_argument("--model", help="judge model override "
-                    "(default: Settings.eval_judge_model, else the design model)")
-    ap.add_argument("--no-judge", action="store_true",
-                    help="score Class-C only; skip the LLM judge (no network / API key)")
-    ap.add_argument("--print", dest="show", action="store_true",
-                    help="also print the full report JSON")
+    ap.add_argument(
+        "--model",
+        help="judge model override (default: Settings.eval_judge_model, else the design model)",
+    )
+    ap.add_argument(
+        "--no-judge",
+        action="store_true",
+        help="score Class-C only; skip the LLM judge (no network / API key)",
+    )
+    ap.add_argument(
+        "--print", dest="show", action="store_true", help="also print the full report JSON"
+    )
     args = ap.parse_args(argv)
 
     pd = Path(args.project_dir)
@@ -290,12 +315,11 @@ def main(argv=None) -> int:
     else:
         from kicraft.server.client import CappedOpenRouterClient, make_client
         from kicraft.server.config import Settings
+
         s = Settings.from_env()
         client = CappedOpenRouterClient(s)
-        # Judge defaults to a stronger, steadier model than the design model; it
-        # gets a routing-relaxed client when it is not the design model.
-        judge_model = (args.model or getattr(s, "eval_judge_model", None)
-                       or getattr(s, "review_model", None) or s.model)
+        # Judge identity is independent from electrical review.
+        judge_model = args.model or getattr(s, "eval_judge_model", None) or s.model
         if judge_model and judge_model != s.model:
             judge_client = make_client(s.for_judge())
         judge_max_tokens = getattr(s, "eval_judge_max_tokens", None)
@@ -303,16 +327,24 @@ def main(argv=None) -> int:
         users_db = s.users_db_path
 
     started_at, finished_at = _project_times(pd, users_db)
-    report = evaluate_project(pd, client, judge_model=judge_model, judge_client=judge_client,
-                              judge_max_tokens=judge_max_tokens,
-                              ledger_path=ledger_path,
-                              started_at=started_at, finished_at=finished_at,
-                              skip_judge=args.no_judge)
+    report = evaluate_project(
+        pd,
+        client,
+        judge_model=judge_model,
+        judge_client=judge_client,
+        judge_max_tokens=judge_max_tokens,
+        ledger_path=ledger_path,
+        started_at=started_at,
+        finished_at=finished_at,
+        skip_judge=args.no_judge,
+    )
 
     s = report["score"]
     j = report["judge"]
-    print(f"{pd.name}: weighted={s['weighted']} final={s['final']} "
-          f"grade={s['grade']} {s['verdict'] or ''}".rstrip())
+    print(
+        f"{pd.name}: weighted={s['weighted']} final={s['final']} "
+        f"grade={s['grade']} {s['verdict'] or ''}".rstrip()
+    )
     if j["ran"] and not j["ok"]:
         print(f"  judge error: {j['error']}")
     if s["note"]:

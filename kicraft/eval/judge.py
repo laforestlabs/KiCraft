@@ -18,6 +18,7 @@ offline.
 On malformed model output it retries once with the concrete defect, then fails
 closed (levels left null, an error recorded) rather than guessing a score.
 """
+
 from __future__ import annotations
 
 import json
@@ -64,7 +65,8 @@ def _render_rubric_section(jdims: list[dict], ogates: list[dict]) -> str:
     out.append(
         "\nOBSERVER GATES (include a gate in triggered_gates ONLY if it FIRES, "
         "with concrete evidence; do NOT enumerate gates that do not fire. If you "
-        "mention a gate at all, set its \"triggered\" field explicitly):")
+        'mention a gate at all, set its "triggered" field explicitly):'
+    )
     for g in ogates:
         out.append(f"  - {g['id']} (cap {g['cap']}): {g['condition']}")
     return "\n".join(out)
@@ -97,8 +99,7 @@ def _build_messages(rubric_text: str, contract: str, digest: str) -> list[dict]:
         f"{digest}\n\n"
         f"{contract}"
     )
-    return [{"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": user}]
+    return [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}]
 
 
 def _extract_json(text: str):
@@ -113,7 +114,7 @@ def _extract_json(text: str):
         if t[:4].lower() == "json":
             t = t[4:]
         if "```" in t:
-            t = t[:t.rfind("```")]
+            t = t[: t.rfind("```")]
         t = t.strip()
     try:
         return json.loads(t)
@@ -130,7 +131,7 @@ def _extract_json(text: str):
             depth -= 1
             if depth == 0:
                 try:
-                    return json.loads(t[start:i + 1])
+                    return json.loads(t[start : i + 1])
                 except json.JSONDecodeError:
                     return None
     return None
@@ -181,18 +182,23 @@ def _validate(verdict, jdims: list[dict], ogates: list[dict]):
             return False, {}, [], [], f"dimension '{did}' missing or not an object"
         lvl = _coerce_level(entry.get("level"))
         if lvl is None:
-            return False, {}, [], [], f"dimension '{did}' level not an integer 0-4 (got {entry.get('level')!r})"
+            return (
+                False,
+                {},
+                [],
+                [],
+                f"dimension '{did}' level not an integer 0-4 (got {entry.get('level')!r})",
+            )
         ev = entry.get("evidence")
         dims[did] = {"level": lvl, "evidence": str(ev) if ev is not None else ""}
 
     gate_caps = {g["id"]: g["cap"] for g in ogates}
     gates, rejected = [], []
-    for g in (verdict.get("triggered_gates") or []):
+    for g in verdict.get("triggered_gates") or []:
         if not (isinstance(g, dict) and g.get("id") in gate_caps):
             continue
         why = str(g.get("evidence") or g.get("why") or "")
-        rec = {"id": g["id"], "cap": gate_caps[g["id"]], "by": "observer",
-               "why": why}
+        rec = {"id": g["id"], "cap": gate_caps[g["id"]], "by": "observer", "why": why}
         trig = g.get("triggered")
         if trig is False:
             rec["rejected_because"] = "triggered: false"
@@ -206,9 +212,62 @@ def _validate(verdict, jdims: list[dict], ogates: list[dict]):
     return True, dims, gates, rejected, None
 
 
-def grade_class_j(client, digest: str, rubric: dict, *, model: str | None = None,
-                  max_tokens: int = 24000, temperature: float = 0.0,
-                  max_attempts: int = 2) -> dict:
+def _response_format(jdims: list[dict], ogates: list[dict]) -> dict:
+    dimension = {
+        "type": "object",
+        "properties": {
+            "level": {"type": "integer", "minimum": 0, "maximum": 4},
+            "evidence": {"type": "string"},
+        },
+        "required": ["level", "evidence"],
+        "additionalProperties": False,
+    }
+    gate_ids = [str(gate["id"]) for gate in ogates]
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "kicraft_eval_judge_v1",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "dimensions": {
+                        "type": "object",
+                        "properties": {str(dim["id"]): dimension for dim in jdims},
+                        "required": [str(dim["id"]) for dim in jdims],
+                        "additionalProperties": False,
+                    },
+                    "triggered_gates": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "enum": gate_ids},
+                                "triggered": {"type": "boolean"},
+                                "evidence": {"type": "string"},
+                            },
+                            "required": ["id", "triggered", "evidence"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["dimensions", "triggered_gates"],
+                "additionalProperties": False,
+            },
+        },
+    }
+
+
+def grade_class_j(
+    client,
+    digest: str,
+    rubric: dict,
+    *,
+    model: str | None = None,
+    max_tokens: int = 24000,
+    temperature: float = 0.0,
+    max_attempts: int = 2,
+) -> dict:
     """Grade the five Class-J dimensions and detect observer gates with an LLM.
 
     Returns ``{ok, dimensions, gates, gates_rejected, cost_usd, error, raw}``
@@ -223,30 +282,58 @@ def grade_class_j(client, digest: str, rubric: dict, *, model: str | None = None
     rubric_text = _render_rubric_section(jdims, ogates)
     contract = _output_contract(jdims)
     messages = _build_messages(rubric_text, contract, digest)
+    response_format = _response_format(jdims, ogates)
 
     total_cost = 0.0
     last_text = ""
     error = None
+    guard_factory = getattr(getattr(client, "s", None), "judge_reasoning_guard", None)
+    reasoning_guard = guard_factory() if callable(guard_factory) else None
     for attempt in range(max_attempts):
-        res = client.chat(messages, model=model, max_tokens=max_tokens,
-                          temperature=temperature,
-                          meta_ctx={"phase": "eval_judge", "stage": "judge", "attempt": attempt})
+        res = client.chat(
+            messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_guard=reasoning_guard,
+            response_format=response_format,
+            meta_ctx={"phase": "eval_judge", "stage": "judge", "attempt": attempt},
+        )
         last_text = res.get("text") or ""
         total_cost += float(res.get("cost_usd") or 0.0)
-        ok, dims, gates, rejected, error = _validate(
-            _extract_json(last_text), jdims, ogates)
+        if res.get("finish_reason") == "reasoning_loop":
+            reason = res.get("loop_abort_reason") or "unknown"
+            ok, dims, gates, rejected = False, {}, [], []
+            error = f"client aborted judge reasoning ({reason})"
+        else:
+            ok, dims, gates, rejected, error = _validate(_extract_json(last_text), jdims, ogates)
         if ok:
-            return {"ok": True, "dimensions": dims, "gates": gates,
-                    "gates_rejected": rejected,
-                    "cost_usd": total_cost, "error": None, "raw": last_text}
+            return {
+                "ok": True,
+                "dimensions": dims,
+                "gates": gates,
+                "gates_rejected": rejected,
+                "cost_usd": total_cost,
+                "error": None,
+                "raw": last_text,
+            }
         # Repair: state the concrete defect and ask exactly once more.
         messages.append({"role": "assistant", "content": last_text})
-        messages.append({"role": "user", "content":
-                         f"That response was not acceptable: {error}. Return ONLY the JSON "
-                         "object, with all five dimensions present, an integer level 0-4 and "
-                         "an evidence string for each."})
+        messages.append(
+            {
+                "role": "user",
+                "content": f"That response was not acceptable: {error}. Return ONLY the JSON "
+                "object, with all five dimensions present, an integer level 0-4 and "
+                "an evidence string for each.",
+            }
+        )
 
-    return {"ok": False,
-            "dimensions": {d["id"]: {"level": None, "evidence": ""} for d in jdims},
-            "gates": [], "gates_rejected": [], "cost_usd": total_cost,
-            "error": error or "judge produced no valid verdict", "raw": last_text}
+    return {
+        "ok": False,
+        "dimensions": {d["id"]: {"level": None, "evidence": ""} for d in jdims},
+        "gates": [],
+        "gates_rejected": [],
+        "cost_usd": total_cost,
+        "error": error or "judge produced no valid verdict",
+        "raw": last_text,
+    }

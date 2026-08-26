@@ -11,11 +11,15 @@ import json
 import pytest
 import requests
 
+from kicraft.server import stage_driver as stage_driver_mod
 from kicraft.server.stage_driver import (
     BOM_TOOLS,
     _attach_questions,
+    _apply_wiring_patch,
+    _commit_rejection_signature,
     _classify_parse_failure,
     _design_reasoning,
+    _expand_bom_stage_response,
     _extract_json,
     _normalize_questions,
     _retry_feedback,
@@ -24,6 +28,173 @@ from kicraft.server.stage_driver import (
     build_system,
 )
 from kicraft.server.session import run_session
+
+
+def _run_payload(**overrides):
+    payload = {
+        "refs": None,
+        "ref_prefix": "C",
+        "start": 1,
+        "end": 2,
+        "value": "100nF",
+        "symbol": "Device:C",
+        "footprint": "Capacitor_SMD:C_0603_1608Metric",
+        "sheet": "MAIN",
+    }
+    payload.update(overrides)
+    if payload.get("refs") is not None:
+        payload.pop("ref_prefix", None)
+        payload.pop("start", None)
+        payload.pop("end", None)
+    return payload
+
+
+def test_compact_bom_expands_400_member_array_to_canonical_parts():
+    refs = [f"D{number}" for number in range(1, 401)]
+    payload = {
+        "part_runs": [
+            _run_payload(
+                ref_prefix="D",
+                end=400,
+                value="LED",
+                symbol="Device:LED",
+                footprint="LED_SMD:LED_0805_2012Metric",
+            )
+        ],
+        "arrays": [{"refs": refs, "pattern": "grid", "rows": 20, "cols": 20}],
+    }
+    canonical, expanded = _expand_bom_stage_response(payload)
+    assert expanded == 400
+    assert len(canonical["parts"]) == 400
+    assert canonical["parts"][0]["ref"] == "D1"
+    assert canonical["parts"][-1]["ref"] == "D400"
+    assert "part_runs" not in canonical
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"part_runs": [_run_payload(end=300), _run_payload(ref_prefix="R", end=201)]},
+        {
+            "parts": [
+                {
+                    "ref": "U1",
+                    "value": "IC",
+                    "symbol": "Device:R",
+                    "footprint": "Resistor_SMD:R_0603_1608Metric",
+                    "sheet": "MAIN",
+                }
+            ],
+            "part_runs": [_run_payload(end=450)],
+        },
+        {"part_runs": [_run_payload(end=10), _run_payload(start=10, end=20)]},
+        {"part_runs": [_run_payload(refs=["C1", "C1"])]},
+        {"part_runs": [_run_payload(start=3, end=2)]},
+    ],
+)
+def test_compact_bom_rejects_overflow_overlap_and_bad_sequences(payload):
+    with pytest.raises(ValueError):
+        _expand_bom_stage_response(payload)
+
+
+def _wiring_candidate():
+    return {
+        "connections": [
+            {
+                "net_name": "A",
+                "sheet": "MAIN",
+                "endpoints": [
+                    {"ref": "U1", "pin": "1"},
+                    {"ref": "R1", "pin": "1"},
+                ],
+            },
+            {
+                "net_name": "B",
+                "sheet": "MAIN",
+                "endpoints": [{"ref": "U1", "pin": "2"}],
+            },
+        ],
+        "no_connect_pins": [],
+    }
+
+
+def test_wiring_patch_changes_only_named_endpoint():
+    candidate = _wiring_candidate()
+    patched, count = _apply_wiring_patch(
+        candidate,
+        {
+            "operations": [
+                {
+                    "op": "set_pin_net",
+                    "ref": "U1",
+                    "pin": "1",
+                    "sheet": "MAIN",
+                    "expected_net": "A",
+                    "net": "B",
+                }
+            ]
+        },
+        allowed_refs={"U1", "R1"},
+        allowed_pins={"U1": {"1", "2"}, "R1": {"1"}},
+        allowed_nets={"A", "B"},
+    )
+    assert count == 1
+    assert candidate == _wiring_candidate()
+    net_a = next(row for row in patched["connections"] if row["net_name"] == "A")
+    net_b = next(row for row in patched["connections"] if row["net_name"] == "B")
+    assert net_a["endpoints"] == [{"ref": "R1", "pin": "1"}]
+    assert {"ref": "U1", "pin": "1"} in net_b["endpoints"]
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        {
+            "op": "set_pin_net",
+            "ref": "U1",
+            "pin": "1",
+            "sheet": "MAIN",
+            "expected_net": "STALE",
+            "net": "B",
+        },
+        {
+            "op": "set_pin_net",
+            "ref": "X9",
+            "pin": "1",
+            "sheet": "MAIN",
+            "expected_net": None,
+            "net": "B",
+        },
+        {
+            "op": "set_pin_net",
+            "ref": "U1",
+            "pin": "9",
+            "sheet": "MAIN",
+            "expected_net": None,
+            "net": "B",
+        },
+        {
+            "op": "set_pin_net",
+            "ref": "U1",
+            "pin": "1",
+            "sheet": "MAIN",
+            "expected_net": "A",
+            "net": "UNKNOWN",
+        },
+    ],
+)
+def test_wiring_patch_stale_unknown_inputs_fail_without_mutation(operation):
+    candidate = _wiring_candidate()
+    before = json.loads(json.dumps(candidate))
+    with pytest.raises(ValueError):
+        _apply_wiring_patch(
+            candidate,
+            {"operations": [operation]},
+            allowed_refs={"U1", "R1"},
+            allowed_pins={"U1": {"1", "2"}, "R1": {"1"}},
+            allowed_nets={"A", "B"},
+        )
+    assert candidate == before
 
 
 def test_retry_feedback_includes_errors_and_offenders():
@@ -315,6 +486,9 @@ class _LoopClient:
         progress=None,
         meta_ctx=None,
         reasoning=None,
+        reasoning_guard=None,
+        collection_bounds=(),
+        response_format=None,
     ):
         self.reasoning_seen.append(reasoning)
         self._n += 1
@@ -406,13 +580,19 @@ class _ScriptedClient:
         progress=None,
         meta_ctx=None,
         reasoning=None,
+        reasoning_guard=None,
+        collection_bounds=(),
+        response_format=None,
     ):
         self.calls.append(
             {
+                "temperature": temperature,
+                "collection_bounds": collection_bounds,
                 "max_tokens": max_tokens,
                 "reasoning": reasoning,
                 "serialization": bool((meta_ctx or {}).get("serialization")),
                 "messages": list(messages),
+                "response_format": response_format,
             }
         )
         return dict(self.replies.pop(0))
@@ -428,13 +608,19 @@ class _ScriptedClient:
         progress=None,
         meta_ctx=None,
         reasoning=None,
+        reasoning_guard=None,
+        collection_bounds=(),
+        response_format=None,
     ):
         self.calls.append(
             {
+                "temperature": temperature,
+                "collection_bounds": collection_bounds,
                 "max_tokens": max_tokens,
                 "reasoning": reasoning,
                 "serialization": bool((meta_ctx or {}).get("serialization")),
                 "messages": list(messages),
+                "response_format": response_format,
             }
         )
         r = dict(self.replies.pop(0))
@@ -518,15 +704,10 @@ def test_malformed_normal_stop_terminates_as_invalid_json_after_one_serializatio
     assert last["attempts"] == 2
 
 
-def test_serialization_available_once_across_commit_corrections(tmp_path):
-    # The single serialization retry is per drive_stage(), NOT per
-    # commit-correction attempt: a malformed commit-correction response after
-    # the serialization call consumed the budget goes terminal.
-    # Call 1 (normal): truncated -> serialization (call 2) returns `{}` which
-    # PARSES but stage-commit rejects (missing fields) -> commit-correction
-    # attempt 1 (call 3) returns malformed -> serialization exhausted ->
-    # terminal invalid_json. Exactly 3 calls proves the parseable serialization
-    # output reached _commit (otherwise the stage would have ended at 2).
+def test_serialization_schema_failure_terminates_without_commit_correction(tmp_path):
+    # A parseable object that violates the requested provider schema is not a
+    # commit candidate. The one schema-bound serialization recovery is terminal
+    # when it repeats the schema defect.
     client = _ScriptedClient(
         [
             {
@@ -536,15 +717,14 @@ def test_serialization_available_once_across_commit_corrections(tmp_path):
                 "cost_usd": 0.0,
             },
             {"text": "{}", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
-            {"text": "malformed again", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
         ]
     )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "failed"
     last = res["results"][-1]
-    assert len(client.calls) == 3  # normal + serialization + correction
-    assert sum(1 for c in client.calls if c["serialization"]) == 1  # only once
-    assert last["failure_kind"] == "invalid_json"
+    assert len(client.calls) == 2
+    assert sum(1 for call in client.calls if call["serialization"]) == 1
+    assert last["failure_kind"] == "invalid_schema"
 
 
 def test_serialization_goes_through_chat_even_for_bom(tmp_path):
@@ -627,6 +807,164 @@ def test_failure_kind_reaches_stage_status(tmp_path):
 # ---- provider/transport failures never enter JSON recovery -----------------
 
 
+def test_collection_limit_uses_one_escape_serialization_call(tmp_path):
+    client = _ScriptedClient(
+        [
+            {
+                "text": '{"goal":',
+                "finish_reason": "collection_limit",
+                "collection_limit": {
+                    "field": "parts",
+                    "observed_count": 501,
+                    "configured_total": 500,
+                    "emitted_content_chars": 82000,
+                },
+                "cost_usd": 0.01,
+            },
+            _ok_intent_reply(),
+        ]
+    )
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "ok"
+    assert len(client.calls) == 2
+    assert client.calls[1]["temperature"] == 0.4
+    retry = client.calls[1]["messages"][-1]["content"]
+    assert "item 501" in retry and "configured total limit is 500" in retry
+    assert "82000 content characters" in retry
+
+
+def test_second_collection_limit_is_terminal(tmp_path):
+    overflow = {
+        "text": '{"goal":',
+        "finish_reason": "collection_limit",
+        "collection_limit": {
+            "field": "parts",
+            "observed_count": 501,
+            "configured_total": 500,
+            "emitted_content_chars": 82000,
+        },
+        "cost_usd": 0.01,
+    }
+    client = _ScriptedClient([overflow, overflow])
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    last = res["results"][-1]
+    assert last["failure_kind"] == "collection_limit"
+    assert last["attempts"] == 2
+
+
+def test_commit_rejection_signature_normalizes_gate_ids_and_offenders():
+    first = {
+        "errors": ["§9.15  multi-net pin short", "9.17 dangling net"],
+        "offenders": [" U1.2   on A/B ", "R1.1"],
+    }
+    second = {
+        "errors": ["9.15 changed explanation", "9.17 another explanation"],
+        "offenders": ["R1.1 remains shorted", "pin U1.2 still appears on two nets"],
+    }
+    assert _commit_rejection_signature(first) == _commit_rejection_signature(second)
+
+
+def test_repeated_commit_rejection_gets_one_pristine_escape_then_stops(tmp_path, monkeypatch):
+    rejected = {
+        "ok": False,
+        "errors": ["9.15 multi-net pin short"],
+        "offenders": ["R1.1 on SIG_A and SIG_B"],
+    }
+    monkeypatch.setattr(stage_driver_mod, "_commit", lambda *args, **kwargs: (False, rejected))
+    client = _ScriptedClient([_ok_intent_reply(), _ok_intent_reply(), _ok_intent_reply()])
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    last = res["results"][-1]
+    assert last["failure_kind"] == "commit_rejected"
+    assert last["attempts"] == 3
+    assert client.calls[2]["reasoning"] == {"enabled": False}
+    assert client.calls[2]["temperature"] == 0.4
+    roles = [message["role"] for message in client.calls[2]["messages"]]
+    assert roles == ["system", "user", "user"]
+
+
+def test_wiring_rejection_is_repaired_by_typed_patch_before_full_gates(tmp_path, monkeypatch):
+    state = {
+        "architecture": {
+            "power_nets": [],
+            "inter_sheet_nets": [],
+        },
+        "bom": {
+            "parts": [
+                {"ref": "U1", "sheet": "MAIN", "symbol": "Test:U", "value": "IC"},
+                {"ref": "R1", "sheet": "MAIN", "symbol": "Test:R", "value": "1k"},
+            ],
+            "connections": [],
+            "no_connect_pins": [],
+        },
+    }
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    prep = {
+        "state": state,
+        "extras": {
+            "symbol_pinouts": {
+                "Test:U": {"pins": [{"number": "1"}, {"number": "2"}]},
+                "Test:R": {"pins": [{"number": "1"}]},
+            }
+        },
+    }
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "_run",
+        lambda *args, **kwargs: type(
+            "Proc", (), {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""}
+        )(),
+    )
+    commits = []
+    rejected = {
+        "ok": False,
+        "errors": ["9.15 multi-net pin short on net 'A'"],
+        "offenders": ["U1.1"],
+    }
+
+    def fake_commit(stage, slot, *args, **kwargs):
+        commits.append(json.loads(json.dumps(slot)))
+        if len(commits) == 1:
+            return False, rejected
+        assert commits[1]["connections"][0]["endpoints"] == [{"ref": "R1", "pin": "1"}]
+        return True, {"ok": True}
+
+    monkeypatch.setattr(stage_driver_mod, "_commit", fake_commit)
+    full = _wiring_candidate()
+    patch = {
+        "operations": [
+            {
+                "op": "set_pin_net",
+                "ref": "U1",
+                "pin": "1",
+                "sheet": "MAIN",
+                "expected_net": "A",
+                "net": "B",
+            }
+        ]
+    }
+    client = _ScriptedClient(
+        [
+            {"text": json.dumps(full), "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": json.dumps(patch), "finish_reason": "stop", "cost_usd": 0.0},
+        ]
+    )
+    client.s = stage_driver_mod.Settings(api_key="test")
+    result = stage_driver_mod.drive_stage(
+        client,
+        "wiring",
+        "test",
+        state_path,
+        tmp_path,
+        max_retries=4,
+    )
+    assert result["commit_ok"] is True
+    assert result["attempts"] == 2
+    assert result["wiring_patch_operations"] == 1
+    assert client.calls[0]["reasoning"] == {"enabled": False}
+    assert client.calls[1]["response_format"]["json_schema"]["name"] == "kicraft_wiring_patch_v1"
+
+
 class _RaisingClient:
     """Raises the configured exception on every completion call."""
 
@@ -648,6 +986,9 @@ class _RaisingClient:
         progress=None,
         meta_ctx=None,
         reasoning=None,
+        reasoning_guard=None,
+        collection_bounds=(),
+        response_format=None,
     ):
         self.calls += 1
         raise self.exc
