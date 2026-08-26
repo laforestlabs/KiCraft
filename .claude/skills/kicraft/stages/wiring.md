@@ -1,42 +1,50 @@
-Stage 5: Wiring. You are running inside the KiCraft stage sub-agent. Your job is to draft the wiring fields of the BOM (`bom.connections` and `bom.no_connect_pins`) and commit them. Follow SKILL.md's "Workflow (follow exactly, in order)" section — this file specifies what the slot must look like.
+Stage 5: Wiring. Produce the final assignment for every component pin.
 
-Given the `intent`, `functional_spec`, `architecture`, and `bom` (all available in the `state` field of stage-prep's output), produce the explicit pin-to-net mapping that synthesis renders as PCB nets (Stage A) and schematic wires + power symbols (Stage B).
+Use `intent`, `functional_spec`, `architecture`, and the committed canonical BOM.
+`extras.symbol_pinouts` is the authoritative pin inventory. Use exact pin
+numbers; never invent pins, use pin names as numbers, or read symbol files.
 
-**The pin inventory is in `extras.symbol_pinouts`.** Stage-prep batches every distinct BomPart.symbol's pin list into one dict, keyed by `Library:Name`. Each value is the same JSON schema you would get from a per-part `lookup-symbol` call (`number`, `name`, `electrical_type`, `position`, etc.). **NEVER invent pin numbers; NEVER use a pin name where a pin number is required; NEVER call `lookup-symbol` yourself; and NEVER read symbol files from `/usr/share/kicad/symbols/` (or anywhere) — the data is already in the prep output.** If `stage-prep wiring` cannot resolve a symbol it exits non-zero with an `offenders` list instead of returning a pinout: that means the BOM has a bad symbol — fix the BOM (re-fetch or correct it) and re-run `stage-prep wiring`, or surface a `material: true` question. Reading the symbol library yourself to work around a missing pinout is a hard-rule violation.
+Slot shape:
 
-Slot-file shape — write a JSON object with just these two fields (the rest of the BOM is preserved automatically):
+```json
+{"pins": [
+  {"ref": "U1", "pin": "1", "net": "+3V3"},
+  {"ref": "U1", "pin": "2", "net": "GND"},
+  {"ref": "U1", "pin": "3", "no_connect": true}
+]}
+```
 
-- `connections`: list of `NetConnection`. Each MUST have:
-  - `net_name` — either an `architecture.power_nets` entry, an `architecture.inter_sheet_nets[*].name`, or a descriptive sheet-local name (no `Net-1`/auto-generated style).
-  - `endpoints`: list of `PinEndpoint`, each `{"ref": "<BomPart.ref>", "pin": "<pin_number>"}`.
-  - `sheet` — must match a `Sheet.name` from the Architecture exactly.
-- `no_connect_pins`: list of `PinEndpoint` for pins explicitly left disconnected.
+Each `(ref, pin)` appears exactly once. Connected records have `net`; deliberately
+unused records have `no_connect: true`. Never emit sheets, connection rows,
+endpoint lists, or correction operations. KiCraft derives canonical
+`NetConnection` rows by grouping connected pins by their BOM sheet and net.
 
-Drafting strategy (per sheet in `architecture.sheets`):
+Wire every repeated component instance and every required supply, programming,
+feedback, sense, bypass, pull, and sheet-local signal. Use architecture power and
+inter-sheet net names verbatim where applicable.
 
-- Produce a `NetConnection` for every `architecture.power_nets` entry (e.g. `GND`, `+3V3`) with at least one endpoint on this sheet's parts.
-- Produce a `NetConnection` for every `architecture.inter_sheet_nets[*]` whose endpoints include this sheet, expanded into the specific pins on this sheet's parts that participate (use the hierarchical label name as `net_name`).
-- **Wire EVERY instance of identical repeated parts.** When the BOM has multiple parts sharing the same symbol+value+footprint (identical connectors/switches/relays/LEDs for parallel channels), each one must be wired to its own channel's signals — marking every pin of an identical sibling `no_connect_pins` while another is fully wired ships a silently dead channel through a passing ERC (§9.31 rejects it at commit; a four-jack audio buffer once shipped with 3 of 4 jacks electrically inert).
-- **Multi-unit symbols: wire (or explicitly NC) every unit.** `extras.symbol_pinouts` lists EVERY unit's pins for a multi-unit part (a dual op-amp's A and B sections, each pin tagged `unit`). An unused section's pins must appear in `no_connect_pins` deliberately (with its inputs tied per the datasheet where required) — never simply omitted.
-- Produce a `NetConnection` for every sheet-local net implied by `architecture.topologies[sheet]` (feedback dividers, sense lines, bypass paths, I2C pull-ups, boot caps, etc.). Give each a short uppercase name like `FB_SENSE` or `SDA_LOCAL`.
+Every two-terminal series component must separate two distinct nets. A resistor,
+capacitor, inductor, ferrite, diode, or fuse with both pins assigned to the same
+net is electrically shorted out. For USB termination resistors, use upstream and
+downstream names such as `USB_DP_MCU`/`USB_DP` and `USB_DN_MCU`/`USB_DN`.
 
 **Programming-pin check (when `architecture.mcu_present` is true).** The wiring slot MUST give every MCU a first-time programming path. Provide exactly one of:
 
-1. a net connecting the MCU's programming pin(s) — SWD/SWIO/SWCLK, UART boot, JTAG, USB-DFU, etc. — to a dedicated programming header/connector part;
-2. a net connecting the programming pin(s) to a labeled test point / pad, recorded in `assumptions` with a user-facing note (e.g. `"flash via the Vcc/Gnd/SWIO pads next to U1 (defaulted)"`);
-3. a `material: true` open question naming the shared pin — e.g. *"MCU programming pin PD1/SWIO is shared with active GPIO X; how do you want to program this board the first time?"* — leaving the programming net out of `connections`.
+1. a net assigning the MCU programming pin(s) to a dedicated programming header or connector;
+2. a net assigning the programming pin(s) to a labeled test point or pad;
+3. a `material: true` open question when the programming pin conflicts with active required use.
 
 When the architecture stage has already provided a programming interface (e.g. an onboard CH340C USB-UART bridge, or a programming header) in the BOM, you MUST connect it per (1) and MUST NOT ask: a USB-UART bridge wired to UART0 with DTR/RTS auto-reset to EN/IO0 satisfies (1). Reserve (3) for the genuine case where no interface exists and a programming pin is shared with an active GPIO.
 
 Silently omitting the programming path is forbidden, even when the package shares its programming pin with an active GPIO. Single-wire SWIO parts (e.g. the CH32V003) **always** expose programming on a shared GPIO — that is the norm, not a reason to drop the net.
 
-Net coverage (enforced by stage-commit):
+Net coverage is enforced at commit:
 
-- Every (ref, pin) defined in the symbol must appear in EITHER `connections.endpoints` OR `no_connect_pins`.
-- Use `no_connect_pins` for pins the design intentionally leaves floating (NC pads, unused GPIOs).
-- No pin may be silently omitted. The `9.11 net coverage` check in stage-commit will reject the slot otherwise.
+- Every `(ref, pin)` defined by the symbol appears exactly once in `pins`.
+- Use `no_connect: true` only for deliberately floating pins.
+- Omitted, duplicate, multiply-connected, and connected-plus-no-connect pins fail.
 
-**BOM shortfall — repair it, never ask the user.** If the only thing stopping you from wiring every pin is that the BOM is missing a supporting passive the IC genuinely needs — a decoupling/bypass cap for a dedicated `DEC*`/`VDD*`/`AVDD`/bypass supply pin, a mandatory pull-up, a crystal load cap — you MUST NOT resolve it by leaving the pin in `no_connect_pins` (electrically wrong) and you MUST NOT hand the user a "which pins should I decouple?" question. KiCraft solves its own problems: emit exactly one blocking question **tagged for automatic BOM repair**, whose text is a precise instruction listing what to add:
+**BOM shortfall — repair it, never ask the user.** If required support parts are missing, do not mark the affected pin `no_connect: true` and do not invent a ref. Emit exactly one blocking question tagged for automatic BOM repair with a precise parts instruction:
 
 ```json
 {"questions": [{"text": "The nRF52840 (U1) needs a decoupling cap on each of DEC1-DEC6 and DECUSB; the BOM has only 4x 100nF (C7-C10). Add three more 100nF 0402/0603 caps for the remaining DEC pins and a 4.7uF cap for DECUSB, on the PROCESSOR sheet, clustered with U1.", "blocking": true, "reconcile_target": "bom"}]}
@@ -44,11 +52,11 @@ Net coverage (enforced by stage-commit):
 
 The pipeline re-drives the BOM stage with that instruction, then re-runs wiring — the deficit is fixed and the user is never asked. Only use an **untagged** question (no `reconcile_target`) for a genuine design-intent choice the user alone can make (e.g. a shared programming pin, per §21 option 3). A tagged repair question is not a fallback for laziness: name the exact parts.
 
-Constraints (enforced by Pydantic + stage-commit):
+Constraints:
 
-- Every endpoint `ref` must exist in `bom.parts`.
-- Every endpoint `pin` must exist in the part's KiCad symbol (per `symbol_pinouts`).
-- Every `connection.sheet` must equal one of `bom.parts[*].sheet`.
-- `net_name` is free-form but should match `architecture.power_nets` and `architecture.inter_sheet_nets[*].name` verbatim where applicable.
+- Every `ref` exists in the committed BOM.
+- Every `pin` exists in that component's KiCad symbol.
+- `net` is non-empty and should reuse architecture-owned names where applicable.
+- Correction returns a complete replacement using this same `pins` schema.
 
-Output discipline: the wiring stage owns `connections` and `no_connect_pins`. Re-running replaces both wholesale. If the user revises the BOM, re-run wiring.
+Re-running wiring replaces the canonical connections and no-connect list wholesale.

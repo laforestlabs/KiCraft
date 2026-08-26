@@ -1,11 +1,12 @@
 """Single-stage preparation, provider calls, retries, commits, and finalization."""
+
 from __future__ import annotations
 
 import json
 import re
 import resource
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 import requests
@@ -36,12 +37,6 @@ from .stage_state_io import (
     run_design_cli,
     stamp_stage_status,
 )
-from .stage_wiring_patch import (
-    apply_wiring_patch,
-    wiring_patch_constraints,
-    wiring_patch_messages,
-    wiring_patch_response_format,
-)
 
 # Provider/transport failure families that survive the client's own bounded
 # transport retries and surface here as terminal stage failures. JSON recovery
@@ -54,6 +49,7 @@ _TRANSPORT_FAILURE_EXC = (
     requests.exceptions.ChunkedEncodingError,
 )
 _PROVIDER_FAILURE_EXC = (requests.exceptions.HTTPError,)
+
 
 def _child_cpu_s() -> float:
     """User+system CPU seconds consumed by this process's child subprocesses
@@ -89,6 +85,7 @@ def _record_stage_ledger(client, *, run_id, stage, **kw) -> None:
         guard.record_stage(run_id=run_id, stage=stage, **kw)
     except Exception:  # ledger trouble must never fail a design run
         pass
+
 
 # Per-stage self-correction budget. Wiring must satisfy whole-board net coverage
 # (§9.11) in a single slot; on a complex board the model needs more correction
@@ -126,16 +123,14 @@ _STAGE_MIN_TOKENS = {"wiring": 8192, "bom": 16384}
 def _stage_max_tokens(stage: str, default: int) -> int:
     return max(default, _STAGE_MIN_TOKENS.get(stage, 0))
 
+
 def _retry_feedback(
     out: dict, *, stage: str | None = None, valid_refs: list[str] | None = None
 ) -> str:
-    """Self-correction message fed back to the model after a rejected commit.
+    """Build correction feedback for a complete same-schema replacement.
 
-    Names the exact errors and offending pins, then instructs a *preserving patch*
-    (keep every already-valid entry, change only the flagged ones) rather than a
-    full redraft. On large list-shaped slots like wiring, re-emitting the whole slot
-    each attempt tends to regress already-correct connections (whack-a-mole), so the
-    preservation instruction is the lever that helps a weaker model converge.
+    The model always returns the stage's ordinary response shape. There is no
+    correction-only patch language or alternate response contract.
     """
     msg = f"stage-commit rejected that with errors: {json.dumps(out.get('errors'))}"
     if out.get("offenders"):
@@ -153,13 +148,9 @@ def _retry_feedback(
             )
     msg += (
         ". Return the COMPLETE corrected slot JSON, preserving every entry that was "
-        "already valid and changing ONLY the items listed above. When an offender lists "
-        "'real options: ...', replace the bad id with ONE of those exact ids verbatim "
-        "(do not invent or abbreviate); otherwise call search_symbols / search_footprints "
-        "to find a real id. Do not drop or alter parts of the slot that were not flagged. "
-        "Use COMPACT single-line JSON per part (omit null fields) so the output fits the "
-        "token budget — verbose pretty-printed JSON truncates and fails. "
-        "Output ONLY the slot JSON."
+        "already valid and changing only the rejected items. When an offender lists "
+        "'real options: ...', use one exact option verbatim; otherwise use the BOM "
+        "lookup tools. Use compact JSON and output only the slot object."
     )
     # Unknown-ref in wiring means the model tried to wire a part the BOM lacks --
     # it cannot add parts, so retrying with an invented ref just re-fails. Point
@@ -175,12 +166,8 @@ def _retry_feedback(
         )
         if valid_refs:
             msg += f" The only refs you may reference are: {valid_refs}."
-    # A power/ground NAME written as an endpoint ref (the model wiring '+3V3'
-    # / 'GND' as a pin's ref instead of a connection.net_name) fails the REF_RE
-    # pattern. The raw Pydantic text names a regex, not the fix: rails are
-    # net_name values, and a power/ground connection MAY hold a single endpoint
-    # (a pull resistor's rail-side pin). Point it at the correct shape instead
-    # of letting it thrash (KC-6DCV66 wired +3V3/GND as refs and died).
+    # A power/ground name used as a component ref fails the endpoint shape. The
+    # final-pin contract puts the rail in ``net`` and the component in ``ref``.
     if stage == "wiring":
         errs = json.dumps(out.get("errors") or "")
         rails = {
@@ -192,12 +179,8 @@ def _retry_feedback(
             msg += (
                 " NOTE: "
                 + ", ".join(sorted(rails))
-                + " is a power/ground NET NAME, not a component ref. Wire a "
-                "rail by setting connection.net_name to it and listing the part "
-                "pins as endpoints -- never put a rail name in endpoint.ref (refs "
-                'are part refs like "R1"). A power/ground connection MAY hold a '
-                "single endpoint (a pull-up/pull-down resistor's rail-side pin); "
-                "it is not dangling."
+                + ' is a net name. Use {"ref": "R1", "pin": "2", "net": "+3V3"}; '
+                "never put a rail name in ref."
             )
     return msg
 
@@ -258,6 +241,7 @@ def _normalize_questions(raw_list, stage: str) -> list[dict]:
                 }
             )
     return out[:5]
+
 
 def _client_model(client) -> str | None:
     """Best-effort display name of the model a client will call (shown in the UI)."""
@@ -381,21 +365,6 @@ class PreparedStage:
     executor: object | None
 
 
-@dataclass
-class AttemptState:
-    attempts: int = 0
-    loop_retries: int = 0
-    serialization_calls: int = 0
-    prior_rejection_signature: tuple | None = None
-    clean_slate_next: bool = False
-    reasoning: dict | None = None
-    temperature: float = 0.2
-    messages: list[dict] = field(default_factory=list)
-    wiring_candidate: dict | None = None
-    wiring_rejection: dict = field(default_factory=dict)
-    wiring_patch_mode: bool = False
-
-
 @dataclass(frozen=True)
 class AttemptOutcome:
     kind: Literal["candidate", "questions", "recoverable_failure", "terminal_failure"]
@@ -515,15 +484,30 @@ def run_serialization_recovery(
     )
 
 
+def _unknown_sheet_references(prepared: PreparedStage, candidate: dict) -> list[dict[str, str]]:
+    if prepared.stage != "bom":
+        return []
+    architecture = prepared.prompt_state.get("architecture") or {}
+    known = {
+        str(sheet.get("name"))
+        for sheet in architecture.get("sheets") or []
+        if isinstance(sheet, dict) and sheet.get("name")
+    }
+    violations = []
+    for part in candidate.get("parts") or []:
+        if not isinstance(part, dict):
+            continue
+        sheet = str(part.get("sheet") or "")
+        if sheet not in known:
+            violations.append({"ref": str(part.get("ref") or ""), "sheet": sheet})
+    return violations
+
+
 def decode_stage_response(
     prepared: PreparedStage,
     facts: ProviderFacts,
-    *,
-    wiring_patch_mode: bool,
-    wiring_candidate: dict | None,
-    wiring_rejection: dict,
 ) -> AttemptOutcome:
-    """Parse and classify one response without committing durable state."""
+    """Parse and normalize one response without mutating durable state."""
     try:
         if facts.finish == "collection_limit":
             raise ValueError("stream collection limit")
@@ -533,44 +517,21 @@ def decode_stage_response(
                 "questions",
                 {
                     "candidate": {
-                        "questions": _normalize_questions(
-                            parsed["questions"], prepared.stage
-                        )
+                        "questions": _normalize_questions(parsed["questions"], prepared.stage)
                     },
-                    "compact_run_expanded_count": 0,
-                    "patch_operations": 0,
+                    "expanded_component_count": 0,
                 },
             )
-        if prepared.stage == "wiring" and wiring_patch_mode:
-            assert wiring_candidate is not None
-            constraints = wiring_patch_constraints(
-                prepared.prompt_state,
-                prepared.extras,
-                wiring_candidate,
-                wiring_rejection,
-            )
-            try:
-                candidate, applied = apply_wiring_patch(
-                    wiring_candidate,
-                    parsed,
-                    allowed_refs=constraints[0],
-                    allowed_pins=constraints[1],
-                    allowed_nets=constraints[2],
-                )
-            except ValueError as exc:
-                return AttemptOutcome(
-                    "recoverable_failure",
-                    {"patch_error": str(exc), "failure_kind": "invalid_schema"},
-                )
-            return AttemptOutcome(
-                "candidate",
-                {"candidate": candidate, "compact_run_expanded_count": 0, "patch_operations": applied},
-            )
-        candidate, expanded = _normalize_stage_response(prepared.stage, parsed)
+        candidate, expanded = _normalize_stage_response(
+            prepared.stage, parsed, prepared.prompt_state
+        )
         kind = "questions" if isinstance(candidate.get("questions"), list) else "candidate"
         return AttemptOutcome(
             kind,
-            {"candidate": candidate, "compact_run_expanded_count": expanded, "patch_operations": 0},
+            {
+                "candidate": candidate,
+                "expanded_component_count": expanded,
+            },
         )
     except StageSchemaError as exc:
         return AttemptOutcome(
@@ -631,8 +592,7 @@ def finalize_stage(
     rounds,
     tool_calls,
     emitted_collection_count: int,
-    compact_run_expanded_count: int,
-    wiring_patch_operations: int,
+    expanded_component_count: int,
     outcome: dict,
 ) -> dict:
     """Persist status and ledger once, then build the caller-visible result."""
@@ -664,8 +624,7 @@ def finalize_stage(
         cost_usd=cost_usd,
         failure_kind=outcome.get("failure_kind"),
         emitted_collection_count=emitted_collection_count,
-        compact_run_expanded_count=compact_run_expanded_count,
-        wiring_patch_operations=wiring_patch_operations,
+        expanded_component_count=expanded_component_count,
     )
     if progress:
         progress(
@@ -687,10 +646,10 @@ def finalize_stage(
         "wall_s": wall_s,
         "cpu_s": cpu_s,
         "emitted_collection_count": emitted_collection_count,
-        "compact_run_expanded_count": compact_run_expanded_count,
-        "wiring_patch_operations": wiring_patch_operations,
+        "expanded_component_count": expanded_component_count,
         **outcome,
     }
+
 
 def drive_stage(
     client,
@@ -753,12 +712,9 @@ def drive_stage(
     # Bookkeeping the model has no use for stays out of its prompt.
     prompt_state = dict(prep_json["state"])
     prompt_state.pop("stage_status", None)
-    # R5: For the wiring stage, project the BOM to a compact digest
-    # (ref, sheet, symbol, value) instead of the full BOM slot. Pin data
-    # already arrives via the symbol_pinouts extras; the full BOM's
-    # sourcing/footprint/datasheet fields are noise for wiring. This is
-    # PROMPT-ONLY — committed state is untouched (nothing persists
-    # prompt_state).
+    # Wiring sees only the canonical component digest. Existing connection rows
+    # use a different durable representation and would contradict the final-pin
+    # response contract; a wiring drive deliberately replaces them wholesale.
     if stage == "wiring" and isinstance(prompt_state.get("bom"), dict):
         full_bom = prompt_state["bom"]
         prompt_state["bom"] = {
@@ -771,8 +727,6 @@ def drive_stage(
                 }
                 for p in full_bom.get("parts", [])
             ],
-            "connections": full_bom.get("connections", []),
-            "no_connect_pins": full_bom.get("no_connect_pins", []),
         }
     user = f"PROJECT BRIEF:\n{brief}\n\nCURRENT DESIGN STATE (JSON):\n{json.dumps(prompt_state)}"
     if extras:
@@ -897,18 +851,31 @@ def drive_stage(
     attempts = 0
     rounds = None
     tool_calls_ct = None
-    compact_run_expanded_count = 0
+    expanded_component_count = 0
     emitted_collection_count = 0
-    provider_call_budget = 5 if stage == "wiring" else max_retries + 2
-    wiring_candidate: dict | None = None
-    wiring_patch_mode = False
-    wiring_rejection: dict = {}
-    wiring_patch_operations = 0
-    attempt_state = AttemptState(
-        reasoning=reasoning,
-        temperature=temperature,
-        messages=list(messages),
-    )
+    provider_call_budget = max_retries + 2
+
+    def emit_candidate_decoded(
+        decoded: AttemptOutcome,
+        *,
+        provider_attempt: int,
+        serialization_recovery: bool,
+        clean_slate: bool,
+    ) -> None:
+        if not progress or decoded.kind not in {"candidate", "questions"}:
+            return
+        candidate = decoded.payload["candidate"]
+        progress(
+            {
+                "kind": "candidate_decoded",
+                "stage": stage,
+                "attempt": provider_attempt,
+                "serialization_recovery": serialization_recovery,
+                "clean_slate": clean_slate,
+                "expanded_component_count": int(decoded.payload["expanded_component_count"]),
+                "unknown_sheet_references": _unknown_sheet_references(prepared, candidate),
+            }
+        )
 
     for attempt in range(max_retries + 1):
         if attempts >= provider_call_budget:
@@ -925,18 +892,7 @@ def drive_stage(
         clean_slate_next = False
         call_messages = messages
         call_response_format = response_format
-        if stage == "wiring" and wiring_patch_mode:
-            assert wiring_candidate is not None
-            call_messages = wiring_patch_messages(
-                wiring_candidate,
-                wiring_rejection,
-                prompt_state,
-                extras,
-                clean_slate=was_clean_slate,
-            )
-            call_response_format = wiring_patch_response_format()
         attempts += 1  # a call IS attempted even when it raises below
-        attempt_state.attempts = attempts
         try:
             facts = call_stage_provider(
                 client,
@@ -1020,42 +976,19 @@ def drive_stage(
             messages = _lean_retry(None, _REASONING_LOOP_RETRY_MSG)
             continue
 
-        outcome = decode_stage_response(
-            prepared,
-            facts,
-            wiring_patch_mode=wiring_patch_mode,
-            wiring_candidate=wiring_candidate,
-            wiring_rejection=wiring_rejection,
+        outcome = decode_stage_response(prepared, facts)
+        emit_candidate_decoded(
+            outcome,
+            provider_attempt=attempts,
+            serialization_recovery=False,
+            clean_slate=was_clean_slate,
         )
         schema_error = outcome.payload.get("failure_kind") == "invalid_schema"
         schema_error_detail = outcome.payload.get("schema_error")
-        patch_error_detail = outcome.payload.get("patch_error")
         kind = outcome.payload.get("failure_kind")
         if outcome.kind in {"candidate", "questions"}:
             obj = outcome.payload["candidate"]
-            compact_run_expanded_count = outcome.payload["compact_run_expanded_count"]
-            wiring_patch_operations += outcome.payload["patch_operations"]
-            if stage == "wiring":
-                wiring_candidate = obj
-        if patch_error_detail is not None:
-            rejection = {
-                "ok": False,
-                "errors": [f"wiring patch rejected: {patch_error_detail}"],
-                "offenders": [],
-            }
-            last = {"commit": rejection, "schema_error": patch_error_detail}
-            signature, clean_slate_next, terminal = next_attempt(
-                rejection,
-                prior_rejection_signature,
-                was_clean_slate=was_clean_slate,
-            )
-            prior_rejection_signature = signature
-            if terminal:
-                break
-            wiring_rejection = rejection
-            reasoning = {"enabled": False}
-            temperature = max(escape_temperature, 0.0)
-            continue
+            expanded_component_count = outcome.payload["expanded_component_count"]
         if schema_error or kind in {"collection_limit", "truncated_json", "invalid_json"}:
             last = {
                 "failure_kind": kind,
@@ -1110,6 +1043,15 @@ def drive_stage(
                         + json.dumps(list(resolution_ledger.values())[:16], separators=(",", ":")),
                     }
                 )
+            if progress:
+                progress(
+                    {
+                        "kind": "serialization_recovery",
+                        "stage": stage,
+                        "failure_kind": kind,
+                        "resolution_ledger_entries": int(len(resolution_ledger)),
+                    }
+                )
             try:
                 sfacts = run_serialization_recovery(
                     client,
@@ -1142,29 +1084,19 @@ def drive_stage(
                 break
             sraw = sfacts.raw
             scollection_limit = sfacts.collection_limit
-            serialization_outcome = decode_stage_response(
-                prepared,
-                sfacts,
-                wiring_patch_mode=wiring_patch_mode,
-                wiring_candidate=wiring_candidate,
-                wiring_rejection=wiring_rejection,
+            serialization_outcome = decode_stage_response(prepared, sfacts)
+            emit_candidate_decoded(
+                serialization_outcome,
+                provider_attempt=attempts,
+                serialization_recovery=True,
+                clean_slate=was_clean_slate,
             )
-            schema_error = (
-                serialization_outcome.payload.get("failure_kind") == "invalid_schema"
-            )
-            schema_error_detail = (
-                serialization_outcome.payload.get("schema_error")
-                or serialization_outcome.payload.get("patch_error")
-            )
+            schema_error = serialization_outcome.payload.get("failure_kind") == "invalid_schema"
+            schema_error_detail = serialization_outcome.payload.get("schema_error")
             skind = serialization_outcome.payload.get("failure_kind")
             if serialization_outcome.kind in {"candidate", "questions"}:
                 obj = serialization_outcome.payload["candidate"]
-                compact_run_expanded_count = serialization_outcome.payload[
-                    "compact_run_expanded_count"
-                ]
-                wiring_patch_operations += serialization_outcome.payload["patch_operations"]
-                if stage == "wiring":
-                    wiring_candidate = obj
+                expanded_component_count = serialization_outcome.payload["expanded_component_count"]
             if schema_error or skind in {
                 "collection_limit",
                 "reasoning_loop",
@@ -1234,8 +1166,7 @@ def drive_stage(
                 rounds=rounds,
                 tool_calls=tool_calls_ct,
                 emitted_collection_count=emitted_collection_count,
-                compact_run_expanded_count=compact_run_expanded_count,
-                wiring_patch_operations=wiring_patch_operations,
+                expanded_component_count=expanded_component_count,
                 outcome={"commit": out, "slot": obj},
             )
         last = {"commit": out}
@@ -1255,14 +1186,7 @@ def drive_stage(
         )
         if terminal:
             break
-        if stage == "wiring":
-            wiring_candidate = dict(obj)
-            wiring_rejection = out
-            prior_rejection_signature = signature
-            wiring_patch_mode = True
-            reasoning = {"enabled": False}
-            temperature = max(escape_temperature, 0.0)
-            continue
+        prior_rejection_signature = signature
         if clean_slate_next:
             reasoning = {"enabled": False}
             temperature = max(escape_temperature, 0.0)
@@ -1272,11 +1196,8 @@ def drive_stage(
             )
             continue
         prior_rejection_signature = signature
-        # Echo the FULL slot the model just emitted (raw) so the preserving-patch
-        # instruction in _retry_feedback can change only the flagged parts; the
-        # slot is bounded by max_tokens and is far smaller than the tool transcript
-        # this replaces. For wiring, pass the committed BOM refs so an unknown-ref
-        # rejection can name the real refs + the reconcile escape hatch (WS6).
+        # Echo the complete rejected response with structured commit feedback.
+        # Correction uses the same stage schema; no alternate patch contract.
         _valid_refs = committed_bom_refs(state_path) if stage == "wiring" else None
         messages = _lean_retry(raw, _retry_feedback(out, stage=stage, valid_refs=_valid_refs))
 
@@ -1299,7 +1220,6 @@ def drive_stage(
         rounds=rounds,
         tool_calls=tool_calls_ct,
         emitted_collection_count=emitted_collection_count,
-        compact_run_expanded_count=compact_run_expanded_count,
-        wiring_patch_operations=wiring_patch_operations,
+        expanded_component_count=expanded_component_count,
         outcome=last,
     )

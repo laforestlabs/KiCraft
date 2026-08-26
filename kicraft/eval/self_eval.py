@@ -149,6 +149,8 @@ _EVENT_KINDS = frozenset(
         "stage_done",
         "question",
         "retry",
+        "serialization_recovery",
+        "candidate_decoded",
         "build_start",
         "build_log",
         "build_done",
@@ -249,7 +251,7 @@ def _write_campaign_manifest(
         "judge_provider_order": list(settings.judge_provider_order),
         "response_policies": {
             "design": "kicraft_<stage>_response_v1",
-            "wiring_patch": "kicraft_wiring_patch_v1",
+            "bom_and_wiring": "kicraft_<stage>_response_v2",
             "review": "kicraft_electrical_review_v1",
             "judge": "kicraft_eval_judge_v1",
         },
@@ -590,6 +592,7 @@ def evaluate_one(
         "prompt": prompt,
         "stem": stem,
         "rundir": str(rundir),
+        "run_id": run_id,
     }
     try:
         d = run_design(
@@ -623,6 +626,7 @@ def evaluate_one(
             skip_judge=skip_judge,
             started_at=started_at,
             finished_at=_now_iso(),
+            run_id=run_id,
         )
         sc, judge = report["score"], report["judge"]
         rec.update(

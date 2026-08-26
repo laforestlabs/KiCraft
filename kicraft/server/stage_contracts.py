@@ -1,13 +1,17 @@
 """Per-invocation stage response contracts and response normalization."""
+
 from __future__ import annotations
 
 import json
 import re
 from dataclasses import dataclass
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kicraft.design import models
+
+from .config import BOM_SHEET_PART_LIMIT, BOM_TOTAL_PART_LIMIT
 
 # Canonical stage -> slot model, mirroring cli_app._apply_slot's owned-field map.
 SLOT_MODEL = {
@@ -22,11 +26,48 @@ SUPPORTED_STAGES = (*SLOT_MODEL.keys(), "wiring")
 DESIGN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
 
 
-class WiringSlotResponse(BaseModel):
+class ConnectedPinAssignment(BaseModel):
+    """Final connected state for one component pin."""
+
     model_config = ConfigDict(extra="forbid")
 
-    connections: list[models.NetConnection]
-    no_connect_pins: list[models.PinEndpoint]
+    ref: str
+    pin: str
+    net: str = Field(min_length=1)
+
+
+class NoConnectPinAssignment(BaseModel):
+    """Final intentionally-unconnected state for one component pin."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str
+    pin: str
+    no_connect: Literal[True]
+
+
+PinAssignment = Annotated[
+    ConnectedPinAssignment | NoConnectPinAssignment,
+    Field(union_mode="left_to_right"),
+]
+
+
+class WiringStageResponse(BaseModel):
+    """Model-facing wiring contract: one final assignment per pin."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pins: list[PinAssignment] = Field(max_length=5000)
+
+    @model_validator(mode="after")
+    def _pins_unique(self):
+        seen: set[tuple[str, str]] = set()
+        for assignment in self.pins:
+            key = (assignment.ref, assignment.pin)
+            if key in seen:
+                raise ValueError(f"duplicate pin assignment {assignment.ref}.{assignment.pin}")
+            seen.add(key)
+        return self
 
 
 class IntentStageResponse(models.IntentSlot):
@@ -41,15 +82,14 @@ class StageQuestionResponse(BaseModel):
     questions: list[models.Question] = Field(min_length=1, max_length=5)
 
 
-class BomPartRun(BaseModel):
-    """Compact stage-only declaration for identical BOM members."""
+class BomComponentGroup(BaseModel):
+    """One component type expanded into deterministic references."""
 
     model_config = ConfigDict(extra="forbid")
 
-    refs: list[str] | None = Field(default=None, min_length=1, max_length=450)
-    ref_prefix: str | None = None
-    start: int | None = Field(default=None, ge=1)
-    end: int | None = Field(default=None, ge=1)
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    reference_prefix: str = Field(pattern=r"^[A-Z]+$")
+    quantity: int = Field(ge=1, le=BOM_SHEET_PART_LIMIT)
     value: str
     symbol: str
     footprint: str
@@ -57,96 +97,119 @@ class BomPartRun(BaseModel):
     mpn: str | None = None
     datasheet: str | None = None
     sourcing_note: str | None = None
-    side: str | None = None
-
-    @model_validator(mode="after")
-    def _one_reference_form(self):
-        explicit = self.refs is not None
-        ranged = self.ref_prefix is not None or self.start is not None or self.end is not None
-        if explicit == ranged:
-            raise ValueError("part run requires exactly one of refs or ref_prefix/start/end")
-        if ranged:
-            if not self.ref_prefix or self.start is None or self.end is None:
-                raise ValueError("part run range requires ref_prefix, start, and end")
-            if not re.fullmatch(r"[A-Z]+", self.ref_prefix):
-                raise ValueError("part run ref_prefix must contain uppercase letters only")
-            if self.end < self.start:
-                raise ValueError("part run end must be greater than or equal to start")
-            if self.end - self.start + 1 > 450:
-                raise ValueError("part run may contain at most 450 references")
-        return self
-
-    def reference_count(self) -> int:
-        if self.refs is not None:
-            return len(self.refs)
-        assert self.start is not None and self.end is not None
-        return self.end - self.start + 1
-
-    def iter_refs(self):
-        if self.refs is not None:
-            yield from self.refs
-            return
-        assert self.ref_prefix is not None and self.start is not None and self.end is not None
-        for number in range(self.start, self.end + 1):
-            yield f"{self.ref_prefix}{number}"
+    side: Literal["front", "back"] | None = None
 
 
-class BomStageResponse(BaseModel):
-    """Schema-bound BOM response; expanded into canonical ``BOM.parts``."""
+class BomArrayGroup(BaseModel):
+    """Placement pattern covering every member of one component group."""
 
     model_config = ConfigDict(extra="forbid")
 
-    parts: list[models.BomPart] = Field(default_factory=list, max_length=500)
-    part_runs: list[BomPartRun] = Field(default_factory=list, max_length=500)
-    ic_groups: dict[str, list[str]] = Field(default_factory=dict)
-    group_labels: dict[str, str] = Field(default_factory=dict)
-    thermal_refs: list[str] = Field(default_factory=list)
-    signal_flow_order: list[str] = Field(default_factory=list)
-    component_zones: dict[str, dict[str, str]] = Field(default_factory=dict)
-    arrays: list[models.ArraySpec] = Field(default_factory=list)
-    placement_hints: list[models.PlacementHint] = Field(default_factory=list)
+    group_id: str
+    pattern: Literal["grid", "ring"] = "grid"
+    rows: int | None = Field(default=None, gt=0)
+    cols: int | None = Field(default=None, gt=0)
+    pitch_mm: float | None = Field(default=None, gt=0)
+    serpentine: bool = True
+    radius_mm: float | None = Field(default=None, gt=0)
+    start_angle_deg: float = 0.0
+
+
+class BomStageResponse(BaseModel):
+    """Model-facing BOM contract: exactly one group-first representation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    groups: list[BomComponentGroup] = Field(min_length=1, max_length=BOM_TOTAL_PART_LIMIT)
+    arrays: list[BomArrayGroup] = Field(default_factory=list, max_length=100)
     assumptions: list[str] = Field(default_factory=list)
     substitutions: list[models.Substitution] = Field(default_factory=list)
-    connections: list[models.NetConnection] = Field(default_factory=list)
-    no_connect_pins: list[models.PinEndpoint] = Field(default_factory=list)
 
-def _expand_bom_stage_response(payload: dict) -> tuple[dict, int]:
-    """Validate compact runs and return the unchanged canonical BOM shape."""
+    @model_validator(mode="after")
+    def _ids_unique(self):
+        ids = [group.id for group in self.groups]
+        if len(ids) != len(set(ids)):
+            raise ValueError("BOM group ids must be unique")
+        array_groups = [array.group_id for array in self.arrays]
+        if len(array_groups) != len(set(array_groups)):
+            raise ValueError("a BOM group may appear in at most one array")
+        unknown = set(array_groups) - set(ids)
+        if unknown:
+            raise ValueError(f"BOM arrays reference unknown groups: {sorted(unknown)}")
+        return self
+
+
+def _normalize_bom_stage_response(payload: dict) -> tuple[dict, int]:
+    """Expand component groups into the canonical per-part BOM."""
     response = BomStageResponse.model_validate(payload)
-    total = len(response.parts) + sum(run.reference_count() for run in response.part_runs)
-    if total > 500:
-        raise ValueError(f"BOM has {total} parts; maximum is 500")
+    total = sum(group.quantity for group in response.groups)
+    if total > BOM_TOTAL_PART_LIMIT:
+        raise ValueError(f"BOM has {total} parts; maximum is {BOM_TOTAL_PART_LIMIT}")
 
-    seen = {part.ref for part in response.parts}
-    if len(seen) != len(response.parts):
-        raise ValueError("BOM ordinary parts contain duplicate references")
     per_sheet: dict[str, int] = {}
-    for part in response.parts:
-        per_sheet[part.sheet] = per_sheet.get(part.sheet, 0) + 1
-    run_refs: list[tuple[BomPartRun, list[str]]] = []
-    for run in response.part_runs:
-        refs = list(run.iter_refs())
-        for ref in refs:
-            if not models.REF_RE.fullmatch(ref):
-                raise ValueError(f"invalid part run reference {ref!r}")
-            if ref in seen:
-                raise ValueError(f"duplicate or overlapping part run reference {ref!r}")
-            seen.add(ref)
-        per_sheet[run.sheet] = per_sheet.get(run.sheet, 0) + len(refs)
-        run_refs.append((run, refs))
-    oversized = {sheet: count for sheet, count in per_sheet.items() if count > 450}
-    if oversized:
-        raise ValueError(f"BOM exceeds 450 parts on a sheet: {oversized}")
+    next_number: dict[str, int] = {}
+    refs_by_group: dict[str, list[str]] = {}
+    parts: list[models.BomPart] = []
+    for group in response.groups:
+        per_sheet[group.sheet] = per_sheet.get(group.sheet, 0) + group.quantity
+        start = next_number.get(group.reference_prefix, 1)
+        refs = [
+            f"{group.reference_prefix}{number}" for number in range(start, start + group.quantity)
+        ]
+        next_number[group.reference_prefix] = start + group.quantity
+        refs_by_group[group.id] = refs
+        shared = group.model_dump(exclude={"id", "reference_prefix", "quantity"}, exclude_none=True)
+        parts.extend(models.BomPart.model_validate({"ref": ref, **shared}) for ref in refs)
 
-    expanded = list(response.parts)
-    for run, refs in run_refs:
-        shared = run.model_dump(exclude={"refs", "ref_prefix", "start", "end"}, exclude_none=True)
-        expanded.extend(models.BomPart.model_validate({"ref": ref, **shared}) for ref in refs)
-    canonical = response.model_dump(exclude={"part_runs"})
-    canonical["parts"] = [part.model_dump(exclude_none=True) for part in expanded]
-    return models.BOM.model_validate(canonical).model_dump(exclude_none=True), total - len(
-        response.parts
+    oversized = {sheet: count for sheet, count in per_sheet.items() if count > BOM_SHEET_PART_LIMIT}
+    if oversized:
+        raise ValueError(f"BOM exceeds {BOM_SHEET_PART_LIMIT} parts on a sheet: {oversized}")
+
+    arrays = []
+    for array in response.arrays:
+        data = array.model_dump(exclude={"group_id"}, exclude_none=True)
+        arrays.append(
+            models.ArraySpec.model_validate({"refs": refs_by_group[array.group_id], **data})
+        )
+    canonical = models.BOM(
+        parts=parts,
+        arrays=arrays,
+        assumptions=response.assumptions,
+        substitutions=response.substitutions,
     )
+    return canonical.model_dump(exclude_none=True), total
+
+
+def _normalize_wiring_stage_response(payload: dict, prompt_state: dict) -> dict:
+    """Derive canonical connection rows from final pin assignments."""
+    response = WiringStageResponse.model_validate(payload)
+    bom = prompt_state.get("bom")
+    if not isinstance(bom, dict):
+        raise ValueError("wiring response requires a committed BOM")
+    ref_sheets = {
+        str(part.get("ref")): str(part.get("sheet"))
+        for part in bom.get("parts") or []
+        if isinstance(part, dict) and part.get("ref") and part.get("sheet")
+    }
+    grouped: dict[tuple[str, str], list[models.PinEndpoint]] = {}
+    no_connect_pins: list[models.PinEndpoint] = []
+    for assignment in response.pins:
+        if assignment.ref not in ref_sheets:
+            raise ValueError(f"wiring references unknown component {assignment.ref!r}")
+        endpoint = models.PinEndpoint(ref=assignment.ref, pin=assignment.pin)
+        if isinstance(assignment, NoConnectPinAssignment):
+            no_connect_pins.append(endpoint)
+            continue
+        key = (ref_sheets[assignment.ref], assignment.net)
+        grouped.setdefault(key, []).append(endpoint)
+    connections = [
+        models.NetConnection(sheet=sheet, net_name=net, endpoints=endpoints)
+        for (sheet, net), endpoints in grouped.items()
+    ]
+    return {
+        "connections": [connection.model_dump() for connection in connections],
+        "no_connect_pins": [endpoint.model_dump() for endpoint in no_connect_pins],
+    }
 
 
 def _json_response_format(name: str, schema: dict) -> dict:
@@ -155,13 +218,14 @@ def _json_response_format(name: str, schema: dict) -> dict:
         "json_schema": {"name": name, "strict": True, "schema": schema},
     }
 
+
 def _slot_response_schema(stage: str) -> dict:
     if stage == "intent":
         return IntentStageResponse.model_json_schema()
     if stage == "bom":
         return BomStageResponse.model_json_schema()
     if stage == "wiring":
-        return WiringSlotResponse.model_json_schema()
+        return WiringStageResponse.model_json_schema()
     return SLOT_MODEL[stage].model_json_schema()
 
 
@@ -176,6 +240,7 @@ def _response_schema(stage: str) -> dict:
     if definitions:
         schema["$defs"] = definitions
     return schema
+
 
 @dataclass(frozen=True)
 class StageResponseContract:
@@ -211,40 +276,39 @@ def build_stage_response_contract(stage: str, prompt_state: dict) -> StageRespon
         definitions = schema.get("$defs")
         if not isinstance(definitions, dict):
             raise ValueError("BOM response schema is missing $defs")
-        for definition_name in ("BomPart", "BomPartRun"):
-            definition = definitions.get(definition_name)
-            properties = definition.get("properties") if isinstance(definition, dict) else None
-            sheet = properties.get("sheet") if isinstance(properties, dict) else None
-            if not isinstance(sheet, dict):
-                raise ValueError(f"BOM response schema is missing {definition_name}.sheet")
-            sheet["enum"] = names
-    response_format = _json_response_format(f"kicraft_{stage}_response_v1", schema)
+        definition = definitions.get("BomComponentGroup")
+        properties = definition.get("properties") if isinstance(definition, dict) else None
+        sheet = properties.get("sheet") if isinstance(properties, dict) else None
+        if not isinstance(sheet, dict):
+            raise ValueError("BOM response schema is missing BomComponentGroup.sheet")
+        sheet["enum"] = names
+    version = 2 if stage in {"bom", "wiring"} else 1
+    response_format = _json_response_format(f"kicraft_{stage}_response_v{version}", schema)
     return StageResponseContract(stage=stage, schema=schema, response_format=response_format)
 
 
 def schema_json(contract: StageResponseContract) -> str:
     return json.dumps(contract.schema)
 
+
 class StageSchemaError(ValueError):
     pass
 
 
-def _normalize_stage_response(stage: str, payload: dict) -> tuple[dict, int]:
+def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> tuple[dict, int]:
     try:
         if isinstance(payload.get("questions"), list):
             return StageQuestionResponse.model_validate(payload).model_dump(exclude_none=True), 0
         if stage == "intent":
             return IntentStageResponse.model_validate(payload).model_dump(exclude_none=True), 0
         if stage == "bom":
-            return _expand_bom_stage_response(payload)
+            return _normalize_bom_stage_response(payload)
         if stage == "wiring":
-            return (
-                WiringSlotResponse.model_validate(payload).model_dump(exclude_none=True),
-                0,
-            )
+            return _normalize_wiring_stage_response(payload, prompt_state), 0
         return SLOT_MODEL[stage].model_validate(payload).model_dump(exclude_none=True), 0
     except (TypeError, ValueError) as exc:
         raise StageSchemaError(str(exc)) from exc
+
 
 def _extract_json(text: str) -> dict:
     """Parse exactly ONE complete JSON object from ``text``.

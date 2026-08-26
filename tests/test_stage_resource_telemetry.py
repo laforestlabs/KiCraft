@@ -117,11 +117,13 @@ def test_failed_bom_records_wall_cpu_rounds_to_all_three_sinks(tmp_path):
     with sqlite3.connect(g.path) as c:
         row = c.execute(
             "SELECT stage, ok, rounds, tool_calls, wall_s, cpu_s, "
-            "cost_usd, run_id, failure_kind FROM stage_runs"
+            "cost_usd, run_id, failure_kind, emitted_collection_count, "
+            "expanded_component_count FROM stage_runs"
         ).fetchone()
     assert row[0] == "bom" and row[1] == 0 and row[2] == 1 and row[3] == 0
     assert row[4] == r["wall_s"] and row[6] == 0.0 and row[7] == "p7-1"
     assert row[8] == "invalid_json"
+    assert row[9:] == (0, 0)
 
 
 def test_failed_intent_records_wall_cpu_but_null_rounds(tmp_path):

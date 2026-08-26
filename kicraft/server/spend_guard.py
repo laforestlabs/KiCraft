@@ -79,8 +79,7 @@ class SpendGuard:
                 "cost_usd REAL,"
                 "failure_kind TEXT,"
                 "emitted_collection_count INTEGER,"
-                "compact_run_expanded_count INTEGER,"
-                "wiring_patch_operations INTEGER)"
+                "expanded_component_count INTEGER)"
             )
             # Backward-compatible migration: ledgers created before failure_kind
             # existed keep their rows and gain the column via ALTER TABLE --
@@ -91,8 +90,7 @@ class SpendGuard:
                 conn.execute("ALTER TABLE stage_runs ADD COLUMN failure_kind TEXT")
             for column in (
                 "emitted_collection_count INTEGER",
-                "compact_run_expanded_count INTEGER",
-                "wiring_patch_operations INTEGER",
+                "expanded_component_count INTEGER",
             ):
                 name = column.split()[0]
                 if name not in cols:
@@ -205,8 +203,7 @@ class SpendGuard:
         cost_usd: float,
         failure_kind: str | None = None,
         emitted_collection_count: int | None = None,
-        compact_run_expanded_count: int | None = None,
-        wiring_patch_operations: int | None = None,
+        expanded_component_count: int | None = None,
     ) -> None:
         """Append one completed stage to ``stage_runs`` — the durable per-stage
         resource record. ``wall_s``/``cpu_s`` are the gap metrics: a stage's
@@ -227,8 +224,8 @@ class SpendGuard:
             conn.execute(
                 "INSERT INTO stage_runs (ts, run_id, stage, ok, attempts, rounds, "
                 "tool_calls, wall_s, cpu_s, cost_usd, failure_kind, "
-                "emitted_collection_count, compact_run_expanded_count, "
-                "wiring_patch_operations) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "emitted_collection_count, expanded_component_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     _utcnow_iso(),
                     run_id,
@@ -242,9 +239,6 @@ class SpendGuard:
                     float(cost_usd or 0.0),
                     str(failure_kind) if failure_kind is not None else None,
                     int(emitted_collection_count) if emitted_collection_count is not None else None,
-                    int(compact_run_expanded_count)
-                    if compact_run_expanded_count is not None
-                    else None,
-                    int(wiring_patch_operations) if wiring_patch_operations is not None else None,
+                    int(expanded_component_count) if expanded_component_count is not None else None,
                 ),
             )

@@ -1021,3 +1021,56 @@ def test_model_preflight_rejects_missing_schema_capability_before_smoke():
     )
     assert result["ok"] is False
     assert result["endpoints"][0]["missing_parameters"] == ["response_format"]
+
+
+def test_model_preflight_merges_campaign_metadata_into_fixed_role_context():
+    settings = Settings(api_key="k")
+    endpoint = {
+        "data": {
+            "id": settings.model,
+            "endpoints": [
+                {
+                    "model_id": settings.model,
+                    "provider_name": "DeepInfra",
+                    "tag": "deepinfra/fp8",
+                    "pricing": {"prompt": "0.00000008", "completion": "0.00000018"},
+                    "supported_parameters": [
+                        "reasoning",
+                        "response_format",
+                        "tools",
+                        "tool_choice",
+                    ],
+                }
+            ],
+        }
+    }
+    seen = {}
+
+    class Client:
+        def __init__(self, _settings):
+            pass
+
+        def chat_with_tools(self, *args, **kwargs):
+            seen.update(kwargs["meta_ctx"])
+            return {
+                "text": '{"ok": true}',
+                "cost_usd": 0.001,
+                "provider": "DeepInfra",
+                "model": settings.model,
+                "finish_reason": "stop",
+            }
+
+    result = preflight_role(
+        settings,
+        role="designer",
+        model=settings.model,
+        http=_EndpointHttp(endpoint),
+        client_factory=Client,
+        meta_ctx={"campaign_id": "canary-1", "phase": "wrong", "role": "wrong"},
+    )
+    assert result["ok"] is True
+    assert seen == {
+        "campaign_id": "canary-1",
+        "phase": "model_preflight",
+        "role": "designer",
+    }

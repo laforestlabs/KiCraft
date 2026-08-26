@@ -8,9 +8,10 @@ from __future__ import annotations
 import json
 import pytest
 
-from kicraft.design import models
 from kicraft.server.stage_contracts import (
     StageQuestionResponse,
+    _normalize_bom_stage_response,
+    _normalize_wiring_stage_response,
     _response_schema,
     build_stage_response_contract,
 )
@@ -22,22 +23,26 @@ def build_system(stage: str, collection_bounds=None) -> str:
     return _build_system(build_stage_response_contract(stage, state), collection_bounds)
 
 
-def test_bom_example_validates_against_the_model():
+def test_bom_example_validates_against_the_model_contract():
     slot = json.loads(_WORKED_EXAMPLES["bom"])
-    bom = models.BOM.model_validate(slot)
-    assert [p.ref for p in bom.parts] == ["U1", "C1", "C2", "R1", "R2", "J1"]
-    assert bom.ic_groups["U1"] == ["C1", "C2"]
+    canonical, expanded = _normalize_bom_stage_response(slot)
+    assert expanded == 6
+    assert [part["ref"] for part in canonical["parts"]] == [
+        "U1",
+        "C1",
+        "C2",
+        "R1",
+        "R2",
+        "J1",
+    ]
 
 
-def test_wiring_example_validates_as_bom_wiring_fields():
-    slot = json.loads(_WORKED_EXAMPLES["wiring"])
-    # Wiring commits into bom.connections/no_connect_pins; validate through
-    # the BOM model carrying the same parts as the bom example.
-    base = json.loads(_WORKED_EXAMPLES["bom"])
-    base["connections"] = slot["connections"]
-    base["no_connect_pins"] = slot["no_connect_pins"]
-    bom = models.BOM.model_validate(base)
-    nets = {c.net_name for c in bom.connections}
+def test_wiring_example_normalizes_to_canonical_wiring():
+    bom, _ = _normalize_bom_stage_response(json.loads(_WORKED_EXAMPLES["bom"]))
+    canonical = _normalize_wiring_stage_response(
+        json.loads(_WORKED_EXAMPLES["wiring"]), {"bom": bom}
+    )
+    nets = {connection["net_name"] for connection in canonical["connections"]}
     assert nets == {"VIN", "+3V3", "GND", "NRST", "BOOT0"}
 
 
@@ -49,28 +54,25 @@ def test_examples_ride_the_system_prompt():
 
 def test_bom_system_prompt_carries_collection_bounds() -> None:
     prompt = build_system("bom")
-    assert "`parts` collection must contain at most 500 items total" in prompt
+    assert "`groups` collection must contain at most 500 items total" in prompt
     assert "at most 450 items per `sheet`" in prompt
     assert "BOUNDED OUTPUT POLICY" not in build_system("wiring")
     assert "BOUNDED OUTPUT POLICY" not in build_system("bom", ())
 
 
-def test_bom_contract_closes_both_sheet_fields_and_reuses_schema_object():
+def test_bom_contract_closes_group_sheet_and_reuses_schema_object():
     names = ["ADDRESSABLE LED OUTPUT", "SPEAKER OUTPUT"]
     state = {"architecture": {"sheets": [{"name": name} for name in names]}}
     contract = build_stage_response_contract("bom", state)
 
     definitions = contract.schema["$defs"]
-    assert definitions["BomPart"]["properties"]["sheet"]["enum"] == names
-    assert definitions["BomPartRun"]["properties"]["sheet"]["enum"] == names
+    assert definitions["BomComponentGroup"]["properties"]["sheet"]["enum"] == names
     assert contract.response_format["json_schema"]["schema"] is contract.schema
     assert "ADDRESSABLE LED OTPUT" not in names
     assert "SPEAKER OTPUT" not in names
 
     prompt = _build_system(contract)
-    encoded = prompt.split("string patterns are strict):\n", 1)[1].split(
-        "\nWorked example", 1
-    )[0]
+    encoded = prompt.split("string patterns are strict):\n", 1)[1].split("\nWorked example", 1)[0]
     assert json.loads(encoded) == contract.schema
     assert "SHEET NAMES ARE CLOSED" in prompt
 

@@ -699,18 +699,15 @@ def check_collection_bounds(
 
 
 def check_bom_size(bom) -> CheckResult:
-    """§9.35 — reject BOM cardinality that exceeds the response policy."""
-    from kicraft.server.config import STAGE_COLLECTION_BOUNDS
+    """§9.35 — reject canonical BOM cardinality beyond commit limits."""
+    from kicraft.server.config import BOM_SHEET_PART_LIMIT, BOM_TOTAL_PART_LIMIT
 
-    bound = next(item for item in STAGE_COLLECTION_BOUNDS["bom"] if item.field == "parts")
     result = check_collection_bounds(
         "parts",
         bom.parts,
-        total=bound.total,
-        per_group=bound.per_group,
-        group_key=(
-            (lambda part: getattr(part, bound.group_key)) if bound.group_key is not None else None
-        ),
+        total=BOM_TOTAL_PART_LIMIT,
+        per_group=BOM_SHEET_PART_LIMIT,
+        group_key=lambda part: part.sheet,
     )
     return CheckResult(
         name="9.35 BOM emission bounds",

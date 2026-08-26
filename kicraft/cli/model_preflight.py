@@ -46,6 +46,7 @@ def preflight_role(
     smoke: bool = True,
     http=None,
     client_factory=CappedOpenRouterClient,
+    meta_ctx: dict | None = None,
 ) -> dict:
     """Validate one exact role route and optionally make one bounded smoke call."""
     http = http or requests
@@ -130,7 +131,11 @@ def preflight_role(
                     "schema": _SMOKE_SCHEMA,
                 },
             },
-            "meta_ctx": {"phase": "model_preflight", "role": role},
+            "meta_ctx": {
+                **(meta_ctx or {}),
+                "phase": "model_preflight",
+                "role": role,
+            },
         }
         if role == "designer":
             result = client.chat_with_tools(

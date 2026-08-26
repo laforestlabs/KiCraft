@@ -15,8 +15,9 @@ from kicraft.server import stage_runtime as stage_driver_mod
 from kicraft.server.config import Settings
 from kicraft.server.stage_bom_tools import BOM_TOOLS
 from kicraft.server.stage_contracts import (
-    _expand_bom_stage_response,
     _extract_json,
+    _normalize_bom_stage_response,
+    _normalize_wiring_stage_response,
     build_stage_response_contract,
 )
 from kicraft.server.stage_prompts import build_system as _build_system
@@ -30,7 +31,6 @@ from kicraft.server.stage_runtime import (
     _stage_max_tokens,
 )
 from kicraft.server.stage_state_io import attach_questions as _attach_questions
-from kicraft.server.stage_wiring_patch import apply_wiring_patch as _apply_wiring_patch
 from kicraft.server.session import run_session
 
 
@@ -40,171 +40,134 @@ def build_system(stage: str, collection_bounds=None) -> str:
     return _build_system(contract, collection_bounds)
 
 
-def _run_payload(**overrides):
+def _group_payload(**overrides):
     payload = {
-        "refs": None,
-        "ref_prefix": "C",
-        "start": 1,
-        "end": 2,
+        "id": "capacitors",
+        "reference_prefix": "C",
+        "quantity": 2,
         "value": "100nF",
         "symbol": "Device:C",
         "footprint": "Capacitor_SMD:C_0603_1608Metric",
         "sheet": "MAIN",
     }
     payload.update(overrides)
-    if payload.get("refs") is not None:
-        payload.pop("ref_prefix", None)
-        payload.pop("start", None)
-        payload.pop("end", None)
     return payload
 
 
-def test_compact_bom_expands_400_member_array_to_canonical_parts():
-    refs = [f"D{number}" for number in range(1, 401)]
+def test_group_bom_expands_large_array_to_canonical_parts():
     payload = {
-        "part_runs": [
-            _run_payload(
-                ref_prefix="D",
-                end=400,
+        "groups": [
+            _group_payload(
+                id="leds",
+                reference_prefix="D",
+                quantity=400,
                 value="LED",
                 symbol="Device:LED",
                 footprint="LED_SMD:LED_0805_2012Metric",
             )
         ],
-        "arrays": [{"refs": refs, "pattern": "grid", "rows": 20, "cols": 20}],
+        "arrays": [{"group_id": "leds", "pattern": "grid", "rows": 20, "cols": 20}],
     }
-    canonical, expanded = _expand_bom_stage_response(payload)
+    canonical, expanded = _normalize_bom_stage_response(payload)
     assert expanded == 400
-    assert len(canonical["parts"]) == 400
-    assert canonical["parts"][0]["ref"] == "D1"
+    assert [part["ref"] for part in canonical["parts"][:2]] == ["D1", "D2"]
     assert canonical["parts"][-1]["ref"] == "D400"
-    assert "part_runs" not in canonical
+    assert canonical["arrays"][0]["refs"] == [f"D{number}" for number in range(1, 401)]
+    assert "groups" not in canonical
+
+
+def test_group_bom_allocates_repeated_prefixes_in_response_order():
+    canonical, _ = _normalize_bom_stage_response(
+        {
+            "groups": [
+                _group_payload(id="input_caps", quantity=2),
+                _group_payload(id="output_cap", quantity=1, value="1uF"),
+            ]
+        }
+    )
+    assert [part["ref"] for part in canonical["parts"]] == ["C1", "C2", "C3"]
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        {"part_runs": [_run_payload(end=300), _run_payload(ref_prefix="R", end=201)]},
         {
-            "parts": [
-                {
-                    "ref": "U1",
-                    "value": "IC",
-                    "symbol": "Device:R",
-                    "footprint": "Resistor_SMD:R_0603_1608Metric",
-                    "sheet": "MAIN",
-                }
-            ],
-            "part_runs": [_run_payload(end=450)],
+            "groups": [
+                _group_payload(quantity=300),
+                _group_payload(id="resistors", reference_prefix="R", quantity=201),
+            ]
         },
-        {"part_runs": [_run_payload(end=10), _run_payload(start=10, end=20)]},
-        {"part_runs": [_run_payload(refs=["C1", "C1"])]},
-        {"part_runs": [_run_payload(start=3, end=2)]},
+        {"groups": [_group_payload(quantity=450), _group_payload(id="extra", quantity=1)]},
+        {"groups": [_group_payload(), _group_payload()]},
+        {"groups": [_group_payload()], "arrays": [{"group_id": "missing", "rows": 1, "cols": 2}]},
+        {"parts": []},
+        {"part_runs": []},
     ],
 )
-def test_compact_bom_rejects_overflow_overlap_and_bad_sequences(payload):
+def test_group_bom_rejects_limits_duplicates_unknown_arrays_and_legacy_shapes(payload):
     with pytest.raises(ValueError):
-        _expand_bom_stage_response(payload)
+        _normalize_bom_stage_response(payload)
 
 
-def _wiring_candidate():
+def _wiring_prompt_state():
     return {
+        "bom": {
+            "parts": [
+                {"ref": "U1", "sheet": "CONTROL"},
+                {"ref": "R1", "sheet": "CONTROL"},
+                {"ref": "J1", "sheet": "IO"},
+            ]
+        }
+    }
+
+
+def test_final_pin_assignments_derive_canonical_connections_and_sheets():
+    canonical = _normalize_wiring_stage_response(
+        {
+            "pins": [
+                {"ref": "U1", "pin": "1", "net": "SIG"},
+                {"ref": "R1", "pin": "1", "net": "SIG"},
+                {"ref": "J1", "pin": "1", "net": "SIG"},
+                {"ref": "U1", "pin": "2", "no_connect": True},
+            ]
+        },
+        _wiring_prompt_state(),
+    )
+    assert canonical == {
         "connections": [
             {
-                "net_name": "A",
-                "sheet": "MAIN",
+                "net_name": "SIG",
                 "endpoints": [
                     {"ref": "U1", "pin": "1"},
                     {"ref": "R1", "pin": "1"},
                 ],
+                "sheet": "CONTROL",
             },
             {
-                "net_name": "B",
-                "sheet": "MAIN",
-                "endpoints": [{"ref": "U1", "pin": "2"}],
+                "net_name": "SIG",
+                "endpoints": [{"ref": "J1", "pin": "1"}],
+                "sheet": "IO",
             },
         ],
-        "no_connect_pins": [],
+        "no_connect_pins": [{"ref": "U1", "pin": "2"}],
     }
 
 
-def test_wiring_patch_changes_only_named_endpoint():
-    candidate = _wiring_candidate()
-    patched, count = _apply_wiring_patch(
-        candidate,
-        {
-            "operations": [
-                {
-                    "op": "set_pin_net",
-                    "ref": "U1",
-                    "pin": "1",
-                    "sheet": "MAIN",
-                    "expected_net": "A",
-                    "net": "B",
-                }
-            ]
-        },
-        allowed_refs={"U1", "R1"},
-        allowed_pins={"U1": {"1", "2"}, "R1": {"1"}},
-        allowed_nets={"A", "B"},
-    )
-    assert count == 1
-    assert candidate == _wiring_candidate()
-    net_a = next(row for row in patched["connections"] if row["net_name"] == "A")
-    net_b = next(row for row in patched["connections"] if row["net_name"] == "B")
-    assert net_a["endpoints"] == [{"ref": "R1", "pin": "1"}]
-    assert {"ref": "U1", "pin": "1"} in net_b["endpoints"]
-
-
 @pytest.mark.parametrize(
-    "operation",
+    "pins",
     [
-        {
-            "op": "set_pin_net",
-            "ref": "U1",
-            "pin": "1",
-            "sheet": "MAIN",
-            "expected_net": "STALE",
-            "net": "B",
-        },
-        {
-            "op": "set_pin_net",
-            "ref": "X9",
-            "pin": "1",
-            "sheet": "MAIN",
-            "expected_net": None,
-            "net": "B",
-        },
-        {
-            "op": "set_pin_net",
-            "ref": "U1",
-            "pin": "9",
-            "sheet": "MAIN",
-            "expected_net": None,
-            "net": "B",
-        },
-        {
-            "op": "set_pin_net",
-            "ref": "U1",
-            "pin": "1",
-            "sheet": "MAIN",
-            "expected_net": "A",
-            "net": "UNKNOWN",
-        },
+        [
+            {"ref": "U1", "pin": "1", "net": "A"},
+            {"ref": "U1", "pin": "1", "net": "B"},
+        ],
+        [{"ref": "X9", "pin": "1", "net": "A"}],
+        [{"ref": "U1", "pin": "1", "net": "A", "no_connect": True}],
+        [{"ref": "U1", "pin": "1"}],
     ],
 )
-def test_wiring_patch_stale_unknown_inputs_fail_without_mutation(operation):
-    candidate = _wiring_candidate()
-    before = json.loads(json.dumps(candidate))
+def test_final_pin_assignments_reject_ambiguous_and_unknown_endpoints(pins):
     with pytest.raises(ValueError):
-        _apply_wiring_patch(
-            candidate,
-            {"operations": [operation]},
-            allowed_refs={"U1", "R1"},
-            allowed_pins={"U1": {"1", "2"}, "R1": {"1"}},
-            allowed_nets={"A", "B"},
-        )
-    assert candidate == before
+        _normalize_wiring_stage_response({"pins": pins}, _wiring_prompt_state())
 
 
 def test_retry_feedback_includes_errors_and_offenders():
@@ -217,7 +180,7 @@ def test_retry_feedback_includes_errors_and_offenders():
     assert "9.11 net coverage" in msg  # the rule that failed
     assert "U2.4" in msg  # the exact pin the model must fix
     assert "preserv" in msg.lower()  # patch, do not redraft
-    assert "ONLY the slot JSON" in msg
+    assert "only the slot" in msg.lower()
 
 
 def test_retry_feedback_without_offenders_omits_that_line():
@@ -400,7 +363,7 @@ def test_retry_feedback_power_name_as_ref_teaches_net_name_shape():
         "[type=value_error, input_value='GND', input_type=str]"
     )
     msg = _retry_feedback({"ok": False, "errors": [err]}, stage="wiring")
-    assert "is a power/ground NET NAME, not a component ref" in msg
+    assert "is a net name" in msg
     assert "+3V3" in msg and "GND" in msg
 
 
@@ -658,7 +621,14 @@ def test_truncated_json_triggers_one_plain_tool_free_serialization_call(tmp_path
             _ok_intent_reply(),
         ]
     )
-    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    events = []
+    res = run_session(
+        tmp_path,
+        "a USB-powered LED",
+        ["intent"],
+        client=client,
+        progress=events.append,
+    )
     assert res["status"] == "ok"
     assert len(client.calls) == 2
     first, serial = client.calls
@@ -672,6 +642,19 @@ def test_truncated_json_triggers_one_plain_tool_free_serialization_call(tmp_path
     assert "collection must contain" not in retry_message
     # the cap is the policy's fixed value, never doubled AGAIN: a truncated
     # serialization result would go terminal, not raise to 16384.
+    recovery = next(event for event in events if event["kind"] == "serialization_recovery")
+    assert recovery == {
+        "kind": "serialization_recovery",
+        "stage": "intent",
+        "failure_kind": "truncated_json",
+        "resolution_ledger_entries": 0,
+    }
+    decoded = next(event for event in events if event["kind"] == "candidate_decoded")
+    assert decoded["attempt"] == 2
+    assert decoded["serialization_recovery"] is True
+    assert decoded["clean_slate"] is False
+    assert decoded["expanded_component_count"] == 0
+    assert decoded["unknown_sheet_references"] == []
 
 
 def test_second_truncated_serialization_result_terminates_as_truncated_json(tmp_path):
@@ -773,8 +756,7 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
     assert client.calls[1]["reasoning"] == {"enabled": False}
     retry_message = client.calls[1]["messages"][-1]["content"]
     assert "about 16 characters" in retry_message
-    assert "`parts` collection must contain at most 500 items total" in retry_message
-    assert "at most 450 items per `sheet`" in retry_message
+    assert client.calls[1]["response_format"]["json_schema"]["name"] == "kicraft_bom_response_v2"
     assert res["results"][-1]["failure_kind"] == "invalid_json"
 
 
@@ -926,12 +908,11 @@ def test_repeated_commit_rejection_gets_one_pristine_escape_then_stops(tmp_path,
     roles = [message["role"] for message in client.calls[2]["messages"]]
     assert roles == ["system", "user", "user"]
     assert all(
-        call["response_format"] is client.calls[0]["response_format"]
-        for call in client.calls
+        call["response_format"] is client.calls[0]["response_format"] for call in client.calls
     )
 
 
-def test_wiring_rejection_is_repaired_by_typed_patch_before_full_gates(tmp_path, monkeypatch):
+def test_wiring_rejection_uses_complete_same_schema_correction(tmp_path, monkeypatch):
     state = {
         "architecture": {
             "power_nets": [],
@@ -975,27 +956,33 @@ def test_wiring_rejection_is_repaired_by_typed_patch_before_full_gates(tmp_path,
         commits.append(json.loads(json.dumps(slot)))
         if len(commits) == 1:
             return False, rejected
-        assert commits[1]["connections"][0]["endpoints"] == [{"ref": "R1", "pin": "1"}]
+        by_net = {connection["net_name"]: connection for connection in commits[1]["connections"]}
+        assert by_net["A"]["endpoints"] == [{"ref": "R1", "pin": "1"}]
+        assert by_net["B"]["endpoints"] == [
+            {"ref": "U1", "pin": "1"},
+            {"ref": "U1", "pin": "2"},
+        ]
         return True, {"ok": True}
 
     monkeypatch.setattr(stage_driver_mod, "commit_stage", fake_commit)
-    full = _wiring_candidate()
-    patch = {
-        "operations": [
-            {
-                "op": "set_pin_net",
-                "ref": "U1",
-                "pin": "1",
-                "sheet": "MAIN",
-                "expected_net": "A",
-                "net": "B",
-            }
+    first = {
+        "pins": [
+            {"ref": "U1", "pin": "1", "net": "A"},
+            {"ref": "R1", "pin": "1", "net": "A"},
+            {"ref": "U1", "pin": "2", "net": "B"},
+        ]
+    }
+    corrected = {
+        "pins": [
+            {"ref": "U1", "pin": "1", "net": "B"},
+            {"ref": "R1", "pin": "1", "net": "A"},
+            {"ref": "U1", "pin": "2", "net": "B"},
         ]
     }
     client = _ScriptedClient(
         [
-            {"text": json.dumps(full), "finish_reason": "stop", "cost_usd": 0.0},
-            {"text": json.dumps(patch), "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": json.dumps(first), "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": json.dumps(corrected), "finish_reason": "stop", "cost_usd": 0.0},
         ]
     )
     client.s = Settings(api_key="test")
@@ -1009,9 +996,12 @@ def test_wiring_rejection_is_repaired_by_typed_patch_before_full_gates(tmp_path,
     )
     assert result["commit_ok"] is True
     assert result["attempts"] == 2
-    assert result["wiring_patch_operations"] == 1
+    assert result["expanded_component_count"] == 0
     assert client.calls[0]["reasoning"] == {"enabled": False}
-    assert client.calls[1]["response_format"]["json_schema"]["name"] == "kicraft_wiring_patch_v1"
+    assert all(
+        call["response_format"]["json_schema"]["name"] == "kicraft_wiring_response_v2"
+        for call in client.calls
+    )
 
 
 class _RaisingClient:
@@ -1086,7 +1076,7 @@ def test_response_policy_falls_back_for_mock_clients():
     assert pol.serialization_max_tokens == 32768
     assert pol.serialization_retries == 1
     assert len(pol.collection_bounds) == 1
-    assert pol.collection_bounds[0].field == "parts"
+    assert pol.collection_bounds[0].field == "groups"
     assert pol.collection_bounds[0].total == 500
     assert pol.collection_bounds[0].per_group == 450
     # a HIGHER caller cap is preserved (never floored down)

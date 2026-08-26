@@ -1,4 +1,5 @@
 """Stage specification loading and system-prompt construction."""
+
 from __future__ import annotations
 
 import json
@@ -11,6 +12,7 @@ from .config import STAGE_COLLECTION_BOUNDS, CollectionBound
 from .pricing import _stock_floor
 from .stage_contracts import StageResponseContract
 
+
 def _bundle_sourcing_lcsc(bundle: str) -> str:
     """The vendored bundle's pinned sourcing C#, or '' (best-effort, offline)."""
     try:
@@ -20,11 +22,13 @@ def _bundle_sourcing_lcsc(bundle: str) -> str:
     except Exception:
         return ""
 
+
 _REPO = Path(__file__).resolve().parents[2]
 _SPEC_DIRS = [
     _REPO / "kicraft" / "skill_assets" / "skill" / "stages",  # packaged (preferred)
     _REPO / ".claude" / "skills" / "kicraft" / "stages",  # current dev location
 ]
+
 
 def _spec_text(stage: str) -> str:
     for d in _SPEC_DIRS:
@@ -116,44 +120,41 @@ def _stage_extra(stage: str) -> str:
             "request them TOGETHER in a single turn (emit multiple tool calls at once) "
             "instead of one per turn -- running out of rounds forces an immediate final "
             "answer with whatever resolved so far.\n"
-            "- COMPACT OUTPUT: keep heterogeneous components in `parts`. Put repeated "
-            "identical components in `part_runs`: either `refs` with an explicit ordered "
-            "reference list, or `ref_prefix` + integer `start`/`end`, plus one shared "
-            "value/symbol/footprint/sheet payload. Omit null fields. Canonical expansion "
-            "is deterministic and still enforces 500 total and 450 per sheet before commit.\n"
-            "- SHEET NAMES ARE CLOSED: every parts[].sheet and part_runs[].sheet must copy one "
-            "architecture.sheets[].name verbatim; never abbreviate, correct, or invent a sheet name.\n"
+            "- ONE BOM REPRESENTATION: output `groups` only. Each group is one identical "
+            "component type with a stable lowercase `id`, uppercase `reference_prefix`, "
+            "integer `quantity`, and the shared value/symbol/footprint/sheet fields. KiCraft "
+            "assigns references sequentially per prefix in group order; never emit refs or "
+            "individual parts. Use quantity 1 for a unique component.\n"
+            "- ARRAYS REFERENCE GROUPS: arrays[].group_id names one complete group; KiCraft "
+            "derives its member refs. Do not enumerate array refs.\n"
+            "- SHEET NAMES ARE CLOSED: every groups[].sheet must copy one "
+            "architecture.sheets[].name verbatim; never invent a sheet name.\n"
             "- Every symbol AND footprint MUST resolve to a real file. When finished, output "
             "ONLY the BOM slot JSON."
         )
     if stage == "wiring":
         return (
-            "\n- NET COVERAGE IS ENFORCED: every (ref, pin) of every part listed in "
-            "extras.symbol_pinouts MUST appear either in a connections[].endpoints entry or "
-            "in no_connect_pins. Omitting any pin fails the commit.\n"
-            "- Use exact pin NUMBERS from extras.symbol_pinouts (never pin names).\n"
-            "- Put genuinely-unused pins (USB-C SBU1/SBU2, shield, spare CC) in no_connect_pins.\n"
-            "- net_name should match an architecture power_net or inter_sheet_net verbatim "
-            "where applicable; connection.sheet must equal a bom part's sheet.\n"
-            "- PULL-UP / PULL-DOWN: a pull resistor has TWO pins. Wire its signal-side pin "
-            "on a signal net alongside the IC pin it serves, and its rail-side pin on the "
-            "power/ground net (use +3V3/GND/... as connection.net_name). A power/ground "
-            'connection MAY hold a single endpoint -- that lone rail pin is NOT "dangling". '
-            'Never write a rail name into an endpoint.ref (refs are part refs like "R1").\n'
-            "- BOM SHORTFALL = SELF-REPAIR, NOT A USER QUESTION: if the ONLY thing preventing "
-            "full net coverage is that the BOM lacks a supporting passive an IC requires (a "
-            "decoupling/bypass cap for a dedicated DEC/VDD/AVDD/bypass pin, a mandatory pull-up, "
-            "a crystal load cap), do NOT no-connect that pin and do NOT ask the user to choose. "
-            "Emit ONE blocking question tagged for automatic BOM repair — the pipeline re-runs "
-            "the BOM stage to add the parts, then re-runs wiring; the user is never asked:\n"
-            '    {"questions": [{"text": "<exactly what to add: how many parts, what value, '
-            'which IC pins each serves>", "blocking": true, "reconcile_target": "bom"}]}\n'
-            "Make the text a precise BOM instruction, not a choice. Reserve untagged questions "
-            "(no reconcile_target) for genuine design-intent ambiguity the user alone can settle.\n"
-            "- COMPACT OUTPUT: for a board with many repeated parts (an LED array, a channel "
-            "bank), use COMPACT single-line JSON per connection -- no pretty-printing, no "
-            "indentation. The output token budget is finite; verbose JSON truncates and the "
-            "whole draft fails as 'no JSON in reply'."
+            "\n- OUTPUT FINAL PIN STATE: `pins` contains exactly one record for every "
+            "(component ref, pin number). A connected pin is "
+            '{"ref":"U1","pin":"1","net":"+3V3"}; an intentionally unused pin is '
+            '{"ref":"U1","pin":"2","no_connect":true}. Do not emit connection rows, '
+            "sheet names, endpoint lists, or patch operations; KiCraft derives them.\n"
+            "- NET COVERAGE IS ENFORCED: every (ref, pin) in extras.symbol_pinouts must "
+            "appear exactly once. Omitting or duplicating a pin fails commit.\n"
+            "- Use exact pin NUMBERS from extras.symbol_pinouts, never pin names.\n"
+            "- `net` should match an architecture power net or inter-sheet net verbatim "
+            "where applicable; descriptive sheet-local names are allowed.\n"
+            "- PULL-UP / PULL-DOWN: assign the signal-side resistor pin to the signal net "
+            "and its rail-side pin to the power or ground net. Rail names belong in `net`, "
+            "never `ref`.\n"
+            "- SERIES COMPONENTS MUST SEPARATE NETS: a two-terminal resistor, capacitor, "
+            "inductor, ferrite, diode, or fuse cannot have both pins on the same net. For "
+            "USB or other series termination, use distinct names on its two sides, e.g. "
+            "`USB_DP_MCU` and `USB_DP`; same-net terminals short the part out.\n"
+            "- BOM SHORTFALL = SELF-REPAIR, NOT A USER QUESTION: if required support parts "
+            'are missing, emit one blocking question with `reconcile_target":"bom"` and '
+            "a precise instruction. Do not invent refs or mark required pins no-connect.\n"
+            "- Use compact JSON. Correction always returns this same complete `pins` shape."
         )
     return ""
 
@@ -251,6 +252,7 @@ def _format_core_defaults_block(rows) -> str | None:
         ]
     return "\n".join(lines)
 
+
 # Hand-written compact example instance per stage. A mid-tier model pattern-
 # matches one worked example far more reliably than it infers nested-optional
 # shape from a raw $defs/anyOf schema dump (2026-07-19 review §7.1); the BOM
@@ -260,47 +262,46 @@ def _format_core_defaults_block(rows) -> str | None:
 # an example fails the suite instead of teaching the model a bounce.
 _WORKED_EXAMPLES = {
     "bom": (
-        '{"parts": ['
-        '{"ref": "U1", "value": "AMS1117-3.3", "symbol": "ams1117-3v3:AMS1117-3.3", '
+        '{"groups": ['
+        '{"id": "regulator", "reference_prefix": "U", "quantity": 1, '
+        '"value": "AMS1117-3.3", "symbol": "ams1117-3v3:AMS1117-3.3", '
         '"footprint": "ams1117-3v3:SOT-223-3_TabPin2", "sheet": "POWER", '
         '"mpn": "AMS1117-3.3", "sourcing_note": "LCSC C6186"}, '
-        '{"ref": "C1", "value": "10uF", "symbol": "Device:C", '
+        '{"id": "bulk_cap", "reference_prefix": "C", "quantity": 1, '
+        '"value": "10uF", "symbol": "Device:C", '
         '"footprint": "Capacitor_SMD:C_0603_1608Metric", "sheet": "POWER"}, '
-        '{"ref": "C2", "value": "100nF", "symbol": "Device:C", '
+        '{"id": "bypass_cap", "reference_prefix": "C", "quantity": 1, '
+        '"value": "100nF", "symbol": "Device:C", '
         '"footprint": "Capacitor_SMD:C_0603_1608Metric", "sheet": "POWER"}, '
-        '{"ref": "R1", "value": "10k", "symbol": "Device:R", '
+        '{"id": "bias_resistors", "reference_prefix": "R", "quantity": 2, '
+        '"value": "10k", "symbol": "Device:R", '
         '"footprint": "Resistor_SMD:R_0603_1608Metric", "sheet": "POWER"}, '
-        '{"ref": "R2", "value": "10k", "symbol": "Device:R", '
-        '"footprint": "Resistor_SMD:R_0603_1608Metric", "sheet": "POWER"}, '
-        '{"ref": "J1", "value": "DC barrel jack", '
-        '"symbol": "Connector:Barrel_Jack_Switch", '
+        '{"id": "input_jack", "reference_prefix": "J", "quantity": 1, '
+        '"value": "DC barrel jack", "symbol": "Connector:Barrel_Jack_Switch", '
         '"footprint": "Connector_BarrelJack:BarrelJack_Horizontal", '
         '"sheet": "POWER"}], '
-        '"ic_groups": {"U1": ["C1", "C2"]}, '
-        '"thermal_refs": ["U1"], '
-        '"signal_flow_order": ["U1"], '
-        '"component_zones": {"J1": {"edge": "left"}}, '
-        '"assumptions": ["Input jack on the left edge (defaulted)"], '
+        '"assumptions": ["Input jack selected from stock library (defaulted)"], '
         '"substitutions": [{"wanted": "LD1117-3.3", "got": "AMS1117-3.3", '
         '"reason": "spec-named LDO out of retail stock; same pinout/dropout"}]}'
     ),
     "wiring": (
-        '{"connections": ['
-        '{"net_name": "VIN", "sheet": "POWER", "endpoints": '
-        '[{"ref": "J1", "pin": "1"}, {"ref": "U1", "pin": "3"}, '
-        '{"ref": "C1", "pin": "1"}]}, '
-        '{"net_name": "+3V3", "sheet": "POWER", "endpoints": '
-        '[{"ref": "U1", "pin": "2"}, {"ref": "C2", "pin": "1"}, '
-        '{"ref": "R1", "pin": "1"}]}, '
-        '{"net_name": "GND", "sheet": "POWER", "endpoints": '
-        '[{"ref": "J1", "pin": "2"}, {"ref": "U1", "pin": "1"}, '
-        '{"ref": "C1", "pin": "2"}, {"ref": "C2", "pin": "2"}, '
-        '{"ref": "R2", "pin": "1"}]}, '
-        '{"net_name": "NRST", "sheet": "POWER", "endpoints": '
-        '[{"ref": "R1", "pin": "2"}, {"ref": "U1", "pin": "4"}]}, '
-        '{"net_name": "BOOT0", "sheet": "POWER", "endpoints": '
-        '[{"ref": "R2", "pin": "2"}, {"ref": "U1", "pin": "5"}]}], '
-        '"no_connect_pins": [{"ref": "J1", "pin": "3"}]}'
+        '{"pins": ['
+        '{"ref": "J1", "pin": "1", "net": "VIN"}, '
+        '{"ref": "U1", "pin": "3", "net": "VIN"}, '
+        '{"ref": "C1", "pin": "1", "net": "VIN"}, '
+        '{"ref": "U1", "pin": "2", "net": "+3V3"}, '
+        '{"ref": "C2", "pin": "1", "net": "+3V3"}, '
+        '{"ref": "R1", "pin": "1", "net": "+3V3"}, '
+        '{"ref": "J1", "pin": "2", "net": "GND"}, '
+        '{"ref": "U1", "pin": "1", "net": "GND"}, '
+        '{"ref": "C1", "pin": "2", "net": "GND"}, '
+        '{"ref": "C2", "pin": "2", "net": "GND"}, '
+        '{"ref": "R2", "pin": "1", "net": "GND"}, '
+        '{"ref": "R1", "pin": "2", "net": "NRST"}, '
+        '{"ref": "U1", "pin": "4", "net": "NRST"}, '
+        '{"ref": "R2", "pin": "2", "net": "BOOT0"}, '
+        '{"ref": "U1", "pin": "5", "net": "BOOT0"}, '
+        '{"ref": "J1", "pin": "3", "no_connect": true}]}'
     ),
 }
 
@@ -340,7 +341,9 @@ def _bounded_output_contract(stage: str, bounds: tuple[CollectionBound, ...] | N
     )
 
 
-def build_system(contract: StageResponseContract, collection_bounds: tuple[CollectionBound, ...] | None = None) -> str:
+def build_system(
+    contract: StageResponseContract, collection_bounds: tuple[CollectionBound, ...] | None = None
+) -> str:
     stage = contract.stage
     spec = _spec_text(stage)
     schema = json.dumps(contract.schema)
@@ -370,6 +373,7 @@ def build_system(contract: StageResponseContract, collection_bounds: tuple[Colle
         "output the slot."
         f"{_stage_extra(stage)}"
     )
+
 
 def _fallback_stem(brief: str) -> str:
     words = re.findall(r"[A-Za-z0-9]+", brief.upper())[:3]

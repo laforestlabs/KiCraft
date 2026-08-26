@@ -1,4 +1,5 @@
 """Tests for the mock-LLM provider mode (kicraft/loadtest/mockllm.py + make_client)."""
+
 from __future__ import annotations
 
 import json
@@ -11,8 +12,13 @@ import pytest
 from kicraft.loadtest import mockllm
 from kicraft.server.config import Settings
 
-_FIXTURE = (Path(__file__).resolve().parents[2] / "kicraft" / "loadtest"
-            / "fixtures" / "transcript_usb_pd_trigger.json")
+_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "kicraft"
+    / "loadtest"
+    / "fixtures"
+    / "transcript_usb_pd_trigger.json"
+)
 
 
 # --- transcript reconstruction ------------------------------------------------
@@ -22,23 +28,40 @@ def test_transcript_from_state_reconstructs_every_committed_stage():
         "intent": {"summary": "x", "assumptions": []},
         "functional_spec": {"blocks": []},
         "architecture": {"sheets": []},
-        "bom": {"parts": [{"ref": "R1"}],
-                "connections": [{"net_name": "N"}],
-                "no_connect_pins": [{"ref": "U1", "pin": "3"}]},
+        "bom": {
+            "parts": [
+                {
+                    "ref": "R1",
+                    "value": "1k",
+                    "symbol": "Device:R",
+                    "footprint": "Resistor_SMD:R_0603_1608Metric",
+                    "sheet": "MAIN",
+                }
+            ],
+            "connections": [
+                {
+                    "net_name": "N",
+                    "sheet": "MAIN",
+                    "endpoints": [{"ref": "R1", "pin": "1"}],
+                }
+            ],
+            "no_connect_pins": [{"ref": "R1", "pin": "2"}],
+        },
     }
     t = mockllm.transcript_from_state(state)
     assert t["stem"] == "DEMO"
     assert set(t["stages"]) == {"intent", "functional_spec", "architecture", "bom", "wiring"}
     # intent slot carries project_stem (the driver pops it before commit)
     assert json.loads(t["stages"]["intent"])["project_stem"] == "DEMO"
-    # bom slot is stripped of the wiring-owned fields...
     bom_slot = json.loads(t["stages"]["bom"])
-    assert "connections" not in bom_slot and "no_connect_pins" not in bom_slot
-    assert bom_slot["parts"] == [{"ref": "R1"}]
-    # ...which reappear in the wiring slot
+    assert list(bom_slot) == ["groups", "assumptions", "substitutions"]
+    assert bom_slot["groups"][0]["reference_prefix"] == "R"
+    assert bom_slot["groups"][0]["quantity"] == 1
     wiring = json.loads(t["stages"]["wiring"])
-    assert wiring["connections"] == [{"net_name": "N"}]
-    assert wiring["no_connect_pins"] == [{"ref": "U1", "pin": "3"}]
+    assert wiring["pins"] == [
+        {"ref": "R1", "pin": "1", "net": "N"},
+        {"ref": "R1", "pin": "2", "no_connect": True},
+    ]
 
 
 def test_transcript_from_state_partial_state_yields_partial_transcript():
@@ -61,8 +84,9 @@ def test_mockclient_returns_stage_text_at_zero_cost():
     assert res["finish_reason"] == "stop"
     # tool path (BOM) keys off the same meta_ctx and is also free
     calls = []
-    res2 = c.chat_with_tools([], [], lambda n, a: calls.append(n) or "out",
-                             meta_ctx={"stage": "bom"})
+    res2 = c.chat_with_tools(
+        [], [], lambda n, a: calls.append(n) or "out", meta_ctx={"stage": "bom"}
+    )
     assert res2["text"] == '{"parts": []}'
     assert res2["cost_usd"] == 0.0
     assert calls == []  # tools not invoked by default
@@ -99,8 +123,10 @@ def test_mockclient_without_transcript_raises_clearly(monkeypatch):
 def test_recording_client_captures_committed_text():
     class _Inner:
         s, guard = object(), object()
+
         def chat(self, messages, **kw):
             return {"text": '{"slot": 1}', "cost_usd": 0.01}
+
         def chat_with_tools(self, messages, tools, executor, **kw):
             return {"text": '{"bom": 1}', "cost_usd": 0.02}
 
@@ -115,6 +141,7 @@ def test_make_client_defaults_to_real_client(monkeypatch, tmp_path):
     pytest.importorskip("requests")  # client.py imports requests at module load
     monkeypatch.delenv("KICRAFT_LLM_MODE", raising=False)
     from kicraft.server.client import CappedOpenRouterClient, make_client
+
     s = Settings(api_key="test-key", ledger_path=tmp_path / "ledger.db")
     assert isinstance(make_client(s), CappedOpenRouterClient)
 
@@ -124,6 +151,7 @@ def test_make_client_returns_mockclient_in_mock_modes(monkeypatch, mode):
     pytest.importorskip("requests")  # client.py imports requests at module load
     monkeypatch.setenv("KICRAFT_LLM_MODE", mode)
     from kicraft.server.client import make_client
+
     # No settings and no OPENROUTER_API_KEY needed for the mock path.
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     assert isinstance(make_client(), mockllm.MockClient)
@@ -135,6 +163,7 @@ def _kicad_available() -> bool:
         return False
     try:
         import pcbnew  # noqa: F401
+
         return True
     except Exception:
         return False
@@ -155,7 +184,8 @@ def test_replay_drives_full_chain_at_zero_cost(monkeypatch):
         results, guard, _ = drive_chain(list(DESIGN_STAGES), "a usb-c pd trigger", ws)
         assert [r["stage"] for r in results] == list(DESIGN_STAGES)
         assert all(r["commit_ok"] for r in results), [
-            (r["stage"], r.get("error") or r.get("commit")) for r in results]
+            (r["stage"], r.get("error") or r.get("commit")) for r in results
+        ]
         assert guard["spent_total_usd"] == 0.0
     finally:
         shutil.rmtree(ws, ignore_errors=True)

@@ -166,12 +166,15 @@ def test_friction_penalizes_interrogating_a_complete_brief(tmp_path):
 def test_judge_valid_verdict_and_gate(tmp_path):
     rub = load_rubric()
     client = FakeClient(_verdict(level=2, gates=[{"id": "unprogrammable_mcu", "evidence": "no SWD/USB"}]))
-    out = grade_class_j(client, "DIGEST", rub, model="x")
+    out = grade_class_j(client, "DIGEST", rub, model="x", meta_ctx={"run_id": "p1-7"})
     assert out["ok"] and client.calls == 1
     assert all(v["level"] == 2 for v in out["dimensions"].values())
     assert out["gates"] == [{"id": "unprogrammable_mcu", "cap": 50, "by": "observer", "why": "no SWD/USB"}]
     # judge call is tagged for the ledger
     assert client.last_meta["phase"] == "eval_judge"
+    assert client.last_meta["run_id"] == "p1-7"
+    assert client.last_meta["stage"] == "judge"
+    assert client.last_meta["attempt"] == 0
 
 
 def test_judge_repairs_after_malformed(tmp_path):
@@ -213,9 +216,10 @@ def _assert_report_shape(report):
 def test_evaluate_project_full(tmp_path):
     base = _make_project(tmp_path)
     client = FakeClient(_verdict(level=4))
-    report = evaluate_project(base, client, judge_model="judge-x")
+    report = evaluate_project(base, client, judge_model="judge-x", run_id="p123-9")
     _assert_report_shape(report)
     assert report["judge"]["ran"] and report["judge"]["ok"]
+    assert client.last_meta["run_id"] == "p123-9"
     # all 11 dims graded -> finalized with a numeric grade
     assert all(v["level"] is not None for v in report["dimensions"].values())
     assert report["score"]["grade"] in ("A", "B", "C", "D", "F")

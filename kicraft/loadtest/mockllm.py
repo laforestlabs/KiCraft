@@ -14,10 +14,9 @@ Transcript shape::
                                    "architecture": "<json>", "bom": "<json>",
                                    "wiring": "<json>"}}
 
-The cheapest way to make one is :func:`transcript_from_state`: any frozen
-``state.json`` from a prior successful run already holds each stage's committed
-slot, and the slot->state ownership (``cli_app._apply_slot``) is invertible, so we
-reconstruct the exact slot JSON the model must emit -- $0, no real call.
+The cheapest way to make one is :func:`transcript_from_state`: a frozen
+``state.json`` is deterministically projected into the current model-facing
+contracts while preserving the canonical committed state.
 
 Selected by ``KICRAFT_LLM_MODE`` (``mock``/``replay`` -> MockClient; anything else,
 including unset, -> the real client via :func:`kicraft.server.client.make_client`).
@@ -31,24 +30,83 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
 # Stages whose committed slot lives at a single top-level state key. ``intent``
-# additionally carries ``project_stem`` (the driver pops it before commit), and
-# ``wiring`` is derived from the bom's connection fields -- both handled below.
+# additionally carries ``project_stem`` (the driver pops it before commit).
 _TOP_LEVEL_STAGES = ("intent", "functional_spec", "architecture")
-# bom-owned fields set by the wiring stage, not the bom stage; stripped from the
-# reconstructed bom slot so replay mirrors the real pipeline order.
-_WIRING_OWNED = ("connections", "no_connect_pins")
+
+_MODEL_BOM_PART_FIELDS = (
+    "value",
+    "symbol",
+    "footprint",
+    "sheet",
+    "mpn",
+    "datasheet",
+    "sourcing_note",
+    "side",
+)
+
+
+def _bom_response_from_canonical(bom: dict) -> dict:
+    """Convert a canonical frozen BOM to the single group-first response shape."""
+    next_number: dict[str, int] = {}
+    groups = []
+    for index, part in enumerate(bom.get("parts") or [], start=1):
+        ref = str(part.get("ref") or "")
+        match = re.fullmatch(r"([A-Z]+)([0-9]+)", ref)
+        if match is None:
+            raise ValueError(f"canonical replay BOM has non-sequential reference {ref!r}")
+        prefix, raw_number = match.groups()
+        number = int(raw_number)
+        expected = next_number.get(prefix, 1)
+        if number != expected:
+            raise ValueError(
+                f"canonical replay BOM reference {ref!r} is not the expected {prefix}{expected}"
+            )
+        next_number[prefix] = expected + 1
+        group = {
+            "id": f"replay_{index}",
+            "reference_prefix": prefix,
+            "quantity": 1,
+        }
+        group.update(
+            {field: part[field] for field in _MODEL_BOM_PART_FIELDS if part.get(field) is not None}
+        )
+        groups.append(group)
+    return {
+        "groups": groups,
+        "assumptions": bom.get("assumptions") or [],
+        "substitutions": bom.get("substitutions") or [],
+    }
+
+
+def _wiring_response_from_canonical(bom: dict) -> dict:
+    """Convert durable connection rows to one final assignment per pin."""
+    assignments: dict[tuple[str, str], dict] = {}
+    for connection in bom.get("connections") or []:
+        for endpoint in connection.get("endpoints") or []:
+            key = (str(endpoint.get("ref")), str(endpoint.get("pin")))
+            assignment = {**endpoint, "net": connection.get("net_name")}
+            if key in assignments and assignments[key] != assignment:
+                raise ValueError(f"canonical replay wiring assigns {key} more than once")
+            assignments[key] = assignment
+    for endpoint in bom.get("no_connect_pins") or []:
+        key = (str(endpoint.get("ref")), str(endpoint.get("pin")))
+        assignment = {**endpoint, "no_connect": True}
+        if key in assignments:
+            raise ValueError(f"canonical replay wiring both connects and no-connects {key}")
+        assignments[key] = assignment
+    return {"pins": list(assignments.values())}
 
 
 def transcript_from_state(state: dict) -> dict:
-    """Reconstruct a stage->slot-text transcript from a frozen ``state.json`` dict.
+    """Build a current-contract stage transcript from frozen canonical state.
 
-    Inverts ``cli_app._apply_slot``: each stage's slot is the subset of state it
-    owns. Returns ``{"stem", "stages"}``; stages absent from the state are
-    omitted (so a partially-committed state yields a partial transcript).
+    Stages absent from state are omitted, so a partially committed state yields
+    a partial transcript.
     """
     stem = state.get("project_stem") or "MOCK_BOARD"
     stages: dict[str, str] = {}
@@ -62,14 +120,8 @@ def transcript_from_state(state: dict) -> dict:
             stages[stg] = json.dumps(val)
     bom = state.get("bom")
     if bom is not None:
-        bom_slot = {k: v for k, v in bom.items() if k not in _WIRING_OWNED}
-        stages["bom"] = json.dumps(bom_slot)
-        stages["wiring"] = json.dumps(
-            {
-                "connections": bom.get("connections") or [],
-                "no_connect_pins": bom.get("no_connect_pins") or [],
-            }
-        )
+        stages["bom"] = json.dumps(_bom_response_from_canonical(bom))
+        stages["wiring"] = json.dumps(_wiring_response_from_canonical(bom))
     return {"stem": stem, "stages": stages}
 
 

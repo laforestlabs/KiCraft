@@ -219,6 +219,18 @@ def test_event_writer_keeps_only_design_and_build_kinds(tmp_path):
         {"kind": "tool_result", "output": "..."},  # dropped
         {"kind": "question", "stage": "intent"},
         {"kind": "retry", "stage": "bom"},
+        {
+            "kind": "serialization_recovery",
+            "stage": "bom",
+            "failure_kind": "truncated_json",
+            "resolution_ledger_entries": 2,
+        },
+        {
+            "kind": "candidate_decoded",
+            "stage": "bom",
+            "attempt": 2,
+            "mode": "full",
+        },
         {"kind": "stage_done", "stage": "bom", "ok": True},
         {"kind": "build_start"},
         {"kind": "build_log", "text": "ok"},
@@ -231,6 +243,8 @@ def test_event_writer_keeps_only_design_and_build_kinds(tmp_path):
         "stage_start",
         "question",
         "retry",
+        "serialization_recovery",
+        "candidate_decoded",
         "stage_done",
         "build_start",
         "build_log",
@@ -367,6 +381,7 @@ def test_evaluate_one_happy_path_drives_builds_and_scores(tmp_path, monkeypatch)
     # the real wall-clock window is passed so latency always scores (grade finalizes)
     assert seen_kw.get("started_at") and seen_kw.get("finished_at")
     assert seen_kw.get("judge_model") == "judge-x" and seen_kw.get("skip_judge") is False
+    assert rec["run_id"] == seen_kw["run_id"]
 
 
 def test_evaluate_one_skips_build_when_design_incomplete(tmp_path, monkeypatch):

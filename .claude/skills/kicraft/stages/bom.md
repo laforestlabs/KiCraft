@@ -4,59 +4,53 @@ Given the `architecture` (available in the `state` field of stage-prep's output)
 
 **Programming interface.** Reflect the architecture's programming decision:
 
-- **Native-USB MCU** (an ESP32-S3 / C3 / S2 / C6, the default): native USB means **no USB-UART bridge** — it does NOT mean no programming-support parts. Follow the architecture decision and include ONE complete recovery/programming mechanism per §9.29: BOOT and EN/RESET buttons or jumpers; labeled test pads reaching the required boot strap (IO0/GPIO0) and EN/reset signals; or another architecture-approved reset/strap mechanism. A USB connector alone is NOT sufficient for first download and recovery — without a boot-strap path the board is one bad firmware away from a brick. Include the required pull components from the selected module's datasheet (e.g. EN and GPIO0 pull-ups/pull-downs as specified). Put the controls on the MCU sheet and include the supporting passives in the MCU's `ic_groups` entry so placement keeps them together.
-- **Classic ESP32 with a USB-UART bridge**: include the bridge chosen by the architecture stage (the core-defaults `usb-uart-bridge` row — the vendored `ch340c` bundle, CH340C / C84681), two small-signal NPN transistors + base resistors for the DTR/RTS auto-reset to EN/IO0, and the bridge's decoupling. Cluster them with the bridge in `ic_groups`.
+- **Native-USB MCU** (ESP32-S3/C3/S2/C6): native USB means no USB-UART bridge, but a USB connector alone is not sufficient for first download and recovery. Include BOOT and EN/RESET buttons or equivalent labeled strap test pads, required pulls, and complete decoupling as explicit groups on the MCU sheet.
+- **Classic ESP32 with a USB-UART bridge**: include the CH340C bridge, two small-signal NPN transistors, base resistors for DTR/RTS auto-reset to EN/IO0, and bridge decoupling as distinct component groups on the MCU sheet.
 
 Either way the wiring stage connects the path, so no programming question reaches it.
 
-Slot shape (`BOM`):
+Slot shape:
 
-- `parts`: list of `BomPart`. Each MUST have:
-  - `ref` — standard EDA designator matching `^[A-Z]+[0-9]+[A-Z0-9_-]*$` (e.g. `U1`, `C12`, `R3`, `RT1`, `BT1`, `J2`). NOT `1U`, `u1`, `MyPart`, or `U-1`.
-  - `value` — human-friendly value or MPN (`"10k"`, `"1uF"`, `"BQ24072RGT"`).
-  - `symbol` — KiCad symbol in `Library:Name` form. See "Symbol & footprint sources" below for where these come from.
-  - `footprint` — KiCad footprint in `Library:Name` form (e.g. `"Resistor_SMD:R_0402_1005Metric"`, `"Package_TO_SOT_SMD:SOT-23-5"`). NEVER empty.
-  - `sheet` — must match a `Sheet.name` from the Architecture exactly.
-  - `mpn` / `datasheet` / `sourcing_note` — optional but useful.
-  - `side` (OPTIONAL) — `"front"` (default) or `"back"`. Set `"back"` for any part the intent places on the back of the board (e.g. "a header on the **back side**", a back-mounted connector or battery clip). General to any part; the part is flipped onto B.Cu at placement time. A back-side *internal* connector (a power/data pin header that does NOT mate through an enclosure wall) gets `side: "back"` and **no** `component_zones` edge — see the `component_zones` rule below.
-  - `source_leaf` — set only if a leaf installer added this part; leave null otherwise.
+- `groups`: the only component representation. Each entry has:
+  - `id`: stable lowercase identifier unique in this response.
+  - `reference_prefix`: uppercase EDA prefix such as `U`, `R`, `C`, or `J`.
+  - `quantity`: number of identical components; use 1 for a unique part.
+  - `value`, `symbol`, `footprint`, `sheet`: shared component fields.
+  - optional `mpn`, `datasheet`, `sourcing_note`, and `side`.
+
+KiCraft assigns references sequentially per prefix in group order. Never emit
+individual parts, explicit references, start/end ranges, connections, or
+no-connect records.
 
 **Decoupling completeness — provision every cap the datasheet shows, not a token one or two.** An IC's power integrity is your job here, not the wiring stage's (wiring can only connect parts, it cannot add them — an under-provisioned IC stalls the whole design). For every IC, give it the decoupling its datasheet's reference schematic specifies:
 
 - One bypass cap (usually 100nF) **per dedicated supply/decoupling pin**. A chip that exposes several `DEC*` / `VDD*` / `VDDA` / `AVDD` / bypass pins needs one cap each — e.g. an nRF52840 has DEC1–DEC6 + DECUSB (so ~6× 100nF + a 4.7µF on DECUSB, per its datasheet), an STM32 has a 100nF on every VDD/VDDA pair. Do not ship two caps for a chip that has six supply pins.
-- Plus the bulk/reservoir cap(s) the datasheet calls out (often a 1–10µF near the main rail), and any special-purpose cap (VDDH/DC-DC, USB, PLL loop, crystal load caps).
-- Cluster every one of these with the IC in `ic_groups[<ic_ref>]` so placement keeps them adjacent.
+- Plus the bulk/reservoir and special-purpose capacitors the datasheet calls out. Give each distinct value/package its own group.
 
 When in doubt, err toward the datasheet's typical-application count. Sizing decoupling correctly here is cheaper than a re-drive later.
 
 **Adjustable-regulator feedback dividers are checked numerically.** For an adjustable-output regulator (TPS54xx, LM2596/LM2576, MP15xx/MP23xx, XL4015, ...), size the feedback divider from the chip's datasheet Vref so `Vout = Vref x (1 + Rtop/Rbot)` hits the rail declared in `architecture.rail_voltages` within a few percent — a divider that misses the named rail by >10% is rejected at commit (§9.32).
 
-Additional top-level fields (still inside the BOM slot):
+Additional top-level fields:
 
-- `ic_groups`: dict mapping an IC's `ref` to the list of supporting passives that should physically cluster with it (decoupling caps, feedback resistors, inductors). **This is the single most impactful input to placement quality. Spend time on it.**
-- `group_labels`: dict mapping IC `ref` to a short silkscreen label (e.g. `"U2": "CHARGER"`).
-- `thermal_refs`: list of refs that dissipate significant heat (regulators, power MOSFETs).
-- `signal_flow_order`: IC refs in the order signals flow through them (input → ... → output).
-- `component_zones`: per-ref placement hints, e.g. `{"J1": {"edge": "left"}, "BT1": {"zone": "bottom"}, "H4": {"corner": "top-left"}}`. **Rule, not just an example:** any connector that mates off-board (USB receptacle, barrel jack, an enclosure-wall header) MUST get an `edge` or `corner` zone so it lands at the board edge — pick the meaningful edge from the intent (e.g. the side the cable enters). If you omit it, synthesis defaults edge-mount connector families to an edge as a backstop, but choosing the right edge yourself produces a better board. **Inverse rule:** an *internal* connector that does NOT mate off-board — a power/data pin header feeding the board itself, including a "back-side" header — must NOT get an edge/corner zone (use `side: "back"` for the layer instead). An edge zone strands such a header at a far board edge and bloats the outline.
-- `arrays`: list of regular repeated-component patterns (an addressable-LED matrix, a keypad, a resistor-network bank, an LED ring). The downstream autoplacer lays these out **programmatically** instead of running the force/simulated-annealing solver over them (which does not converge at array scale). **List `refs` in data-chain / logical order** (e.g. `D1, D2, … D200` following the DIN→DOUT chain) so consecutive parts stay physically adjacent and routing short. Two patterns:
-  - **grid** (default): `{"refs": [...], "rows": R, "cols": C, "pitch_mm": <optional>, "serpentine": true}` — a serpentine matrix. `rows*cols` MUST equal `len(refs)`; take the dimensions from the intent (a "10x20" matrix → `rows: 10, cols: 20`, 200 refs).
-  - **ring**: `{"refs": [...], "pattern": "ring", "radius_mm": <optional>, "start_angle_deg": <optional>}` — members evenly spaced on a circle, in chain order. **Use this whenever the intent says ring / circle / evenly spaced around ("12 WS2812B evenly spaced in a circle").** Do NOT send `rows`/`cols` with a ring. Set `radius_mm` when the intent fixes the board/ring size — put the LEDs near the board edge (a "60 mm round ring board" → `radius_mm: 24`); omit it to get the tightest legal ring.
-
-  Omit `pitch_mm` to let the placer derive spacing from the footprint courtyard. Only include genuine repeated patterns here — not ordinary clusters (use `ic_groups` for those).
-- `placement_hints` (OPTIONAL): per-passive *schematic*-layout intent. The schematic placer already clusters each 2-pin passive next to the pin it serves and rotates it so its far pin points into open space — inferring the role from the netlist (a cap on rail+gnd is decoupling, a resistor on rail+signal is a pull-up, …). Add a hint only to **override or disambiguate** that inference, e.g. an RC where the "served" pin isn't obvious, a cap between two rails, or a passive that should hug a different IC than the netlist implies. Each entry is `{"ref": "C7", "role": "decoupling", "anchor_ref": "U2", "anchor_pin": "12", "rail_net": "+3V3"}`. `role` is one of `decoupling | bulk | pullup | pulldown | series | feedback | other` (required); `anchor_ref` / `anchor_pin` / `rail_net` are each optional (the placer fills any gap from `connections`). Hints are cheap to omit — leave them out unless a sheet renders badly without them.
+- `arrays`: regular placement patterns. Each entry names one complete component
+  group through `group_id`; KiCraft derives the member refs. Grid arrays require
+  `rows` and `cols` whose product equals the group quantity. Ring arrays require
+  at least three members and omit rows/cols. Optional placement fields are
+  `pitch_mm`, `serpentine`, `radius_mm`, and `start_angle_deg`.
 - `assumptions`: defaults applied, each ending `(defaulted)`.
-- `substitutions`: the **substitution ledger** — one entry `{"wanted": "<part the spec/user named>", "got": "<part the BOM ships>", "reason": "<why>"}` for EVERY part where the BOM deviates from a part the intent/spec/architecture named (a different MPN or silicon variant, a different part class like slide-for-rotary switch, a different mount type, a downgraded rating). A substitution is often the right engineering call; shipping it **silently** is the defect. §9.33 rejects the commit when a spec-named MPN is neither in `parts` nor covered here; §9.34 does the same for a brief-stated SMT/through-hole qualifier the footprint contradicts. Empty list when nothing deviates.
+- `substitutions`: one `wanted`/`got`/`reason` record for every deviation from a
+  part named by the intent, specification, or architecture.
 
-DO NOT include `connections` or `no_connect_pins` in the BOM slot. Those fields are owned by the wiring stage; `stage-commit bom` preserves any pre-existing values automatically.
+Constraints:
 
-Constraints (enforced by Pydantic):
-
-- Refs unique across the whole BOM.
-- Every `ic_groups` key and member must be in `parts`.
-- Every entry in `thermal_refs`, `signal_flow_order`, and `component_zones` keys must be in `parts`.
-- Every `arrays[*].refs` entry must be in `parts`, no ref may appear in two arrays. Grid: `rows*cols == len(refs)`. Ring: >= 3 refs, no `rows`/`cols`.
-- Every `placement_hints[*].ref` and `anchor_ref` (when set) must be in `parts`.
-- `ref` / `symbol` / `footprint` shapes match the regexes above.
+- Group ids are unique.
+- Quantities expand to at most 500 total parts and 450 parts per sheet.
+- Every group sheet exactly matches an architecture sheet.
+- Each group may appear in at most one array.
+- Symbols and footprints use real `Library:Name` identifiers and must resolve.
+- References, array member lists, and canonical BOM placement fields are derived
+  by KiCraft rather than supplied by the model.
 
 ## Part selection
 
@@ -82,7 +76,7 @@ Beyond the parts block, the following default-install KiCad 9 stock libraries (a
 
 **Any other stock-KiCad library — `Sensor_*`, `MCU_*`, `RF_*`, `Regulator_*`, `Interface_*`, `Amplifier_*`, vendor-named libraries — is NOT first-tier.** Treat a symbol from one of those exactly like a parts-block/fetch miss: route it through the section below (auto-fetch for beginner/intermediate, or a `material: true` question). Stock symbols for sensors, MCUs, regulators, and interface ICs are frequently out of date or differ from the part the user actually wants, so picking one silently is precisely the substitution this stage exists to prevent.
 
-**Multi-unit (dual/quad) devices — one section per part.** KiCraft instantiates exactly ONE unit of a symbol per BOM part (the emitter places `(unit 1)`; the wiring stage only sees unit 1's pins). So a dual/quad op-amp, comparator, or logic-gate package yields a SINGLE usable section, not two/four. If the design needs N independent sections (e.g. a 4-channel buffer = four op-amps), add N SEPARATE parts (`U1`, `U2`, … each its own `ref`) — do NOT rely on the extra amplifiers inside one dual/quad chip; those units stay unwired and the channels are dead even though ERC passes. Using a quad package for a single section is fine; using one quad and expecting four channels is the trap.
+**Multi-unit (dual/quad) devices — one usable section per expanded component.** If the design needs N independent sections, set the component group's quantity to N; do not expect KiCraft to instantiate the unused units of one package.
 
 ### When a needed part is in neither the parts block nor stock KiCad
 

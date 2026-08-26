@@ -103,12 +103,16 @@ class ReasoningGuardPolicy:
             raise ValueError("reasoning wall-stall ceiling must be positive")
 
 
+BOM_TOTAL_PART_LIMIT = 500
+BOM_SHEET_PART_LIMIT = 450
+
+
 STAGE_COLLECTION_BOUNDS: dict[str, tuple[CollectionBound, ...]] = {
     "bom": (
         CollectionBound(
-            field="parts",
-            total=500,
-            per_group=450,
+            field="groups",
+            total=BOM_TOTAL_PART_LIMIT,
+            per_group=BOM_SHEET_PART_LIMIT,
             group_key="sheet",
         ),
     ),

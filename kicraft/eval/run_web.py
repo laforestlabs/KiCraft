@@ -168,6 +168,7 @@ def evaluate_project(
     started_at: str | None = None,
     finished_at: str | None = None,
     skip_judge: bool = False,
+    run_id: str | None = None,
 ) -> dict:
     """Score one finished web project and write ``eval/report.json``.
 
@@ -191,7 +192,15 @@ def evaluate_project(
     if not skip_judge and client is not None:
         digest = build_run_digest(pd, m)
         jkw = {"max_tokens": judge_max_tokens} if judge_max_tokens else {}
-        judge = grade_class_j(judge_client or client, digest, rubric, model=judge_model, **jkw)
+        meta_ctx = {"run_id": run_id} if run_id else None
+        judge = grade_class_j(
+            judge_client or client,
+            digest,
+            rubric,
+            model=judge_model,
+            meta_ctx=meta_ctx,
+            **jkw,
+        )
         for did, jv in judge["dimensions"].items():
             if did in dims:
                 dims[did]["level"] = jv["level"]

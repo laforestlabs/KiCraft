@@ -267,6 +267,7 @@ def grade_class_j(
     max_tokens: int = 24000,
     temperature: float = 0.0,
     max_attempts: int = 2,
+    meta_ctx: dict | None = None,
 ) -> dict:
     """Grade the five Class-J dimensions and detect observer gates with an LLM.
 
@@ -297,7 +298,12 @@ def grade_class_j(
             temperature=temperature,
             reasoning_guard=reasoning_guard,
             response_format=response_format,
-            meta_ctx={"phase": "eval_judge", "stage": "judge", "attempt": attempt},
+            meta_ctx={
+                **(meta_ctx or {}),
+                "phase": "eval_judge",
+                "stage": "judge",
+                "attempt": attempt,
+            },
         )
         last_text = res.get("text") or ""
         total_cost += float(res.get("cost_usd") or 0.0)
