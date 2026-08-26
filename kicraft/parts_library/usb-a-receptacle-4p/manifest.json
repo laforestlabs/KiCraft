@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:e40fc4b88a87c7f0526ea6638ff60962aab564ef6c04543d9cacedf1999db7c9",
+  "content_hash": "sha256:8cd097c8e35702d6bb94a302a60003042f54cc80105f7e3ea44ff0702424ba5a",
   "datasheet_url": "https://www.lcsc.com/datasheet/C9900001609.pdf",
   "description": "USB-A female receptacle, 4-pin, right-angle through-hole with shield tabs. Standard USB 2.0 host/device port. For USB-to-UART bridges, MCU USB device ports, and panel-mount host ports.",
   "footprint_name": "USB-A-SMD_USB-A-10.6-FEMALE_C9900001609",

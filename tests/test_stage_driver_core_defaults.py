@@ -10,16 +10,23 @@ call. Offline: real stage-prep subprocesses, fake LLM client, no network.
 """
 
 from __future__ import annotations
+import json
 
 import pytest
 
 from kicraft.parts_library.core_blocks import load_core_catalog, resolve_block
 from kicraft.server.session import run_session
-from kicraft.server.stage_driver import (
+from kicraft.server.stage_contracts import build_stage_response_contract
+from kicraft.server.stage_prompts import (
     _format_core_defaults_block,
-    build_system,
-    drive_stage,
+    build_system as _build_system,
 )
+from kicraft.server.stage_runtime import drive_stage
+
+
+def build_system(stage: str) -> str:
+    state = {"architecture": {"sheets": [{"name": "POWER"}]}} if stage == "bom" else {}
+    return _build_system(build_stage_response_contract(stage, state))
 
 
 @pytest.fixture(autouse=True)
@@ -234,7 +241,14 @@ def _user_prompt(client: _RecordingClient) -> str:
 def _drive(tmp_path, stage, core_defaults):
     (tmp_path / ".kicraft").mkdir(parents=True, exist_ok=True)
     state_path = tmp_path / ".kicraft" / "state.json"
-    state_path.write_text("{}", encoding="utf-8")
+    state = {}
+    if stage == "bom":
+        state["architecture"] = {
+            "sheets": [{"name": "POWER", "stem": "POWER", "function": "Power"}],
+            "power_nets": [],
+            "inter_sheet_nets": [],
+        }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
     client = _RecordingClient()
     r = drive_stage(
         client,
@@ -322,7 +336,7 @@ def test_bundle_row_dropped_when_cached_retail_dry(monkeypatch):
     # (their C# lives in the vendored manifest) while the prompt tells the
     # model NOT to re-verify them -- a retail-dry bundle default (drv8833
     # C50506: 3,299 assembly / 0 retail) was a guaranteed §9.26 bounce.
-    from kicraft.server import stage_driver as sd
+    from kicraft.server import stage_prompts as sd
 
     monkeypatch.setattr(sd.jlcparts, "available", lambda: True)
     monkeypatch.setattr(sd.jlcparts, "lookup", lambda cid: {"stock": 3299})
@@ -358,7 +372,7 @@ def test_bundle_row_dropped_when_cached_retail_dry(monkeypatch):
 
 def test_bundle_row_kept_without_fresh_retail_reading(monkeypatch):
     # No fresh cached reading -> no drop (offline path must not guess).
-    from kicraft.server import stage_driver as sd
+    from kicraft.server import stage_prompts as sd
 
     monkeypatch.setattr(sd.jlcparts, "available", lambda: True)
     monkeypatch.setattr(sd.jlcparts, "lookup", lambda cid: {"stock": 3299})

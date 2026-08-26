@@ -12,7 +12,12 @@ from __future__ import annotations
 import fnmatch
 
 from kicraft.autoplacer.config import DEFAULT_CONFIG
-from kicraft.server.stage_driver import build_system
+from kicraft.server.stage_contracts import build_stage_response_contract
+from kicraft.server.stage_prompts import build_system as _build_system
+
+
+def build_system(stage: str) -> str:
+    return _build_system(build_stage_response_contract(stage, {}))
 
 _MINI_FOOTPRINT = "BULETM-SMD_ESP32-S3-MINI-1-N8"
 

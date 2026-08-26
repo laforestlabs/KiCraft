@@ -19,7 +19,7 @@ from pathlib import Path
 
 from kicraft.fsutil import atomic_write_text
 
-from .stage_driver import DESIGN_STAGES, drive_chain
+from .stage_pipeline import DESIGN_STAGES, drive_chain
 from .storage import _state_path
 
 # The deterministic build sub-phases, in pipeline order after DESIGN_STAGES.
@@ -166,11 +166,11 @@ def read_state(ws) -> dict:
 def commit_slot(ws, stage: str, slot: dict, brief: str = "", project_stem=None):
     """Commit an edited slot to the workspace state.json via the deterministic CLI
     (which re-validates it). Returns (ok, out); out carries `errors` on rejection."""
-    from .stage_driver import _commit, _stamp_stage_status
+    from .stage_state_io import commit_stage, stamp_stage_status
     state_path = Path(ws) / ".kicraft" / "state.json"
-    ok, out = _commit(stage, dict(slot), state_path, brief, project_stem, Path(ws))
+    ok, out = commit_stage(stage, dict(slot), state_path, brief, project_stem, Path(ws))
     if ok:  # a manual edit is a zero-cost commit; the stage is (re)done
-        _stamp_stage_status(state_path, stage, True)
+        stamp_stage_status(state_path, stage, True)
     return ok, out
 
 

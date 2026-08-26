@@ -4,7 +4,7 @@
   "description": "MICROCHIP(\u7f8e\u56fd\u5fae\u82af) MCP23017T-E/SS",
   "footprint_name": "SSOP-28_L10.2-W5.3-P0.65-LS7.8-BL",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "MCP23017T-E/SS",
   "name": "mcp23017t-e-ss",
   "provenance": {

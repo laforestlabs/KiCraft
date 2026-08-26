@@ -266,7 +266,7 @@ def test_open_stream_raises_after_exhausting_retries(monkeypatch):
 
 
 def test_design_temperature_defaults_to_zero_and_is_configurable():
-    from kicraft.server.stage_driver import _design_temperature
+    from kicraft.server.stage_runtime import _design_temperature
 
     c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
     assert c.s.design_temperature == 0.0  # new default cuts variance

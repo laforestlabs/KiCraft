@@ -70,7 +70,14 @@ def _guard(tmp_path) -> SpendGuard:
 def _drive(tmp_path, stage):
     (tmp_path / ".kicraft").mkdir(parents=True, exist_ok=True)
     sp = tmp_path / ".kicraft" / "state.json"
-    sp.write_text("{}", encoding="utf-8")
+    state = {}
+    if stage == "bom":
+        state["architecture"] = {
+            "sheets": [{"name": "POWER", "stem": "POWER", "function": "Power"}],
+            "power_nets": [],
+            "inter_sheet_nets": [],
+        }
+    sp.write_text(json.dumps(state), encoding="utf-8")
     g = _guard(tmp_path)
     client = _FailingClient(g)
     r = drive_stage(

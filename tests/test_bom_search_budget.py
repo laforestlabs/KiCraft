@@ -16,8 +16,17 @@ import json
 import types
 
 from kicraft.parts_library import mpn_cache
-from kicraft.server import stage_driver
-from kicraft.server.stage_driver import _bom_executor, _new_bundle_rows, _normalize_mpn
+from kicraft.server import stage_state_io as stage_driver
+from kicraft.server.stage_bom_tools import (
+    _new_bundle_rows,
+    _normalize_mpn,
+    build_bom_executor,
+)
+from kicraft.server.stage_state_io import KICRAFT
+
+
+def _bom_executor(workspace):
+    return build_bom_executor(workspace, stage_driver.run_design_cli, KICRAFT)
 
 
 _LIST_PARTS_SAMPLE = """## Available parts
@@ -165,7 +174,7 @@ def test_read_only_lookups_memoized_within_stage(monkeypatch, tmp_path):
         calls.append(cmd)
         return types.SimpleNamespace(stdout=f"out:{cmd[-1]}", stderr="", returncode=0)
 
-    monkeypatch.setattr(stage_driver, "_run", fake_run)
+    monkeypatch.setattr(stage_driver, "run_design_cli", fake_run)
     ex = _bom_executor(tmp_path)
 
     a = ex("lookup_symbol", {"symbol": "Device:R"})

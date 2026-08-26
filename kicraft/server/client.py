@@ -648,8 +648,8 @@ class CappedOpenRouterClient:
                     {
                         "role": "user",
                         "content": (
-                            "This is the FINAL response. Stop calling tools and output "
-                            "ONLY the schema-bound JSON answer now."
+                            "This is the FINAL tool round and FINAL response. Stop "
+                            "calling tools and output ONLY the schema-bound JSON answer now."
                         ),
                     }
                 )

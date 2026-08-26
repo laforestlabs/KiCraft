@@ -17,7 +17,11 @@ from kicraft.server.session import (
     null_downstream,
     read_state,
 )
-from kicraft.server.stage_driver import DESIGN_STAGES, _commit, _stamp_stage_status
+from kicraft.server.stage_pipeline import DESIGN_STAGES
+from kicraft.server.stage_state_io import (
+    commit_stage as _commit,
+    stamp_stage_status as _stamp_stage_status,
+)
 
 
 def _write_state(ws: Path, data: dict) -> None:

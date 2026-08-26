@@ -4,7 +4,7 @@
   "description": "UMW(\u53cb\u53f0\u534a\u5bfc\u4f53) USBLC6-2SC6",
   "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "USBLC6-2SC6",
   "name": "usblc6-2sc6",
   "provenance": {

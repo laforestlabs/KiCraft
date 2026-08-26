@@ -29,6 +29,7 @@ import pytest
 
 from kicraft.cli import artifact_paths as ap
 from kicraft.design import cli_app
+from kicraft.design.models import ArtifactPaths, ConversationState
 
 
 @pytest.fixture(autouse=True)
@@ -79,6 +80,19 @@ def _noroute_args() -> SimpleNamespace:
     )
 
 
+def _build_context(project: Path, stem: str) -> tuple[ConversationState, ArtifactPaths]:
+    state = ConversationState()
+    artifacts = ArtifactPaths(
+        project_dir=project,
+        project_stem=stem,
+        root_sch=project / "root.kicad_sch",
+        leaf_schs=[],
+        kicad_pro=project / f"{stem}.kicad_pro",
+        autoplacer_json=project / "autoplacer.json",
+    )
+    return state, artifacts
+
+
 # --- site 2: --no-route placed promote ----------------------------------------
 
 def test_noroute_promote_rejects_stale_placed_board(tmp_path, monkeypatch):
@@ -97,8 +111,9 @@ def test_noroute_promote_rejects_stale_placed_board(tmp_path, monkeypatch):
     # _run_layout "succeeds" but (as in the bug) leaves the stale board in place.
     monkeypatch.setattr(cli_app, "_run_layout", lambda *a, **k: 0)
 
+    state, artifacts = _build_context(tmp_path, stem)
     rc = cli_app._layout_route_fab(
-        _noroute_args(), None, tmp_path / "state.json", None, None,
+        _noroute_args(), state, tmp_path / "state.json", artifacts, None,
         stem, tmp_path, tmp_path / "root.kicad_sch", pcb,
     )
 
@@ -120,8 +135,9 @@ def test_noroute_promote_accepts_fresh_placed_board(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli_app, "_run_layout", lambda *a, **k: 0)
 
+    state, artifacts = _build_context(tmp_path, stem)
     rc = cli_app._layout_route_fab(
-        _noroute_args(), None, tmp_path / "state.json", None, None,
+        _noroute_args(), state, tmp_path / "state.json", artifacts, None,
         stem, tmp_path, tmp_path / "root.kicad_sch", pcb,
     )
 
@@ -152,8 +168,9 @@ def test_fab_promote_ignores_stale_routed_and_falls_through(tmp_path):
     _set_mtime(routed, t0 - 100)  # stale routed from a previous run
     _set_mtime(placed, t0 + 10)   # but this run did place a parent
 
+    state, artifacts = _build_context(tmp_path, stem)
     rc = cli_app._promote_verify_fab(
-        None, tmp_path / "state.json", [], stem, tmp_path, pcb,
+        state, tmp_path / "state.json", artifacts, stem, tmp_path, pcb,
     )
 
     assert rc == 6, "a stale routed parent must not pass the fab gate"
@@ -179,8 +196,9 @@ def test_rc6_preview_shows_stale_partial_flagged_not_fresh(tmp_path):
     _write_meta(sub, run_id="OLD")
     _set_mtime(placed, t0 - 100)  # stale partial
 
+    state, artifacts = _build_context(tmp_path, stem)
     rc = cli_app._promote_verify_fab(
-        None, tmp_path / "state.json", [], stem, tmp_path, pcb,
+        state, tmp_path / "state.json", artifacts, stem, tmp_path, pcb,
     )
 
     assert rc == 6
@@ -207,8 +225,9 @@ def test_rc6_promote_snapshots_seed_and_replay_restore_recovers_it(tmp_path):
     placed = _touch(sub / ap.PARENT_PLACED, "(kicad_pcb PARTIAL)\n")
     _set_mtime(placed, t0 + 10)  # fresh partial, no routed parent -> rc6
 
+    state, artifacts = _build_context(tmp_path, stem)
     rc = cli_app._promote_verify_fab(
-        None, tmp_path / "state.json", [], stem, tmp_path, pcb,
+        state, tmp_path / "state.json", artifacts, stem, tmp_path, pcb,
     )
 
     assert rc == 6
@@ -273,8 +292,9 @@ def test_rc6_preview_marks_fresh_partial_fresh(tmp_path):
     placed = _touch(sub / ap.PARENT_PLACED)
     _set_mtime(placed, t0 + 10)  # fresh
 
+    state, artifacts = _build_context(tmp_path, stem)
     rc = cli_app._promote_verify_fab(
-        None, tmp_path / "state.json", [], stem, tmp_path, pcb,
+        state, tmp_path / "state.json", artifacts, stem, tmp_path, pcb,
     )
 
     assert rc == 6

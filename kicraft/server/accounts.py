@@ -142,7 +142,7 @@ _INVITE_CODE_RE = re.compile(r"[A-Za-z0-9_-]{3,64}")
 # (_sync_core_components_from_catalog), so block/part edits happen via git
 # while the DB owns only runtime state (enabled flag + price/stock
 # snapshots). Consumed per run by the architecture/BOM prompts (see
-# stage_driver._format_core_defaults_block); renaming a function_key is a
+# stage_prompts._format_core_defaults_block); renaming a function_key is a
 # breaking change. CORE_COMPONENT_CATEGORIES and the function-key regex live
 # in kicraft.parts_library.core_blocks and are imported above.
 

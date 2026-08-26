@@ -10,9 +10,9 @@ import json
 
 import pytest
 
-from kicraft.server import stage_driver as sd
-from kicraft.server.stage_driver import (
-    BudgetExceeded,
+from kicraft.server import stage_pipeline as sd
+from kicraft.server.spend_guard import BudgetExceeded
+from kicraft.server.stage_pipeline import (
     _BudgetGuard,
     drive_replay,
     make_budget_client,

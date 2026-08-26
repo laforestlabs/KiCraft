@@ -4,7 +4,7 @@
   "description": "10K\u03a9",
   "footprint_name": "RES-ADJ-TH_3296W",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "3296W-1-103LF",
   "name": "trim-pot-3296w-10k",
   "provenance": {

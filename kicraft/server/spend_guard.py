@@ -222,7 +222,7 @@ class SpendGuard:
         Note: ``cpu_s`` comes from RUSAGE_CHILDREN, which is per-process, so it
         is only trustworthy when designs run serially — concurrent stages in the
         same web process cross-contaminate each other's child-CPU delta (see
-        stage_driver._child_cpu_s). ``wall_s`` is unaffected."""
+        stage_runtime._child_cpu_s). ``wall_s`` is unaffected."""
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO stage_runs (ts, run_id, stage, ok, attempts, rounds, "

@@ -4,7 +4,7 @@
   "description": "Bosch(\u535a\u4e16) BME280",
   "footprint_name": "LGA-8_BME280_BL",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "BME280",
   "name": "bme280-bosch-sensor",
   "provenance": {

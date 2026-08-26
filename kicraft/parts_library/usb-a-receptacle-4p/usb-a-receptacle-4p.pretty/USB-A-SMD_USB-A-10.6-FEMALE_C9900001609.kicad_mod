@@ -422,5 +422,16 @@
 		(remove_unused_layers no)
 		(uuid "405e0037-a7d2-4145-8c32-38e74913943d")
 	)
+	(model "${KICAD9_3DMODEL_DIR}/Connector_USB.3dshapes/USB_A_Molex_67643_Horizontal.step"
+		(offset
+			(xyz 0 0 0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz 0 0 0)
+		)
+	)
 	(embedded_fonts no)
 )

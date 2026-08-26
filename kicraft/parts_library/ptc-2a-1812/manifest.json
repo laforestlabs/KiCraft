@@ -4,7 +4,7 @@
   "description": "BOURNS MF-MSMF200-2",
   "footprint_name": "F1812",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "MF-MSMF200-2",
   "name": "ptc-2a-1812",
   "provenance": {

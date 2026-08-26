@@ -4,7 +4,7 @@
   "description": "1.27mm 3",
   "footprint_name": "SW-SMD_6P-L5.4-W5.4-P1.27-LS8.4",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "DSHP03TSGET",
   "name": "dip-switch-3pos",
   "provenance": {

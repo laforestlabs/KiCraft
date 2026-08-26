@@ -1384,7 +1384,7 @@ def _cmd_list_parts(args: argparse.Namespace) -> int:
 # LCSC part numbers as users paste them — bare (C7386355) or inside an
 # lcsc.com / jlcpcb.com product URL (where they follow '_' or '/'). The
 # lookarounds reject MPNs that merely embed a C+digits run (e.g. C8051F320).
-# stage_driver._LCSC_ID_RE mirrors this pattern for brief/answer scanning.
+# stage_bom_tools._LCSC_ID_RE mirrors this pattern for brief/answer scanning.
 _LCSC_ID_RE = re.compile(r"(?<![A-Za-z0-9])C\d{4,8}(?![A-Za-z0-9])", re.IGNORECASE)
 
 _EASYEDA_SEARCH_URL = "https://easyeda.com/api/components/search"
@@ -1745,20 +1745,6 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
         return 4
 
     fields = ("lcsc", "model", "brand", "package", "description")
-    # Filter out EasyEDA results whose LCSC isn't in the offline catalog.
-    # EasyEDA can return internal placeholder IDs (e.g. C9900001223) that
-    # have CAD data but are not real orderable part numbers.
-    if jlcparts.available() and results:
-        valid = [r for r in results if jlcparts.lcsc_exists(r.get("lcsc", ""))]
-        if not valid and results:
-            _log_query(
-                "lookup_lcsc_id",
-                outcome="miss",
-                query=mpn,
-                n_candidates=len(results),
-                error="all-easyeda-results-fabricated",
-            )
-        results = valid
     best = _pick_lcsc(mpn, results)
     if best and best.get("lcsc"):
         _log_query(

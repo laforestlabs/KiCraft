@@ -5,7 +5,13 @@ USB, no bridge); fall back to an onboard CH340C USB-UART bridge only for the cla
 ESP32-WROOM-32, which has no native USB."""
 from __future__ import annotations
 
-from kicraft.server.stage_driver import build_system
+from kicraft.server.stage_contracts import build_stage_response_contract
+from kicraft.server.stage_prompts import build_system as _build_system
+
+
+def build_system(stage: str) -> str:
+    state = {"architecture": {"sheets": [{"name": "POWER"}]}} if stage == "bom" else {}
+    return _build_system(build_stage_response_contract(stage, state))
 
 
 def test_architecture_spec_decides_programming_interface_early():

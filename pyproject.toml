@@ -51,6 +51,7 @@ dev = [
     "ruff>=0.1",
     "bandit>=1.7",
     "pip-audit>=2.7",
+    "matplotlib>=3.7",
 ]
 
 [project.scripts]

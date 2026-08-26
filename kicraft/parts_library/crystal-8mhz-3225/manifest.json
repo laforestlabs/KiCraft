@@ -4,7 +4,7 @@
   "description": "YXC(\u626c\u5174\u6676\u632f) X32258MSB4SI",
   "footprint_name": "CRYSTAL-SMD_4P-L3.2-W2.5-BL",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "X32258MSB4SI",
   "name": "crystal-8mhz-3225",
   "provenance": {

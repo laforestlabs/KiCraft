@@ -4,7 +4,7 @@
   "description": "DMBJ(\u632f\u5b9d\u4f73) CD54-100M 10UH",
   "footprint_name": "IND-SMD_L5.8-W5.2",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "CD54-100M 10UH",
   "name": "cd54-100m-inductor",
   "provenance": {

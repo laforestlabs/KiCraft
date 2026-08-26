@@ -37,7 +37,7 @@ from .host_metrics import HostMetricsStore
 from .kicanvas import KiCanvasSource, KiCanvasView, kicanvas_head
 from .render_serving import _register_project_dir, _resolve_project_token
 from .spend_guard import SpendGuard
-from .stage_driver import KICRAFT
+from .stage_state_io import KICRAFT
 from .storage import _discover_generated_dir
 from ..parts_library import jlcparts
 from kicraft.tuning.benchmark import BENCHMARK_PROMPTS

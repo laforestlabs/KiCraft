@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import pytest
 from kicraft.design.cli_app import (
     _cmd_list_parts,
     _cmd_search_footprints,
@@ -24,6 +25,15 @@ from kicraft.design.cli_app import (
 from kicraft.design.library import search_library_parts
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home_parts(monkeypatch, tmp_path):
+    """Host-local fetched parts must not change vendored search ranking tests."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("KICRAFT_EXTRA_PARTS_DIRS", raising=False)
 
 
 # ---------- search_library_parts ----------

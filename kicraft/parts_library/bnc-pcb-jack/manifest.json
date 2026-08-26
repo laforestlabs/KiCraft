@@ -4,7 +4,7 @@
   "description": "Kinghelm KH-BNC50-3511 \u2014 BNC board-side elbow jack, 50\u03a9, 3 GHz, through-hole, 9.5mm height",
   "footprint_name": "ANT-TH_KH-BNC50-3511",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "KH-BNC50-3511",
   "name": "bnc-pcb-jack",
   "provenance": {

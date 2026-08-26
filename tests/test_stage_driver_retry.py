@@ -11,23 +11,33 @@ import json
 import pytest
 import requests
 
-from kicraft.server import stage_driver as stage_driver_mod
-from kicraft.server.stage_driver import (
-    BOM_TOOLS,
-    _attach_questions,
-    _apply_wiring_patch,
-    _commit_rejection_signature,
-    _classify_parse_failure,
-    _design_reasoning,
+from kicraft.server import stage_runtime as stage_driver_mod
+from kicraft.server.config import Settings
+from kicraft.server.stage_bom_tools import BOM_TOOLS
+from kicraft.server.stage_contracts import (
     _expand_bom_stage_response,
     _extract_json,
+    build_stage_response_contract,
+)
+from kicraft.server.stage_prompts import build_system as _build_system
+from kicraft.server.stage_runtime import (
+    _classify_parse_failure,
+    _commit_rejection_signature,
+    _design_reasoning,
     _normalize_questions,
     _retry_feedback,
     _stage_max_retries,
     _stage_max_tokens,
-    build_system,
 )
+from kicraft.server.stage_state_io import attach_questions as _attach_questions
+from kicraft.server.stage_wiring_patch import apply_wiring_patch as _apply_wiring_patch
 from kicraft.server.session import run_session
+
+
+def build_system(stage: str, collection_bounds=None) -> str:
+    state = {"architecture": {"sheets": [{"name": "POWER"}]}} if stage == "bom" else {}
+    contract = build_stage_response_contract(stage, state)
+    return _build_system(contract, collection_bounds)
 
 
 def _run_payload(**overrides):
@@ -359,7 +369,7 @@ def test_retry_feedback_unknown_ref_in_wiring_points_at_reconcile(tmp_path):
     # WS6: an unknown-ref rejection in wiring must tell the model it cannot add
     # parts and to park with reconcile_target=bom, and list the real refs -- so it
     # stops inventing refs and burning its retry budget.
-    from kicraft.server.stage_driver import _retry_feedback
+    from kicraft.server.stage_runtime import _retry_feedback
 
     out = {"errors": ["NetConnection 'PWR' references unknown ref 'Q99'"]}
     msg = _retry_feedback(out, stage="wiring", valid_refs=["C1", "U1"])
@@ -369,7 +379,7 @@ def test_retry_feedback_unknown_ref_in_wiring_points_at_reconcile(tmp_path):
 
 
 def test_retry_feedback_no_reconcile_note_for_non_wiring_stage():
-    from kicraft.server.stage_driver import _retry_feedback
+    from kicraft.server.stage_runtime import _retry_feedback
 
     out = {"errors": ["some symbol not found"]}
     msg = _retry_feedback(out, stage="bom")
@@ -434,7 +444,7 @@ def test_build_system_offers_clarifying_questions():
 
 
 def test_bom_part_hints_extracts_pasted_lcsc_ids():
-    from kicraft.server.stage_driver import _bom_part_hints
+    from kicraft.server.stage_prompts import _bom_part_hints
 
     brief = (
         "ToF breakout with the sensor at "
@@ -446,7 +456,7 @@ def test_bom_part_hints_extracts_pasted_lcsc_ids():
 
 
 def test_bom_part_hints_ignores_refdes_and_embedded_runs():
-    from kicraft.server.stage_driver import _bom_part_hints
+    from kicraft.server.stage_prompts import _bom_part_hints
 
     # C1/C104 are refdes/values, C8051F320 is an MPN — none are LCSC ids.
     assert _bom_part_hints("decouple C1 with 100nF, C104 pattern, MCU C8051F320") == ""
@@ -727,7 +737,7 @@ def test_serialization_schema_failure_terminates_without_commit_correction(tmp_p
     assert last["failure_kind"] == "invalid_schema"
 
 
-def test_serialization_goes_through_chat_even_for_bom(tmp_path):
+def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
     # Serialization recovery must route through plain client.chat() for the BOM
     # stage too — never chat_with_tools, so no tool rounds and no transcript
     # resend. The normal attempt is the tool loop (chat_with_tools).
@@ -742,11 +752,23 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path):
             {"text": "also bad", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
         ]
     )
+    prep = {
+        "state": {"architecture": {"sheets": [{"name": "POWER"}]}},
+        "extras": {},
+    }
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc", (), {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""}
+        )(),
+    )
     res = run_session(tmp_path, "a USB-powered LED", ["bom"], client=client)
     assert res["status"] == "failed"
     assert len(client.calls) == 2
     assert client.calls[0]["serialization"] is False  # chat_with_tools (tool loop)
     assert client.calls[1]["serialization"] is True  # plain chat for serialization
+    assert client.calls[1]["response_format"] is client.calls[0]["response_format"]
     assert client.calls[1]["max_tokens"] == 32768  # bom serialization cap
     assert client.calls[1]["reasoning"] == {"enabled": False}
     retry_message = client.calls[1]["messages"][-1]["content"]
@@ -754,6 +776,29 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path):
     assert "`parts` collection must contain at most 500 items total" in retry_message
     assert "at most 450 items per `sheet`" in retry_message
     assert res["results"][-1]["failure_kind"] == "invalid_json"
+
+
+def test_invalid_bom_architecture_fails_before_provider_call(tmp_path, monkeypatch):
+    prep = {"state": {"architecture": {"sheets": []}}, "extras": {}}
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc", (), {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""}
+        )(),
+    )
+    client = _ScriptedClient([])
+    result = stage_driver_mod.drive_stage(
+        client,
+        "bom",
+        "test",
+        tmp_path / "state.json",
+        tmp_path,
+    )
+    assert client.calls == []
+    assert result["attempts"] == 0
+    assert result["cost_usd"] == 0.0
+    assert result["error"].startswith("stage contract failed:")
 
 
 def test_empty_length_takes_reasoning_recovery_not_invalid_json(tmp_path):
@@ -870,7 +915,7 @@ def test_repeated_commit_rejection_gets_one_pristine_escape_then_stops(tmp_path,
         "errors": ["9.15 multi-net pin short"],
         "offenders": ["R1.1 on SIG_A and SIG_B"],
     }
-    monkeypatch.setattr(stage_driver_mod, "_commit", lambda *args, **kwargs: (False, rejected))
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", lambda *args, **kwargs: (False, rejected))
     client = _ScriptedClient([_ok_intent_reply(), _ok_intent_reply(), _ok_intent_reply()])
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     last = res["results"][-1]
@@ -880,6 +925,10 @@ def test_repeated_commit_rejection_gets_one_pristine_escape_then_stops(tmp_path,
     assert client.calls[2]["temperature"] == 0.4
     roles = [message["role"] for message in client.calls[2]["messages"]]
     assert roles == ["system", "user", "user"]
+    assert all(
+        call["response_format"] is client.calls[0]["response_format"]
+        for call in client.calls
+    )
 
 
 def test_wiring_rejection_is_repaired_by_typed_patch_before_full_gates(tmp_path, monkeypatch):
@@ -910,7 +959,7 @@ def test_wiring_rejection_is_repaired_by_typed_patch_before_full_gates(tmp_path,
     }
     monkeypatch.setattr(
         stage_driver_mod,
-        "_run",
+        "prepare_stage",
         lambda *args, **kwargs: type(
             "Proc", (), {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""}
         )(),
@@ -929,7 +978,7 @@ def test_wiring_rejection_is_repaired_by_typed_patch_before_full_gates(tmp_path,
         assert commits[1]["connections"][0]["endpoints"] == [{"ref": "R1", "pin": "1"}]
         return True, {"ok": True}
 
-    monkeypatch.setattr(stage_driver_mod, "_commit", fake_commit)
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", fake_commit)
     full = _wiring_candidate()
     patch = {
         "operations": [
@@ -949,7 +998,7 @@ def test_wiring_rejection_is_repaired_by_typed_patch_before_full_gates(tmp_path,
             {"text": json.dumps(patch), "finish_reason": "stop", "cost_usd": 0.0},
         ]
     )
-    client.s = stage_driver_mod.Settings(api_key="test")
+    client.s = Settings(api_key="test")
     result = stage_driver_mod.drive_stage(
         client,
         "wiring",
@@ -1026,7 +1075,7 @@ def test_budget_exceeded_propagates_and_is_not_classified(tmp_path):
 
 def test_response_policy_falls_back_for_mock_clients():
     from kicraft.server.config import StageResponsePolicy
-    from kicraft.server.stage_driver import _response_policy
+    from kicraft.server.stage_runtime import _response_policy
 
     # a settings-less mock client: floored normal cap, no reasoning control
     # (no design_reasoning), the fixed serialization cap, one serialization retry
