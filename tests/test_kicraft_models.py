@@ -7,6 +7,7 @@ Locks the validation contract:
 - power/ground net name recognition (mirrors §2.5)
 - BOM cross-references (ic_groups, thermal_refs, signal_flow_order, component_zones)
 """
+
 from __future__ import annotations
 
 import pytest
@@ -107,6 +108,41 @@ def test_valid_footprint() -> None:
     assert p.footprint == "Package_TO_SOT_SMD:SOT-23-5"
 
 
+def test_valid_installed_footprint_with_comma() -> None:
+    footprint = (
+        "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-3-5.08_1x03_P5.08mm_Horizontal"
+    )
+    part = BomPart(
+        ref="J1",
+        value="3-pin terminal block",
+        symbol="Connector_Generic:Conn_01x03",
+        footprint=footprint,
+        sheet="POWER",
+    )
+    assert part.footprint == footprint
+
+
+@pytest.mark.parametrize(
+    "footprint",
+    [
+        "Library:",
+        ":Name",
+        "Library:Name:Extra",
+        "Library/Name:Footprint",
+        "Library:Footprint/Child",
+    ],
+)
+def test_malformed_footprint_scope_rejected(footprint: str) -> None:
+    with pytest.raises(ValidationError):
+        BomPart(
+            ref="J1",
+            value="x",
+            symbol="Connector_Generic:Conn_01x01",
+            footprint=footprint,
+            sheet="POWER",
+        )
+
+
 # ---------- Sheet naming (§7) ----------
 
 
@@ -135,8 +171,11 @@ def test_functional_block_count_defaults_one_and_must_be_positive() -> None:
 
 def test_sheet_replication_fields_ok_and_paired() -> None:
     s = Sheet(
-        name="STEPPER AXIS X", stem="STEPPER_AXIS_X", function="x",
-        replication_group="STEPPER_AXIS", replication_instance=1,
+        name="STEPPER AXIS X",
+        stem="STEPPER_AXIS_X",
+        function="x",
+        replication_group="STEPPER_AXIS",
+        replication_instance=1,
     )
     assert s.replication_group == "STEPPER_AXIS" and s.replication_instance == 1
     # unpaired -> rejected
@@ -146,12 +185,18 @@ def test_sheet_replication_fields_ok_and_paired() -> None:
         Sheet(name="X", stem="X", function="x", replication_instance=2)
     # instance must be >= 1
     with pytest.raises(ValidationError):
-        Sheet(name="X", stem="X", function="x",
-              replication_group="G", replication_instance=0)
+        Sheet(name="X", stem="X", function="x", replication_group="G", replication_instance=0)
     # cannot be both library reuse and a replication instance
     with pytest.raises(ValidationError):
-        Sheet(name="X", stem="X", function="x", from_library="leaf@1",
-              library_instance=1, replication_group="G", replication_instance=1)
+        Sheet(
+            name="X",
+            stem="X",
+            function="x",
+            from_library="leaf@1",
+            library_instance=1,
+            replication_group="G",
+            replication_instance=1,
+        )
 
 
 # ---------- Architecture cross-refs ----------
@@ -330,8 +375,7 @@ def test_pin_endpoint_valid() -> None:
 # "1'"/"2'" are prime-notation pins from real symbols (e.g. the EVQ-P7A01P
 # tactile switch, whose paired terminals are 1/1' and 2/2'); the wiring stage
 # must be able to reference them.
-@pytest.mark.parametrize(
-    "pin", ["3", "A1", "B12", "VBAT", "+3V3", "~RESET", "GPIO0", "1'", "2'"])
+@pytest.mark.parametrize("pin", ["3", "A1", "B12", "VBAT", "+3V3", "~RESET", "GPIO0", "1'", "2'"])
 def test_pin_endpoint_pin_accepts_real_kicad_pin_tokens(pin: str) -> None:
     ep = PinEndpoint(ref="U1", pin=pin)
     assert ep.pin == pin
@@ -445,8 +489,7 @@ def test_bom_no_connect_pin_valid() -> None:
 
 def _led_parts(n: int) -> list[BomPart]:
     return [
-        BomPart(ref=f"D{i}", value="LED", symbol="L:LED", footprint="L:LED",
-                sheet="LED MATRIX")
+        BomPart(ref=f"D{i}", value="LED", symbol="L:LED", footprint="L:LED", sheet="LED MATRIX")
         for i in range(1, n + 1)
     ]
 
@@ -472,24 +515,26 @@ def test_arrayspec_nonpositive_dims_rejected() -> None:
 
 
 def test_bom_arrays_valid() -> None:
-    bom = BOM(parts=_led_parts(4),
-              arrays=[ArraySpec(refs=["D1", "D2", "D3", "D4"], rows=2, cols=2)])
+    bom = BOM(
+        parts=_led_parts(4), arrays=[ArraySpec(refs=["D1", "D2", "D3", "D4"], rows=2, cols=2)]
+    )
     assert len(bom.arrays) == 1
 
 
 def test_bom_arrays_unknown_ref_rejected() -> None:
     with pytest.raises(ValidationError):
-        BOM(parts=_led_parts(2),
-            arrays=[ArraySpec(refs=["D1", "D9"], rows=1, cols=2)])
+        BOM(parts=_led_parts(2), arrays=[ArraySpec(refs=["D1", "D9"], rows=1, cols=2)])
 
 
 def test_bom_ref_in_two_arrays_rejected() -> None:
     with pytest.raises(ValidationError):
-        BOM(parts=_led_parts(3),
+        BOM(
+            parts=_led_parts(3),
             arrays=[
                 ArraySpec(refs=["D1", "D2"], rows=1, cols=2),
                 ArraySpec(refs=["D2", "D3"], rows=1, cols=2),
-            ])
+            ],
+        )
 
 
 def test_bom_arrays_default_empty() -> None:

@@ -88,6 +88,29 @@ def test_group_bom_allocates_repeated_prefixes_in_response_order():
     assert [part["ref"] for part in canonical["parts"]] == ["C1", "C2", "C3"]
 
 
+def test_group_bom_accepts_installed_phoenix_footprint_with_comma():
+    footprint = (
+        "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-3-5.08_1x03_P5.08mm_Horizontal"
+    )
+    canonical, total = _normalize_bom_stage_response(
+        {
+            "groups": [
+                _group_payload(
+                    id="output_terminal",
+                    reference_prefix="J",
+                    quantity=1,
+                    value="3-pin terminal block",
+                    symbol="Connector_Generic:Conn_01x03",
+                    footprint=footprint,
+                    sheet="POWER",
+                )
+            ]
+        }
+    )
+    assert total == 1
+    assert canonical["parts"][0]["footprint"] == footprint
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -187,6 +210,36 @@ def test_retry_feedback_without_offenders_omits_that_line():
     msg = _retry_feedback({"ok": False, "errors": ["some other error"]})
     assert "some other error" in msg
     assert "offenders" not in msg  # no offenders line when none present
+
+
+def test_retry_feedback_explains_series_path_for_dangling_terminal():
+    msg = _retry_feedback(
+        {
+            "ok": False,
+            "errors": ["9.15 no dangling signal nets: 1 signal net wires a single pin"],
+            "offenders": ["net 'CAN_TX_MCU' on sheet 'CAN TRANSCEIVER' wires only R3.2"],
+        },
+        stage="wiring",
+    )
+    assert "source + Rn.1 = SIG_IN" in msg
+    assert "Rn.2 + destination = SIG_OUT" in msg
+    assert "moving the destination pin" in msg
+
+
+def test_retry_feedback_explains_complete_self_short_repair():
+    msg = _retry_feedback(
+        {
+            "ok": False,
+            "errors": ["9.17 two-terminal self-short: 1 part shorted"],
+            "offenders": [
+                "R3 (Device:R) has both terminals on net 'CAN_TX' -- the part is shorted"
+            ],
+        },
+        stage="wiring",
+    )
+    assert "complete three-item change" in msg
+    assert "MOVE the intended destination" in msg
+    assert "Do not merely rename one part terminal" in msg
 
 
 def test_parse_failure_classification_distinguishes_the_three_kinds():
@@ -718,6 +771,20 @@ def test_serialization_schema_failure_terminates_without_commit_correction(tmp_p
     assert len(client.calls) == 2
     assert sum(1 for call in client.calls if call["serialization"]) == 1
     assert last["failure_kind"] == "invalid_schema"
+
+
+def test_schema_recovery_reports_local_validation_error(tmp_path):
+    client = _ScriptedClient(
+        [
+            {"text": "{}", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            _ok_intent_reply(),
+        ]
+    )
+    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert res["status"] == "ok"
+    retry_message = client.calls[1]["messages"][-1]["content"]
+    assert "valid JSON but failed KiCraft's local slot validation" in retry_message
+    assert "Field required" in retry_message
 
 
 def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):

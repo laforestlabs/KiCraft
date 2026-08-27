@@ -7,6 +7,7 @@ ArtifactPaths type set by the synthesis stage.
 Validation rules mirror the hard requirements from
 `docs/kicraft_schematic_prompt.md` so invalid state cannot reach synthesis.
 """
+
 from __future__ import annotations
 
 import re
@@ -18,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 REF_RE = re.compile(r"^[A-Z]+[0-9]+[A-Z0-9_-]*$")
-FOOTPRINT_RE = re.compile(r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.+-]+$")
+FOOTPRINT_RE = re.compile(r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.,+-]+$")
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.+-]+$")
 SHEET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9 ]*[A-Z0-9]$")
 SHEET_STEM_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -54,12 +55,12 @@ BlockCategory = Literal["sense", "process", "drive", "power", "interface"]
 # pin ties to). See PlacementHint and synthesis/placement.py.
 PlacementRole = Literal[
     "decoupling",  # local bypass cap: rail pin <-> gnd pin, hugs a power pin
-    "bulk",        # large reservoir cap: rail <-> gnd, like decoupling
-    "pullup",      # resistor: signal pin <-> a positive rail
-    "pulldown",    # resistor: signal pin <-> ground
-    "series",      # in-line R/L/ferrite in a signal/power path
-    "feedback",    # divider / compensation around the IC
-    "other",       # cluster near the anchor, no special orientation
+    "bulk",  # large reservoir cap: rail <-> gnd, like decoupling
+    "pullup",  # resistor: signal pin <-> a positive rail
+    "pulldown",  # resistor: signal pin <-> ground
+    "series",  # in-line R/L/ferrite in a signal/power path
+    "feedback",  # divider / compensation around the IC
+    "other",  # cluster near the anchor, no special orientation
 ]
 SignalType = Literal["power", "ground", "digital", "analog", "clock", "bus", "rf", "other"]
 EdgeZone = Literal["left", "right", "top", "bottom"]
@@ -274,18 +275,12 @@ class Sheet(BaseModel):
     def _library_fields_paired(self):
         if (self.from_library is None) != (self.library_instance is None):
             raise ValueError(
-                "Sheet.from_library and Sheet.library_instance must both "
-                "be set or both be None"
+                "Sheet.from_library and Sheet.library_instance must both be set or both be None"
             )
         if self.library_instance is not None and self.library_instance < 1:
-            raise ValueError(
-                f"Sheet.library_instance must be >= 1, got {self.library_instance}"
-            )
+            raise ValueError(f"Sheet.library_instance must be >= 1, got {self.library_instance}")
         if self.from_library is not None and "@" not in self.from_library:
-            raise ValueError(
-                f"Sheet.from_library {self.from_library!r} must be "
-                f"'<name>@<version>'"
-            )
+            raise ValueError(f"Sheet.from_library {self.from_library!r} must be '<name>@<version>'")
         return self
 
     @model_validator(mode="after")
@@ -297,8 +292,7 @@ class Sheet(BaseModel):
             )
         if self.replication_instance is not None and self.replication_instance < 1:
             raise ValueError(
-                f"Sheet.replication_instance must be >= 1, got "
-                f"{self.replication_instance}"
+                f"Sheet.replication_instance must be >= 1, got {self.replication_instance}"
             )
         if self.replication_group is not None and self.from_library is not None:
             raise ValueError(
@@ -440,9 +434,7 @@ class PinEndpoint(BaseModel):
     @classmethod
     def _pin_pattern(cls, v: str) -> str:
         if not PIN_NUMBER_RE.match(v):
-            raise ValueError(
-                f"PinEndpoint.pin {v!r} must match {PIN_NUMBER_RE.pattern}"
-            )
+            raise ValueError(f"PinEndpoint.pin {v!r} must match {PIN_NUMBER_RE.pattern}")
         return v
 
 
@@ -532,13 +524,9 @@ class ArraySpec(BaseModel):
                     "evenly spaced on a circle); remove them"
                 )
             if len(self.refs) < 3:
-                raise ValueError(
-                    f"ArraySpec pattern='ring' needs >= 3 refs, got {len(self.refs)}"
-                )
+                raise ValueError(f"ArraySpec pattern='ring' needs >= 3 refs, got {len(self.refs)}")
             if self.radius_mm is not None and self.radius_mm <= 0:
-                raise ValueError(
-                    f"ArraySpec radius_mm must be > 0, got {self.radius_mm}"
-                )
+                raise ValueError(f"ArraySpec radius_mm must be > 0, got {self.radius_mm}")
         else:
             if self.rows is None or self.cols is None:
                 raise ValueError("ArraySpec pattern='grid' requires rows and cols")
@@ -548,9 +536,7 @@ class ArraySpec(BaseModel):
                     f"{self.rows * self.cols}) != len(refs) ({len(self.refs)})"
                 )
             if self.radius_mm is not None:
-                raise ValueError(
-                    "ArraySpec radius_mm applies only to pattern='ring'"
-                )
+                raise ValueError("ArraySpec radius_mm applies only to pattern='ring'")
         if len(self.refs) != len(set(self.refs)):
             dupes = sorted({r for r in self.refs if self.refs.count(r) > 1})
             raise ValueError(f"ArraySpec has duplicate refs: {dupes}")
@@ -607,7 +593,7 @@ class Substitution(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     wanted: str  # the part the spec/user named (MPN or description)
-    got: str     # the part the BOM ships instead
+    got: str  # the part the BOM ships instead
     reason: str = ""
 
 
@@ -662,17 +648,14 @@ class BOM(BaseModel):
                 if ref not in ref_set:
                     raise ValueError(f"arrays ref {ref!r} not in BOM parts")
                 if ref in seen_array_refs:
-                    raise ValueError(
-                        f"arrays ref {ref!r} appears in more than one array"
-                    )
+                    raise ValueError(f"arrays ref {ref!r} appears in more than one array")
                 seen_array_refs.add(ref)
         for hint in self.placement_hints:
             if hint.ref not in ref_set:
                 raise ValueError(f"placement_hints ref {hint.ref!r} not in BOM parts")
             if hint.anchor_ref is not None and hint.anchor_ref not in ref_set:
                 raise ValueError(
-                    f"placement_hints[{hint.ref!r}].anchor_ref "
-                    f"{hint.anchor_ref!r} not in BOM parts"
+                    f"placement_hints[{hint.ref!r}].anchor_ref {hint.anchor_ref!r} not in BOM parts"
                 )
         return self
 
@@ -687,9 +670,7 @@ class BOM(BaseModel):
                     )
         for ep in self.no_connect_pins:
             if ep.ref not in ref_set:
-                raise ValueError(
-                    f"no_connect_pins references unknown ref {ep.ref!r}"
-                )
+                raise ValueError(f"no_connect_pins references unknown ref {ep.ref!r}")
         return self
 
     @model_validator(mode="after")
@@ -698,8 +679,7 @@ class BOM(BaseModel):
         unknown = {c.sheet for c in self.connections} - part_sheets
         if unknown:
             raise ValueError(
-                f"NetConnection.sheet values not represented in BOM.parts: "
-                f"{sorted(unknown)}"
+                f"NetConnection.sheet values not represented in BOM.parts: {sorted(unknown)}"
             )
         return self
 
@@ -713,9 +693,19 @@ PLACEMENT_ANCHOR_VALUES: dict[str, list[str]] = {
     "edge": ["left", "right", "top", "bottom"],
     "corner": ["top-left", "top-right", "bottom-left", "bottom-right"],
     "zone": [
-        "center", "top", "bottom", "left", "right",
-        "center-top", "center-bottom", "center-left", "center-right",
-        "top-left", "top-right", "bottom-left", "bottom-right",
+        "center",
+        "top",
+        "bottom",
+        "left",
+        "right",
+        "center-top",
+        "center-bottom",
+        "center-left",
+        "center-right",
+        "top-left",
+        "top-right",
+        "bottom-left",
+        "bottom-right",
     ],
 }
 
@@ -782,13 +772,9 @@ class PlacementSection(BaseModel):
                 try:
                     rot = float(spec["rotation"])
                 except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        f"component_zones[{ref!r}].rotation must be a number"
-                    ) from exc
+                    raise ValueError(f"component_zones[{ref!r}].rotation must be a number") from exc
                 if not 0.0 <= rot <= 360.0:
-                    raise ValueError(
-                        f"component_zones[{ref!r}].rotation must be in 0..360"
-                    )
+                    raise ValueError(f"component_zones[{ref!r}].rotation must be in 0..360")
         return self
 
 
@@ -816,9 +802,7 @@ class SilkPinText(BaseModel):
     @classmethod
     def _pin_pattern(cls, v: str) -> str:
         if not PIN_NUMBER_RE.match(v):
-            raise ValueError(
-                f"SilkPinText.pin {v!r} must match {PIN_NUMBER_RE.pattern}"
-            )
+            raise ValueError(f"SilkPinText.pin {v!r} must match {PIN_NUMBER_RE.pattern}")
         return v
 
 
@@ -863,6 +847,7 @@ class SilkPlan(BaseModel):
 class ReviewFinding(BaseModel):
     """A single electrical-review finding, persisted so the GUI inspector can
     render it richly (severity badge, area, issue, suggestion) even on reopen."""
+
     severity: Literal["blocker", "warning", "note"]
     area: str = ""
     issue: str
@@ -871,6 +856,7 @@ class ReviewFinding(BaseModel):
 
 class PcbViolation(BaseModel):
     """One bounded, coordinate-bearing PCB failure fact from a DRC report."""
+
     type: str
     x_mm: float | None = None
     y_mm: float | None = None
@@ -882,6 +868,7 @@ class PcbViolation(BaseModel):
 
 class PcbError(BaseModel):
     """Durable explanation for one terminal place/route or verify failure."""
+
     stage: Literal["place_route", "verify"]
     code: str
     title: str
@@ -921,6 +908,7 @@ class ArtifactPaths(BaseModel):
     # include "legend:N"; dropped entries are "id: reason" strings.
     silk_placed: list[str] = Field(default_factory=list)
     silk_dropped: list[str] = Field(default_factory=list)
+
 
 # ---------- Conversation state ----------
 

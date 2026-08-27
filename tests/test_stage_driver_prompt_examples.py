@@ -26,13 +26,14 @@ def build_system(stage: str, collection_bounds=None) -> str:
 def test_bom_example_validates_against_the_model_contract():
     slot = json.loads(_WORKED_EXAMPLES["bom"])
     canonical, expanded = _normalize_bom_stage_response(slot)
-    assert expanded == 6
+    assert expanded == 7
     assert [part["ref"] for part in canonical["parts"]] == [
         "U1",
         "C1",
         "C2",
         "R1",
         "R2",
+        "R3",
         "J1",
     ]
 
@@ -43,7 +44,15 @@ def test_wiring_example_normalizes_to_canonical_wiring():
         json.loads(_WORKED_EXAMPLES["wiring"]), {"bom": bom}
     )
     nets = {connection["net_name"] for connection in canonical["connections"]}
-    assert nets == {"VIN", "+3V3", "GND", "NRST", "BOOT0"}
+    assert nets == {"VIN", "+3V3", "GND", "NRST", "BOOT0", "SIG_SOURCE", "SIG_LOAD"}
+    endpoints_by_net = {
+        connection["net_name"]: {
+            (endpoint["ref"], endpoint["pin"]) for endpoint in connection["endpoints"]
+        }
+        for connection in canonical["connections"]
+    }
+    assert endpoints_by_net["SIG_SOURCE"] == {("U1", "6"), ("R3", "1")}
+    assert endpoints_by_net["SIG_LOAD"] == {("R3", "2"), ("J1", "4")}
 
 
 def test_examples_ride_the_system_prompt():

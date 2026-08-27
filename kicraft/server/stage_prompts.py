@@ -147,10 +147,13 @@ def _stage_extra(stage: str) -> str:
             "- PULL-UP / PULL-DOWN: assign the signal-side resistor pin to the signal net "
             "and its rail-side pin to the power or ground net. Rail names belong in `net`, "
             "never `ref`.\n"
-            "- SERIES COMPONENTS MUST SEPARATE NETS: a two-terminal resistor, capacitor, "
-            "inductor, ferrite, diode, or fuse cannot have both pins on the same net. For "
-            "USB or other series termination, use distinct names on its two sides, e.g. "
-            "`USB_DP_MCU` and `USB_DP`; same-net terminals short the part out.\n"
+            "- SERIES COMPONENTS MUST FORM A COMPLETE PATH: a two-terminal resistor, capacitor, "
+            "inductor, ferrite, diode, or fuse uses distinct nets on its two sides, and EACH net "
+            "must also reach another component pin. For example: source pin + R1.1 use `SIG_IN`; "
+            "R1.2 + destination pin use `SIG_OUT`. When inserting a series part into an existing "
+            "signal, move the destination pin to the new local net; leaving both endpoints on the "
+            "old net makes the new net dangle, while putting both resistor pins on one net shorts "
+            "the part out.\n"
             "- BOM SHORTFALL = SELF-REPAIR, NOT A USER QUESTION: if required support parts "
             'are missing, emit one blocking question with `reconcile_target":"bom"` and '
             "a precise instruction. Do not invent refs or mark required pins no-connect.\n"
@@ -273,7 +276,7 @@ _WORKED_EXAMPLES = {
         '{"id": "bypass_cap", "reference_prefix": "C", "quantity": 1, '
         '"value": "100nF", "symbol": "Device:C", '
         '"footprint": "Capacitor_SMD:C_0603_1608Metric", "sheet": "POWER"}, '
-        '{"id": "bias_resistors", "reference_prefix": "R", "quantity": 2, '
+        '{"id": "bias_resistors", "reference_prefix": "R", "quantity": 3, '
         '"value": "10k", "symbol": "Device:R", '
         '"footprint": "Resistor_SMD:R_0603_1608Metric", "sheet": "POWER"}, '
         '{"id": "input_jack", "reference_prefix": "J", "quantity": 1, '
@@ -301,6 +304,10 @@ _WORKED_EXAMPLES = {
         '{"ref": "U1", "pin": "4", "net": "NRST"}, '
         '{"ref": "R2", "pin": "2", "net": "BOOT0"}, '
         '{"ref": "U1", "pin": "5", "net": "BOOT0"}, '
+        '{"ref": "U1", "pin": "6", "net": "SIG_SOURCE"}, '
+        '{"ref": "R3", "pin": "1", "net": "SIG_SOURCE"}, '
+        '{"ref": "R3", "pin": "2", "net": "SIG_LOAD"}, '
+        '{"ref": "J1", "pin": "4", "net": "SIG_LOAD"}, '
         '{"ref": "J1", "pin": "3", "no_connect": true}]}'
     ),
 }

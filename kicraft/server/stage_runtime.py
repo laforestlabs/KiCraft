@@ -182,6 +182,24 @@ def _retry_feedback(
                 + ' is a net name. Use {"ref": "R1", "pin": "2", "net": "+3V3"}; '
                 "never put a rail name in ref."
             )
+        rejection_text = json.dumps([*(out.get("errors") or []), *(out.get("offenders") or [])])
+        if "9.15 no dangling signal nets" in rejection_text:
+            msg += (
+                " NOTE: if the sole pin is one terminal of a two-terminal series part, "
+                "do not rename that terminal or put both part pins on one net. Complete the "
+                "path by moving the destination pin that currently shares the OTHER terminal's "
+                "net onto the dangling terminal's net. Pattern: source + Rn.1 = SIG_IN; "
+                "Rn.2 + destination = SIG_OUT. Both SIG_IN and SIG_OUT must have two pins."
+            )
+        if "9.17 two-terminal self-short" in rejection_text:
+            msg += (
+                " NOTE: fix a self-shorted series part as one complete three-item change: "
+                "(1) keep one terminal on the source net, (2) put the other terminal on a new "
+                "local net, and (3) MOVE the intended destination IC/connector pin from the "
+                "source net onto that new local net. Do not merely rename one part terminal; "
+                "that creates a 9.15 dangling net. Required pattern: source + Rn.1 = SIG_IN; "
+                "Rn.2 + destination = SIG_OUT."
+            )
     return msg
 
 
@@ -319,6 +337,14 @@ _SERIALIZATION_RETRY_MSG = (
     "complete slot as ONE compact JSON object now: no markdown fences, no prose, "
     "no explanations. Omit null fields and keep every item on a single line so "
     "the whole slot fits the output budget."
+)
+
+_SCHEMA_RETRY_MSG = (
+    "Your previous reply was valid JSON but failed KiCraft's local slot validation, "
+    "so nothing was committed. Validation error: {schema_error}. "
+    "{bounds_sentence}Do NOT call any tools. Re-emit the complete corrected slot as "
+    "ONE compact JSON object now: no markdown fences, no prose, no explanations. "
+    "Preserve valid entries, correct the reported field, and omit null fields."
 )
 
 _COLLECTION_LIMIT_RETRY_MSG = (
@@ -1018,11 +1044,12 @@ def drive_stage(
             sctx = {**ctx, "serialization": True}
             smessages = list(call_messages)
             bounds_sentence = _collection_bounds_sentence(policy.collection_bounds)
-            retry_template = (
-                _COLLECTION_LIMIT_RETRY_MSG
-                if kind == "collection_limit"
-                else _SERIALIZATION_RETRY_MSG
-            )
+            if kind == "collection_limit":
+                retry_template = _COLLECTION_LIMIT_RETRY_MSG
+            elif kind == "invalid_schema":
+                retry_template = _SCHEMA_RETRY_MSG
+            else:
+                retry_template = _SERIALIZATION_RETRY_MSG
             limit_info = collection_limit or {}
             retry_message = retry_template.format(
                 prior_chars=len(raw or ""),
@@ -1032,6 +1059,7 @@ def drive_stage(
                 configured_total=limit_info.get("configured_total", "unknown"),
                 limit_scope=limit_info.get("limit_scope", "total"),
                 emitted_content_chars=limit_info.get("emitted_content_chars", len(raw or "")),
+                schema_error=(schema_error_detail or "unspecified schema violation")[:1200],
             )
             smessages.append({"role": "user", "content": retry_message})
             resolution_ledger = getattr(executor, "resolution_ledger", {}) if executor else {}
