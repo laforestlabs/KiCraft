@@ -248,6 +248,7 @@ class SolvedLeafSubcircuit:
             solved_components = copy.deepcopy(routed_state.components)
             routed_traces = copy.deepcopy(routed_state.traces)
             routed_vias = copy.deepcopy(routed_state.vias)
+            antenna_edge_intents = copy.deepcopy(routed_state.antenna_edge_intents)
             # The standalone leaf board is centered on its A4 page for viewing
             # (leaf_routing._center_on_leaf_page). Re-base its geometry back to its own
             # outline origin (top-left -> (0,0)) before serializing solved_layout.json,
@@ -297,6 +298,9 @@ class SolvedLeafSubcircuit:
                 self.extraction.local_state.board_width,
                 self.extraction.local_state.board_height,
             )
+            antenna_edge_intents = copy.deepcopy(
+                self.extraction.local_state.antenna_edge_intents
+            )
 
         anchors = infer_interface_anchors(
             self.extraction.interface_ports,
@@ -325,6 +329,7 @@ class SolvedLeafSubcircuit:
             interface_anchors=anchors,
             score=round_result.score,
             artifact_paths={},
+            antenna_edge_intents=antenna_edge_intents,
             frozen=True,
         )
 
@@ -529,6 +534,9 @@ def _placement_diagnostics(
         parts_from_components(components), plane_nets=frozenset(plane_nets)
     )
     diag: dict[str, Any] = {"grid": dict(getattr(solver, "last_grid_stats", {}) or {})}
+    antenna_conflicts = list(getattr(solver, "antenna_edge_conflicts", []) or [])
+    if antenna_conflicts:
+        diag["antenna_edge_conflicts"] = antenna_conflicts
     if rows:
         dists = sorted(d for _ref, d in rows)
         mid = len(dists) // 2
@@ -616,6 +624,46 @@ def _solve_one_round(
     )
 
     diagnostics = _placement_diagnostics(solver, solved_components, cfg)
+    antenna_conflicts = diagnostics.get("antenna_edge_conflicts") or []
+    if antenna_conflicts:
+        reason = str(antenna_conflicts[0])
+        round_timing["route_local_subcircuit_total_s"] = 0.0
+        round_timing["solve_one_round_total_s"] = round(
+            max(0.0, time.monotonic() - round_total_start), 3
+        )
+        return SolveRoundResult(
+            round_index=round_index,
+            seed=seed,
+            score=float("-inf"),
+            placement=placement,
+            components=solved_components,
+            routing={
+                "enabled": bool(route),
+                "skipped": True,
+                "reason": reason,
+                "router": "kicad-routing-tools",
+                "traces": 0,
+                "vias": 0,
+                "total_length_mm": 0.0,
+                "round_board_illegal_pre_stamp": "",
+                "round_board_pre_route": "",
+                "round_board_routed": "",
+                "routed_internal_nets": [],
+                "failed_internal_nets": list(sorted(extraction.internal_net_names)),
+                "_trace_segments": [],
+                "_via_objects": [],
+                "validation": {
+                    "accepted": False,
+                    "rejected": True,
+                    "rejection_stage": "antenna_edge_placement",
+                    "rejection_reasons": antenna_conflicts,
+                },
+                "failed": True,
+            },
+            routed=False,
+            timing_breakdown=round_timing,
+            placement_diagnostics=diagnostics,
+        )
 
     # Place-quality gate: routing a placement whose decaps sit tens of mm from
     # the pins they bridge burns 30-100 s to learn what the geometry already

@@ -15,7 +15,10 @@ from pathlib import Path
 import pcbnew
 
 from kicraft.autoplacer.brain.types import BoardState, Component, Layer, Net, Pad, Point, TraceSegment, Via
-from kicraft.autoplacer.hardware.keepout_extract import extract_keepout_rects
+from kicraft.autoplacer.hardware.keepout_extract import (
+    extract_antenna_edge_intents,
+    extract_keepout_rects,
+)
 
 # Generic power net names used as fallback when config doesn't specify power_nets.
 # Project-specific power nets should be listed in the project's autoplacer config.
@@ -599,6 +602,9 @@ class KiCadAdapter:
                     )
                 )
 
+        antenna_extraction = extract_antenna_edge_intents(board, self.cfg, components)
+        for diagnostic in antenna_extraction.diagnostics:
+            print(f"  {diagnostic}")
         return BoardState(
             components=components,
             nets=nets,
@@ -606,6 +612,7 @@ class KiCadAdapter:
             vias=vias,
             board_outline=(tl, br),
             keepout_rects=extract_keepout_rects(board, self.cfg),
+            antenna_edge_intents=list(antenna_extraction.intents),
         )
 
     def apply_placement(

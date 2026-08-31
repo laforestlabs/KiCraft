@@ -49,10 +49,12 @@ from .subcircuit_instances import (
     transform_subcircuit_instance,
 )
 from .types import (
+    AntennaEdgeIntent,
     BoardState,
     Component,
     HierarchyLevelState,
     InterfaceAnchor,
+    Layer,
     Net,
     Point,
     SilkscreenElement,
@@ -232,6 +234,8 @@ class AttachmentConstraint:
     # (the barrel tip), which the outline's anchor-slack sanity clamp must trust
     # rather than reject as a transform bug. See ``connector_pad_edge_anchors``.
     barrel_overhang: bool = False
+    anchor_kind: Literal["body", "antenna"] = "body"
+    antenna_intent: AntennaEdgeIntent | None = None
 
 
 @dataclass(slots=True)
@@ -339,6 +343,16 @@ def derive_attachment_constraints(
                 value,
             )
             continue
+        antenna_intent: AntennaEdgeIntent | None = None
+        if source == "child_artifact" and child_idx is not None:
+            antenna_intent = next(
+                (
+                    intent
+                    for intent in loaded_artifacts[child_idx].layout.antenna_edge_intents
+                    if intent.owner_ref == ref
+                ),
+                None,
+            )
 
         is_hole = ref.startswith("H") or ("hole" in getattr(comp, "kind", "").lower())
         is_conn = ref.startswith("J") or ("connector" in getattr(comp, "kind", "").lower())
@@ -404,11 +418,36 @@ def derive_attachment_constraints(
                 child_index=child_idx,
                 strict=target in ("edge", "corner"),
                 barrel_overhang=barrel_overhang,
+                anchor_kind="antenna" if antenna_intent is not None else "body",
+                antenna_intent=antenna_intent,
             )
         )
         constraint = constraints[-1]
         if constraint.source == "child_artifact" and constraint.child_index is not None:
             child_constraints.setdefault(int(constraint.child_index), []).append(constraint)
+
+    explicitly_constrained_refs = set(component_zones)
+    for child_index, artifact in enumerate(loaded_artifacts):
+        for intent in artifact.layout.antenna_edge_intents:
+            if (
+                intent.owner_ref in explicitly_constrained_refs
+                or intent.owner_ref not in artifact.layout.components
+            ):
+                continue
+            constraint = AttachmentConstraint(
+                ref=intent.owner_ref,
+                target="edge",
+                value=intent.target_edge,
+                inward_keep_in_mm=max(0.0, float(intent.inset_mm)),
+                outward_overhang_mm=max(0.0, -float(intent.inset_mm)),
+                source="child_artifact",
+                child_index=child_index,
+                strict=True,
+                anchor_kind="antenna",
+                antenna_intent=intent,
+            )
+            constraints.append(constraint)
+            child_constraints.setdefault(child_index, []).append(constraint)
 
     child_specs: dict[int, PlacementSpec] = {}
     for child_index, grouped_constraints in child_constraints.items():
@@ -427,6 +466,7 @@ def derive_attachment_constraints(
         )
         expand_rotation_candidates(spec)
         _filter_rotations_for_connector_opening(spec, logger)
+        _filter_rotations_for_antenna(spec, logger)
         child_specs[child_index] = spec
 
     return DerivedAttachmentConstraints(
@@ -628,6 +668,78 @@ def _filter_rotations_for_connector_opening(
             len(spec.rotation_candidates),
         )
 
+def _filter_rotations_for_antenna(
+    spec: PlacementSpec,
+    logger: logging.Logger,
+) -> None:
+    """Keep only leaf rotations preserving antenna direction and extremity."""
+    constraints = [
+        constraint
+        for constraint in spec.constraints
+        if constraint.target == "edge"
+        and constraint.anchor_kind == "antenna"
+        and constraint.antenna_intent is not None
+    ]
+    if not constraints:
+        return
+    vectors = {
+        "left": Point(-1.0, 0.0),
+        "right": Point(1.0, 0.0),
+        "top": Point(0.0, -1.0),
+        "bottom": Point(0.0, 1.0),
+    }
+    kept: list[float] = []
+    for rotation in spec.rotation_candidates:
+        model = spec.models.get(rotation)
+        if model is None:
+            continue
+        valid = True
+        for constraint in constraints:
+            component = model.transformed.transformed_components.get(constraint.ref)
+            if component is None:
+                valid = False
+                break
+            intent = constraint.antenna_intent
+            direction = vectors[intent.local_direction]
+            anchor_point = intent.local_anchor_midpoint
+            if component.layer == Layer.BACK:
+                direction = Point(-direction.x, direction.y)
+                anchor_point = Point(-anchor_point.x, anchor_point.y)
+            actual = geometry.rotate_vector(direction, component.rotation)
+            expected = vectors[constraint.value]
+            if abs(actual.x - expected.x) > 1e-6 or abs(actual.y - expected.y) > 1e-6:
+                valid = False
+                break
+            offset = geometry.rotate_vector(anchor_point, component.rotation)
+            anchor = Point(component.pos.x + offset.x, component.pos.y + offset.y)
+            for other_ref, other in model.transformed.transformed_components.items():
+                if other_ref == constraint.ref:
+                    continue
+                other_min, other_max = other.physical_bbox()
+                if (
+                    (constraint.value == "left" and other_min.x < anchor.x - 0.1)
+                    or (constraint.value == "right" and other_max.x > anchor.x + 0.1)
+                    or (constraint.value == "top" and other_min.y < anchor.y - 0.1)
+                    or (constraint.value == "bottom" and other_max.y > anchor.y + 0.1)
+                ):
+                    valid = False
+                    break
+            if not valid:
+                break
+        if valid:
+            kept.append(rotation)
+    if not kept:
+        refs = ",".join(sorted(constraint.ref for constraint in constraints))
+        raise ValueError(f"antenna_edge_orientation_conflict:{refs}")
+    spec.rotation_candidates = kept
+    spec.all_rotation_candidates = kept
+    logger.info(
+        "Leaf %s: antenna edge contract kept rotations %s",
+        spec.instance_path,
+        kept,
+    )
+
+
 
 def _constraint_sides(constraint: AttachmentConstraint) -> list[str]:
     if constraint.target == "edge":
@@ -689,6 +801,12 @@ def _compute_local_anchor_offset(
     rotation_deg: float = 0.0,
 ) -> Point:
     component = transformed.transformed_components[constraint.ref]
+    if constraint.anchor_kind == "antenna" and constraint.antenna_intent is not None:
+        point = constraint.antenna_intent.local_anchor_midpoint
+        if component.layer == Layer.BACK:
+            point = Point(-point.x, point.y)
+        offset = geometry.rotate_vector(point, component.rotation)
+        return Point(component.pos.x + offset.x, component.pos.y + offset.y)
     bbox_min, bbox_max = _constraint_local_rect(
         transformed,
         constraint.ref,
@@ -912,6 +1030,11 @@ def build_parent_composition(
         vias=merged_vias,
         silkscreen=merged_silkscreen,
         board_outline=outline,
+        antenna_edge_intents=[
+            copy.deepcopy(intent)
+            for child in composed_children
+            for intent in child.transformed.layout.antenna_edge_intents
+        ],
     )
 
     score = _score_parent_composition(

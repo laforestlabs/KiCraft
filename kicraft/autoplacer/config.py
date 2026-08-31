@@ -242,6 +242,21 @@ DEFAULT_CONFIG = {
             "y_max": 12.0,
         },
     },
+    # Generic antenna edge-defaulting. Named footprint-local antenna rule areas
+    # are authoritative; family rectangles above cover footprints whose source
+    # geometry is absent. Explicit component_zones / antenna_components win.
+    "antenna_edge_pin_enabled": True,
+    "antenna_default_edge": "top",
+    "antenna_edge_inset_mm": 0.0,
+    "antenna_edge_tolerance_mm": 0.10,
+    "antenna_direction_min_offset_mm": 0.5,
+    "antenna_direction_dominance_ratio": 1.25,
+    "antenna_rule_area_name_patterns": [
+        "*antenna*keepout*",
+        "*antenna_keepout*",
+        "*rf*keepout*",
+    ],
+    "antenna_components": {},
     # Orderedness — how strongly passives are snapped into neat rows/columns.
     # 0.0 = organic/force-directed layout, 1.0 = full grid alignment.
     # Intermediate values blend proportionally.  Searchable by autoexperiment.

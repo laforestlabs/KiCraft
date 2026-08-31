@@ -3985,10 +3985,11 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     return 0
 
 
-def _persist_artifacts(state, state_path: Path, artifacts) -> None:
-    """Record `artifacts` on the state and persist state.json, so downstream
-    tooling sees the produced paths + status even when checks failed."""
+def _persist_artifacts(state, state_path: Path | None, artifacts) -> None:
+    """Record artifacts in memory and persist them when state.json exists."""
     state.artifacts = artifacts
+    if state_path is None:
+        return
     state_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
 
@@ -4395,6 +4396,54 @@ def _connector_misoriented(pcb: Path) -> tuple[list[str], list[str]]:
         return blocking, warnings
     except Exception:
         return [], []
+
+def _antenna_edge_contract_violations(pcb: Path) -> list[str]:
+    """Verify persisted parent antenna intent against the promoted board."""
+    artifact_root = pcb.parent / ".experiments" / "subcircuits"
+    run_id = artifact_paths.board_run_id(pcb) or os.environ.get("KICRAFT_RUN_ID")
+    if not run_id:
+        return []
+    candidates: list[tuple[int, list[dict]]] = []
+    for metadata_path in artifact_root.glob("*/metadata.json"):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata.get("schema_version") != "parent-compose-v1":
+                continue
+            if run_id and metadata.get("run_id") != run_id:
+                continue
+            solved_path = metadata_path.with_name("solved_layout.json")
+            solved = json.loads(solved_path.read_text(encoding="utf-8"))
+            intents = solved.get("antenna_edge_intents") or []
+            if intents:
+                candidates.append((len(intents), intents))
+        except (OSError, ValueError, TypeError):
+            continue
+    if not candidates:
+        return []
+    intents = max(candidates, key=lambda item: item[0])[1]
+    try:
+        from kicraft.autoplacer.brain.antenna_edge import verify_antenna_edges
+        from kicraft.autoplacer.config import DEFAULT_CONFIG
+
+        tolerance = float(DEFAULT_CONFIG["antenna_edge_tolerance_mm"])
+        pad_inset = float(DEFAULT_CONFIG.get("pad_inset_margin_mm", 0.3))
+        config_files = sorted(pcb.parent.glob("*_autoplacer.json"))
+        if config_files:
+            project_cfg = json.loads(config_files[0].read_text(encoding="utf-8"))
+            tolerance = float(
+                project_cfg.get("antenna_edge_tolerance_mm", tolerance)
+            )
+            pad_inset = float(project_cfg.get("pad_inset_margin_mm", pad_inset))
+        _, violations = verify_antenna_edges(
+            str(pcb),
+            intents,
+            tolerance_mm=tolerance,
+            pad_inset_margin_mm=pad_inset,
+        )
+        return violations
+    except Exception as exc:
+        return [f"antenna_constraint_invalid:{type(exc).__name__}:{exc}"]
+
 
 
 def _check_form_factor_conformance(state, pcb: Path) -> dict | None:
@@ -4880,7 +4929,7 @@ def _build_pcb_errors(summary: dict | None, *, stage: str) -> list[PcbError]:
 
 def _persist_pcb_diagnostics(
     state,
-    state_path: Path,
+    state_path: Path | None,
     artifacts,
     stem: str,
     project_dir: Path,
@@ -5837,9 +5886,20 @@ def _promote_verify_fab(
         gate.setdefault("warnings", []).extend(mouth_warnings)
         for w in mouth_warnings:
             print(f"[build]     connector-facing warning: {w}")
+    # Persisted antenna support-line and orientation contract.
+    antenna_violations = _antenna_edge_contract_violations(pcb)
+    if antenna_violations:
+        gate["fab_acceptable"] = False
+        for reason in antenna_violations:
+            if reason not in gate.setdefault("reasons", []):
+                gate["reasons"].append(reason)
+        print(
+            f"[build]     antenna-edge: {len(antenna_violations)} violation(s) "
+            f"({'; '.join(antenna_violations)})"
+        )
     # Area-waste visibility (PCB area-compaction plan, Phase 0): utilization /
-    # aspect metrics on the promoted board ride the verify line and the gate
-    # record. Diagnostic only -- never a promote/fab gate input.
+    # aspect metrics on the promoted board ride the verify line and gate record.
+    # Diagnostic only -- never a promote/fab gate input.
     board_metrics: dict[str, float] = {}
     try:
         from kicraft.cli.inspect_parent import board_utilization

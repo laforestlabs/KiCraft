@@ -603,10 +603,11 @@ def _resolve_constraint_anchor_positions(
 ) -> dict[str, Point]:
     """Compute the world-frame anchor position for every constrained ref.
 
-    For child-artifact constraints, recompute local_anchor_offset at the
-    chosen rotation (the rotation the solver picked, not the spec's first
-    candidate) and add it to the placement origin. For parent-local
-    constraints, use the component's pad centroid or body center.
+    Antenna anchors are derived from footprint-local geometry on components
+    that ``transform_loaded_artifact`` has already moved to the chosen origin,
+    so that result is already world-frame.  The legacy body-anchor path
+    intentionally retains its established origin-relative convention.
+    Parent-local constraints use the component's pad centroid or body center.
     """
     anchors: dict[str, Point] = {}
     for spec in derived.child_specs.values():
@@ -623,7 +624,7 @@ def _resolve_constraint_anchor_positions(
                 from kicraft.autoplacer.brain.subcircuit_composer import (
                     _compute_local_anchor_offset,
                 )
-                local_offset = _compute_local_anchor_offset(
+                world_anchor = _compute_local_anchor_offset(
                     transformed,
                     constraint,
                     spec.constraints,
@@ -632,10 +633,13 @@ def _resolve_constraint_anchor_positions(
                 )
             except Exception:
                 continue
-            anchors[constraint.ref] = Point(
-                placement.origin.x + local_offset.x,
-                placement.origin.y + local_offset.y,
-            )
+            if constraint.anchor_kind == "antenna":
+                anchors[constraint.ref] = world_anchor
+            else:
+                anchors[constraint.ref] = Point(
+                    placement.origin.x + world_anchor.x,
+                    placement.origin.y + world_anchor.y,
+                )
 
     from kicraft.autoplacer.brain.subcircuit_composer import pad_centroid_anchor
 

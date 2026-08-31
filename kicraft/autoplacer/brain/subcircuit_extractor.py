@@ -251,6 +251,11 @@ def extract_leaf_board_state(
             Point(0.0, 0.0),
             Point(envelope.width_mm, envelope.height_mm),
         ),
+        antenna_edge_intents=[
+            copy.deepcopy(intent)
+            for intent in full_state.antenna_edge_intents
+            if intent.owner_ref in component_set
+        ],
     )
 
     notes = [

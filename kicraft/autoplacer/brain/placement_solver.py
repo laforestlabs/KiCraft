@@ -97,12 +97,65 @@ from .placement_utils import (
     _world_artifact_origin,
 )
 from .types import (
+    AntennaEdgeIntent,
     BoardState,
     Component,
     Layer,
     Point,
     edge_outward_angle,
 )
+
+
+_DIRECTION_VECTORS = {
+    "left": Point(-1.0, 0.0),
+    "right": Point(1.0, 0.0),
+    "top": Point(0.0, -1.0),
+    "bottom": Point(0.0, 1.0),
+}
+
+
+def antenna_board_vector(
+    local_direction: str, rotation_deg: float, layer: Layer = Layer.FRONT
+) -> Point:
+    """Transform a footprint-local antenna direction into board space."""
+    vector = _DIRECTION_VECTORS[local_direction]
+    if layer == Layer.BACK:
+        vector = Point(-vector.x, vector.y)
+    return rotate_vector(vector, rotation_deg)
+
+
+def antenna_rotation_for_edge(
+    local_direction: str, target_edge: str, layer: Layer = Layer.FRONT
+) -> float:
+    """Cardinal KiCad rotation that points an antenna out of ``target_edge``."""
+    want_angle = edge_outward_angle(Layer.FRONT, target_edge)
+    want = Point(
+        round(math.cos(math.radians(want_angle)), 6),
+        round(math.sin(math.radians(want_angle)), 6),
+    )
+    for rotation in (0.0, 90.0, 180.0, 270.0):
+        got = antenna_board_vector(local_direction, rotation, layer)
+        if abs(got.x - want.x) <= 1e-6 and abs(got.y - want.y) <= 1e-6:
+            return rotation
+    raise ValueError(f"Unsupported antenna direction/edge: {local_direction}/{target_edge}")
+
+
+def antenna_anchor_offset(intent: AntennaEdgeIntent, comp: Component) -> Point:
+    """Board-space vector from footprint origin to antenna support midpoint."""
+    point = intent.local_anchor_midpoint
+    if comp.layer == Layer.BACK:
+        point = Point(-point.x, point.y)
+    return rotate_vector(point, comp.rotation)
+
+
+def antenna_faces_edge(intent: AntennaEdgeIntent, comp: Component) -> bool:
+    got = antenna_board_vector(intent.local_direction, comp.rotation, comp.layer)
+    want_angle = edge_outward_angle(Layer.FRONT, intent.target_edge)
+    want = Point(
+        round(math.cos(math.radians(want_angle)), 6),
+        round(math.sin(math.radians(want_angle)), 6),
+    )
+    return abs(got.x - want.x) <= 1e-6 and abs(got.y - want.y) <= 1e-6
 
 
 class PlacementSolver:
@@ -115,7 +168,28 @@ class PlacementSolver:
 
     def __init__(self, state: BoardState, config: dict = None, seed: int = 0):
         self.state = state
-        self.cfg = config or {}
+        # Effective config is solver-local: inferred antenna defaults never
+        # mutate the caller's project config.
+        self.cfg = copy.deepcopy(config or {})
+        self._antenna_intents_by_ref = {
+            intent.owner_ref: intent for intent in state.antenna_edge_intents
+        }
+        effective_zones = copy.deepcopy(self.cfg.get("component_zones") or {})
+        antenna_components = self.cfg.get("antenna_components") or {}
+        for ref, intent in self._antenna_intents_by_ref.items():
+            zone = effective_zones.setdefault(ref, {})
+            if not isinstance(zone, dict):
+                continue
+            if not any(key in zone for key in ("edge", "corner", "zone")):
+                zone["edge"] = intent.target_edge
+            explicit = antenna_components.get(ref)
+            if (
+                isinstance(explicit, dict)
+                and "rotation" in explicit
+                and "rotation" not in zone
+            ):
+                zone["rotation"] = explicit["rotation"]
+        self.cfg["component_zones"] = effective_zones
         self.seed = seed
         self.rng = random.Random(seed)
         # Discrete anchor-relative grid active this solve (SA-as-assignment);
@@ -978,6 +1052,8 @@ class PlacementSolver:
         by _restore_pinned_positions().
         """
         self._pinned_targets: dict[str, Point] = {}
+        self._pinned_rotations: dict[str, float] = {}
+        self.antenna_edge_conflicts: list[str] = []
         tl, br = self.state.board_outline
         margin = self.edge_margin
         zones = self.cfg.get("component_zones", {})
@@ -1147,18 +1223,31 @@ class PlacementSolver:
                         comp.body_center.y + shift_y,
                     )
 
+        def _antenna_pad_conflict(comp: Component) -> bool:
+            if comp.ref not in self._antenna_intents_by_ref:
+                return False
+            for pad in comp.pads:
+                pad_tl, pad_br = pad.bbox()
+                if (
+                    pad_tl.x < tl.x + pad_inset
+                    or pad_br.x > br.x - pad_inset
+                    or pad_tl.y < tl.y + pad_inset
+                    or pad_br.y > br.y - pad_inset
+                ):
+                    return True
+            return False
+
         def _connector_edge_x(comp: Component, edge: str) -> float:
-            """Compute X position so connector body edge is flush with the
-            board edge (plus connector_inset_mm offset).
-
-            For left edge: body left edge at tl.x + connector_inset
-            For right edge: body right edge at br.x - connector_inset
-
-            For ``kind == "subcircuit"`` blocks with ``anchor_offset_mm``
-            in their zone config, the named anchor -- not the body edge
-            -- is what we flush against the board edge. The body half
-            offset is replaced by the inverse-rotated anchor offset.
-            """
+            """Place a connector body or antenna support line on an X edge."""
+            intent = self._antenna_intents_by_ref.get(comp.ref)
+            if intent is not None:
+                offset = antenna_anchor_offset(intent, comp)
+                target = (
+                    tl.x + intent.inset_mm
+                    if edge == "left"
+                    else br.x - intent.inset_mm
+                )
+                return target - offset.x
             if comp.kind == "subcircuit":
                 anchor_off = zones.get(comp.ref, {}).get("anchor_offset_mm")
                 if anchor_off is not None:
@@ -1190,14 +1279,16 @@ class PlacementSolver:
                 return br.x - connector_inset - hw - off_x
 
         def _connector_edge_y(comp: Component, edge: str) -> float:
-            """Compute Y position so connector body edge is flush with the
-            board edge (plus connector_inset_mm offset).
-
-            For top edge: body top edge at tl.y + connector_inset
-            For bottom edge: body bottom edge at br.y - connector_inset
-
-            See ``_connector_edge_x`` for the subcircuit-block override.
-            """
+            """Place a connector body or antenna support line on a Y edge."""
+            intent = self._antenna_intents_by_ref.get(comp.ref)
+            if intent is not None:
+                offset = antenna_anchor_offset(intent, comp)
+                target = (
+                    tl.y + intent.inset_mm
+                    if edge == "top"
+                    else br.y - intent.inset_mm
+                )
+                return target - offset.y
             if comp.kind == "subcircuit":
                 anchor_off = zones.get(comp.ref, {}).get("anchor_offset_mm")
                 if anchor_off is not None:
@@ -1232,8 +1323,20 @@ class PlacementSolver:
             wrong half-extent.
             """
             zone_cfg = zones.get(comp.ref, {})
+            intent = self._antenna_intents_by_ref.get(comp.ref)
             if "rotation" in zone_cfg:
-                new_rot = zone_cfg["rotation"]
+                new_rot = float(zone_cfg["rotation"]) % 360.0
+                if intent is not None:
+                    probe = copy.copy(comp)
+                    probe.rotation = new_rot
+                    if not antenna_faces_edge(intent, probe):
+                        self.antenna_edge_conflicts.append(
+                            f"antenna_edge_orientation_conflict:{comp.ref}"
+                        )
+            elif intent is not None:
+                new_rot = antenna_rotation_for_edge(
+                    intent.local_direction, edge, comp.layer
+                )
             else:
                 new_rot = self._best_rotation_for_edge(comp, edge, self.cfg)
             old_rot = comp.rotation
@@ -1251,6 +1354,10 @@ class PlacementSolver:
             comp.pos = pos
             _update_pad_positions(comp, old_pos, comp.rotation)
             _shift_pads_inside(comp, assigned_edge=edge)
+            if _antenna_pad_conflict(comp):
+                self.antenna_edge_conflicts.append(
+                    f"antenna_edge_pad_conflict:{comp.ref}"
+                )
 
         # --- Collect edge-pinned connectors by edge for grouped placement ---
         edge_groups: dict[str, list[str]] = {}  # edge -> [ref, ...]
@@ -1262,6 +1369,7 @@ class PlacementSolver:
                 # re-orient it -- but record its target so the overlap/keepout
                 # passes restore it if a neighbour nudges it.
                 self._pinned_targets[ref] = Point(comp.pos.x, comp.pos.y)
+                self._pinned_rotations[ref] = comp.rotation
                 continue
             zone_cfg = zones.get(ref, {})
             if "edge" in zone_cfg:
@@ -1297,6 +1405,29 @@ class PlacementSolver:
             if keep:
                 self._edge_pinned_groups[edge] = keep
 
+        def _parallel_span(comp: Component, edge: str) -> tuple[float, float]:
+            """Occupied parallel-axis span and its center offset from ``pos``."""
+            intent = self._antenna_intents_by_ref.get(comp.ref)
+            if intent is None or not intent.local_polygon:
+                size = comp.height_mm if edge in ("left", "right") else comp.width_mm
+                return size, 0.0
+            body_tl, body_br = comp.bbox()
+            if edge in ("left", "right"):
+                lows = [body_tl.y - comp.pos.y]
+                highs = [body_br.y - comp.pos.y]
+            else:
+                lows = [body_tl.x - comp.pos.x]
+                highs = [body_br.x - comp.pos.x]
+            for point in intent.local_polygon:
+                if comp.layer == Layer.BACK:
+                    point = Point(-point.x, point.y)
+                offset = rotate_vector(point, comp.rotation)
+                value = offset.y if edge in ("left", "right") else offset.x
+                lows.append(value)
+                highs.append(value)
+            low, high = min(lows), max(highs)
+            return high - low, (low + high) / 2.0
+
         # Reserve corner space along edge before placing edge groups so
         # edge connectors don't land where a corner-pinned mounting hole
         # will go. Without this, on LLUPS J1 (USB-C, edge=left) could
@@ -1309,6 +1440,7 @@ class PlacementSolver:
         #   - geometry validation flagged USB pads as outside the
         #     constraint-derived outline.
         # Reserving the corner footprint up front side-steps both.
+
         mh_cfg = self.cfg.get("mounting_holes") or {}
         corner_keep = float((mh_cfg.get("keepout") or {}).get("size_mm", 4.0))
         zones_cfg_all = self.cfg.get("component_zones", {})
@@ -1365,12 +1497,12 @@ class PlacementSolver:
                 _orient_for_edge(group_comps[i], edge)
 
             if edge in ("left", "right"):
-                # Column along Y axis — body edge flush with board edge
-                sizes = [group_comps[i].height_mm for i in order]
+                # Column along Y axis — include antenna keepout parallel span.
+                spans = [_parallel_span(group_comps[i], edge) for i in order]
+                sizes = [span[0] for span in spans]
                 total_h = sum(sizes) + connector_gap * (len(sizes) - 1)
                 # Grow the board height so EVERY same-edge connector fits flush
                 # in ONE column. Without this, a column taller than the leaf
-                # (e.g. 4 screw terminals on a short board, run_19) overflows:
                 # _shift_pads_inside pulls the overrun back inside, the overlap
                 # resolver then shoves it inboard into a 2nd column, and that
                 # connector reads as stranded. Grow-only, and only when the
@@ -1403,9 +1535,11 @@ class PlacementSolver:
                 for k, idx in enumerate(order):
                     comp = group_comps[idx]
                     fixed_x = _connector_edge_x(comp, edge)
-                    pos = Point(fixed_x, cursor_y)
+                    pos = Point(fixed_x, cursor_y - spans[k][1])
                     _place_at(comp, edge, pos)
                     self._pinned_targets[refs[idx]] = Point(comp.pos.x, comp.pos.y)
+                    if comp.ref in self._antenna_intents_by_ref:
+                        self._pinned_rotations[comp.ref] = comp.rotation
                     comp.locked = not unlock_all
                     # The cursor is the part CENTER, so the pitch is
                     # half-this + gap + half-next (keeps the packed span
@@ -1416,11 +1550,11 @@ class PlacementSolver:
                             sizes[k] / 2 + connector_gap + sizes[k + 1] / 2
                         )
             else:
-                # Row along X axis — body edge flush with board edge
-                sizes = [group_comps[i].width_mm for i in order]
+                # Row along X axis — include antenna keepout parallel span.
+                spans = [_parallel_span(group_comps[i], edge) for i in order]
+                sizes = [span[0] for span in spans]
                 total_w = sum(sizes) + connector_gap * (len(sizes) - 1)
                 # Grow the board width so the same-edge row fits in ONE line
-                # (see the column branch above for why overflow strands).
                 needed_w = total_w + 2 * margin + _corner_reserve
                 if needed_w > (br.x - tl.x):
                     br = Point(tl.x + needed_w, br.y)
@@ -1446,11 +1580,12 @@ class PlacementSolver:
                 for k, idx in enumerate(order):
                     comp = group_comps[idx]
                     fixed_y = _connector_edge_y(comp, edge)
-                    pos = Point(cursor_x, fixed_y)
+                    pos = Point(cursor_x - spans[k][1], fixed_y)
                     _place_at(comp, edge, pos)
                     self._pinned_targets[refs[idx]] = Point(comp.pos.x, comp.pos.y)
+                    if comp.ref in self._antenna_intents_by_ref:
+                        self._pinned_rotations[comp.ref] = comp.rotation
                     comp.locked = not unlock_all
-                    # Half-extent pitch; see the column branch above.
                     if k + 1 < len(order):
                         cursor_x += (
                             sizes[k] / 2 + connector_gap + sizes[k + 1] / 2
@@ -1583,6 +1718,11 @@ class PlacementSolver:
             comp = comps.get(ref)
             if comp is None:
                 continue
+            target_rotation = self._pinned_rotations.get(ref)
+            if target_rotation is not None:
+                delta = (target_rotation - comp.rotation) % 360.0
+                if abs(delta) > 0.001:
+                    rotate_component_in_place(comp, delta)
             dx = target.x - comp.pos.x
             dy = target.y - comp.pos.y
             if abs(dx) < 0.01 and abs(dy) < 0.01:

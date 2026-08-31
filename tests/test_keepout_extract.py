@@ -10,7 +10,10 @@ pcbnew = pytest.importorskip("pcbnew")
 from kicraft.autoplacer.config import DEFAULT_CONFIG  # noqa: E402
 from kicraft.autoplacer.hardware.keepout_extract import (  # noqa: E402
     _transform_local_rect,
+    collect_track_via_rule_areas,
     extract_keepout_rects,
+    track_intersects_rule_area,
+    via_intersects_rule_area,
 )
 
 _LIB = os.path.join(
@@ -117,3 +120,54 @@ def test_inject_transform_matches_pcbnew_placement(tmp_path, rot):
     assert got_tl.y == pytest.approx(truth.tl.y, abs=0.05)
     assert got_br.x == pytest.approx(truth.br.x, abs=0.05)
     assert got_br.y == pytest.approx(truth.br.y, abs=0.05)
+
+def _add_rule_area(board, points, *, tracks=False, vias=False):
+    zone = pcbnew.ZONE(board)
+    zone.SetIsRuleArea(True)
+    zone.SetDoNotAllowTracks(tracks)
+    zone.SetDoNotAllowVias(vias)
+    outline = zone.Outline()
+    outline.NewOutline()
+    for x, y in points:
+        outline.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+    board.Add(zone)
+    return zone
+
+
+def test_rule_area_flags_and_physical_copper_collision(tmp_path):
+    board = pcbnew.NewBoard(str(tmp_path / "rules.kicad_pcb"))
+    _add_rule_area(
+        board,
+        [(10, 10), (20, 10), (20, 20), (10, 20)],
+        tracks=True,
+    )
+    _add_rule_area(
+        board,
+        [(30, 10), (40, 10), (40, 20), (30, 20)],
+        vias=True,
+    )
+    areas = collect_track_via_rule_areas(board)
+    track_area = next(area for area in areas if area.blocks_tracks)
+    via_area = next(area for area in areas if area.blocks_vias)
+
+    assert not track_area.blocks_vias
+    assert not via_area.blocks_tracks
+    assert track_intersects_rule_area((9.0, 9.85), (21.0, 9.85), 0.2, track_area)
+    assert not track_intersects_rule_area((9.0, 9.75), (21.0, 9.75), 0.2, track_area)
+    assert via_intersects_rule_area((29.85, 15.0), 0.2, via_area)
+    assert not via_intersects_rule_area((29.75, 15.0), 0.2, via_area)
+    assert not track_intersects_rule_area((30.0, 15.0), (40.0, 15.0), 1.0, via_area)
+    assert not via_intersects_rule_area((15.0, 15.0), 1.0, track_area)
+
+
+def test_rotated_footprint_rule_area_uses_placed_polygon(tmp_path):
+    board = _board_with_wroom(str(tmp_path / "rotated.kicad_pcb"), rot=45.0)
+    area = collect_track_via_rule_areas(board)[0]
+    zone = area.zone
+    bb = zone.Outline().BBox()
+    center = (pcbnew.ToMM(bb.Centre().x), pcbnew.ToMM(bb.Centre().y))
+
+    assert via_intersects_rule_area(center, 0.0, area)
+    # A rotated rectangle leaves its bounding-box corners outside the polygon.
+    corner = (pcbnew.ToMM(bb.GetLeft()), pcbnew.ToMM(bb.GetTop()))
+    assert not via_intersects_rule_area(corner, 0.0, area)

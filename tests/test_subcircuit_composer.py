@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import pytest
 
+from kicraft.cli.compose_subcircuits import _resolve_constraint_anchor_positions
 from kicraft.autoplacer.brain import geometry
 from kicraft.autoplacer.brain.subcircuit_composer import (
     AttachmentConstraint,
+    ChildArtifactPlacement,
     ChildPlacement,
     LeafBlockerSet,
     PlacementConstraintEntry,
@@ -17,6 +19,7 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     _compute_local_anchor_offset,
     _transform_local_point,
     build_parent_composition,
+    derive_attachment_constraints,
     child_layer_envelopes,
     composition_summary,
     estimate_layer_aware_parent_board_size,
@@ -24,8 +27,13 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
     packed_extents_outline,
     _derive_board_outline,
 )
-from kicraft.autoplacer.brain.subcircuit_instances import TransformedSubcircuit
+from kicraft.autoplacer.brain.subcircuit_instances import (
+    LoadedSubcircuitArtifact,
+    TransformedSubcircuit,
+    transform_loaded_artifact,
+)
 from kicraft.autoplacer.brain.types import (
+    AntennaEdgeIntent,
     Component,
     InterfaceAnchor,
     InterfaceDirection,
@@ -646,3 +654,96 @@ def test_transform_local_point_90deg_is_not_math_ccw():
     got = _transform_local_point(Point(1.0, 0.0), Point(0.0, 0.0), 90.0)
     assert got.x == pytest.approx(0.0)
     assert got.y == pytest.approx(-1.0), f"expected KiCad-CW (0,-1), got {got}"
+
+
+def test_antenna_intent_drives_parent_rotation_anchor_and_propagation():
+    component = _make_component("U1", 10.0, 16.4, w=18.0, h=25.0)
+    intent = AntennaEdgeIntent(
+        owner_ref="U1",
+        source="footprint_rule_area",
+        source_id="antenna_keepout",
+        local_direction="top",
+        local_anchor_mm=-16.4,
+        local_anchor_midpoint=Point(0.0, -16.4),
+        local_polygon=(
+            Point(-9.0, -16.4),
+            Point(9.0, -16.4),
+            Point(9.0, -10.0),
+            Point(-9.0, -10.0),
+        ),
+        target_edge="top",
+    )
+    layout = _make_layout("ANTENNA", {"U1": component})
+    layout.antenna_edge_intents = [intent]
+    artifact = LoadedSubcircuitArtifact(
+        artifact_dir="/tmp/antenna",
+        metadata={},
+        debug={},
+        layout=layout,
+    )
+
+    derived = derive_attachment_constraints([artifact], {}, {}, {})
+
+    assert len(derived.constraints) == 1
+    constraint = derived.constraints[0]
+    assert constraint.anchor_kind == "antenna"
+    spec = derived.child_specs[0]
+    assert spec.rotation_candidates == [0.0]
+    entry = spec.models[0.0].constraint_entries[0]
+    assert entry.local_anchor_offset.y == pytest.approx(0.0)
+
+    parent = _make_parent_def("PARENT", ["ANTENNA"])
+    composition = build_parent_composition(
+        parent,
+        child_artifact_placements=[
+            ChildArtifactPlacement(
+                artifact=artifact,
+                origin=Point(0.0, 0.0),
+                rotation=0.0,
+            )
+        ],
+    )
+    assert composition.board_state.antenna_edge_intents == [intent]
+
+
+def test_parent_anchor_resolver_does_not_add_child_origin_twice():
+    component = _make_component("U1", 10.0, 16.4, w=18.0, h=25.0)
+    intent = AntennaEdgeIntent(
+        owner_ref="U1",
+        source="footprint_rule_area",
+        source_id="antenna_keepout",
+        local_direction="top",
+        local_anchor_mm=-16.4,
+        local_anchor_midpoint=Point(0.0, -16.4),
+        local_polygon=(),
+        target_edge="top",
+    )
+    layout = _make_layout("ANTENNA", {"U1": component})
+    layout.antenna_edge_intents = [intent]
+    artifact = LoadedSubcircuitArtifact(
+        artifact_dir="/tmp/antenna",
+        metadata={},
+        debug={},
+        layout=layout,
+    )
+    derived = derive_attachment_constraints([artifact], {}, {}, {})
+    placement = ChildArtifactPlacement(
+        artifact=artifact,
+        origin=Point(5.0, 7.0),
+        rotation=0.0,
+    )
+    transformed = transform_loaded_artifact(
+        artifact,
+        origin=placement.origin,
+        rotation=placement.rotation,
+    )
+
+    anchors = _resolve_constraint_anchor_positions(
+        derived,
+        {artifact.instance_path: placement},
+        [artifact],
+        {0: transformed},
+        {},
+    )
+
+    assert anchors["U1"] == Point(15.0, 7.0)

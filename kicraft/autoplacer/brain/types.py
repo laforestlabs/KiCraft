@@ -329,6 +329,30 @@ class KeepoutRect:
     source: str = ""
     owner_origin: Point | None = None
 
+@dataclass(slots=True, frozen=True)
+class AntennaEdgeIntent:
+    """Serializable footprint-local antenna anchor and requested board edge.
+
+    ``local_polygon`` and ``local_anchor_midpoint`` stay in the unrotated
+    footprint frame.  This lets leaf and parent placement apply the same
+    KiCad-clockwise transform without rediscovering semantics from a ref or
+    footprint name.
+    """
+
+    owner_ref: str
+    source: str
+    source_id: str
+    local_direction: str
+    local_anchor_mm: float
+    local_anchor_midpoint: Point
+    local_polygon: tuple[Point, ...]
+    target_edge: str
+    inset_mm: float = 0.0
+    explicit_edge: bool = False
+    explicit_rotation: bool = False
+
+
+
 
 @dataclass
 class BoardState:
@@ -345,6 +369,9 @@ class BoardState:
     # RF antenna keep-clear rects (board coords), populated by adapter.load via
     # hardware.keepout_extract. The placer pushes non-owner parts out of each.
     keepout_rects: list[KeepoutRect] = field(default_factory=list)
+    # Accepted antenna edge contracts. Geometry remains footprint-local so it
+    # survives placement, leaf re-basing, and rigid parent composition.
+    antenna_edge_intents: list[AntennaEdgeIntent] = field(default_factory=list)
 
     @property
     def board_width(self) -> float:
@@ -589,6 +616,7 @@ class SubCircuitLayout:
     interface_anchors: list[InterfaceAnchor] = field(default_factory=list)
     score: float = 0.0
     artifact_paths: dict[str, str] = field(default_factory=dict)
+    antenna_edge_intents: list[AntennaEdgeIntent] = field(default_factory=list)
     frozen: bool = True
 
     @property

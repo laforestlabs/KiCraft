@@ -16,6 +16,7 @@ from kicraft.autoplacer.brain.subcircuit_extractor import (
     summarize_extraction,
 )
 from kicraft.autoplacer.brain.types import (
+    AntennaEdgeIntent,
     BoardState,
     Component,
     InterfaceDirection,
@@ -354,3 +355,32 @@ class TestSummarize:
         assert "trace_count" in debug
         assert "via_count" in debug
         assert "notes" in debug
+
+
+def test_leaf_extraction_preserves_only_owned_antenna_intents():
+    leaf, full_state = _basic_full_state()
+    owned = AntennaEdgeIntent(
+        owner_ref="R1",
+        source="explicit",
+        source_id="R1",
+        local_direction="top",
+        local_anchor_mm=-2.0,
+        local_anchor_midpoint=Point(0.0, -2.0),
+        local_polygon=(),
+        target_edge="top",
+    )
+    unrelated = AntennaEdgeIntent(
+        owner_ref="U1",
+        source="explicit",
+        source_id="U1",
+        local_direction="left",
+        local_anchor_mm=-2.0,
+        local_anchor_midpoint=Point(-2.0, 0.0),
+        local_polygon=(),
+        target_edge="left",
+    )
+    full_state.antenna_edge_intents = [owned, unrelated]
+
+    extraction = extract_leaf_board_state(leaf, full_state)
+
+    assert extraction.local_state.antenna_edge_intents == [owned]

@@ -32,6 +32,7 @@ from typing import Any
 
 from . import geometry
 from .types import (
+    AntennaEdgeIntent,
     Component,
     InterfaceAnchor,
     InterfacePort,
@@ -328,6 +329,7 @@ def _layout_from_artifact_payload(
     solved_silkscreen = _parse_silkscreen(canonical)
     ports = _interface_ports_from_payload(canonical.get("ports", []))
     interface_anchors = _parse_interface_anchors(canonical)
+    antenna_edge_intents = _parse_antenna_edge_intents(canonical)
     bbox = _parse_bbox(canonical, solved_components)
     score = _parse_score(canonical.get("score"))
 
@@ -344,6 +346,7 @@ def _layout_from_artifact_payload(
         interface_anchors=interface_anchors,
         score=score,
         artifact_paths=artifact_paths,
+        antenna_edge_intents=antenna_edge_intents,
         frozen=True,
     )
 
@@ -443,7 +446,56 @@ def _normalize_to_canonical(
         "interface_anchors": normalized_anchors,
         "bounding_box": bbox,
         "score": score,
+        "antenna_edge_intents": [],
     }
+
+def _parse_antenna_edge_intents(payload: dict[str, Any]) -> list[AntennaEdgeIntent]:
+    sides = {"left", "right", "top", "bottom"}
+    rows = payload.get("antenna_edge_intents", [])
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        raise ValueError("antenna_edge_intents must be a list")
+    intents: list[AntennaEdgeIntent] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("antenna edge intent must be an object")
+        direction = str(row.get("local_direction", ""))
+        edge = str(row.get("target_edge", ""))
+        if direction not in sides or edge not in sides:
+            raise ValueError(
+                f"invalid antenna edge intent direction/edge: {direction}/{edge}"
+            )
+        midpoint = row.get("local_anchor_midpoint")
+        if not isinstance(midpoint, dict):
+            raise ValueError("antenna edge intent missing local_anchor_midpoint")
+        polygon = row.get("local_polygon", [])
+        if not isinstance(polygon, list):
+            raise ValueError("antenna edge intent local_polygon must be a list")
+        intents.append(
+            AntennaEdgeIntent(
+                owner_ref=str(row.get("owner_ref", "")),
+                source=str(row.get("source", "")),
+                source_id=str(row.get("source_id", "")),
+                local_direction=direction,
+                local_anchor_mm=float(row.get("local_anchor_mm", 0.0)),
+                local_anchor_midpoint=Point(
+                    float(midpoint.get("x", 0.0)),
+                    float(midpoint.get("y", 0.0)),
+                ),
+                local_polygon=tuple(
+                    Point(float(point["x"]), float(point["y"]))
+                    for point in polygon
+                    if isinstance(point, dict) and "x" in point and "y" in point
+                ),
+                target_edge=edge,
+                inset_mm=float(row.get("inset_mm", 0.0)),
+                explicit_edge=bool(row.get("explicit_edge", False)),
+                explicit_rotation=bool(row.get("explicit_rotation", False)),
+            )
+        )
+    return intents
+
 
 
 def _interface_ports_from_payload(ports: Any) -> list[InterfacePort]:

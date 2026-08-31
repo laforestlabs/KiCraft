@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .types import (
+    AntennaEdgeIntent,
     Component,
     InterfaceAnchor,
     InterfacePort,
@@ -223,6 +224,23 @@ def serialize_components(components: dict[str, Component]) -> dict[str, dict[str
         ref: serialize_component(component)
         for ref, component in sorted(components.items())
     }
+
+def serialize_antenna_edge_intent(intent: AntennaEdgeIntent) -> dict[str, Any]:
+    return {
+        "owner_ref": intent.owner_ref,
+        "source": intent.source,
+        "source_id": intent.source_id,
+        "local_direction": intent.local_direction,
+        "local_anchor_mm": float(intent.local_anchor_mm),
+        "local_anchor_midpoint": serialize_point(intent.local_anchor_midpoint),
+        "local_polygon": [serialize_point(point) for point in intent.local_polygon],
+        "target_edge": intent.target_edge,
+        "inset_mm": float(intent.inset_mm),
+        "explicit_edge": bool(intent.explicit_edge),
+        "explicit_rotation": bool(intent.explicit_rotation),
+    }
+
+
 
 
 def serialize_traces(traces: list[TraceSegment]) -> list[dict[str, Any]]:
@@ -593,6 +611,10 @@ def build_solved_layout_artifact(
         "silkscreen": serialize_silkscreen(layout.silkscreen),
         "ports": serialize_interface_ports(layout.ports),
         "interface_anchors": serialize_interface_anchors(layout.interface_anchors),
+        "antenna_edge_intents": [
+            serialize_antenna_edge_intent(intent)
+            for intent in layout.antenna_edge_intents
+        ],
         "anchor_validation": anchor_validation,
         "artifact_paths": paths.to_dict(),
         "notes": combined_notes,

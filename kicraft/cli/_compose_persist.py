@@ -66,6 +66,7 @@ def _persist_parent_artifact(
         ports=list(parent_def.ports),
         interface_anchors=[],
         score=state.score_total,
+        antenna_edge_intents=list(composition.board_state.antenna_edge_intents),
         frozen=True,
     )
 

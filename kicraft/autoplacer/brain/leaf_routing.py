@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from kicraft.autoplacer.brain import geometry
 from kicraft.autoplacer.brain.array_placement import leaf_is_fully_array
 from kicraft.autoplacer.brain.leaf_geometry import (
     grow_leaf_outline_to_contain_placement,
@@ -22,7 +23,7 @@ from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
     generate_stage_diagnostic_artifacts,
     promote_to_round_snapshot,
 )
-from kicraft.autoplacer.brain.types import Component, Point
+from kicraft.autoplacer.brain.types import AntennaEdgeIntent, Component, Layer, Point
 from kicraft.autoplacer.routing_board import (
     import_routed_copper,
     validate_routed_board,
@@ -113,6 +114,7 @@ def _silk_for_leaf(
 def _outline_around_geometry(
     components: dict[str, Component],
     cfg: dict[str, Any],
+    antenna_edge_intents: list[AntennaEdgeIntent] | None = None,
     *,
     traces=None,
     vias=None,
@@ -132,10 +134,25 @@ def _outline_around_geometry(
     bbox = _compute_component_bbox(components, traces=traces, vias=vias)
     silk_margin = float(cfg.get("silkscreen_margin_mm", 0.5))
     edge_margin = float(cfg.get("leaf_edge_margin_mm", silk_margin))
-    return (
-        Point(bbox["min_x"] - edge_margin, bbox["min_y"] - edge_margin),
-        Point(bbox["max_x"] + edge_margin, bbox["max_y"] + edge_margin),
-    )
+    tl = Point(bbox["min_x"] - edge_margin, bbox["min_y"] - edge_margin)
+    br = Point(bbox["max_x"] + edge_margin, bbox["max_y"] + edge_margin)
+    for intent in antenna_edge_intents or []:
+        component = components.get(intent.owner_ref)
+        if component is None:
+            continue
+        point = intent.local_anchor_midpoint
+        if component.layer == Layer.BACK:
+            point = Point(-point.x, point.y)
+        anchor = geometry.transform_point(point, component.pos, component.rotation)
+        if intent.target_edge == "left":
+            tl.x = anchor.x - intent.inset_mm
+        elif intent.target_edge == "right":
+            br.x = anchor.x + intent.inset_mm
+        elif intent.target_edge == "top":
+            tl.y = anchor.y - intent.inset_mm
+        elif intent.target_edge == "bottom":
+            br.y = anchor.y + intent.inset_mm
+    return tl, br
 
 
 def _center_on_leaf_page(
@@ -752,6 +769,70 @@ def route_local_subcircuit(
             },
             route_timing,
         )
+    pre_route_validation_start = time.monotonic()
+    pre_route_validation = validate_routed_board(
+        str(pre_route_board),
+        cfg=cfg,
+        expected_anchor_names=[port.name for port in extraction.interface_ports],
+        actual_anchor_names=[port.name for port in extraction.interface_ports],
+        required_anchor_names=[
+            port.name for port in extraction.interface_ports if port.required
+        ],
+        timeout_s=int(cfg.get("subcircuit_validation_timeout_s", 30)),
+    )
+    route_timing["pre_route_validation_s"] = round(
+        max(0.0, time.monotonic() - pre_route_validation_start), 3
+    )
+    # Most pre-route findings remain informational. Keepout damage is different:
+    # deterministic locked copper cannot be repaired by the autorouter.
+    pre_route_drc = pre_route_validation.get("drc", {})
+    if pre_route_drc.get("violations"):
+        pre_route_violation_types = {v.get("type") for v in pre_route_drc["violations"]}
+        print(
+            f"  Pre-route DRC info: {len(pre_route_drc['violations'])} violations ({', '.join(sorted(pre_route_violation_types))})"
+        )
+    if int(pre_route_drc.get("items_not_allowed", 0) or 0) > 0:
+        if generate_diagnostics:
+            generate_leaf_diagnostic_artifacts(
+                artifact_dir=artifact_paths.artifact_dir,
+                pre_route_board=str(pre_route_board),
+                routed_board=None,
+                pre_route_validation=pre_route_validation,
+                pre_route_opts=LeafStageOpts(
+                    render_board_views=render_pre_route_board_views,
+                    write_drc_json=write_pre_route_drc_json,
+                    write_drc_report=write_pre_route_drc_report,
+                    render_drc_overlay=render_pre_route_drc_overlay,
+                ),
+                routed_opts=LeafStageOpts.off(),
+                build_contact_sheet=False,
+                quiet_render=fast_smoke_mode,
+            )
+        route_timing["route_local_subcircuit_total_s"] = round(
+            max(0.0, time.monotonic() - route_total_start), 3
+        )
+        return (
+            {
+                "enabled": True,
+                "skipped": True,
+                "reason": "illegal_routed_geometry",
+                "router": "kicad-routing-tools",
+                "traces": 0,
+                "vias": 0,
+                "total_length_mm": 0.0,
+                "routed_internal_nets": [],
+                "failed_internal_nets": list(sorted(extraction.internal_net_names)),
+                "_trace_segments": [],
+                "_via_objects": [],
+                "validation": {
+                    **pre_route_validation,
+                    "rejected": True,
+                    "rejection_stage": "leaf_pre_route_drc",
+                },
+                "failed": True,
+            },
+            route_timing,
+        )
     # Route cache: deterministic array leaves reuse identical KRT output.
     _cache_pcb = None
     _cache_meta = None
@@ -782,28 +863,6 @@ def route_local_subcircuit(
         max(0.0, time.monotonic() - routing_start), 3
     )
 
-    pre_route_validation_start = time.monotonic()
-    pre_route_validation = validate_routed_board(
-        str(pre_route_board),
-        cfg=cfg,
-        expected_anchor_names=[port.name for port in extraction.interface_ports],
-        actual_anchor_names=[port.name for port in extraction.interface_ports],
-        required_anchor_names=[
-            port.name for port in extraction.interface_ports if port.required
-        ],
-        timeout_s=int(cfg.get("subcircuit_validation_timeout_s", 30)),
-    )
-    route_timing["pre_route_validation_s"] = round(
-        max(0.0, time.monotonic() - pre_route_validation_start), 3
-    )
-    # Pre-route DRC is informational only -- we let the autorouter attempt routing
-    # regardless of pre-route violations. The post-route DRC gate handles acceptance.
-    pre_route_drc = pre_route_validation.get("drc", {})
-    if pre_route_drc.get("violations"):
-        pre_route_violation_types = {v.get("type") for v in pre_route_drc["violations"]}
-        print(
-            f"  Pre-route DRC info: {len(pre_route_drc['violations'])} violations ({', '.join(sorted(pre_route_violation_types))})"
-        )
     if generate_diagnostics and render_intermediate:
         pre_route_render_start = time.monotonic()
         leaf_diagnostics = generate_leaf_diagnostic_artifacts(
@@ -888,6 +947,7 @@ def route_local_subcircuit(
         cfg,
         traces=routed_state_for_silk.traces,
         vias=routed_state_for_silk.vias,
+        antenna_edge_intents=routed_state_for_silk.antenna_edge_intents,
     )
     if _new_outline is not None:
         _new_tl, _new_br = _new_outline
@@ -1428,7 +1488,11 @@ def _stamp_trivial_leaf(
     # stamp. Apply the same shrink-and-center as the main-path silk re-stamp so the
     # rounded silk hugs Edge.Cuts and the standalone leaf opens centered on its A4
     # page (the parent composer re-bases each leaf on load, so this is placement-safe).
-    _new_outline = _outline_around_geometry(route_input_board.components, cfg)
+    _new_outline = _outline_around_geometry(
+        route_input_board.components,
+        cfg,
+        antenna_edge_intents=route_input_board.antenna_edge_intents,
+    )
     if _new_outline is not None:
         _new_tl, _new_br = _new_outline
         _delta, _centered_outline = _center_on_leaf_page(_new_tl, _new_br, cfg)
