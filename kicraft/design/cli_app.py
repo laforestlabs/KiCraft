@@ -205,15 +205,7 @@ def _candidate_hint(cands: list[str]) -> str:
 
 
 def _unresolved_footprints(bom, project_root: Path) -> list[str]:
-    """Return a human-readable list of BOM parts whose ``footprint`` does
-    not resolve to a real ``.kicad_mod`` on disk (across the four parts-
-    library tiers + stock KiCad). An empty list means every footprint
-    resolves. Catches LLM footprint-name hallucination (e.g. a plausible
-    truncation like ``SW_SPST_PTS645`` for ``SW_SPST_PTS645Sx43SMTR92``).
-
-    Each offender carries up to a few real look-alike footprint ids so the
-    commit-rejection feedback can steer the model to a valid pick in one round.
-    """
+    """Return BOM footprints that the synthesis loader cannot resolve and load."""
     bad: list[str] = []
     for part in bom.parts:
         fp = part.footprint or ""
@@ -225,16 +217,10 @@ def _unresolved_footprints(bom, project_root: Path) -> list[str]:
             )
             continue
         try:
-            pretty = resolve_footprint_library_path(library, project_root=project_root)
-        except LibraryNotFoundError:
+            lookup_footprint(fp, project_root=project_root)
+        except (FootprintNotFoundError, ValueError) as exc:
             bad.append(
-                f"{part.ref}: footprint library {library!r} not found (footprint {fp!r})"
-                + _candidate_hint(_footprint_candidates(fp))
-            )
-            continue
-        if not (pretty / f"{name}.kicad_mod").is_file():
-            bad.append(
-                f"{part.ref}: no '{name}.kicad_mod' in {pretty} (footprint {fp!r})"
+                f"{part.ref}: footprint {fp!r} is not loadable: {exc}"
                 + _candidate_hint(_footprint_candidates(fp))
             )
     return bad

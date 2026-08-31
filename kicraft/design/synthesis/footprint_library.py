@@ -9,13 +9,11 @@ instead. Footprints live one-per-file as ``<stock>/<Library>.pretty/<Name>.kicad
 so discovery is a filename glob (no file reads), and the footprint name itself is
 verbose enough that substring matching on the ``Library:Name`` id is effective.
 
-Resolution/validation already exist in :mod:`parts_lookup` (``resolve_footprint_
-library_path``) and ``cli_app._unresolved_footprints``; this module only adds the
-missing *discovery* layer.
+Resolution and loadability validation share :func:`load_footprint`, the single
+``pcbnew.FootprintLoad`` seam used by BOM commit, lookup tools, and synthesis.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from .parts_lookup import (
@@ -26,8 +24,7 @@ from .parts_lookup import (
 
 
 class FootprintNotFoundError(LookupError):
-    """Raised when a footprint library is missing or the footprint isn't in it."""
-
+    """Raised when a footprint cannot be loaded from the resolver chain."""
 
 # Query terms that describe the *kind* of thing being searched, not the part, and so
 # never appear in a footprint id. The model habitually appends "footprint" to queries
@@ -35,6 +32,48 @@ class FootprintNotFoundError(LookupError):
 # would otherwise zero the result. ("smd" is NOT a stopword — it is a real token in
 # many footprint library names, e.g. Inductor_SMD / LED_SMD / Capacitor_SMD.)
 _STOPWORDS = frozenset({"footprint", "footprints"})
+
+
+def load_footprint(
+    pcbnew_mod,
+    library: str,
+    name: str,
+    *,
+    project_root: Path | None = None,
+    stock_dir: Path = DEFAULT_KICAD_FOOTPRINT_DIR,
+):
+    """Resolve and load one footprint through the synthesis resolver."""
+    try:
+        lib_dir = resolve_footprint_library_path(
+            library, project_root=project_root, stock_dir=stock_dir
+        )
+    except LibraryNotFoundError as exc:
+        raise FootprintNotFoundError(str(exc)) from exc
+    try:
+        fp = pcbnew_mod.FootprintLoad(str(lib_dir), name)
+    except Exception as exc:  # noqa: BLE001
+        raise FootprintNotFoundError(
+            f"could not load {library}:{name} from {lib_dir}: {exc}"
+        ) from exc
+    if fp is None:
+        raise FootprintNotFoundError(
+            f"FootprintLoad returned None for {library}:{name} from {lib_dir}"
+        )
+
+    from kicraft.parts_library.footprint_courtyard import (
+        normalize_pth_pads_for_fab,
+        repair_malformed_courtyard,
+    )
+
+    repair_malformed_courtyard(fp)
+    pth_changes = normalize_pth_pads_for_fab(fp)
+    if pth_changes:
+        print(
+            f"footprint {library}:{name}: normalized {len(pth_changes)} PTH "
+            f"pad(s) to fab floors ({'; '.join(pth_changes[:4])}"
+            f"{'; ...' if len(pth_changes) > 4 else ''})"
+        )
+    return fp, lib_dir
 
 
 def search_footprints(
@@ -78,35 +117,33 @@ def lookup_footprint(
     project_root: Path | None = None,
     stock_dir: Path = DEFAULT_KICAD_FOOTPRINT_DIR,
 ) -> dict:
-    """Verify a ``Library:Name`` footprint resolves to a real ``.kicad_mod`` and
-    report its pad count (the footprint analog of ``lookup_symbol``'s pin list).
+    """Load a ``Library:Name`` footprint and report its actual pad count.
 
-    Resolution goes through the same parts-library 4-tier + stock search as the
-    BOM-commit check (:func:`parts_lookup.resolve_footprint_library_path`).
-
-    Raises:
-        ValueError: ``footprint`` is not in ``Library:Name`` form.
-        FootprintNotFoundError: library missing, or the ``.kicad_mod`` not in it.
+    Uses the same resolver and ``pcbnew.FootprintLoad`` seam as synthesis, so a
+    file that exists but KiCad cannot load is rejected before board generation.
     """
     library, _, name = (footprint or "").partition(":")
     if not library or not name:
         raise ValueError(f"footprint {footprint!r} is not 'Library:Name'")
-    try:
-        pretty = resolve_footprint_library_path(
-            library, project_root=project_root, stock_dir=stock_dir
-        )
-    except LibraryNotFoundError as exc:
-        raise FootprintNotFoundError(str(exc)) from exc
-    mod = pretty / f"{name}.kicad_mod"
-    if not mod.is_file():
-        raise FootprintNotFoundError(f"no '{name}.kicad_mod' in {pretty}")
-    text = mod.read_text(encoding="utf-8", errors="ignore")
-    pad_count = len(re.findall(r"\(pad\s", text))
-    return {"footprint": f"{library}:{name}", "pad_count": pad_count}
+    import pcbnew
+
+    fp, lib_dir = load_footprint(
+        pcbnew,
+        library,
+        name,
+        project_root=project_root,
+        stock_dir=stock_dir,
+    )
+    return {
+        "footprint": f"{library}:{name}",
+        "pad_count": len(list(fp.Pads())),
+        "resolved_directory": str(lib_dir),
+    }
 
 
 __all__ = [
     "FootprintNotFoundError",
+    "load_footprint",
     "lookup_footprint",
     "search_footprints",
 ]

@@ -172,13 +172,19 @@ def _move(comp: Component, x: float, y: float) -> None:
     _update_pad_positions(comp, old, comp.rotation)
 
 
-def _pitch(members: list[Component], spec: dict, gap: float) -> tuple[float, float]:
-    """Grid pitch (x, y). Explicit ``pitch_mm`` wins, else courtyard + gap."""
-    p = spec.get("pitch_mm")
-    if p:
-        return float(p), float(p)
+def _pitch(
+    members: list[Component],
+    spec: dict,
+    derived_gap: float,
+    explicit_gap: float,
+) -> tuple[float, float]:
+    """Grid pitch, flooring an explicit request only when bodies overlap."""
+    requested = float(spec.get("pitch_mm") or 0.0)
+    gap = explicit_gap if requested else derived_gap
     px = max(c.width_mm for c in members) + gap
     py = max(c.height_mm for c in members) + gap
+    if requested:
+        return max(requested, px), max(requested, py)
     return px, py
 
 
@@ -260,47 +266,32 @@ def leaf_is_fully_array(comps: dict[str, Component], arrays: list[dict]) -> bool
 
 
 def _grid_member_bbox(grid: dict) -> tuple[float, float, float, float]:
-    """(min_x, min_y, max_x, max_y) of a placed grid's member pad bodies."""
+    """(min_x, min_y, max_x, max_y) of an array's occupied member bodies."""
     xs = [c.x for c in grid["centers"]]
     ys = [c.y for c in grid["centers"]]
-    hw, hh = grid["led_w"] / 2.0, grid["led_h"] / 2.0
+    if grid.get("pattern") == "ring":
+        hw = hh = grid["led_diag"] / 2.0
+    else:
+        hw, hh = grid["led_w"] / 2.0, grid["led_h"] / 2.0
     return (min(xs) - hw, min(ys) - hh, max(xs) + hw, max(ys) + hh)
 
 
 def _assert_grids_disjoint(grids: list[dict]) -> None:
-    """Fail loudly if two array grids were placed over the same coordinates.
-
-    Every grid currently starts at the same origin (``x0, y0 = px, py``), so two
-    arrays on one leaf land on top of each other -- each member of grid B sits on
-    a member of grid A, and B's pads then block A's inter-member routing (the
-    KC-NZXXEE decap-array signature). Layer 1 removes the usual offender (a decap
-    array), but any future two-array leaf would silently produce a broken board.
-    A grid pair overlapping by more than half the smaller grid's footprint is a
-    contradiction, not a layout -- raise rather than route garbage.
-    """
+    """Require every placed array's occupied member bbox to be disjoint."""
     for a in range(len(grids)):
         for b in range(a + 1, len(grids)):
             ax1, ay1, ax2, ay2 = _grid_member_bbox(grids[a])
             bx1, by1, bx2, by2 = _grid_member_bbox(grids[b])
-            ox = max(0.0, min(ax2, bx2) - max(ax1, bx1))
-            oy = max(0.0, min(ay2, by2) - max(ay1, by1))
-            overlap = ox * oy
-            if overlap <= 0:
+            ox = min(ax2, bx2) - max(ax1, bx1)
+            oy = min(ay2, by2) - max(ay1, by1)
+            if ox <= 1e-9 or oy <= 1e-9:
                 continue
-            area_a = max(1e-9, (ax2 - ax1) * (ay2 - ay1))
-            area_b = max(1e-9, (bx2 - bx1) * (by2 - by1))
-            if overlap > 0.5 * min(area_a, area_b):
-                ga, gb = grids[a]["refs"], grids[b]["refs"]
-                raise ValueError(
-                    "array grids overlap on this leaf -- two ArraySpecs were "
-                    "placed on the same coordinates "
-                    f"({ga[0]}..{ga[-1]} and {gb[0]}..{gb[-1]}, "
-                    f"overlap {overlap:.1f}mm^2). Each grid is laid from the same "
-                    "origin, so they co-locate and block each other's routing. "
-                    "If one is a decoupling-cap array it should be dropped at "
-                    "synthesis (drop_decap_only_arrays); a genuine multi-array "
-                    "leaf needs distinct grid origins."
-                )
+            ga, gb = grids[a]["refs"], grids[b]["refs"]
+            raise ValueError(
+                "array grids overlap after packing "
+                f"({ga[0]}..{ga[-1]} and {gb[0]}..{gb[-1]}, "
+                f"overlap {ox * oy:.1f}mm^2)"
+            )
 
 
 def place_array_leaves(
@@ -325,9 +316,51 @@ def place_array_leaves(
         cfg.get("placement_clearance_mm", cfg.get("clearance_mm", 2.5))
     )
     gap = max(float(cfg.get("array_gap_mm", 0.6)), clearance)
+    explicit_pitch_gap = float(cfg.get("array_gap_mm", 0.6))
     placed: set[str] = set()
     grid_bbox: tuple[float, float, float, float] | None = None
     grids: list[dict] = []  # per-array geometry for adaptive decap colocation
+    packed_member_max_x: float | None = None
+
+    def _pack_grid(
+        grid: dict,
+        layout_bbox: tuple[float, float, float, float],
+    ) -> tuple[float, float, float, float]:
+        """Shelf-pack one placed array and merge its layout bbox."""
+        nonlocal grid_bbox, packed_member_max_x
+        member_bbox = _grid_member_bbox(grid)
+        shift_x = 0.0
+        if packed_member_max_x is not None:
+            shift_x = packed_member_max_x + clearance - member_bbox[0]
+            for ref in grid["refs"]:
+                comp = comps[ref]
+                _move(comp, comp.pos.x + shift_x, comp.pos.y)
+            grid["centers"] = [
+                Point(center.x + shift_x, center.y) for center in grid["centers"]
+            ]
+            if grid.get("center") is not None:
+                center = grid["center"]
+                grid["center"] = Point(center.x + shift_x, center.y)
+            member_bbox = (
+                member_bbox[0] + shift_x,
+                member_bbox[1],
+                member_bbox[2] + shift_x,
+                member_bbox[3],
+            )
+        packed_member_max_x = member_bbox[2]
+        placed_bbox = (
+            layout_bbox[0] + shift_x,
+            layout_bbox[1],
+            layout_bbox[2] + shift_x,
+            layout_bbox[3],
+        )
+        grid_bbox = placed_bbox if grid_bbox is None else (
+            min(grid_bbox[0], placed_bbox[0]),
+            min(grid_bbox[1], placed_bbox[1]),
+            max(grid_bbox[2], placed_bbox[2]),
+            max(grid_bbox[3], placed_bbox[3]),
+        )
+        return placed_bbox
 
     for spec in arrays or []:
         refs = _present_member_refs(spec, comps)
@@ -363,13 +396,7 @@ def place_array_leaves(
             _orient_ring(comps, refs, cfg)
             b = (cx - r_ring - half, cy - r_ring - half,
                  cx + r_ring + half, cy + r_ring + half)
-            grid_bbox = b if grid_bbox is None else (
-                min(grid_bbox[0], b[0]),
-                min(grid_bbox[1], b[1]),
-                max(grid_bbox[2], b[2]),
-                max(grid_bbox[3], b[3]),
-            )
-            grids.append({
+            grid = {
                 "refs": refs, "pattern": "ring",
                 "px": chord, "py": chord, "rows": 1, "cols": 0,
                 "led_w": max(c.width_mm for c in members),
@@ -377,13 +404,15 @@ def place_array_leaves(
                 "led_diag": diag,
                 "center": Point(cx, cy), "radius": r_ring, "angles": angles,
                 "centers": [Point(comps[r].pos.x, comps[r].pos.y) for r in refs],
-            })
+            }
+            _pack_grid(grid, b)
+            grids.append(grid)
             continue
 
         rows = int(spec.get("rows", 0) or 0)
         cols = int(spec.get("cols", 0) or 0)
         serpentine = bool(spec.get("serpentine", True))
-        px, py = _pitch(members, spec, gap)
+        px, py = _pitch(members, spec, gap, explicit_pitch_gap)
         x0, y0 = px, py  # keep coords positive; board-size search fits the leaf
 
         for idx, ref in enumerate(refs):
@@ -402,13 +431,7 @@ def place_array_leaves(
         _orient_array_grid(comps, refs, rows, cols, serpentine, cfg)
 
         b = (x0 - px, y0 - py, x0 + (cols - 1) * px + px, y0 + (rows - 1) * py + py)
-        grid_bbox = b if grid_bbox is None else (
-            min(grid_bbox[0], b[0]),
-            min(grid_bbox[1], b[1]),
-            max(grid_bbox[2], b[2]),
-            max(grid_bbox[3], b[3]),
-        )
-        grids.append({
+        grid = {
             "refs": refs, "pattern": "grid",
             "px": px, "py": py, "rows": rows, "cols": cols,
             "led_w": max(c.width_mm for c in members),
@@ -416,7 +439,9 @@ def place_array_leaves(
             # member centre per chain index, read AFTER placement (serpentine
             # fill + per-row rotation already applied).
             "centers": [Point(comps[r].pos.x, comps[r].pos.y) for r in refs],
-        })
+        }
+        _pack_grid(grid, b)
+        grids.append(grid)
 
     if not placed:
         return placed, False

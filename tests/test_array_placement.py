@@ -176,6 +176,25 @@ def test_explicit_pitch_is_honored() -> None:
     assert (comps["D3"].pos.y - comps["D1"].pos.y) == 5.0  # row pitch
 
 
+def test_explicit_pitch_is_floored_to_legal_member_spacing() -> None:
+    comps = {
+        f"J{i}": _comp(f"J{i}", "terminal", 8.0, 7.0, 2)
+        for i in range(1, 5)
+    }
+    arrays = [{
+        "refs": ["J1", "J2", "J3", "J4"],
+        "rows": 1,
+        "cols": 4,
+        "pitch_mm": 5.0,
+    }]
+    place_array_leaves(
+        comps,
+        arrays,
+        {"placement_clearance_mm": 2.5, "array_orient_chain": False},
+    )
+    assert comps["J2"].pos.x - comps["J1"].pos.x == pytest.approx(8.6)
+
+
 def test_mixed_leaf_locks_array_but_not_fully_handled() -> None:
     # Array + a non-trivial (>2-pad) part -> members locked, but the leaf is
     # NOT fully handled, so the caller still runs the normal pipeline.
@@ -510,23 +529,52 @@ def test_assert_grids_disjoint_raises_on_colocated_grids() -> None:
         _assert_grids_disjoint([a, b])
 
 
-def test_place_array_leaves_rejects_two_arrays_on_same_origin() -> None:
-    # The KC-NZXXEE shape: an LED array and a cap array, both 2x2. Every grid is
-    # laid from the same origin, so without Layer 1 they co-locate -- the guard
-    # must catch that rather than emit a board where caps sit on the LEDs.
+def test_place_array_leaves_packs_two_grids_with_clearance() -> None:
     comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 4) for i in range(1, 5)}
-    comps.update({f"C{i}": _comp(f"C{i}", "100nF", 1.0, 0.5, 2) for i in range(1, 5)})
+    comps.update({f"R{i}": _comp(f"R{i}", "1k", 1.0, 0.5, 2) for i in range(1, 7)})
     arrays = [
         {"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2,
-         "serpentine": True},
-        {"refs": [f"C{i}" for i in range(1, 5)], "rows": 2, "cols": 2,
-         "serpentine": True},
+         "pitch_mm": 2.0, "serpentine": True},
+        {"refs": [f"R{i}" for i in range(1, 7)], "rows": 2, "cols": 3,
+         "pitch_mm": 3.0, "serpentine": True},
     ]
-    with pytest.raises(ValueError, match="overlap"):
-        place_array_leaves(
-            comps, arrays,
-            {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0},
-        )
+    place_array_leaves(
+        comps, arrays,
+        {"placement_clearance_mm": 2.5, "array_orient_chain": False},
+    )
+
+    d_right = max(
+        comps[f"D{i}"].pos.x + comps[f"D{i}"].width_mm / 2
+        for i in range(1, 5)
+    )
+    r_left = min(
+        comps[f"R{i}"].pos.x - comps[f"R{i}"].width_mm / 2
+        for i in range(1, 7)
+    )
+    assert r_left - d_right == pytest.approx(2.5)
+
+
+def test_place_array_leaves_packs_grid_and_ring() -> None:
+    comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 4) for i in range(1, 5)}
+    comps.update({f"L{i}": _comp(f"L{i}", "LED", 1.3, 1.3, 4) for i in range(1, 7)})
+    arrays = [
+        {"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2},
+        {"refs": [f"L{i}" for i in range(1, 7)], "pattern": "ring"},
+    ]
+    place_array_leaves(
+        comps, arrays,
+        {"placement_clearance_mm": 1.25, "array_orient_chain": False},
+    )
+
+    grid_right = max(
+        comps[f"D{i}"].pos.x + comps[f"D{i}"].width_mm / 2
+        for i in range(1, 5)
+    )
+    ring_left = min(
+        comps[f"L{i}"].pos.x - comps[f"L{i}"].width_mm / 2
+        for i in range(1, 7)
+    )
+    assert ring_left - grid_right >= 1.25
 
 
 # --------------------------------------------------------------------------- #

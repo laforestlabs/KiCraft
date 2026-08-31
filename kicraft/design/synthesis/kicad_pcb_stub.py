@@ -19,15 +19,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..models import BOM
-from .parts_lookup import (
-    DEFAULT_KICAD_FOOTPRINT_DIR,
-    LibraryNotFoundError,
-    resolve_footprint_library_path,
-)
-
-
-class FootprintNotFoundError(LookupError):
-    """Raised when a footprint cannot be loaded from the resolver chain."""
+from .footprint_library import load_footprint
+from .parts_lookup import DEFAULT_KICAD_FOOTPRINT_DIR
 
 
 class PadBindingError(ValueError):
@@ -48,51 +41,6 @@ def _split_footprint_id(fid: str) -> tuple[str, str]:
     return library, name
 
 
-def _load_footprint(
-    pcbnew_mod,
-    library: str,
-    name: str,
-    project_root: Path | None = None,
-    stock_dir: Path = DEFAULT_KICAD_FOOTPRINT_DIR,
-):
-    try:
-        lib_dir = resolve_footprint_library_path(
-            library, project_root=project_root, stock_dir=stock_dir
-        )
-    except LibraryNotFoundError as exc:
-        raise FootprintNotFoundError(str(exc)) from exc
-    try:
-        fp = pcbnew_mod.FootprintLoad(str(lib_dir), name)
-    except Exception as exc:  # noqa: BLE001
-        raise FootprintNotFoundError(
-            f"could not load {library}:{name} from {lib_dir}: {exc}"
-        ) from exc
-    if fp is None:
-        raise FootprintNotFoundError(
-            f"footprint {library}:{name} not found in {lib_dir}"
-        )
-    # Every footprint enters a board through this load. Rebuild any malformed
-    # (non-closing / self-intersecting) courtyard here so all downstream
-    # geometry -- which reads the courtyard as the part's physical extent --
-    # sees the real part size instead of a degenerate sliver.
-    from kicraft.parts_library.footprint_courtyard import (
-        normalize_pth_pads_for_fab,
-        repair_malformed_courtyard,
-    )
-
-    repair_malformed_courtyard(fp)
-    # Same single-seam rationale: fetched footprints ship PTH pads below the
-    # board's fab floors (sub-min thermal-via drills, zero-annular shell legs)
-    # that fail DRC outright; already-cached bundles heal here on load.
-    pth_changes = normalize_pth_pads_for_fab(fp)
-    if pth_changes:
-        print(
-            f"footprint {library}:{name}: normalized {len(pth_changes)} PTH "
-            f"pad(s) to fab floors ({'; '.join(pth_changes[:4])}"
-            f"{'; ...' if len(pth_changes) > 4 else ''})"
-        )
-    _normalize_text_heights(pcbnew_mod, fp)
-    return fp
 
 
 def _normalize_text_heights(pcbnew_mod, fp) -> None:
@@ -162,9 +110,10 @@ def write_empty_pcb(
 
     for idx, part in enumerate(bom.parts):
         lib, name = _split_footprint_id(part.footprint)
-        fp = _load_footprint(
+        fp, _lib_dir = load_footprint(
             pcbnew, lib, name, project_root=project_root, stock_dir=stock_dir
         )
+        _normalize_text_heights(pcbnew, fp)
         fp.SetReference(part.ref)
         fp.SetValue(part.value)
         col = idx % cols

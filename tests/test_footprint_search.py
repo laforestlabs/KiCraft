@@ -9,8 +9,10 @@ stock footprint libraries, like the symbol tests need the stock symbol libraries
 """
 from __future__ import annotations
 
+import pcbnew
 import pytest
 
+import kicraft.design.synthesis.footprint_library as footprint_library
 from kicraft.design.synthesis.footprint_library import (
     FootprintNotFoundError,
     lookup_footprint,
@@ -66,6 +68,7 @@ def test_lookup_resolves_pad_count():
     info = lookup_footprint("Resistor_SMD:R_0603_1608Metric")
     assert info["footprint"] == "Resistor_SMD:R_0603_1608Metric"
     assert info["pad_count"] == 2
+    assert info["resolved_directory"].endswith("Resistor_SMD.pretty")
 
 
 def test_lookup_rejects_non_library_name_form():
@@ -77,3 +80,23 @@ def test_lookup_missing_footprint_raises():
     # The exact hallucinated id from the failed cat-feeder run.
     with pytest.raises(FootprintNotFoundError):
         lookup_footprint("Connector_BarrelJack:BarrelJack_2.1mm_P5.5mm")
+
+
+def test_lookup_rejects_existing_file_that_kicad_cannot_load(
+    tmp_path, monkeypatch
+) -> None:
+    pretty = tmp_path / "Broken.pretty"
+    pretty.mkdir()
+    (pretty / "Present.kicad_mod").write_text("(footprint \"Present\")")
+    monkeypatch.setattr(
+        footprint_library,
+        "resolve_footprint_library_path",
+        lambda *args, **kwargs: pretty,
+    )
+    monkeypatch.setattr(pcbnew, "FootprintLoad", lambda *args: None)
+
+    with pytest.raises(
+        FootprintNotFoundError,
+        match="FootprintLoad returned None.*Broken:Present",
+    ):
+        lookup_footprint("Broken:Present", project_root=tmp_path)
