@@ -9,6 +9,7 @@ Covers the systematic fix for edge connectors ending up unusable:
   * Layer C -- the board edge sits flush-to-overhanging the mouth, never
     inset past it.
 """
+
 from __future__ import annotations
 
 import re
@@ -16,10 +17,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from kicraft.autoplacer.brain.array_placement import place_array_leaves
+from kicraft.autoplacer.brain.geometry import rotate_vector
 from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.subcircuit_composer import (
     AttachmentConstraint,
     _filter_rotations_for_connector_opening,
+    _edge_zoned_is_leaf_extremity,
     edge_anchor_target_coordinate,
 )
 from kicraft.autoplacer.brain.types import (
@@ -29,6 +33,7 @@ from kicraft.autoplacer.brain.types import (
     angles_close,
     edge_outward_angle,
     opening_board_angle,
+    opening_rotation_for_edge,
 )
 
 import logging
@@ -56,6 +61,16 @@ def test_opening_board_angle_inverts_rotation():
     assert opening_board_angle(90.0, 0.0) == 90.0
     assert opening_board_angle(90.0, 90.0) == 0.0
     assert opening_board_angle(90.0, 270.0) == 180.0
+
+
+def test_opening_rotation_for_edge_round_trips_facing() -> None:
+    for layer in Layer:
+        for edge in ("top", "bottom", "left", "right"):
+            rotation = opening_rotation_for_edge(180.0, layer, edge)
+            assert angles_close(
+                opening_board_angle(180.0, rotation),
+                edge_outward_angle(layer, edge),
+            )
 
 
 def test_angles_close_wraps():
@@ -100,8 +115,9 @@ def test_bnc_elbow_model_transform_pinned():
     without re-verifying pins-in-holes on a render."""
     from pathlib import Path
 
-    mod = Path("kicraft/parts_library/bnc-pcb-jack/bnc-pcb-jack.pretty/"
-               "ANT-TH_KH-BNC50-3511.kicad_mod").read_text()
+    mod = Path(
+        "kicraft/parts_library/bnc-pcb-jack/bnc-pcb-jack.pretty/ANT-TH_KH-BNC50-3511.kicad_mod"
+    ).read_text()
     assert "(rotate (xyz 0 0 180))" in mod
     assert "(offset (xyz 0.000 -26.500 0.000))" in mod
     # The Board Edge marker must stay on the true mouth side (+y).
@@ -164,9 +180,7 @@ def test_edge_marker_contradiction_lint():
     # Recreate the wrong-side marker (flange back face) in memory.
     for item in fp.GraphicalItems():
         if item.GetLayer() == pcbnew.Dwgs_User and "edge" in item.GetText().lower():
-            item.SetPosition(
-                pcbnew.VECTOR2I(pcbnew.FromMM(0), pcbnew.FromMM(-4.2))
-            )
+            item.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(0), pcbnew.FromMM(-4.2)))
     msg = _edge_marker_contradiction(fp)
     assert msg is not None and "OPPOSITE side" in msg
 
@@ -278,6 +292,88 @@ def _spec_with_connector(opening, edge, layer=Layer.FRONT, leaf_local_rot=0.0):
     )
 
 
+def test_fixed_bottom_connector_bank_has_one_valid_parent_rotation(caplog):
+    comps = {
+        ref: Component(
+            ref=ref,
+            value="WJ126V",
+            pos=Point(0.0, 0.0),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=7.89,
+            height_mm=10.09,
+            kind="connector",
+            opening_direction=180.0,
+        )
+        for ref in ("J1", "J2")
+    }
+    zones = {
+        "J1": {"edge": "bottom"},
+        "J2": {"edge": "bottom"},
+    }
+    place_array_leaves(
+        comps,
+        [{"refs": ["J1", "J2"], "rows": 1, "cols": 2, "pitch_mm": 7.5}],
+        {"component_zones": zones},
+    )
+
+    candidates = [0.0, 90.0, 180.0, 270.0]
+    models = {}
+    for rotation in candidates:
+        transformed = {}
+        for ref, source in comps.items():
+            pos = rotate_vector(source.pos, rotation)
+            width, height = source.width_mm, source.height_mm
+            if rotation in (90.0, 270.0):
+                width, height = height, width
+            transformed[ref] = Component(
+                ref=ref,
+                value=source.value,
+                pos=pos,
+                rotation=(source.rotation + rotation) % 360.0,
+                layer=source.layer,
+                width_mm=width,
+                height_mm=height,
+                kind=source.kind,
+                opening_direction=source.opening_direction,
+            )
+        models[rotation] = SimpleNamespace(
+            transformed=SimpleNamespace(transformed_components=transformed)
+        )
+
+    constraints = [
+        AttachmentConstraint(
+            ref=ref,
+            target="edge",
+            value="bottom",
+            inward_keep_in_mm=0.0,
+            outward_overhang_mm=0.0,
+            source="child_artifact",
+            child_index=0,
+        )
+        for ref in ("J1", "J2")
+    ]
+    spec = SimpleNamespace(
+        constraints=constraints,
+        rotation_candidates=list(candidates),
+        all_rotation_candidates=list(candidates),
+        models=models,
+        instance_path="/input-output",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        _filter_rotations_for_connector_opening(spec, _LOGGER)
+
+    assert spec.rotation_candidates == [0.0]
+    assert spec.all_rotation_candidates == [0.0]
+    fixed = models[0.0].transformed
+    assert _edge_zoned_is_leaf_extremity(fixed, "J1", "bottom")
+    assert _edge_zoned_is_leaf_extremity(fixed, "J2", "bottom")
+    assert not any(
+        "no rotation places every edge-zoned part" in record.message for record in caplog.records
+    )
+
+
 @pytest.mark.parametrize(
     "edge,kept",
     [("bottom", 0.0), ("right", 90.0), ("top", 180.0), ("left", 270.0)],
@@ -304,20 +400,37 @@ def test_filter_keeps_all_when_unsatisfiable(caplog):
     # Two connectors pinned to opposite edges cannot both face out under one
     # rigid leaf rotation -> keep all + warn.
     c_bottom = AttachmentConstraint(
-        ref="J1", target="edge", value="bottom", inward_keep_in_mm=0.0,
-        outward_overhang_mm=0.5, source="child_artifact", child_index=0,
+        ref="J1",
+        target="edge",
+        value="bottom",
+        inward_keep_in_mm=0.0,
+        outward_overhang_mm=0.5,
+        source="child_artifact",
+        child_index=0,
     )
     c_top = AttachmentConstraint(
-        ref="J2", target="edge", value="top", inward_keep_in_mm=0.0,
-        outward_overhang_mm=0.5, source="child_artifact", child_index=0,
+        ref="J2",
+        target="edge",
+        value="top",
+        inward_keep_in_mm=0.0,
+        outward_overhang_mm=0.5,
+        source="child_artifact",
+        child_index=0,
     )
     candidates = [0.0, 90.0, 180.0, 270.0]
 
     def _conn(ref, rot):
         return Component(
-            ref=ref, value="USB-C", pos=Point(0.0, 0.0), rotation=rot,
-            layer=Layer.FRONT, width_mm=9.0, height_mm=3.0, kind="connector",
-            pads=[], opening_direction=90.0,
+            ref=ref,
+            value="USB-C",
+            pos=Point(0.0, 0.0),
+            rotation=rot,
+            layer=Layer.FRONT,
+            width_mm=9.0,
+            height_mm=3.0,
+            kind="connector",
+            pads=[],
+            opening_direction=90.0,
         )
 
     models = {
@@ -339,8 +452,7 @@ def test_filter_keeps_all_when_unsatisfiable(caplog):
         _filter_rotations_for_connector_opening(spec, _LOGGER)
     assert spec.rotation_candidates == candidates
     assert spec.all_rotation_candidates == candidates
-    assert any("no rotation places every edge-zoned part" in r.message
-               for r in caplog.records)
+    assert any("no rotation places every edge-zoned part" in r.message for r in caplog.records)
 
 
 def test_filter_keeps_only_rotations_with_zoned_part_at_extremity():
@@ -349,14 +461,26 @@ def test_filter_keeps_only_rotations_with_zoned_part_at_extremity():
     above it at leaf-rotation 0/270 but below it at 180; only the rotations
     where SW1 is the topmost part survive (RC1 extremity criterion)."""
     constraint = AttachmentConstraint(
-        ref="SW1", target="edge", value="top", inward_keep_in_mm=0.0,
-        outward_overhang_mm=0.0, source="child_artifact", child_index=0,
+        ref="SW1",
+        target="edge",
+        value="top",
+        inward_keep_in_mm=0.0,
+        outward_overhang_mm=0.0,
+        source="child_artifact",
+        child_index=0,
     )
 
     def _part(ref, y):
         return Component(
-            ref=ref, value=ref, pos=Point(0.0, y), rotation=0.0,
-            layer=Layer.FRONT, width_mm=2.0, height_mm=2.0, kind="other", pads=[],
+            ref=ref,
+            value=ref,
+            pos=Point(0.0, y),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=2.0,
+            height_mm=2.0,
+            kind="other",
+            pads=[],
         )
 
     # Per rotation, place SW1 and a sibling R1; SW1 is topmost (smaller y) only
@@ -394,31 +518,47 @@ def test_filter_falls_back_to_mouth_correct_rotations(caplog):
     unmateable port at any outline (self-eval 2026-07-19 run_01: RV1 packed
     outboard of the BNC, so extremity was unsatisfiable at every rotation)."""
     constraint = AttachmentConstraint(
-        ref="J1", target="edge", value="bottom", inward_keep_in_mm=0.0,
-        outward_overhang_mm=0.5, source="child_artifact", child_index=0,
+        ref="J1",
+        target="edge",
+        value="bottom",
+        inward_keep_in_mm=0.0,
+        outward_overhang_mm=0.5,
+        source="child_artifact",
+        child_index=0,
     )
     candidates = [0.0, 90.0, 180.0, 270.0]
 
     def _conn(rot):
         return Component(
-            ref="J1", value="BNC", pos=Point(0.0, 0.0), rotation=rot,
-            layer=Layer.FRONT, width_mm=9.0, height_mm=3.0, kind="connector",
-            pads=[], opening_direction=90.0,
+            ref="J1",
+            value="BNC",
+            pos=Point(0.0, 0.0),
+            rotation=rot,
+            layer=Layer.FRONT,
+            width_mm=9.0,
+            height_mm=3.0,
+            kind="connector",
+            pads=[],
+            opening_direction=90.0,
         )
 
     def _sibling():
         # Always OUTBOARD of J1 on the bottom side -> extremity never holds.
         return Component(
-            ref="R1", value="R1", pos=Point(0.0, 30.0), rotation=0.0,
-            layer=Layer.FRONT, width_mm=2.0, height_mm=2.0, kind="other",
+            ref="R1",
+            value="R1",
+            pos=Point(0.0, 30.0),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=2.0,
+            height_mm=2.0,
+            kind="other",
             pads=[],
         )
 
     models = {
         rot: SimpleNamespace(
-            transformed=SimpleNamespace(
-                transformed_components={"J1": _conn(rot), "R1": _sibling()}
-            )
+            transformed=SimpleNamespace(transformed_components={"J1": _conn(rot), "R1": _sibling()})
         )
         for rot in candidates
     }
@@ -446,8 +586,13 @@ def test_connector_edge_overhangs_not_insets():
     # inset put the anchor INSIDE the outline and buried the port.
     min_pt, max_pt = Point(0.0, 0.0), Point(20.0, 30.0)
     c = AttachmentConstraint(
-        ref="J1", target="edge", value="bottom", inward_keep_in_mm=0.0,
-        outward_overhang_mm=0.5, source="child_artifact", child_index=0,
+        ref="J1",
+        target="edge",
+        value="bottom",
+        inward_keep_in_mm=0.0,
+        outward_overhang_mm=0.5,
+        source="child_artifact",
+        child_index=0,
     )
     target = edge_anchor_target_coordinate("bottom", c, min_pt, max_pt)
     assert target > max_pt.y  # mouth sits beyond the board bottom edge

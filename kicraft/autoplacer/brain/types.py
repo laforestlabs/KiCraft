@@ -50,6 +50,11 @@ def opening_board_angle(opening_direction: float, rotation: float) -> float:
     return (opening_direction - rotation) % 360.0
 
 
+def opening_rotation_for_edge(opening_direction: float, layer: "Layer", edge: str) -> float:
+    """Absolute KiCad rotation that points a local connector mouth outward."""
+    return (opening_direction - edge_outward_angle(layer, edge)) % 360.0
+
+
 def angles_close(a: float, b: float, tol: float = 1.0) -> bool:
     """True when two angles are equal modulo 360 within ``tol`` degrees."""
     return abs(((a - b + 180.0) % 360.0) - 180.0) <= tol
@@ -66,6 +71,7 @@ class BlockRotationGeometry:
     of a block, since blocks have no pads to rotate via the IC/connector
     rotation path.
     """
+
     width_mm: float
     height_mm: float
 
@@ -153,9 +159,7 @@ class Component:
     kind: str = ""  # "connector", "mounting_hole", "ic", "passive", "misc"
     is_through_hole: bool = False  # True if footprint has PTH pads
     body_center: Point | None = None  # courtyard/body bbox center (absolute coords)
-    opening_direction: float | None = (
-        None  # LOCAL-frame angle (0/90/180/270) where opening faces
-    )
+    opening_direction: float | None = None  # LOCAL-frame angle (0/90/180/270) where opening faces
     block_blocker_set: LeafBlockerSet | None = None
     block_artifact_origin_offset: Point | None = None
     block_side: str | None = None
@@ -329,6 +333,7 @@ class KeepoutRect:
     source: str = ""
     owner_origin: Point | None = None
 
+
 @dataclass(slots=True, frozen=True)
 class AntennaEdgeIntent:
     """Serializable footprint-local antenna anchor and requested board edge.
@@ -352,8 +357,6 @@ class AntennaEdgeIntent:
     explicit_rotation: bool = False
 
 
-
-
 @dataclass
 class BoardState:
     """Complete snapshot -- the interchange format between Brain and Hardware."""
@@ -363,9 +366,7 @@ class BoardState:
     traces: list[TraceSegment] = field(default_factory=list)
     vias: list[Via] = field(default_factory=list)
     silkscreen: list[SilkscreenElement] = field(default_factory=list)
-    board_outline: tuple[Point, Point] = field(
-        default_factory=lambda: (Point(0, 0), Point(90, 58))
-    )
+    board_outline: tuple[Point, Point] = field(default_factory=lambda: (Point(0, 0), Point(90, 58)))
     # RF antenna keep-clear rects (board coords), populated by adapter.load via
     # hardware.keepout_extract. The placer pushes non-owner parts out of each.
     keepout_rects: list[KeepoutRect] = field(default_factory=list)
@@ -385,7 +386,6 @@ class BoardState:
     def board_center(self) -> Point:
         tl, br = self.board_outline
         return Point((tl.x + br.x) / 2, (tl.y + br.y) / 2)
-
 
 
 # Default weighting of the PlacementScore sub-scores -- the single source of
@@ -495,7 +495,6 @@ class PlacementScore:
         weight_sum = sum(w.values()) or 1.0
         self.total = sum(getattr(self, k) * v for k, v in w.items()) / weight_sum
         return self.total
-
 
 
 # ---------------------------------------------------------------------------
@@ -650,9 +649,7 @@ class SolveRoundResult:
     placement_diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        routing = {
-            key: value for key, value in self.routing.items() if not key.startswith("_")
-        }
+        routing = {key: value for key, value in self.routing.items() if not key.startswith("_")}
         return {
             "round_index": self.round_index,
             "seed": self.seed,
@@ -696,12 +693,8 @@ class SolveRoundResult:
                 "traces": int(routing.get("traces", 0) or 0),
                 "vias": int(routing.get("vias", 0) or 0),
                 "total_length_mm": float(routing.get("total_length_mm", 0.0) or 0.0),
-                "failed_internal_nets": list(
-                    routing.get("failed_internal_nets", []) or []
-                ),
-                "routed_internal_nets": list(
-                    routing.get("routed_internal_nets", []) or []
-                ),
+                "failed_internal_nets": list(routing.get("failed_internal_nets", []) or []),
+                "routed_internal_nets": list(routing.get("routed_internal_nets", []) or []),
             },
         }
 
@@ -725,9 +718,5 @@ class HierarchyLevelState:
     child_instances: list[SubCircuitInstance] = field(default_factory=list)
     local_components: dict[str, Component] = field(default_factory=dict)
     interconnect_nets: dict[str, Net] = field(default_factory=dict)
-    board_outline: tuple[Point, Point] = field(
-        default_factory=lambda: (Point(0, 0), Point(0, 0))
-    )
+    board_outline: tuple[Point, Point] = field(default_factory=lambda: (Point(0, 0), Point(0, 0)))
     constraints: dict[str, object] = field(default_factory=dict)
-
-

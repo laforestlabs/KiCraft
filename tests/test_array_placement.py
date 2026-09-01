@@ -5,6 +5,7 @@ Regression: a 200-LED array fed to the force/SA solver never converged
 grid-placed deterministically, skipping the optimizer. See
 ``kicraft/autoplacer/brain/array_placement.py``.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -14,18 +15,32 @@ from kicraft.autoplacer.brain.array_placement import (
     place_array_leaves,
 )
 from kicraft.autoplacer.brain.placement_solver import PlacementSolver
-from kicraft.autoplacer.brain.types import BoardState, Component, Layer, Pad, Point
+from kicraft.autoplacer.brain.types import (
+    BoardState,
+    Component,
+    Layer,
+    Pad,
+    Point,
+    angles_close,
+    edge_outward_angle,
+    opening_board_angle,
+)
 
 
 def _comp(ref: str, value: str, w: float, h: float, npads: int) -> Component:
     pads = [
-        Pad(ref=ref, pad_id=str(i + 1), pos=Point(-0.5 + i * 0.3, 0.0),
-            net="N", layer=Layer.FRONT)
+        Pad(ref=ref, pad_id=str(i + 1), pos=Point(-0.5 + i * 0.3, 0.0), net="N", layer=Layer.FRONT)
         for i in range(npads)
     ]
     return Component(
-        ref=ref, value=value, pos=Point(0.0, 0.0), rotation=0.0,
-        layer=Layer.FRONT, width_mm=w, height_mm=h, pads=pads,
+        ref=ref,
+        value=value,
+        pos=Point(0.0, 0.0),
+        rotation=0.0,
+        layer=Layer.FRONT,
+        width_mm=w,
+        height_mm=h,
+        pads=pads,
     )
 
 
@@ -34,15 +49,14 @@ def test_grid_geometry_serpentine_lock_and_strip() -> None:
     comps.update({f"C{i}": _comp(f"C{i}", "100nF", 1.0, 0.5, 2) for i in range(1, 3)})
     d1_pad0 = (comps["D1"].pads[0].pos.x, comps["D1"].pads[0].pos.y)
 
-    arrays = [{"refs": [f"D{i}" for i in range(1, 7)], "rows": 2, "cols": 3,
-               "serpentine": True}]
+    arrays = [{"refs": [f"D{i}" for i in range(1, 7)], "rows": 2, "cols": 3, "serpentine": True}]
     # clearance 0 so the gap isn't floored to the placement clearance.
     # array_orient_chain off: this test pins grid geometry + the pure-translation
     # of pads; chain orientation (which rotates members) is covered separately.
     placed, fully = place_array_leaves(
-        comps, arrays,
-        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0,
-         "array_orient_chain": False},
+        comps,
+        arrays,
+        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0, "array_orient_chain": False},
     )
 
     assert placed == {f"D{i}" for i in range(1, 7)}
@@ -72,8 +86,16 @@ def _led(ref: str, dout_net: str, din_net: str) -> Component:
         Pad(ref=ref, pad_id="3", pos=Point(+0.4, +0.4), net="GND", layer=Layer.FRONT),
         Pad(ref=ref, pad_id="4", pos=Point(+0.4, -0.4), net=din_net, layer=Layer.FRONT),
     ]
-    return Component(ref=ref, value="LED", pos=Point(0.0, 0.0), rotation=0.0,
-                     layer=Layer.FRONT, width_mm=1.3, height_mm=1.3, pads=pads)
+    return Component(
+        ref=ref,
+        value="LED",
+        pos=Point(0.0, 0.0),
+        rotation=0.0,
+        layer=Layer.FRONT,
+        width_mm=1.3,
+        height_mm=1.3,
+        pads=pads,
+    )
 
 
 def test_chain_orientation_points_dout_at_next() -> None:
@@ -86,8 +108,9 @@ def test_chain_orientation_points_dout_at_next() -> None:
         "D2": _led("D2", "D2_DOUT", "D1_DOUT"),
         "D3": _led("D3", "D3_DOUT", "D2_DOUT"),
     }
-    arrays = [{"refs": ["D1", "D2", "D3"], "rows": 1, "cols": 3,
-               "pitch_mm": 3.0, "serpentine": True}]
+    arrays = [
+        {"refs": ["D1", "D2", "D3"], "rows": 1, "cols": 3, "pitch_mm": 3.0, "serpentine": True}
+    ]
     place_array_leaves(comps, arrays, {})  # orientation on by default
 
     def dout_pad(ref, net):
@@ -122,8 +145,8 @@ def test_serpentine_grid_uses_two_alternating_rotations() -> None:
     comps = _grid(25)
     refs = [f"D{i}" for i in range(1, 26)]
     place_array_leaves(
-        comps, [{"refs": refs, "rows": 5, "cols": 5,
-                 "pitch_mm": 3.0, "serpentine": True}], {})
+        comps, [{"refs": refs, "rows": 5, "cols": 5, "pitch_mm": 3.0, "serpentine": True}], {}
+    )
     assert len({comps[r].rotation for r in refs}) == 2
     for r in range(5):
         row = {comps[refs[r * 5 + c]].rotation for c in range(5)}
@@ -141,8 +164,8 @@ def test_pure_array_leaf_is_fully_handled() -> None:
     comps = _grid(25)
     refs = [f"D{i}" for i in range(1, 26)]
     placed, fully = place_array_leaves(
-        comps, [{"refs": refs, "rows": 5, "cols": 5,
-                 "pitch_mm": 3.0, "serpentine": True}], {})
+        comps, [{"refs": refs, "rows": 5, "cols": 5, "pitch_mm": 3.0, "serpentine": True}], {}
+    )
     assert placed == set(refs)
     assert fully is True
 
@@ -151,14 +174,13 @@ def test_non_serpentine_grid_is_single_uniform_rotation() -> None:
     comps = _grid(25)
     refs = [f"D{i}" for i in range(1, 26)]
     place_array_leaves(
-        comps, [{"refs": refs, "rows": 5, "cols": 5,
-                 "pitch_mm": 3.0, "serpentine": False}], {})
+        comps, [{"refs": refs, "rows": 5, "cols": 5, "pitch_mm": 3.0, "serpentine": False}], {}
+    )
     assert len({comps[r].rotation for r in refs}) == 1
 
 
 def test_chain_orientation_can_be_disabled() -> None:
-    comps = {"D1": _led("D1", "D1_DOUT", "DATA_IN"),
-             "D2": _led("D2", "D2_DOUT", "D1_DOUT")}
+    comps = {"D1": _led("D1", "D1_DOUT", "DATA_IN"), "D2": _led("D2", "D2_DOUT", "D1_DOUT")}
     arrays = [{"refs": ["D1", "D2"], "rows": 1, "cols": 2, "pitch_mm": 3.0}]
     place_array_leaves(comps, arrays, {"array_orient_chain": False})
     # rotation untouched -> DOUT stays on its original (-x) side.
@@ -169,30 +191,176 @@ def test_chain_orientation_can_be_disabled() -> None:
 
 def test_explicit_pitch_is_honored() -> None:
     comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 2) for i in range(1, 5)}
-    arrays = [{"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2,
-               "pitch_mm": 5.0, "serpentine": False}]
+    arrays = [
+        {
+            "refs": ["D1", "D2", "D3", "D4"],
+            "rows": 2,
+            "cols": 2,
+            "pitch_mm": 5.0,
+            "serpentine": False,
+        }
+    ]
     place_array_leaves(comps, arrays, {})
     assert (comps["D2"].pos.x - comps["D1"].pos.x) == 5.0  # column pitch
     assert (comps["D3"].pos.y - comps["D1"].pos.y) == 5.0  # row pitch
 
 
 def test_explicit_pitch_is_floored_to_legal_member_spacing() -> None:
-    comps = {
-        f"J{i}": _comp(f"J{i}", "terminal", 8.0, 7.0, 2)
-        for i in range(1, 5)
-    }
-    arrays = [{
-        "refs": ["J1", "J2", "J3", "J4"],
-        "rows": 1,
-        "cols": 4,
-        "pitch_mm": 5.0,
-    }]
+    comps = {f"J{i}": _comp(f"J{i}", "terminal", 8.0, 7.0, 2) for i in range(1, 5)}
+    arrays = [
+        {
+            "refs": ["J1", "J2", "J3", "J4"],
+            "rows": 1,
+            "cols": 4,
+            "pitch_mm": 5.0,
+        }
+    ]
     place_array_leaves(
         comps,
         arrays,
         {"placement_clearance_mm": 2.5, "array_orient_chain": False},
     )
     assert comps["J2"].pos.x - comps["J1"].pos.x == pytest.approx(8.6)
+
+
+def _edge_connector(
+    ref: str,
+    *,
+    width: float = 7.89,
+    height: float = 10.09,
+    opening: float | None = 180.0,
+) -> Component:
+    return Component(
+        ref=ref,
+        value="WJ126V",
+        pos=Point(0.0, 0.0),
+        rotation=0.0,
+        layer=Layer.FRONT,
+        width_mm=width,
+        height_mm=height,
+        pads=[
+            Pad(
+                ref=ref,
+                pad_id=str(index + 1),
+                pos=Point(-2.5 + 5.0 * index, 1.0),
+                net=f"{ref}_{index + 1}",
+                layer=Layer.FRONT,
+                size_mm=Point(1.8, 1.8),
+            )
+            for index in range(2)
+        ],
+        kind="connector",
+        body_center=Point(0.4, 1.2),
+        opening_direction=opening,
+    )
+
+
+def _physical_gap(a: Component, b: Component, horizontal: bool) -> float:
+    a_tl, a_br = a.physical_bbox()
+    b_tl, _ = b.physical_bbox()
+    return b_tl.x - a_br.x if horizontal else b_tl.y - a_br.y
+
+
+def test_bottom_edge_connector_array_forms_outward_horizontal_bank() -> None:
+    comps = {"J1": _edge_connector("J1"), "J2": _edge_connector("J2")}
+    placed, fully = place_array_leaves(
+        comps,
+        [
+            {
+                "refs": ["J1", "J2"],
+                "pattern": "grid",
+                "rows": 1,
+                "cols": 2,
+                "pitch_mm": 7.5,
+            }
+        ],
+        {
+            "component_zones": {
+                "J1": {"edge": "bottom"},
+                "J2": {"edge": "bottom"},
+            },
+            "placement_clearance_mm": 2.5,
+        },
+    )
+
+    assert placed == {"J1", "J2"}
+    assert fully is True
+    assert comps["J1"].pos.y == pytest.approx(comps["J2"].pos.y)
+    assert comps["J1"].pos.x < comps["J2"].pos.x
+    assert {comps[ref].rotation for ref in placed} == {90.0}
+    assert all(comps[ref].locked and comps[ref].array_member for ref in placed)
+    assert _physical_gap(comps["J1"], comps["J2"], True) == pytest.approx(0.6)
+    for ref in placed:
+        comp = comps[ref]
+        assert angles_close(
+            opening_board_angle(comp.opening_direction, comp.rotation),
+            edge_outward_angle(comp.layer, "bottom"),
+        )
+
+
+@pytest.mark.parametrize("edge", ["top", "bottom", "left", "right"])
+def test_edge_connector_array_faces_and_aligns_all_edges(edge: str) -> None:
+    comps = {
+        "J1": _edge_connector("J1", width=7.89, height=10.09),
+        "J2": _edge_connector("J2", width=9.0, height=8.0),
+    }
+    place_array_leaves(
+        comps,
+        [{"refs": ["J1", "J2"], "rows": 1, "cols": 2}],
+        {
+            "component_zones": {
+                "J1": {"edge": edge},
+                "J2": {"edge": edge},
+            },
+            "array_gap_mm": 0.6,
+            "placement_clearance_mm": 0.0,
+        },
+    )
+
+    horizontal = edge in ("top", "bottom")
+    assert _physical_gap(comps["J1"], comps["J2"], horizontal) == pytest.approx(0.6)
+    bboxes = [comps[ref].physical_bbox() for ref in ("J1", "J2")]
+    if edge == "top":
+        assert bboxes[0][0].y == pytest.approx(bboxes[1][0].y)
+    elif edge == "bottom":
+        assert bboxes[0][1].y == pytest.approx(bboxes[1][1].y)
+    elif edge == "left":
+        assert bboxes[0][0].x == pytest.approx(bboxes[1][0].x)
+    else:
+        assert bboxes[0][1].x == pytest.approx(bboxes[1][1].x)
+    for comp in comps.values():
+        assert angles_close(
+            opening_board_angle(comp.opening_direction, comp.rotation),
+            edge_outward_angle(comp.layer, edge),
+        )
+
+
+def test_connector_array_without_one_common_explicit_edge_stays_generic() -> None:
+    comps = {"J1": _edge_connector("J1"), "J2": _edge_connector("J2")}
+    place_array_leaves(
+        comps,
+        [{"refs": ["J1", "J2"], "rows": 1, "cols": 2}],
+        {"component_zones": {"J1": {"edge": "bottom"}}},
+    )
+    assert comps["J1"].rotation == 0.0
+    assert comps["J2"].rotation == 0.0
+
+
+def test_two_dimensional_same_edge_connector_array_fails_loudly() -> None:
+    refs = ["J1", "J2", "J3", "J4"]
+    comps = {ref: _edge_connector(ref) for ref in refs}
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^edge_connector_array_not_one_dimensional:"
+            r"J1,J2,J3,J4@bottom\(2x2\)$"
+        ),
+    ):
+        place_array_leaves(
+            comps,
+            [{"refs": refs, "rows": 2, "cols": 2}],
+            {"component_zones": {ref: {"edge": "bottom"} for ref in refs}},
+        )
 
 
 def test_mixed_leaf_locks_array_but_not_fully_handled() -> None:
@@ -231,8 +399,7 @@ def test_solver_skips_pipeline_for_array_leaf() -> None:
     assert len(out) == 52
     assert all(out[f"D{i}"].locked for i in range(1, 51))
     # all members on distinct grid positions
-    positions = {(round(out[f"D{i}"].pos.x, 3), round(out[f"D{i}"].pos.y, 3))
-                 for i in range(1, 51)}
+    positions = {(round(out[f"D{i}"].pos.x, 3), round(out[f"D{i}"].pos.y, 3)) for i in range(1, 51)}
     assert len(positions) == 50
 
 
@@ -241,9 +408,7 @@ def test_grid_pitch_respects_clearance() -> None:
     # legal by construction (a tighter gap made the legalizer thrash).
     comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 2) for i in range(1, 5)}
     arrays = [{"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2}]
-    place_array_leaves(
-        comps, arrays, {"array_gap_mm": 0.5, "placement_clearance_mm": 3.0}
-    )
+    place_array_leaves(comps, arrays, {"array_gap_mm": 0.5, "placement_clearance_mm": 3.0})
     # gap floored to 3.0 -> pitch = courtyard(1.5) + 3.0 = 4.5
     assert (comps["D2"].pos.x - comps["D1"].pos.x) == 4.5
 
@@ -253,8 +418,9 @@ def test_legalizer_skips_array_members() -> None:
     # escaped by the legalizer (that thrash was the 200-LED routing hang).
     comps = {f"D{i}": _comp(f"D{i}", "LED", 2.0, 2.0, 2) for i in range(1, 5)}
     place_array_leaves(
-        comps, [{"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2,
-                 "pitch_mm": 2.2}], {},  # 2.2 < courtyard+clearance -> "overlaps"
+        comps,
+        [{"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2, "pitch_mm": 2.2}],
+        {},  # 2.2 < courtyard+clearance -> "overlaps"
     )
     state = BoardState(components=comps, nets={})
     solver = PlacementSolver(state, {"placement_clearance_mm": 2.5}, seed=0)
@@ -266,12 +432,13 @@ def test_legalizer_skips_array_members() -> None:
 
 def test_leaf_is_fully_array_gate() -> None:
     from kicraft.autoplacer.brain.array_placement import leaf_is_fully_array
+
     comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 4) for i in range(1, 5)}
     comps["C1"] = _comp("C1", "100nF", 1.0, 0.5, 2)
     arrays = [{"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2}]
-    assert leaf_is_fully_array(comps, arrays) is True          # grid + passive
+    assert leaf_is_fully_array(comps, arrays) is True  # grid + passive
     comps["U1"] = _comp("U1", "IC", 5.0, 5.0, 8)
-    assert leaf_is_fully_array(comps, arrays) is False         # extra non-passive
+    assert leaf_is_fully_array(comps, arrays) is False  # extra non-passive
     assert leaf_is_fully_array({"R1": _comp("R1", "10k", 1.0, 0.5, 2)}, []) is False
 
 
@@ -282,8 +449,7 @@ def test_deterministic_route_signature() -> None:
     comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 4) for i in range(1, 5)}
     place_array_leaves(
         comps,
-        [{"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2,
-          "pitch_mm": 3.0}],
+        [{"refs": ["D1", "D2", "D3", "D4"], "rows": 2, "cols": 2, "pitch_mm": 3.0}],
         {},
     )
     state = BoardState(components=comps, nets={})
@@ -297,9 +463,7 @@ def test_deterministic_route_signature() -> None:
     assert sig == _deterministic_route_signature(
         state, {**cfg, "kicad_routing_tools_timeout_s": 999}
     )
-    assert sig != _deterministic_route_signature(
-        state, {**cfg, "kicad_routing_tools_max_ripup": 5}
-    )
+    assert sig != _deterministic_route_signature(state, {**cfg, "kicad_routing_tools_max_ripup": 5})
     assert sig != _deterministic_route_signature(
         state, {**cfg, "kicad_routing_tools_ordering": "inside_out"}
     )
@@ -316,19 +480,27 @@ def test_non_array_part_pushed_off_grid() -> None:
 
     comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 4) for i in range(1, 10)}
     place_array_leaves(
-        comps, [{"refs": [f"D{i}" for i in range(1, 10)], "rows": 3, "cols": 3,
-                 "pitch_mm": 3.0}], {"array_orient_chain": False},
+        comps,
+        [{"refs": [f"D{i}" for i in range(1, 10)], "rows": 3, "cols": 3, "pitch_mm": 3.0}],
+        {"array_orient_chain": False},
     )
     # grid spans ~ x,y in [1.5..7.5]; drop R1 (5mm wide) right on top of it.
     members = [c for c in comps.values() if getattr(c, "array_member", False)]
     gx = sum(c.pos.x for c in members) / len(members)
     gy = sum(c.pos.y for c in members) / len(members)
-    r1 = Component(ref="R1", value="330", pos=Point(gx, gy), rotation=0.0,
-                   layer=Layer.FRONT, width_mm=5.0, height_mm=2.0,
-                   pads=[Pad(ref="R1", pad_id="1", pos=Point(gx - 2, gy), net="A",
-                             layer=Layer.FRONT),
-                         Pad(ref="R1", pad_id="2", pos=Point(gx + 2, gy), net="B",
-                             layer=Layer.FRONT)])
+    r1 = Component(
+        ref="R1",
+        value="330",
+        pos=Point(gx, gy),
+        rotation=0.0,
+        layer=Layer.FRONT,
+        width_mm=5.0,
+        height_mm=2.0,
+        pads=[
+            Pad(ref="R1", pad_id="1", pos=Point(gx - 2, gy), net="A", layer=Layer.FRONT),
+            Pad(ref="R1", pad_id="2", pos=Point(gx + 2, gy), net="B", layer=Layer.FRONT),
+        ],
+    )
     r1.body_center = Point(gx, gy)
     comps["R1"] = r1
 
@@ -350,12 +522,18 @@ def test_non_array_part_pushed_off_grid() -> None:
 def _decap(ref: str, w: float = 1.0, h: float = 0.5) -> Component:
     """A 2-pad 100nF decoupling cap (both pads power/ground)."""
     return Component(
-        ref=ref, value="100nF", pos=Point(0.0, 0.0), rotation=0.0,
-        layer=Layer.FRONT, width_mm=w, height_mm=h,
-        pads=[Pad(ref=ref, pad_id="1", pos=Point(-0.5, 0.0), net="+5V",
-                  layer=Layer.FRONT),
-              Pad(ref=ref, pad_id="2", pos=Point(0.5, 0.0), net="GND",
-                  layer=Layer.FRONT)])
+        ref=ref,
+        value="100nF",
+        pos=Point(0.0, 0.0),
+        rotation=0.0,
+        layer=Layer.FRONT,
+        width_mm=w,
+        height_mm=h,
+        pads=[
+            Pad(ref=ref, pad_id="1", pos=Point(-0.5, 0.0), net="+5V", layer=Layer.FRONT),
+            Pad(ref=ref, pad_id="2", pos=Point(0.5, 0.0), net="GND", layer=Layer.FRONT),
+        ],
+    )
 
 
 def test_per_led_decaps_beside_led_not_scattered() -> None:
@@ -369,21 +547,28 @@ def test_per_led_decaps_beside_led_not_scattered() -> None:
         comps[f"C{i}"] = _decap(f"C{i}")
     # a series DATA resistor (NOT a decap: signal nets) must NOT be co-located
     comps["R1"] = Component(
-        ref="R1", value="330", pos=Point(0.0, 0.0), rotation=0.0, layer=Layer.FRONT,
-        width_mm=1.0, height_mm=0.5,
-        pads=[Pad(ref="R1", pad_id="1", pos=Point(-0.5, 0.0), net="DATA",
-                  layer=Layer.FRONT),
-              Pad(ref="R1", pad_id="2", pos=Point(0.5, 0.0), net="DATA_IN",
-                  layer=Layer.FRONT)])
+        ref="R1",
+        value="330",
+        pos=Point(0.0, 0.0),
+        rotation=0.0,
+        layer=Layer.FRONT,
+        width_mm=1.0,
+        height_mm=0.5,
+        pads=[
+            Pad(ref="R1", pad_id="1", pos=Point(-0.5, 0.0), net="DATA", layer=Layer.FRONT),
+            Pad(ref="R1", pad_id="2", pos=Point(0.5, 0.0), net="DATA_IN", layer=Layer.FRONT),
+        ],
+    )
 
-    arrays = [{"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2,
-               "pitch_mm": 3.0}]
+    arrays = [{"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2, "pitch_mm": 3.0}]
     placed, _ = place_array_leaves(comps, arrays, {})
 
     # placed, locked, and tagged array_member (so the legalizer's clearance gate
     # exempts them from the 2.5mm placement clearance the tight grid is exempt from)
-    assert all(f"C{i}" in placed and comps[f"C{i}"].locked
-               and comps[f"C{i}"].array_member for i in range(1, 5))
+    assert all(
+        f"C{i}" in placed and comps[f"C{i}"].locked and comps[f"C{i}"].array_member
+        for i in range(1, 5)
+    )
     assert "R1" not in placed, "signal resistor must not be co-located as a decap"
 
     led_pos = {i: comps[f"D{i}"].pos for i in range(1, 5)}
@@ -393,8 +578,7 @@ def test_per_led_decaps_beside_led_not_scattered() -> None:
     for i in range(1, 5):
         cap = comps[f"C{i}"].pos
         # beside SOME LED: within one pitch of a member centre (not flung away)
-        nearest = min(((cap.x - p.x) ** 2 + (cap.y - p.y) ** 2) ** 0.5
-                      for p in led_pos.values())
+        nearest = min(((cap.x - p.x) ** 2 + (cap.y - p.y) ** 2) ** 0.5 for p in led_pos.values())
         assert nearest <= 3.0, f"C{i} not beside any LED (nearest {nearest:.2f}mm)"
         # in the vertical channel: aligned to its LED's column, offset in y
         assert any(abs(cap.x - p.x) < 0.01 for p in led_pos.values())
@@ -409,8 +593,7 @@ def _ring_layout(pitch_mm: float = 1.6):
     for i in range(1, 5):
         comps[f"C{i}"] = _decap(f"C{i}")
     # pitch 1.6 vs 1.3 LED -> only 0.3mm gap, no room for a 0.5mm-tall cap beside
-    arrays = [{"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2,
-               "pitch_mm": pitch_mm}]
+    arrays = [{"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2, "pitch_mm": pitch_mm}]
     placed, _ = place_array_leaves(comps, arrays, {})
     return comps, placed
 
@@ -467,11 +650,13 @@ def test_perimeter_ring_stays_in_positive_quadrant() -> None:
         c = comps[r]
         assert c.pos.x >= 0.0 and c.pos.y >= 0.0, (
             f"{r} body at ({c.pos.x:.3f}, {c.pos.y:.3f}) is outside the positive "
-            "quadrant -> would fall outside the fitted leaf outline")
+            "quadrant -> would fall outside the fitted leaf outline"
+        )
         for p in c.pads:
             assert p.pos.x >= -1e-6 and p.pos.y >= -1e-6, (
                 f"{r} pad {p.pad_id} at ({p.pos.x:.3f}, {p.pos.y:.3f}) is negative "
-                "-> outside the fitted leaf Edge.Cuts (the KC-93X3X3 legality kill)")
+                "-> outside the fitted leaf Edge.Cuts (the KC-93X3X3 legality kill)"
+            )
     # The re-base is rigid: the ring is still a clean 4-edge frame around the grid
     # (relative geometry preserved), just translated into positive space.
     leds = [comps[f"D{i}"].pos for i in range(1, 5)]
@@ -496,12 +681,18 @@ def test_companion_refs_reload_retag_helper() -> None:
     comps["C1"] = _decap("C1")
     comps["C2"] = _decap("C2")
     comps["R1"] = Component(
-        ref="R1", value="330", pos=Point(0.0, 0.0), rotation=0.0, layer=Layer.FRONT,
-        width_mm=1.0, height_mm=0.5,
-        pads=[Pad(ref="R1", pad_id="1", pos=Point(-0.5, 0.0), net="DATA",
-                  layer=Layer.FRONT),
-              Pad(ref="R1", pad_id="2", pos=Point(0.5, 0.0), net="DATA_IN",
-                  layer=Layer.FRONT)])
+        ref="R1",
+        value="330",
+        pos=Point(0.0, 0.0),
+        rotation=0.0,
+        layer=Layer.FRONT,
+        width_mm=1.0,
+        height_mm=0.5,
+        pads=[
+            Pad(ref="R1", pad_id="1", pos=Point(-0.5, 0.0), net="DATA", layer=Layer.FRONT),
+            Pad(ref="R1", pad_id="2", pos=Point(0.5, 0.0), net="DATA_IN", layer=Layer.FRONT),
+        ],
+    )
     arrays = [{"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2}]
     assert array_companion_refs(comps, arrays) == ["C1", "C2"]
     # no array present in this leaf -> claim nothing (plain decap leaf untouched)
@@ -511,9 +702,9 @@ def test_companion_refs_reload_retag_helper() -> None:
 
 # --- Layer 3: grid-overlap guard --------------------------------------------
 
+
 def _grid_dict(refs, centers, w=1.5, h=1.5):
-    return {"refs": refs, "led_w": w, "led_h": h,
-            "centers": [Point(x, y) for x, y in centers]}
+    return {"refs": refs, "led_w": w, "led_h": h, "centers": [Point(x, y) for x, y in centers]}
 
 
 def test_assert_grids_disjoint_allows_separated_grids() -> None:
@@ -533,24 +724,29 @@ def test_place_array_leaves_packs_two_grids_with_clearance() -> None:
     comps = {f"D{i}": _comp(f"D{i}", "LED", 1.5, 1.5, 4) for i in range(1, 5)}
     comps.update({f"R{i}": _comp(f"R{i}", "1k", 1.0, 0.5, 2) for i in range(1, 7)})
     arrays = [
-        {"refs": [f"D{i}" for i in range(1, 5)], "rows": 2, "cols": 2,
-         "pitch_mm": 2.0, "serpentine": True},
-        {"refs": [f"R{i}" for i in range(1, 7)], "rows": 2, "cols": 3,
-         "pitch_mm": 3.0, "serpentine": True},
+        {
+            "refs": [f"D{i}" for i in range(1, 5)],
+            "rows": 2,
+            "cols": 2,
+            "pitch_mm": 2.0,
+            "serpentine": True,
+        },
+        {
+            "refs": [f"R{i}" for i in range(1, 7)],
+            "rows": 2,
+            "cols": 3,
+            "pitch_mm": 3.0,
+            "serpentine": True,
+        },
     ]
     place_array_leaves(
-        comps, arrays,
+        comps,
+        arrays,
         {"placement_clearance_mm": 2.5, "array_orient_chain": False},
     )
 
-    d_right = max(
-        comps[f"D{i}"].pos.x + comps[f"D{i}"].width_mm / 2
-        for i in range(1, 5)
-    )
-    r_left = min(
-        comps[f"R{i}"].pos.x - comps[f"R{i}"].width_mm / 2
-        for i in range(1, 7)
-    )
+    d_right = max(comps[f"D{i}"].pos.x + comps[f"D{i}"].width_mm / 2 for i in range(1, 5))
+    r_left = min(comps[f"R{i}"].pos.x - comps[f"R{i}"].width_mm / 2 for i in range(1, 7))
     assert r_left - d_right == pytest.approx(2.5)
 
 
@@ -562,18 +758,13 @@ def test_place_array_leaves_packs_grid_and_ring() -> None:
         {"refs": [f"L{i}" for i in range(1, 7)], "pattern": "ring"},
     ]
     place_array_leaves(
-        comps, arrays,
+        comps,
+        arrays,
         {"placement_clearance_mm": 1.25, "array_orient_chain": False},
     )
 
-    grid_right = max(
-        comps[f"D{i}"].pos.x + comps[f"D{i}"].width_mm / 2
-        for i in range(1, 5)
-    )
-    ring_left = min(
-        comps[f"L{i}"].pos.x - comps[f"L{i}"].width_mm / 2
-        for i in range(1, 7)
-    )
+    grid_right = max(comps[f"D{i}"].pos.x + comps[f"D{i}"].width_mm / 2 for i in range(1, 5))
+    ring_left = min(comps[f"L{i}"].pos.x - comps[f"L{i}"].width_mm / 2 for i in range(1, 7))
     assert ring_left - grid_right >= 1.25
 
 
@@ -600,9 +791,9 @@ def _center_of(comps, refs):
 def test_ring_geometry_even_spacing_lock_and_fully_handled() -> None:
     comps, refs = _ring_comps(12)
     placed, fully = place_array_leaves(
-        comps, [{"refs": refs, "pattern": "ring"}],
-        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0,
-         "array_orient_chain": False},
+        comps,
+        [{"refs": refs, "pattern": "ring"}],
+        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0, "array_orient_chain": False},
     )
     assert placed == set(refs)
     assert fully is True
@@ -612,10 +803,7 @@ def test_ring_geometry_even_spacing_lock_and_fully_handled() -> None:
     # Equal radius (a circle, not a blob): spread < 1% of the mean.
     assert max(radii) - min(radii) < 0.01 * (sum(radii) / len(radii))
     # Even angular spacing: every consecutive pair subtends 360/12 = 30 deg.
-    angles = [
-        _math.degrees(_math.atan2(comps[r].pos.y - cy, comps[r].pos.x - cx))
-        for r in refs
-    ]
+    angles = [_math.degrees(_math.atan2(comps[r].pos.y - cy, comps[r].pos.x - cx)) for r in refs]
     steps = [(angles[(i + 1) % 12] - angles[i]) % 360.0 for i in range(12)]
     assert all(abs(s - 30.0) < 0.5 for s in steps)
     # Positive quadrant (leaf outline grows from the origin into +x/+y).
@@ -628,13 +816,15 @@ def test_ring_geometry_even_spacing_lock_and_fully_handled() -> None:
 def test_ring_explicit_radius_honored() -> None:
     comps, refs = _ring_comps(12)
     place_array_leaves(
-        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 24.0}],
-        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0,
-         "array_orient_chain": False},
+        comps,
+        [{"refs": refs, "pattern": "ring", "radius_mm": 24.0}],
+        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0, "array_orient_chain": False},
     )
     cx, cy = _center_of(comps, refs)
     for r in refs:
-        assert _math.hypot(comps[r].pos.x - cx, comps[r].pos.y - cy) == pytest.approx(24.0, abs=0.05)
+        assert _math.hypot(comps[r].pos.x - cx, comps[r].pos.y - cy) == pytest.approx(
+            24.0, abs=0.05
+        )
 
 
 def test_ring_radius_floored_to_member_clearance() -> None:
@@ -642,9 +832,9 @@ def test_ring_radius_floored_to_member_clearance() -> None:
     # (chord >= member diagonal + gap), never overlapped.
     comps, refs = _ring_comps(12)
     place_array_leaves(
-        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 0.5}],
-        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0,
-         "array_orient_chain": False},
+        comps,
+        [{"refs": refs, "pattern": "ring", "radius_mm": 0.5}],
+        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0, "array_orient_chain": False},
     )
     cx, cy = _center_of(comps, refs)
     r0 = _math.hypot(comps[refs[0]].pos.x - cx, comps[refs[0]].pos.y - cy)
@@ -655,9 +845,7 @@ def test_ring_radius_floored_to_member_clearance() -> None:
 
 def test_ring_orientation_points_dout_along_chain() -> None:
     comps, refs = _ring_comps(12)
-    place_array_leaves(
-        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 10.0}], {}
-    )
+    place_array_leaves(comps, [{"refs": refs, "pattern": "ring", "radius_mm": 10.0}], {})
 
     def dout_pad(ref):
         net = f"{ref}_DOUT"
@@ -676,8 +864,13 @@ def _ring_with_decaps(n: int):
     comps, refs = _ring_comps(n)
     for i in range(1, n + 1):
         comps[f"C{i}"] = Component(
-            ref=f"C{i}", value="100nF", pos=Point(0.0, 0.0), rotation=0.0,
-            layer=Layer.FRONT, width_mm=1.0, height_mm=0.5,
+            ref=f"C{i}",
+            value="100nF",
+            pos=Point(0.0, 0.0),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=1.0,
+            height_mm=0.5,
             pads=[
                 Pad(ref=f"C{i}", pad_id="1", pos=Point(-0.4, 0.0), net="+5V", layer=Layer.FRONT),
                 Pad(ref=f"C{i}", pad_id="2", pos=Point(+0.4, 0.0), net="GND", layer=Layer.FRONT),
@@ -693,7 +886,8 @@ def test_ring_companion_decaps_placed_in_band_at_gap_midpoints() -> None:
     n = 6
     comps, refs = _ring_with_decaps(n)
     placed, fully = place_array_leaves(
-        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 10.0}],
+        comps,
+        [{"refs": refs, "pattern": "ring", "radius_mm": 10.0}],
         {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0},
     )
     assert fully is True
@@ -703,10 +897,15 @@ def test_ring_companion_decaps_placed_in_band_at_gap_midpoints() -> None:
     def ang(x, y):
         return _math.degrees(_math.atan2(y - cy, x - cx)) % 360.0
 
-    r_pwr = sum(
-        _math.hypot(p.pos.x - cx, p.pos.y - cy)
-        for r in refs for p in comps[r].pads if p.net == "+5V"
-    ) / n
+    r_pwr = (
+        sum(
+            _math.hypot(p.pos.x - cx, p.pos.y - cy)
+            for r in refs
+            for p in comps[r].pads
+            if p.net == "+5V"
+        )
+        / n
+    )
     r_tap = r_pwr * _math.cos(_math.pi / n)
     for i in range(1, n + 1):
         c = comps[f"C{i}"]
@@ -732,7 +931,8 @@ def test_ring_band_decaps_fall_back_to_perimeter_when_gap_too_tight() -> None:
     n = 6
     comps, refs = _ring_with_decaps(n)
     placed, fully = place_array_leaves(
-        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 0.5}],
+        comps,
+        [{"refs": refs, "pattern": "ring", "radius_mm": 0.5}],
         {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0},
     )
     assert fully is True
@@ -749,9 +949,9 @@ def test_ring_band_decaps_legacy_switch_restores_interior_placement() -> None:
     n = 6
     comps, refs = _ring_with_decaps(n)
     placed, fully = place_array_leaves(
-        comps, [{"refs": refs, "pattern": "ring", "radius_mm": 10.0}],
-        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0,
-         "array_ring_band_decaps": False},
+        comps,
+        [{"refs": refs, "pattern": "ring", "radius_mm": 10.0}],
+        {"array_gap_mm": 0.5, "placement_clearance_mm": 0.0, "array_ring_band_decaps": False},
     )
     assert fully is True
     cx, cy = _center_of(comps, refs)
@@ -766,9 +966,7 @@ def test_ring_band_decaps_legacy_switch_restores_interior_placement() -> None:
         a_member = ang(comps[refs[i - 1]].pos.x, comps[refs[i - 1]].pos.y)
         assert abs((a_cap - a_member + 180.0) % 360.0 - 180.0) < 2.0
         r_cap = _math.hypot(c.pos.x - cx, c.pos.y - cy)
-        r_led = _math.hypot(
-            comps[refs[i - 1]].pos.x - cx, comps[refs[i - 1]].pos.y - cy
-        )
+        r_led = _math.hypot(comps[refs[i - 1]].pos.x - cx, comps[refs[i - 1]].pos.y - cy)
         assert r_cap < r_led
 
 

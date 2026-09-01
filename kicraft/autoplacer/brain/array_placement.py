@@ -16,13 +16,14 @@ Members are listed in data-chain order, so the fill order (boustrophedon for
 grids, circular for rings) keeps consecutive members physically adjacent — the
 DOUT->DIN routes stay short.
 """
+
 from __future__ import annotations
 
 import math
 
 from .geometry import rotate_component_in_place, rotate_vector
 from .placement_utils import _update_pad_positions
-from .types import Component, Point
+from .types import Component, Point, opening_rotation_for_edge
 
 
 def _orient_array_grid(
@@ -106,9 +107,7 @@ def _orient_array_grid(
             rotate_component_in_place(comp, delta)
 
 
-def _orient_ring(
-    comps: dict[str, Component], refs: list[str], cfg: dict
-) -> None:
+def _orient_ring(comps: dict[str, Component], refs: list[str], cfg: dict) -> None:
     """Rotate every ring member so its DOUT points along the chain direction
     (the chord toward the next member).
 
@@ -188,9 +187,121 @@ def _pitch(
     return px, py
 
 
-def _present_member_refs(
-    spec: dict, comps: dict[str, Component]
-) -> list[str] | None:
+_BOARD_EDGES = frozenset({"left", "right", "top", "bottom"})
+
+
+def _same_edge_connector_bank(
+    refs: list[str], comps: dict[str, Component], cfg: dict
+) -> str | None:
+    """Return the common explicit edge for an all-connector grid, if any."""
+    zones = cfg.get("component_zones")
+    if not isinstance(zones, dict) or not all(comps[ref].kind == "connector" for ref in refs):
+        return None
+    edges: list[str] = []
+    for ref in refs:
+        zone = zones.get(ref)
+        if not isinstance(zone, dict) or zone.get("edge") not in _BOARD_EDGES:
+            return None
+        edges.append(str(zone["edge"]))
+    return edges[0] if len(set(edges)) == 1 else None
+
+
+def _place_edge_connector_bank(
+    comps: dict[str, Component],
+    refs: list[str],
+    edge: str,
+    spec: dict,
+    derived_gap: float,
+    explicit_gap: float,
+) -> tuple[dict, tuple[float, float, float, float]]:
+    """Orient and physically pack a one-dimensional connector edge bank."""
+    members = [comps[ref] for ref in refs]
+    for comp in members:
+        if comp.opening_direction is None:
+            continue
+        target = opening_rotation_for_edge(comp.opening_direction, comp.layer, edge)
+        delta = (target - comp.rotation) % 360.0
+        if delta > 1e-6:
+            rotate_component_in_place(comp, delta)
+
+    requested = float(spec.get("pitch_mm") or 0.0)
+    gap = explicit_gap if requested else derived_gap
+    horizontal = edge in ("top", "bottom")
+    extents: list[tuple[float, float, float, float]] = []
+    for comp in members:
+        tl, br = comp.physical_bbox()
+        extents.append(
+            (
+                tl.x - comp.pos.x,
+                tl.y - comp.pos.y,
+                br.x - comp.pos.x,
+                br.y - comp.pos.y,
+            )
+        )
+
+    tangent_centers: list[float] = []
+    previous_center = previous_max = 0.0
+    for index, extent in enumerate(extents):
+        tangent_min = extent[0] if horizontal else extent[1]
+        tangent_max = extent[2] if horizontal else extent[3]
+        if index == 0:
+            center = gap - tangent_min
+        else:
+            center = max(
+                previous_center + requested,
+                previous_max + gap - tangent_min,
+            )
+        tangent_centers.append(center)
+        previous_center = center
+        previous_max = center + tangent_max
+
+    normal_mins = [extent[1] if horizontal else extent[0] for extent in extents]
+    normal_maxs = [extent[3] if horizontal else extent[2] for extent in extents]
+    if edge in ("top", "left"):
+        outward_target = gap
+        normal_centers = [outward_target - normal_min for normal_min in normal_mins]
+    else:
+        outward_target = gap + max(
+            normal_max - normal_min for normal_min, normal_max in zip(normal_mins, normal_maxs)
+        )
+        normal_centers = [outward_target - normal_max for normal_max in normal_maxs]
+
+    for ref, tangent, normal in zip(refs, tangent_centers, normal_centers):
+        comp = comps[ref]
+        x, y = (tangent, normal) if horizontal else (normal, tangent)
+        _move(comp, x, y)
+        comp.locked = True
+        comp.array_member = True
+
+    physical = [comp.physical_bbox() for comp in members]
+    member_bbox = (
+        min(tl.x for tl, _ in physical),
+        min(tl.y for tl, _ in physical),
+        max(br.x for _, br in physical),
+        max(br.y for _, br in physical),
+    )
+    deltas = [
+        tangent_centers[index] - tangent_centers[index - 1]
+        for index in range(1, len(tangent_centers))
+    ]
+    tangent_pitch = max(deltas, default=requested)
+    grid = {
+        "refs": refs,
+        "pattern": "grid",
+        "edge_connector_bank": edge,
+        "px": tangent_pitch if horizontal else 0.0,
+        "py": 0.0 if horizontal else tangent_pitch,
+        "rows": 1 if horizontal else len(refs),
+        "cols": len(refs) if horizontal else 1,
+        "led_w": max(comp.width_mm for comp in members),
+        "led_h": max(comp.height_mm for comp in members),
+        "centers": [Point(comps[ref].pos.x, comps[ref].pos.y) for ref in refs],
+        "member_bbox": member_bbox,
+    }
+    return grid, member_bbox
+
+
+def _present_member_refs(spec: dict, comps: dict[str, Component]) -> list[str] | None:
     """Validated member refs of a FULLY-present array spec, else None.
 
     The single spec-shape predicate shared by placement, companion detection
@@ -210,9 +321,7 @@ def _present_member_refs(
     return refs if rows > 0 and cols > 0 and rows * cols == len(refs) else None
 
 
-def array_companion_refs(
-    comps: dict[str, Component], arrays: list[dict]
-) -> list[str]:
+def array_companion_refs(comps: dict[str, Component], arrays: list[dict]) -> list[str]:
     """Refs of the per-array decoupling companions in this leaf.
 
     A companion is a 2-pad part whose BOTH nets are power/ground (a decap, not a
@@ -267,6 +376,8 @@ def leaf_is_fully_array(comps: dict[str, Component], arrays: list[dict]) -> bool
 
 def _grid_member_bbox(grid: dict) -> tuple[float, float, float, float]:
     """(min_x, min_y, max_x, max_y) of an array's occupied member bodies."""
+    if "member_bbox" in grid:
+        return grid["member_bbox"]
     xs = [c.x for c in grid["centers"]]
     ys = [c.y for c in grid["centers"]]
     if grid.get("pattern") == "ring":
@@ -312,9 +423,7 @@ def place_array_leaves(
     # cells sit closer than that, the overlap resolver treats every adjacent
     # pair as overlapping and thrashes (O(n^2) escape passes that also never
     # reach a "legal" state). So the derived gap is at least the clearance.
-    clearance = float(
-        cfg.get("placement_clearance_mm", cfg.get("clearance_mm", 2.5))
-    )
+    clearance = float(cfg.get("placement_clearance_mm", cfg.get("clearance_mm", 2.5)))
     gap = max(float(cfg.get("array_gap_mm", 0.6)), clearance)
     explicit_pitch_gap = float(cfg.get("array_gap_mm", 0.6))
     placed: set[str] = set()
@@ -335,9 +444,7 @@ def place_array_leaves(
             for ref in grid["refs"]:
                 comp = comps[ref]
                 _move(comp, comp.pos.x + shift_x, comp.pos.y)
-            grid["centers"] = [
-                Point(center.x + shift_x, center.y) for center in grid["centers"]
-            ]
+            grid["centers"] = [Point(center.x + shift_x, center.y) for center in grid["centers"]]
             if grid.get("center") is not None:
                 center = grid["center"]
                 grid["center"] = Point(center.x + shift_x, center.y)
@@ -347,6 +454,8 @@ def place_array_leaves(
                 member_bbox[2] + shift_x,
                 member_bbox[3],
             )
+        if "member_bbox" in grid:
+            grid["member_bbox"] = member_bbox
         packed_member_max_x = member_bbox[2]
         placed_bbox = (
             layout_bbox[0] + shift_x,
@@ -354,11 +463,15 @@ def place_array_leaves(
             layout_bbox[2] + shift_x,
             layout_bbox[3],
         )
-        grid_bbox = placed_bbox if grid_bbox is None else (
-            min(grid_bbox[0], placed_bbox[0]),
-            min(grid_bbox[1], placed_bbox[1]),
-            max(grid_bbox[2], placed_bbox[2]),
-            max(grid_bbox[3], placed_bbox[3]),
+        grid_bbox = (
+            placed_bbox
+            if grid_bbox is None
+            else (
+                min(grid_bbox[0], placed_bbox[0]),
+                min(grid_bbox[1], placed_bbox[1]),
+                max(grid_bbox[2], placed_bbox[2]),
+                max(grid_bbox[3], placed_bbox[3]),
+            )
         )
         return placed_bbox
 
@@ -394,15 +507,20 @@ def place_array_leaves(
                 comp.array_member = True
                 placed.add(ref)
             _orient_ring(comps, refs, cfg)
-            b = (cx - r_ring - half, cy - r_ring - half,
-                 cx + r_ring + half, cy + r_ring + half)
+            b = (cx - r_ring - half, cy - r_ring - half, cx + r_ring + half, cy + r_ring + half)
             grid = {
-                "refs": refs, "pattern": "ring",
-                "px": chord, "py": chord, "rows": 1, "cols": 0,
+                "refs": refs,
+                "pattern": "ring",
+                "px": chord,
+                "py": chord,
+                "rows": 1,
+                "cols": 0,
                 "led_w": max(c.width_mm for c in members),
                 "led_h": max(c.height_mm for c in members),
                 "led_diag": diag,
-                "center": Point(cx, cy), "radius": r_ring, "angles": angles,
+                "center": Point(cx, cy),
+                "radius": r_ring,
+                "angles": angles,
                 "centers": [Point(comps[r].pos.x, comps[r].pos.y) for r in refs],
             }
             _pack_grid(grid, b)
@@ -412,6 +530,25 @@ def place_array_leaves(
         rows = int(spec.get("rows", 0) or 0)
         cols = int(spec.get("cols", 0) or 0)
         serpentine = bool(spec.get("serpentine", True))
+        edge_bank = _same_edge_connector_bank(refs, comps, cfg)
+        if edge_bank is not None:
+            if rows > 1 and cols > 1:
+                raise ValueError(
+                    "edge_connector_array_not_one_dimensional:"
+                    f"{','.join(refs)}@{edge_bank}({rows}x{cols})"
+                )
+            grid, b = _place_edge_connector_bank(
+                comps,
+                refs,
+                edge_bank,
+                spec,
+                gap,
+                explicit_pitch_gap,
+            )
+            placed.update(refs)
+            _pack_grid(grid, b)
+            grids.append(grid)
+            continue
         px, py = _pitch(members, spec, gap, explicit_pitch_gap)
         x0, y0 = px, py  # keep coords positive; board-size search fits the leaf
 
@@ -432,8 +569,12 @@ def place_array_leaves(
 
         b = (x0 - px, y0 - py, x0 + (cols - 1) * px + px, y0 + (rows - 1) * py + py)
         grid = {
-            "refs": refs, "pattern": "grid",
-            "px": px, "py": py, "rows": rows, "cols": cols,
+            "refs": refs,
+            "pattern": "grid",
+            "px": px,
+            "py": py,
+            "rows": rows,
+            "cols": cols,
             "led_w": max(c.width_mm for c in members),
             "led_h": max(c.height_mm for c in members),
             # member centre per chain index, read AFTER placement (serpentine
@@ -458,13 +599,12 @@ def place_array_leaves(
     # overlap bugs). See _place_companion_decaps for the adaptive beside/edge rule.
     if grid_bbox is not None and cfg.get("array_colocate_decaps", True):
         decaps = [
-            r for r in array_companion_refs(comps, arrays)
+            r
+            for r in array_companion_refs(comps, arrays)
             if r not in placed and not getattr(comps[r], "locked", False)
         ]
         if decaps:
-            grid_bbox = _place_companion_decaps(
-                comps, decaps, grids, grid_bbox, cfg
-            )
+            grid_bbox = _place_companion_decaps(comps, decaps, grids, grid_bbox, cfg)
             placed.update(decaps)
             for r in decaps:
                 comps[r].locked = True
@@ -492,8 +632,12 @@ def place_array_leaves(
             for r in placed:
                 c = comps[r]
                 _move(c, c.pos.x + shift_x, c.pos.y + shift_y)
-            grid_bbox = (grid_bbox[0] + shift_x, grid_bbox[1] + shift_y,
-                         grid_bbox[2] + shift_x, grid_bbox[3] + shift_y)
+            grid_bbox = (
+                grid_bbox[0] + shift_x,
+                grid_bbox[1] + shift_y,
+                grid_bbox[2] + shift_x,
+                grid_bbox[3] + shift_y,
+            )
 
     remaining = [r for r in comps if r not in placed]
     # Pure array leaf: nothing but the grid. It is fully placed -- report handled
@@ -561,11 +705,7 @@ def _place_companion_decaps(
     # legacy radially-inward placement stays behind
     # ``array_ring_band_decaps: False`` (it deliberately parks companions in
     # the interior, which nesting invalidates).
-    if (
-        grid is not None
-        and grid.get("pattern") == "ring"
-        and len(refs) <= len(grid["refs"])
-    ):
+    if grid is not None and grid.get("pattern") == "ring" and len(refs) <= len(grid["refs"]):
         if cfg.get("array_ring_band_decaps", True):
             if _place_ring_band_decaps(comps, refs, grid, comp_gap):
                 return grid_bbox
