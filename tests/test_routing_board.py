@@ -12,8 +12,7 @@ def testrun_kicad_cli_drc_counts_tracks_crossing_as_short(monkeypatch, tmp_path)
     a genuine short and must gate fab acceptance -- rounded-c3-devboard shipped
     past shorts=0 with a real GND-over-TXD0 crossing before this."""
     report = (
-        "[tracks_crossing]: Tracks crossing @(167.41 mm, 98.84 mm): "
-        "[Net 1](GND) [Net 2](TXD0)\n"
+        "[tracks_crossing]: Tracks crossing @(167.41 mm, 98.84 mm): [Net 1](GND) [Net 2](TXD0)\n"
     )
 
     class _FakeResult:
@@ -300,20 +299,32 @@ def test_validate_routed_board_waives_ignorable_copper_edge(
 
 
 def _clean_drc(_path, timeout_s=30):
-    return {"report_text": "", "violations": [], "clearance": 0,
-            "copper_edge_clearance": 0, "shorts": 0, "unconnected": 0,
-            "timed_out": False, "missing_cli": False}
+    return {
+        "report_text": "",
+        "violations": [],
+        "clearance": 0,
+        "copper_edge_clearance": 0,
+        "shorts": 0,
+        "unconnected": 0,
+        "timed_out": False,
+        "missing_cli": False,
+    }
 
 
-def test_validate_routed_board_rejects_empty_board(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-):
+def test_validate_routed_board_rejects_empty_board(tmp_path, monkeypatch: pytest.MonkeyPatch):
     # A board with zero footprints has no shorts and no ratsnest, so a clean
     # DRC would otherwise accept it. The empty_board guard must reject it.
     monkeypatch.setattr(
-        routing_board, "count_board_tracks",
-        lambda _p: {"traces": 0, "vias": 0, "total_length_mm": 0.0,
-                    "footprints": 0, "pads": 0, "footprint_refs": []},
+        routing_board,
+        "count_board_tracks",
+        lambda _p: {
+            "traces": 0,
+            "vias": 0,
+            "total_length_mm": 0.0,
+            "footprints": 0,
+            "pads": 0,
+            "footprint_refs": [],
+        },
     )
     monkeypatch.setattr(routing_board, "run_kicad_cli_drc", _clean_drc)
     board_path = tmp_path / "empty.kicad_pcb"
@@ -329,9 +340,16 @@ def test_validate_routed_board_accepts_populated_clean_board(
 ):
     # The empty_board guard must be a no-op for a real, populated board.
     monkeypatch.setattr(
-        routing_board, "count_board_tracks",
-        lambda _p: {"traces": 12, "vias": 2, "total_length_mm": 80.0,
-                    "footprints": 3, "pads": 9, "footprint_refs": ["R1", "C1", "U1"]},
+        routing_board,
+        "count_board_tracks",
+        lambda _p: {
+            "traces": 12,
+            "vias": 2,
+            "total_length_mm": 80.0,
+            "footprints": 3,
+            "pads": 9,
+            "footprint_refs": ["R1", "C1", "U1"],
+        },
     )
     monkeypatch.setattr(routing_board, "run_kicad_cli_drc", _clean_drc)
     board_path = tmp_path / "ok.kicad_pcb"
@@ -348,9 +366,16 @@ def test_validate_routed_board_unknown_footprint_count_not_empty(
     # A count-subprocess failure reports footprints=-1 (unknown); that must NOT
     # be misread as an empty board.
     monkeypatch.setattr(
-        routing_board, "count_board_tracks",
-        lambda _p: {"traces": 0, "vias": 0, "total_length_mm": 0.0,
-                    "footprints": -1, "pads": -1, "footprint_refs": []},
+        routing_board,
+        "count_board_tracks",
+        lambda _p: {
+            "traces": 0,
+            "vias": 0,
+            "total_length_mm": 0.0,
+            "footprints": -1,
+            "pads": -1,
+            "footprint_refs": [],
+        },
     )
     monkeypatch.setattr(routing_board, "run_kicad_cli_drc", _clean_drc)
     board_path = tmp_path / "unknown.kicad_pcb"
@@ -371,7 +396,10 @@ def testrun_pcbnew_script_retries_transient_failed_to_load_board(
             return type(
                 "Result",
                 (),
-                {"returncode": 1, "stderr": "RuntimeError: Failed to load board: /tmp/foo.kicad_pcb\n"},
+                {
+                    "returncode": 1,
+                    "stderr": "RuntimeError: Failed to load board: /tmp/foo.kicad_pcb\n",
+                },
             )()
         return type("Result", (), {"returncode": 0, "stderr": ""})()
 
@@ -394,7 +422,10 @@ def testrun_pcbnew_script_retries_up_to_six_attempts(
             return type(
                 "Result",
                 (),
-                {"returncode": 1, "stderr": "RuntimeError: Failed to load board: /tmp/foo.kicad_pcb\n"},
+                {
+                    "returncode": 1,
+                    "stderr": "RuntimeError: Failed to load board: /tmp/foo.kicad_pcb\n",
+                },
             )()
         return type("Result", (), {"returncode": 0, "stderr": ""})()
 
@@ -519,9 +550,15 @@ def test_validate_routed_board_flags_copper_outside_outline(
         routing_board,
         "run_kicad_cli_drc",
         lambda _path, timeout_s=30: {
-            "report_text": "", "violations": [], "shorts": 0,
-            "unconnected": 0, "clearance": 0, "copper_edge_clearance": 0,
-            "ran": True, "returncode": 0, "timed_out": False,
+            "report_text": "",
+            "violations": [],
+            "shorts": 0,
+            "unconnected": 0,
+            "clearance": 0,
+            "copper_edge_clearance": 0,
+            "ran": True,
+            "returncode": 0,
+            "timed_out": False,
             "missing_cli": False,
         },
     )
@@ -529,9 +566,10 @@ def test_validate_routed_board_flags_copper_outside_outline(
         routing_board,
         "count_copper_outside_outline",
         lambda _path, tol_mm=0.05: {
-            "ok": True, "outside_tracks": 3, "outside_vias": 1,
-            "examples": [{"kind": "track", "x_mm": 99.0, "y_mm": 1.0,
-                          "net": "GND"}],
+            "ok": True,
+            "outside_tracks": 3,
+            "outside_vias": 1,
+            "examples": [{"kind": "track", "x_mm": 99.0, "y_mm": 1.0, "net": "GND"}],
         },
     )
     board_path = tmp_path / "fake_board.kicad_pcb"
@@ -557,9 +595,15 @@ def test_validate_routed_board_unresolved_outline_is_not_escaped_copper(
         routing_board,
         "run_kicad_cli_drc",
         lambda _path, timeout_s=30: {
-            "report_text": "", "violations": [], "shorts": 0,
-            "unconnected": 0, "clearance": 0, "copper_edge_clearance": 0,
-            "ran": True, "returncode": 0, "timed_out": False,
+            "report_text": "",
+            "violations": [],
+            "shorts": 0,
+            "unconnected": 0,
+            "clearance": 0,
+            "copper_edge_clearance": 0,
+            "ran": True,
+            "returncode": 0,
+            "timed_out": False,
             "missing_cli": False,
         },
     )
@@ -567,7 +611,9 @@ def test_validate_routed_board_unresolved_outline_is_not_escaped_copper(
         routing_board,
         "count_copper_outside_outline",
         lambda _path, tol_mm=0.05: {
-            "ok": False, "outside_tracks": -1, "outside_vias": -1,
+            "ok": False,
+            "outside_tracks": -1,
+            "outside_vias": -1,
             "examples": [],
         },
     )
@@ -580,3 +626,50 @@ def test_validate_routed_board_unresolved_outline_is_not_escaped_copper(
     assert "malformed_board_geometry" not in validation["rejection_reasons"]
 
 
+@pytest.mark.parametrize(
+    ("items_not_allowed", "accepted"),
+    [(0, True), (1, False)],
+)
+def test_validate_routed_board_gates_items_not_allowed(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    items_not_allowed: int,
+    accepted: bool,
+):
+    monkeypatch.setattr(
+        routing_board,
+        "count_board_tracks",
+        lambda _path: {
+            "footprints": 1,
+            "traces": 0,
+            "vias": 0,
+            "total_length_mm": 0.0,
+        },
+    )
+    monkeypatch.setattr(
+        routing_board,
+        "count_copper_outside_outline",
+        lambda _path: {"ok": True, "outside_tracks": 0, "outside_vias": 0},
+    )
+    monkeypatch.setattr(
+        routing_board,
+        "run_kicad_cli_drc",
+        lambda _path, timeout_s=30: {
+            "report_text": "",
+            "violations": [],
+            "items_not_allowed": items_not_allowed,
+            "clearance": 0,
+            "copper_edge_clearance": 0,
+            "shorts": 0,
+            "timed_out": False,
+            "missing_cli": False,
+        },
+    )
+    board_path = tmp_path / "board.kicad_pcb"
+    board_path.write_text("stub", encoding="utf-8")
+
+    validation = routing_board.validate_routed_board(str(board_path))
+
+    assert validation["accepted"] is accepted
+    assert validation["obviously_illegal_routed_geometry"] is (not accepted)
+    assert ("illegal_routed_geometry" in validation["rejection_reasons"]) is (not accepted)

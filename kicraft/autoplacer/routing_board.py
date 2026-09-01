@@ -54,8 +54,7 @@ def _kicad_subprocess_env() -> dict[str, str]:
         if not p:
             continue
         if (
-            os.path.exists(os.path.join(p, "pcbnew.py"))
-            or os.path.isdir(os.path.join(p, "pcbnew"))
+            os.path.exists(os.path.join(p, "pcbnew.py")) or os.path.isdir(os.path.join(p, "pcbnew"))
         ) and p not in merged:
             merged.append(p)
 
@@ -147,8 +146,7 @@ def _retry_pcbnew_run(cmd: list[str]) -> None:
     raise RuntimeError(
         f"pcbnew subprocess failed (rc={last_result.returncode}):\n"
         f"cmd: {cmd[0]} ... ({len(cmd) - 1} args)\n"
-        f"stderr:\n{last_result.stderr}\n"
-        + (f"stdout:\n{stdout}" if stdout else "")
+        f"stderr:\n{last_result.stderr}\n" + (f"stdout:\n{stdout}" if stdout else "")
     )
 
 
@@ -228,14 +226,11 @@ def _classify_clearance_violations(
             if header.group(1) in ("clearance", "hole_clearance"):
                 item_refs = []
             continue
-        if (
-            item_refs is not None
-            and line.startswith("    ")
-            and "@(" in line
-        ):
+        if item_refs is not None and line.startswith("    ") and "@(" in line:
             item_refs.append(set(ref_pattern.findall(line)))
     _close_block()
     return {"waived": waived, "genuine": genuine}
+
 
 def count_board_tracks(kicad_pcb_path: str) -> dict[str, Any]:
     """Count traces, vias, length, and the placed footprints from a board.
@@ -274,14 +269,18 @@ def count_board_tracks(kicad_pcb_path: str) -> dict[str, Any]:
         env=_kicad_subprocess_env(),
     )
     if result.returncode != 0:
-        return {"traces": 0, "vias": 0, "total_length_mm": 0.0,
-                "footprints": -1, "pads": -1, "footprint_refs": []}
+        return {
+            "traces": 0,
+            "vias": 0,
+            "total_length_mm": 0.0,
+            "footprints": -1,
+            "pads": -1,
+            "footprint_refs": [],
+        }
     return json.loads(result.stdout.strip())
 
 
-def count_copper_outside_outline(
-    kicad_pcb_path: str, tol_mm: float = 0.05
-) -> dict[str, Any]:
+def count_copper_outside_outline(kicad_pcb_path: str, tol_mm: float = 0.05) -> dict[str, Any]:
     """Count track endpoints / via centres lying OUTSIDE the Edge.Cuts outline.
 
     A router or repair pass can place copper outside the board outline, where even
@@ -551,13 +550,14 @@ def run_kicad_cli_drc(kicad_pcb_path: str, timeout_s: int = 30) -> dict[str, Any
                         if loc_m:
                             current["x_mm"] = float(loc_m.group(1))
                             current["y_mm"] = float(loc_m.group(2))
-                    net_tokens = re.findall(
-                        r"\[Net\s+\d+\]\(([^)]+)\)|\[([^\]]+)\]", line
-                    )
+                    net_tokens = re.findall(r"\[Net\s+\d+\]\(([^)]+)\)|\[([^\]]+)\]", line)
                     for formatted, bare in net_tokens:
                         net = (formatted or bare).strip()
-                        if (not net or re.match(r"(?i)^net\s+\d+$", net)
-                                or net.lower() in {"no net", "<no net>"}):
+                        if (
+                            not net
+                            or re.match(r"(?i)^net\s+\d+$", net)
+                            or net.lower() in {"no net", "<no net>"}
+                        ):
                             continue
                         if current["net1"] is None:
                             current["net1"] = net
@@ -719,6 +719,8 @@ def validate_routed_board(
 
     if drc.get("shorts", 0) > 0:
         validation["obviously_illegal_routed_geometry"] = True
+    if int(drc.get("items_not_allowed", 0) or 0) > 0:
+        validation["obviously_illegal_routed_geometry"] = True
 
     # Clearance violations that are entirely footprint-internal (e.g. dense
     # USB-C pads that are closer than the board clearance rule) are inherent
@@ -734,9 +736,7 @@ def validate_routed_board(
         drc["clearance_footprint_refs"] = sorted(
             set(_extract_clearance_footprint_refs(report_text))
         )
-        ignorable_refs = (
-            set(cfg.get("ignorable_footprint_refs", [])) if cfg else set()
-        )
+        ignorable_refs = set(cfg.get("ignorable_footprint_refs", [])) if cfg else set()
         verdict = _classify_clearance_violations(report_text, ignorable_refs)
         if verdict["waived"]:
             validation["footprint_internal_clearance_count"] = verdict["waived"]
@@ -801,11 +801,7 @@ def validate_routed_board(
     # and the board must not read as "clean" (2026-07-19 review §2.3). A
     # nonzero exit WITH parsed violations keeps the parsed verdict -- the
     # per-category gates above already act on it.
-    if (
-        drc.get("ran")
-        and int(drc.get("returncode", 0) or 0) != 0
-        and not drc.get("violations")
-    ):
+    if drc.get("ran") and int(drc.get("returncode", 0) or 0) != 0 and not drc.get("violations"):
         validation["rejection_reasons"].append("drc_failed")
 
     expected = sorted(set(expected_anchor_names or []))

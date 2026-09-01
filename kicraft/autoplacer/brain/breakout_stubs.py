@@ -14,12 +14,18 @@ Consumers: power-pour fragmentation ties (:func:`auto_power_tie_specs`,
 array-routing daisy-chain/ring ties, and GND plane bonding (``gnd_pour.py``).
 This is not an escape-planning engine.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
 from kicraft.autoplacer.fab_profile import fab_floors
+from kicraft.autoplacer.hardware.keepout_extract import (
+    collect_track_via_rule_areas,
+    track_intersects_rule_area,
+    via_intersects_rule_area,
+)
 
 import pcbnew
 
@@ -91,8 +97,9 @@ class BreakoutSpec:
     via_drill_mm: float | None = None
 
 
-def _find_pad(board: "pcbnew.BOARD", ref: str, pad_number: str,
-              near_xy: tuple[float, float] | None = None):
+def _find_pad(
+    board: "pcbnew.BOARD", ref: str, pad_number: str, near_xy: tuple[float, float] | None = None
+):
     """The footprint's pad with *pad_number*; nearest to *near_xy* when several
     pads share that number (module footprints number every ground pad "GND")."""
     for fp in board.GetFootprints():
@@ -101,15 +108,17 @@ def _find_pad(board: "pcbnew.BOARD", ref: str, pad_number: str,
             if not matches:
                 return None, None
             if near_xy is not None and len(matches) > 1:
-                matches.sort(key=lambda p: (
-                    (pcbnew.ToMM(p.GetPosition().x) - near_xy[0]) ** 2
-                    + (pcbnew.ToMM(p.GetPosition().y) - near_xy[1]) ** 2))
+                matches.sort(
+                    key=lambda p: (
+                        (pcbnew.ToMM(p.GetPosition().x) - near_xy[0]) ** 2
+                        + (pcbnew.ToMM(p.GetPosition().y) - near_xy[1]) ** 2
+                    )
+                )
             return fp, matches[0]
     return None, None
 
 
-def _nearest_same_net_pad(board: "pcbnew.BOARD", net_name: str,
-                          near_xy: tuple[float, float]):
+def _nearest_same_net_pad(board: "pcbnew.BOARD", net_name: str, near_xy: tuple[float, float]):
     """Any pad on *net_name*, nearest *near_xy*: the netclass/margin stand-in
     for a tie anchored at bare track copper (the guard machinery is
     pad-shaped, but the net's clearance rules are pad-independent)."""
@@ -118,8 +127,9 @@ def _nearest_same_net_pad(board: "pcbnew.BOARD", net_name: str,
         for p in fp.Pads():
             if p.GetNetname() != net_name:
                 continue
-            d = ((pcbnew.ToMM(p.GetPosition().x) - near_xy[0]) ** 2
-                 + (pcbnew.ToMM(p.GetPosition().y) - near_xy[1]) ** 2)
+            d = (pcbnew.ToMM(p.GetPosition().x) - near_xy[0]) ** 2 + (
+                pcbnew.ToMM(p.GetPosition().y) - near_xy[1]
+            ) ** 2
             if best_d is None or d < best_d:
                 best_fp, best_pad, best_d = fp, p, d
     return best_fp, best_pad
@@ -194,7 +204,6 @@ def _pad_ref(pad) -> str:
         return ""
 
 
-
 def _pad_hole_overhang_mm(pad) -> float | None:
     """Hole radius beyond the pad's narrow copper radius, or no hole."""
     try:
@@ -210,6 +219,7 @@ def _pad_hole_overhang_mm(pad) -> float | None:
     except Exception:
         return None
     return max(0.0, drill_r - copper_r)
+
 
 def _foreign_pad_margins(
     board: "pcbnew.BOARD",
@@ -250,9 +260,13 @@ def _foreign_pad_margins(
             floor_mm, src_cl, _own_clearance_mm(pad, layer_id, floor_mm)
         )
         overhang = _pad_hole_overhang_mm(pad)
-        required = pair if overhang is None else max(
-            pair,
-            hole_clearance_mm + overhang,
+        required = (
+            pair
+            if overhang is None
+            else max(
+                pair,
+                hole_clearance_mm + overhang,
+            )
         )
         same_fp = src_ref and _pad_ref(pad) == src_ref
         # Margins bound the track centerline, so include half its width.
@@ -293,9 +307,7 @@ def _segment_clears_obstacles(
     steps = max(1, int(((bx - ax) ** 2 + (by - ay) ** 2) ** 0.5 / step_mm))
     for k in range(steps + 1):
         t = k / steps
-        if not _point_clears_obstacles(
-            obstacles, ax + (bx - ax) * t, ay + (by - ay) * t
-        ):
+        if not _point_clears_obstacles(obstacles, ax + (bx - ax) * t, ay + (by - ay) * t):
             return False
     return True
 
@@ -432,9 +444,7 @@ def _rect_perimeter_path(
     return [c for c, _ in out]
 
 
-def _pads_bbox_mm(
-    pads: list, margin_mm: float = 0.0
-) -> tuple[float, float, float, float]:
+def _pads_bbox_mm(pads: list, margin_mm: float = 0.0) -> tuple[float, float, float, float]:
     """``(x1, y1, x2, y2)`` in mm enclosing every pad's box, grown by *margin_mm*.
 
     This is the footprint's *pad field* -- deliberately not ``fp.GetBoundingBox()``,
@@ -517,9 +527,7 @@ def perimeter_tie_specs(
     one net island.
     """
     specs: list[BreakoutSpec] = []
-    fp = next(
-        (f for f in board.GetFootprints() if f.GetReferenceAsString() == ref), None
-    )
+    fp = next((f for f in board.GetFootprints() if f.GetReferenceAsString() == ref), None)
     if fp is None:
         return specs
     pads_all = list(fp.Pads())
@@ -569,9 +577,7 @@ def perimeter_tie_specs(
         )
         if _segment_clears_obstacles(path_obs, p1, p2):
             specs.append(
-                BreakoutSpec(
-                    ref=ref, pad=pads[i].GetNumber(), waypoints=[p2], layer=layer
-                )
+                BreakoutSpec(ref=ref, pad=pads[i].GetNumber(), waypoints=[p2], layer=layer)
             )
             continue
         # A pad field closer to the board edge than its margin puts part of the
@@ -601,9 +607,7 @@ def perimeter_tie_specs(
         corners = _rect_perimeter_path(b1, b2, wx1, wy1, wx2, wy2)
         waypoints = [b1, *corners, b2, p2]
         specs.append(
-            BreakoutSpec(
-                ref=ref, pad=pads[i].GetNumber(), waypoints=waypoints, layer=layer
-            )
+            BreakoutSpec(ref=ref, pad=pads[i].GetNumber(), waypoints=waypoints, layer=layer)
         )
     return specs
 
@@ -696,13 +700,10 @@ def shield_tie_specs(
             p = pad.GetPosition()
             mate = min(
                 pool,
-                key=lambda m: (m.GetPosition().x - p.x) ** 2
-                + (m.GetPosition().y - p.y) ** 2,
+                key=lambda m: (m.GetPosition().x - p.x) ** 2 + (m.GetPosition().y - p.y) ** 2,
             )
             mp = mate.GetPosition()
-            d_mm = (
-                (pcbnew.ToMM(mp.x - p.x)) ** 2 + (pcbnew.ToMM(mp.y - p.y)) ** 2
-            ) ** 0.5
+            d_mm = ((pcbnew.ToMM(mp.x - p.x)) ** 2 + (pcbnew.ToMM(mp.y - p.y)) ** 2) ** 0.5
             # Touching pads are already connected; a far mate means this is not
             # the shield-leg shape and a straight tie would cross the part.
             if d_mm < 0.1 or d_mm > max_mm:
@@ -750,6 +751,7 @@ def add_breakout_stubs(
         return summary
 
     board = pcbnew.LoadBoard(pcb_path)
+    rule_areas = collect_track_via_rule_areas(board)
     inner_box = _board_inner_box_mm(board)
     floor_mm = fab_floors(cfg)["clearance_mm"]
     hole_clearance_mm = float(cfg.get("hole_clearance_min_mm", 0.25))
@@ -798,8 +800,13 @@ def add_breakout_stubs(
             ds = _p.GetDrillSize()
             if ds.x > 0 or ds.y > 0:
                 pp = _p.GetPosition()
-                holes.append((pcbnew.ToMM(pp.x), pcbnew.ToMM(pp.y),
-                              max(pcbnew.ToMM(ds.x), pcbnew.ToMM(ds.y)) / 2.0))
+                holes.append(
+                    (
+                        pcbnew.ToMM(pp.x),
+                        pcbnew.ToMM(pp.y),
+                        max(pcbnew.ToMM(ds.x), pcbnew.ToMM(ds.y)) / 2.0,
+                    )
+                )
 
     def _pt(xy: tuple[float, float]):
         return pcbnew.VECTOR2I(pcbnew.FromMM(xy[0]), pcbnew.FromMM(xy[1]))
@@ -810,13 +817,9 @@ def add_breakout_stubs(
             # netclass clearance / foreign-pad margins; geometry starts at
             # start_xy. Waypoints are mandatory (no footprint to escape).
             if not spec.waypoints:
-                summary["skipped"].append(
-                    f"{spec.ref}.{spec.pad}:free_anchor_needs_waypoints"
-                )
+                summary["skipped"].append(f"{spec.ref}.{spec.pad}:free_anchor_needs_waypoints")
                 continue
-            fp, pad = _nearest_same_net_pad(
-                board, spec.net or "", spec.start_xy
-            )
+            fp, pad = _nearest_same_net_pad(board, spec.net or "", spec.start_xy)
             if pad is None:
                 summary["skipped"].append(f"{spec.ref}.{spec.pad}:net_not_found")
                 continue
@@ -841,10 +844,24 @@ def add_breakout_stubs(
         # USB_DN tie anchored at a track end grazed the stand-in footprint's
         # USB_DP pad at 0.05 mm under the relaxed margins (run_10).
         path_obs, tip_obs = _foreign_pad_margins(
-            board, pad, floor_mm=floor_mm, half_width_mm=half_width_mm,
-            layer_id=layer, strict_same_fp=spec.start_xy is not None,
+            board,
+            pad,
+            floor_mm=floor_mm,
+            half_width_mm=half_width_mm,
+            layer_id=layer,
+            strict_same_fp=spec.start_xy is not None,
             hole_clearance_mm=hole_clearance_mm,
         )
+
+        def _track_hits_keepout(points: list[tuple[float, float]]) -> bool:
+            return any(
+                track_intersects_rule_area(a, b, half_width_mm, area)
+                for a, b in zip(points, points[1:])
+                for area in rule_areas
+            )
+
+        def _via_hits_keepout(xy: tuple[float, float]) -> bool:
+            return any(via_intersects_rule_area(xy, via_r_mm, area) for area in rule_areas)
 
         def _conflicts_with_copper(points: list[tuple[float, float]]) -> bool:
             """True when the path runs too close to other-net stamped/board copper."""
@@ -870,16 +887,18 @@ def add_breakout_stubs(
         via_drill_size_mm = float(spec.via_drill_mm or cfg.get("via_drill_mm", 0.3))
         via_r_mm = via_size_mm / 2.0
         via_drill_r_mm = via_drill_size_mm / 2.0
-        via_obs = ([(p, m + int(pcbnew.FromMM(via_r_mm - half_width_mm)))
-                    for p, m in tip_obs] if spec.via_at_end else [])
+        via_obs = (
+            [(p, m + int(pcbnew.FromMM(via_r_mm - half_width_mm))) for p, m in tip_obs]
+            if spec.via_at_end
+            else []
+        )
 
         def _via_redundant(xy: tuple[float, float]) -> bool:
             """A same-net via already sits under the stub end: the plane bond
             exists, so stamp the track but not a duplicate via (two shield
             legs tying to the same SMD pad is the common case)."""
             return any(
-                n == net_code
-                and ((xy[0] - vx) ** 2 + (xy[1] - vy) ** 2) ** 0.5 <= via_r_mm
+                n == net_code and ((xy[0] - vx) ** 2 + (xy[1] - vy) ** 2) ** 0.5 <= via_r_mm
                 for n, vx, vy in via_pts
             )
 
@@ -893,8 +912,7 @@ def add_breakout_stubs(
                 if _seg_seg_dist_mm(xy, xy, o_a, o_b) < need:
                     return False
             return not any(
-                ((xy[0] - hx) ** 2 + (xy[1] - hy) ** 2) ** 0.5
-                < hr + via_drill_r_mm + hole_min_mm
+                ((xy[0] - hx) ** 2 + (xy[1] - hy) ** 2) ** 0.5 < hr + via_drill_r_mm + hole_min_mm
                 for hx, hy, hr in holes
             )
 
@@ -911,18 +929,20 @@ def add_breakout_stubs(
             # neighbour the geometry could not see may still intrude. A partial
             # tie is useless, so drop the whole spec rather than clip it.
             if not all(
-                _segment_clears_obstacles(path_obs, a, b)
-                for a, b in zip(points, points[1:])
+                _segment_clears_obstacles(path_obs, a, b) for a, b in zip(points, points[1:])
             ):
                 summary["skipped"].append(f"{spec.ref}.{spec.pad}:waypoint_crosses_pad")
                 continue
-            if _conflicts_with_copper(points):
-                summary["skipped"].append(
-                    f"{spec.ref}.{spec.pad}:conflicts_with_stamped_stub"
-                )
+            if _track_hits_keepout(points):
+                summary["skipped"].append(f"{spec.ref}.{spec.pad}:track_keepout")
                 continue
-            if (spec.via_at_end and not _via_redundant(points[-1])
-                    and not _via_fits(points[-1])):
+            if _conflicts_with_copper(points):
+                summary["skipped"].append(f"{spec.ref}.{spec.pad}:conflicts_with_stamped_stub")
+                continue
+            if spec.via_at_end and not _via_redundant(points[-1]) and _via_hits_keepout(points[-1]):
+                summary["skipped"].append(f"{spec.ref}.{spec.pad}:via_keepout")
+                continue
+            if spec.via_at_end and not _via_redundant(points[-1]) and not _via_fits(points[-1]):
                 summary["skipped"].append(f"{spec.ref}.{spec.pad}:via_blocked")
                 continue
         else:
@@ -948,11 +968,17 @@ def add_breakout_stubs(
             # collision-only margins, so a pad genuinely walled in by its own
             # row still escapes.
             strict_path_obs, _ = _foreign_pad_margins(
-                board, pad, floor_mm=floor_mm, half_width_mm=half_width_mm,
-                layer_id=layer, strict_same_fp=True,
+                board,
+                pad,
+                floor_mm=floor_mm,
+                half_width_mm=half_width_mm,
+                layer_id=layer,
+                strict_same_fp=True,
                 hole_clearance_mm=hole_clearance_mm,
             )
             points = None
+            track_keepout_seen = False
+            via_keepout_seen = False
             for path_set in (strict_path_obs, path_obs):
                 for du in (dir_unit, (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
                     end = _radial_escape_end(
@@ -967,19 +993,29 @@ def add_breakout_stubs(
                     if end is None:
                         continue
                     cand = [start_mm, end]
+                    if _track_hits_keepout(cand):
+                        track_keepout_seen = True
+                        continue
                     if _conflicts_with_copper(cand):
                         continue
-                    if (spec.via_at_end and not _via_redundant(end)
-                            and not _via_fits(end)):
+                    if spec.via_at_end and not _via_redundant(end) and _via_hits_keepout(end):
+                        via_keepout_seen = True
+                        continue
+                    if spec.via_at_end and not _via_redundant(end) and not _via_fits(end):
                         continue
                     points = cand
                     break
                 if points is not None:
                     break
             if points is None:
-                summary["skipped"].append(
-                    f"{spec.ref}.{spec.pad}:no_safe_radial_escape"
+                reason = (
+                    "track_keepout"
+                    if track_keepout_seen
+                    else "via_keepout"
+                    if via_keepout_seen
+                    else "no_safe_radial_escape"
                 )
+                summary["skipped"].append(f"{spec.ref}.{spec.pad}:{reason}")
                 continue
 
         # Hard invariant: never stamp locked copper outside the board outline.
@@ -1021,8 +1057,7 @@ def add_breakout_stubs(
             # barrel (a zero-length all-layer segment for copper checks), and
             # its net (so a tie ending here skips its now-redundant via).
             holes.append((points[-1][0], points[-1][1], via_drill_r_mm))
-            stamped.append((net_code, points[-1], points[-1], via_r_mm,
-                            src_cl_mm, None))
+            stamped.append((net_code, points[-1], points[-1], via_r_mm, src_cl_mm, None))
             via_pts.append((net_code, points[-1][0], points[-1][1]))
 
         summary["stubs"] += 1

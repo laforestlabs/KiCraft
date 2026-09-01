@@ -17,6 +17,7 @@ net) AND is either large (>= ``thermal_pad_area_mm2``) or *interior* to a
 multi-pin footprint (well inside the pad bounding box). That captures the whole
 EP array while leaving perimeter GND pins -- which route normally -- alone.
 """
+
 from __future__ import annotations
 
 import math
@@ -25,6 +26,10 @@ from typing import Any
 from kicraft.autoplacer.fab_profile import fab_floors
 
 import pcbnew
+from kicraft.autoplacer.hardware.keepout_extract import (
+    collect_track_via_rule_areas,
+    via_intersects_rule_area,
+)
 
 
 def _grid_positions(center_nm: int, half_nm: int, pitch_nm: int) -> list[int]:
@@ -53,37 +58,10 @@ def _apply_gnd_pad_connection(zone: Any, cfg: dict[str, Any]) -> None:
     """
     if str(cfg.get("gnd_plane_pad_connection", "full")).lower() == "thermal":
         zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
-        zone.SetThermalReliefGap(
-            pcbnew.FromMM(float(cfg.get("zone_thermal_gap_mm", 0.5)))
-        )
-        zone.SetThermalReliefSpokeWidth(
-            pcbnew.FromMM(float(cfg.get("zone_thermal_spoke_mm", 0.5)))
-        )
+        zone.SetThermalReliefGap(pcbnew.FromMM(float(cfg.get("zone_thermal_gap_mm", 0.5))))
+        zone.SetThermalReliefSpokeWidth(pcbnew.FromMM(float(cfg.get("zone_thermal_spoke_mm", 0.5))))
     else:
         zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
-
-
-def _collect_keepout_zones(board: Any) -> list[Any]:
-    """Rule-area keep-out zones that forbid tracks or vias -- both board-level
-    and the ones embedded inside footprints (the ESP32-S3-MINI/WROOM antenna
-    near-field ``antenna_keepout`` ships inside the module's .kicad_mod).
-
-    KiCad Routing Tools's router exchange input export already steers *signal* traces clear of these, but
-    the post-route GND finisher (in-pad/array thermal vias + small-pad escape
-    stubs) had no such guard, so it stamped GND vias and 1 mm stubs straight into
-    U1's antenna keep-out (the KC-S8PC37 signature: 30 items_not_allowed).
-    """
-    zones: list[Any] = []
-    for z in board.Zones():
-        if z.GetIsRuleArea() and (z.GetDoNotAllowVias() or z.GetDoNotAllowTracks()):
-            zones.append(z)
-    for fp in board.GetFootprints():
-        for z in fp.Zones():
-            if z.GetIsRuleArea() and (
-                z.GetDoNotAllowVias() or z.GetDoNotAllowTracks()
-            ):
-                zones.append(z)
-    return zones
 
 
 def pour_gnd_planes(
@@ -134,12 +112,8 @@ def pour_gnd_planes(
             zone.SetNet(gnd_net)
             zone.SetLayer(target_layer)
             zone.SetIsRuleArea(False)
-            zone.SetLocalClearance(
-                pcbnew.FromMM(float(cfg.get("zone_clearance_mm", 0.3)))
-            )
-            zone.SetMinThickness(
-                pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25)))
-            )
+            zone.SetLocalClearance(pcbnew.FromMM(float(cfg.get("zone_clearance_mm", 0.3))))
+            zone.SetMinThickness(pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25))))
             _apply_gnd_pad_connection(zone, cfg)
             zone.SetAssignedPriority(0)
             board.Add(zone)
@@ -246,12 +220,8 @@ def pour_power_planes(
                 zone.SetNet(net)
                 zone.SetLayer(target_layer)
                 zone.SetIsRuleArea(False)
-                zone.SetLocalClearance(
-                    pcbnew.FromMM(float(cfg.get("zone_clearance_mm", 0.3)))
-                )
-                zone.SetMinThickness(
-                    pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25)))
-                )
+                zone.SetLocalClearance(pcbnew.FromMM(float(cfg.get("zone_clearance_mm", 0.3))))
+                zone.SetMinThickness(pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25))))
                 # Solid pad connection (not thermal): thermal-relief spokes need
                 # a gap wider than a dense connector's pad pitch, so they never
                 # form and the power pad stays isolated from the plane. A power
@@ -328,11 +298,17 @@ def _collect_net_clusters(
                 sz = p.GetSize(F)
             r = min(pcbnew.ToMM(sz.x), pcbnew.ToMM(sz.y)) / 2.0
             is_pth = p.GetAttribute() == pcbnew.PAD_ATTRIB_PTH
-            nodes.append({
-                "kind": "pad", "ref": fp.GetReferenceAsString(), "num": p.GetNumber(),
-                "layers": {F, B} if is_pth else {F if p.IsOnLayer(F) else B},
-                "pts": _pts_around(x, y, r), "xy": (x, y), "r": r,
-            })
+            nodes.append(
+                {
+                    "kind": "pad",
+                    "ref": fp.GetReferenceAsString(),
+                    "num": p.GetNumber(),
+                    "layers": {F, B} if is_pth else {F if p.IsOnLayer(F) else B},
+                    "pts": _pts_around(x, y, r),
+                    "xy": (x, y),
+                    "r": r,
+                }
+            )
     for t in board.GetTracks():
         if t.GetNetCode() != net_code:
             continue
@@ -340,8 +316,9 @@ def _collect_net_clusters(
             pos = t.GetPosition()
             x, y = pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y)
             r = pcbnew.ToMM(t.GetWidth()) / 2.0
-            nodes.append({"kind": "via", "layers": {F, B},
-                          "pts": _pts_around(x, y, r), "xy": (x, y), "r": r})
+            nodes.append(
+                {"kind": "via", "layers": {F, B}, "pts": _pts_around(x, y, r), "xy": (x, y), "r": r}
+            )
         else:
             a, b2 = t.GetStart(), t.GetEnd()
             ax, ay = pcbnew.ToMM(a.x), pcbnew.ToMM(a.y)
@@ -356,9 +333,14 @@ def _collect_net_clusters(
                 (ax + (bx - ax) * k / n_samples, ay + (by - ay) * k / n_samples)
                 for k in range(n_samples + 1)
             ]
-            nodes.append({"kind": "trk", "layers": {t.GetLayer()},
-                          "pts": pts,
-                          "xy": ((ax + bx) / 2, (ay + by) / 2)})
+            nodes.append(
+                {
+                    "kind": "trk",
+                    "layers": {t.GetLayer()},
+                    "pts": pts,
+                    "xy": ((ax + bx) / 2, (ay + by) / 2),
+                }
+            )
     islands: list[dict] = []
     for z in board.Zones():
         if z.GetNetname() != net_name or z.GetIsRuleArea():
@@ -367,9 +349,15 @@ def _collect_net_clusters(
         fill = z.GetFilledPolysList(layer)
         for i in range(fill.OutlineCount()):
             bb = fill.Outline(i).BBox()
-            islands.append({"kind": "island", "layers": {layer}, "fill": fill,
-                            "idx": i,
-                            "xy": (pcbnew.ToMM(bb.Centre().x), pcbnew.ToMM(bb.Centre().y))})
+            islands.append(
+                {
+                    "kind": "island",
+                    "layers": {layer},
+                    "fill": fill,
+                    "idx": i,
+                    "xy": (pcbnew.ToMM(bb.Centre().x), pcbnew.ToMM(bb.Centre().y)),
+                }
+            )
 
     all_nodes = nodes + islands
     parent = list(range(len(all_nodes)))
@@ -389,7 +377,7 @@ def _collect_net_clusters(
         for ni, n in enumerate(nodes):
             if not (n["layers"] & isl["layers"]):
                 continue
-            for (px, py) in n["pts"]:
+            for px, py in n["pts"]:
                 if isl["fill"].Contains(
                     pcbnew.VECTOR2I(pcbnew.FromMM(px), pcbnew.FromMM(py)), isl["idx"]
                 ):
@@ -402,8 +390,8 @@ def _collect_net_clusters(
             if not (nodes[i]["layers"] & nodes[j]["layers"]):
                 continue
             done = False
-            for (ax, ay) in nodes[i]["pts"]:
-                for (bx, by) in nodes[j]["pts"]:
+            for ax, ay in nodes[i]["pts"]:
+                for bx, by in nodes[j]["pts"]:
                     if (ax - bx) ** 2 + (ay - by) ** 2 < 0.0025:
                         union(i, j)
                         done = True
@@ -440,8 +428,14 @@ def repair_stranded_net(
     is skipped (the board is no worse than before).
     """
     cfg = cfg or {}
-    summary: dict[str, Any] = {"net": net_name, "clusters": 0, "stranded": 0,
-                               "tied": 0, "skipped": [], "unresolved": 0}
+    summary: dict[str, Any] = {
+        "net": net_name,
+        "clusters": 0,
+        "stranded": 0,
+        "tied": 0,
+        "skipped": [],
+        "unresolved": 0,
+    }
     if not net_name:
         return summary
 
@@ -454,8 +448,7 @@ def repair_stranded_net(
         return summary
     main_root = max(clusters, key=lambda r: len(clusters[r]))
     main_targets = [
-        all_nodes[i] for i in clusters[main_root]
-        if all_nodes[i]["kind"] in ("pad", "via")
+        all_nodes[i] for i in clusters[main_root] if all_nodes[i]["kind"] in ("pad", "via")
     ]
     if not main_targets:
         return summary
@@ -484,11 +477,11 @@ def repair_stranded_net(
         # success (the run_01 ESP32 signature, together with the wrong-pad
         # lookup near_xy now prevents).
         via_bridge = any(
-            ((n["xy"][0] - sx) ** 2 + (n["xy"][1] - sy) ** 2) ** 0.5 <= n["r"]
-            for n in via_nodes
+            ((n["xy"][0] - sx) ** 2 + (n["xy"][1] - sy) ** 2) ** 0.5 <= n["r"] for n in via_nodes
         )
         start_layers = [
-            (lname, lid) for lname, lid in (("F.Cu", F), ("B.Cu", B))
+            (lname, lid)
+            for lname, lid in (("F.Cu", F), ("B.Cu", B))
             if lid in src["layers"] or via_bridge
         ]
         start_layers.sort(key=lambda t: t[1] not in src["layers"])
@@ -512,9 +505,15 @@ def repair_stranded_net(
                     continue
                 res = add_breakout_stubs(
                     pcb_path,
-                    [BreakoutSpec(ref=src["ref"], pad=src["num"],
-                                  waypoints=[tgt["xy"]], layer=layer_name,
-                                  near_xy=src["xy"])],
+                    [
+                        BreakoutSpec(
+                            ref=src["ref"],
+                            pad=src["num"],
+                            waypoints=[tgt["xy"]],
+                            layer=layer_name,
+                            near_xy=src["xy"],
+                        )
+                    ],
                     cfg=cfg,
                 )
                 if res.get("stubs", 0):
@@ -537,9 +536,11 @@ def repair_stranded_net(
         clusters, _ = _collect_net_clusters(board, net_name)
     summary["unresolved"] = max(0, len(clusters) - 1)
     if summary["unresolved"]:
-        print(f"  WARNING: {net_name} strand repair left {summary['unresolved']} "
-              f"cluster(s) disconnected (tied={summary['tied']}, "
-              f"skipped={summary['skipped']})")
+        print(
+            f"  WARNING: {net_name} strand repair left {summary['unresolved']} "
+            f"cluster(s) disconnected (tied={summary['tied']}, "
+            f"skipped={summary['skipped']})"
+        )
     return summary
 
 
@@ -551,8 +552,7 @@ def repair_stranded_gnd(
     cfg = cfg or {}
     gnd_name = cfg.get("gnd_zone_net", "GND")
     if not cfg.get("gnd_strand_repair_enabled", True):
-        return {"net": gnd_name, "clusters": 0, "stranded": 0, "tied": 0,
-                "skipped": []}
+        return {"net": gnd_name, "clusters": 0, "stranded": 0, "tied": 0, "skipped": []}
     return repair_stranded_net(pcb_path, gnd_name, cfg)
 
 
@@ -571,8 +571,7 @@ def repair_stranded_power(
     that ignored its return value still repair the right rails.
     """
     cfg = cfg or {}
-    out: dict[str, Any] = {"nets": [], "stranded": 0, "tied": 0, "skipped": [],
-                           "unresolved": 0}
+    out: dict[str, Any] = {"nets": [], "stranded": 0, "tied": 0, "skipped": [], "unresolved": 0}
     if not cfg.get("power_strand_repair_enabled", True):
         return out
     if nets is None:
@@ -627,8 +626,7 @@ def gnd_escape_specs(
         if len(pads) < 3:  # escapes stay multipad-only, matching post-route
             continue
         for pad in pads:
-            if pad.GetAttribute() not in (pcbnew.PAD_ATTRIB_SMD,
-                                          pcbnew.PAD_ATTRIB_CONN):
+            if pad.GetAttribute() not in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN):
                 continue
             if pad.GetNetCode() != gnd_code:
                 continue
@@ -636,9 +634,14 @@ def gnd_escape_specs(
             w, h = pcbnew.ToMM(size.x), pcbnew.ToMM(size.y)
             if min(w, h) >= via_size_mm or w * h >= area_threshold:
                 continue  # the post-route in-pad via handles it
-            specs.append(BreakoutSpec(ref=fp.GetReferenceAsString(),
-                                      pad=pad.GetNumber(),
-                                      length_mm=length, via_at_end=True))
+            specs.append(
+                BreakoutSpec(
+                    ref=fp.GetReferenceAsString(),
+                    pad=pad.GetNumber(),
+                    length_mm=length,
+                    via_at_end=True,
+                )
+            )
     return specs
 
 
@@ -671,19 +674,12 @@ def add_gnd_pour_and_thermal_vias(
 
     # Track/via keep-outs (the footprint-embedded antenna near-field, board-level
     # rule areas) the finisher must keep its vias and escape stubs out of.
-    keepout_zones = _collect_keepout_zones(board)
+    keepout_areas = collect_track_via_rule_areas(board)
 
     def _in_keepout(pt: Any, clearance_iu: int = 0) -> bool:
-        """True when ``pt`` lies in (or within ``clearance_iu`` of) a track/via
-        keep-out, so a via of that radius -- or an escape stub reaching that far
-        -- would intrude on the protected area."""
-        for z in keepout_zones:
-            bb = z.GetBoundingBox()
-            if clearance_iu:
-                bb.Inflate(int(clearance_iu))
-            if bb.Contains(pt):
-                return True
-        return False
+        center = (pcbnew.ToMM(pt.x), pcbnew.ToMM(pt.y))
+        radius_mm = pcbnew.ToMM(clearance_iu)
+        return any(via_intersects_rule_area(center, radius_mm, area) for area in keepout_areas)
 
     via_drill = pcbnew.FromMM(float(cfg.get("via_drill_mm", 0.3)))
     via_size = pcbnew.FromMM(float(cfg.get("via_size_mm", 0.6)))
@@ -719,17 +715,13 @@ def add_gnd_pour_and_thermal_vias(
             continue
         t_layer = pcbnew.B_Cu if t.GetClass() == "PCB_VIA" else t.GetLayer()
         item_cl = _own_clearance_mm(t, t_layer, floor_mm)
-        copper_obstacles.append(
-            (t, int(pcbnew.FromMM(via_r_mm + max(gnd_cl_mm, item_cl))))
-        )
+        copper_obstacles.append((t, int(pcbnew.FromMM(via_r_mm + max(gnd_cl_mm, item_cl)))))
     for ofp in board.GetFootprints():
         for op in ofp.Pads():
             if op.GetNetCode() == gnd_code:
                 continue
             item_cl = _own_clearance_mm(op, pcbnew.B_Cu, floor_mm)
-            copper_obstacles.append(
-                (op, int(pcbnew.FromMM(via_r_mm + max(gnd_cl_mm, item_cl))))
-            )
+            copper_obstacles.append((op, int(pcbnew.FromMM(via_r_mm + max(gnd_cl_mm, item_cl)))))
 
     # Drilled holes: a new via's hole wall must keep the board's hole-to-hole
     # minimum from EVERY existing hole (vias and PTH pads) -- nothing checked
@@ -741,15 +733,19 @@ def add_gnd_pour_and_thermal_vias(
     for t in board.GetTracks():
         if t.GetClass() == "PCB_VIA":
             p = t.GetPosition()
-            holes.append((pcbnew.ToMM(p.x), pcbnew.ToMM(p.y),
-                          pcbnew.ToMM(t.GetDrillValue()) / 2.0))
+            holes.append((pcbnew.ToMM(p.x), pcbnew.ToMM(p.y), pcbnew.ToMM(t.GetDrillValue()) / 2.0))
     for ofp in board.GetFootprints():
         for op in ofp.Pads():
             ds = op.GetDrillSize()
             if ds.x > 0 or ds.y > 0:
                 p = op.GetPosition()
-                holes.append((pcbnew.ToMM(p.x), pcbnew.ToMM(p.y),
-                              max(pcbnew.ToMM(ds.x), pcbnew.ToMM(ds.y)) / 2.0))
+                holes.append(
+                    (
+                        pcbnew.ToMM(p.x),
+                        pcbnew.ToMM(p.y),
+                        max(pcbnew.ToMM(ds.x), pcbnew.ToMM(ds.y)) / 2.0,
+                    )
+                )
 
     def _via_blocked(x: int, y: int) -> bool:
         """True when a GND via at (x, y) would violate another net's copper
@@ -769,8 +765,7 @@ def add_gnd_pour_and_thermal_vias(
             return True
         xm, ym = pcbnew.ToMM(int(x)), pcbnew.ToMM(int(y))
         return any(
-            ((xm - hx) ** 2 + (ym - hy) ** 2) ** 0.5
-            < hr + via_drill_r_mm + hole_min_mm
+            ((xm - hx) ** 2 + (ym - hy) ** 2) ** 0.5 < hr + via_drill_r_mm + hole_min_mm
             for hx, hy, hr in holes
         )
 
@@ -808,15 +803,15 @@ def add_gnd_pour_and_thermal_vias(
     def _already_bonded(pad) -> bool:
         p = pad.GetPosition()
         px, py = pcbnew.ToMM(p.x), pcbnew.ToMM(p.y)
-        return any(((px - vx) ** 2 + (py - vy) ** 2) ** 0.5 <= prebonded_reach
-                   for vx, vy in gnd_via_pts)
+        return any(
+            ((px - vx) ** 2 + (py - vy) ** 2) ** 0.5 <= prebonded_reach for vx, vy in gnd_via_pts
+        )
 
     # --- 1. Thermal-via arrays under GND thermal / exposed pads ---
     for fp in board.GetFootprints():
         pads = list(fp.Pads())
         smd = [
-            p for p in pads
-            if p.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN)
+            p for p in pads if p.GetAttribute() in (pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN)
         ]
         if not smd:
             continue
@@ -854,8 +849,7 @@ def add_gnd_pour_and_thermal_vias(
                 # the pad: if that lands in a keep-out, skip it (the pad still
                 # bonds through its footprint's other GND pins / the pour).
                 escape_reach = pcbnew.FromMM(
-                    float(cfg.get("gnd_escape_length_mm", 1.0))
-                    + pcbnew.ToMM(via_size)
+                    float(cfg.get("gnd_escape_length_mm", 1.0)) + pcbnew.ToMM(via_size)
                 )
                 if (
                     multipad
@@ -921,11 +915,7 @@ def add_gnd_pour_and_thermal_vias(
 
     zone = None
     for z in board.Zones():
-        if (
-            z.GetLayer() == target_layer
-            and z.GetNetname() == gnd_name
-            and not z.GetIsRuleArea()
-        ):
+        if z.GetLayer() == target_layer and z.GetNetname() == gnd_name and not z.GetIsRuleArea():
             zone = z
             break
     if zone is None:
@@ -934,9 +924,7 @@ def add_gnd_pour_and_thermal_vias(
         zone.SetLayer(target_layer)
         zone.SetIsRuleArea(False)
         zone.SetLocalClearance(pcbnew.FromMM(float(cfg.get("zone_clearance_mm", 0.3))))
-        zone.SetMinThickness(
-            pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25)))
-        )
+        zone.SetMinThickness(pcbnew.FromMM(float(cfg.get("zone_min_thickness_mm", 0.25))))
         _apply_gnd_pad_connection(zone, cfg)
         zone.SetAssignedPriority(0)
         board.Add(zone)
@@ -1008,9 +996,7 @@ def stamp_gnd_edge_spine(
     }
     outward = {"left": -1.0, "right": 1.0, "top": -1.0, "bottom": 1.0}
     try:
-        ecl = max(
-            pcbnew.ToMM(board.GetDesignSettings().m_CopperEdgeClearance), 0.05
-        )
+        ecl = max(pcbnew.ToMM(board.GetDesignSettings().m_CopperEdgeClearance), 0.05)
     except AttributeError:
         ecl = 0.3
     floor_mm = fab_floors(cfg)["clearance_mm"]
@@ -1047,11 +1033,15 @@ def stamp_gnd_edge_spine(
                 sz = p.GetSize()
             except TypeError:
                 sz = p.GetSize(pcbnew.F_Cu)
-            groups.setdefault(edge, []).append((
-                ref, p.GetNumber(),
-                pcbnew.ToMM(pos.x), pcbnew.ToMM(pos.y),
-                max(pcbnew.ToMM(sz.x), pcbnew.ToMM(sz.y)) / 2.0,
-            ))
+            groups.setdefault(edge, []).append(
+                (
+                    ref,
+                    p.GetNumber(),
+                    pcbnew.ToMM(pos.x),
+                    pcbnew.ToMM(pos.y),
+                    max(pcbnew.ToMM(sz.x), pcbnew.ToMM(sz.y)) / 2.0,
+                )
+            )
 
     del board
 
@@ -1062,10 +1052,7 @@ def stamp_gnd_edge_spine(
         sign = outward[edge]
         line = edge_line[edge]
         # Drop pads implausibly far inboard (shaped outline / stale zone).
-        pads = [
-            p for p in pads
-            if abs(line - (p[2] if vertical else p[3])) <= max_inset
-        ]
+        pads = [p for p in pads if abs(line - (p[2] if vertical else p[3])) <= max_inset]
         if len({ref for ref, *_ in pads}) < 2:
             summary["edges"][edge] = {"skipped": "pads_not_near_edge"}
             continue
@@ -1076,9 +1063,7 @@ def stamp_gnd_edge_spine(
         # board's copper-to-edge clearance. Centre the rail in that band --
         # hugging either bound leaves the sampled HitTest guard a hair away
         # from rejecting every chained segment.
-        outermost = max(
-            (p[2] if vertical else p[3]) * sign + p[4] for p in pads
-        )
+        outermost = max((p[2] if vertical else p[3]) * sign + p[4] for p in pads)
         pair = 0.01 + max(floor_mm, group_cl.get(edge, floor_mm))
         width = float(cfg.get("gnd_edge_spine_width_mm", 0.25))
         spine_c = None
@@ -1117,10 +1102,16 @@ def stamp_gnd_edge_spine(
             for layer in ("F.Cu", "B.Cu"):
                 res = add_breakout_stubs(
                     pcb_path,
-                    [BreakoutSpec(ref=ref, pad=num,
-                                  waypoints=[jog, last_jog, (lx, ly)],
-                                  layer=layer, width_mm=width,
-                                  near_xy=(px, py))],
+                    [
+                        BreakoutSpec(
+                            ref=ref,
+                            pad=num,
+                            waypoints=[jog, last_jog, (lx, ly)],
+                            layer=layer,
+                            width_mm=width,
+                            near_xy=(px, py),
+                        )
+                    ],
                     cfg=cfg,
                 )
                 if res.get("stubs", 0):
@@ -1139,7 +1130,9 @@ def stamp_gnd_edge_spine(
                 skipped.extend(reasons or [f"{ref}.{num}"])
         summary["stubs"] += stubs
         summary["edges"][edge] = {
-            "pads": len(pads), "stubs": stubs, "skipped": skipped,
+            "pads": len(pads),
+            "stubs": stubs,
+            "skipped": skipped,
         }
 
     if summary["stubs"]:
@@ -1232,17 +1225,13 @@ def repair_parent_gnd_islands(
             continue
         t_layer = pcbnew.B_Cu if t.GetClass() == "PCB_VIA" else t.GetLayer()
         item_cl = _own_clearance_mm(t, t_layer, floor_mm)
-        copper_obstacles.append(
-            (t, int(pcbnew.FromMM(via_r_mm + max(floor_mm, item_cl))))
-        )
+        copper_obstacles.append((t, int(pcbnew.FromMM(via_r_mm + max(floor_mm, item_cl)))))
     for ofp in board0.GetFootprints():
         for op in ofp.Pads():
             if op.GetNetCode() == gnd_code:
                 continue
             item_cl = _own_clearance_mm(op, pcbnew.B_Cu, floor_mm)
-            copper_obstacles.append(
-                (op, int(pcbnew.FromMM(via_r_mm + max(floor_mm, item_cl))))
-            )
+            copper_obstacles.append((op, int(pcbnew.FromMM(via_r_mm + max(floor_mm, item_cl)))))
 
     # Drilled holes.
     h2h = pcbnew.ToMM(board0.GetDesignSettings().m_HoleToHoleMin)
@@ -1251,15 +1240,19 @@ def repair_parent_gnd_islands(
     for t in board0.GetTracks():
         if t.GetClass() == "PCB_VIA":
             p = t.GetPosition()
-            holes.append((pcbnew.ToMM(p.x), pcbnew.ToMM(p.y),
-                          pcbnew.ToMM(t.GetDrillValue()) / 2.0))
+            holes.append((pcbnew.ToMM(p.x), pcbnew.ToMM(p.y), pcbnew.ToMM(t.GetDrillValue()) / 2.0))
     for ofp in board0.GetFootprints():
         for op in ofp.Pads():
             ds = op.GetDrillSize()
             if ds.x > 0 or ds.y > 0:
                 p = op.GetPosition()
-                holes.append((pcbnew.ToMM(p.x), pcbnew.ToMM(p.y),
-                              max(pcbnew.ToMM(ds.x), pcbnew.ToMM(ds.y)) / 2.0))
+                holes.append(
+                    (
+                        pcbnew.ToMM(p.x),
+                        pcbnew.ToMM(p.y),
+                        max(pcbnew.ToMM(ds.x), pcbnew.ToMM(ds.y)) / 2.0,
+                    )
+                )
     del board0
 
     def _via_blocked(x_iu: int, y_iu: int) -> bool:
@@ -1268,8 +1261,7 @@ def repair_parent_gnd_islands(
             return True
         xm, ym = pcbnew.ToMM(x_iu), pcbnew.ToMM(y_iu)
         return any(
-            ((xm - hx) ** 2 + (ym - hy) ** 2) ** 0.5
-            < hr + via_drill_r_mm + hole_min_mm
+            ((xm - hx) ** 2 + (ym - hy) ** 2) ** 0.5 < hr + via_drill_r_mm + hole_min_mm
             for hx, hy, hr in holes
         )
 
@@ -1308,19 +1300,13 @@ def repair_parent_gnd_islands(
         # --- Via stitching: connect overlap islands on opposite layers ---
         main_root = max(clusters, key=lambda r: len(clusters[r]))
         main_cluster = set(clusters[main_root])
-        main_islands = [
-            all_nodes[i] for i in main_cluster
-            if all_nodes[i]["kind"] == "island"
-        ]
+        main_islands = [all_nodes[i] for i in main_cluster if all_nodes[i]["kind"] == "island"]
 
         for root, members in clusters.items():
             if root == main_root:
                 continue
             # Find islands in this stranded cluster
-            stranded_islands = [
-                all_nodes[i] for i in members
-                if all_nodes[i]["kind"] == "island"
-            ]
+            stranded_islands = [all_nodes[i] for i in members if all_nodes[i]["kind"] == "island"]
             for si in stranded_islands:
                 si_layer = next(iter(si["layers"]))
                 si_pts = si["fill"].Outline(si["idx"])
@@ -1333,9 +1319,7 @@ def repair_parent_gnd_islands(
                     for k in range(si_pts.PointCount()):
                         p = si_pts.CPoint(k)
                         px_iu, py_iu = p.x, p.y
-                        if mi["fill"].Contains(
-                            pcbnew.VECTOR2I(px_iu, py_iu), mi["idx"]
-                        ):
+                        if mi["fill"].Contains(pcbnew.VECTOR2I(px_iu, py_iu), mi["idx"]):
                             if _add_via(px_iu, py_iu):
                                 summary["vias"] += 1
                             break
@@ -1343,9 +1327,7 @@ def repair_parent_gnd_islands(
                         # Also test the island centre
                         bb = si_pts.BBox()
                         cx, cy = bb.GetCenter().x, bb.GetCenter().y
-                        if mi["fill"].Contains(
-                            pcbnew.VECTOR2I(cx, cy), mi["idx"]
-                        ):
+                        if mi["fill"].Contains(pcbnew.VECTOR2I(cx, cy), mi["idx"]):
                             if _add_via(cx, cy):
                                 summary["vias"] += 1
 
@@ -1383,8 +1365,10 @@ def repair_parent_gnd_islands(
     del board
 
     if not summary.get("converged"):
-        print(f"  WARNING: parent GND island repair did not converge "
-              f"after {max_iter} iterations; "
-              f"{summary.get('clusters', '?')} clusters remain.")
+        print(
+            f"  WARNING: parent GND island repair did not converge "
+            f"after {max_iter} iterations; "
+            f"{summary.get('clusters', '?')} clusters remain."
+        )
 
     return summary

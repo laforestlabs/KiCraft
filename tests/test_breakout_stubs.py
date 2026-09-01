@@ -60,14 +60,14 @@ def test_radial_stub_is_single_locked_segment_outward(tmp_path):
     path = str(tmp_path / "b.kicad_pcb")
     # pad to the right of centre -> escape +x.
     _board(path, (5.0, 10.0), {"B5": ("CC2", 8.0, 10.0)})
-    res = add_breakout_stubs(
-        path, [BreakoutSpec(ref="J1", pad="B5", length_mm=1.5)]
-    )
+    res = add_breakout_stubs(path, [BreakoutSpec(ref="J1", pad="B5", length_mm=1.5)])
     assert res["stubs"] == 1 and res["segments"] == 1 and res["vias"] == 0
 
     board = pcbnew.LoadBoard(path)
     tracks = list(board.GetTracks())
-    segs = [t for t in tracks if isinstance(t, pcbnew.PCB_TRACK) and not isinstance(t, pcbnew.PCB_VIA)]
+    segs = [
+        t for t in tracks if isinstance(t, pcbnew.PCB_TRACK) and not isinstance(t, pcbnew.PCB_VIA)
+    ]
     assert len(segs) == 1
     t = segs[0]
     assert t.IsLocked()
@@ -79,9 +79,7 @@ def test_radial_stub_is_single_locked_segment_outward(tmp_path):
 def test_waypoint_path_lays_multiple_segments(tmp_path):
     path = str(tmp_path / "b.kicad_pcb")
     _board(path, (5.0, 10.0), {"B5": ("CC2", 8.0, 10.0)})
-    spec = BreakoutSpec(
-        ref="J1", pad="B5", waypoints=[(10.0, 10.0), (10.0, 3.0), (12.0, 3.0)]
-    )
+    spec = BreakoutSpec(ref="J1", pad="B5", waypoints=[(10.0, 10.0), (10.0, 3.0), (12.0, 3.0)])
     res = add_breakout_stubs(path, [spec])
     # pad -> wp1 -> wp2 -> wp3 == 3 segments.
     assert res["segments"] == 3
@@ -90,9 +88,7 @@ def test_waypoint_path_lays_multiple_segments(tmp_path):
 def test_via_at_end_adds_locked_via(tmp_path):
     path = str(tmp_path / "b.kicad_pcb")
     _board(path, (5.0, 10.0), {"B5": ("CC2", 8.0, 10.0)})
-    res = add_breakout_stubs(
-        path, [BreakoutSpec(ref="J1", pad="B5", via_at_end=True)]
-    )
+    res = add_breakout_stubs(path, [BreakoutSpec(ref="J1", pad="B5", via_at_end=True)])
     assert res["vias"] == 1
     board = pcbnew.LoadBoard(path)
     vias = [t for t in board.GetTracks() if isinstance(t, pcbnew.PCB_VIA)]
@@ -123,9 +119,7 @@ def test_radial_escape_is_clipped_before_a_neighbour_pad(tmp_path):
         (5.0, 10.0),
         {"B5": ("CC2", 8.0, 10.0), "BLK": ("GND", 9.2, 10.0)},
     )
-    res = add_breakout_stubs(
-        path, [BreakoutSpec(ref="J1", pad="B5", length_mm=3.0)]
-    )
+    res = add_breakout_stubs(path, [BreakoutSpec(ref="J1", pad="B5", length_mm=3.0)])
     assert res["stubs"] == 1
     board = pcbnew.LoadBoard(path)
     seg = next(
@@ -153,9 +147,7 @@ def test_radial_escape_skipped_when_no_safe_room(tmp_path):
             "B4": ("GND", 7.75, 9.75),
         },
     )
-    res = add_breakout_stubs(
-        path, [BreakoutSpec(ref="J1", pad="B5", length_mm=2.0)]
-    )
+    res = add_breakout_stubs(path, [BreakoutSpec(ref="J1", pad="B5", length_mm=2.0)])
     assert res["stubs"] == 0
     assert any("no_safe_radial_escape" in s for s in res["skipped"])
 
@@ -176,13 +168,11 @@ def test_radial_escape_falls_back_to_axis_direction(tmp_path):
         {
             "B5": ("CC2", 8.0, 10.0),
             "N0": ("GND", 8.18, 10.30),  # kills the radial ray near the start
-            "N3": ("GND", 8.0, 11.15),   # row neighbours block +/-y tips
+            "N3": ("GND", 8.0, 11.15),  # row neighbours block +/-y tips
             "N4": ("GND", 8.0, 8.85),
         },
     )
-    res = add_breakout_stubs(
-        path, [BreakoutSpec(ref="J1", pad="B5", length_mm=1.5)]
-    )
+    res = add_breakout_stubs(path, [BreakoutSpec(ref="J1", pad="B5", length_mm=1.5)])
     assert res["stubs"] == 1
     board = pcbnew.LoadBoard(path)
     seg = next(
@@ -217,9 +207,7 @@ def test_perimeter_tie_routes_around_bbox(tmp_path):
     # Detours off the pad row (corner waypoints well above/below y=10)...
     assert any(abs(y - 10.0) > 0.8 for _, y in s.waypoints)
     # ...and never lands on the obstacle (CC2 pad at (10,10)).
-    assert not any(
-        abs(x - 10.0) < 0.5 and abs(y - 10.0) < 0.5 for x, y in s.waypoints
-    )
+    assert not any(abs(x - 10.0) < 0.5 and abs(y - 10.0) < 0.5 for x, y in s.waypoints)
 
 
 def test_perimeter_tie_uses_pad_field_not_inflated_bbox(tmp_path):
@@ -238,10 +226,10 @@ def test_perimeter_tie_uses_pad_field_not_inflated_bbox(tmp_path):
     fp.SetPosition(pcbnew.VECTOR2I(_mm(10.0), _mm(10.0)))
     board.Add(fp)
     pads = {
-        "1": ("VBUS", 9.5, 9.0),   # VIN
-        "2": ("GND", 9.5, 10.0),   # GND, between the two VBUS pads
+        "1": ("VBUS", 9.5, 9.0),  # VIN
+        "2": ("GND", 9.5, 10.0),  # GND, between the two VBUS pads
         "3": ("VBUS", 9.5, 11.0),  # EN tied to VIN
-        "4": ("", 10.5, 11.0),     # NC, no net
+        "4": ("", 10.5, 11.0),  # NC, no net
         "5": ("P3V3", 10.5, 9.0),  # VOUT
     }
     for num, (netname, x, y) in pads.items():
@@ -272,10 +260,7 @@ def test_perimeter_tie_uses_pad_field_not_inflated_bbox(tmp_path):
     foreign = [p for p in fp.Pads() if p.GetNetname() != "VBUS"]
     start = fp.FindPadByNumber(s.pad).GetPosition()
     points = [(pcbnew.ToMM(start.x), pcbnew.ToMM(start.y)), *s.waypoints]
-    assert all(
-        _segment_clears_pads(foreign, a, b, 0.1)
-        for a, b in zip(points, points[1:])
-    )
+    assert all(_segment_clears_pads(foreign, a, b, 0.1) for a, b in zip(points, points[1:]))
 
 
 def test_waypoint_spec_crossing_foreign_pad_is_dropped(tmp_path):
@@ -288,9 +273,7 @@ def test_waypoint_spec_crossing_foreign_pad_is_dropped(tmp_path):
         (5.0, 10.0),
         {"B5": ("CC2", 6.0, 10.0), "BLK": ("GND", 9.0, 10.0)},
     )
-    res = add_breakout_stubs(
-        path, [BreakoutSpec(ref="J1", pad="B5", waypoints=[(12.0, 10.0)])]
-    )
+    res = add_breakout_stubs(path, [BreakoutSpec(ref="J1", pad="B5", waypoints=[(12.0, 10.0)])])
     assert res["stubs"] == 0
     assert any("waypoint_crosses_pad" in s for s in res["skipped"])
     board = pcbnew.LoadBoard(path)
@@ -358,10 +341,7 @@ def test_perimeter_tie_walk_is_clamped_onto_the_board(tmp_path):
     foreign = [p for p in fp.Pads() if p.GetNetname() != "VDD"]
     start = fp.FindPadByNumber(s.pad).GetPosition()
     points = [(pcbnew.ToMM(start.x), pcbnew.ToMM(start.y)), *s.waypoints]
-    assert all(
-        _segment_clears_pads(foreign, a, b, 0.1)
-        for a, b in zip(points, points[1:])
-    )
+    assert all(_segment_clears_pads(foreign, a, b, 0.1) for a, b in zip(points, points[1:]))
 
 
 def test_waypoint_spec_leaving_board_is_dropped(tmp_path):
@@ -370,9 +350,7 @@ def test_waypoint_spec_leaving_board_is_dropped(tmp_path):
     # skipped entirely -- whatever generated it.
     path = str(tmp_path / "b.kicad_pcb")
     _board(path, (5.0, 10.0), {"B5": ("CC2", 8.0, 10.0)})
-    res = add_breakout_stubs(
-        path, [BreakoutSpec(ref="J1", pad="B5", waypoints=[(8.0, -1.0)])]
-    )
+    res = add_breakout_stubs(path, [BreakoutSpec(ref="J1", pad="B5", waypoints=[(8.0, -1.0)])])
     assert res["stubs"] == 0
     assert any("off_board" in s for s in res["skipped"])
     board = pcbnew.LoadBoard(path)
@@ -441,9 +419,7 @@ def _write_pro_with_power_class(pcb_path, power_nets):
                     "meta": {"version": 3},
                     "net_colors": None,
                     "netclass_assignments": None,
-                    "netclass_patterns": [
-                        {"netclass": "Power", "pattern": n} for n in power_nets
-                    ],
+                    "netclass_patterns": [{"netclass": "Power", "pattern": n} for n in power_nets],
                 },
             }
         )
@@ -523,9 +499,7 @@ def test_radial_tip_extends_past_power_netclass_keepout(tmp_path):
     shutil.copyfile(scratch, path)
     _write_pro_with_power_class(path, ["VBUS"])
     board = pcbnew.LoadBoard(path)
-    vbus = next(
-        p for f in board.GetFootprints() for p in f.Pads() if p.GetNumber() == "B4A9"
-    )
+    vbus = next(p for f in board.GetFootprints() for p in f.Pads() if p.GetNumber() == "B4A9")
     assert pcbnew.ToMM(vbus.GetOwnClearance(pcbnew.F_Cu)) == pytest.approx(0.3)
     del board
 
@@ -673,6 +647,7 @@ def test_shield_tie_respects_disable_and_max_distance(tmp_path):
 # Strict same-footprint margins + tip-via guards
 # ---------------------------------------------------------------------------
 
+
 def test_foreign_pad_margins_strict_same_fp(tmp_path):
     from kicraft.autoplacer.brain.breakout_stubs import (
         _foreign_pad_margins,
@@ -680,10 +655,14 @@ def test_foreign_pad_margins_strict_same_fp(tmp_path):
     )
 
     path = str(tmp_path / "b.kicad_pcb")
-    _board(path, (5.0, 10.0), {
-        "B5": ("CC2", 8.0, 10.0),
-        "B6": ("GND", 8.0, 11.5),
-    })
+    _board(
+        path,
+        (5.0, 10.0),
+        {
+            "B5": ("CC2", 8.0, 10.0),
+            "B6": ("GND", 8.0, 11.5),
+        },
+    )
     board = pcbnew.LoadBoard(path)
     pads = {p.GetNumber(): p for fp in board.GetFootprints() for p in fp.Pads()}
     kw = dict(floor_mm=0.153, half_width_mm=0.0765, layer_id=pcbnew.F_Cu)
@@ -698,9 +677,11 @@ def test_foreign_pad_margins_strict_same_fp(tmp_path):
     # deterministic DRC rejection), plus the 10 µm sampled-check guard (the
     # run_13 aQFN 1 µm near-miss). The verify DRC does not waive a stub
     # grazing a same-footprint pad.
-    pair = 0.01 + max(0.153,
-                      _own_clearance_mm(pads["B5"], pcbnew.F_Cu, 0.153),
-                      _own_clearance_mm(pads["B6"], pcbnew.F_Cu, 0.153))
+    pair = 0.01 + max(
+        0.153,
+        _own_clearance_mm(pads["B5"], pcbnew.F_Cu, 0.153),
+        _own_clearance_mm(pads["B6"], pcbnew.F_Cu, 0.153),
+    )
     assert strict[0][1] == pcbnew.FromMM(pair + 0.0765) and pair > 0.163
 
 
@@ -746,8 +727,9 @@ def test_tip_via_near_same_net_via_is_skipped_or_blocked(tmp_path):
     board.Save(path)
 
     # End exactly on the existing via: redundant -> track yes, via no.
-    res = add_breakout_stubs(path, [BreakoutSpec(
-        ref="J1", pad="B5", waypoints=[(10.0, 10.0)], via_at_end=True)])
+    res = add_breakout_stubs(
+        path, [BreakoutSpec(ref="J1", pad="B5", waypoints=[(10.0, 10.0)], via_at_end=True)]
+    )
     assert res["stubs"] == 1 and res["segments"] == 1 and res["vias"] == 0
 
     # End 0.35 mm from the via: not touching, and the two drills would sit
@@ -766,8 +748,9 @@ def test_tip_via_near_same_net_via_is_skipped_or_blocked(tmp_path):
     board.Add(via)
     board.Save(path2)
 
-    res = add_breakout_stubs(path2, [BreakoutSpec(
-        ref="J1", pad="B5", waypoints=[(10.0, 10.0)], via_at_end=True)])
+    res = add_breakout_stubs(
+        path2, [BreakoutSpec(ref="J1", pad="B5", waypoints=[(10.0, 10.0)], via_at_end=True)]
+    )
     assert res["stubs"] == 0 and res["segments"] == 0
     assert any("via_blocked" in s for s in res["skipped"])
 
@@ -790,10 +773,69 @@ def test_near_xy_disambiguates_same_number_pads(tmp_path):
     fp.Add(dup)
     board.Save(path)
 
-    res = add_breakout_stubs(path, [BreakoutSpec(
-        ref="J1", pad="B5", waypoints=[(12.0, 20.0)], near_xy=(8.0, 20.0))])
+    res = add_breakout_stubs(
+        path, [BreakoutSpec(ref="J1", pad="B5", waypoints=[(12.0, 20.0)], near_xy=(8.0, 20.0))]
+    )
     assert res["stubs"] == 1, res
     board = pcbnew.LoadBoard(path)
     trk = [t for t in board.GetTracks() if not isinstance(t, pcbnew.PCB_VIA)][0]
     ys = sorted([pcbnew.ToMM(trk.GetStart().y), pcbnew.ToMM(trk.GetEnd().y)])
     assert ys == [pytest.approx(20.0), pytest.approx(20.0)]
+
+
+def _add_copper_rule_area(path, points, *, tracks=False, vias=False):
+    board = pcbnew.LoadBoard(path)
+    zone = pcbnew.ZONE(board)
+    zone.SetIsRuleArea(True)
+    zone.SetDoNotAllowTracks(tracks)
+    zone.SetDoNotAllowVias(vias)
+    zone.Outline().NewOutline()
+    for x, y in points:
+        zone.Outline().Append(_mm(x), _mm(y))
+    board.Add(zone)
+    board.Save(path)
+
+
+def test_waypoint_track_keepout_rejects_spec_atomically(tmp_path):
+    path = str(tmp_path / "track_keepout.kicad_pcb")
+    _board(path, (5.0, 10.0), {"B5": ("GND", 8.0, 10.0)})
+    _add_copper_rule_area(
+        path,
+        [(9.0, 9.0), (11.0, 9.0), (11.0, 11.0), (9.0, 11.0)],
+        tracks=True,
+    )
+
+    result = add_breakout_stubs(
+        path,
+        [BreakoutSpec(ref="J1", pad="B5", waypoints=[(12.0, 10.0)])],
+    )
+
+    assert result["stubs"] == result["segments"] == result["vias"] == 0
+    assert result["skipped"] == ["J1.B5:track_keepout"]
+    assert list(pcbnew.LoadBoard(path).GetTracks()) == []
+
+
+def test_end_via_keepout_rejects_track_and_via_atomically(tmp_path):
+    path = str(tmp_path / "via_keepout.kicad_pcb")
+    _board(path, (5.0, 10.0), {"B5": ("GND", 8.0, 10.0)})
+    _add_copper_rule_area(
+        path,
+        [(11.5, 9.5), (12.5, 9.5), (12.5, 10.5), (11.5, 10.5)],
+        vias=True,
+    )
+
+    result = add_breakout_stubs(
+        path,
+        [
+            BreakoutSpec(
+                ref="J1",
+                pad="B5",
+                waypoints=[(12.0, 10.0)],
+                via_at_end=True,
+            )
+        ],
+    )
+
+    assert result["stubs"] == result["segments"] == result["vias"] == 0
+    assert result["skipped"] == ["J1.B5:via_keepout"]
+    assert list(pcbnew.LoadBoard(path).GetTracks()) == []

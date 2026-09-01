@@ -29,9 +29,7 @@ import pytest
 
 import kicraft.design.cli_app as cli_app
 
-FIXTURE = (
-    Path(__file__).parent / "fixtures" / "replay_workspace" / "USB_PD_TRIGGER"
-)
+FIXTURE = Path(__file__).parent / "fixtures" / "replay_workspace" / "USB_PD_TRIGGER"
 
 
 def _stub_workspace(tmp_path: Path, stem: str = "DEMO") -> Path:
@@ -54,15 +52,26 @@ def _stub_workspace(tmp_path: Path, stem: str = "DEMO") -> Path:
 def test_resolve_project_mode_discovers_artifacts(tmp_path):
     d = _stub_workspace(tmp_path)
     args = SimpleNamespace(project=str(d), state=None, out_dir=None)
-    state, sp, arts, stem, pdir, root, pcb = cli_app._resolve_synthesized_workspace(
-        args
-    )
+    state, sp, arts, stem, pdir, root, pcb = cli_app._resolve_synthesized_workspace(args)
     assert stem == "DEMO"
     assert pdir == d.resolve()
     assert root == d / "DEMO.kicad_sch"
     assert pcb == d / "DEMO.kicad_pcb"
     assert sp is None  # no sibling state.json -> project-only mode
     assert [p.name for p in arts.leaf_schs] == ["LEAF_A.kicad_sch"]
+
+
+def test_persist_artifacts_without_state_path_updates_memory_only(tmp_path):
+    project = _stub_workspace(tmp_path)
+    state, state_path, artifacts, *_ = cli_app._resolve_synthesized_workspace(
+        SimpleNamespace(project=str(project), state=None, out_dir=None)
+    )
+
+    cli_app._persist_artifacts(state, state_path, artifacts)
+
+    assert state_path is None
+    assert state.artifacts is artifacts
+    assert not (project / "state.json").exists()
 
 
 def test_resolve_project_mode_missing_pcb_cannot_identify(tmp_path):
@@ -139,9 +148,7 @@ def test_replay_subcommand_registered_and_defaults(monkeypatch):
 def test_replay_flag_parsing(monkeypatch):
     seen = {}
     monkeypatch.setattr(cli_app, "_cmd_replay", lambda args: seen.update(vars(args)) or 0)
-    cli_app.main(
-        ["replay", "--project", "/tmp/x", "--seed", "9", "--no-route", "--no-fab"]
-    )
+    cli_app.main(["replay", "--project", "/tmp/x", "--seed", "9", "--no-route", "--no-fab"])
     assert seen["seed"] == 9
     assert seen["route"] is False
     assert seen["no_fab"] is True
@@ -184,8 +191,14 @@ def test_replay_never_calls_synth_and_threads_seed(tmp_path, monkeypatch):
     _patch_replay_seams(monkeypatch, rec)
 
     args = SimpleNamespace(
-        project=str(d), state=None, out_dir=None, quality="fast",
-        seed=7, route=False, no_fab=False, no_archive=True,
+        project=str(d),
+        state=None,
+        out_dir=None,
+        quality="fast",
+        seed=7,
+        route=False,
+        no_fab=False,
+        no_archive=True,
     )
     rc = cli_app._cmd_replay(args)
     assert rc == 0
@@ -207,8 +220,14 @@ def test_routed_replay_preflights_krt_once(tmp_path, monkeypatch):
         lambda project_dir: calls.append(Path(project_dir)) or {},
     )
     args = SimpleNamespace(
-        project=str(d), state=None, out_dir=None, quality="fast",
-        seed=0, route=True, no_fab=True, no_archive=True,
+        project=str(d),
+        state=None,
+        out_dir=None,
+        quality="fast",
+        seed=0,
+        route=True,
+        no_fab=True,
+        no_archive=True,
     )
     assert cli_app._cmd_replay(args) == 0
     assert calls == [d]
@@ -220,8 +239,14 @@ def test_replay_pins_deterministic_env(tmp_path, monkeypatch):
     monkeypatch.delenv("PYTHONHASHSEED", raising=False)
     _patch_replay_seams(monkeypatch, {})
     args = SimpleNamespace(
-        project=str(d), state=None, out_dir=None, quality="fast",
-        seed=0, route=False, no_fab=True, no_archive=True,
+        project=str(d),
+        state=None,
+        out_dir=None,
+        quality="fast",
+        seed=0,
+        route=False,
+        no_fab=True,
+        no_archive=True,
     )
     assert cli_app._cmd_replay(args) == 0
     assert os.environ["PYTHONHASHSEED"] == "0"
@@ -232,9 +257,7 @@ def test_replay_detects_synthesis_mutation(tmp_path, monkeypatch):
     loudly (rc 8) -- the no-synthesis invariant must hold."""
     d = _stub_workspace(tmp_path)
     monkeypatch.setattr(cli_app, "_degenerate_hierarchy_error", lambda root: None)
-    monkeypatch.setattr(
-        "kicraft.build_slots.build_slot", lambda **k: contextlib.nullcontext()
-    )
+    monkeypatch.setattr("kicraft.build_slots.build_slot", lambda **k: contextlib.nullcontext())
 
     def mutating(args, state, sp, arts, results, stem, pdir, root, pcb):
         root.write_text("(kicad_sch root) MUTATED\n", encoding="utf-8")
@@ -242,8 +265,14 @@ def test_replay_detects_synthesis_mutation(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli_app, "_layout_route_fab", mutating)
     args = SimpleNamespace(
-        project=str(d), state=None, out_dir=None, quality="fast",
-        seed=0, route=False, no_fab=True, no_archive=True,
+        project=str(d),
+        state=None,
+        out_dir=None,
+        quality="fast",
+        seed=0,
+        route=False,
+        no_fab=True,
+        no_archive=True,
     )
     assert cli_app._cmd_replay(args) == 8
 
@@ -262,8 +291,11 @@ def test_run_layout_threads_seed_and_route_to_solve_hierarchy(tmp_path, monkeypa
 
     monkeypatch.setattr(sh, "main", fake_main)
     rc = cli_app._run_layout(
-        "fast", tmp_path / "root.kicad_sch", tmp_path / "b.kicad_pcb",
-        seed=5, route=False,
+        "fast",
+        tmp_path / "root.kicad_sch",
+        tmp_path / "b.kicad_pcb",
+        seed=5,
+        route=False,
     )
     assert rc == 0
     argv = captured["argv"]
@@ -277,8 +309,11 @@ def test_run_layout_passes_route_when_enabled(tmp_path, monkeypatch):
     captured = {}
     monkeypatch.setattr(sh, "main", lambda argv: captured.update(argv=list(argv)) or 0)
     cli_app._run_layout(
-        "fast", tmp_path / "root.kicad_sch", tmp_path / "b.kicad_pcb",
-        seed=0, route=True,
+        "fast",
+        tmp_path / "root.kicad_sch",
+        tmp_path / "b.kicad_pcb",
+        seed=0,
+        route=True,
     )
     assert "--route" in captured["argv"]
 
@@ -305,13 +340,21 @@ def test_build_namespace_preserves_engine_defaults(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli_app, "_run_layout", fake_run_layout)
     monkeypatch.setattr(
-        cli_app, "_promote_verify_fab",
+        cli_app,
+        "_promote_verify_fab",
         lambda *a, **k: captured.update(do_fab=k.get("do_fab")) or 0,
     )
     args = SimpleNamespace(quality="good", no_archive=True)  # build-like
     rc = cli_app._layout_route_fab(
-        args, object(), tmp_path / "s.json", object(), [],
-        "DEMO", tmp_path, tmp_path / "r.kicad_sch", tmp_path / "b.kicad_pcb",
+        args,
+        object(),
+        tmp_path / "s.json",
+        object(),
+        [],
+        "DEMO",
+        tmp_path,
+        tmp_path / "r.kicad_sch",
+        tmp_path / "b.kicad_pcb",
     )
     assert rc == 0
     assert captured["seed"] is None
@@ -329,8 +372,7 @@ def _leaf_placements(project_dir: Path) -> dict[str, dict]:
 
     out: dict[str, dict] = {}
     for p in glob.glob(
-        str(project_dir / ".experiments" / "subcircuits"
-            / "*" / "leaf_placed.kicad_pcb")
+        str(project_dir / ".experiments" / "subcircuits" / "*" / "leaf_placed.kicad_pcb")
     ):
         board = pcbnew.LoadBoard(p)
         out[Path(p).parent.name] = {
@@ -348,9 +390,18 @@ def _replay_once(dest: Path) -> None:
     shutil.copytree(FIXTURE, dest)
     rc = subprocess.run(
         [
-            sys.executable, "-m", "kicraft.design.cli_app", "replay",
-            "--project", str(dest), "--quality", "fast", "--no-route",
-            "--no-fab", "--seed", "0",
+            sys.executable,
+            "-m",
+            "kicraft.design.cli_app",
+            "replay",
+            "--project",
+            str(dest),
+            "--quality",
+            "fast",
+            "--no-route",
+            "--no-fab",
+            "--seed",
+            "0",
         ],
         cwd=str(FIXTURE.parent.parent.parent),  # repo root
     ).returncode
@@ -371,8 +422,7 @@ def test_parent_corpus_matches_golden():
     pytest.importorskip("pcbnew")
     repo_root = Path(__file__).resolve().parent.parent
     rc = subprocess.run(
-        [sys.executable, str(repo_root / "scripts" / "replay_corpus.py"),
-         "--mode", "parent"],
+        [sys.executable, str(repo_root / "scripts" / "replay_corpus.py"), "--mode", "parent"],
         cwd=str(repo_root),
     ).returncode
     assert rc == 0, "parent corpus drifted from golden (or errored)"
