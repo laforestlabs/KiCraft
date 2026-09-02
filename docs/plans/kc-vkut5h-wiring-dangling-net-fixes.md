@@ -174,3 +174,44 @@ Update the `next_attempt` docstring and caller comment to document these transit
 6. Use a successful copied replay state for B's fresh-synthesis/provenance acceptance.
 7. Deploy with the repository scripts, then perform one live web rerun.
 8. Run `triage run` + `triage audits` on the new run and inspect the committed USB/translator/HUB75 topology, provenance, wheel-spin, and substitutions ledger.
+
+## Results (measured 2026-09-02, frozen-cohort replays, deepseek flash design model)
+
+- **B landed + accepted** (`e349987`, keep-out fixup `595305a`). Vendored `esp32-s3-wroom-1-n16r8` (C2913202) and
+  `sn74hct245` (C53436288): pin/pad inventories and footprint pads verified identical to the home baseline
+  through `lookup_pins` + `pcbnew.FootprintLoad` in a temp project with no project-tier override; vendored tier
+  wins precedence; both `validate-part` clean and promoted to production. Fresh synthesis of a completed
+  replay state passes §9.1–§9.13 and `triage audits [A]` reports both slugs `curated-default`, **zero
+  home-fetched** (was 4). The fresh LCSC conversion of the ESP32 was rejected per step 3 (legacy-format
+  footprint with a courtyard clipping the pads) and vendored from the known-working home artifacts instead;
+  its shipped .step needed the documented `restep_model_frames` re-frame (fit med 0.001 mm, identical to the
+  adjudicated `esp32-s3-wroom-1` transform) and gained the antenna RF keep-out the sibling bundle carries.
+- **A1/A2/A3 landed**: `c519a45` (topology-safe §9.15 context + identity-stability tests), `7c1f212` (§9.20
+  ESP32-S3 native-USB function gate), `5be28d5` (one-clean-slate bounded-continuation state machine),
+  `fad9d8a` (A2 feedback names the resolved target pin — added after replay evidence that function-only
+  wording left the model searching and still failing).
+- **Deterministic gates**: full focused suites green (validation 96, retry 72, prompt-examples 13, plus all
+  importers of the three cited functions). `_commit_rejection_signature` proven byte-equal for legacy vs
+  enriched offenders through the real check. Stage-commit and build-time paths confirmed to share the same
+  enriched function (`cli_app.py:1189`/`3724`), `offenders[:20]` retained with accurate `offenders_total`.
+- **Replay gates (n=3 per state, per plan):** control8 cohort valid commits: control(B-only) 12/24, B+A1
+  17/24 (mean attempts 2.67→2.42, mean cost $0.00226→$0.00197 — both improved), B+A1+A2 16/24,
+  B+A1+A2+A3 15/24. **A1 missed the absolute 20/24 adoption bar** (rp2040-min 0/12 and can-node 0/9 never
+  converge — residual defect: missing pull resistors in the BOM, which wiring cannot add; unrelated to §9.15
+  feedback). It is retained under the 08-31 plan fallback as a proven-neutral-or-better feedback improvement
+  (every paired metric improved or held).
+- **A2 objective achieved**: every frozen-candidate wrong-pin commit (control r3, A1 r1) was retro-rejected
+  by the final §9.20 validator — wrong-USB-pin boards can no longer slip through on §9.15 cleanliness —
+  and all committed outputs of A2-bearing variants pass it.
+- **A3**: exactly-one-escape and call-bound properties hold in the state-matrix tests and were observed live
+  (rp2040-min rescued from terminal at attempt 3 in `b-a123`; can-node 0/3→2/3). Net cohort commits moved
+  ±1 between A2/A3 variants across runs — indistinguishable from model noise at n=3; attempt/cost deltas
+  reported above per plan.
+- **KC-VKUT5H target**: B+A1+A2+A3 committed 1/12 replay samples (bar was ≥2/3) — the residual blocker is
+  model stubbornness (repeated RXD0/TXD0/IO11-IO14 USB bindings + cross-sheet HUB75 name splits despite
+  feedback naming the exact correct pin), not a gate gap; the gates now refuse every such board honestly.
+- **Deployed + live rerun**: web + worker restarted (`curl` 200; worker ready). One live web run of the
+  verbatim brief (project 41/781, $0.053 total) committed intent→bom and terminated honestly at wiring
+  (attempts=6 = call budget; §9.15+§9.20 recurring; the enriched `[esp32s3_native_usb]` feedback with
+  `the correct endpoint is pin 13 of U2 (IO19)` confirmed live). **Build success is NOT credited** —
+  the wiring commit bar for the live rerun was not met; no gate was weakened to make it pass.
