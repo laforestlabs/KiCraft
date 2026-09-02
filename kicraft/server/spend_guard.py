@@ -95,6 +95,31 @@ class SpendGuard:
                 name = column.split()[0]
                 if name not in cols:
                     conn.execute(f"ALTER TABLE stage_runs ADD COLUMN {column}")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS stage_attempts ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "ts TEXT NOT NULL,"
+                "run_id TEXT,"
+                "stage TEXT NOT NULL,"
+                "attempt INTEGER NOT NULL,"
+                "call_mode TEXT NOT NULL,"
+                "model TEXT,"
+                "provider TEXT,"
+                "finish_reason TEXT,"
+                "outcome TEXT NOT NULL,"
+                "http_status INTEGER,"
+                "error_code TEXT,"
+                "request_id TEXT,"
+                "wall_s REAL,"
+                "input_tokens INTEGER,"
+                "output_tokens INTEGER,"
+                "cost_usd REAL,"
+                "diagnostic_codes TEXT)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS stage_attempts_run_stage "
+                "ON stage_attempts(run_id, stage, attempt)"
+            )
 
     def _sum(self, where: str = "", params: tuple = ()) -> float:
         with self._conn() as conn:
@@ -138,6 +163,43 @@ class SpendGuard:
                 (cutoff,),
             ).fetchall()
         return [(r[0], float(r[1] or 0.0)) for r in rows]
+
+    def stage_attempt_aggregates(self, days: int = 30) -> list[dict]:
+        """Redacted provider/semantic attempt aggregates for admin diagnosis."""
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT stage,model,provider,outcome,error_code,COUNT(*) AS attempts,"
+                "AVG(wall_s) AS avg_wall_s,SUM(cost_usd) AS cost_usd "
+                "FROM stage_attempts WHERE ts >= ? "
+                "GROUP BY stage,model,provider,outcome,error_code "
+                "ORDER BY attempts DESC,stage,model,provider,outcome",
+                (cutoff,),
+            ).fetchall()
+        return [
+            {
+                "stage": row[0],
+                "model": row[1],
+                "provider": row[2],
+                "outcome": row[3],
+                "error_code": row[4],
+                "attempts": int(row[5]),
+                "avg_wall_s": float(row[6]) if row[6] is not None else None,
+                "cost_usd": float(row[7] or 0.0),
+            }
+            for row in rows
+        ]
+
+    def stage_diagnostic_aggregates(self, days: int = 30) -> list[dict]:
+        cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT a.stage,j.value,COUNT(*) FROM stage_attempts AS a,"
+                "json_each(COALESCE(a.diagnostic_codes,'[]')) AS j "
+                "WHERE a.ts >= ? GROUP BY a.stage,j.value ORDER BY COUNT(*) DESC,a.stage,j.value",
+                (cutoff,),
+            ).fetchall()
+        return [{"stage": row[0], "code": row[1], "attempts": int(row[2])} for row in rows]
 
     def status(self) -> dict:
         day, total = self.spent_today(), self.spent_total()
@@ -240,5 +302,54 @@ class SpendGuard:
                     str(failure_kind) if failure_kind is not None else None,
                     int(emitted_collection_count) if emitted_collection_count is not None else None,
                     int(expanded_component_count) if expanded_component_count is not None else None,
+                ),
+            )
+
+    def record_stage_attempt(
+        self,
+        *,
+        run_id: str | None,
+        stage: str,
+        attempt: int,
+        call_mode: str,
+        outcome: str,
+        model: str | None = None,
+        provider: str | None = None,
+        finish_reason: str | None = None,
+        http_status: int | None = None,
+        error_code: str | None = None,
+        request_id: str | None = None,
+        wall_s: float | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        cost_usd: float | None = None,
+        diagnostic_codes=(),
+    ) -> None:
+        """Append redacted per-call facts; never stores prompts or responses."""
+        codes = sorted({str(code) for code in diagnostic_codes if code})
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO stage_attempts (ts,run_id,stage,attempt,call_mode,"
+                "model,provider,finish_reason,outcome,http_status,error_code,"
+                "request_id,wall_s,input_tokens,output_tokens,cost_usd,diagnostic_codes)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    _utcnow_iso(),
+                    run_id,
+                    stage,
+                    int(attempt),
+                    str(call_mode),
+                    model,
+                    provider,
+                    finish_reason,
+                    str(outcome),
+                    http_status,
+                    error_code,
+                    request_id,
+                    wall_s,
+                    input_tokens,
+                    output_tokens,
+                    float(cost_usd or 0.0),
+                    json.dumps(codes, separators=(",", ":")),
                 ),
             )

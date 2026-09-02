@@ -322,6 +322,20 @@ class InterSheetNet(BaseModel):
         return self
 
 
+JsonScalar = str | int | float | bool | None
+
+
+class RecipeSelection(BaseModel):
+    """Explicit versioned circuit recipe selected by architecture."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipe: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]*@[1-9][0-9]*$")
+    instance: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+    sheets: dict[str, str]
+    parameters: dict[str, JsonScalar] = Field(default_factory=dict)
+
+
 class Architecture(BaseModel):
     topologies: dict[str, str] = Field(default_factory=dict)
     rail_voltages: dict[str, float] = Field(default_factory=dict)
@@ -331,6 +345,7 @@ class Architecture(BaseModel):
     power_nets: list[str]
     inter_sheet_nets: list[InterSheetNet]
     assumptions: list[str] = Field(default_factory=list)
+    recipe_selections: list[RecipeSelection] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _sheets_unique(self):
@@ -340,6 +355,20 @@ class Architecture(BaseModel):
             raise ValueError("Architecture.sheets must have unique names")
         if len(stems) != len(set(stems)):
             raise ValueError("Architecture.sheets must have unique stems")
+        return self
+
+    @model_validator(mode="after")
+    def _recipe_instances_unique_and_mapped(self):
+        instances = [selection.instance for selection in self.recipe_selections]
+        if len(instances) != len(set(instances)):
+            raise ValueError("Architecture.recipe_selections instances must be unique")
+        sheet_names = {sheet.name for sheet in self.sheets}
+        for selection in self.recipe_selections:
+            unknown = set(selection.sheets.values()) - sheet_names
+            if unknown:
+                raise ValueError(
+                    f"recipe {selection.instance!r} maps unknown sheets: {sorted(unknown)}"
+                )
         return self
 
     @model_validator(mode="after")
@@ -383,6 +412,14 @@ class BomPart(BaseModel):
     # that is still unconsumed from a pre-existing part of the same value:
     # only the former may suppress a repeat add of the same ask.
     reconcile_added: bool = False
+    # Deterministic circuit-recipe provenance. Model-facing BOM groups cannot
+    # author these fields.
+    recipe_id: str | None = None
+    recipe_instance: str | None = None
+    recipe_role: str | None = None
+    # False means a routed/validated board-fabricated feature omitted from
+    # assembly BOM and position exports.
+    assembly: bool = True
 
     @field_validator("ref")
     @classmethod
@@ -597,6 +634,18 @@ class Substitution(BaseModel):
     reason: str = ""
 
 
+class EdgeInterface(BaseModel):
+    """Ordered fabrication interface constrained to one board edge."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    refs: list[str] = Field(min_length=1)
+    side: Literal["top", "bottom", "left", "right"]
+    pitch_mm: float = Field(gt=0)
+    behavior: Literal["castellated"]
+
+
 class BOM(BaseModel):
     parts: list[BomPart]
     ic_groups: dict[str, list[str]] = Field(default_factory=dict)
@@ -610,6 +659,7 @@ class BOM(BaseModel):
     substitutions: list[Substitution] = Field(default_factory=list)
     connections: list[NetConnection] = Field(default_factory=list)
     no_connect_pins: list[PinEndpoint] = Field(default_factory=list)
+    edge_interfaces: list[EdgeInterface] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _refs_unique(self):
@@ -656,6 +706,12 @@ class BOM(BaseModel):
             if hint.anchor_ref is not None and hint.anchor_ref not in ref_set:
                 raise ValueError(
                     f"placement_hints[{hint.ref!r}].anchor_ref {hint.anchor_ref!r} not in BOM parts"
+                )
+        for interface in self.edge_interfaces:
+            unknown = set(interface.refs) - ref_set
+            if unknown:
+                raise ValueError(
+                    f"edge interface {interface.name!r} references unknown refs: {sorted(unknown)}"
                 )
         return self
 
@@ -913,6 +969,19 @@ class ArtifactPaths(BaseModel):
 # ---------- Conversation state ----------
 
 
+class StageDiagnostic(BaseModel):
+    """Versioned, redacted deterministic finding for one committed stage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]{2,127}$")
+    severity: Literal["advisory", "repair_required", "fab_gate"]
+    message: str
+    evidence: list[str] = Field(default_factory=list)
+    detector_version: int = Field(ge=1)
+    attempt: int | None = Field(default=None, ge=1)
+
+
 class StageStatus(BaseModel):
     """Durable outcome of one pipeline stage, keyed by stage name in
     ConversationState.stage_status. Written by the server stage driver at
@@ -920,6 +989,16 @@ class StageStatus(BaseModel):
     restore pipeline progress without replaying the ephemeral event stream."""
 
     ok: bool
+    # Outcome dimensions are additive so old state remains readable. ``None``
+    # means the historical writer did not observe the dimension.
+    provider_ok: bool | None = None
+    schema_ok: bool | None = None
+    semantic_clean: bool | None = None
+    repair_required: bool = False
+    fab_safe: bool | None = None
+    repair_attempted: bool = False
+    repair_adopted: bool = False
+    diagnostics: list[StageDiagnostic] = Field(default_factory=list)
     cost_usd: float | None = None
     attempts: int | None = None
     finished_at: str | None = None  # UTC ISO timestamp

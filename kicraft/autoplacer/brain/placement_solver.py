@@ -842,6 +842,11 @@ class PlacementSolver:
             resnap_to_grid(best_comps, self._grid, exclude=_step16_moved)
             self._clamp_pads_to_board(best_comps)
 
+        # Castellations intentionally violate the normal "all copper inside"
+        # invariant. Restore their exact drill datums after every generic clamp
+        # and courtyard pass; no subsequent geometry pass may move them.
+        self._restore_fabricated_edge_interfaces(best_comps)
+
         # Final score
         work_state.components = best_comps
         final = PlacementScorer(work_state, self.cfg).score()
@@ -1502,6 +1507,52 @@ class PlacementSolver:
                     comp.locked = not unlock_all
                     if k + 1 < len(order):
                         cursor_x += sizes[k] / 2 + connector_gap + sizes[k + 1] / 2
+        # Fabrication primitives are not ordinary edge connectors. Their plated
+        # pad centers must lie on Edge.Cuts, at the declared pitch and in the
+        # declared order; body-flush placement leaves the drill stranded inside.
+        for interface in self.cfg.get("edge_interfaces", []) or []:
+            refs = [str(ref) for ref in interface.get("refs", [])]
+            edge = str(interface.get("side", ""))
+            pitch = float(interface.get("pitch_mm", 0.0))
+            if not refs or edge not in {"left", "right", "top", "bottom"} or pitch <= 0:
+                continue
+            members = [comps.get(ref) for ref in refs]
+            if any(member is None or not member.pads for member in members):
+                continue
+            required_span = (len(refs) - 1) * pitch + 2 * margin
+            if edge in {"left", "right"} and required_span > br.y - tl.y:
+                br = Point(br.x, tl.y + required_span)
+                self.state.board_outline = (tl, br)
+            elif edge in {"top", "bottom"} and required_span > br.x - tl.x:
+                br = Point(tl.x + required_span, br.y)
+                self.state.board_outline = (tl, br)
+            parallel_start = (
+                (tl.y + br.y - (len(refs) - 1) * pitch) / 2
+                if edge in {"left", "right"}
+                else (tl.x + br.x - (len(refs) - 1) * pitch) / 2
+            )
+            for index, (ref, comp) in enumerate(zip(refs, members)):
+                pad = comp.pads[0]
+                pad_offset = Point(pad.pos.x - comp.pos.x, pad.pos.y - comp.pos.y)
+                pad_x = (
+                    tl.x
+                    if edge == "left"
+                    else br.x
+                    if edge == "right"
+                    else parallel_start + index * pitch
+                )
+                pad_y = (
+                    tl.y
+                    if edge == "top"
+                    else br.y
+                    if edge == "bottom"
+                    else parallel_start + index * pitch
+                )
+                old_pos = Point(comp.pos.x, comp.pos.y)
+                comp.pos = Point(pad_x - pad_offset.x, pad_y - pad_offset.y)
+                _update_pad_positions(comp, old_pos, comp.rotation)
+                comp.locked = True
+                self._pinned_targets[ref] = Point(comp.pos.x, comp.pos.y)
 
         # --- Non-edge constraints (corners, zones, mounting holes) ---
         for ref, comp in comps.items():
@@ -1613,6 +1664,21 @@ class PlacementSolver:
                 _update_pad_positions(comp, old_pos, comp.rotation)
                 self._pinned_targets[ref] = Point(comp.pos.x, comp.pos.y)
                 comp.locked = not unlock_all
+
+    def _restore_fabricated_edge_interfaces(self, comps: dict[str, Component]) -> None:
+        refs = {
+            str(ref)
+            for interface in self.cfg.get("edge_interfaces", []) or []
+            for ref in interface.get("refs", []) or []
+        }
+        for ref in refs:
+            comp = comps.get(ref)
+            target = self._pinned_targets.get(ref)
+            if comp is None or target is None:
+                continue
+            old_pos = Point(comp.pos.x, comp.pos.y)
+            comp.pos = Point(target.x, target.y)
+            _update_pad_positions(comp, old_pos, comp.rotation)
 
     def _restore_pinned_positions(self, comps: dict[str, Component]):
         """Restore edge/corner-pinned components to their target positions.

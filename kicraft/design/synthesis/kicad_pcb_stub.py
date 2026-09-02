@@ -14,6 +14,7 @@ This keeps existing callers working unchanged.
 Uses ``pcbnew.NewBoard()`` + ``pcbnew.FootprintLoad()`` — both stable
 across the KiCad 6 → 9 transitions in scope for this project.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -41,8 +42,6 @@ def _split_footprint_id(fid: str) -> tuple[str, str]:
     return library, name
 
 
-
-
 def _normalize_text_heights(pcbnew_mod, fp) -> None:
     """Bump SILK-layer footprint text below the board's min_text_height up to it.
 
@@ -59,8 +58,9 @@ def _normalize_text_heights(pcbnew_mod, fp) -> None:
     min_h = pcbnew_mod.FromMM(DEFAULT_RULES["min_text_height"])
     min_t = pcbnew_mod.FromMM(DEFAULT_RULES["min_text_thickness"])
     texts = [fp.Reference(), fp.Value()]
-    texts += [it for it in fp.GraphicalItems()
-              if it.GetClass() in ("PCB_TEXT", "FP_TEXT", "PCB_FIELD")]
+    texts += [
+        it for it in fp.GraphicalItems() if it.GetClass() in ("PCB_TEXT", "FP_TEXT", "PCB_FIELD")
+    ]
     for t in texts:
         if t.GetLayer() not in silk:
             continue
@@ -68,12 +68,12 @@ def _normalize_text_heights(pcbnew_mod, fp) -> None:
         h = min(size.x, size.y)
         if 0 < h < min_h:
             scale = min_h / h
-            t.SetTextSize(pcbnew_mod.VECTOR2I(
-                max(int(size.x * scale), min_h), max(int(size.y * scale), min_h)
-            ))
-            t.SetTextThickness(
-                max(int(t.GetTextThickness() * scale), min_t)
+            t.SetTextSize(
+                pcbnew_mod.VECTOR2I(
+                    max(int(size.x * scale), min_h), max(int(size.y * scale), min_h)
+                )
             )
+            t.SetTextThickness(max(int(t.GetTextThickness() * scale), min_t))
 
 
 def write_empty_pcb(
@@ -116,13 +116,16 @@ def write_empty_pcb(
         _normalize_text_heights(pcbnew, fp)
         fp.SetReference(part.ref)
         fp.SetValue(part.value)
+        if not part.assembly:
+            attributes = fp.GetAttributes()
+            attributes |= getattr(pcbnew, "FP_EXCLUDE_FROM_BOM", 0)
+            attributes |= getattr(pcbnew, "FP_EXCLUDE_FROM_POS_FILES", 0)
+            fp.SetAttributes(attributes)
         col = idx % cols
         row = idx // cols
         x_mm = origin_x_mm + col * pitch_mm
         y_mm = origin_y_mm + row * pitch_mm
-        fp.SetPosition(
-            pcbnew.VECTOR2I(pcbnew.FromMM(x_mm), pcbnew.FromMM(y_mm))
-        )
+        fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(x_mm), pcbnew.FromMM(y_mm)))
         board.Add(fp)
         fps_by_ref[part.ref] = fp
 
@@ -164,7 +167,8 @@ def write_empty_pcb(
     if unbound:
         raise PadBindingError(
             "wired endpoint(s) match no footprint pad and would become "
-            "invisible dead copper: " + "; ".join(unbound[:20])
+            "invisible dead copper: "
+            + "; ".join(unbound[:20])
             + (f" (+{len(unbound) - 20} more)" if len(unbound) > 20 else "")
         )
 

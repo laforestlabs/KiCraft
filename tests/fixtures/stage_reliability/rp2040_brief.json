@@ -1,0 +1,3 @@
+{
+  "brief": "A minimal RP2040 board (QFN-56) with QSPI flash, USB-C, a 12 MHz crystal, and castellated GPIO."
+}

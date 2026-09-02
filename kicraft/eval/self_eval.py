@@ -151,6 +151,7 @@ _EVENT_KINDS = frozenset(
         "retry",
         "serialization_recovery",
         "candidate_decoded",
+        "stage_diagnostic",
         "build_start",
         "build_log",
         "build_done",
@@ -251,6 +252,7 @@ def _write_campaign_manifest(
         "judge_provider_order": list(settings.judge_provider_order),
         "response_policies": {
             "design": "kicraft_<stage>_response_v1",
+            "architecture": "kicraft_architecture_response_v2",
             "bom_and_wiring": "kicraft_<stage>_response_v2",
             "review": "kicraft_electrical_review_v1",
             "judge": "kicraft_eval_judge_v1",
@@ -604,6 +606,25 @@ def evaluate_one(
             questions=d["questions"],
             design_error=d["error"],
         )
+        state_doc = {}
+        try:
+            state_doc = json.loads((rundir / ".kicraft" / "state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        stage_statuses = state_doc.get("stage_status") if isinstance(state_doc, dict) else {}
+        stage_statuses = stage_statuses if isinstance(stage_statuses, dict) else {}
+        rec["design_committed"] = all(
+            isinstance(stage_statuses.get(stage), dict) and stage_statuses[stage].get("ok") is True
+            for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
+        )
+        rec["semantic_clean"] = rec["design_committed"] and all(
+            stage_statuses[stage].get("semantic_clean") is not False
+            for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
+        )
+        rec["fab_safe"] = rec["design_committed"] and all(
+            stage_statuses[stage].get("fab_safe") is not False
+            for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
+        )
 
         if d["status"] == "ok":
             with build_gate or contextlib.nullcontext():
@@ -756,6 +777,9 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         "graded_n": len(finals),
         "n_errored": sum(1 for r in records if r.get("error")),
         "fab_ready": sum(1 for r in records if r.get("build_rc") == 0),
+        "design_committed": sum(1 for r in records if r.get("design_committed") is True),
+        "semantic_clean": sum(1 for r in records if r.get("semantic_clean") is True),
+        "fab_safe": sum(1 for r in records if r.get("fab_safe") is True),
         "mean_final": round(statistics.fmean(finals), 1) if finals else None,
         "median_final": round(statistics.median(finals), 1) if finals else None,
         # per-brief-median aggregates (== flat mean/median when repeats == 1)
@@ -823,6 +847,11 @@ def _render_md(s: dict) -> str:
     L.append(
         f"- briefs: **{s.get('n_briefs', s['n'])}**{rep_note}  ·  graded runs: **{s['graded_n']}**  ·  "
         f"fab-ready builds: **{s['fab_ready']}/{s['n']}**  ·  errored: **{s['n_errored']}**"
+    )
+    L.append(
+        f"- design committed: **{s['design_committed']}/{s['n']}**  ·  "
+        f"semantic clean: **{s['semantic_clean']}/{s['n']}**  ·  "
+        f"fab safe: **{s['fab_safe']}/{s['n']}**"
     )
     if s.get("mean_final") is not None:
         L.append(f"- score (0–100): mean **{s['mean_final']}** · median **{s['median_final']}**")

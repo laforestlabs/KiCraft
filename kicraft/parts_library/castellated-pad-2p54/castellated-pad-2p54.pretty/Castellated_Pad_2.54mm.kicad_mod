@@ -1,0 +1,16 @@
+(footprint "Castellated_Pad_2.54mm"
+  (version 20240108)
+  (generator "KiCraft")
+  (layer "F.Cu")
+  (descr "Plated half-hole castellation; drill center must lie on Edge.Cuts")
+  (tags "castellated half hole edge pad")
+  (attr through_hole exclude_from_pos_files exclude_from_bom)
+  (fp_rect (start -1.27 -1.27) (end 1.27 1.27)
+    (stroke (width 0.15) (type default)) (fill none) (layer "F.Fab"))
+  (pad "1" thru_hole oval (at 0 0) (size 2.2 1.8) (drill 1.0)
+    (layers "*.Cu" "*.Mask") (remove_unused_layers no))
+  (model "${KIPRJMOD}/3dmodels/castellated-pad-2p54/castellated-pad-2p54.wrl"
+    (offset (xyz 0 0 0))
+    (scale (xyz 1 1 1))
+    (rotate (xyz 0 0 0)))
+)

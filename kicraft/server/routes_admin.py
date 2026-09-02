@@ -10,6 +10,7 @@ render helpers live in ``web`` and are imported below; they are resolved at requ
 time, and ``_store`` still reads ``web._STORE`` so the test seam is unchanged. Charts
 use NiceGUI's bundled ECharts primitive (the ``server`` extra has no plotly).
 """
+
 from __future__ import annotations
 import json
 import math
@@ -80,21 +81,33 @@ def _echart_bar(labels, values, *, title: str, color: str = "#60a5fa") -> dict:
         "title": {"text": title, "textStyle": {"color": "#e2e8f0", "fontSize": 13}},
         "tooltip": {"trigger": "axis"},
         "grid": {"left": 50, "right": 16, "top": 44, "bottom": 56},
-        "xAxis": {"type": "category", "data": list(labels),
-                  "axisLabel": {"color": _CHART_AXIS, "fontSize": 10, "rotate": 45}},
-        "yAxis": {"type": "value", "axisLabel": {"color": _CHART_AXIS},
-                  "splitLine": {"lineStyle": {"color": _CHART_GRID}}},
-        "series": [{"type": "bar", "data": list(values),
-                    "itemStyle": {"color": color}}],
+        "xAxis": {
+            "type": "category",
+            "data": list(labels),
+            "axisLabel": {"color": _CHART_AXIS, "fontSize": 10, "rotate": 45},
+        },
+        "yAxis": {
+            "type": "value",
+            "axisLabel": {"color": _CHART_AXIS},
+            "splitLine": {"lineStyle": {"color": _CHART_GRID}},
+        },
+        "series": [{"type": "bar", "data": list(values), "itemStyle": {"color": color}}],
     }
 
 
 def _echart_line(labels, values, *, title: str, color: str = "#34d399") -> dict:
     """ECharts line/area-chart option dict (pure; see _echart_bar)."""
     opt = _echart_bar(labels, values, title=title, color=color)
-    opt["series"] = [{"type": "line", "data": list(values), "smooth": True,
-                      "showSymbol": False, "itemStyle": {"color": color},
-                      "areaStyle": {"color": color, "opacity": 0.15}}]
+    opt["series"] = [
+        {
+            "type": "line",
+            "data": list(values),
+            "smooth": True,
+            "showSymbol": False,
+            "itemStyle": {"color": color},
+            "areaStyle": {"color": color, "opacity": 0.15},
+        }
+    ]
     return opt
 
 
@@ -105,14 +118,21 @@ def _echart_pie(pairs, *, title: str) -> dict:
         "title": {"text": title, "textStyle": {"color": "#e2e8f0", "fontSize": 13}},
         "tooltip": {"trigger": "item"},
         "legend": {"bottom": 0, "textStyle": {"color": _CHART_AXIS}},
-        "series": [{"type": "pie", "radius": ["38%", "66%"], "center": ["50%", "46%"],
-                    "data": [{"name": str(n), "value": v} for n, v in pairs],
-                    "label": {"color": "#cbd5e1"}}],
+        "series": [
+            {
+                "type": "pie",
+                "radius": ["38%", "66%"],
+                "center": ["50%", "46%"],
+                "data": [{"name": str(n), "value": v} for n, v in pairs],
+                "label": {"color": "#cbd5e1"},
+            }
+        ],
     }
 
 
-def _echart_multi_line(labels, series, *, title: str, y_name: str = "",
-                       baseline=None, y_range=None) -> dict:
+def _echart_multi_line(
+    labels, series, *, title: str, y_name: str = "", baseline=None, y_range=None
+) -> dict:
     """Multi-series line chart over a category x-axis (pure; see _echart_bar).
 
     ``series`` = [(name, values, color), ...]; ``baseline`` draws a dashed
@@ -120,19 +140,32 @@ def _echart_multi_line(labels, series, *, title: str, y_name: str = "",
     y-axis to (min, max)."""
     s = []
     for i, (name, values, color) in enumerate(series):
-        d = {"type": "line", "name": name, "data": list(values), "smooth": True,
-             "showSymbol": False, "connectNulls": True,
-             "itemStyle": {"color": color}, "lineStyle": {"color": color}}
+        d = {
+            "type": "line",
+            "name": name,
+            "data": list(values),
+            "smooth": True,
+            "showSymbol": False,
+            "connectNulls": True,
+            "itemStyle": {"color": color},
+            "lineStyle": {"color": color},
+        }
         if i == 0 and baseline is not None:
             d["markLine"] = {
-                "symbol": "none", "silent": True,
+                "symbol": "none",
+                "silent": True,
                 "label": {"color": "#f59e0b", "formatter": "default", "fontSize": 9},
                 "lineStyle": {"color": "#f59e0b", "type": "dashed"},
-                "data": [{"yAxis": baseline}]}
+                "data": [{"yAxis": baseline}],
+            }
         s.append(d)
-    yaxis = {"type": "value", "name": y_name, "nameTextStyle": {"color": _CHART_AXIS},
-             "axisLabel": {"color": _CHART_AXIS},
-             "splitLine": {"lineStyle": {"color": _CHART_GRID}}}
+    yaxis = {
+        "type": "value",
+        "name": y_name,
+        "nameTextStyle": {"color": _CHART_AXIS},
+        "axisLabel": {"color": _CHART_AXIS},
+        "splitLine": {"lineStyle": {"color": _CHART_GRID}},
+    }
     if y_range is not None:
         yaxis["min"], yaxis["max"] = y_range
     return {
@@ -141,10 +174,15 @@ def _echart_multi_line(labels, series, *, title: str, y_name: str = "",
         "tooltip": {"trigger": "axis"},
         "legend": {"top": 22, "textStyle": {"color": _CHART_AXIS, "fontSize": 10}},
         "grid": {"left": 54, "right": 18, "top": 58, "bottom": 34},
-        "xAxis": {"type": "category", "data": list(labels), "name": "generation",
-                  "nameLocation": "middle", "nameGap": 24,
-                  "nameTextStyle": {"color": _CHART_AXIS},
-                  "axisLabel": {"color": _CHART_AXIS, "fontSize": 10}},
+        "xAxis": {
+            "type": "category",
+            "data": list(labels),
+            "name": "generation",
+            "nameLocation": "middle",
+            "nameGap": 24,
+            "nameTextStyle": {"color": _CHART_AXIS},
+            "axisLabel": {"color": _CHART_AXIS, "fontSize": 10},
+        },
         "yAxis": yaxis,
         "series": s,
     }
@@ -153,22 +191,38 @@ def _echart_multi_line(labels, series, *, title: str, y_name: str = "",
 def _echart_scatter(series, *, title: str, x_name: str = "", y_name: str = "") -> dict:
     """Scatter chart (pure; see _echart_bar). ``series`` = [(name, points, color,
     size), ...] where points = [[x, y], ...]."""
-    s = [{"type": "scatter", "name": name, "data": list(points),
-          "symbolSize": size, "itemStyle": {"color": color}}
-         for name, points, color, size in series]
+    s = [
+        {
+            "type": "scatter",
+            "name": name,
+            "data": list(points),
+            "symbolSize": size,
+            "itemStyle": {"color": color},
+        }
+        for name, points, color, size in series
+    ]
     return {
         "backgroundColor": "transparent",
         "title": {"text": title, "textStyle": {"color": "#e2e8f0", "fontSize": 13}},
         "tooltip": {"trigger": "item"},
         "legend": {"top": 22, "textStyle": {"color": _CHART_AXIS, "fontSize": 10}},
         "grid": {"left": 54, "right": 18, "top": 58, "bottom": 44},
-        "xAxis": {"type": "value", "name": x_name, "nameLocation": "middle",
-                  "nameGap": 26, "nameTextStyle": {"color": _CHART_AXIS},
-                  "axisLabel": {"color": _CHART_AXIS},
-                  "splitLine": {"lineStyle": {"color": _CHART_GRID}}},
-        "yAxis": {"type": "value", "name": y_name, "nameTextStyle": {"color": _CHART_AXIS},
-                  "axisLabel": {"color": _CHART_AXIS},
-                  "splitLine": {"lineStyle": {"color": _CHART_GRID}}},
+        "xAxis": {
+            "type": "value",
+            "name": x_name,
+            "nameLocation": "middle",
+            "nameGap": 26,
+            "nameTextStyle": {"color": _CHART_AXIS},
+            "axisLabel": {"color": _CHART_AXIS},
+            "splitLine": {"lineStyle": {"color": _CHART_GRID}},
+        },
+        "yAxis": {
+            "type": "value",
+            "name": y_name,
+            "nameTextStyle": {"color": _CHART_AXIS},
+            "axisLabel": {"color": _CHART_AXIS},
+            "splitLine": {"lineStyle": {"color": _CHART_GRID}},
+        },
         "series": s,
     }
 
@@ -178,8 +232,13 @@ def _echart_scatter(series, *, title: str, x_name: str = "", y_name: str = "") -
 # request. ``_HOST_TIMESCALE_SECONDS`` -> None means "all history".
 _HOST_TIMESCALES = ["1h", "6h", "24h", "7d", "30d", "90d", "all"]
 _HOST_TIMESCALE_SECONDS = {
-    "1h": 3600.0, "6h": 21600.0, "24h": 86400.0,
-    "7d": 604800.0, "30d": 2592000.0, "90d": 7776000.0, "all": None,
+    "1h": 3600.0,
+    "6h": 21600.0,
+    "24h": 86400.0,
+    "7d": 604800.0,
+    "30d": 2592000.0,
+    "90d": 7776000.0,
+    "all": None,
 }
 
 
@@ -190,11 +249,10 @@ def _host_downsample(rows: list[dict], max_points: int = 240) -> list[dict]:
     if len(rows) <= max_points:
         return rows
     bucket = math.ceil(len(rows) / max_points)
-    keys = ("cpu_pct", "mem_pct", "disk_pct", "mem_used_mb",
-            "disk_used_mb", "disk_total_mb")
+    keys = ("cpu_pct", "mem_pct", "disk_pct", "mem_used_mb", "disk_used_mb", "disk_total_mb")
     out: list[dict] = []
     for i in range(0, len(rows), bucket):
-        chunk = rows[i:i + bucket]
+        chunk = rows[i : i + bucket]
         agg: dict = {"ts": chunk[-1]["ts"]}
         for k in keys:
             vals = [c[k] for c in chunk if c.get(k) is not None]
@@ -203,19 +261,29 @@ def _host_downsample(rows: list[dict], max_points: int = 240) -> list[dict]:
     return out
 
 
-def _host_usage_chart(rows: list[dict], key: str, *, title: str,
-                      color: str, y_name: str = "", y_max: float | None = 100.0,
-                      y_fmt: str | None = None) -> dict:
+def _host_usage_chart(
+    rows: list[dict],
+    key: str,
+    *,
+    title: str,
+    color: str,
+    y_name: str = "",
+    y_max: float | None = 100.0,
+    y_fmt: str | None = None,
+) -> dict:
     """ECharts *time-axis* area line for one host metric (pure; see
     ``_echart_bar``). Points are ``[ts_ms, value]`` so ECharts picks axis ticks
     and tooltip time formatting itself -- better than a category axis for a
     multi-timescale view. ``y_max=100`` pins percent charts 0..100; pass None
     for an auto-scaled axis (drive MB shows raw magnitude)."""
     pts = [[r["ts"] * 1000.0, r[key]] for r in rows if r.get(key) is not None]
-    yaxis: dict = {"type": "value", "name": y_name,
-                   "nameTextStyle": {"color": _CHART_AXIS},
-                   "axisLabel": {"color": _CHART_AXIS},
-                   "splitLine": {"lineStyle": {"color": _CHART_GRID}}}
+    yaxis: dict = {
+        "type": "value",
+        "name": y_name,
+        "nameTextStyle": {"color": _CHART_AXIS},
+        "axisLabel": {"color": _CHART_AXIS},
+        "splitLine": {"lineStyle": {"color": _CHART_GRID}},
+    }
     if y_fmt is not None:
         yaxis["axisLabel"]["formatter"] = y_fmt
     if y_max is not None:
@@ -225,14 +293,24 @@ def _host_usage_chart(rows: list[dict], key: str, *, title: str,
         "title": {"text": title, "textStyle": {"color": "#e2e8f0", "fontSize": 13}},
         "tooltip": {"trigger": "axis"},
         "grid": {"left": 48, "right": 18, "top": 44, "bottom": 32},
-        "xAxis": {"type": "time",
-                  "axisLabel": {"color": _CHART_AXIS, "fontSize": 10},
-                  "splitLine": {"lineStyle": {"color": _CHART_GRID}}},
+        "xAxis": {
+            "type": "time",
+            "axisLabel": {"color": _CHART_AXIS, "fontSize": 10},
+            "splitLine": {"lineStyle": {"color": _CHART_GRID}},
+        },
         "yAxis": yaxis,
-        "series": [{"type": "line", "data": pts, "smooth": True,
-                    "showSymbol": False, "connectNulls": True,
-                    "itemStyle": {"color": color}, "lineStyle": {"color": color},
-                    "areaStyle": {"color": color, "opacity": 0.15}}],
+        "series": [
+            {
+                "type": "line",
+                "data": pts,
+                "smooth": True,
+                "showSymbol": False,
+                "connectNulls": True,
+                "itemStyle": {"color": color},
+                "lineStyle": {"color": color},
+                "areaStyle": {"color": color, "opacity": 0.15},
+            }
+        ],
     }
 
 
@@ -252,13 +330,13 @@ def _render_host_charts(selection: str) -> None:
     def _card(key: str, title: str, color: str) -> None:
         with ui.card().classes("flex-1").style(_admin_card_style()):
             if rows:
-                ui.echart(_host_usage_chart(rows, key, title=title, color=color,
-                         y_name="%")) \
-                    .classes("w-full").style("height:240px")
+                ui.echart(
+                    _host_usage_chart(rows, key, title=title, color=color, y_name="%")
+                ).classes("w-full").style("height:240px")
             else:
-                ui.label("No host metrics yet — the sampler starts with the "
-                         "web server.").classes("text-xs") \
-                    .style("color:#64748b;align-self:center")
+                ui.label("No host metrics yet — the sampler starts with the web server.").classes(
+                    "text-xs"
+                ).style("color:#64748b;align-self:center")
 
     with ui.row().classes("w-full flex-wrap gap-3"):
         _card("cpu_pct", "CPU usage (%)", "#60a5fa")
@@ -266,51 +344,57 @@ def _render_host_charts(selection: str) -> None:
         _card("disk_pct", "Drive usage (%)", "#22d3ee")
 
 
-
 def _admin_header(active: str) -> None:
     """Shared header for the admin pages; `active` names the current sub-page."""
-    with ui.header().classes("items-center justify-between") \
-            .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)"):
+    with (
+        ui.header()
+        .classes("items-center justify-between")
+        .style("background:var(--kc-surface);border-bottom:1px solid var(--kc-border)")
+    ):
         with ui.row().classes("items-center gap-2"):
             ui.label("KiCraft").classes("text-xl font-bold text-white")
             ui.label(f"admin · {active}").classes("text-sm").style("color:#94a3b8")
         with ui.row().classes("items-center gap-2"):
-            ui.button("Overview", icon="insights",
-                      on_click=lambda: ui.navigate.to("/admin")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
-            ui.button("Users", icon="group",
-                      on_click=lambda: ui.navigate.to("/admin/users")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
-            ui.button("Projects", icon="folder_open",
-                      on_click=lambda: ui.navigate.to("/admin/projects")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
-            ui.button("Invites", icon="vpn_key",
-                      on_click=lambda: ui.navigate.to("/admin/invites")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
-            ui.button("Components", icon="memory",
-                      on_click=lambda: ui.navigate.to("/admin/core-components")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
-            ui.button("Self-Eval", icon="science",
-                      on_click=lambda: ui.navigate.to("/admin/self-eval")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
-            ui.button("Tuning", icon="tune",
-                      on_click=lambda: ui.navigate.to("/admin/tuning")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
-            ui.button("Tidiness A/B", icon="grid_view",
-                      on_click=lambda: ui.navigate.to("/admin/tidiness-ab")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
-            ui.button("Load", icon="speed",
-                      on_click=lambda: ui.navigate.to("/admin/loadtest")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
-            ui.button("Security", icon="security",
-                      on_click=lambda: ui.navigate.to("/admin/security")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
-            ui.button("Support", icon="support_agent",
-                      on_click=lambda: ui.navigate.to("/admin/support")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
-            ui.button("Back to workspace", icon="arrow_back",
-                      on_click=lambda: ui.navigate.to("/")) \
-                .props("flat dense no-caps color=white").classes("text-xs")
+            ui.button("Overview", icon="insights", on_click=lambda: ui.navigate.to("/admin")).props(
+                "flat dense no-caps color=white"
+            ).classes("text-xs")
+            ui.button("Users", icon="group", on_click=lambda: ui.navigate.to("/admin/users")).props(
+                "flat dense no-caps color=white"
+            ).classes("text-xs")
+            ui.button(
+                "Projects", icon="folder_open", on_click=lambda: ui.navigate.to("/admin/projects")
+            ).props("flat dense no-caps color=white").classes("text-xs")
+            ui.button(
+                "Invites", icon="vpn_key", on_click=lambda: ui.navigate.to("/admin/invites")
+            ).props("flat dense no-caps color=white").classes("text-xs")
+            ui.button(
+                "Components",
+                icon="memory",
+                on_click=lambda: ui.navigate.to("/admin/core-components"),
+            ).props("flat dense no-caps color=white").classes("text-xs")
+            ui.button(
+                "Self-Eval", icon="science", on_click=lambda: ui.navigate.to("/admin/self-eval")
+            ).props("flat dense no-caps color=white").classes("text-xs")
+            ui.button(
+                "Tuning", icon="tune", on_click=lambda: ui.navigate.to("/admin/tuning")
+            ).props("flat dense no-caps color=white").classes("text-xs")
+            ui.button(
+                "Tidiness A/B",
+                icon="grid_view",
+                on_click=lambda: ui.navigate.to("/admin/tidiness-ab"),
+            ).props("flat dense no-caps color=white").classes("text-xs")
+            ui.button(
+                "Load", icon="speed", on_click=lambda: ui.navigate.to("/admin/loadtest")
+            ).props("flat dense no-caps color=white").classes("text-xs")
+            ui.button(
+                "Security", icon="security", on_click=lambda: ui.navigate.to("/admin/security")
+            ).props("flat dense no-caps color=white").classes("text-xs")
+            ui.button(
+                "Support", icon="support_agent", on_click=lambda: ui.navigate.to("/admin/support")
+            ).props("flat dense no-caps color=white").classes("text-xs")
+            ui.button(
+                "Back to workspace", icon="arrow_back", on_click=lambda: ui.navigate.to("/")
+            ).props("flat dense no-caps color=white").classes("text-xs")
 
 
 def _admin_card_style() -> str:
@@ -323,16 +407,24 @@ def _admin_card_style() -> str:
 # converge over CMA-ES generations. Reads each run dir (tuning.db + checkpoint)
 # via kicraft.tuning.report_data; auto-refreshes so a live run updates in place.
 # --------------------------------------------------------------------------- #
-_TUNE_PALETTE = ["#60a5fa", "#34d399", "#fbbf24", "#f87171", "#a78bfa",
-                 "#22d3ee", "#fb923c", "#4ade80", "#e879f9", "#f472b6"]
+_TUNE_PALETTE = [
+    "#60a5fa",
+    "#34d399",
+    "#fbbf24",
+    "#f87171",
+    "#a78bfa",
+    "#22d3ee",
+    "#fb923c",
+    "#4ade80",
+    "#e879f9",
+    "#f472b6",
+]
 
 
 def _tuning_out_roots() -> list[Path]:
     """Every root a tuning run can live under (GUI default + repo logs)."""
-    base = Path(getattr(Settings.from_env(), "projects_dir",
-                        Path.home() / ".kicraft" / "projects"))
-    roots = [base.parent / "tuning",
-             Path(__file__).resolve().parents[2] / "logs" / "tuning"]
+    base = Path(getattr(Settings.from_env(), "projects_dir", Path.home() / ".kicraft" / "projects"))
+    roots = [base.parent / "tuning", Path(__file__).resolve().parents[2] / "logs" / "tuning"]
     out: list[Path] = []
     seen: set = set()
     for r in roots:
@@ -366,8 +458,9 @@ def _tuning_detail_ui(d: dict) -> None:
             _stat("default fab-ready", f"{base['fab']:.2f}")
 
     if not gens:
-        ui.label("Baseline still evaluating — charts populate once generation 0 "
-                 "completes.").classes("text-sm").style("color:#94a3b8")
+        ui.label(
+            "Baseline still evaluating — charts populate once generation 0 completes."
+        ).classes("text-sm").style("color:#94a3b8")
 
     labels = [g["gen"] for g in gens]
 
@@ -377,41 +470,69 @@ def _tuning_detail_ui(d: dict) -> None:
     if gens:
         with ui.row().classes("w-full gap-3 flex-wrap"):
             with ui.card().classes("flex-1").style(_admin_card_style()):
-                ui.echart(_echart_multi_line(labels, [
-                    ("train best", _col("fab", "train"), "#34d399"),
-                    ("holdout", _col("fab", "holdout"), "#60a5fa")],
-                    title="Fab-ready rate / generation", y_name="rate",
-                    baseline=base.get("fab"), y_range=(0, 1))) \
-                    .classes("w-full").style("height:260px")
+                ui.echart(
+                    _echart_multi_line(
+                        labels,
+                        [
+                            ("train best", _col("fab", "train"), "#34d399"),
+                            ("holdout", _col("fab", "holdout"), "#60a5fa"),
+                        ],
+                        title="Fab-ready rate / generation",
+                        y_name="rate",
+                        baseline=base.get("fab"),
+                        y_range=(0, 1),
+                    )
+                ).classes("w-full").style("height:260px")
             with ui.card().classes("flex-1").style(_admin_card_style()):
-                ui.echart(_echart_multi_line(labels, [
-                    ("train best", _col("j", "train"), "#a78bfa"),
-                    ("holdout", _col("j", "holdout"), "#60a5fa")],
-                    title="Objective J / generation", y_name="J")) \
-                    .classes("w-full").style("height:260px")
+                ui.echart(
+                    _echart_multi_line(
+                        labels,
+                        [
+                            ("train best", _col("j", "train"), "#a78bfa"),
+                            ("holdout", _col("j", "holdout"), "#60a5fa"),
+                        ],
+                        title="Objective J / generation",
+                        y_name="J",
+                    )
+                ).classes("w-full").style("height:260px")
         with ui.row().classes("w-full gap-3 flex-wrap"):
             with ui.card().classes("flex-1").style(_admin_card_style()):
-                ui.echart(_echart_multi_line(labels, [
-                    ("train best", _col("drc", "train"), "#f87171")],
-                    title="Mean DRC (shorts+unconnected) / generation",
-                    y_name="violations", baseline=base.get("drc"))) \
-                    .classes("w-full").style("height:260px")
+                ui.echart(
+                    _echart_multi_line(
+                        labels,
+                        [("train best", _col("drc", "train"), "#f87171")],
+                        title="Mean DRC (shorts+unconnected) / generation",
+                        y_name="violations",
+                        baseline=base.get("drc"),
+                    )
+                ).classes("w-full").style("height:260px")
             with ui.card().classes("flex-1").style(_admin_card_style()):
-                ui.echart(_echart_multi_line(labels, [
-                    ("train best", _col("wall", "train"), "#22d3ee")],
-                    title="Mean build time / generation", y_name="seconds",
-                    baseline=base.get("wall"))) \
-                    .classes("w-full").style("height:260px")
+                ui.echart(
+                    _echart_multi_line(
+                        labels,
+                        [("train best", _col("wall", "train"), "#22d3ee")],
+                        title="Mean build time / generation",
+                        y_name="seconds",
+                        baseline=base.get("wall"),
+                    )
+                ).classes("w-full").style("height:260px")
 
         with ui.card().classes("w-full").style(_admin_card_style()):
             series = []
             for i, p in enumerate(active):
                 tr = {pt["gen"]: pt["norm"] for pt in d["param_traces"].get(p, [])}
-                series.append((p, [tr.get(g) for g in labels],
-                               _TUNE_PALETTE[i % len(_TUNE_PALETTE)]))
-            ui.echart(_echart_multi_line(
-                labels, series, title="Parameter convergence (normalized 0–1)",
-                y_name="norm", y_range=(0, 1))).classes("w-full").style("height:320px")
+                series.append(
+                    (p, [tr.get(g) for g in labels], _TUNE_PALETTE[i % len(_TUNE_PALETTE)])
+                )
+            ui.echart(
+                _echart_multi_line(
+                    labels,
+                    series,
+                    title="Parameter convergence (normalized 0–1)",
+                    y_name="norm",
+                    y_range=(0, 1),
+                )
+            ).classes("w-full").style("height:320px")
 
     pts = d["points"]
     if pts:
@@ -419,18 +540,24 @@ def _tuning_detail_ui(d: dict) -> None:
         front = [[p["wall"], p["fab"]] for p in pts if p["front"] and not p["baseline"]]
         baseln = [[p["wall"], p["fab"]] for p in pts if p["baseline"]]
         with ui.card().classes("w-full").style(_admin_card_style()):
-            ui.echart(_echart_scatter([
-                ("evaluated", dom, "#475569", 7),
-                ("Pareto front", front, "#34d399", 12),
-                ("default", baseln, "#f59e0b", 15)],
-                title="Pareto archive — fab-ready vs build time",
-                x_name="mean build time (s)", y_name="fab-ready rate")) \
-                .classes("w-full").style("height:340px")
+            ui.echart(
+                _echart_scatter(
+                    [
+                        ("evaluated", dom, "#475569", 7),
+                        ("Pareto front", front, "#34d399", 12),
+                        ("default", baseln, "#f59e0b", 15),
+                    ],
+                    title="Pareto archive — fab-ready vs build time",
+                    x_name="mean build time (s)",
+                    y_name="fab-ready rate",
+                )
+            ).classes("w-full").style("height:340px")
 
     if active and gens:
         with ui.card().classes("w-full").style(_admin_card_style()):
-            ui.label("Active params: current best vs default").classes(
-                "text-sm font-bold").style("color:#94a3b8")
+            ui.label("Active params: current best vs default").classes("text-sm font-bold").style(
+                "color:#94a3b8"
+            )
             with ui.row().classes("w-full gap-3 text-xs").style("color:#64748b"):
                 ui.label("param").style("width:260px")
                 ui.label("default").style("width:110px")
@@ -438,13 +565,16 @@ def _tuning_detail_ui(d: dict) -> None:
             for p in active:
                 tr = d["param_traces"].get(p, [])
                 cur = tr[-1]["value"] if tr else None
-                with ui.row().classes("w-full gap-3 text-xs").style(
-                        "border-top:1px solid var(--kc-border);padding:3px 0"):
+                with (
+                    ui.row()
+                    .classes("w-full gap-3 text-xs")
+                    .style("border-top:1px solid var(--kc-border);padding:3px 0")
+                ):
                     ui.label(p).classes("font-mono").style("width:260px;color:#cbd5e1")
-                    ui.label(f"{d['defaults'].get(p, 0):.4g}").style(
-                        "width:110px;color:#94a3b8")
+                    ui.label(f"{d['defaults'].get(p, 0):.4g}").style("width:110px;color:#94a3b8")
                     ui.label("—" if cur is None else f"{cur:.4g}").style(
-                        "width:120px;color:#e2e8f0")
+                        "width:120px;color:#e2e8f0"
+                    )
 
 
 @ui.page("/admin/tuning")
@@ -459,23 +589,29 @@ def admin_tuning_page():
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
         ui.label("Auto-tuning runs").classes("text-2xl font-bold text-white")
-        ui.label("CMA-ES tuning of the default placement/routing config against the "
-                 "routed Pareto objective (fab-ready · DRC · build time).") \
-            .classes("text-sm").style("color:#94a3b8")
+        ui.label(
+            "CMA-ES tuning of the default placement/routing config against the "
+            "routed Pareto objective (fab-ready · DRC · build time)."
+        ).classes("text-sm").style("color:#94a3b8")
         ui.separator().style("background:var(--kc-border);margin-top:4px")
         runs_box = ui.column().classes("w-full gap-0")
 
         def render_list():
-            runs = [report_data.run_overview(d)
-                    for d in report_data.discover_runs(_tuning_out_roots())]
+            runs = [
+                report_data.run_overview(d) for d in report_data.discover_runs(_tuning_out_roots())
+            ]
             runs_box.clear()
             with runs_box:
                 if not runs:
-                    ui.label("No tuning runs under ~/.kicraft/tuning or logs/tuning yet.") \
-                        .classes("text-xs").style("color:#64748b")
+                    ui.label("No tuning runs under ~/.kicraft/tuning or logs/tuning yet.").classes(
+                        "text-xs"
+                    ).style("color:#64748b")
                     return
-                with ui.row().classes("w-full items-center gap-3 text-xs").style(
-                        "padding:4px 6px;color:#64748b"):
+                with (
+                    ui.row()
+                    .classes("w-full items-center gap-3 text-xs")
+                    .style("padding:4px 6px;color:#64748b")
+                ):
                     ui.label("run").style("width:210px")
                     ui.label("state").style("width:90px")
                     ui.label("gen").style("width:54px")
@@ -483,28 +619,29 @@ def admin_tuning_page():
                     ui.label("default fab").style("width:96px")
                     ui.label("best fab").style("width:80px")
                 for r in runs:
-                    state = ("done" if r["finished"]
-                             else "running" if r["running"] else "new")
-                    col = {"done": "#4ade80", "running": "#fbbf24",
-                           "new": "#64748b"}[state]
-                    row = ui.row().classes(
-                        "w-full items-center gap-3 text-xs cursor-pointer").style(
-                        "border-top:1px solid var(--kc-border);padding:5px 6px")
+                    state = "done" if r["finished"] else "running" if r["running"] else "new"
+                    col = {"done": "#4ade80", "running": "#fbbf24", "new": "#64748b"}[state]
+                    row = (
+                        ui.row()
+                        .classes("w-full items-center gap-3 text-xs cursor-pointer")
+                        .style("border-top:1px solid var(--kc-border);padding:5px 6px")
+                    )
                     tok = _register_project_dir(Path(r["path"]))
-                    row.on("click", lambda _e=None, t=tok:
-                           ui.navigate.to(f"/admin/tuning/run?run={quote(t)}"))
+                    row.on(
+                        "click",
+                        lambda _e=None, t=tok: ui.navigate.to(f"/admin/tuning/run?run={quote(t)}"),
+                    )
                     with row:
-                        ui.label(r["name"]).classes("font-mono").style(
-                            "width:210px;color:#e2e8f0")
+                        ui.label(r["name"]).classes("font-mono").style("width:210px;color:#e2e8f0")
                         ui.label(state).style(f"width:90px;color:{col}")
                         ui.label(str(r["gen"])).style("width:54px;color:#cbd5e1")
                         ui.label(str(r["n_configs"])).style("width:70px;color:#cbd5e1")
-                        ui.label("—" if r["baseline_fab"] is None
-                                 else f"{r['baseline_fab']:.2f}").style(
-                            "width:96px;color:#cbd5e1")
-                        ui.label("—" if r["best_fab"] is None
-                                 else f"{r['best_fab']:.2f}").style(
-                            "width:80px;color:#cbd5e1")
+                        ui.label(
+                            "—" if r["baseline_fab"] is None else f"{r['baseline_fab']:.2f}"
+                        ).style("width:96px;color:#cbd5e1")
+                        ui.label("—" if r["best_fab"] is None else f"{r['best_fab']:.2f}").style(
+                            "width:80px;color:#cbd5e1"
+                        )
 
         ui.timer(10.0, render_list)
         render_list()
@@ -522,12 +659,13 @@ def admin_tuning_run_page(run: str = ""):
 
     run_dir = _resolve_project_token(run) if run else None
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
-        ui.button("← All runs", icon="arrow_back",
-                  on_click=lambda: ui.navigate.to("/admin/tuning")) \
-            .props("flat dense no-caps color=white").classes("text-xs")
+        ui.button(
+            "← All runs", icon="arrow_back", on_click=lambda: ui.navigate.to("/admin/tuning")
+        ).props("flat dense no-caps color=white").classes("text-xs")
         if run_dir is None or not run_dir.is_dir():
-            ui.label("Run not found (the link may be stale).").classes(
-                "text-sm").style("color:#f87171")
+            ui.label("Run not found (the link may be stale).").classes("text-sm").style(
+                "color:#f87171"
+            )
             return
         ui.label(run_dir.name).classes("text-xl font-bold").style("color:#e2e8f0")
         body = ui.column().classes("w-full gap-3")
@@ -538,8 +676,9 @@ def admin_tuning_run_page(run: str = ""):
                 d = report_data.load_run(run_dir)
             except Exception as exc:  # noqa: BLE001 — surface, don't crash the page
                 with body:
-                    ui.label(f"(could not load run: {exc})").classes(
-                        "text-xs").style("color:#f87171")
+                    ui.label(f"(could not load run: {exc})").classes("text-xs").style(
+                        "color:#f87171"
+                    )
                 return
             with body:
                 _tuning_detail_ui(d)
@@ -558,10 +697,11 @@ def _tidiness_ab_out_roots() -> list[Path]:
     """Every root an A/B gallery can live under -- the durable sibling of the
     projects dir (where the harness defaults now) and the repo ``logs/`` dir.
     Existing dirs only, de-duplicated by resolved path."""
-    base = Path(getattr(Settings.from_env(), "projects_dir",
-                        Path.home() / ".kicraft" / "projects"))
-    roots = [base.parent / "tidiness_ab",
-             Path(__file__).resolve().parents[2] / "logs" / "tidiness_ab"]
+    base = Path(getattr(Settings.from_env(), "projects_dir", Path.home() / ".kicraft" / "projects"))
+    roots = [
+        base.parent / "tidiness_ab",
+        Path(__file__).resolve().parents[2] / "logs" / "tidiness_ab",
+    ]
     out: list[Path] = []
     seen: set = set()
     for r in roots:
@@ -607,8 +747,12 @@ def _tidiness_ab_summary(d: Path) -> str:
         unc = r.get("unconnected")
         # Variant pair is [baseline, candidate]; older runs are classic/soft.
         base, cand = (r.get("variants") or ["classic", "soft"])[:2]
-        if (isinstance(unc, dict) and unc.get(base) is not None
-                and unc.get(cand) is not None and unc[cand] > unc[base]):
+        if (
+            isinstance(unc, dict)
+            and unc.get(base) is not None
+            and unc.get(cand) is not None
+            and unc[cand] > unc[base]
+        ):
             reg += 1
     tail = f" · {reg} routing-regressed" if reg else ""
     return f"{len(data)} designs{tail}"
@@ -626,11 +770,12 @@ def admin_tidiness_ab_page():
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
         ui.label("Soft-tidiness A/B").classes("text-2xl font-bold text-white")
-        ui.label("Classic SA vs the soft-tidiness placement term, per leaf: "
-                 "side-by-side renders plus orientation / row-residual / routing "
-                 "metrics. Generated by scripts/soft_tidiness_ab.py ($0, no LLM); "
-                 "the rigorous routing verdict is the N-of-3 median.") \
-            .classes("text-sm").style("color:#94a3b8")
+        ui.label(
+            "Classic SA vs the soft-tidiness placement term, per leaf: "
+            "side-by-side renders plus orientation / row-residual / routing "
+            "metrics. Generated by scripts/soft_tidiness_ab.py ($0, no LLM); "
+            "the rigorous routing verdict is the N-of-3 median."
+        ).classes("text-sm").style("color:#94a3b8")
         ui.separator().style("background:var(--kc-border);margin-top:4px")
         runs_box = ui.column().classes("w-full gap-0")
 
@@ -639,28 +784,36 @@ def admin_tidiness_ab_page():
             runs_box.clear()
             with runs_box:
                 if not runs:
-                    ui.label("No A/B galleries under ~/.kicraft/tidiness_ab or "
-                             "logs/tidiness_ab yet. Generate one with "
-                             "scripts/soft_tidiness_ab.py.") \
-                        .classes("text-xs").style("color:#64748b")
+                    ui.label(
+                        "No A/B galleries under ~/.kicraft/tidiness_ab or "
+                        "logs/tidiness_ab yet. Generate one with "
+                        "scripts/soft_tidiness_ab.py."
+                    ).classes("text-xs").style("color:#64748b")
                     return
-                with ui.row().classes("w-full items-center gap-3 text-xs").style(
-                        "padding:4px 6px;color:#64748b"):
+                with (
+                    ui.row()
+                    .classes("w-full items-center gap-3 text-xs")
+                    .style("padding:4px 6px;color:#64748b")
+                ):
                     ui.label("gallery").style("width:300px")
                     ui.label("summary").classes("flex-1")
                 for d in runs:
                     tok = _register_project_dir(d)
-                    row = ui.row().classes(
-                        "w-full items-center gap-3 text-xs cursor-pointer").style(
-                        "border-top:1px solid var(--kc-border);padding:6px 6px")
-                    row.on("click", lambda _e=None, t=tok:
-                           ui.navigate.to(f"/admin/tidiness-ab/view?run={quote(t)}"))
+                    row = (
+                        ui.row()
+                        .classes("w-full items-center gap-3 text-xs cursor-pointer")
+                        .style("border-top:1px solid var(--kc-border);padding:6px 6px")
+                    )
+                    row.on(
+                        "click",
+                        lambda _e=None, t=tok: ui.navigate.to(
+                            f"/admin/tidiness-ab/view?run={quote(t)}"
+                        ),
+                    )
                     with row:
                         ui.icon("grid_view").style("color:#60a5fa")
-                        ui.label(d.name).classes("font-mono").style(
-                            "width:280px;color:#e2e8f0")
-                        ui.label(_tidiness_ab_summary(d)).classes("flex-1").style(
-                            "color:#94a3b8")
+                        ui.label(d.name).classes("font-mono").style("width:280px;color:#e2e8f0")
+                        ui.label(_tidiness_ab_summary(d)).classes("flex-1").style("color:#94a3b8")
 
         ui.timer(15.0, render_list)
         render_list()
@@ -679,16 +832,17 @@ def admin_tidiness_ab_view_page(run: str = ""):
 
     run_dir = _resolve_project_token(run) if run else None
     with ui.column().classes("w-full mx-auto p-2 gap-2").style("max-width:1300px"):
-        ui.button("← All galleries", icon="arrow_back",
-                  on_click=lambda: ui.navigate.to("/admin/tidiness-ab")) \
-            .props("flat dense no-caps color=white").classes("text-xs")
-        if (run_dir is None or not run_dir.is_dir()
-                or not (run_dir / "index.html").is_file()):
-            ui.label("Gallery not found (the link may be stale).").classes(
-                "text-sm").style("color:#f87171")
+        ui.button(
+            "← All galleries",
+            icon="arrow_back",
+            on_click=lambda: ui.navigate.to("/admin/tidiness-ab"),
+        ).props("flat dense no-caps color=white").classes("text-xs")
+        if run_dir is None or not run_dir.is_dir() or not (run_dir / "index.html").is_file():
+            ui.label("Gallery not found (the link may be stale).").classes("text-sm").style(
+                "color:#f87171"
+            )
             return
-        ui.label(run_dir.name).classes("text-lg font-bold font-mono").style(
-            "color:#e2e8f0")
+        ui.label(run_dir.name).classes("text-lg font-bold font-mono").style("color:#e2e8f0")
         # `run` is the (URL-safe base64 + '.') token verbatim -- no slashes, so it
         # slots straight into the path without re-quoting.
         # sanitize=False is REQUIRED: ui.html defaults to DOMPurify, which strips
@@ -698,8 +852,8 @@ def admin_tidiness_ab_view_page(run: str = ""):
             f'<iframe src="/tidiness-ab/{run}/index.html" title="A/B gallery" '
             'style="width:100%;height:calc(100vh - 150px);border:1px solid '
             'var(--kc-border);border-radius:8px;background:#fff"></iframe>',
-            sanitize=False) \
-            .classes("w-full")
+            sanitize=False,
+        ).classes("w-full")
 
 
 # --------------------------------------------------------------------------- #
@@ -741,54 +895,59 @@ def admin_support_page():
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
         ui.label("Support").classes("text-2xl font-bold text-white")
-        ui.label("Every failed board files a report automatically; the ones a "
-                 "user actually reported are highlighted. Run the investigate "
-                 "skill on any report for a ranked pipeline-gap analysis.") \
-            .classes("text-sm").style("color:#94a3b8")
+        ui.label(
+            "Every failed board files a report automatically; the ones a "
+            "user actually reported are highlighted. Run the investigate "
+            "skill on any report for a ranked pipeline-gap analysis."
+        ).classes("text-sm").style("color:#94a3b8")
 
         with ui.row().classes("items-center gap-3"):
             auto = ui.switch(
                 "Auto-investigate new user reports",
-                value=(store.get_setting("support.auto_investigate", "1") == "1"))
+                value=(store.get_setting("support.auto_investigate", "1") == "1"),
+            )
 
             def on_toggle(e) -> None:
                 if not guard():
-                    auto.value = (store.get_setting(
-                        "support.auto_investigate", "1") == "1")
+                    auto.value = store.get_setting("support.auto_investigate", "1") == "1"
                     return
-                store.set_setting("support.auto_investigate",
-                                  "1" if e.value else "0")
-                ui.notify("Auto-investigate " + ("on" if e.value else "off"),
-                          color="positive")
+                store.set_setting("support.auto_investigate", "1" if e.value else "0")
+                ui.notify("Auto-investigate " + ("on" if e.value else "off"), color="positive")
+
             auto.on_value_change(on_toggle)
-            ui.label("A user report launches a headless /kicraft-investigate "
-                     "run — each is a real agent session (LLM spend).") \
-                .classes("text-xs").style("color:#64748b")
+            ui.label(
+                "A user report launches a headless /kicraft-investigate "
+                "run — each is a real agent session (LLM spend)."
+            ).classes("text-xs").style("color:#64748b")
 
         with ui.row().classes("items-center gap-3"):
             auto_err = ui.switch(
                 "Auto-investigate failed builds (error_auto, capped/day)",
-                value=(store.get_setting(
-                    "support.auto_investigate_errors", "0") == "1"))
+                value=(store.get_setting("support.auto_investigate_errors", "0") == "1"),
+            )
 
             def on_toggle_err(e) -> None:
                 if not guard():
-                    auto_err.value = (store.get_setting(
-                        "support.auto_investigate_errors", "0") == "1")
+                    auto_err.value = (
+                        store.get_setting("support.auto_investigate_errors", "0") == "1"
+                    )
                     return
-                store.set_setting("support.auto_investigate_errors",
-                                  "1" if e.value else "0")
-                ui.notify("Auto-investigate failed builds "
-                          + ("on" if e.value else "off"), color="positive")
+                store.set_setting("support.auto_investigate_errors", "1" if e.value else "0")
+                ui.notify(
+                    "Auto-investigate failed builds " + ("on" if e.value else "off"),
+                    color="positive",
+                )
+
             auto_err.on_value_change(on_toggle_err)
-            ui.label("OFF by default: every failed build files an error_auto "
-                     "report; this triages them headlessly, capped per day "
-                     "(KICRAFT_INVESTIGATE_ERRORS_DAILY_CAP, default 6).") \
-                .classes("text-xs").style("color:#64748b")
+            ui.label(
+                "OFF by default: every failed build files an error_auto "
+                "report; this triages them headlessly, capped per day "
+                "(KICRAFT_INVESTIGATE_ERRORS_DAILY_CAP, default 6)."
+            ).classes("text-xs").style("color:#64748b")
 
         ui.separator().style("background:var(--kc-border);margin-top:4px")
 
-        state = {"filter": "all"}   # all | user | new | reviewed
+        state = {"filter": "all"}  # all | user | new | reviewed
         cards_box = ui.row().classes("w-full flex-wrap gap-3")
         filter_box = ui.row().classes("items-center gap-2")
         list_box = ui.column().classes("w-full gap-0")
@@ -797,67 +956,73 @@ def admin_support_page():
         def show_details(r) -> None:
             d = r.diagnostics or {}
             detail_dialog.clear()
-            with detail_dialog, ui.card().classes("w-[820px] max-w-[96vw] gap-2") \
-                    .style("background:var(--kc-surface);"
-                           "border:1px solid var(--kc-border-strong)"):
-                title = f"Report #{r.id}" + (f" · {r.board_code}"
-                                             if r.board_code else "")
+            with (
+                detail_dialog,
+                ui.card()
+                .classes("w-[820px] max-w-[96vw] gap-2")
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border-strong)"),
+            ):
+                title = f"Report #{r.id}" + (f" · {r.board_code}" if r.board_code else "")
                 ui.label(title).classes("text-lg font-bold text-white")
-                ui.label(f"{r.kind} · {r.status} · {r.created_at[:19]}") \
-                    .classes("text-xs").style("color:#94a3b8")
+                ui.label(f"{r.kind} · {r.status} · {r.created_at[:19]}").classes("text-xs").style(
+                    "color:#94a3b8"
+                )
                 if r.message:
-                    ui.label("User message").classes("text-xs") \
-                        .style("color:#64748b")
-                    ui.label(r.message).classes("text-sm whitespace-pre-wrap") \
-                        .style("color:#e2e8f0")
+                    ui.label("User message").classes("text-xs").style("color:#64748b")
+                    ui.label(r.message).classes("text-sm whitespace-pre-wrap").style(
+                        "color:#e2e8f0"
+                    )
                 if d.get("brief"):
                     ui.label("Brief").classes("text-xs").style("color:#64748b")
-                    ui.label(str(d["brief"])) \
-                        .classes("text-sm whitespace-pre-wrap") \
-                        .style("color:#cbd5e1;max-height:120px;overflow:auto")
-                facts = [f"{k}: {d[k]}" for k in
-                         ("run_status", "stages_done", "spend_usd", "app_version")
-                         if d.get(k) is not None]
+                    ui.label(str(d["brief"])).classes("text-sm whitespace-pre-wrap").style(
+                        "color:#cbd5e1;max-height:120px;overflow:auto"
+                    )
+                facts = [
+                    f"{k}: {d[k]}"
+                    for k in ("run_status", "stages_done", "spend_usd", "app_version")
+                    if d.get(k) is not None
+                ]
                 if facts:
-                    ui.label(" · ".join(facts)).classes("text-xs font-mono") \
-                        .style("color:#94a3b8")
+                    ui.label(" · ".join(facts)).classes("text-xs font-mono").style("color:#94a3b8")
 
                 def block(label: str, items) -> None:
                     if not items:
                         return
-                    with ui.expansion(f"{label} ({len(items)})") \
-                            .classes("w-full").style("background:var(--kc-bg);"
-                                                     "border:1px solid var(--kc-border)"):
-                        ui.label("\n".join(str(x) for x in items)) \
-                            .classes("text-xs font-mono whitespace-pre-wrap") \
-                            .style("color:#94a3b8;max-height:260px;overflow:auto")
+                    with (
+                        ui.expansion(f"{label} ({len(items)})")
+                        .classes("w-full")
+                        .style("background:var(--kc-bg);border:1px solid var(--kc-border)")
+                    ):
+                        ui.label("\n".join(str(x) for x in items)).classes(
+                            "text-xs font-mono whitespace-pre-wrap"
+                        ).style("color:#94a3b8;max-height:260px;overflow:auto")
+
                 block("Build log tail", d.get("build_log_tail") or [])
                 block("ERC errors", d.get("erc_errors") or [])
                 block("Failed checks", d.get("failed_checks") or [])
                 with ui.row().classes("justify-end w-full"):
-                    ui.button("Close", on_click=detail_dialog.close) \
-                        .props("flat color=white")
+                    ui.button("Close", on_click=detail_dialog.close).props("flat color=white")
             detail_dialog.open()
 
         def show_report(inv) -> None:
             report_dialog.clear()
-            with report_dialog, ui.card().classes("w-[900px] max-w-[97vw] gap-2") \
-                    .style("background:var(--kc-surface);"
-                           "border:1px solid var(--kc-border-strong)"):
+            with (
+                report_dialog,
+                ui.card()
+                .classes("w-[900px] max-w-[97vw] gap-2")
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border-strong)"),
+            ):
                 head = f"Investigation #{inv.id} · {inv.status}"
                 if inv.rc is not None:
                     head += f" · rc={inv.rc}"
                 ui.label(head).classes("text-lg font-bold text-white")
                 if inv.report_md:
-                    with ui.element("div").classes("w-full") \
-                            .style("max-height:70vh;overflow:auto"):
+                    with ui.element("div").classes("w-full").style("max-height:70vh;overflow:auto"):
                         ui.markdown(inv.report_md)
                 else:
-                    ui.label("No report captured yet.").classes("text-sm") \
-                        .style("color:#94a3b8")
+                    ui.label("No report captured yet.").classes("text-sm").style("color:#94a3b8")
                 with ui.row().classes("justify-end w-full"):
-                    ui.button("Close", on_click=report_dialog.close) \
-                        .props("flat color=white")
+                    ui.button("Close", on_click=report_dialog.close).props("flat color=white")
             report_dialog.open()
 
         # ---- mutations --------------------------------------------------------
@@ -865,12 +1030,14 @@ def admin_support_page():
             if not guard():
                 return
             from . import investigate_runner
+
             log_dir = store.projects_dir.parent / "support_investigations"
-            inv_id = investigate_runner.enqueue_investigation(
-                store, r, log_dir=log_dir)
+            inv_id = investigate_runner.enqueue_investigation(store, r, log_dir=log_dir)
             if inv_id is None:
-                ui.notify("Nothing locatable to investigate, or one is already "
-                          "running for this report.", color="warning")
+                ui.notify(
+                    "Nothing locatable to investigate, or one is already running for this report.",
+                    color="warning",
+                )
             else:
                 ui.notify(f"Investigation #{inv_id} started.", color="positive")
             render()
@@ -884,20 +1051,24 @@ def admin_support_page():
 
         # ---- render -----------------------------------------------------------
         def stat(label: str, value: int) -> None:
-            with ui.card().classes("gap-0 items-start").style(
-                    "background:var(--kc-surface);border:1px solid var(--kc-border);"
-                    "min-width:150px"):
-                ui.label(str(value)).classes("text-2xl font-bold") \
-                    .style("color:#e2e8f0")
+            with (
+                ui.card()
+                .classes("gap-0 items-start")
+                .style(
+                    "background:var(--kc-surface);border:1px solid var(--kc-border);min-width:150px"
+                )
+            ):
+                ui.label(str(value)).classes("text-2xl font-bold").style("color:#e2e8f0")
                 ui.label(label).classes("text-xs").style("color:#94a3b8")
 
         def filter_chip(key: str, label: str) -> None:
             active = state["filter"] == key
-            btn = ui.button(label, on_click=lambda _e=None, k=key: set_filter(k)) \
-                .props("dense no-caps " + ("unelevated" if active else "flat")) \
+            btn = (
+                ui.button(label, on_click=lambda _e=None, k=key: set_filter(k))
+                .props("dense no-caps " + ("unelevated" if active else "flat"))
                 .classes("text-xs")
-            btn.style("color:#0b1220;background:#60a5fa" if active
-                      else "color:#94a3b8")
+            )
+            btn.style("color:#0b1220;background:#60a5fa" if active else "color:#94a3b8")
 
         def set_filter(key: str) -> None:
             state["filter"] = key
@@ -905,55 +1076,55 @@ def admin_support_page():
 
         def render_row(r, inv) -> None:
             user_reported = _is_user_reported(r)
-            base = ("w-full items-center gap-2 text-xs")
+            base = "w-full items-center gap-2 text-xs"
             style = "border-top:1px solid var(--kc-border);padding:6px 4px"
             if user_reported:
                 style += ";border-left:3px solid #fbbf24;background:rgba(251,191,36,0.06)"
             with ui.row().classes(base).style(style):
                 ui.label(str(r.id)).style("width:44px;color:#64748b")
-                ui.label(r.created_at[:19]).classes("font-mono") \
-                    .style("width:140px;color:#94a3b8")
-                ui.label(r.board_code or "—").classes("font-mono") \
-                    .style("width:92px;color:#e2e8f0")
+                ui.label(r.created_at[:19]).classes("font-mono").style("width:140px;color:#94a3b8")
+                ui.label(r.board_code or "—").classes("font-mono").style("width:92px;color:#e2e8f0")
                 reporter = "—"
                 if r.user_id:
                     u = store.get_user(r.user_id)
-                    reporter = (u.email if u else f"#{r.user_id}")
-                ui.label(reporter).style("width:170px;color:#cbd5e1;"
-                                         "overflow:hidden;text-overflow:ellipsis")
+                    reporter = u.email if u else f"#{r.user_id}"
+                ui.label(reporter).style(
+                    "width:170px;color:#cbd5e1;overflow:hidden;text-overflow:ellipsis"
+                )
                 if user_reported:
-                    ui.label("user").classes("font-bold").style(
-                        "width:56px;color:#fbbf24")
+                    ui.label("user").classes("font-bold").style("width:56px;color:#fbbf24")
                 else:
                     ui.label(r.kind).style("width:56px;color:#64748b")
                 ui.label(r.status).style(
-                    "width:64px;color:" + ("#4ade80" if r.status == "reviewed"
-                                           else "#60a5fa"))
-                ui.label((r.message or "").replace("\n", " ")[:70] or "—") \
-                    .classes("flex-1").style("color:#94a3b8;overflow:hidden;"
-                                             "text-overflow:ellipsis")
+                    "width:64px;color:" + ("#4ade80" if r.status == "reviewed" else "#60a5fa")
+                )
+                ui.label((r.message or "").replace("\n", " ")[:70] or "—").classes("flex-1").style(
+                    "color:#94a3b8;overflow:hidden;text-overflow:ellipsis"
+                )
                 # investigation status + actions
                 if inv and inv.status in ("queued", "running"):
                     ui.spinner(size="sm").style("color:#fbbf24")
                     ui.label("investigating…").style("color:#fbbf24")
                 else:
                     lbl = "Re-investigate" if inv else "Investigate"
-                    ui.button(lbl, icon="biotech",
-                              on_click=lambda _e=None, rr=r: do_investigate(rr)) \
-                        .props("flat dense no-caps color=white").classes("text-xs")
+                    ui.button(
+                        lbl, icon="biotech", on_click=lambda _e=None, rr=r: do_investigate(rr)
+                    ).props("flat dense no-caps color=white").classes("text-xs")
                 if inv and inv.status == "failed":
                     ui.icon("error").style("color:#f87171")
                 if inv and inv.report_md:
-                    ui.button("Report", icon="description",
-                              on_click=lambda _e=None, ii=inv: show_report(ii)) \
-                        .props("flat dense no-caps color=white").classes("text-xs")
-                ui.button("Details", icon="info",
-                          on_click=lambda _e=None, rr=r: show_details(rr)) \
-                    .props("flat dense no-caps color=white").classes("text-xs")
+                    ui.button(
+                        "Report",
+                        icon="description",
+                        on_click=lambda _e=None, ii=inv: show_report(ii),
+                    ).props("flat dense no-caps color=white").classes("text-xs")
+                ui.button(
+                    "Details", icon="info", on_click=lambda _e=None, rr=r: show_details(rr)
+                ).props("flat dense no-caps color=white").classes("text-xs")
                 if r.status != "reviewed":
-                    ui.button("Reviewed", icon="done",
-                              on_click=lambda _e=None, rr=r: mark_reviewed(rr)) \
-                        .props("flat dense no-caps color=white").classes("text-xs")
+                    ui.button(
+                        "Reviewed", icon="done", on_click=lambda _e=None, rr=r: mark_reviewed(rr)
+                    ).props("flat dense no-caps color=white").classes("text-xs")
 
         def render() -> None:
             reports = store.list_support_reports(status=None, limit=300)
@@ -961,8 +1132,7 @@ def admin_support_page():
             cards_box.clear()
             with cards_box:
                 stat("Failed boards", len(reports))
-                stat("User-reported", sum(1 for r in reports
-                                          if _is_user_reported(r)))
+                stat("User-reported", sum(1 for r in reports if _is_user_reported(r)))
                 stat("Untriaged", sum(1 for r in reports if r.status == "new"))
                 stat("Investigated", sum(1 for r in reports if r.id in inv_by))
             filter_box.clear()
@@ -982,15 +1152,20 @@ def admin_support_page():
                 if f == "reviewed":
                     return r.status == "reviewed"
                 return True
+
             rows = [r for r in reports if keep(r)]
             list_box.clear()
             with list_box:
                 if not rows:
-                    ui.label("No reports match this filter.") \
-                        .classes("text-xs").style("color:#64748b;padding:8px 4px")
+                    ui.label("No reports match this filter.").classes("text-xs").style(
+                        "color:#64748b;padding:8px 4px"
+                    )
                     return
-                with ui.row().classes("w-full items-center gap-2 text-xs") \
-                        .style("padding:4px 4px;color:#64748b"):
+                with (
+                    ui.row()
+                    .classes("w-full items-center gap-2 text-xs")
+                    .style("padding:4px 4px;color:#64748b")
+                ):
                     ui.label("id").style("width:44px")
                     ui.label("created").style("width:140px")
                     ui.label("board").style("width:92px")
@@ -1002,7 +1177,7 @@ def admin_support_page():
                 for r in rows:
                     render_row(r, inv_by.get(r.id))
 
-        ui.timer(10.0, render)   # flip running investigations to done live
+        ui.timer(10.0, render)  # flip running investigations to done live
         render()
 
 
@@ -1022,8 +1197,7 @@ _SELF_EVAL: dict = {"proc": None, "out": None, "started_at": None, "args": {}}
 def _self_eval_out_root() -> Path:
     """Where the GUI *launches* new batches (and the harness defaults to): a
     ``self_eval/`` sibling of the configured projects dir."""
-    base = Path(getattr(Settings.from_env(), "projects_dir",
-                        Path.home() / ".kicraft" / "projects"))
+    base = Path(getattr(Settings.from_env(), "projects_dir", Path.home() / ".kicraft" / "projects"))
     return base.parent / "self_eval"
 
 
@@ -1038,8 +1212,7 @@ def _self_eval_out_roots() -> list[Path]:
 
     Existing dirs only, de-duplicated by resolved path (the two roots coincide when
     the projects dir is the repo)."""
-    roots = [_self_eval_out_root(),
-             Path(__file__).resolve().parents[2] / "logs" / "self_eval"]
+    roots = [_self_eval_out_root(), Path(__file__).resolve().parents[2] / "logs" / "self_eval"]
     out: list[Path] = []
     seen: set = set()
     for r in roots:
@@ -1076,9 +1249,10 @@ def _self_eval_batch_dirs() -> list[Path]:
             continue
         for d in entries:
             if d.is_dir() and (
-                    (d / "_args.json").is_file()
-                    or (d / "summary.json").is_file()
-                    or any(d.glob("run_[0-9][0-9]_*"))):
+                (d / "_args.json").is_file()
+                or (d / "summary.json").is_file()
+                or any(d.glob("run_[0-9][0-9]_*"))
+            ):
                 cands.append(d)
     cands.sort(key=lambda d: d.stat().st_mtime, reverse=True)
     return cands[:50]
@@ -1103,16 +1277,29 @@ def _self_eval_batch_overview(out: Path) -> dict:
     or CLI batch still shows useful totals (fab-ready needs the summary, so it is
     None until the batch finishes)."""
     out = Path(out)
-    info = {"path": str(out), "name": out.name, "label": _self_eval_root_label(out),
-            "mtime": out.stat().st_mtime, "n": 0, "scored": 0, "fab_ready": None,
-            "mean": None, "grades": {}, "done": (out / "summary.json").is_file()}
+    info = {
+        "path": str(out),
+        "name": out.name,
+        "label": _self_eval_root_label(out),
+        "mtime": out.stat().st_mtime,
+        "n": 0,
+        "scored": 0,
+        "fab_ready": None,
+        "mean": None,
+        "grades": {},
+        "done": (out / "summary.json").is_file(),
+    }
     sj = out / "summary.json"
     if sj.is_file():
         try:
             s = json.loads(sj.read_text())
-            info.update(n=s.get("n") or 0, scored=s.get("graded_n") or 0,
-                        fab_ready=s.get("fab_ready"), mean=s.get("mean_final"),
-                        grades=s.get("grade_counts") or {})
+            info.update(
+                n=s.get("n") or 0,
+                scored=s.get("graded_n") or 0,
+                fab_ready=s.get("fab_ready"),
+                mean=s.get("mean_final"),
+                grades=s.get("grade_counts") or {},
+            )
             return info
         except (OSError, json.JSONDecodeError):
             pass
@@ -1140,6 +1327,7 @@ def _self_eval_selected(out, args: dict) -> list:
     """The (index, entry) brief set a batch covers, where entry is a benchmark
     ``{"slug", "archetype", "brief"}`` dict from ``BENCHMARK_PROMPTS``."""
     from kicraft.eval.self_eval import _select
+
     if "no_judge" in args:  # args from a launch / _args.json are authoritative
         return _select(list(BENCHMARK_PROMPTS), args.get("limit"), args.get("only"))
     # Legacy run (pre _args.json): reconstruct the brief set from the run dirs on disk
@@ -1166,13 +1354,15 @@ def _self_eval_launch(limit, only, no_judge) -> str:
     if _self_eval_running():
         return ""
     import datetime as _dt
+
     ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = _self_eval_out_root() / ts
     out.mkdir(parents=True, exist_ok=True)
     # Persist the run args so the page can re-adopt this batch after a server
     # restart (the harness keeps running as a detached subprocess).
     (out / "_args.json").write_text(
-        json.dumps({"limit": limit, "only": only, "no_judge": no_judge}))
+        json.dumps({"limit": limit, "only": only, "no_judge": no_judge})
+    )
     cmd = [KICRAFT[0], "-m", "kicraft.eval.self_eval", "--out", str(out)]
     if limit:
         cmd += ["--limit", str(int(limit))]
@@ -1181,11 +1371,19 @@ def _self_eval_launch(limit, only, no_judge) -> str:
     if no_judge:
         cmd += ["--no-judge"]
     logf = (out / "run.log").open("w")
-    proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
-                            env={**os.environ, "KICRAFT_CALLER": "web"},
-                            cwd=str(Path(__file__).resolve().parents[2]))
-    _SELF_EVAL.update(proc=proc, out=out, started_at=time.time(),
-                      args={"limit": limit, "only": only, "no_judge": no_judge})
+    proc = subprocess.Popen(
+        cmd,
+        stdout=logf,
+        stderr=subprocess.STDOUT,
+        env={**os.environ, "KICRAFT_CALLER": "web"},
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    _SELF_EVAL.update(
+        proc=proc,
+        out=out,
+        started_at=time.time(),
+        args={"limit": limit, "only": only, "no_judge": no_judge},
+    )
     return str(out)
 
 
@@ -1242,8 +1440,11 @@ def _build_review_outcome(lines) -> dict | None:
                 status = "passed"
     if status is None:
         return None
-    return {"status": status, "n": (len(blockers) if status == "blocked" else n),
-            "blockers": blockers}
+    return {
+        "status": status,
+        "n": (len(blockers) if status == "blocked" else n),
+        "blockers": blockers,
+    }
 
 
 def _self_eval_brief_status(out: Path, idx: int, entry: dict) -> dict:
@@ -1251,8 +1452,13 @@ def _self_eval_brief_status(out: Path, idx: int, entry: dict) -> dict:
     benchmark ``{"slug", "archetype", "brief"}`` dict."""
     hits = sorted(out.glob(f"run_{idx:02d}_*"))
     rd = hits[0] if hits else None
-    base = {"index": idx, "slug": entry["slug"], "archetype": entry["archetype"],
-            "prompt": entry["brief"], "rundir": (str(rd) if rd else None)}
+    base = {
+        "index": idx,
+        "slug": entry["slug"],
+        "archetype": entry["archetype"],
+        "prompt": entry["brief"],
+        "rundir": (str(rd) if rd else None),
+    }
     if rd is None:
         return {**base, "status": "pending"}
     stage = build_label = None
@@ -1278,8 +1484,12 @@ def _self_eval_brief_status(out: Path, idx: int, entry: dict) -> dict:
         # A review block returns rc 7 -- the same label as a DRC/route fail.
         # Relabel it so the dashboard distinguishes an electrically-flagged board
         # (structurally clean, the gate doing its job) from one that failed to route.
-        if review and review["status"] == "blocked" and build_label \
-                and build_label.startswith("build rc="):
+        if (
+            review
+            and review["status"] == "blocked"
+            and build_label
+            and build_label.startswith("build rc=")
+        ):
             build_label = f"review-blocked ({review['n']})"
     rep = rd / "eval" / "report.json"
     if rep.is_file():
@@ -1290,11 +1500,17 @@ def _self_eval_brief_status(out: Path, idx: int, entry: dict) -> dict:
         if r:
             sc = r.get("score") or {}
             gates = [g.get("id") for g in (r.get("gates") or {}).get("triggered", [])]
-            return {**base, "status": "done", "grade": sc.get("grade"),
-                    "final": sc.get("final"), "verdict": sc.get("verdict"),
-                    "gates": gates, "build": build_label, "review": review}
-    return {**base, "status": "running", "stage": stage, "build": build_label,
-            "review": review}
+            return {
+                **base,
+                "status": "done",
+                "grade": sc.get("grade"),
+                "final": sc.get("final"),
+                "verdict": sc.get("verdict"),
+                "gates": gates,
+                "build": build_label,
+                "review": review,
+            }
+    return {**base, "status": "running", "stage": stage, "build": build_label, "review": review}
 
 
 def _self_eval_leaf_boards(gen_dir: Path) -> list:
@@ -1311,14 +1527,16 @@ def _self_eval_leaf_boards(gen_dir: Path) -> list:
     for leaf in sorted(artifact_root(gen_dir).glob(f"*/{LEAF_ROUTED}")):
         leafdir = leaf.parent
         tok = _register_project_dir(leafdir)
-        out.append({
-            # "accepted" == produced a solved_layout.json (routed cleanly enough to be
-            # composed into the parent); a ✗ leaf is where a bad route lives.
-            "label": f"leaf {leafdir.name.split('__')[0][:8]}",
-            "accepted": (leafdir / "solved_layout.json").is_file(),
-            "url": f"/project/{tok}/{leaf.name}",
-            "filename": leaf.name,
-        })
+        out.append(
+            {
+                # "accepted" == produced a solved_layout.json (routed cleanly enough to be
+                # composed into the parent); a ✗ leaf is where a bad route lives.
+                "label": f"leaf {leafdir.name.split('__')[0][:8]}",
+                "accepted": (leafdir / "solved_layout.json").is_file(),
+                "url": f"/project/{tok}/{leaf.name}",
+                "filename": leaf.name,
+            }
+        )
     return out
 
 
@@ -1336,20 +1554,27 @@ def admin_self_eval_page():
     n_avail = len(BENCHMARK_PROMPTS)
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
         ui.label("Self-evaluation").classes("text-2xl font-bold text-white")
-        ui.label("Drive every curated example brief end to end (auto-answering "
-                 "clarifying questions with the model's suggested option) and grade "
-                 "each with the kicraft.eval rubric. Runs in the background and "
-                 "SPENDS real money via the capped client; the spend guard still caps "
-                 "the day.").classes("text-sm").style("color:#94a3b8")
+        ui.label(
+            "Drive every curated example brief end to end (auto-answering "
+            "clarifying questions with the model's suggested option) and grade "
+            "each with the kicraft.eval rubric. Runs in the background and "
+            "SPENDS real money via the capped client; the spend guard still caps "
+            "the day."
+        ).classes("text-sm").style("color:#94a3b8")
         with ui.row().classes("items-end gap-3 flex-wrap"):
-            limit_in = ui.number("Limit (first N)", value=1, min=0, max=n_avail,
-                                 format="%d").props("dense outlined dark").classes("w-40")
-            only_in = ui.input("Only (slugs, e.g. usb-pd-trigger,buck-3a)") \
-                .props("dense outlined dark").classes("w-44")
+            limit_in = (
+                ui.number("Limit (first N)", value=1, min=0, max=n_avail, format="%d")
+                .props("dense outlined dark")
+                .classes("w-40")
+            )
+            only_in = (
+                ui.input("Only (slugs, e.g. usb-pd-trigger,buck-3a)")
+                .props("dense outlined dark")
+                .classes("w-44")
+            )
             judge_sw = ui.switch("LLM judge (A–F)", value=True)
             run_btn = ui.button("Run self-eval", icon="play_arrow").props("color=primary")
-            ui.label(f"{n_avail} briefs available").classes("text-xs") \
-                .style("color:#64748b")
+            ui.label(f"{n_avail} briefs available").classes("text-xs").style("color:#64748b")
 
         # Every batch on disk, across both roots (this page's and the CLI's), so a
         # run an agent launched from the command line is listed here too. Click one
@@ -1358,8 +1583,7 @@ def admin_self_eval_page():
         runs_box = ui.column().classes("w-full gap-0")
 
         ui.separator().style("background:var(--kc-border);margin-top:6px")
-        head = ui.row().classes("items-center gap-4 text-sm font-mono") \
-            .style("color:#cbd5e1")
+        head = ui.row().classes("items-center gap-4 text-sm font-mono").style("color:#cbd5e1")
         table = ui.column().classes("w-full gap-0")
 
     # Per-client element refs, built ONCE (not every timer tick). Rebuilding the
@@ -1373,13 +1597,12 @@ def admin_self_eval_page():
     # Which batch the brief table shows. Follows the live/most-recent run until the
     # user clicks a row to pin one (so a finished CLI batch stays put for review).
     view = {"dir": None, "pinned": False}
-    _SE_COLORS = {"done": "#4ade80", "running": "#fbbf24",
-                  "pending": "#64748b", "error": "#f87171"}
+    _SE_COLORS = {"done": "#4ade80", "running": "#fbbf24", "pending": "#64748b", "error": "#f87171"}
 
     def select_batch(path: str):
         view["dir"] = path
         view["pinned"] = True
-        sig["sel"] = None       # force the brief table to rebuild for the new batch
+        sig["sel"] = None  # force the brief table to rebuild for the new batch
         runs_sig["key"] = None  # re-highlight the selected row
 
     def open_run(idx):
@@ -1392,26 +1615,31 @@ def admin_self_eval_page():
         runs_box.clear()
         with runs_box:
             if not batches:
-                ui.label("No self-eval runs yet — configure above and press Run.") \
-                    .classes("text-xs").style("color:#64748b")
+                ui.label("No self-eval runs yet — configure above and press Run.").classes(
+                    "text-xs"
+                ).style("color:#64748b")
                 return
             for b in batches:
-                selected = (b["path"] == view["dir"])
+                selected = b["path"] == view["dir"]
                 bg = "#13233f" if selected else "transparent"
-                row = ui.row().classes("w-full items-center gap-3 text-xs cursor-pointer") \
+                row = (
+                    ui.row()
+                    .classes("w-full items-center gap-3 text-xs cursor-pointer")
                     .style(f"border-top:1px solid var(--kc-border);padding:4px 6px;background:{bg}")
+                )
                 row.on("click", lambda _e=None, p=b["path"]: select_batch(p))
                 with row:
-                    ui.icon("check_circle" if b["done"] else "play_circle") \
-                        .style("color:%s" % ("#4ade80" if b["done"] else "#fbbf24"))
-                    ui.label(b["name"]).classes("font-mono") \
-                        .style("width:188px;color:#e2e8f0")
+                    ui.icon("check_circle" if b["done"] else "play_circle").style(
+                        "color:%s" % ("#4ade80" if b["done"] else "#fbbf24")
+                    )
+                    ui.label(b["name"]).classes("font-mono").style("width:188px;color:#e2e8f0")
                     ui.label(b["label"]).style("width:104px;color:#94a3b8")
                     ui.label(f"{b['n']} briefs").style("width:74px;color:#cbd5e1")
                     fr = "—" if b["fab_ready"] is None else f"{b['fab_ready']}/{b['n']}"
                     ui.label(f"fab {fr}").style("width:84px;color:#cbd5e1")
-                    ui.label("mean —" if b["mean"] is None else f"mean {b['mean']}") \
-                        .style("width:84px;color:#cbd5e1")
+                    ui.label("mean —" if b["mean"] is None else f"mean {b['mean']}").style(
+                        "width:84px;color:#cbd5e1"
+                    )
                     grds = "  ".join(f"{g}:{n}" for g, n in sorted(b["grades"].items()))
                     ui.label(grds).classes("flex-1 truncate").style("color:#64748b")
 
@@ -1419,8 +1647,11 @@ def admin_self_eval_page():
         table.clear()
         rows.clear()
         with table:
-            with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
-                    .style("color:#64748b;padding-bottom:2px"):
+            with (
+                ui.row()
+                .classes("w-full items-center gap-2 text-xs font-bold")
+                .style("color:#64748b;padding-bottom:2px")
+            ):
                 ui.label("#").style("width:24px")
                 ui.label("status").style("width:108px")
                 ui.label("grade").style("width:60px")
@@ -1429,18 +1660,25 @@ def admin_self_eval_page():
                 ui.label("brief").classes("flex-1")
                 ui.label("").style("width:56px")
             for idx, entry in selected:
-                with ui.row().classes("w-full items-center gap-2 text-xs") \
-                        .style("border-top:1px solid var(--kc-border);padding:3px 0"):
+                with (
+                    ui.row()
+                    .classes("w-full items-center gap-2 text-xs")
+                    .style("border-top:1px solid var(--kc-border);padding:3px 0")
+                ):
                     ui.label(str(idx)).style("width:24px;color:#cbd5e1")
                     st_l = ui.label("pending").style("width:108px;color:#64748b")
                     gr_l = ui.label("").style("width:60px;color:#e2e8f0")
                     bd_l = ui.label("").style("width:118px;color:#94a3b8")
                     ui.label(entry["archetype"]).style("width:140px;color:#64748b")
-                    ui.label(f"{entry['slug']} — {entry['brief']}"[:96]) \
-                        .classes("flex-1").style("color:#cbd5e1")
-                    btn = ui.button("view", on_click=lambda _e=None, i=idx: open_run(i)) \
-                        .props("flat dense no-caps color=primary").classes("text-xs") \
+                    ui.label(f"{entry['slug']} — {entry['brief']}"[:96]).classes("flex-1").style(
+                        "color:#cbd5e1"
+                    )
+                    btn = (
+                        ui.button("view", on_click=lambda _e=None, i=idx: open_run(i))
+                        .props("flat dense no-caps color=primary")
+                        .classes("text-xs")
                         .style("width:56px")
+                    )
                     btn.set_visibility(False)
                     rows[idx] = {"status": st_l, "grade": gr_l, "build": bd_l, "btn": btn}
 
@@ -1452,10 +1690,13 @@ def admin_self_eval_page():
         only = (only_in.value or "").strip() or None
         out = _self_eval_launch(limit, only, not judge_sw.value)
         if out:
-            view["pinned"] = False   # follow the run we just launched
-            runs_sig["key"] = None   # rebuild the list so it appears immediately
-        ui.notify(f"Started → {out}" if out else "Could not start.",
-                  color=("positive" if out else "warning"))
+            view["pinned"] = False  # follow the run we just launched
+            runs_sig["key"] = None  # rebuild the list so it appears immediately
+        ui.notify(
+            f"Started → {out}" if out else "Could not start.",
+            color=("positive" if out else "warning"),
+        )
+
     run_btn.on_click(start)
 
     def render():
@@ -1472,8 +1713,9 @@ def admin_self_eval_page():
             view["pinned"] = False
             view["dir"] = default
 
-        rkey = tuple((b["path"], b["done"], b["n"], b["scored"],
-                      b["path"] == view["dir"]) for b in batches)
+        rkey = tuple(
+            (b["path"], b["done"], b["n"], b["scored"], b["path"] == view["dir"]) for b in batches
+        )
         if rkey != runs_sig["key"]:
             build_runs(batches)
             runs_sig["key"] = rkey
@@ -1481,8 +1723,7 @@ def admin_self_eval_page():
         head.clear()
         if not view["dir"]:
             with head:
-                ui.label("No run yet — configure above and press Run.") \
-                    .style("color:#64748b")
+                ui.label("No run yet — configure above and press Run.").style("color:#64748b")
             if sig["sel"] is not None:
                 table.clear()
                 rows.clear()
@@ -1517,9 +1758,10 @@ def admin_self_eval_page():
             if rblk:
                 # Structurally-clean boards the Layer-4 electrical review rejected
                 # -- the gate working, NOT routing failures (which are 'build rc=').
-                ui.label(f"⚡ review-blocked {rblk}").style("color:#f59e0b") \
-                    .tooltip("structurally clean but the electrical review found a "
-                             "blocker (counted separately from route/DRC failures)")
+                ui.label(f"⚡ review-blocked {rblk}").style("color:#f59e0b").tooltip(
+                    "structurally clean but the electrical review found a "
+                    "blocker (counted separately from route/DRC failures)"
+                )
             ui.label(f"judge {'off' if args.get('no_judge') else 'on'}")
         for s in statuses:
             idx = s["index"]
@@ -1531,14 +1773,13 @@ def admin_self_eval_page():
             r["status"].set_text((s.get("stage") or st) if st == "running" else st)
             r["status"].style("color:" + _SE_COLORS.get(st, "#94a3b8"))
             g = s.get("grade")
-            r["grade"].set_text(f"{g} {s.get('final')}" if g
-                                else ("—" if st == "done" else ""))
+            r["grade"].set_text(f"{g} {s.get('final')}" if g else ("—" if st == "done" else ""))
             bl = s.get("build") or ""
             r["build"].set_text(bl)
             if bl == "fab-ready":
-                bcol = "#4ade80"                       # green: shipped
+                bcol = "#4ade80"  # green: shipped
             elif bl.startswith("review-blocked"):
-                bcol = "#f59e0b"                       # amber: electrically flagged
+                bcol = "#f59e0b"  # amber: electrically flagged
             elif bl.startswith("build rc=") or bl == "building…":
                 bcol = "#f87171" if bl.startswith("build rc=") else "#94a3b8"
             else:
@@ -1546,9 +1787,11 @@ def admin_self_eval_page():
             r["build"].style("color:" + bcol)
             rv = s.get("review")
             if rv and rv.get("blockers"):
-                r["build"].tooltip("electrical review blocker(s): "
-                                   + " | ".join(rv["blockers"])[:400])
+                r["build"].tooltip(
+                    "electrical review blocker(s): " + " | ".join(rv["blockers"])[:400]
+                )
             r["btn"].set_visibility(bool(s.get("rundir")))
+
     ui.timer(1.0, render)
 
 
@@ -1568,12 +1811,13 @@ def admin_self_eval_run_page(run: str = ""):
 
     run_dir = _resolve_project_token(run) if run else None
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
-        ui.button("← All runs", icon="arrow_back",
-                  on_click=lambda: ui.navigate.to("/admin/self-eval")) \
-            .props("flat dense no-caps color=white").classes("text-xs")
+        ui.button(
+            "← All runs", icon="arrow_back", on_click=lambda: ui.navigate.to("/admin/self-eval")
+        ).props("flat dense no-caps color=white").classes("text-xs")
         if run_dir is None or not run_dir.is_dir():
-            ui.label("Run not found (the link may be stale or the run was deleted).") \
-                .classes("text-sm").style("color:#f87171")
+            ui.label("Run not found (the link may be stale or the run was deleted).").classes(
+                "text-sm"
+            ).style("color:#f87171")
             return
 
         brief = ""
@@ -1583,17 +1827,14 @@ def admin_self_eval_run_page(run: str = ""):
                 brief = bf.read_text(errors="replace").strip()
             except OSError:
                 brief = ""
-        ui.label(brief[:160] or run_dir.name).classes("text-lg font-bold") \
-            .style("color:#e2e8f0")
+        ui.label(brief[:160] or run_dir.name).classes("text-lg font-bold").style("color:#e2e8f0")
 
         rep = run_dir / "eval" / "report.json"
         if rep.is_file():
             try:
-                _render_scorecard(ui.column().classes("w-full gap-1"),
-                                  json.loads(rep.read_text()))
+                _render_scorecard(ui.column().classes("w-full gap-1"), json.loads(rep.read_text()))
             except (OSError, json.JSONDecodeError, KeyError, TypeError):
-                ui.label("(could not load report.json)").classes("text-xs") \
-                    .style("color:#f87171")
+                ui.label("(could not load report.json)").classes("text-xs").style("color:#f87171")
         else:
             ui.label("Not scored yet.").classes("text-sm").style("color:#94a3b8")
 
@@ -1618,49 +1859,63 @@ def admin_self_eval_run_page(run: str = ""):
                 blocked = any(s == "BLOCKER" for s, _ in findings)
                 sevcol = {"BLOCKER": "#f87171", "WARNING": "#f59e0b", "NOTE": "#94a3b8"}
                 with ui.card().classes("w-full mt-2").style("background:#111827"):
-                    ui.label("⚡ Electrical review — "
-                             + ("BLOCKED (kept for inspection, no fab package)"
-                                if blocked else "passed (non-blocking findings)")) \
-                        .classes("text-sm font-bold") \
-                        .style("color:" + ("#f87171" if blocked else "#4ade80"))
+                    ui.label(
+                        "⚡ Electrical review — "
+                        + (
+                            "BLOCKED (kept for inspection, no fab package)"
+                            if blocked
+                            else "passed (non-blocking findings)"
+                        )
+                    ).classes("text-sm font-bold").style(
+                        "color:" + ("#f87171" if blocked else "#4ade80")
+                    )
                     for sev, txt in findings:
-                        ui.label(f"[{sev}] {txt}").classes("text-xs") \
-                            .style("color:" + sevcol[sev])
+                        ui.label(f"[{sev}] {txt}").classes("text-xs").style("color:" + sevcol[sev])
 
         gen = _discover_generated_dir(run_dir)
         if gen is None:
-            ui.label("No synthesized project — the design stages did not produce "
-                     "schematic sheets for this brief.").classes("text-sm mt-2") \
-                .style("color:#94a3b8")
-            ui.label(f"artifacts: {run_dir}").classes("text-xs font-mono mt-2") \
-                .style("color:#64748b")
+            ui.label(
+                "No synthesized project — the design stages did not produce "
+                "schematic sheets for this brief."
+            ).classes("text-sm mt-2").style("color:#94a3b8")
+            ui.label(f"artifacts: {run_dir}").classes("text-xs font-mono mt-2").style(
+                "color:#64748b"
+            )
             return
         token = _register_project_dir(gen)
         stem = gen.name
 
         # Schematic (interactive). Kept on-screen (not in a tab/dialog) because a
         # KiCanvas WebGL canvas built in a hidden / zero-size container never repaints.
-        with ui.card().classes("w-full") \
-                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+        with (
+            ui.card()
+            .classes("w-full")
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
+        ):
             srcs = _schematic_sources(gen, stem, token)
             if srcs:
                 _render_synth_view(srcs, stem, gen)
             else:
-                ui.label("No schematic sheets found.").classes("text-xs") \
-                    .style("color:#94a3b8")
+                ui.label("No schematic sheets found.").classes("text-xs").style("color:#94a3b8")
 
         # Parent board (interactive): the composed <stem>.kicad_pcb. Absent if the
         # build failed before composing a parent.
         parent_pcb = gen / f"{stem}.kicad_pcb"
-        with ui.card().classes("w-full") \
-                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+        with (
+            ui.card()
+            .classes("w-full")
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
+        ):
             ui.label("Parent board").classes("text-xs font-medium").style("color:#94a3b8")
             if parent_pcb.is_file():
-                KiCanvasView([KiCanvasSource(f"/project/{token}/{parent_pcb.name}",
-                                             parent_pcb.name)], height="h-[520px]")
+                KiCanvasView(
+                    [KiCanvasSource(f"/project/{token}/{parent_pcb.name}", parent_pcb.name)],
+                    height="h-[520px]",
+                )
             else:
-                ui.label("No composed parent board (the build did not reach parent "
-                         "routing).").classes("text-xs").style("color:#94a3b8")
+                ui.label(
+                    "No composed parent board (the build did not reach parent routing)."
+                ).classes("text-xs").style("color:#94a3b8")
 
         # Per-leaf routed boards, each interactive (KiCanvas) so the actual routing is
         # zoomable -- not a flat thumbnail. Every leaf lives in its own nested
@@ -1668,26 +1923,33 @@ def admin_self_eval_run_page(run: str = ""):
         # (the flat /project/<token>/<file> route only serves files sitting directly
         # under the token dir). A ✗ leaf is where a rejected route lives.
         leaves = _self_eval_leaf_boards(gen)
-        ui.label("Leaf boards — a ✗ leaf is where a rejected route lives") \
-            .classes("text-sm font-bold mt-2").style("color:#cbd5e1")
+        ui.label("Leaf boards — a ✗ leaf is where a rejected route lives").classes(
+            "text-sm font-bold mt-2"
+        ).style("color:#cbd5e1")
         if not leaves:
-            ui.label("No per-leaf routed boards (single-leaf design, or the leaves "
-                     "were composed into the parent).").classes("text-xs") \
-                .style("color:#94a3b8")
+            ui.label(
+                "No per-leaf routed boards (single-leaf design, or the leaves "
+                "were composed into the parent)."
+            ).classes("text-xs").style("color:#94a3b8")
         for b in leaves[:8]:
-            with ui.card().classes("w-full") \
-                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+            with (
+                ui.card()
+                .classes("w-full")
+                .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
+            ):
                 lab, col = b["label"], "#cbd5e1"
                 if b["accepted"]:
-                    lab += "  ✓ accepted"; col = "#4ade80"
+                    lab += "  ✓ accepted"
+                    col = "#4ade80"
                 else:
-                    lab += "  ✗ rejected"; col = "#f87171"
+                    lab += "  ✗ rejected"
+                    col = "#f87171"
                 ui.label(lab).classes("text-xs font-mono").style(f"color:{col}")
-                KiCanvasView([KiCanvasSource(b["url"], b["filename"])],
-                             height="h-[460px]")
+                KiCanvasView([KiCanvasSource(b["url"], b["filename"])], height="h-[460px]")
         if len(leaves) > 8:
-            ui.label(f"(+{len(leaves) - 8} more leaves not shown)") \
-                .classes("text-xs").style("color:#64748b")
+            ui.label(f"(+{len(leaves) - 8} more leaves not shown)").classes("text-xs").style(
+                "color:#64748b"
+            )
 
         # Bill of materials -- the same read-only table the project viewer renders,
         # built from the run's committed state.json so an eval run is inspectable to
@@ -1695,6 +1957,7 @@ def admin_self_eval_run_page(run: str = ""):
         # so a module-level `from .web import ...` would be circular.
         try:
             from .web import _load_persisted_state, _render_bom_table
+
             bom_state = _load_persisted_state(run_dir)
             if bom_state is not None:
                 _render_bom_table(bom_state)
@@ -1717,8 +1980,7 @@ def admin_self_eval_run_page(run: str = ""):
                     continue
                 k = e.get("kind")
                 if k == "stage_start":
-                    cur_stage = {"stage": e.get("stage") or "stage",
-                                 "reason": [], "answer": []}
+                    cur_stage = {"stage": e.get("stage") or "stage", "reason": [], "answer": []}
                     run_stages.append(cur_stage)
                 elif cur_stage is not None and k == "reasoning_delta":
                     cur_stage["reason"].append(e.get("text", ""))
@@ -1730,22 +1992,29 @@ def admin_self_eval_run_page(run: str = ""):
                 if txt:
                     blocks.append((s["stage"], txt))
             if blocks:
-                with ui.card().classes("w-full") \
-                        .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
-                    ui.label("Thinking stream — the model's reasoning per stage") \
-                        .classes("text-xs font-medium").style("color:#94a3b8")
+                with (
+                    ui.card()
+                    .classes("w-full")
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
+                ):
+                    ui.label("Thinking stream — the model's reasoning per stage").classes(
+                        "text-xs font-medium"
+                    ).style("color:#94a3b8")
                     for i, (stg, txt) in enumerate(blocks):
-                        with ui.expansion(stg, icon="psychology",
-                                          value=(i == 0)).classes("w-full") \
-                                .props("dense"):
+                        with (
+                            ui.expansion(stg, icon="psychology", value=(i == 0))
+                            .classes("w-full")
+                            .props("dense")
+                        ):
                             ui.label(txt).classes("text-xs font-mono w-full").style(
                                 "white-space:pre-wrap;color:#cbd5e1;display:block;"
-                                "max-height:360px;overflow:auto")
+                                "max-height:360px;overflow:auto"
+                            )
 
-        ui.label(f"artifacts: {run_dir}").classes("text-xs font-mono mt-2") \
-            .style("color:#64748b")
-        ui.label(f"deep DRC inspection: kicraft inspect-parent {gen}") \
-            .classes("text-xs font-mono").style("color:#64748b")
+        ui.label(f"artifacts: {run_dir}").classes("text-xs font-mono mt-2").style("color:#64748b")
+        ui.label(f"deep DRC inspection: kicraft inspect-parent {gen}").classes(
+            "text-xs font-mono"
+        ).style("color:#64748b")
 
 
 # --------------------------------------------------------------------------- #
@@ -1754,8 +2023,13 @@ def admin_self_eval_run_page(run: str = ""):
 # then chart the live LoadResultStore. Scenarios are $0 (replay / mock LLM); the
 # ABORT button writes the harness's abort file and terminates the subprocess.
 # --------------------------------------------------------------------------- #
-_LOADTEST: dict = {"proc": None, "scenario": None, "started_at": None,
-                   "abort_file": None, "log": None}
+_LOADTEST: dict = {
+    "proc": None,
+    "scenario": None,
+    "started_at": None,
+    "abort_file": None,
+    "log": None,
+}
 
 
 def _loadtest_running() -> bool:
@@ -1769,6 +2043,7 @@ def _loadtest_launch(scenario, *, n, slots, parallel, build_slots, route, do_bui
     import datetime as _dt
 
     from kicraft.loadtest.store import default_store_path
+
     ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     base = default_store_path().parent
     base.mkdir(parents=True, exist_ok=True)
@@ -1776,21 +2051,40 @@ def _loadtest_launch(scenario, *, n, slots, parallel, build_slots, route, do_bui
     abort_file = base / f"abort-{ts}"
     cmd = [KICRAFT[0], "-m", "kicraft.loadtest"]
     if scenario == "build-storm":
-        cmd += ["build-storm", "--n", str(int(n)), "--slots", str(int(slots)),
-                "--abort-file", str(abort_file)]
+        cmd += [
+            "build-storm",
+            "--n",
+            str(int(n)),
+            "--slots",
+            str(int(slots)),
+            "--abort-file",
+            str(abort_file),
+        ]
         if route:
             cmd += ["--route"]
     else:
-        cmd += ["pipeline", "--n", str(int(n)), "--parallel", str(int(parallel)),
-                "--build-slots", str(int(build_slots))]
+        cmd += [
+            "pipeline",
+            "--n",
+            str(int(n)),
+            "--parallel",
+            str(int(parallel)),
+            "--build-slots",
+            str(int(build_slots)),
+        ]
         if not do_build:
             cmd += ["--no-build"]
     logf = log.open("w")
-    proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT,
-                            env={**os.environ, "KICRAFT_CALLER": "web"},
-                            cwd=str(Path(__file__).resolve().parents[2]))
-    _LOADTEST.update(proc=proc, scenario=scenario, started_at=time.time(),
-                     abort_file=abort_file, log=log)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=logf,
+        stderr=subprocess.STDOUT,
+        env={**os.environ, "KICRAFT_CALLER": "web"},
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    _LOADTEST.update(
+        proc=proc, scenario=scenario, started_at=time.time(), abort_file=abort_file, log=log
+    )
     return str(log)
 
 
@@ -1818,38 +2112,68 @@ def admin_loadtest_page():
     from kicraft.loadtest import charts as lc
     from kicraft.loadtest.store import LoadResultStore, default_store_path
 
-    cfg = {"scenario": "build-storm", "n": 8, "slots": 2, "parallel": 3,
-           "build_slots": 2, "route": False, "do_build": True}
+    cfg = {
+        "scenario": "build-storm",
+        "n": 8,
+        "slots": 2,
+        "parallel": 3,
+        "build_slots": 2,
+        "route": False,
+        "do_build": True,
+    }
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
         ui.label("Load / stress testing").classes("text-2xl font-bold text-white")
-        ui.label("Build-storm (replay, $0) and full-pipeline (mock LLM, $0) scenarios. "
-                 "Find the build-slot saturation knee and what breaks first.") \
-            .classes("text-sm").style("color:#94a3b8")
+        ui.label(
+            "Build-storm (replay, $0) and full-pipeline (mock LLM, $0) scenarios. "
+            "Find the build-slot saturation knee and what breaks first."
+        ).classes("text-sm").style("color:#94a3b8")
         ui.separator().style("background:var(--kc-border)")
 
         with ui.row().classes("items-end gap-3 w-full"):
-            scen = ui.select(["build-storm", "pipeline"], value=cfg["scenario"],
-                             label="scenario").props("dark dense").style("width:150px")
-            n_in = ui.number("designs (n)", value=cfg["n"], min=1, max=200,
-                             format="%d").props("dark dense").style("width:120px")
-            slots_in = ui.number("build slots", value=cfg["slots"], min=1, max=16,
-                                 format="%d").props("dark dense").style("width:110px")
-            par_in = ui.number("parallel", value=cfg["parallel"], min=1, max=32,
-                               format="%d").props("dark dense").style("width:100px")
+            scen = (
+                ui.select(["build-storm", "pipeline"], value=cfg["scenario"], label="scenario")
+                .props("dark dense")
+                .style("width:150px")
+            )
+            n_in = (
+                ui.number("designs (n)", value=cfg["n"], min=1, max=200, format="%d")
+                .props("dark dense")
+                .style("width:120px")
+            )
+            slots_in = (
+                ui.number("build slots", value=cfg["slots"], min=1, max=16, format="%d")
+                .props("dark dense")
+                .style("width:110px")
+            )
+            par_in = (
+                ui.number("parallel", value=cfg["parallel"], min=1, max=32, format="%d")
+                .props("dark dense")
+                .style("width:100px")
+            )
             route_cb = ui.checkbox("route (heavy)", value=cfg["route"]).props("dark")
             build_cb = ui.checkbox("build", value=cfg["do_build"]).props("dark")
             launch_btn = ui.button("Launch", icon="play_arrow")
-            ui.button("ABORT", icon="stop", color="red") \
-                .props("outline").on("click", lambda: (_loadtest_abort(), _refresh()))
+            ui.button("ABORT", icon="stop", color="red").props("outline").on(
+                "click", lambda: (_loadtest_abort(), _refresh())
+            )
         status = ui.label("").classes("text-xs font-mono").style("color:#94a3b8")
 
         def _launch():
             log = _loadtest_launch(
-                scen.value, n=n_in.value, slots=slots_in.value, parallel=par_in.value,
-                build_slots=slots_in.value, route=route_cb.value, do_build=build_cb.value)
-            ui.notify("launched" if log else "a load run is already in progress",
-                      type="positive" if log else "warning")
+                scen.value,
+                n=n_in.value,
+                slots=slots_in.value,
+                parallel=par_in.value,
+                build_slots=slots_in.value,
+                route=route_cb.value,
+                do_build=build_cb.value,
+            )
+            ui.notify(
+                "launched" if log else "a load run is already in progress",
+                type="positive" if log else "warning",
+            )
+
         launch_btn.on("click", lambda: (_launch(), _refresh()))
 
         charts_box = ui.column().classes("w-full gap-3")
@@ -1860,9 +2184,11 @@ def admin_loadtest_page():
 
         def _refresh():
             running = _loadtest_running()
-            status.text = (f"running: {_LOADTEST.get('scenario')} "
-                           f"(log {_LOADTEST.get('log')})" if running
-                           else "idle — launch a scenario above")
+            status.text = (
+                f"running: {_LOADTEST.get('scenario')} (log {_LOADTEST.get('log')})"
+                if running
+                else "idle — launch a scenario above"
+            )
             store = _store_ro()
             runs = store.list_runs(limit=40)
             # live charts for the newest run
@@ -1872,25 +2198,32 @@ def admin_loadtest_page():
                 samples = store.samples_for(rid)
                 summary = runs[0]["summary"] or {}
                 with charts_box:
-                    ui.label(f"latest: {rid}").classes("text-sm font-mono") \
-                        .style("color:#e2e8f0")
+                    ui.label(f"latest: {rid}").classes("text-sm font-mono").style("color:#e2e8f0")
                     with ui.row().classes("w-full gap-3"):
-                        ui.echart(lc.host_chart(samples)).classes("flex-1") \
-                            .style("height:260px;min-width:380px")
-                        ui.echart(lc.queue_chart(samples)).classes("flex-1") \
-                            .style("height:260px;min-width:380px")
+                        ui.echart(lc.host_chart(samples)).classes("flex-1").style(
+                            "height:260px;min-width:380px"
+                        )
+                        ui.echart(lc.queue_chart(samples)).classes("flex-1").style(
+                            "height:260px;min-width:380px"
+                        )
                     with ui.row().classes("w-full gap-3"):
-                        ui.echart(lc.latency_bar(summary)).classes("flex-1") \
-                            .style("height:240px;min-width:300px")
-                        ui.echart(lc.outcome_pie(summary)).classes("flex-1") \
-                            .style("height:240px;min-width:300px")
-                        ui.echart(lc.disk_chart(samples)).classes("flex-1") \
-                            .style("height:240px;min-width:300px")
+                        ui.echart(lc.latency_bar(summary)).classes("flex-1").style(
+                            "height:240px;min-width:300px"
+                        )
+                        ui.echart(lc.outcome_pie(summary)).classes("flex-1").style(
+                            "height:240px;min-width:300px"
+                        )
+                        ui.echart(lc.disk_chart(samples)).classes("flex-1").style(
+                            "height:240px;min-width:300px"
+                        )
             runs_box.clear()
             with runs_box:
                 ui.label("Recent runs").classes("text-sm font-bold text-white")
-                with ui.row().classes("w-full items-center gap-3 text-xs").style(
-                        "padding:4px 6px;color:#64748b"):
+                with (
+                    ui.row()
+                    .classes("w-full items-center gap-3 text-xs")
+                    .style("padding:4px 6px;color:#64748b")
+                ):
                     ui.label("run").style("width:280px")
                     ui.label("scenario").style("width:110px")
                     ui.label("n").style("width:50px")
@@ -1899,18 +2232,21 @@ def admin_loadtest_page():
                     ui.label("wall s").style("width:80px")
                 for r in runs:
                     s = r["summary"] or {}
-                    with ui.row().classes("w-full items-center gap-3 text-xs").style(
-                            "border-top:1px solid var(--kc-border);padding:5px 6px"):
+                    with (
+                        ui.row()
+                        .classes("w-full items-center gap-3 text-xs")
+                        .style("border-top:1px solid var(--kc-border);padding:5px 6px")
+                    ):
                         ui.label(r["run_id"]).classes("font-mono").style(
-                            "width:280px;color:#e2e8f0")
+                            "width:280px;color:#e2e8f0"
+                        )
                         ui.label(r["scenario"] or "").style("width:110px;color:#cbd5e1")
                         ui.label(str(s.get("n", "—"))).style("width:50px;color:#cbd5e1")
                         ui.label(str(s.get("ok", s.get("design_ok", "—")))).style(
-                            "width:50px;color:#cbd5e1")
-                        ui.label(str(s.get("max_running", "—"))).style(
-                            "width:80px;color:#cbd5e1")
-                        ui.label(str(s.get("wall_total_s", "—"))).style(
-                            "width:80px;color:#cbd5e1")
+                            "width:50px;color:#cbd5e1"
+                        )
+                        ui.label(str(s.get("max_running", "—"))).style("width:80px;color:#cbd5e1")
+                        ui.label(str(s.get("wall_total_s", "—"))).style("width:80px;color:#cbd5e1")
 
         ui.timer(2.0, _refresh)
         _refresh()
@@ -1932,14 +2268,17 @@ def _security_launch() -> bool:
     if _security_running():
         return False
     from kicraft.security.store import default_store_path
+
     base = default_store_path().parent
     base.mkdir(parents=True, exist_ok=True)
     log = base / "scan.log"
     proc = subprocess.Popen(
         [KICRAFT[0], "-m", "kicraft.security.scans"],
-        stdout=log.open("w"), stderr=subprocess.STDOUT,
+        stdout=log.open("w"),
+        stderr=subprocess.STDOUT,
         env={**os.environ, "KICRAFT_CALLER": "web"},
-        cwd=str(Path(__file__).resolve().parents[2]))
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
     _SECURITY.update(proc=proc, started_at=time.time(), log=log)
     return True
 
@@ -1959,10 +2298,11 @@ def admin_security_page():
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
         ui.label("Security scans").classes("text-2xl font-bold text-white")
-        ui.label("Static analysis (bandit), dependency CVEs (pip-audit), and secret "
-                 "scanning (gitleaks). Acknowledge a triaged finding to hide it from "
-                 "the open list (it survives a re-scan).").classes("text-sm") \
-            .style("color:#94a3b8")
+        ui.label(
+            "Static analysis (bandit), dependency CVEs (pip-audit), and secret "
+            "scanning (gitleaks). Acknowledge a triaged finding to hide it from "
+            "the open list (it survives a re-scan)."
+        ).classes("text-sm").style("color:#94a3b8")
         ui.separator().style("background:var(--kc-border)")
 
         with ui.row().classes("items-center gap-3"):
@@ -1970,30 +2310,44 @@ def admin_security_page():
             ftab = ui.toggle(["open", "acknowledged", "all"], value="open").props("dark")
             status = ui.label("").classes("text-xs font-mono").style("color:#94a3b8")
 
-        run_btn.on("click", lambda: (
-            ui.notify("scanning…" if _security_launch() else "a scan is already running",
-                      type="positive" if not _security_running() else "info"),
-            _refresh()))
+        run_btn.on(
+            "click",
+            lambda: (
+                ui.notify(
+                    "scanning…" if _security_launch() else "a scan is already running",
+                    type="positive" if not _security_running() else "info",
+                ),
+                _refresh(),
+            ),
+        )
 
         charts_box = ui.row().classes("w-full gap-3")
         table_box = ui.column().classes("w-full gap-0")
 
         def _refresh():
-            status.text = ("scanning…" if _security_running()
-                           else f"{sum(store.severity_counts().values())} open finding(s)")
+            status.text = (
+                "scanning…"
+                if _security_running()
+                else f"{sum(store.severity_counts().values())} open finding(s)"
+            )
             charts_box.clear()
             with charts_box:
-                ui.echart(sc.severity_bar(store.severity_counts())).classes("flex-1") \
-                    .style("height:240px;min-width:380px")
-                ui.echart(sc.status_pie(store.status_counts())).classes("flex-1") \
-                    .style("height:240px;min-width:380px")
+                ui.echart(sc.severity_bar(store.severity_counts())).classes("flex-1").style(
+                    "height:240px;min-width:380px"
+                )
+                ui.echart(sc.status_pie(store.status_counts())).classes("flex-1").style(
+                    "height:240px;min-width:380px"
+                )
             want = ftab.value
             status_filter = None if want == "all" else want
             findings = store.list_findings(status=status_filter)
             table_box.clear()
             with table_box:
-                with ui.row().classes("w-full items-center gap-2 text-xs").style(
-                        "padding:4px 6px;color:#64748b"):
+                with (
+                    ui.row()
+                    .classes("w-full items-center gap-2 text-xs")
+                    .style("padding:4px 6px;color:#64748b")
+                ):
                     ui.label("sev").style("width:70px")
                     ui.label("tool").style("width:80px")
                     ui.label("rule").style("width:90px")
@@ -2001,28 +2355,40 @@ def admin_security_page():
                     ui.label("message").style("flex:1")
                     ui.label("").style("width:110px")
                 for f in findings[:400]:
-                    col = {"critical": "#ef4444", "high": "#f97316",
-                           "medium": "#f59e0b", "low": "#60a5fa"}.get(
-                        f["severity"], "#94a3b8")
-                    with ui.row().classes("w-full items-center gap-2 text-xs").style(
-                            "border-top:1px solid var(--kc-border);padding:4px 6px"):
+                    col = {
+                        "critical": "#ef4444",
+                        "high": "#f97316",
+                        "medium": "#f59e0b",
+                        "low": "#60a5fa",
+                    }.get(f["severity"], "#94a3b8")
+                    with (
+                        ui.row()
+                        .classes("w-full items-center gap-2 text-xs")
+                        .style("border-top:1px solid var(--kc-border);padding:4px 6px")
+                    ):
                         ui.label(f["severity"]).style(f"width:70px;color:{col}")
                         ui.label(f["tool"]).style("width:80px;color:#cbd5e1")
-                        ui.label(f["rule"]).classes("font-mono").style(
-                            "width:90px;color:#cbd5e1")
+                        ui.label(f["rule"]).classes("font-mono").style("width:90px;color:#cbd5e1")
                         ui.label(f["location"]).classes("font-mono").style(
-                            "width:260px;color:#94a3b8")
+                            "width:260px;color:#94a3b8"
+                        )
                         ui.label(f["message"]).style("flex:1;color:#cbd5e1")
                         if f["status"] == "open":
-                            ui.button("ack", on_click=lambda _e=None, fid=f["id"]:
-                                      (store.set_status(fid, "acknowledged"), _refresh())) \
-                                .props("flat dense no-caps").classes("text-xs") \
-                                .style("width:110px")
+                            ui.button(
+                                "ack",
+                                on_click=lambda _e=None, fid=f["id"]: (
+                                    store.set_status(fid, "acknowledged"),
+                                    _refresh(),
+                                ),
+                            ).props("flat dense no-caps").classes("text-xs").style("width:110px")
                         else:
-                            ui.button("reopen", on_click=lambda _e=None, fid=f["id"]:
-                                      (store.set_status(fid, "open"), _refresh())) \
-                                .props("flat dense no-caps").classes("text-xs") \
-                                .style("width:110px")
+                            ui.button(
+                                "reopen",
+                                on_click=lambda _e=None, fid=f["id"]: (
+                                    store.set_status(fid, "open"),
+                                    _refresh(),
+                                ),
+                            ).props("flat dense no-caps").classes("text-xs").style("width:110px")
 
         ftab.on("update:model-value", lambda _e=None: _refresh())
         ui.timer(2.0, lambda: status.text.startswith("scanning") and _refresh())
@@ -2048,9 +2414,13 @@ def admin_overview_page():
         _guard = SpendGuard(Settings.from_env())
         ledger_total = _guard.spent_total()
         ledger_by_day = _guard.spent_by_day(30)
+        stage_attempt_rows = _guard.stage_attempt_aggregates(30)
+        stage_diagnostic_rows = _guard.stage_diagnostic_aggregates(30)
     except Exception:
         ledger_total = None
         ledger_by_day = store.spend_per_day(30)
+        stage_attempt_rows = []
+        stage_diagnostic_rows = []
     ui.dark_mode().enable()
     ui.query("body").style("background:var(--kc-bg)")
     _admin_header("overview")
@@ -2067,8 +2437,13 @@ def admin_overview_page():
         ui.label("Admin dashboard").classes("text-2xl font-bold text-white")
 
         def card(label: str, value: str, hint: str = "") -> None:
-            with ui.card().classes("gap-0 items-start") \
-                    .style("background:var(--kc-surface);border:1px solid var(--kc-border);min-width:150px"):
+            with (
+                ui.card()
+                .classes("gap-0 items-start")
+                .style(
+                    "background:var(--kc-surface);border:1px solid var(--kc-border);min-width:150px"
+                )
+            ):
                 ui.label(value).classes("text-2xl font-bold").style("color:#e2e8f0")
                 ui.label(label).classes("text-xs").style("color:#94a3b8")
                 if hint:
@@ -2078,12 +2453,15 @@ def admin_overview_page():
         with ui.row().classes("w-full flex-wrap gap-3"):
             card("Total users", str(stats["users_total"]), f"+{stats['users_new']} in {w}d")
             card("Admins", str(stats["admins"]))
-            card("Total projects", str(stats["projects_total"]),
-                 f"+{stats['projects_new']} in {w}d")
-            spend_total = ledger_total if ledger_total is not None \
-                else stats["spend_total_usd"]
-            card("Total spend", money(spend_total),
-                 f"${stats['spend_total_usd']:,.2f} on user projects")
+            card(
+                "Total projects", str(stats["projects_total"]), f"+{stats['projects_new']} in {w}d"
+            )
+            spend_total = ledger_total if ledger_total is not None else stats["spend_total_usd"]
+            card(
+                "Total spend",
+                money(spend_total),
+                f"${stats['spend_total_usd']:,.2f} on user projects",
+            )
             card("Avg / design", money(stats["spend_avg_usd"]))
             card("Avg latency", latency(stats["avg_latency_s"]))
 
@@ -2092,32 +2470,78 @@ def admin_overview_page():
         sp = ledger_by_day  # ledger (all calls) -> matches the OpenRouter daily chart
         with ui.row().classes("w-full flex-wrap gap-4"):
             with ui.card().classes("flex-1").style(_admin_card_style()):
-                ui.echart(_echart_line([d for d, _ in pp], [v for _, v in pp],
-                                       title="Projects / day (30d)")) \
-                    .classes("w-full").style("height:260px")
+                ui.echart(
+                    _echart_line(
+                        [d for d, _ in pp], [v for _, v in pp], title="Projects / day (30d)"
+                    )
+                ).classes("w-full").style("height:260px")
             with ui.card().classes("flex-1").style(_admin_card_style()):
-                ui.echart(_echart_line([d for d, _ in su], [v for _, v in su],
-                                       title="Signups / day (30d)", color="#60a5fa")) \
-                    .classes("w-full").style("height:260px")
+                ui.echart(
+                    _echart_line(
+                        [d for d, _ in su],
+                        [v for _, v in su],
+                        title="Signups / day (30d)",
+                        color="#60a5fa",
+                    )
+                ).classes("w-full").style("height:260px")
         with ui.row().classes("w-full flex-wrap gap-4"):
             with ui.card().classes("flex-1").style(_admin_card_style()):
-                ui.echart(_echart_bar([d for d, _ in sp], [round(v, 2) for _, v in sp],
-                                      title="Spend / day (30d)", color="#fbbf24")) \
-                    .classes("w-full").style("height:260px")
+                ui.echart(
+                    _echart_bar(
+                        [d for d, _ in sp],
+                        [round(v, 2) for _, v in sp],
+                        title="Spend / day (30d)",
+                        color="#fbbf24",
+                    )
+                ).classes("w-full").style("height:260px")
             with ui.card().classes("flex-1").style(_admin_card_style()):
-                ui.echart(_echart_pie(store.status_distribution(),
-                                      title="Project status")) \
-                    .classes("w-full").style("height:260px")
+                ui.echart(_echart_pie(store.status_distribution(), title="Project status")).classes(
+                    "w-full"
+                ).style("height:260px")
             with ui.card().classes("flex-1").style(_admin_card_style()):
-                ui.echart(_echart_pie(store.tier_distribution(), title="User tiers")) \
-                    .classes("w-full").style("height:260px")
+                ui.echart(_echart_pie(store.tier_distribution(), title="User tiers")).classes(
+                    "w-full"
+                ).style("height:260px")
+
+        ui.label("LLM stage reliability (30d, redacted)").classes(
+            "text-base font-semibold text-white mt-2"
+        )
+        with ui.row().classes("w-full flex-wrap gap-4"):
+            with ui.card().classes("flex-1").style(_admin_card_style()):
+                ui.table(
+                    columns=[
+                        {"name": "stage", "label": "Stage", "field": "stage"},
+                        {"name": "model", "label": "Model", "field": "model"},
+                        {"name": "provider", "label": "Provider", "field": "provider"},
+                        {"name": "outcome", "label": "Outcome", "field": "outcome"},
+                        {"name": "error_code", "label": "Code", "field": "error_code"},
+                        {"name": "attempts", "label": "N", "field": "attempts"},
+                        {"name": "cost_usd", "label": "Cost", "field": "cost_usd"},
+                        {"name": "avg_wall_s", "label": "Avg s", "field": "avg_wall_s"},
+                    ],
+                    rows=stage_attempt_rows,
+                    row_key="stage",
+                    pagination=10,
+                ).classes("w-full").props("dark dense flat")
+            with ui.card().classes("flex-1").style(_admin_card_style()):
+                ui.table(
+                    columns=[
+                        {"name": "stage", "label": "Stage", "field": "stage"},
+                        {"name": "code", "label": "Diagnostic", "field": "code"},
+                        {"name": "attempts", "label": "N", "field": "attempts"},
+                    ],
+                    rows=stage_diagnostic_rows,
+                    row_key="code",
+                    pagination=10,
+                ).classes("w-full").props("dark dense flat")
 
         # Host-resource trends: drive / RAM / CPU over time. A background
         # sampler (started by the web process, kicraft/server/host_metrics.py)
         # appends a row every ~30 s; the admin page only reads. The timescale
         # selector rebuilds the three charts in place via ui.refreshable.
         ui.label("Host usage (drive · RAM · CPU)").classes(
-            "text-base font-semibold text-white mt-2")
+            "text-base font-semibold text-white mt-2"
+        )
         with ui.row().classes("items-center gap-2 flex-wrap"):
             ui.label("Window").classes("text-xs").style("color:#94a3b8")
 
@@ -2128,17 +2552,21 @@ def admin_overview_page():
             def _on_window(e, hc=host_charts) -> None:
                 hc.refresh(e.value)
 
-            ui.select(_HOST_TIMESCALES, value="7d", on_change=_on_window) \
-                .props("dark dense options-dense no-caps").style("width:110px")
+            ui.select(_HOST_TIMESCALES, value="7d", on_change=_on_window).props(
+                "dark dense options-dense no-caps"
+            ).style("width:110px")
             host_charts("7d")
-        ui.label("Top users by projects") \
-            .classes("text-base font-semibold text-white mt-2")
-        top = sorted(store.users_with_project_counts(),
-                     key=lambda r: r["project_count"], reverse=True)[:10]
+        ui.label("Top users by projects").classes("text-base font-semibold text-white mt-2")
+        top = sorted(
+            store.users_with_project_counts(), key=lambda r: r["project_count"], reverse=True
+        )[:10]
         with ui.column().classes("w-full gap-1"):
             for r in top:
-                with ui.row().classes("w-full items-center gap-3 text-xs") \
-                        .style("border-top:1px solid var(--kc-border);padding:3px 0"):
+                with (
+                    ui.row()
+                    .classes("w-full items-center gap-3 text-xs")
+                    .style("border-top:1px solid var(--kc-border);padding:3px 0")
+                ):
                     ui.label(r["email"]).style("width:260px;color:#e2e8f0")
                     ui.badge(r["tier"], color="primary")
                     if r["role"] == "admin":
@@ -2162,18 +2590,25 @@ def admin_projects_page():
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1400px"):
         ui.label("Project browser").classes("text-2xl font-bold text-white")
-        ui.label("Inspect stored projects without opening them in an editable workspace.") \
-            .classes("text-sm").style("color:#94a3b8")
-        search = ui.input(
-            placeholder="Filter by owner, stem, brief, or board code…") \
-            .props("dense clearable outlined dark").classes("w-full")
+        ui.label("Inspect stored projects without opening them in an editable workspace.").classes(
+            "text-sm"
+        ).style("color:#94a3b8")
+        search = (
+            ui.input(placeholder="Filter by owner, stem, brief, or board code…")
+            .props("dense clearable outlined dark")
+            .classes("w-full")
+        )
         container = ui.column().classes("w-full gap-0")
 
         def _matches(row: dict, needle: str) -> bool:
             if not needle:
                 return True
-            fields = (row.get("owner_email"), row.get("project_stem"),
-                      row.get("brief"), row.get("board_code"))
+            fields = (
+                row.get("owner_email"),
+                row.get("project_stem"),
+                row.get("brief"),
+                row.get("board_code"),
+            )
             return any(needle in str(value or "").lower() for value in fields)
 
         def build_projects() -> None:
@@ -2182,15 +2617,16 @@ def admin_projects_page():
             visible = [row for row in rows if _matches(row, needle)]
             with container:
                 if not rows:
-                    ui.label("No stored projects.").classes("text-sm") \
-                        .style("color:#94a3b8")
+                    ui.label("No stored projects.").classes("text-sm").style("color:#94a3b8")
                     return
                 if not visible:
-                    ui.label("No projects match.").classes("text-sm") \
-                        .style("color:#94a3b8")
+                    ui.label("No projects match.").classes("text-sm").style("color:#94a3b8")
                     return
-                with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
-                        .style("color:#64748b;padding:2px 0"):
+                with (
+                    ui.row()
+                    .classes("w-full items-center gap-2 text-xs font-bold")
+                    .style("color:#64748b;padding:2px 0")
+                ):
                     ui.label("owner").style("width:220px")
                     ui.label("project").style("width:180px")
                     ui.label("brief").classes("flex-grow")
@@ -2203,23 +2639,32 @@ def admin_projects_page():
                     owner = row.get("owner_email") or "(deleted user)"
                     stem = row.get("project_stem") or "(untitled)"
                     brief = (row.get("brief") or "").strip()
-                    with ui.row().classes("w-full items-center gap-2 text-xs") \
-                            .style("border-top:1px solid var(--kc-border);padding:5px 0"):
+                    with (
+                        ui.row()
+                        .classes("w-full items-center gap-2 text-xs")
+                        .style("border-top:1px solid var(--kc-border);padding:5px 0")
+                    ):
                         ui.label(owner).style("width:220px;color:#e2e8f0")
                         ui.label(stem).style("width:180px;color:#cbd5e1")
                         ui.label(brief or "—").classes("flex-grow").style(
-                            "color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap")
-                        ui.label(row.get("board_code") or "—").style(
-                            "width:120px;color:#cbd5e1")
+                            "color:#94a3b8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                        )
+                        ui.label(row.get("board_code") or "—").style("width:120px;color:#cbd5e1")
                         ui.label(row.get("status") or "—").style("width:100px;color:#cbd5e1")
                         ui.label("public" if row.get("is_public") else "private").style(
-                            "width:90px;color:#94a3b8")
+                            "width:90px;color:#94a3b8"
+                        )
                         ui.label((row.get("created_at") or "")[:19]).style(
-                            "width:150px;color:#64748b")
-                        ui.button("View", on_click=lambda pid=row["id"]:
-                                  ui.navigate.to(f"/admin/projects/view?project={pid}")) \
-                            .props("flat dense no-caps").classes("text-xs admin-project-view") \
-                            .style("width:70px").mark("admin-project-view")
+                            "width:150px;color:#64748b"
+                        )
+                        ui.button(
+                            "View",
+                            on_click=lambda pid=row["id"]: ui.navigate.to(
+                                f"/admin/projects/view?project={pid}"
+                            ),
+                        ).props("flat dense no-caps").classes("text-xs admin-project-view").style(
+                            "width:70px"
+                        ).mark("admin-project-view")
 
         search.on_value_change(lambda: build_projects())
         build_projects()
@@ -2243,15 +2688,17 @@ def admin_project_view_page(project: str = ""):
         project_id = None
     source = _store().get_project(project_id) if project_id is not None else None
     if source is None:
-        with ui.column().classes("w-full mx-auto p-8 gap-2 items-center") \
-                .style("max-width:760px"):
+        with ui.column().classes("w-full mx-auto p-8 gap-2 items-center").style("max-width:760px"):
             ui.icon("help_outline").style("color:#64748b;font-size:40px")
             ui.label("Project unavailable.").classes("text-lg text-white")
-            ui.label("The project id is missing, invalid, or no longer exists.") \
-                .classes("text-sm").style("color:#94a3b8")
-            ui.button("Back to projects", icon="arrow_back",
-                      on_click=lambda: ui.navigate.to("/admin/projects")) \
-                .props("flat no-caps")
+            ui.label("The project id is missing, invalid, or no longer exists.").classes(
+                "text-sm"
+            ).style("color:#94a3b8")
+            ui.button(
+                "Back to projects",
+                icon="arrow_back",
+                on_click=lambda: ui.navigate.to("/admin/projects"),
+            ).props("flat no-caps")
         return
 
     store = _store()
@@ -2291,12 +2738,12 @@ def admin_project_view_page(project: str = ""):
             ui.notify("The source project's files are unavailable.", color="warning")
             return
         if error == "copy_error":
-            ui.notify("The project files could not be copied; the source is unchanged.",
-                      color="negative")
+            ui.notify(
+                "The project files could not be copied; the source is unchanged.", color="negative"
+            )
             return
         if error is not None or clone_id is None:
-            ui.notify("Couldn't clone this project; the source is unchanged.",
-                      color="negative")
+            ui.notify("Couldn't clone this project; the source is unchanged.", color="negative")
             return
         ui.notify("Cloned into your workspace.", color="positive")
         ui.navigate.to(f"/?project={clone_id}")
@@ -2304,22 +2751,27 @@ def admin_project_view_page(project: str = ""):
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1200px"):
         with ui.row().classes("w-full items-center justify-between gap-2"):
             ui.label(stem).classes("text-2xl font-bold text-white")
-            ui.button("Back to projects", icon="arrow_back",
-                      on_click=lambda: ui.navigate.to("/admin/projects")) \
-                .props("flat dense no-caps color=white")
+            ui.button(
+                "Back to projects",
+                icon="arrow_back",
+                on_click=lambda: ui.navigate.to("/admin/projects"),
+            ).props("flat dense no-caps color=white")
         if (source.brief or "").strip():
             ui.label(source.brief).classes("text-sm").style("color:#94a3b8")
-        with ui.card().classes("w-full gap-1") \
-                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
-            ui.label("Project metadata").classes("text-xs font-medium") \
-                .style("color:#94a3b8")
+        with (
+            ui.card()
+            .classes("w-full gap-1")
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
+        ):
+            ui.label("Project metadata").classes("text-xs font-medium").style("color:#94a3b8")
             for label, value in (
-                    ("Owner", owner_email),
-                    ("Source project id", str(source.id)),
-                    ("Board code", source.board_code or "—"),
-                    ("Status", source.status),
-                    ("Visibility", "public" if source.is_public else "private"),
-                    ("Created", source.created_at or "—")):
+                ("Owner", owner_email),
+                ("Source project id", str(source.id)),
+                ("Board code", source.board_code or "—"),
+                ("Status", source.status),
+                ("Visibility", "public" if source.is_public else "private"),
+                ("Created", source.created_at or "—"),
+            ):
                 with ui.row().classes("w-full items-center gap-2 text-xs"):
                     ui.label(label).style("width:150px;color:#64748b")
                     ui.label(value).classes("flex-grow").style("color:#e2e8f0")
@@ -2328,27 +2780,33 @@ def admin_project_view_page(project: str = ""):
         if gen and token:
             srcs = _schematic_sources(gen, source.project_stem or "", token)
             if srcs:
-                with ui.card().classes("w-full") \
-                        .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+                with (
+                    ui.card()
+                    .classes("w-full")
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
+                ):
                     _render_synth_view(srcs, source.project_stem or "", gen)
                 previewed = True
             board = _board_source(gen, source.project_stem or "", token)
             if board:
-                with ui.card().classes("w-full") \
-                        .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
-                    ui.label("Board").classes("text-xs font-medium") \
-                        .style("color:#94a3b8")
+                with (
+                    ui.card()
+                    .classes("w-full")
+                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
+                ):
+                    ui.label("Board").classes("text-xs font-medium").style("color:#94a3b8")
                     KiCanvasView([KiCanvasSource(board[0], board[1])], height="h-[520px]")
                 previewed = True
         if not previewed:
-            ui.label("This project's files aren't available to preview.") \
-                .classes("text-sm").style("color:#64748b")
+            ui.label("This project's files aren't available to preview.").classes("text-sm").style(
+                "color:#64748b"
+            )
 
         _render_bom_table(_load_persisted_state(source.dir_path))
         if source.status == "ok" and source.dir_path and Path(source.dir_path).is_dir():
-            ui.button("Clone to my workspace", icon="content_copy", on_click=do_clone) \
-                .props("color=primary unelevated no-caps") \
-                .classes("admin-project-clone").mark("admin-project-clone")
+            ui.button("Clone to my workspace", icon="content_copy", on_click=do_clone).props(
+                "color=primary unelevated no-caps"
+            ).classes("admin-project-clone").mark("admin-project-clone")
 
 
 @ui.page("/admin/users")
@@ -2368,8 +2826,12 @@ def admin_users_page():
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1400px"):
         ui.label("User management").classes("text-2xl font-bold text-white")
-        search = ui.input(placeholder="Filter by email…").props("dense clearable") \
-            .classes("w-72").style("color:#e2e8f0")
+        search = (
+            ui.input(placeholder="Filter by email…")
+            .props("dense clearable")
+            .classes("w-72")
+            .style("color:#e2e8f0")
+        )
         container = ui.column().classes("w-full gap-0")
 
         def guard() -> bool:
@@ -2402,8 +2864,9 @@ def admin_users_page():
                     ui.notify("Refusing to remove the last admin.", color="warning")
                     return
             store.set_role(row["id"], "admin" if making else "user")
-            ui.notify(f"{row['email']} is now {'an admin' if making else 'a user'}.",
-                      color="positive")
+            ui.notify(
+                f"{row['email']} is now {'an admin' if making else 'a user'}.", color="positive"
+            )
             build_users()
 
         def do_reset_link(email: str) -> None:
@@ -2411,19 +2874,27 @@ def admin_users_page():
                 return
             token = store.create_reset_token(email)
             if token is None:
-                ui.notify("A reset link was issued moments ago; wait a minute and retry.",
-                          color="warning")
+                ui.notify(
+                    "A reset link was issued moments ago; wait a minute and retry.", color="warning"
+                )
                 return
             url = f"{Settings.from_env().public_url}/reset?token={token}"
-            with ui.dialog() as dlg, ui.card() \
-                    .style("background:var(--kc-surface);border:1px solid var(--kc-border);min-width:520px"):
-                ui.label(f"Password-reset link for {email}") \
-                    .classes("text-sm font-bold").style("color:#e2e8f0")
-                ui.label(f"Valid ~{_RESET_TTL_SECONDS // 60} min, single use. "
-                         "Relay it to the user out-of-band.") \
-                    .classes("text-xs").style("color:#94a3b8")
-                ui.input(value=url).props("readonly outlined dense") \
-                    .classes("w-full").style("color:#e2e8f0")
+            with (
+                ui.dialog() as dlg,
+                ui.card().style(
+                    "background:var(--kc-surface);border:1px solid var(--kc-border);min-width:520px"
+                ),
+            ):
+                ui.label(f"Password-reset link for {email}").classes("text-sm font-bold").style(
+                    "color:#e2e8f0"
+                )
+                ui.label(
+                    f"Valid ~{_RESET_TTL_SECONDS // 60} min, single use. "
+                    "Relay it to the user out-of-band."
+                ).classes("text-xs").style("color:#94a3b8")
+                ui.input(value=url).props("readonly outlined dense").classes("w-full").style(
+                    "color:#e2e8f0"
+                )
                 with ui.row().classes("w-full justify-end"):
                     ui.button("Close", on_click=dlg.close).props("flat dense")
             dlg.open()
@@ -2465,12 +2936,18 @@ def admin_users_page():
                 ui.notify(f"Deleted {row['email']}.", color="positive")
                 build_users()
 
-            with ui.dialog() as dlg, ui.card() \
-                    .style("background:var(--kc-surface);border:1px solid var(--kc-border);min-width:420px"):
-                ui.label(f"Delete {row['email']}?") \
-                    .classes("text-base font-bold").style("color:#e2e8f0")
-                ui.label("Removes their account, project rows, and stored files. "
-                         "This is irreversible.").classes("text-xs").style("color:#f87171")
+            with (
+                ui.dialog() as dlg,
+                ui.card().style(
+                    "background:var(--kc-surface);border:1px solid var(--kc-border);min-width:420px"
+                ),
+            ):
+                ui.label(f"Delete {row['email']}?").classes("text-base font-bold").style(
+                    "color:#e2e8f0"
+                )
+                ui.label(
+                    "Removes their account, project rows, and stored files. This is irreversible."
+                ).classes("text-xs").style("color:#f87171")
                 with ui.row().classes("w-full justify-end gap-2"):
                     ui.button("Cancel", on_click=dlg.close).props("flat dense")
                     ui.button("Delete", color="negative", on_click=confirm).props("dense")
@@ -2484,8 +2961,11 @@ def admin_users_page():
             if flt:
                 rows = [r for r in rows if flt in r["email"].lower()]
             with container:
-                with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
-                        .style("color:#64748b;padding:2px 0"):
+                with (
+                    ui.row()
+                    .classes("w-full items-center gap-2 text-xs font-bold")
+                    .style("color:#64748b;padding:2px 0")
+                ):
                     ui.label("email").style("width:230px")
                     ui.label("tier").style("width:96px")
                     ui.label("billing").style("width:76px")
@@ -2499,44 +2979,57 @@ def admin_users_page():
                 for r in rows:
                     is_admin_row = r["role"] == "admin"
                     is_self = me is not None and r["id"] == me.id
-                    with ui.row().classes("w-full items-center gap-2 text-xs") \
-                            .style("border-top:1px solid var(--kc-border);padding:4px 0"):
-                        ui.label(r["email"] + ("  (you)" if is_self else "")) \
-                            .style("width:230px;color:#e2e8f0")
-                        ui.select({"free": "Free", "pro": "Pro", "max": "Max"},
-                                  value=r["tier"],
-                                  on_change=lambda e, em=r["email"]: do_set_tier(em, e.value)) \
-                            .props("dense options-dense").style("width:96px")
+                    with (
+                        ui.row()
+                        .classes("w-full items-center gap-2 text-xs")
+                        .style("border-top:1px solid var(--kc-border);padding:4px 0")
+                    ):
+                        ui.label(r["email"] + ("  (you)" if is_self else "")).style(
+                            "width:230px;color:#e2e8f0"
+                        )
+                        ui.select(
+                            {"free": "Free", "pro": "Pro", "max": "Max"},
+                            value=r["tier"],
+                            on_change=lambda e, em=r["email"]: do_set_tier(em, e.value),
+                        ).props("dense options-dense").style("width:96px")
                         sub_status = r.get("subscription_status") or "-"
                         ui.label(sub_status).style(
                             "width:76px;color:"
-                            + ("#34d399" if sub_status in ("active", "trialing")
-                               else "#64748b")) \
-                            .tooltip("Stripe subscription status (manual tier "
-                                     "changes hold until the next webhook sync)")
+                            + ("#34d399" if sub_status in ("active", "trialing") else "#64748b")
+                        ).tooltip(
+                            "Stripe subscription status (manual tier "
+                            "changes hold until the next webhook sync)"
+                        )
                         ui.label(r["role"]).style(
-                            f"width:70px;color:{'#a78bfa' if is_admin_row else '#64748b'}")
+                            f"width:70px;color:{'#a78bfa' if is_admin_row else '#64748b'}"
+                        )
                         ui.label(str(r["project_count"])).style("width:48px;color:#cbd5e1")
                         ui.label(f"${r['spend_usd']:.2f}").style("width:64px;color:#cbd5e1")
-                        ui.label((r["created_at"] or "")[:10]) \
-                            .style("width:84px;color:#64748b")
+                        ui.label((r["created_at"] or "")[:10]).style("width:84px;color:#64748b")
                         with ui.row().classes("flex-1 gap-1 items-center"):
-                            ui.button("Revoke" if is_admin_row else "Make admin",
-                                      icon="remove_moderator" if is_admin_row
-                                      else "admin_panel_settings",
-                                      on_click=lambda row=r: do_toggle_admin(row)) \
-                                .props("flat dense no-caps").classes("text-xs")
-                            ui.button("Reset link", icon="link",
-                                      on_click=lambda em=r["email"]: do_reset_link(em)) \
-                                .props("flat dense no-caps").classes("text-xs")
-                            ui.button("Export", icon="download",
-                                      on_click=lambda uid=r["id"]: do_export(uid)) \
-                                .props("flat dense no-caps").classes("text-xs") \
-                                .tooltip("Account + project metadata as JSON "
-                                         "(on-disk files via the CLI)")
-                            ui.button("Delete", icon="delete", color="negative",
-                                      on_click=lambda row=r: do_delete(row)) \
-                                .props("flat dense no-caps").classes("text-xs")
+                            ui.button(
+                                "Revoke" if is_admin_row else "Make admin",
+                                icon="remove_moderator" if is_admin_row else "admin_panel_settings",
+                                on_click=lambda row=r: do_toggle_admin(row),
+                            ).props("flat dense no-caps").classes("text-xs")
+                            ui.button(
+                                "Reset link",
+                                icon="link",
+                                on_click=lambda em=r["email"]: do_reset_link(em),
+                            ).props("flat dense no-caps").classes("text-xs")
+                            ui.button(
+                                "Export",
+                                icon="download",
+                                on_click=lambda uid=r["id"]: do_export(uid),
+                            ).props("flat dense no-caps").classes("text-xs").tooltip(
+                                "Account + project metadata as JSON (on-disk files via the CLI)"
+                            )
+                            ui.button(
+                                "Delete",
+                                icon="delete",
+                                color="negative",
+                                on_click=lambda row=r: do_delete(row),
+                            ).props("flat dense no-caps").classes("text-xs")
 
         search.on_value_change(lambda: build_users())
         build_users()
@@ -2571,8 +3064,11 @@ def admin_invites_page():
         ui.label("Invite codes").classes("text-2xl font-bold text-white")
 
         # -- public-launch switch -------------------------------------------
-        with ui.card().classes("w-full gap-1") \
-                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+        with (
+            ui.card()
+            .classes("w-full gap-1")
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
+        ):
             ui.label("Public signup").classes("text-base font-semibold text-white")
 
             def on_toggle(e) -> None:
@@ -2580,42 +3076,59 @@ def admin_invites_page():
                     open_sw.value = store.signup_open()  # revert the flip
                     return
                 store.set_signup_open(bool(e.value))
-                ui.notify("Public signup is now "
-                          f"{'OPEN: anyone can register on the Free tier' if e.value else 'closed: an invite code is required'}.",
-                          color="positive")
+                ui.notify(
+                    "Public signup is now "
+                    f"{'OPEN: anyone can register on the Free tier' if e.value else 'closed: an invite code is required'}.",
+                    color="positive",
+                )
 
-            open_sw = ui.switch("Allow Free-tier signup without an invite code",
-                                value=store.signup_open())
+            open_sw = ui.switch(
+                "Allow Free-tier signup without an invite code", value=store.signup_open()
+            )
             open_sw.on_value_change(on_toggle)
-            ui.label("Off = invite-only beta (every signup needs a code below). "
-                     "On = public launch: the code field becomes optional, and a "
-                     "code still upgrades the signup to its tier.") \
-                .classes("text-xs").style("color:#94a3b8")
+            ui.label(
+                "Off = invite-only beta (every signup needs a code below). "
+                "On = public launch: the code field becomes optional, and a "
+                "code still upgrades the signup to its tier."
+            ).classes("text-xs").style("color:#94a3b8")
 
         # -- mint a new code --------------------------------------------------
-        with ui.card().classes("w-full gap-1") \
-                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+        with (
+            ui.card()
+            .classes("w-full gap-1")
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
+        ):
             ui.label("New invite code").classes("text-base font-semibold text-white")
             with ui.row().classes("w-full items-end gap-3 flex-wrap"):
-                code_in = ui.input("Code", placeholder="FREEMAX") \
-                    .props("dense").classes("w-44")
-                tier_sel = ui.select(tier_options, value=DEFAULT_TIER, label="Tier") \
-                    .props("dense options-dense").classes("w-28")
-                days_in = ui.number("Days", min=1, precision=0) \
-                    .props("dense clearable").classes("w-28") \
+                code_in = ui.input("Code", placeholder="FREEMAX").props("dense").classes("w-44")
+                tier_sel = (
+                    ui.select(tier_options, value=DEFAULT_TIER, label="Tier")
+                    .props("dense options-dense")
+                    .classes("w-28")
+                )
+                days_in = (
+                    ui.number("Days", min=1, precision=0)
+                    .props("dense clearable")
+                    .classes("w-28")
                     .tooltip("How long the signup keeps the tier; blank = forever")
-                uses_in = ui.number("Max uses", min=1, precision=0) \
-                    .props("dense clearable").classes("w-28") \
+                )
+                uses_in = (
+                    ui.number("Max uses", min=1, precision=0)
+                    .props("dense clearable")
+                    .classes("w-28")
                     .tooltip("How many signups may redeem it; blank = unlimited")
+                )
 
                 def do_create() -> None:
                     if not guard():
                         return
                     try:
                         c = store.create_invite_code(
-                            code_in.value or "", tier_sel.value or DEFAULT_TIER,
+                            code_in.value or "",
+                            tier_sel.value or DEFAULT_TIER,
                             duration_days=int(days_in.value) if days_in.value else None,
-                            max_uses=int(uses_in.value) if uses_in.value else None)
+                            max_uses=int(uses_in.value) if uses_in.value else None,
+                        )
                     except ValueError as e:
                         ui.notify(str(e), color="negative")
                         return
@@ -2624,10 +3137,11 @@ def admin_invites_page():
                     build_codes()
 
                 ui.button("Create", icon="add", on_click=do_create).props("dense")
-            ui.label("Example: code FREEMAX, tier Max, days blank gives the Max "
-                     "tier free forever; days 30 gives it for 30 days, then the "
-                     "account drops back to Free.") \
-                .classes("text-xs").style("color:#94a3b8")
+            ui.label(
+                "Example: code FREEMAX, tier Max, days blank gives the Max "
+                "tier free forever; days 30 gives it for 30 days, then the "
+                "account drops back to Free."
+            ).classes("text-xs").style("color:#94a3b8")
 
         # -- existing codes ----------------------------------------------------
         container = ui.column().classes("w-full gap-0")
@@ -2640,16 +3154,18 @@ def admin_invites_page():
             except ValueError as e:
                 ui.notify(str(e), color="negative")
                 return
-            ui.notify(f"{row['code']} {'re-enabled' if enabled else 'disabled'}.",
-                      color="positive")
+            ui.notify(f"{row['code']} {'re-enabled' if enabled else 'disabled'}.", color="positive")
             build_codes()
 
         def build_codes() -> None:
             container.clear()
             rows = store.list_invite_codes()
             with container:
-                with ui.row().classes("w-full items-center gap-2 text-xs font-bold") \
-                        .style("color:#64748b;padding:2px 0"):
+                with (
+                    ui.row()
+                    .classes("w-full items-center gap-2 text-xs font-bold")
+                    .style("color:#64748b;padding:2px 0")
+                ):
                     ui.label("code").style("width:170px")
                     ui.label("tier").style("width:60px")
                     ui.label("grants").style("width:110px")
@@ -2659,52 +3175,62 @@ def admin_invites_page():
                     ui.label("last used").style("width:84px")
                     ui.label("actions").classes("flex-1")
                 if not rows:
-                    ui.label("No invite codes yet. Mint one above; the legacy "
-                             "env code (if set) also still works.") \
-                        .classes("text-sm").style("color:#94a3b8")
+                    ui.label(
+                        "No invite codes yet. Mint one above; the legacy "
+                        "env code (if set) also still works."
+                    ).classes("text-sm").style("color:#94a3b8")
                 for r in rows:
-                    with ui.row().classes("w-full items-center gap-2 text-xs") \
-                            .style("border-top:1px solid var(--kc-border);padding:4px 0"):
-                        ui.label(r["code"]).style(
-                            "width:170px;color:#e2e8f0;font-family:monospace")
-                        ui.badge(TIERS[r["tier"]]["label"]
-                                 if r["tier"] in TIERS else r["tier"],
-                                 color="primary").style("width:60px")
-                        ui.label("forever" if r["duration_days"] is None
-                                 else f"{r['duration_days']} days") \
-                            .style("width:110px;color:#cbd5e1")
-                        ui.label(f"{r['use_count']} / "
-                                 f"{r['max_uses'] if r['max_uses'] is not None else '∞'}") \
-                            .style("width:70px;color:#cbd5e1")
+                    with (
+                        ui.row()
+                        .classes("w-full items-center gap-2 text-xs")
+                        .style("border-top:1px solid var(--kc-border);padding:4px 0")
+                    ):
+                        ui.label(r["code"]).style("width:170px;color:#e2e8f0;font-family:monospace")
+                        ui.badge(
+                            TIERS[r["tier"]]["label"] if r["tier"] in TIERS else r["tier"],
+                            color="primary",
+                        ).style("width:60px")
+                        ui.label(
+                            "forever"
+                            if r["duration_days"] is None
+                            else f"{r['duration_days']} days"
+                        ).style("width:110px;color:#cbd5e1")
+                        ui.label(
+                            f"{r['use_count']} / "
+                            f"{r['max_uses'] if r['max_uses'] is not None else '∞'}"
+                        ).style("width:70px;color:#cbd5e1")
                         if not r["enabled"]:
                             ui.label("disabled").style("width:70px;color:#f87171")
-                        elif r["max_uses"] is not None \
-                                and r["use_count"] >= r["max_uses"]:
+                        elif r["max_uses"] is not None and r["use_count"] >= r["max_uses"]:
                             ui.label("used up").style("width:70px;color:#f59e0b")
                         else:
                             ui.label("active").style("width:70px;color:#34d399")
-                        ui.label((r["created_at"] or "")[:10]) \
-                            .style("width:84px;color:#64748b")
-                        ui.label((r["last_used_at"] or "")[:10] or "never") \
-                            .style("width:84px;color:#64748b")
+                        ui.label((r["created_at"] or "")[:10]).style("width:84px;color:#64748b")
+                        ui.label((r["last_used_at"] or "")[:10] or "never").style(
+                            "width:84px;color:#64748b"
+                        )
                         with ui.row().classes("flex-1 gap-1 items-center"):
                             if r["enabled"]:
-                                ui.button("Disable", icon="block",
-                                          on_click=lambda row=r:
-                                          do_set_enabled(row, False)) \
-                                    .props("flat dense no-caps").classes("text-xs")
+                                ui.button(
+                                    "Disable",
+                                    icon="block",
+                                    on_click=lambda row=r: do_set_enabled(row, False),
+                                ).props("flat dense no-caps").classes("text-xs")
                             else:
-                                ui.button("Enable", icon="check_circle",
-                                          on_click=lambda row=r:
-                                          do_set_enabled(row, True)) \
-                                    .props("flat dense no-caps").classes("text-xs")
+                                ui.button(
+                                    "Enable",
+                                    icon="check_circle",
+                                    on_click=lambda row=r: do_set_enabled(row, True),
+                                ).props("flat dense no-caps").classes("text-xs")
 
         build_codes()
 
         if _signup_code():
-            ui.label("Note: the legacy KICRAFT_SIGNUP_CODE env code is also still "
-                     "accepted at signup (it grants the Free tier). Remove it from "
-                     ".env to retire it.").classes("text-xs").style("color:#64748b")
+            ui.label(
+                "Note: the legacy KICRAFT_SIGNUP_CODE env code is also still "
+                "accepted at signup (it grants the Free tier). Remove it from "
+                ".env to retire it."
+            ).classes("text-xs").style("color:#64748b")
 
 
 @ui.page("/admin/core-components")
@@ -2736,22 +3262,28 @@ def admin_core_components_page():
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1400px"):
         ui.label("Core components").classes("text-2xl font-bold text-white")
 
-        with ui.card().classes("w-full gap-1") \
-                .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+        with (
+            ui.card()
+            .classes("w-full gap-1")
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
+        ):
             with ui.row().classes("w-full items-center gap-3"):
-                ui.label("Default part per functional block") \
-                    .classes("text-base font-semibold text-white")
-            ui.label("Synced from the repo catalog "
-                     "(kicraft/parts_library/core_blocks.json) on every "
-                     "restart; the architecture/BOM prompts consume it per "
-                     "run. Part and block edits happen via git; this page "
-                     "owns only enable/disable and price/stock snapshots.") \
-                .classes("text-xs").style("color:#94a3b8")
+                ui.label("Default part per functional block").classes(
+                    "text-base font-semibold text-white"
+                )
+            ui.label(
+                "Synced from the repo catalog "
+                "(kicraft/parts_library/core_blocks.json) on every "
+                "restart; the architecture/BOM prompts consume it per "
+                "run. Part and block edits happen via git; this page "
+                "owns only enable/disable and price/stock snapshots."
+            ).classes("text-xs").style("color:#94a3b8")
             if not jlcparts.available():
-                ui.label("The jlcparts offline catalog is not installed on this "
-                         "host, so the per-row price/stock refresh is hidden "
-                         "(it works on the production box).") \
-                    .classes("text-xs").style("color:#64748b")
+                ui.label(
+                    "The jlcparts offline catalog is not installed on this "
+                    "host, so the per-row price/stock refresh is hidden "
+                    "(it works on the production box)."
+                ).classes("text-xs").style("color:#64748b")
 
         container = ui.column().classes("w-full gap-0")
 
@@ -2763,9 +3295,10 @@ def admin_core_components_page():
             except ValueError as e:
                 ui.notify(str(e), color="negative")
                 return
-            ui.notify(f"{row['function_key']} "
-                      f"{'re-enabled' if enabled else 'disabled'}.",
-                      color="positive")
+            ui.notify(
+                f"{row['function_key']} {'re-enabled' if enabled else 'disabled'}.",
+                color="positive",
+            )
             build_table()
 
         def do_refresh(row: dict) -> None:
@@ -2775,15 +3308,19 @@ def admin_core_components_page():
                 return
             info = jlcparts.lookup(row["default_lcsc"])
             if not info:
-                ui.notify(f"{row['default_lcsc']} not found in the offline "
-                          "catalog.", color="negative")
+                ui.notify(
+                    f"{row['default_lcsc']} not found in the offline catalog.", color="negative"
+                )
                 return
             upd = store.record_core_component_snapshot(
-                row["id"], price_usd=info.get("price"), stock=info.get("stock"))
-            price_s = (f"${upd['price_usd']:.4f}"
-                       if upd["price_usd"] is not None else "price unknown")
-            ui.notify(f"{row['function_key']}: stock {upd['stock']}, {price_s} "
-                      "(qty 1).", color="positive")
+                row["id"], price_usd=info.get("price"), stock=info.get("stock")
+            )
+            price_s = (
+                f"${upd['price_usd']:.4f}" if upd["price_usd"] is not None else "price unknown"
+            )
+            ui.notify(
+                f"{row['function_key']}: stock {upd['stock']}, {price_s} (qty 1).", color="positive"
+            )
             build_table()
 
         def build_table() -> None:
@@ -2794,18 +3331,22 @@ def admin_core_components_page():
                 by_cat.setdefault(r["category"], []).append(r)
             with container:
                 if not rows:
-                    ui.label("The registry is empty: the catalog sync found "
-                             "no blocks (check the server log).") \
-                        .classes("text-sm").style("color:#94a3b8")
+                    ui.label(
+                        "The registry is empty: the catalog sync found "
+                        "no blocks (check the server log)."
+                    ).classes("text-sm").style("color:#94a3b8")
                 for cat in CORE_COMPONENT_CATEGORIES:
                     cat_rows = by_cat.get(cat, [])
                     if not cat_rows:
                         continue
-                    ui.label(cat.capitalize()) \
-                        .classes("text-sm font-bold mt-3").style("color:#e2e8f0")
-                    with ui.row().classes(
-                            "w-full items-center gap-2 text-xs font-bold") \
-                            .style("color:#64748b;padding:2px 0"):
+                    ui.label(cat.capitalize()).classes("text-sm font-bold mt-3").style(
+                        "color:#e2e8f0"
+                    )
+                    with (
+                        ui.row()
+                        .classes("w-full items-center gap-2 text-xs font-bold")
+                        .style("color:#64748b;padding:2px 0")
+                    ):
                         ui.label("function key").style("width:140px")
                         ui.label("block / tier").style("width:220px")
                         ui.label("default part").style("width:170px")
@@ -2819,71 +3360,66 @@ def admin_core_components_page():
                         ui.label("actions").classes("flex-1")
                     for r in cat_rows:
                         dim = "" if r["enabled"] else "opacity:0.45;"
-                        with ui.row().classes(
-                                "w-full items-center gap-2 text-xs") \
-                                .style("border-top:1px solid var(--kc-border);"
-                                       f"padding:4px 0;{dim}"):
+                        with (
+                            ui.row()
+                            .classes("w-full items-center gap-2 text-xs")
+                            .style(f"border-top:1px solid var(--kc-border);padding:4px 0;{dim}")
+                        ):
                             ui.label(r["function_key"]).style(
-                                "width:140px;color:#e2e8f0;font-family:monospace")
+                                "width:140px;color:#e2e8f0;font-family:monospace"
+                            )
                             with ui.column().classes("gap-0").style("width:220px"):
-                                name = ui.label(r["display_name"]) \
-                                    .style("color:#e2e8f0")
+                                name = ui.label(r["display_name"]).style("color:#e2e8f0")
                                 if r["selection_notes"]:
                                     name.tooltip(r["selection_notes"])
                                 if r["qualifier"]:
-                                    ui.label(r["qualifier"]) \
-                                        .style("color:#64748b")
+                                    ui.label(r["qualifier"]).style("color:#64748b")
                             ui.label(r["default_mpn"]).style(
-                                "width:170px;color:#cbd5e1;font-family:monospace")
+                                "width:170px;color:#cbd5e1;font-family:monospace"
+                            )
                             if r["default_lcsc"]:
-                                ui.link(r["default_lcsc"],
-                                        "https://www.lcsc.com/product-detail/"
-                                        f"{r['default_lcsc']}.html",
-                                        new_tab=True) \
-                                    .style("width:80px;color:#60a5fa;"
-                                           "font-family:monospace")
+                                ui.link(
+                                    r["default_lcsc"],
+                                    f"https://www.lcsc.com/product-detail/{r['default_lcsc']}.html",
+                                    new_tab=True,
+                                ).style("width:80px;color:#60a5fa;font-family:monospace")
                             else:
-                                ui.label("series").style(
-                                    "width:80px;color:#64748b")
+                                ui.label("series").style("width:80px;color:#64748b")
                             ui.label(r.get("bundle") or "").style(
-                                "width:120px;color:#34d399;"
-                                "font-family:monospace")
-                            ui.label(r["package"] or "").style(
-                                "width:130px;color:#94a3b8")
-                            ui.label(f"${r['price_usd']:.4f}"
-                                     if r["price_usd"] is not None else "") \
-                                .style("width:70px;color:#cbd5e1")
-                            ui.label(f"{r['stock']:,}"
-                                     if r["stock"] is not None else "") \
-                                .style("width:80px;color:#cbd5e1")
-                            ui.label(r["snapshot_date"] or "").style(
-                                "width:84px;color:#64748b")
+                                "width:120px;color:#34d399;font-family:monospace"
+                            )
+                            ui.label(r["package"] or "").style("width:130px;color:#94a3b8")
+                            ui.label(
+                                f"${r['price_usd']:.4f}" if r["price_usd"] is not None else ""
+                            ).style("width:70px;color:#cbd5e1")
+                            ui.label(f"{r['stock']:,}" if r["stock"] is not None else "").style(
+                                "width:80px;color:#cbd5e1"
+                            )
+                            ui.label(r["snapshot_date"] or "").style("width:84px;color:#64748b")
                             if r["enabled"]:
-                                ui.label("active").style(
-                                    "width:64px;color:#34d399")
+                                ui.label("active").style("width:64px;color:#34d399")
                             else:
-                                ui.label("disabled").style(
-                                    "width:64px;color:#f87171")
+                                ui.label("disabled").style("width:64px;color:#f87171")
                             with ui.row().classes("flex-1 gap-1 items-center"):
                                 if r["enabled"]:
-                                    ui.button("Disable", icon="block",
-                                              on_click=lambda row=r:
-                                              do_set_enabled(row, False)) \
-                                        .props("flat dense no-caps") \
-                                        .classes("text-xs")
+                                    ui.button(
+                                        "Disable",
+                                        icon="block",
+                                        on_click=lambda row=r: do_set_enabled(row, False),
+                                    ).props("flat dense no-caps").classes("text-xs")
                                 else:
-                                    ui.button("Enable", icon="check_circle",
-                                              on_click=lambda row=r:
-                                              do_set_enabled(row, True)) \
-                                        .props("flat dense no-caps") \
-                                        .classes("text-xs")
+                                    ui.button(
+                                        "Enable",
+                                        icon="check_circle",
+                                        on_click=lambda row=r: do_set_enabled(row, True),
+                                    ).props("flat dense no-caps").classes("text-xs")
                                 if jlcparts.available() and r["default_lcsc"]:
-                                    ui.button("Refresh", icon="sync",
-                                              on_click=lambda row=r:
-                                              do_refresh(row)) \
-                                        .props("flat dense no-caps") \
-                                        .classes("text-xs") \
-                                        .tooltip("Re-read price/stock from the "
-                                                 "offline jlcparts catalog")
+                                    ui.button(
+                                        "Refresh",
+                                        icon="sync",
+                                        on_click=lambda row=r: do_refresh(row),
+                                    ).props("flat dense no-caps").classes("text-xs").tooltip(
+                                        "Re-read price/stock from the offline jlcparts catalog"
+                                    )
 
         build_table()

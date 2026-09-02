@@ -1,0 +1,2238 @@
+{
+  "parts": [
+    {
+      "ref": "J1",
+      "value": "USB-C 16P receptacle",
+      "symbol": "usb-c-16p:TYPE-C-31-M-12",
+      "footprint": "usb-c-16p:USB-C_SMD-TYPE-C-31-M-12_1",
+      "sheet": "USB INPUT",
+      "mpn": "TYPE-C-31-M-12",
+      "datasheet": null,
+      "sourcing_note": "LCSC C165948",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "U1",
+      "value": "USBLC6-2SC6",
+      "symbol": "usblc6-2sc6:USBLC6-2SC6_C2687116",
+      "footprint": "usblc6-2sc6:SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
+      "sheet": "USB INPUT",
+      "mpn": "USBLC6-2SC6",
+      "datasheet": null,
+      "sourcing_note": "LCSC C2687116",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "R1",
+      "value": "5.1k",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "sheet": "USB INPUT",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C23186",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "R2",
+      "value": "5.1k",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "sheet": "USB INPUT",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C23186",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C1",
+      "value": "10uF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "POWER 5V",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C19702",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C2",
+      "value": "100nF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "POWER 5V",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C14663",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "U2",
+      "value": "ME6211C33M5G-N",
+      "symbol": "me6211c33:ME6211C33M5G-N",
+      "footprint": "me6211c33:SOT-23-5_L3.0-W1.7-P0.95-LS2.8-BL",
+      "sheet": "LDO 3V3",
+      "mpn": "ME6211C33M5G-N",
+      "datasheet": null,
+      "sourcing_note": "LCSC C82942",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C3",
+      "value": "1uF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "LDO 3V3",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C5199872",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C4",
+      "value": "1uF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "LDO 3V3",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C5199872",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C5",
+      "value": "10uF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "LDO 3V3",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C19702",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "U3",
+      "value": "RP2040",
+      "symbol": "rp2040:RP2040",
+      "footprint": "rp2040:LQFN-56_L7.0-W7.0-P0.4-EP",
+      "sheet": "MCU RP2040",
+      "mpn": "RP2040",
+      "datasheet": null,
+      "sourcing_note": "LCSC C2040",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C6",
+      "value": "100nF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C14663",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C7",
+      "value": "100nF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C14663",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C8",
+      "value": "100nF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C14663",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C9",
+      "value": "100nF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C14663",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C10",
+      "value": "10uF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C19702",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C11",
+      "value": "100nF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C14663",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C12",
+      "value": "100nF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C14663",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C13",
+      "value": "10uF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C19702",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C14",
+      "value": "100nF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C14663",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C15",
+      "value": "100nF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C14663",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "R3",
+      "value": "10k",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C2906982",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "R4",
+      "value": "10k",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C2906982",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "R5",
+      "value": "10k",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C2906982",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "R6",
+      "value": "10k",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C2906982",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "R7",
+      "value": "10k",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C2906982",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "R8",
+      "value": "10k",
+      "symbol": "Device:R",
+      "footprint": "Resistor_SMD:R_0603_1608Metric",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C2906982",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "SW1",
+      "value": "BOOTSEL",
+      "symbol": "evq-p7a01p:EVQP7A01P",
+      "footprint": "evq-p7a01p:SW-SMD_EVQP7A01P",
+      "sheet": "MCU RP2040",
+      "mpn": "EVQP7A01P",
+      "datasheet": null,
+      "sourcing_note": "LCSC C431538",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J2",
+      "value": "SWD",
+      "symbol": "Connector_Generic:Conn_01x03",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+      "sheet": "MCU RP2040",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C49257",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "U4",
+      "value": "W25Q16JVSNIQ",
+      "symbol": "w25q16jv:W25Q16JVSNIQTR",
+      "footprint": "w25q16jv:SOP-8_L4.9-W3.9-P1.27-LS6.0-BL",
+      "sheet": "QSPI FLASH",
+      "mpn": "W25Q16JVSNIQ",
+      "datasheet": null,
+      "sourcing_note": "LCSC C2456211",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C16",
+      "value": "100nF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "QSPI FLASH",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C14663",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "Y1",
+      "value": "12MHz",
+      "symbol": "crystal-12mhz:X322512MSB4SI",
+      "footprint": "crystal-12mhz:CRYSTAL-SMD_4P-L3.2-W2.5-BL",
+      "sheet": "CLOCK 12MHZ",
+      "mpn": "X322512MSB4SI",
+      "datasheet": null,
+      "sourcing_note": "LCSC C9002",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C17",
+      "value": "18pF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "CLOCK 12MHZ",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C1647",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "C18",
+      "value": "18pF",
+      "symbol": "Device:C",
+      "footprint": "Capacitor_SMD:C_0603_1608Metric",
+      "sheet": "CLOCK 12MHZ",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C1647",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J3",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J4",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J5",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J6",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J7",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J8",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J9",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J10",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J11",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J12",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J13",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J14",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J15",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J16",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J17",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J18",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J19",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J20",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J21",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J22",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J23",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J24",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J25",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J26",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J27",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J28",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J29",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J30",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J31",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    },
+    {
+      "ref": "J32",
+      "value": "Castellated GPIO pad",
+      "symbol": "Connector_Generic:Conn_01x01",
+      "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+      "sheet": "GPIO CASTELLATED",
+      "mpn": null,
+      "datasheet": null,
+      "sourcing_note": "LCSC C492400",
+      "side": null,
+      "source_leaf": null,
+      "reconcile_added": false
+    }
+  ],
+  "ic_groups": {},
+  "group_labels": {},
+  "thermal_refs": [],
+  "signal_flow_order": [],
+  "component_zones": {},
+  "arrays": [
+    {
+      "refs": [
+        "J3",
+        "J4",
+        "J5",
+        "J6",
+        "J7",
+        "J8",
+        "J9",
+        "J10",
+        "J11",
+        "J12",
+        "J13",
+        "J14",
+        "J15",
+        "J16",
+        "J17",
+        "J18",
+        "J19",
+        "J20",
+        "J21",
+        "J22",
+        "J23",
+        "J24",
+        "J25",
+        "J26",
+        "J27",
+        "J28",
+        "J29",
+        "J30",
+        "J31",
+        "J32"
+      ],
+      "pattern": "grid",
+      "rows": 1,
+      "cols": 30,
+      "pitch_mm": 2.54,
+      "serpentine": true,
+      "radius_mm": null,
+      "start_angle_deg": 0.0
+    }
+  ],
+  "placement_hints": [],
+  "assumptions": [
+    "LDO 3.3V: ME6211C33M5G-N per core defaults (defaulted)",
+    "QSPI flash: W25Q16JVSNIQ per core defaults (defaulted)",
+    "RP2040: native USB, no USB-UART bridge needed (defaulted)",
+    "USB-C connector: usb-c-16p bundle from parts library (defaulted)",
+    "USB ESD protection: USBLC6-2SC6 auto-fetched from LCSC C2687116 (defaulted)",
+    "12MHz crystal: X322512MSB4SI from parts library (defaulted)",
+    "RP2040 decoupling: 4x 100nF on 3V3, 2x 100nF + 10uF on 1V1, 100nF on ADC and USB per datasheet (defaulted)",
+    "Castellated GPIO pads: 30 pads, one per GPIO, using 1x01 pin header footprint as edge pad placeholder (defaulted)",
+    "QSPI pull-ups: 4x 10k on CS/SCK/D0-D3 per RP2040 hardware design guide (defaulted)",
+    "CC1/CC2 pull-downs: 5.1k each for USB-C device detection (defaulted)",
+    "BOOTSEL button: EVQP7A01P tactile switch from parts library (defaulted)",
+    "SWD header: 1x03 2.54mm pin header for SWCLK/SWDIO/GND debug access (defaulted)"
+  ],
+  "substitutions": [
+    {
+      "wanted": "W25Q16JV-IQ",
+      "got": "W25Q16JVSNIQ",
+      "reason": "SOIC-8 variant in stock at LCSC C2456211; same 16Mbit QSPI NOR flash"
+    }
+  ],
+  "connections": [
+    {
+      "net_name": "GND",
+      "endpoints": [
+        {
+          "ref": "J1",
+          "pin": "A1B12"
+        },
+        {
+          "ref": "J1",
+          "pin": "B1A12"
+        },
+        {
+          "ref": "U1",
+          "pin": "2"
+        },
+        {
+          "ref": "R1",
+          "pin": "2"
+        },
+        {
+          "ref": "R2",
+          "pin": "2"
+        }
+      ],
+      "sheet": "USB INPUT"
+    },
+    {
+      "net_name": "VBUS",
+      "endpoints": [
+        {
+          "ref": "J1",
+          "pin": "A4B9"
+        },
+        {
+          "ref": "J1",
+          "pin": "B4A9"
+        },
+        {
+          "ref": "U1",
+          "pin": "5"
+        }
+      ],
+      "sheet": "USB INPUT"
+    },
+    {
+      "net_name": "CC1",
+      "endpoints": [
+        {
+          "ref": "J1",
+          "pin": "A5"
+        },
+        {
+          "ref": "R1",
+          "pin": "1"
+        }
+      ],
+      "sheet": "USB INPUT"
+    },
+    {
+      "net_name": "USB_D_MINUS",
+      "endpoints": [
+        {
+          "ref": "J1",
+          "pin": "B7"
+        },
+        {
+          "ref": "J1",
+          "pin": "A7"
+        },
+        {
+          "ref": "U1",
+          "pin": "3"
+        },
+        {
+          "ref": "U1",
+          "pin": "4"
+        }
+      ],
+      "sheet": "USB INPUT"
+    },
+    {
+      "net_name": "USB_D_PLUS",
+      "endpoints": [
+        {
+          "ref": "J1",
+          "pin": "A6"
+        },
+        {
+          "ref": "J1",
+          "pin": "B6"
+        },
+        {
+          "ref": "U1",
+          "pin": "1"
+        },
+        {
+          "ref": "U1",
+          "pin": "6"
+        }
+      ],
+      "sheet": "USB INPUT"
+    },
+    {
+      "net_name": "CC2",
+      "endpoints": [
+        {
+          "ref": "J1",
+          "pin": "B5"
+        },
+        {
+          "ref": "R2",
+          "pin": "1"
+        }
+      ],
+      "sheet": "USB INPUT"
+    },
+    {
+      "net_name": "VBUS",
+      "endpoints": [
+        {
+          "ref": "C1",
+          "pin": "1"
+        },
+        {
+          "ref": "C2",
+          "pin": "1"
+        }
+      ],
+      "sheet": "POWER 5V"
+    },
+    {
+      "net_name": "GND",
+      "endpoints": [
+        {
+          "ref": "C1",
+          "pin": "2"
+        },
+        {
+          "ref": "C2",
+          "pin": "2"
+        }
+      ],
+      "sheet": "POWER 5V"
+    },
+    {
+      "net_name": "VBUS",
+      "endpoints": [
+        {
+          "ref": "U2",
+          "pin": "1"
+        },
+        {
+          "ref": "C3",
+          "pin": "1"
+        }
+      ],
+      "sheet": "LDO 3V3"
+    },
+    {
+      "net_name": "GND",
+      "endpoints": [
+        {
+          "ref": "U2",
+          "pin": "2"
+        },
+        {
+          "ref": "C3",
+          "pin": "2"
+        },
+        {
+          "ref": "C4",
+          "pin": "2"
+        },
+        {
+          "ref": "C5",
+          "pin": "2"
+        }
+      ],
+      "sheet": "LDO 3V3"
+    },
+    {
+      "net_name": "+3V3",
+      "endpoints": [
+        {
+          "ref": "U2",
+          "pin": "3"
+        },
+        {
+          "ref": "U2",
+          "pin": "5"
+        },
+        {
+          "ref": "C4",
+          "pin": "1"
+        },
+        {
+          "ref": "C5",
+          "pin": "1"
+        }
+      ],
+      "sheet": "LDO 3V3"
+    },
+    {
+      "net_name": "GPIO7",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "9"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO6",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "8"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO5",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "7"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO4",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "6"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GND",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "57"
+        },
+        {
+          "ref": "C6",
+          "pin": "2"
+        },
+        {
+          "ref": "C7",
+          "pin": "2"
+        },
+        {
+          "ref": "C8",
+          "pin": "2"
+        },
+        {
+          "ref": "C9",
+          "pin": "2"
+        },
+        {
+          "ref": "C10",
+          "pin": "2"
+        },
+        {
+          "ref": "C11",
+          "pin": "2"
+        },
+        {
+          "ref": "C12",
+          "pin": "2"
+        },
+        {
+          "ref": "C13",
+          "pin": "2"
+        },
+        {
+          "ref": "C14",
+          "pin": "2"
+        },
+        {
+          "ref": "C15",
+          "pin": "2"
+        },
+        {
+          "ref": "SW1",
+          "pin": "2"
+        },
+        {
+          "ref": "SW1",
+          "pin": "2'"
+        },
+        {
+          "ref": "J2",
+          "pin": "3"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "QSPI_CS",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "56"
+        },
+        {
+          "ref": "R6",
+          "pin": "1"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "QSPI_D1",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "55"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "QSPI_D2",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "54"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "QSPI_D0",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "53"
+        },
+        {
+          "ref": "R7",
+          "pin": "1"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "QSPI_SCK",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "52"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "QSPI_D3",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "51"
+        },
+        {
+          "ref": "R8",
+          "pin": "1"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "+3V3",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "50"
+        },
+        {
+          "ref": "U3",
+          "pin": "49"
+        },
+        {
+          "ref": "U3",
+          "pin": "48"
+        },
+        {
+          "ref": "U3",
+          "pin": "45"
+        },
+        {
+          "ref": "U3",
+          "pin": "44"
+        },
+        {
+          "ref": "U3",
+          "pin": "43"
+        },
+        {
+          "ref": "U3",
+          "pin": "42"
+        },
+        {
+          "ref": "U3",
+          "pin": "33"
+        },
+        {
+          "ref": "U3",
+          "pin": "23"
+        },
+        {
+          "ref": "U3",
+          "pin": "22"
+        },
+        {
+          "ref": "U3",
+          "pin": "10"
+        },
+        {
+          "ref": "U3",
+          "pin": "1"
+        },
+        {
+          "ref": "C6",
+          "pin": "1"
+        },
+        {
+          "ref": "C7",
+          "pin": "1"
+        },
+        {
+          "ref": "C8",
+          "pin": "1"
+        },
+        {
+          "ref": "C9",
+          "pin": "1"
+        },
+        {
+          "ref": "C10",
+          "pin": "1"
+        },
+        {
+          "ref": "C11",
+          "pin": "1"
+        },
+        {
+          "ref": "C12",
+          "pin": "1"
+        },
+        {
+          "ref": "C13",
+          "pin": "1"
+        },
+        {
+          "ref": "C14",
+          "pin": "1"
+        },
+        {
+          "ref": "C15",
+          "pin": "1"
+        },
+        {
+          "ref": "R3",
+          "pin": "2"
+        },
+        {
+          "ref": "R4",
+          "pin": "2"
+        },
+        {
+          "ref": "R5",
+          "pin": "2"
+        },
+        {
+          "ref": "R6",
+          "pin": "2"
+        },
+        {
+          "ref": "R7",
+          "pin": "2"
+        },
+        {
+          "ref": "R8",
+          "pin": "2"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO3",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "5"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "USB_D_PLUS",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "47"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "USB_D_MINUS",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "46"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO29",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "41"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO28",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "40"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO2",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "4"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO27",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "39"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO26",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "38"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO25",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "37"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO24",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "36"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO23",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "35"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO22",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "34"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO21",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "32"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO20",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "31"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO19",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "30"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO1",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "3"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO18",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "29"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO17",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "28"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO16",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "27"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "RUN",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "26"
+        },
+        {
+          "ref": "R3",
+          "pin": "1"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "SWDIO",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "25"
+        },
+        {
+          "ref": "R4",
+          "pin": "1"
+        },
+        {
+          "ref": "J2",
+          "pin": "1"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "SWCLK",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "24"
+        },
+        {
+          "ref": "R5",
+          "pin": "1"
+        },
+        {
+          "ref": "J2",
+          "pin": "2"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "XOUT",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "21"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "XIN",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "20"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO0",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "2"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO15",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "18"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO14",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "17"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO13",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "16"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO12",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "15"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO11",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "14"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO10",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "13"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO9",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "12"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "GPIO8",
+      "endpoints": [
+        {
+          "ref": "U3",
+          "pin": "11"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "BOOTSEL",
+      "endpoints": [
+        {
+          "ref": "SW1",
+          "pin": "1"
+        },
+        {
+          "ref": "SW1",
+          "pin": "1'"
+        }
+      ],
+      "sheet": "MCU RP2040"
+    },
+    {
+      "net_name": "QSPI_CS",
+      "endpoints": [
+        {
+          "ref": "U4",
+          "pin": "1"
+        }
+      ],
+      "sheet": "QSPI FLASH"
+    },
+    {
+      "net_name": "QSPI_D1",
+      "endpoints": [
+        {
+          "ref": "U4",
+          "pin": "2"
+        }
+      ],
+      "sheet": "QSPI FLASH"
+    },
+    {
+      "net_name": "QSPI_D2",
+      "endpoints": [
+        {
+          "ref": "U4",
+          "pin": "3"
+        }
+      ],
+      "sheet": "QSPI FLASH"
+    },
+    {
+      "net_name": "GND",
+      "endpoints": [
+        {
+          "ref": "U4",
+          "pin": "4"
+        },
+        {
+          "ref": "C16",
+          "pin": "2"
+        }
+      ],
+      "sheet": "QSPI FLASH"
+    },
+    {
+      "net_name": "QSPI_D0",
+      "endpoints": [
+        {
+          "ref": "U4",
+          "pin": "5"
+        }
+      ],
+      "sheet": "QSPI FLASH"
+    },
+    {
+      "net_name": "QSPI_SCK",
+      "endpoints": [
+        {
+          "ref": "U4",
+          "pin": "6"
+        }
+      ],
+      "sheet": "QSPI FLASH"
+    },
+    {
+      "net_name": "QSPI_D3",
+      "endpoints": [
+        {
+          "ref": "U4",
+          "pin": "7"
+        }
+      ],
+      "sheet": "QSPI FLASH"
+    },
+    {
+      "net_name": "+3V3",
+      "endpoints": [
+        {
+          "ref": "U4",
+          "pin": "8"
+        },
+        {
+          "ref": "C16",
+          "pin": "1"
+        }
+      ],
+      "sheet": "QSPI FLASH"
+    },
+    {
+      "net_name": "XOUT",
+      "endpoints": [
+        {
+          "ref": "Y1",
+          "pin": "3"
+        },
+        {
+          "ref": "C18",
+          "pin": "1"
+        }
+      ],
+      "sheet": "CLOCK 12MHZ"
+    },
+    {
+      "net_name": "XIN",
+      "endpoints": [
+        {
+          "ref": "Y1",
+          "pin": "1"
+        },
+        {
+          "ref": "C17",
+          "pin": "1"
+        }
+      ],
+      "sheet": "CLOCK 12MHZ"
+    },
+    {
+      "net_name": "GND",
+      "endpoints": [
+        {
+          "ref": "Y1",
+          "pin": "2"
+        },
+        {
+          "ref": "Y1",
+          "pin": "4"
+        },
+        {
+          "ref": "C17",
+          "pin": "2"
+        },
+        {
+          "ref": "C18",
+          "pin": "2"
+        }
+      ],
+      "sheet": "CLOCK 12MHZ"
+    },
+    {
+      "net_name": "GPIO0",
+      "endpoints": [
+        {
+          "ref": "J3",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO1",
+      "endpoints": [
+        {
+          "ref": "J4",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO2",
+      "endpoints": [
+        {
+          "ref": "J5",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO3",
+      "endpoints": [
+        {
+          "ref": "J6",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO4",
+      "endpoints": [
+        {
+          "ref": "J7",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO5",
+      "endpoints": [
+        {
+          "ref": "J8",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO6",
+      "endpoints": [
+        {
+          "ref": "J9",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO7",
+      "endpoints": [
+        {
+          "ref": "J10",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO8",
+      "endpoints": [
+        {
+          "ref": "J11",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO9",
+      "endpoints": [
+        {
+          "ref": "J12",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO10",
+      "endpoints": [
+        {
+          "ref": "J13",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO11",
+      "endpoints": [
+        {
+          "ref": "J14",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO12",
+      "endpoints": [
+        {
+          "ref": "J15",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO13",
+      "endpoints": [
+        {
+          "ref": "J16",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO14",
+      "endpoints": [
+        {
+          "ref": "J17",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO15",
+      "endpoints": [
+        {
+          "ref": "J18",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO16",
+      "endpoints": [
+        {
+          "ref": "J19",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO17",
+      "endpoints": [
+        {
+          "ref": "J20",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO18",
+      "endpoints": [
+        {
+          "ref": "J21",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO19",
+      "endpoints": [
+        {
+          "ref": "J22",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO20",
+      "endpoints": [
+        {
+          "ref": "J23",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO21",
+      "endpoints": [
+        {
+          "ref": "J24",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO22",
+      "endpoints": [
+        {
+          "ref": "J25",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO23",
+      "endpoints": [
+        {
+          "ref": "J26",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO24",
+      "endpoints": [
+        {
+          "ref": "J27",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO25",
+      "endpoints": [
+        {
+          "ref": "J28",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO26",
+      "endpoints": [
+        {
+          "ref": "J29",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO27",
+      "endpoints": [
+        {
+          "ref": "J30",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO28",
+      "endpoints": [
+        {
+          "ref": "J31",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    },
+    {
+      "net_name": "GPIO29",
+      "endpoints": [
+        {
+          "ref": "J32",
+          "pin": "1"
+        }
+      ],
+      "sheet": "GPIO CASTELLATED"
+    }
+  ],
+  "no_connect_pins": [
+    {
+      "ref": "J1",
+      "pin": "B8"
+    },
+    {
+      "ref": "J1",
+      "pin": "A8"
+    },
+    {
+      "ref": "J1",
+      "pin": "4"
+    },
+    {
+      "ref": "J1",
+      "pin": "3"
+    },
+    {
+      "ref": "J1",
+      "pin": "2"
+    },
+    {
+      "ref": "J1",
+      "pin": "1"
+    },
+    {
+      "ref": "U2",
+      "pin": "4"
+    },
+    {
+      "ref": "U3",
+      "pin": "19"
+    }
+  ]
+}

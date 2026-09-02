@@ -5,6 +5,7 @@ parent board (pcbnew) + the ``ParentCompositionState``; they call no other
 compose internal. Re-exported from ``compose_subcircuits`` so the external API
 (``_repair_parent_outline`` / ``_validate_parent_geometry``) keeps resolving.
 """
+
 from __future__ import annotations
 
 import math
@@ -166,6 +167,7 @@ def _repair_parent_outline(
         # is a breadcrumb for tightening the pure function, not a silent fix.
         if changed:
             import sys as _sys
+
             print(
                 "[outline] verify-only _repair_parent_outline WOULD grow: "
                 f"{[round(br.x - tl.x, 2), round(br.y - tl.y, 2)]} -> "
@@ -317,9 +319,7 @@ def _circumscribe_dims(
     return None
 
 
-def inscribed_rect_bound(
-    req: dict[str, Any] | None, aspect: float
-) -> tuple[float, float] | None:
+def inscribed_rect_bound(req: dict[str, Any] | None, aspect: float) -> tuple[float, float] | None:
     """Largest ``(w, h)`` content rectangle at ``aspect`` (= w/h) whose
     circumscribed requested shape lands AT the ``size_mm`` target per axis.
 
@@ -418,16 +418,20 @@ def _occupied_content_rects(board_state) -> list[tuple[Point, Point]]:
         for i in range(n):
             x0, y0 = t.start.x + dx * (i / n), t.start.y + dy * (i / n)
             x1, y1 = t.start.x + dx * ((i + 1) / n), t.start.y + dy * ((i + 1) / n)
-            rects.append((
-                Point(min(x0, x1) - half, min(y0, y1) - half),
-                Point(max(x0, x1) + half, max(y0, y1) + half),
-            ))
+            rects.append(
+                (
+                    Point(min(x0, x1) - half, min(y0, y1) - half),
+                    Point(max(x0, x1) + half, max(y0, y1) + half),
+                )
+            )
     for v in getattr(board_state, "vias", None) or []:
         half = float(getattr(v, "size_mm", 0.6) or 0.6) / 2.0
-        rects.append((
-            Point(v.pos.x - half, v.pos.y - half),
-            Point(v.pos.x + half, v.pos.y + half),
-        ))
+        rects.append(
+            (
+                Point(v.pos.x - half, v.pos.y - half),
+                Point(v.pos.x + half, v.pos.y + half),
+            )
+        )
     return rects
 
 
@@ -532,9 +536,7 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
         poly = circumscribe_polygon(shape, tl, br, content_rects=occupied)
         (minx, miny), (maxx, maxy) = poly.aabb()
         fitted_area = _ring_area(poly.points())
-        guard = _shape_fit_guard(
-            shape, req, content_area, maxx - minx, maxy - miny, fitted_area
-        )
+        guard = _shape_fit_guard(shape, req, content_area, maxx - minx, maxy - miny, fitted_area)
         if guard is not None:
             return guard
         points = [(float(x), float(y)) for x, y in poly.points()]
@@ -547,9 +549,7 @@ def _fit_requested_shape(state: ParentCompositionState) -> dict[str, Any]:
             if f > 1.0 + 1e-9:
                 pcx = (minx + maxx) / 2.0
                 pcy = (miny + maxy) / 2.0
-                points = [
-                    (pcx + (x - pcx) * f, pcy + (y - pcy) * f) for x, y in points
-                ]
+                points = [(pcx + (x - pcx) * f, pcy + (y - pcy) * f) for x, y in points]
                 minx = pcx - (pcx - minx) * f
                 maxx = pcx + (maxx - pcx) * f
                 miny = pcy - (pcy - miny) * f
@@ -622,10 +622,7 @@ def _validate_parent_geometry(
     # shapely-backed PolygonOutline for named/compound auto outlines. Both share
     # the same surface, so the checks below are identical for either.
     shape_spec = None
-    if (
-        state.manual_outline is not None
-        and state.manual_outline.get("shape", "rect") != "rect"
-    ):
+    if state.manual_outline is not None and state.manual_outline.get("shape", "rect") != "rect":
         from kicraft.layout_editor.outline import OutlineSpec
 
         shape_spec = OutlineSpec.from_dict(state.manual_outline)
@@ -644,15 +641,14 @@ def _validate_parent_geometry(
     def _point_outside(px: float, py: float) -> bool:
         if px < min_x or px > max_x or py < min_y or py > max_y:
             return True
-        return shape_spec is not None and not shape_spec.contains_point(
-            px, py, tol=margin
-        )
+        return shape_spec is not None and not shape_spec.contains_point(px, py, tol=margin)
 
     outside_components: list[dict[str, Any]] = []
     outside_pads = 0
     outside_traces = 0
     outside_vias = 0
     edge_constrained = set(state.edge_constrained_refs or ())
+    fabricated_edge_refs = set(getattr(state, "fabricated_edge_refs", ()) or ())
 
     for ref, comp in (composition.board_state.components or {}).items():
         # geometry_union tracks the full physical extent of every component
@@ -669,22 +665,21 @@ def _validate_parent_geometry(
         # connectors are exempted because the housing legitimately mounts
         # past the PCB edge.
         body_tl, body_br = comp.bbox()
-        if ref in edge_constrained:
+        if ref in edge_constrained or ref in fabricated_edge_refs:
             component_outside = False
         else:
-            component_outside = _bbox_outside(
-                body_tl.x, body_tl.y, body_br.x, body_br.y
-            )
+            component_outside = _bbox_outside(body_tl.x, body_tl.y, body_br.x, body_br.y)
 
-        # Pad check: pad COPPER (not just the center) must be inside the
-        # board outline. No edge-constrained exemption -- pad copper that
-        # crosses Edge.Cuts is unfabricable.
+        # Ordinary pad copper must remain inside. Declared fabrication-only edge
+        # terminals intentionally straddle Edge.Cuts and are proven separately
+        # by the final edge-datum/pitch gate.
         pad_outside_count = 0
-        for pad in comp.pads:
-            pad_tl, pad_br = pad.bbox()
-            if _bbox_outside(pad_tl.x, pad_tl.y, pad_br.x, pad_br.y):
-                pad_outside_count += 1
-                outside_pads += 1
+        if ref not in fabricated_edge_refs:
+            for pad in comp.pads:
+                pad_tl, pad_br = pad.bbox()
+                if _bbox_outside(pad_tl.x, pad_tl.y, pad_br.x, pad_br.y):
+                    pad_outside_count += 1
+                    outside_pads += 1
 
         if component_outside or pad_outside_count > 0:
             outside_components.append(
@@ -708,9 +703,7 @@ def _validate_parent_geometry(
         geometry_union_min_y = min(geometry_union_min_y, trace.start.y, trace.end.y)
         geometry_union_max_x = max(geometry_union_max_x, trace.start.x, trace.end.x)
         geometry_union_max_y = max(geometry_union_max_y, trace.start.y, trace.end.y)
-        if _point_outside(trace.start.x, trace.start.y) or _point_outside(
-            trace.end.x, trace.end.y
-        ):
+        if _point_outside(trace.start.x, trace.start.y) or _point_outside(trace.end.x, trace.end.y):
             outside_traces += 1
 
     for via in composition.board_state.vias or []:
@@ -722,9 +715,7 @@ def _validate_parent_geometry(
             outside_vias += 1
 
     validation = {
-        "accepted": not outside_components
-        and outside_traces == 0
-        and outside_vias == 0,
+        "accepted": not outside_components and outside_traces == 0 and outside_vias == 0,
         "geometry_union": {
             "top_left": {
                 "x": 0.0 if geometry_union_min_x == float("inf") else geometry_union_min_x,

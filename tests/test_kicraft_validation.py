@@ -1279,14 +1279,29 @@ def test_mcu_prog_path_passes_rp2040_with_swd_broken_out(monkeypatch) -> None:
         ),
     )
     bom = BOM(
-        parts=[_bpart("U1", "rp2040:RP2040")],
+        parts=[
+            _bpart("U1", "rp2040:RP2040"),
+            BomPart(
+                ref="J1",
+                value="SWD",
+                symbol="Connector_Generic:Conn_01x04",
+                footprint="Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+                sheet="MCU",
+            ),
+        ],
         connections=[
             NetConnection(
-                net_name="SWCLK", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="2")]
+                net_name="SWCLK",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="J1", pin="4")],
             ),
             NetConnection(
-                net_name="SWDIO", sheet="MCU", endpoints=[PinEndpoint(ref="U1", pin="3")]
+                net_name="SWDIO",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U1", pin="3"), PinEndpoint(ref="J1", pin="2")],
             ),
+            NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="J1", pin="3")]),
+            NetConnection(net_name="+3V3", sheet="MCU", endpoints=[PinEndpoint(ref="J1", pin="1")]),
         ],
     )
     assert check_mcu_programming_path(bom).ok
@@ -1301,6 +1316,7 @@ def test_mcu_prog_path_passes_rp2040_with_bootsel_button(monkeypatch) -> None:
                 "rp2040:RP2040": [
                     ("2", "SWCLK", "input"),
                     ("3", "SWDIO", "bidirectional"),
+                    ("4", "~{QSPI_SS}", "output"),
                 ]
             }
         ),
@@ -1318,6 +1334,11 @@ def test_mcu_prog_path_passes_rp2040_with_bootsel_button(monkeypatch) -> None:
         ],
         connections=[
             NetConnection(net_name="GND", sheet="MCU", endpoints=[PinEndpoint(ref="SW1", pin="1")]),
+            NetConnection(
+                net_name="QSPI_CS",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U1", pin="4"), PinEndpoint(ref="SW1", pin="2")],
+            ),
         ],
         no_connect_pins=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U1", pin="3")],
     )

@@ -23,6 +23,10 @@ Wire every repeated component instance and every required supply, programming,
 feedback, sense, bypass, pull, and sheet-local signal. Use architecture power and
 inter-sheet net names verbatim where applicable.
 
+`extras.recipe_locked_pins` are already wired deterministically. Do not emit
+those `(ref,pin)` pairs; assign only project-owned pins. KiCraft merges and checks
+the complete graph after normalization.
+
 Every two-terminal series component must separate two distinct nets. A resistor,
 capacitor, inductor, ferrite, diode, or fuse with both pins assigned to the same
 net is electrically shorted out. For USB termination resistors, use upstream and
@@ -37,6 +41,10 @@ downstream names such as `USB_DP_MCU`/`USB_DP` and `USB_DN_MCU`/`USB_DN`.
 When the architecture stage has already provided a programming interface (e.g. an onboard CH340C USB-UART bridge, or a programming header) in the BOM, you MUST connect it per (1) and MUST NOT ask: a USB-UART bridge wired to UART0 with DTR/RTS auto-reset to EN/IO0 satisfies (1). Reserve (3) for the genuine case where no interface exists and a programming pin is shared with an active GPIO.
 
 Silently omitting the programming path is forbidden, even when the package shares its programming pin with an active GPIO. Single-wire SWIO parts (e.g. the CH32V003) **always** expose programming on a shared GPIO — that is the norm, not a reason to drop the net.
+
+For RP2040, a BOOTSEL-named net or arbitrary switch is insufficient: the switch
+must connect the QSPI chip-select node to GND. SWD is sufficient only when both
+SWDIO and SWCLK reach the same external interface with GND and VTref.
 
 Net coverage is enforced at commit:
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Literal
 
 # Version of the legal documents in docs/legal/. Stamped into each user's consent
 # record at signup; bumping it (here and in the documents) forces existing users
@@ -180,6 +181,13 @@ def _resolved_design_profile() -> tuple[str, dict[str, object]]:
     return name, profile
 
 
+def _stage_semantics_mode(value: str) -> Literal["observe", "repair", "enforce"]:
+    mode = str(value).strip().lower()
+    if mode not in {"observe", "repair", "enforce"}:
+        raise ValueError("KICRAFT_STAGE_SEMANTICS must be observe, repair, or enforce")
+    return mode
+
+
 @dataclass(frozen=True)
 class StageResponsePolicy:
     """Immutable response policy for one design-stage drive.
@@ -252,6 +260,9 @@ class Settings:
         default_factory=lambda: dict(STAGE_COLLECTION_BOUNDS)
     )
 
+    # Temporary rollout switch: observe diagnostics, attempt one repair, or
+    # enable supported-family fabrication enforcement.
+    stage_semantics: Literal["observe", "repair", "enforce"] = "observe"
     # --- Design-stage reasoning budget + in-stream loop breaker ---------------
     # Reasoning budget for the design stages. Intent/functional_spec (small,
     # serialization-critical, and the observed loop site) always run with the
@@ -434,6 +445,9 @@ class Settings:
             ),
             serialization_max_tokens=dict(STAGE_SERIALIZATION_MAX_TOKENS),
             collection_bounds=dict(STAGE_COLLECTION_BOUNDS),
+            stage_semantics=_stage_semantics_mode(
+                os.environ.get("KICRAFT_STAGE_SEMANTICS", cls.stage_semantics)
+            ),
             design_reasoning_tokens=int(
                 os.environ.get("KICRAFT_DESIGN_REASONING_TOKENS", cls.design_reasoning_tokens)
             ),

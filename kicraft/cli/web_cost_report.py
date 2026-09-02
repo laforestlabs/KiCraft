@@ -278,6 +278,57 @@ def load_stage_runs(db_path, since=None) -> list[dict]:
         conn.close()
 
 
+def load_stage_attempts(db_path, since=None) -> list[dict]:
+    """Load redacted provider-call outcomes; absent on legacy ledgers."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(stage_attempts)")]
+        if not cols:
+            return []
+        selected = [
+            name
+            for name in (
+                "ts",
+                "run_id",
+                "stage",
+                "attempt",
+                "call_mode",
+                "model",
+                "provider",
+                "finish_reason",
+                "outcome",
+                "http_status",
+                "error_code",
+                "request_id",
+                "wall_s",
+                "input_tokens",
+                "output_tokens",
+                "cost_usd",
+                "diagnostic_codes",
+            )
+            if name in cols
+        ]
+        query = f"SELECT {', '.join(selected)} FROM stage_attempts"
+        params: tuple = ()
+        if since:
+            query += " WHERE ts >= ?"
+            params = (since,)
+        query += " ORDER BY ts, id"
+        rows = []
+        for values in conn.execute(query, params):
+            row = dict(zip(selected, values))
+            try:
+                row["diagnostic_codes"] = json.loads(row.get("diagnostic_codes") or "[]")
+            except (json.JSONDecodeError, TypeError):
+                row["diagnostic_codes"] = []
+            rows.append(row)
+        return rows
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+
+
 def summarize_stage_runs(rows) -> dict:
     """Aggregate stage_runs into per-stage {n, wall_s, cpu_s, cost, rounds,
     tool_calls, attempts, fails, failure_kinds}. This is the resource breakdown

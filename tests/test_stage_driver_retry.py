@@ -1105,7 +1105,7 @@ def test_provider_failure_is_terminal_and_not_sent_through_json_recovery(tmp_pat
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "failed"
     last = res["results"][-1]
-    assert last["failure_kind"] == "provider_error"
+    assert last["failure_kind"] == "provider_request_rejected"
     assert last["attempts"] == 1
     assert client.calls == 1  # terminal: NO serialization retry, NO re-parse
 
@@ -1115,7 +1115,7 @@ def test_transport_failure_is_terminal_and_not_sent_through_json_recovery(tmp_pa
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "failed"
     last = res["results"][-1]
-    assert last["failure_kind"] == "transport_error"
+    assert last["failure_kind"] == "transport_connection"
     assert client.calls == 1
 
 

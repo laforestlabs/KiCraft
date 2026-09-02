@@ -8,6 +8,7 @@ When the architecture contains library-backed sheets, the synthesis
 stage passes in the merged library fragments and a ``library_leaves``
 map; both flow into the emitted JSON.
 """
+
 from __future__ import annotations
 
 import json
@@ -106,9 +107,7 @@ def write_autoplacer_json(
     }
 
     # Start with BOM-derived values; fold in library fragments additively.
-    ic_groups: dict[str, list[str]] = {
-        ic: list(members) for ic, members in bom.ic_groups.items()
-    }
+    ic_groups: dict[str, list[str]] = {ic: list(members) for ic, members in bom.ic_groups.items()}
     group_labels: dict[str, str] = dict(bom.group_labels)
     thermal_refs: list[str] = list(bom.thermal_refs)
     signal_flow_order: list[str] = list(bom.signal_flow_order)
@@ -205,13 +204,24 @@ def write_autoplacer_json(
     if arrays:
         body["arrays"] = arrays
 
+    if bom.edge_interfaces:
+        body["edge_interfaces"] = [
+            {
+                "name": interface.name,
+                "refs": list(interface.refs),
+                "side": interface.side,
+                "pitch_mm": interface.pitch_mm,
+                "behavior": interface.behavior,
+                "exact_edge_datum": True,
+            }
+            for interface in bom.edge_interfaces
+        ]
+
     if library_leaves:
         body["library_leaves"] = library_leaves
 
     if backside_leaves:
-        body["parent_placement"] = {
-            "backside_through_hole_leaves": backside_leaves
-        }
+        body["parent_placement"] = {"backside_through_hole_leaves": backside_leaves}
 
     # Fixed board dimensions (user-chosen) pin the solver's board and
     # disable the size search; otherwise the search stays on and derives
@@ -269,7 +279,7 @@ def write_autoplacer_json(
                 # that creates these parts runs on the same env gate.
                 marker = f"standard form factor: {template.key} "
                 header_refs = {
-                    (p.sourcing_note or "")[len(marker):].strip(): p.ref
+                    (p.sourcing_note or "")[len(marker) :].strip(): p.ref
                     for p in bom.parts
                     if (p.sourcing_note or "").startswith(marker)
                 }

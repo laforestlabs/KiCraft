@@ -1,4 +1,5 @@
 """Durable stage state and argv-only design CLI boundaries."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -15,6 +16,7 @@ from kicraft.fsutil import atomic_write_text
 # The repo venv has no `kicraft` console script; cli_app.py has a __main__ guard.
 KICRAFT = [sys.executable, "-m", "kicraft.design.cli_app"]
 
+
 def run_design_cli(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
     # Tag part-query telemetry from the web path so part-query-report can split
     # hosted vs offline usage (query_log reads $KICRAFT_CALLER). Honors an
@@ -28,11 +30,15 @@ def run_design_cli(cmd: list[str], cwd: Path | None = None) -> subprocess.Comple
 def prepare_stage(stage: str, state_path, workspace: Path) -> subprocess.CompletedProcess:
     return run_design_cli(KICRAFT + ["stage-prep", stage, str(state_path)], workspace)
 
+
 def _fallback_stem(brief: str) -> str:
     words = re.findall(r"[A-Za-z0-9]+", brief.upper())[:3]
     return ("_".join(words)[:32]) or "PROJECT"
 
-def commit_stage(stage, slot, state_path, brief, project_stem=None, workspace=None) -> tuple[bool, dict]:
+
+def commit_stage(
+    stage, slot, state_path, brief, project_stem=None, workspace=None
+) -> tuple[bool, dict]:
     sf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
     json.dump(slot, sf)
     sf.close()
@@ -63,24 +69,37 @@ def stamp_stage_status(
     cpu_s=None,
     error=None,
     failure_kind=None,
+    provider_ok=None,
+    schema_ok=None,
+    semantic_clean=None,
+    repair_required=False,
+    fab_safe=None,
+    repair_attempted=False,
+    repair_adopted=False,
+    diagnostics=None,
 ) -> None:
-    """Record a stage's durable outcome in state.json's stage_status block (a real
-    ConversationState field, so the CLI's load/validate/dump round-trip preserves
-    it). This is what lets a reopened project restore its pipeline progress
-    without the ephemeral event stream. wall_s/cpu_s/rounds/tool_calls fill the
-    prior measurement gap: how long a stage took, how much child CPU it burned,
-    and how many tool rounds it cost (the written ledger records the same for the
-    cross-run report). failure_kind is the terminal classification of a failed
-    stage (one of reasoning_loop / truncated_json / invalid_json /
-    commit_rejected / provider_error / transport_error). Tolerates a missing
-    state.json (a first-stage failure before any commit). Atomic write: the web
-    render timer reads this file concurrently."""
+    """Atomically record the durable operational and semantic stage outcome."""
     p = Path(state_path)
     try:
         sj = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         sj = {}
-    entry: dict = {"ok": bool(ok), "finished_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+    entry: dict = {
+        "ok": bool(ok),
+        "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "repair_required": bool(repair_required),
+        "repair_attempted": bool(repair_attempted),
+        "repair_adopted": bool(repair_adopted),
+        "diagnostics": list(diagnostics or []),
+    }
+    for key, value in (
+        ("provider_ok", provider_ok),
+        ("schema_ok", schema_ok),
+        ("semantic_clean", semantic_clean),
+        ("fab_safe", fab_safe),
+    ):
+        if value is not None:
+            entry[key] = bool(value)
     if cost_usd is not None:
         entry["cost_usd"] = round(float(cost_usd), 6)
     if attempts is not None:
@@ -103,6 +122,7 @@ def stamp_stage_status(
     p.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(p, json.dumps(sj, indent=2) + "\n")
 
+
 def committed_bom_refs(state_path) -> list[str]:
     """Refs the committed BOM already contains -- the only refs wiring may use."""
     try:
@@ -111,6 +131,7 @@ def committed_bom_refs(state_path) -> list[str]:
         return sorted(str(p.get("ref")) for p in parts if isinstance(p, dict) and p.get("ref"))
     except (OSError, json.JSONDecodeError, AttributeError):
         return []
+
 
 def attach_questions(state_path, stage: str, questions: list[dict]) -> None:
     """Write the stage's clarifying questions into state.json's open_questions

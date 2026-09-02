@@ -1744,16 +1744,62 @@ def _esp_boot_problem(pins, wired):
 
 
 def _rp2040_boot_problem(pins, wired, nc, ref, bom):
-    """RP2040: programmable iff SWD (SWCLK/SWDIO) is broken out OR a BOOTSEL button
-    exists to ground the flash CS. Fails only when NEITHER is present."""
-    swd = [num for num, p in pins.items() if _SWD_PIN_RE.search(p["name"])]
-    swd_wired = any(wired.get(num) is not None and (ref, num) not in nc for num in swd)
-    has_button = any(_ref_prefix(p.ref) == "SW" for p in bom.parts)
-    if swd_wired or has_button:
-        return None
+    """Prove an RP2040 SWD or BOOTSEL path from the committed net graph."""
+    if not bom.connections:
+        return (
+            "no programming graph is committed: SWDIO/SWCLK must reach one "
+            "external interface or BOOTSEL must switch QSPI_CS to GND"
+        )
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    access = _programming_access_parts(bom)
+    access_refs = {
+        part.ref
+        for part in access
+        if _PROG_ACCESS_PART_RE.search(f"{part.symbol} {part.value} {part.sourcing_note or ''}")
+    }
+    mcu_pins = info.get(ref, {})
+    swdio = [
+        number for number, pin in mcu_pins.items() if re.search(r"SWDIO|TMS", pin["name"], re.I)
+    ]
+    swclk = [
+        number for number, pin in mcu_pins.items() if re.search(r"SWCLK|TCK", pin["name"], re.I)
+    ]
+    swdio_nets = {wired.get(number) for number in swdio if wired.get(number)}
+    swclk_nets = {wired.get(number) for number in swclk if wired.get(number)}
+    for access_ref in access_refs:
+        access_nets = set(nets.get(access_ref, {}).values())
+        has_signal_pair = bool(access_nets & swdio_nets) and bool(access_nets & swclk_nets)
+        has_ground = any(_net_looks_ground(net) for net in access_nets)
+        has_vtref = any(
+            _net_is_positive_rail(net) or re.search(r"vtref|vref", net, re.I) for net in access_nets
+        )
+        if has_signal_pair and has_ground and has_vtref:
+            return None
+
+    cs_nets = {
+        net
+        for part in bom.parts
+        if _RP2040_FAMILY_RE.search(f"{part.symbol} {part.value}")
+        or re.search(r"qspi|flash|w25q", f"{part.symbol} {part.value}", re.I)
+        for number, pin in info.get(part.ref, {}).items()
+        if re.search(
+            r"(?:qspi[_-]?)?(?:ss|cs)(?:_n)?$",
+            re.sub(r"[^A-Za-z0-9]+", "_", pin["name"]).strip("_"),
+            re.I,
+        )
+        for net in [nets.get(part.ref, {}).get(number)]
+        if net
+    }
+    for part in bom.parts:
+        if _ref_prefix(part.ref) not in {"SW", "S", "JP"}:
+            continue
+        switch_nets = set(nets.get(part.ref, {}).values())
+        if switch_nets & cs_nets and any(_net_looks_ground(net) for net in switch_nets):
+            return None
     return (
-        "no programming path: SWD (SWCLK/SWDIO) is not broken out and there is no "
-        "BOOTSEL button to ground QSPI_CS"
+        "no programming path: SWDIO and SWCLK do not reach the same external "
+        "interface with GND/VTref, and no BOOTSEL switch connects QSPI_CS to GND"
     )
 
 
@@ -1976,21 +2022,24 @@ def check_mcu_programming_access(bom) -> CheckResult:
                 refs_on_net[c.net_name].add(ep.ref)
         for part in mcus:
             pins = info.get(part.ref, {})
-            updi = [n for n, p in pins.items() if _UPDI_PIN_RE.search(p["name"])]
-            if not updi:
-                continue  # not a UPDI part (or pinout unresolvable) -- skip
             wired = nets.get(part.ref, {})
-            reachable = any(
-                wired.get(n) and (refs_on_net.get(wired[n], set()) & access_refs) for n in updi
-            )
-            if not reachable:
-                bad.append(
-                    f"{part.ref} ({part.symbol} {part.value}): UPDI pin "
-                    f"{'/'.join(updi)} does not reach any programming-access "
-                    f"part ({', '.join(sorted(access_refs))}); wire the UPDI "
-                    "net to a header pin or test pad (keeping the existing "
-                    "pullup is fine)"
+            updi = [n for n, p in pins.items() if _UPDI_PIN_RE.search(p["name"])]
+            if updi:
+                reachable = any(
+                    wired.get(n) and (refs_on_net.get(wired[n], set()) & access_refs) for n in updi
                 )
+                if not reachable:
+                    bad.append(
+                        f"{part.ref} ({part.symbol} {part.value}): UPDI pin "
+                        f"{'/'.join(updi)} does not reach any programming-access "
+                        f"part ({', '.join(sorted(access_refs))}); wire the UPDI "
+                        "net to a header pin or test pad (keeping the existing "
+                        "pullup is fine)"
+                    )
+            if _RP2040_FAMILY_RE.search(f"{part.symbol} {part.value}"):
+                problem = _rp2040_boot_problem(pins, wired, set(), part.ref, bom)
+                if problem:
+                    bad.append(f"{part.ref} ({part.symbol} {part.value}): {problem}")
     return CheckResult(
         name="9.29 MCU programming access",
         ok=not bad,
@@ -2603,7 +2652,19 @@ _MPN_STOPWORD_RE = re.compile(
 )
 
 
-def _spec_named_tokens(functional_spec, architecture) -> dict[str, str]:
+def named_part_tokens(texts) -> dict[str, str]:
+    """Return conservative normalized MPN/family tokens from arbitrary text."""
+    out: dict[str, str] = {}
+    for text in texts:
+        for match in _MPN_TOKEN_RE.finditer(str(text)):
+            token = match.group(0).rstrip(".-")
+            if len(token) < 6 or _MPN_STOPWORD_RE.match(token):
+                continue
+            out.setdefault(token.lower(), token)
+    return out
+
+
+def spec_named_tokens(functional_spec, architecture) -> dict[str, str]:
     """MPN-like tokens the spec/architecture free text commits to, keyed by
     lowercase form (original casing kept for messages)."""
     texts: list[str] = []
@@ -2615,14 +2676,11 @@ def _spec_named_tokens(functional_spec, architecture) -> dict[str, str]:
     if functional_spec is not None:
         texts += list(getattr(functional_spec, "assumptions", None) or [])
         texts += [b.purpose or "" for b in (functional_spec.blocks or [])]
-    out: dict[str, str] = {}
-    for t in texts:
-        for m in _MPN_TOKEN_RE.finditer(str(t)):
-            tok = m.group(0).rstrip(".-")
-            if len(tok) < 6 or _MPN_STOPWORD_RE.match(tok):
-                continue
-            out.setdefault(tok.lower(), tok)
-    return out
+    return named_part_tokens(texts)
+
+
+# Compatibility for callers that imported the former private helper.
+_spec_named_tokens = spec_named_tokens
 
 
 def check_spec_named_mpn_substitutions(functional_spec, architecture, bom) -> CheckResult:
@@ -2631,7 +2689,7 @@ def check_spec_named_mpn_substitutions(functional_spec, architecture, bom) -> Ch
     name = "9.33 spec-named part accountability"
     if bom is None or (functional_spec is None and architecture is None):
         return CheckResult(name=name, ok=True, message="not applicable")
-    tokens = _spec_named_tokens(functional_spec, architecture)
+    tokens = spec_named_tokens(functional_spec, architecture)
     if not tokens:
         return CheckResult(name=name, ok=True, message="no spec-named MPNs to account for")
     parts_text = " ".join(

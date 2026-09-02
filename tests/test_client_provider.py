@@ -30,6 +30,29 @@ from kicraft.server.spend_guard import SpendGuard
 from kicraft.cli import web_cost_report
 
 
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        (requests.exceptions.HTTPError("429 Too Many Requests"), "provider_rate_limited"),
+        (requests.exceptions.HTTPError("500 Upstream"), "provider_upstream_5xx"),
+        (requests.exceptions.HTTPError("401 Unauthorized"), "provider_auth"),
+        (
+            requests.exceptions.HTTPError("400 response_format unsupported"),
+            "provider_response_format_rejected",
+        ),
+        (requests.exceptions.Timeout("timed out"), "transport_timeout"),
+        (
+            requests.exceptions.ChunkedEncodingError("stream interrupted"),
+            "transport_stream_interrupted",
+        ),
+    ],
+)
+def test_provider_failures_have_stable_detailed_kinds(exc, kind):
+    facts = client_mod.classify_provider_exception(exc)
+    assert facts["failure_kind"] == kind
+    assert not ({"messages", "payload", "response_body"} & facts.keys())
+
+
 # ---- fakes ----------------------------------------------------------------
 
 

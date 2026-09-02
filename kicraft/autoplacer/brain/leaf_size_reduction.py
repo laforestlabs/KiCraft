@@ -74,14 +74,10 @@ def local_solver_config(
     # repair pass becomes a no-op.
     parent_zones = base_cfg.get("component_zones", {}) or {}
     local_component_zones: dict[str, Any] = {
-        ref: dict(spec)
-        for ref, spec in parent_zones.items()
-        if isinstance(spec, dict)
+        ref: dict(spec) for ref, spec in parent_zones.items() if isinstance(spec, dict)
     }
     source_outline = (
-        extraction.envelope.source_board_outline
-        if extraction.envelope is not None
-        else None
+        extraction.envelope.source_board_outline if extraction.envelope is not None else None
     )
     source_board_tl = source_outline[0] if source_outline is not None else None
     source_board_br = source_outline[1] if source_outline is not None else None
@@ -162,9 +158,7 @@ def local_solver_config(
     # (that mismatch scattered the array to ~7% fill).
     cfg["placement_clearance_mm"] = max(
         0.5,
-        leaf_placement_clearance_mm(
-            base_cfg, extraction.local_state.components, board_area
-        ),
+        leaf_placement_clearance_mm(base_cfg, extraction.local_state.components, board_area),
     )
     cfg["edge_margin_mm"] = max(
         0.5,
@@ -191,6 +185,15 @@ def local_solver_config(
         if _compaction_explicit is None
         else bool(_compaction_explicit)
     )
+    # Fabricated edge arrays have an exact pitch and board-edge datum. Generic
+    # post-solve compaction moves members independently and can create shorts,
+    # so preserve the solver's final geometry for leaves that own such members.
+    if any(
+        str(ref) in extraction.local_state.components
+        for interface in cfg.get("edge_interfaces", []) or []
+        for ref in interface.get("refs", []) or []
+    ):
+        cfg["leaf_compaction_pass"] = False
     # NOTE (area-compaction Phase 2): the canvas-invariant scorer modes
     # (placement_score_net_scale="content", placement_compactness_curve=
     # "strict") are implemented but deliberately NOT defaulted here -- an
@@ -202,21 +205,15 @@ def local_solver_config(
     # values pass through untouched.
 
     cfg["signal_flow_order"] = list(base_cfg.get("leaf_signal_flow_order", []))
-    cfg["ic_groups"] = dict(
-        base_cfg.get("leaf_ic_groups", base_cfg.get("ic_groups", {}))
-    )
-    cfg["group_labels"] = dict(
-        base_cfg.get("leaf_group_labels", base_cfg.get("group_labels", {}))
-    )
+    cfg["ic_groups"] = dict(base_cfg.get("leaf_ic_groups", base_cfg.get("ic_groups", {})))
+    cfg["group_labels"] = dict(base_cfg.get("leaf_group_labels", base_cfg.get("group_labels", {})))
     cfg["orderedness"] = float(
         base_cfg.get(
             "leaf_orderedness",
             0.35 if passive_ratio >= 0.35 or passive_count >= 4 else 0.20,
         )
     )
-    cfg["randomize_group_layout"] = bool(
-        base_cfg.get("leaf_randomize_group_layout", True)
-    )
+    cfg["randomize_group_layout"] = bool(base_cfg.get("leaf_randomize_group_layout", True))
     cfg["scatter_mode"] = str(base_cfg.get("leaf_scatter_mode", "groups"))
     cfg["placement_score_every_n"] = 1
     cfg["unlock_all_footprints"] = False
@@ -228,9 +225,7 @@ def local_solver_config(
         2,
         int(base_cfg.get("legalize_during_force_passes", 2)),
     )
-    cfg["enable_swap_optimization"] = bool(
-        base_cfg.get("leaf_enable_swap_optimization", True)
-    )
+    cfg["enable_swap_optimization"] = bool(base_cfg.get("leaf_enable_swap_optimization", True))
     cfg["leaf_legality_repair_passes"] = max(
         24,
         int(base_cfg.get("leaf_legality_repair_passes", 24)),
@@ -245,12 +240,8 @@ def local_solver_config(
     # 6-20 mm away). The discrete grid (below) makes this the primary passive
     # objective. Plane nets (via-reachable) auto-derive in the scorer from
     # gnd_zone_net/power_plane_*.
-    cfg["pin_locality_dist_ref_mm"] = float(
-        base_cfg.get("pin_locality_dist_ref_mm", 2.0)
-    )
-    cfg["pin_locality_orient_weight"] = float(
-        base_cfg.get("pin_locality_orient_weight", 0.3)
-    )
+    cfg["pin_locality_dist_ref_mm"] = float(base_cfg.get("pin_locality_dist_ref_mm", 2.0))
+    cfg["pin_locality_orient_weight"] = float(base_cfg.get("pin_locality_orient_weight", 0.3))
     # Discrete anchor-relative grid + SA-as-assignment (connectivity-first) is now
     # the leaf placement path: passives are restricted to pin-adjacent slots
     # derived from the placed anchors' pads, so tidiness/legality/packing are
@@ -273,24 +264,18 @@ def local_solver_config(
     cfg["leaf_grid_max_rings"] = int(base_cfg.get("leaf_grid_max_rings", 6))
     cfg["leaf_grid_max_lateral"] = int(base_cfg.get("leaf_grid_max_lateral", 3))
     cfg["leaf_grid_max_slots"] = int(base_cfg.get("leaf_grid_max_slots", 400))
-    cfg["leaf_grid_orientation_policy"] = str(
-        base_cfg.get("leaf_grid_orientation_policy", "auto")
-    )
+    cfg["leaf_grid_orientation_policy"] = str(base_cfg.get("leaf_grid_orientation_policy", "auto"))
     # Slot pitch gap is a PAD/COURTYARD-legal gap, deliberately decoupled from
     # the leaf placement clearance (~2.84 mm): a courtyard AABB already carries
     # its clearance margin, so extent+0.5 mm slots are legal by construction,
     # while the clearance-derived pitch put the rings 6-12 mm off the package --
     # a grid that could not represent "decap 1-2 mm from its pins" at all
     # (dense-soc-leaf-unconnected-plan P0.1).
-    cfg["leaf_grid_pitch_gap_mm"] = float(
-        base_cfg.get("leaf_grid_pitch_gap_mm", 0.5)
-    )
+    cfg["leaf_grid_pitch_gap_mm"] = float(base_cfg.get("leaf_grid_pitch_gap_mm", 0.5))
     # Accept-if-better guard floor: how much shorter the median pad->pin hop must
     # be to count as materially better adjacency, and how much total score a
     # win on adjacency may give up (the buck-3a collapse was -22, well past 8).
-    cfg["leaf_grid_pin_floor_tol_mm"] = float(
-        base_cfg.get("leaf_grid_pin_floor_tol_mm", 0.5)
-    )
+    cfg["leaf_grid_pin_floor_tol_mm"] = float(base_cfg.get("leaf_grid_pin_floor_tol_mm", 0.5))
     cfg["leaf_grid_pin_floor_score_slack"] = float(
         base_cfg.get("leaf_grid_pin_floor_score_slack", 8.0)
     )
@@ -308,9 +293,7 @@ def local_solver_config(
         # every pin-adjacent decap read as an overlap: the escape loop scattered
         # the assignment (5.6 -> 14.4 mm median pad->pin) and the round was
         # rejected `illegal_unrepaired_leaf_placement`.
-        cfg["legality_clearance_mm"] = float(
-            base_cfg.get("leaf_legality_clearance_mm", 0.2)
-        )
+        cfg["legality_clearance_mm"] = float(base_cfg.get("leaf_legality_clearance_mm", 0.2))
     else:
         cfg["psw_pin_locality"] = float(base_cfg.get("leaf_psw_pin_locality", 0.0))
 
@@ -528,9 +511,7 @@ def attempt_leaf_size_reduction(
 
             width_delta = current_width - candidate_width
             height_delta = current_height - candidate_height
-            reroute_threshold = float(
-                cfg.get("leaf_size_reduction_reroute_threshold_mm", 1.5)
-            )
+            reroute_threshold = float(cfg.get("leaf_size_reduction_reroute_threshold_mm", 1.5))
             should_reroute = (
                 candidate["axis"] == "both"
                 or width_delta > reroute_threshold
@@ -551,16 +532,13 @@ def attempt_leaf_size_reduction(
             # "reroute_validation_failed"), which is why outlines never
             # actually shrunk on disk -- only small deltas were ever
             # accepted, via the reuse path that doesn't rewrite the PCB.
-            can_reuse = (
-                not should_reroute
-                and current_round.routing.get("validation", {}).get("accepted", False)
+            can_reuse = not should_reroute and current_round.routing.get("validation", {}).get(
+                "accepted", False
             )
             preserved_boards: dict[str, bytes] = {}
             if can_reuse:
                 rerouted = copy.deepcopy(current_round.routing)
-                rerouted["validation"] = copy.deepcopy(
-                    current_round.routing.get("validation", {})
-                )
+                rerouted["validation"] = copy.deepcopy(current_round.routing.get("validation", {}))
                 rerouted["render_diagnostics"] = {
                     "skipped": True,
                     "reason": "size_reduction_reused_previous_route",
@@ -665,9 +643,7 @@ def attempt_leaf_size_reduction(
         "height_percent": 0.0
         if original_height <= 0.0
         else (height_reduction / original_height) * 100.0,
-        "area_percent": 0.0
-        if original_area <= 0.0
-        else (area_reduction / original_area) * 100.0,
+        "area_percent": 0.0 if original_area <= 0.0 else (area_reduction / original_area) * 100.0,
     }
     if summary.get("validation", {}).get("reason") not in {
         "attempt_limit_reached",

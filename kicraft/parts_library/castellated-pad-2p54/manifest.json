@@ -1,0 +1,26 @@
+{
+  "content_hash": "sha256:fdf2833992937ccd7906609c4bb4546088f5ff6a61538b418adc3c41aaf2e051",
+  "datasheet_url": null,
+  "description": "KiCraft reviewed 2.54 mm plated half-hole castellation",
+  "footprint_name": "Castellated_Pad_2.54mm",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "N/A",
+  "name": "castellated-pad-2p54",
+  "provenance": {
+    "added_at": "2026-09-02T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "reviewed-kicraft",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {},
+  "symbol_name": "Conn_01x01",
+  "tags": [
+    "fabrication-only",
+    "castellated",
+    "edge-interface"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": "Drill center must intersect exactly one Edge.Cuts segment."
+}

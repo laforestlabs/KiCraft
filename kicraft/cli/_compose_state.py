@@ -6,6 +6,7 @@ search -> route -> persist; extracting it lets those layers move to their own
 modules without importing the whole monolith. Re-exported from
 ``compose_subcircuits`` so existing references keep resolving.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -115,6 +116,10 @@ class ParentCompositionState:
     # are expected to extend beyond the board outline (e.g. USB-C shell);
     # the geometry validator must only flag them when pads fall outside.
     edge_constrained_refs: frozenset[str] = field(default_factory=frozenset)
+    # Fabrication-only terminals intentionally straddle Edge.Cuts (castellations).
+    # Their pad copper is exempt from ordinary containment but remains subject to
+    # the dedicated final edge-datum/pitch gate.
+    fabricated_edge_refs: frozenset[str] = field(default_factory=frozenset)
     # Outline sides (left/right/top/bottom) whose position is defined by an
     # edge-ZONED part (a connector mouth, OR a switch/header zoned to that
     # edge). _repair_parent_outline keeps these flush with the part instead of
@@ -214,6 +219,7 @@ class ParentCompositionState:
             "added_parent_via_count": self.added_parent_via_count,
             "packing_metadata": dict(self.packing_metadata),
             "edge_constrained_refs": sorted(self.edge_constrained_refs),
+            "fabricated_edge_refs": sorted(self.fabricated_edge_refs),
             "edge_zoned_outline_sides": sorted(self.edge_zoned_outline_sides),
             "geometry_validation": dict(self.geometry_validation),
             "routed_validation": dict(self.routed_validation),

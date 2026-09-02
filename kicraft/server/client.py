@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 
 import requests
@@ -24,6 +25,60 @@ _RETRY_NETWORK_EXC = (
     requests.exceptions.Timeout,
     requests.exceptions.ChunkedEncodingError,
 )
+
+
+def classify_provider_exception(exc: BaseException) -> dict:
+    """Return redacted stable provider/transport facts without response bodies."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    headers = getattr(response, "headers", {}) or {}
+    request_id = headers.get("x-request-id") or headers.get("x-openrouter-request-id")
+    error_code = None
+    if response is not None:
+        try:
+            payload = response.json()
+            error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error, dict):
+                raw_code = error.get("code")
+                if isinstance(raw_code, (str, int)):
+                    error_code = str(raw_code)[:96]
+        except (ValueError, TypeError):
+            pass
+    text = str(exc).lower()
+    if status is None and isinstance(exc, requests.exceptions.HTTPError):
+        match = re.search(r"\b([1-5][0-9]{2})\b", text)
+        if match:
+            status = int(match.group(1))
+    if status == 429:
+        kind = "provider_rate_limited"
+    elif status is not None and status >= 500:
+        kind = "provider_upstream_5xx"
+    elif status in {401, 403}:
+        kind = "provider_auth"
+    elif status is not None and 400 <= status < 500:
+        if "response_format" in text or "response format" in text:
+            kind = "provider_response_format_rejected"
+        elif any(word in text for word in ("tool", "reasoning", "schema", "capability")):
+            kind = "provider_capability_rejected"
+        else:
+            kind = "provider_request_rejected"
+    elif isinstance(exc, requests.exceptions.Timeout):
+        kind = "transport_timeout"
+    elif isinstance(exc, requests.exceptions.ChunkedEncodingError) or "stream" in text:
+        kind = "transport_stream_interrupted"
+    elif isinstance(exc, requests.exceptions.ConnectionError):
+        kind = "transport_connection"
+    elif isinstance(exc, requests.exceptions.HTTPError):
+        kind = "transport_stream_interrupted" if response is None else "provider_unknown"
+    else:
+        kind = "provider_unknown"
+    return {
+        "failure_kind": kind,
+        "http_status": status,
+        "error_code": error_code,
+        "request_id": str(request_id)[:128] if request_id else None,
+    }
+
 
 # Conservative fallback prices (USD per million tokens, input/output). OpenRouter
 # normally returns the real cost; this is used only if it omits it, and it errs

@@ -11,6 +11,7 @@ It owns only the LLM-driven schematic stages (DESIGN_STAGES). The deterministic
 build (synth/place/route/fab) stays in the caller, which runs it once a session
 reports status "ok".
 """
+
 from __future__ import annotations
 
 import json
@@ -47,28 +48,35 @@ def remaining_stages(state: dict) -> list[str]:
     return []
 
 
-def derive_stage_statuses(state: dict, *, project_status: str | None = None,
-                          sheets_exist: bool = False,
-                          synth_checks_failed: bool = False,
-                          pcb_ready: bool = False,
-                          zip_ok: bool = False) -> dict[str, str]:
-    """Map every pipeline phase to its durable status, for restoring the GUI's
-    stage tabs on a reopened project: 'pending' | 'parked' | 'done' | 'failed'.
+def derive_stage_statuses(
+    state: dict,
+    *,
+    project_status: str | None = None,
+    sheets_exist: bool = False,
+    synth_checks_failed: bool = False,
+    pcb_ready: bool = False,
+    zip_ok: bool = False,
+) -> dict[str, str]:
+    """Restore ``pending|parked|done|warning|failed`` pipeline statuses.
 
-    Design stages read the persisted stage_status block (written by the stage
-    driver at commit/fail time), falling back to slot presence for legacy
-    projects that predate it. An unanswered open question marks its stage
-    'parked'. The build phases are derived from artifact signals the caller
-    reads from the workspace, gated on the design being complete so leftover
-    artifacts from a build that predates an edit don't count. 'active' is never
-    produced here: only a live event stream knows a stage is running.
+    A committed candidate advances even with semantic diagnostics. Legacy
+    committed entries lacking semantic fields remain ``done``.
     """
     ss = state.get("stage_status") or {}
     out: dict[str, str] = {}
     for s in DESIGN_STAGES:
         e = ss.get(s)
         if isinstance(e, dict) and e.get("ok") is True:
-            out[s] = "done"
+            diagnostics = e.get("diagnostics") or []
+            out[s] = (
+                "warning"
+                if (
+                    e.get("semantic_clean") is False
+                    or e.get("repair_required") is True
+                    or bool(diagnostics)
+                )
+                else "done"
+            )
         elif isinstance(e, dict) and e.get("ok") is False:
             out[s] = "failed"
         elif _stage_done(s, state):
@@ -77,43 +85,61 @@ def derive_stage_statuses(state: dict, *, project_status: str | None = None,
             out[s] = "pending"
     for q in state.get("open_questions") or []:
         s = q.get("stage")
-        if not q.get("answer") and out.get(s) not in (None, "done"):
+        if not q.get("answer") and out.get(s) not in (None, "done", "warning"):
             out[s] = "parked"
 
-    design_complete = all(out[s] == "done" for s in DESIGN_STAGES)
+    design_complete = all(out[s] in {"done", "warning"} for s in DESIGN_STAGES)
     failed = project_status == "failed"
+    fab_gated = any(
+        isinstance(entry, dict)
+        and (
+            entry.get("fab_safe") is False
+            or any(
+                isinstance(diagnostic, dict) and diagnostic.get("severity") == "fab_gate"
+                for diagnostic in entry.get("diagnostics") or []
+            )
+        )
+        for entry in ss.values()
+    )
     artifacts = state.get("artifacts") or {}
     pcb_errors = artifacts.get("pcb_errors") or []
     route_error = any(
-        isinstance(error, dict) and error.get("stage") == "place_route"
-        for error in pcb_errors
+        isinstance(error, dict) and error.get("stage") == "place_route" for error in pcb_errors
     )
     verify_error = any(
-        isinstance(error, dict) and error.get("stage") == "verify"
-        for error in pcb_errors
+        isinstance(error, dict) and error.get("stage") == "verify" for error in pcb_errors
     )
     synth_ok = design_complete and sheets_exist and not synth_checks_failed
-    out["synthesize"] = ("done" if synth_ok
-                         else "failed" if design_complete and failed
-                         else "pending")
+    out["synthesize"] = (
+        "done" if synth_ok else "failed" if design_complete and failed else "pending"
+    )
     # A produced board means place/route succeeded unless the durable payload
     # explicitly records a place/route terminal error. A verify-only error keeps
     # the produced candidate inspectable as done/warning here.
     has_warnings = bool(artifacts.get("build_warnings"))
     out["place_route"] = (
-        "failed" if design_complete and route_error
-        else "warning" if design_complete and pcb_ready and has_warnings
-        else "done" if design_complete and pcb_ready
-        else "failed" if synth_ok and failed
+        "failed"
+        if design_complete and route_error
+        else "warning"
+        if design_complete and pcb_ready and has_warnings
+        else "done"
+        if design_complete and pcb_ready
+        else "failed"
+        if synth_ok and failed
         else "pending"
     )
     # failed-with-a-board outranks zip_ok: after a failed (re)build the board
     # on disk is the failed candidate, so any surviving zip is stale. Either
     # terminal PCB error invalidates the fab package.
     out["fab"] = (
-        "failed" if design_complete and pcb_ready and (failed or route_error or verify_error)
-        else "warning" if design_complete and zip_ok and has_warnings
-        else "done" if design_complete and zip_ok
+        "failed"
+        if design_complete and fab_gated
+        else "failed"
+        if design_complete and pcb_ready and (failed or route_error or verify_error)
+        else "warning"
+        if design_complete and zip_ok and has_warnings
+        else "done"
+        if design_complete and zip_ok
         else "pending"
     )
     # Electrical review: the post-wiring review writes its durable outcome to
@@ -123,10 +149,10 @@ def derive_stage_statuses(state: dict, *, project_status: str | None = None,
     # proceeded; the gap is recorded), never a red failure. No stage_status
     # entry (review skipped / pre-R3 project) stays 'pending'.
     er = ss.get("electrical_review")
-    findings = (state.get("review_findings")
-                or (state.get("artifacts") or {}).get("review_findings") or [])
-    has_blocker = any(isinstance(f, dict) and f.get("severity") == "blocker"
-                      for f in findings)
+    findings = (
+        state.get("review_findings") or (state.get("artifacts") or {}).get("review_findings") or []
+    )
+    has_blocker = any(isinstance(f, dict) and f.get("severity") == "blocker" for f in findings)
     if isinstance(er, dict) and er.get("ok") is True:
         out["electrical_review"] = "warning" if has_blocker else "done"
     elif isinstance(er, dict) and er.get("ok") is False:
@@ -149,7 +175,7 @@ def downstream_stages(stage: str) -> list[str]:
     stages = list(DESIGN_STAGES)
     if stage not in stages:
         return []
-    return stages[stages.index(stage) + 1:]
+    return stages[stages.index(stage) + 1 :]
 
 
 def read_state(ws) -> dict:
@@ -167,6 +193,7 @@ def commit_slot(ws, stage: str, slot: dict, brief: str = "", project_stem=None):
     """Commit an edited slot to the workspace state.json via the deterministic CLI
     (which re-validates it). Returns (ok, out); out carries `errors` on rejection."""
     from .stage_state_io import commit_stage, stamp_stage_status
+
     state_path = Path(ws) / ".kicraft" / "state.json"
     ok, out = commit_stage(stage, dict(slot), state_path, brief, project_stem, Path(ws))
     if ok:  # a manual edit is a zero-cost commit; the stage is (re)done
@@ -186,8 +213,6 @@ def _read_state_for_update(ws) -> dict | None:
         return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-
-
 
 
 def record_answers(ws, stage: str, answers: list[dict]) -> None:
@@ -228,14 +253,24 @@ def null_downstream(ws, stage: str) -> list[str]:
         ss = sj.get("stage_status")
         if isinstance(ss, dict):  # the stage's recorded outcome is stale too
             ss.pop(s, None)
-    sj["open_questions"] = [q for q in (sj.get("open_questions") or [])
-                            if q.get("stage") not in cleared]
+    sj["open_questions"] = [
+        q for q in (sj.get("open_questions") or []) if q.get("stage") not in cleared
+    ]
     atomic_write_text(state_path, json.dumps(sj, indent=2) + "\n")
     return cleared
 
 
-def run_session(ws, brief: str, stages, answers=None, instruction=None,
-                client=None, progress=None, run_id=None, core_defaults=None) -> dict:
+def run_session(
+    ws,
+    brief: str,
+    stages,
+    answers=None,
+    instruction=None,
+    client=None,
+    progress=None,
+    run_id=None,
+    core_defaults=None,
+) -> dict:
     """Drive `stages` over the workspace's state.json.
 
     Returns {status, results, guard, questions, last_stage} where status is:
@@ -251,12 +286,18 @@ def run_session(ws, brief: str, stages, answers=None, instruction=None,
     """
     stages = list(stages)
     if not stages:
-        return {"status": "ok", "results": [], "guard": None,
-                "questions": None, "last_stage": None}
+        return {"status": "ok", "results": [], "guard": None, "questions": None, "last_stage": None}
     results, guard, state_path = drive_chain(
-        stages, brief, Path(ws), progress=progress, client=client,
-        answers=answers, instruction=instruction, run_id=run_id,
-        core_defaults=core_defaults)
+        stages,
+        brief,
+        Path(ws),
+        progress=progress,
+        client=client,
+        answers=answers,
+        instruction=instruction,
+        run_id=run_id,
+        core_defaults=core_defaults,
+    )
     last = results[-1] if results else None
     if last and last.get("needs_input"):
         status = "awaiting_input"
@@ -264,10 +305,14 @@ def run_session(ws, brief: str, stages, answers=None, instruction=None,
         status = "ok"
     else:
         status = "failed"
-    return {"status": status, "results": results, "guard": guard,
-            "state_path": state_path,
-            "questions": (last.get("questions") if last else None),
-            "last_stage": (last.get("stage") if last else None)}
+    return {
+        "status": status,
+        "results": results,
+        "guard": guard,
+        "state_path": state_path,
+        "questions": (last.get("questions") if last else None),
+        "last_stage": (last.get("stage") if last else None),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -301,8 +346,7 @@ def bom_reconcile_instruction(questions) -> str:
     "add N of X for pins Y" (or "replace REF with ...") statement per the wiring
     spec; the framing must permit exactly what the deficit asks -- add-only when
     it only adds, replacement-permitting when it names a swap."""
-    lines = [str(q.get("text", "")).strip()
-             for q in questions if str(q.get("text", "")).strip()]
+    lines = [str(q.get("text", "")).strip() for q in questions if str(q.get("text", "")).strip()]
     body = "\n- ".join(lines)
     if any(_REPLACE_ASK_RE.search(ln) for ln in lines):
         return (
@@ -330,8 +374,7 @@ def bom_reconcile_deficits(res: dict) -> list[dict]:
     if res.get("status") != "awaiting_input" or res.get("last_stage") != "wiring":
         return []
     return [
-        q for q in (res.get("questions") or [])
-        if q.get("reconcile_target") == BOM_RECONCILE_TARGET
+        q for q in (res.get("questions") or []) if q.get("reconcile_target") == BOM_RECONCILE_TARGET
     ]
 
 
@@ -387,8 +430,7 @@ _QTY_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4}
 _SHEET_RE = re.compile(r"\b(?:on|to) the ([A-Z][A-Z0-9 _/-]*?) sheet\b")
 _KIND_PREFIX = {"capacitor": "C", "resistor": "R", "inductor": "L"}
 _KIND_ALIAS = {"cap": "capacitor"}
-_KIND_SYMBOL = {"capacitor": "Device:C", "resistor": "Device:R",
-                "inductor": "Device:L"}
+_KIND_SYMBOL = {"capacitor": "Device:C", "resistor": "Device:R", "inductor": "Device:L"}
 _KIND_FOOTPRINT = {
     "capacitor": "Capacitor_SMD:C_0603_1608Metric",
     "resistor": "Resistor_SMD:R_0603_1608Metric",
@@ -424,22 +466,20 @@ def parse_passive_deficits(texts: list[str]) -> list[dict]:
         # "on the X sheet" pins the sheet; "on the X and Y sheets" is
         # ambiguous per-part -- leave None (donor/default sheet applies).
         m_sheet = _SHEET_RE.search(t)
-        sheet = (
-            m_sheet.group(1).strip()
-            if m_sheet and " sheets" not in t
-            else None
-        )
+        sheet = m_sheet.group(1).strip() if m_sheet and " sheets" not in t else None
         seen: set[tuple[str, str]] = set()
         for m in _PASSIVE_ASK_RE.finditer(t):
             kind, value = m.group(3).lower(), m.group(2).strip()
             kind = _KIND_ALIAS.get(kind, kind)
             seen.add((kind, _norm_value(value)))
-            asks.append({
-                "kind": kind,
-                "value": value,
-                "qty": _ask_qty(m.group(1)),
-                "sheet": sheet,
-            })
+            asks.append(
+                {
+                    "kind": kind,
+                    "value": value,
+                    "qty": _ask_qty(m.group(1)),
+                    "sheet": sheet,
+                }
+            )
         # Kind-then-value supplement, scoped to ask-verb sentences and deduped
         # against the value-first pass so the same ask never provisions twice.
         for sent in _SENTENCE_SPLIT_RE.split(_ABBREV_DOT_RE.sub(r"\1\2", t)):
@@ -452,12 +492,14 @@ def parse_passive_deficits(texts: list[str]) -> list[dict]:
                 if key in seen:
                     continue
                 seen.add(key)
-                asks.append({
-                    "kind": kind,
-                    "value": value,
-                    "qty": _ask_qty(m.group(1)),
-                    "sheet": sheet,
-                })
+                asks.append(
+                    {
+                        "kind": kind,
+                        "value": value,
+                        "qty": _ask_qty(m.group(1)),
+                        "sheet": sheet,
+                    }
+                )
     return asks
 
 
@@ -465,8 +507,8 @@ def _next_ref(parts: list[dict], prefix: str) -> str:
     used = set()
     for p in parts:
         r = str(p.get("ref") or "")
-        if r.startswith(prefix) and r[len(prefix):].isdigit():
-            used.add(int(r[len(prefix):]))
+        if r.startswith(prefix) and r[len(prefix) :].isdigit():
+            used.add(int(r[len(prefix) :]))
     n = 1
     while n in used:
         n += 1
@@ -478,6 +520,7 @@ def _catalog_passive(kind: str, value: str) -> dict | None:
     value-matched, Basic-preferred. None when the catalog can't answer."""
     try:
         from kicraft.parts_library import jlcparts
+
         if not jlcparts.available():
             return None
         fp = _KIND_FOOTPRINT[kind]
@@ -489,7 +532,8 @@ def _catalog_passive(kind: str, value: str) -> dict | None:
             relaxed = jlcparts.relax_keyword(kw)
             cands = jlcparts.search(relaxed) if relaxed else []
         ok = [
-            c for c in cands
+            c
+            for c in cands
             if (c.get("stock") or 0) > 0
             and not jlcparts.is_multi_element_array(c)
             and jlcparts.chip_value_matches(value, c)
@@ -509,9 +553,7 @@ def apply_deterministic_bom_adds(ws, deficits: list[dict]) -> list[str]:
     Parts are ADDED only -- nothing existing is touched -- and wiring is
     re-driven by the caller to connect them (ic_groups membership follows from
     wiring's own commit, as with any model-added part)."""
-    asks = parse_passive_deficits(
-        [str(q.get("text", "")) for q in deficits]
-    )
+    asks = parse_passive_deficits([str(q.get("text", "")) for q in deficits])
     if not asks:
         return []
     try:
@@ -537,33 +579,31 @@ def apply_deterministic_bom_adds(ws, deficits: list[dict]) -> list[str]:
     # state.bom.parts is unfixable by the wiring re-drive.
     known_sheets = {
         str(p.get("sheet") or "").strip().upper(): str(p.get("sheet"))
-        for p in parts if p.get("sheet")
+        for p in parts
+        if p.get("sheet")
     }
 
     added: list[str] = []
     for ask in asks:
-        ask_sheet = known_sheets.get(
-            str(ask["sheet"] or "").strip().upper()
-        )
+        ask_sheet = known_sheets.get(str(ask["sheet"] or "").strip().upper())
         want = _norm_value(ask["value"])
         prefix = _KIND_PREFIX[ask["kind"]]
         same_value = [
-            p for p in parts
+            p
+            for p in parts
             if str(p.get("ref", "")).startswith(prefix)
             and _norm_value(str(p.get("value", ""))) == want
         ]
-        ungrouped = [p for p in same_value
-                     if p.get("reconcile_added")
-                     and str(p.get("ref")) not in grouped]
+        ungrouped = [
+            p for p in same_value if p.get("reconcile_added") and str(p.get("ref")) not in grouped
+        ]
         if len(ungrouped) >= ask["qty"]:
             continue
         donor = next(
             (p for p in same_value if p.get("sourcing_note") or p.get("mpn")),
             None,
         )
-        pick = None if donor is not None else _catalog_passive(
-            ask["kind"], ask["value"]
-        )
+        pick = None if donor is not None else _catalog_passive(ask["kind"], ask["value"])
         if donor is None and pick is None:
             continue
         for _ in range(ask["qty"] - len(ungrouped)):
@@ -596,9 +636,7 @@ def apply_deterministic_bom_adds(ws, deficits: list[dict]) -> list[str]:
         # Atomic like every other state.json commit: three processes read this
         # file as their IPC contract, and a mid-write kill must never leave it
         # truncated.
-        atomic_write_text(
-            state_path, json.dumps(state, indent=2) + "\n"
-        )
+        atomic_write_text(state_path, json.dumps(state, indent=2) + "\n")
     except Exception:
         return []
     return added
@@ -612,9 +650,7 @@ def _unfulfilled_asks(ws, deficits) -> list[dict]:
     BOM). Fails open: on any read error every parsed ask is returned, so the
     caller falls through to the LLM bom+wiring pass rather than falsely
     claiming the deficit was fulfilled."""
-    asks = parse_passive_deficits(
-        [str(q.get("text", "")) for q in (deficits or [])]
-    )
+    asks = parse_passive_deficits([str(q.get("text", "")) for q in (deficits or [])])
     if not asks:
         return []
     try:
@@ -653,9 +689,7 @@ _REF_TOKEN_RE = re.compile(r"\b[A-Z]{1,4}\d{1,4}\b")
 
 def _deficit_key(questions) -> tuple[frozenset, frozenset]:
     texts = [str(q.get("text", "")) for q in (questions or [])]
-    refs = frozenset(
-        m.group(0) for t in texts for m in _REF_TOKEN_RE.finditer(t)
-    )
+    refs = frozenset(m.group(0) for t in texts for m in _REF_TOKEN_RE.finditer(t))
     kinds = frozenset(a["kind"] for a in parse_passive_deficits(texts))
     return (refs, kinds)
 
@@ -675,8 +709,15 @@ def _bom_signature(ws) -> tuple[int, frozenset] | None:
 
 
 def maybe_bom_reconcile(
-    ws, brief, res, *, progress=None, run_id=None, core_defaults=None,
-    client=None, reconcile_passes: int = 0,
+    ws,
+    brief,
+    res,
+    *,
+    progress=None,
+    run_id=None,
+    core_defaults=None,
+    client=None,
+    reconcile_passes: int = 0,
 ) -> tuple[dict, int]:
     """Re-drive ``[bom, wiring]`` once when wiring parked on a BOM parts shortfall.
 
@@ -717,35 +758,40 @@ def maybe_bom_reconcile(
         if progress is not None:
             _remainders = []
             if _unfulfilled_nonpassive:
-                _remainders.append(
-                    f"non-passive part(s) ({_unfulfilled_nonpassive.group(0)!r})"
-                )
+                _remainders.append(f"non-passive part(s) ({_unfulfilled_nonpassive.group(0)!r})")
             if _unfulfilled_passive:
                 _remainders.append(
                     "unfulfilled passive ask(s) ("
-                    + ", ".join(
-                        f"{a['kind']} {a['value']}"
-                        for a in _unfulfilled_passive
-                    )
+                    + ", ".join(f"{a['kind']} {a['value']}" for a in _unfulfilled_passive)
                     + ")"
                 )
-            progress({"kind": "build_log",
-                      "text": f"[bom-reconcile] deterministically provisioned "
-                              f"{', '.join(added)}, but the deficit also asks "
-                              f"for {' and '.join(_remainders)} the deterministic "
-                              "pass cannot add -- falling through to the LLM "
-                              "bom+wiring pass for the remainder"})
+            progress(
+                {
+                    "kind": "build_log",
+                    "text": f"[bom-reconcile] deterministically provisioned "
+                    f"{', '.join(added)}, but the deficit also asks "
+                    f"for {' and '.join(_remainders)} the deterministic "
+                    "pass cannot add -- falling through to the LLM "
+                    "bom+wiring pass for the remainder",
+                }
+            )
         added = []
     if added:
         if progress is not None:
-            progress({"kind": "build_log",
-                      "text": f"[bom-reconcile] deterministically provisioned "
-                              f"{', '.join(added)} from the wiring deficit note "
-                              f"(pass {reconcile_passes + 1}/"
-                              f"{BOM_RECONCILE_MAX_PASSES}); re-driving wiring "
-                              "to connect them (no model BOM pass)"})
+            progress(
+                {
+                    "kind": "build_log",
+                    "text": f"[bom-reconcile] deterministically provisioned "
+                    f"{', '.join(added)} from the wiring deficit note "
+                    f"(pass {reconcile_passes + 1}/"
+                    f"{BOM_RECONCILE_MAX_PASSES}); re-driving wiring "
+                    "to connect them (no model BOM pass)",
+                }
+            )
         rr = run_session(
-            ws, brief, ["wiring"],
+            ws,
+            brief,
+            ["wiring"],
             instruction=(
                 "The missing supporting parts from your deficit note were "
                 f"added to the BOM as {', '.join(added)} (same value/footprint "
@@ -753,21 +799,32 @@ def maybe_bom_reconcile(
                 "each of them exactly as your note described. Do NOT ask the "
                 "user and do NOT park on the same deficit again."
             ),
-            progress=progress, run_id=run_id, core_defaults=core_defaults,
+            progress=progress,
+            run_id=run_id,
+            core_defaults=core_defaults,
             client=client,
         )
         return rr, reconcile_passes + 1
     if progress is not None:
-        progress({"kind": "build_log",
-                  "text": f"[bom-reconcile] wiring flagged a BOM parts shortfall; "
-                          f"re-driving bom+wiring (pass {reconcile_passes + 1}/"
-                          f"{BOM_RECONCILE_MAX_PASSES}) to add the missing parts "
-                          "(not asking the user)"})
+        progress(
+            {
+                "kind": "build_log",
+                "text": f"[bom-reconcile] wiring flagged a BOM parts shortfall; "
+                f"re-driving bom+wiring (pass {reconcile_passes + 1}/"
+                f"{BOM_RECONCILE_MAX_PASSES}) to add the missing parts "
+                "(not asking the user)",
+            }
+        )
     before = _bom_signature(ws)
     rr = run_session(
-        ws, brief, ["bom", "wiring"],
+        ws,
+        brief,
+        ["bom", "wiring"],
         instruction=bom_reconcile_instruction(deficits),
-        progress=progress, run_id=run_id, core_defaults=core_defaults, client=client,
+        progress=progress,
+        run_id=run_id,
+        core_defaults=core_defaults,
+        client=client,
     )
     passes = reconcile_passes + 1
     after = _bom_signature(ws)
@@ -781,17 +838,25 @@ def maybe_bom_reconcile(
         new_defs = bom_reconcile_deficits(rr)
         if new_defs and _deficit_key(new_defs) != _deficit_key(deficits):
             if progress is not None:
-                progress({"kind": "build_log",
-                          "text": "[bom-reconcile] the pass changed nothing in "
-                                  "the committed BOM, but wiring re-parked on a "
-                                  "DIFFERENT deficit -- treating as an advancing "
-                                  "chain, not a stuck loop"})
+                progress(
+                    {
+                        "kind": "build_log",
+                        "text": "[bom-reconcile] the pass changed nothing in "
+                        "the committed BOM, but wiring re-parked on a "
+                        "DIFFERENT deficit -- treating as an advancing "
+                        "chain, not a stuck loop",
+                    }
+                )
         else:
             if progress is not None:
-                progress({"kind": "build_log",
-                          "text": "[bom-reconcile] the pass changed nothing in the "
-                                  "committed BOM -- stopping reconcile (stuck loop, "
-                                  "not a deficit chain)"})
+                progress(
+                    {
+                        "kind": "build_log",
+                        "text": "[bom-reconcile] the pass changed nothing in the "
+                        "committed BOM -- stopping reconcile (stuck loop, "
+                        "not a deficit chain)",
+                    }
+                )
             passes = BOM_RECONCILE_MAX_PASSES
         return rr, passes
     # The BOM changed; if wiring still re-parks on the SAME deficit, the model
@@ -800,35 +865,53 @@ def maybe_bom_reconcile(
     # (2026-07-27 run_22: two "ok" BOM passes never added the asked-for FB
     # resistor).
     new_defs = bom_reconcile_deficits(rr)
-    if (new_defs and passes < BOM_RECONCILE_MAX_PASSES
-            and _deficit_key(new_defs) == _deficit_key(deficits)):
+    if (
+        new_defs
+        and passes < BOM_RECONCILE_MAX_PASSES
+        and _deficit_key(new_defs) == _deficit_key(deficits)
+    ):
         if progress is not None:
-            progress({"kind": "build_log",
-                      "text": f"[bom-reconcile] the pass changed the BOM but did "
-                              f"NOT resolve the deficit; pointed retry (pass "
-                              f"{passes + 1}/{BOM_RECONCILE_MAX_PASSES}) naming "
-                              "the unmet ask"})
+            progress(
+                {
+                    "kind": "build_log",
+                    "text": f"[bom-reconcile] the pass changed the BOM but did "
+                    f"NOT resolve the deficit; pointed retry (pass "
+                    f"{passes + 1}/{BOM_RECONCILE_MAX_PASSES}) naming "
+                    "the unmet ask",
+                }
+            )
         before2 = after
         rr = run_session(
-            ws, brief, ["bom", "wiring"],
+            ws,
+            brief,
+            ["bom", "wiring"],
             instruction=(
                 "Your previous BOM pass changed the BOM but did NOT resolve the "
                 "deficit below -- the named part(s) are STILL missing. Apply the "
-                "note literally this time. "
-                + bom_reconcile_instruction(deficits)
+                "note literally this time. " + bom_reconcile_instruction(deficits)
             ),
-            progress=progress, run_id=run_id, core_defaults=core_defaults,
+            progress=progress,
+            run_id=run_id,
+            core_defaults=core_defaults,
             client=client,
         )
         passes += 1
         after2 = _bom_signature(ws)
         retry_defs = bom_reconcile_deficits(rr)
-        if (before2 is not None and after2 is not None and after2 == before2
-                and retry_defs
-                and _deficit_key(retry_defs) == _deficit_key(deficits)):
+        if (
+            before2 is not None
+            and after2 is not None
+            and after2 == before2
+            and retry_defs
+            and _deficit_key(retry_defs) == _deficit_key(deficits)
+        ):
             if progress is not None:
-                progress({"kind": "build_log",
-                          "text": "[bom-reconcile] pointed retry changed nothing "
-                                  "either -- stopping reconcile (stuck loop)"})
+                progress(
+                    {
+                        "kind": "build_log",
+                        "text": "[bom-reconcile] pointed retry changed nothing "
+                        "either -- stopping reconcile (stuck loop)",
+                    }
+                )
             passes = BOM_RECONCILE_MAX_PASSES
     return rr, passes

@@ -5,6 +5,7 @@ Mostly pure functions + local file ops; one test drives the real stage-commit
 CLI subprocess (offline, deterministic) to prove the load/validate/dump
 round-trip preserves the block.
 """
+
 from __future__ import annotations
 
 import json
@@ -35,6 +36,7 @@ def _complete_design() -> dict:
 
 # ---- derive_stage_statuses: design stages -----------------------------------
 
+
 def test_empty_state_is_all_pending():
     out = derive_stage_statuses({})
     assert set(out) == {*DESIGN_STAGES, *BUILD_PHASES}
@@ -42,26 +44,58 @@ def test_empty_state_is_all_pending():
 
 
 def test_stage_status_block_wins():
-    st = {"stage_status": {"intent": {"ok": True, "cost_usd": 0.01},
-                           "functional_spec": {"ok": False}}}
+    st = {
+        "stage_status": {"intent": {"ok": True, "cost_usd": 0.01}, "functional_spec": {"ok": False}}
+    }
     out = derive_stage_statuses(st)
     assert out["intent"] == "done"
     assert out["functional_spec"] == "failed"
     assert out["architecture"] == "pending"
 
 
+def test_committed_diagnostics_restore_warning_and_advance():
+    state = _complete_design()
+    state["stage_status"]["architecture"] = {
+        "ok": True,
+        "semantic_clean": False,
+        "repair_required": True,
+        "diagnostics": [
+            {
+                "code": "architecture_missing_power_endpoint",
+                "severity": "repair_required",
+                "message": "missing endpoint",
+                "evidence": ["vbus"],
+                "detector_version": 1,
+            }
+        ],
+    }
+    out = derive_stage_statuses(state)
+    assert out["architecture"] == "warning"
+    assert out["synthesize"] == "pending"
+
+
+def test_legacy_committed_status_without_semantic_fields_is_done():
+    assert derive_stage_statuses({"stage_status": {"intent": {"ok": True}}})["intent"] == "done"
+
+
 def test_legacy_slot_presence_fallback():
     # Projects persisted before stage_status existed: slot presence marks done,
     # wiring via the bom connections it populates.
-    st = {"intent": {}, "functional_spec": {}, "architecture": {},
-          "bom": {"parts": [{}], "connections": [{"net_name": "V"}]}}
+    st = {
+        "intent": {},
+        "functional_spec": {},
+        "architecture": {},
+        "bom": {"parts": [{}], "connections": [{"net_name": "V"}]},
+    }
     out = derive_stage_statuses(st)
     assert all(out[s] == "done" for s in DESIGN_STAGES)
 
 
 def test_unanswered_question_parks_its_stage():
-    st = {"intent": {"goal": "x"},
-          "open_questions": [{"text": "?", "stage": "bom", "answer": None}]}
+    st = {
+        "intent": {"goal": "x"},
+        "open_questions": [{"text": "?", "stage": "bom", "answer": None}],
+    }
     out = derive_stage_statuses(st)
     assert out["bom"] == "parked"
     assert out["intent"] == "done"
@@ -74,31 +108,34 @@ def test_answered_question_does_not_park():
 
 # ---- derive_stage_statuses: build phases ------------------------------------
 
+
 def test_build_phases_done_from_artifacts():
-    out = derive_stage_statuses(_complete_design(), project_status="ok",
-                                sheets_exist=True, pcb_ready=True, zip_ok=True)
+    out = derive_stage_statuses(
+        _complete_design(), project_status="ok", sheets_exist=True, pcb_ready=True, zip_ok=True
+    )
     assert all(out[p] == "done" for p in BUILD_PHASES)
 
 
 def test_failure_localizes_to_place_route():
-    out = derive_stage_statuses(_complete_design(), project_status="failed",
-                                sheets_exist=True)
+    out = derive_stage_statuses(_complete_design(), project_status="failed", sheets_exist=True)
     assert out["synthesize"] == "done"
     assert out["place_route"] == "failed"
     assert out["fab"] == "pending"
 
 
 def test_failure_localizes_to_synthesize_on_failed_checks():
-    out = derive_stage_statuses(_complete_design(), project_status="failed",
-                                sheets_exist=True, synth_checks_failed=True)
+    out = derive_stage_statuses(
+        _complete_design(), project_status="failed", sheets_exist=True, synth_checks_failed=True
+    )
     assert out["synthesize"] == "failed"
     assert out["place_route"] == "pending"
     assert out["fab"] == "pending"
 
 
 def test_failure_localizes_to_fab():
-    out = derive_stage_statuses(_complete_design(), project_status="failed",
-                                sheets_exist=True, pcb_ready=True)
+    out = derive_stage_statuses(
+        _complete_design(), project_status="failed", sheets_exist=True, pcb_ready=True
+    )
     assert out["synthesize"] == "done"
     assert out["place_route"] == "done"
     assert out["fab"] == "failed"
@@ -107,8 +144,9 @@ def test_failure_localizes_to_fab():
 def test_failed_build_outranks_stale_zip():
     # A failed (re)build keeps the failed candidate board; a zip surviving
     # from an earlier successful build is stale and must NOT turn fab green.
-    out = derive_stage_statuses(_complete_design(), project_status="failed",
-                                sheets_exist=True, pcb_ready=True, zip_ok=True)
+    out = derive_stage_statuses(
+        _complete_design(), project_status="failed", sheets_exist=True, pcb_ready=True, zip_ok=True
+    )
     assert out["fab"] == "failed"
 
 
@@ -116,12 +154,14 @@ def test_stale_artifacts_ignored_when_design_incomplete():
     # An edit nulled downstream slots; the generated tree from the earlier
     # build still exists but must not paint the build phases done.
     st = {"stage_status": {"intent": {"ok": True}}}
-    out = derive_stage_statuses(st, project_status="ok", sheets_exist=True,
-                                pcb_ready=True, zip_ok=True)
+    out = derive_stage_statuses(
+        st, project_status="ok", sheets_exist=True, pcb_ready=True, zip_ok=True
+    )
     assert all(out[p] == "pending" for p in BUILD_PHASES)
 
 
 # ---- _stamp_stage_status -----------------------------------------------------
+
 
 def test_stamp_creates_missing_state(tmp_path):
     sp = tmp_path / ".kicraft" / "state.json"
@@ -134,8 +174,7 @@ def test_stamp_creates_missing_state(tmp_path):
 def test_stamp_preserves_other_state_and_entries(tmp_path):
     sp = tmp_path / ".kicraft" / "state.json"
     sp.parent.mkdir(parents=True)
-    sp.write_text(json.dumps({"project_stem": "X",
-                              "stage_status": {"intent": {"ok": True}}}))
+    sp.write_text(json.dumps({"project_stem": "X", "stage_status": {"intent": {"ok": True}}}))
     _stamp_stage_status(sp, "bom", True, cost_usd=0.123456789, attempts=2)
     sj = json.loads(sp.read_text())
     assert sj["project_stem"] == "X"
@@ -146,11 +185,40 @@ def test_stamp_preserves_other_state_and_entries(tmp_path):
     assert entry["cost_usd"] == 0.123457  # rounded to 6 places
 
 
+def test_stamp_roundtrips_semantic_dimensions(tmp_path):
+    sp = tmp_path / ".kicraft" / "state.json"
+    diagnostic = {
+        "code": "wiring_bootsel_unreachable",
+        "severity": "fab_gate",
+        "message": "isolated switch",
+        "evidence": [],
+        "detector_version": 1,
+    }
+    _stamp_stage_status(
+        sp,
+        "wiring",
+        True,
+        provider_ok=True,
+        schema_ok=True,
+        semantic_clean=False,
+        repair_required=True,
+        fab_safe=False,
+        repair_attempted=True,
+        repair_adopted=False,
+        diagnostics=[diagnostic],
+    )
+    entry = json.loads(sp.read_text())["stage_status"]["wiring"]
+    assert entry["ok"] is True and entry["fab_safe"] is False
+    assert entry["diagnostics"] == [diagnostic]
+
+
 # ---- persistence round-trips ---------------------------------------------------
+
 
 def test_conversation_state_roundtrips_stage_status():
     cs = ConversationState.model_validate(
-        {"stage_status": {"intent": {"ok": True, "cost_usd": 0.01, "attempts": 1}}})
+        {"stage_status": {"intent": {"ok": True, "cost_usd": 0.01, "attempts": 1}}}
+    )
     dumped = json.loads(cs.model_dump_json())
     assert dumped["stage_status"]["intent"]["ok"] is True
 
@@ -160,8 +228,13 @@ def test_cli_commit_preserves_stage_status(tmp_path):
     # stamped before the commit must survive that rewrite.
     sp = tmp_path / ".kicraft" / "state.json"
     _stamp_stage_status(sp, "functional_spec", False)
-    slot = {"goal": "a USB-powered LED", "constraints": [], "named_parts": [],
-            "inferred_expertise": "intermediate", "assumptions": []}
+    slot = {
+        "goal": "a USB-powered LED",
+        "constraints": [],
+        "named_parts": [],
+        "inferred_expertise": "intermediate",
+        "assumptions": [],
+    }
     ok, out = _commit("intent", slot, sp, "a USB-powered LED", "USB_LED", tmp_path)
     assert ok, out
     sj = json.loads(sp.read_text())
@@ -171,11 +244,18 @@ def test_cli_commit_preserves_stage_status(tmp_path):
 
 # ---- null_downstream drops stale outcomes ------------------------------------
 
+
 def test_null_downstream_drops_stale_stage_status(tmp_path):
-    _write_state(tmp_path, {
-        "intent": {}, "functional_spec": {}, "architecture": {},
-        "bom": {"parts": [], "connections": []},
-        "stage_status": {s: {"ok": True} for s in DESIGN_STAGES}})
+    _write_state(
+        tmp_path,
+        {
+            "intent": {},
+            "functional_spec": {},
+            "architecture": {},
+            "bom": {"parts": [], "connections": []},
+            "stage_status": {s: {"ok": True} for s in DESIGN_STAGES},
+        },
+    )
     null_downstream(tmp_path, "functional_spec")
     ss = read_state(tmp_path)["stage_status"]
     assert set(ss) == {"intent", "functional_spec"}

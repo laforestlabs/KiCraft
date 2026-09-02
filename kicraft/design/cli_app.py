@@ -4383,6 +4383,7 @@ def _connector_misoriented(pcb: Path) -> tuple[list[str], list[str]]:
     except Exception:
         return [], []
 
+
 def _antenna_edge_contract_violations(pcb: Path) -> list[str]:
     """Verify persisted parent antenna intent against the promoted board."""
     artifact_root = pcb.parent / ".experiments" / "subcircuits"
@@ -4416,9 +4417,7 @@ def _antenna_edge_contract_violations(pcb: Path) -> list[str]:
         config_files = sorted(pcb.parent.glob("*_autoplacer.json"))
         if config_files:
             project_cfg = json.loads(config_files[0].read_text(encoding="utf-8"))
-            tolerance = float(
-                project_cfg.get("antenna_edge_tolerance_mm", tolerance)
-            )
+            tolerance = float(project_cfg.get("antenna_edge_tolerance_mm", tolerance))
             pad_inset = float(project_cfg.get("pad_inset_margin_mm", pad_inset))
         _, violations = verify_antenna_edges(
             str(pcb),
@@ -4429,7 +4428,6 @@ def _antenna_edge_contract_violations(pcb: Path) -> list[str]:
         return violations
     except Exception as exc:
         return [f"antenna_constraint_invalid:{type(exc).__name__}:{exc}"]
-
 
 
 def _check_form_factor_conformance(state, pcb: Path) -> dict | None:
@@ -5635,6 +5633,62 @@ def _surface_review_findings(state, state_path: Path, findings: list[dict]) -> N
     atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
 
 
+def _castellation_geometry_violations(state, pcb_path: Path) -> list[str]:
+    """Prove each declared castellation intersects one assigned rectangular edge."""
+    interfaces = list(getattr(getattr(state, "bom", None), "edge_interfaces", None) or [])
+    if not interfaces:
+        return []
+    try:
+        import pcbnew
+
+        board = pcbnew.LoadBoard(str(pcb_path))
+        box = board.GetBoardEdgesBoundingBox()
+        left = pcbnew.ToMM(box.GetLeft())
+        right = pcbnew.ToMM(box.GetRight())
+        top = pcbnew.ToMM(box.GetTop())
+        bottom = pcbnew.ToMM(box.GetBottom())
+    except Exception as exc:
+        return [f"castellation geometry unreadable: {exc}"]
+    edge_coordinate = {"left": left, "right": right, "top": top, "bottom": bottom}
+    violations: list[str] = []
+    tolerance_mm = 0.15
+    for interface in interfaces:
+        ordered: list[float] = []
+        for ref in interface.refs:
+            footprint = board.FindFootprintByReference(ref)
+            if footprint is None:
+                violations.append(f"castellation {ref} missing from board")
+                continue
+            pads = list(footprint.Pads())
+            if len(pads) != 1:
+                violations.append(f"castellation {ref} must have exactly one pad")
+                continue
+            pad = pads[0]
+            drill = pad.GetDrillSize()
+            if pcbnew.ToMM(max(drill.x, drill.y)) <= 0:
+                violations.append(f"castellation {ref} is not plated through-hole geometry")
+            position = pad.GetPosition()
+            x, y = pcbnew.ToMM(position.x), pcbnew.ToMM(position.y)
+            touches = [
+                side
+                for side, coordinate in edge_coordinate.items()
+                if abs((x if side in {"left", "right"} else y) - coordinate) <= tolerance_mm
+            ]
+            if touches != [interface.side]:
+                violations.append(
+                    f"castellation {ref} touches {touches or 'no edge'}, expected {interface.side}"
+                )
+            ordered.append(y if interface.side in {"left", "right"} else x)
+        if len(ordered) >= 2:
+            gaps = [abs(b - a) for a, b in zip(ordered, ordered[1:])]
+            if any(abs(gap - interface.pitch_mm) > tolerance_mm for gap in gaps):
+                violations.append(
+                    f"castellation bank {interface.name} pitch/order does not match "
+                    f"{interface.pitch_mm:.3f} mm"
+                )
+    return violations
+
+
 def _promote_verify_fab(
     state,
     state_path: Path,
@@ -5798,6 +5852,21 @@ def _promote_verify_fab(
     gate = _verify_routed_board(pcb)
     expected_refs = {p.ref for p in (state.bom.parts if state and state.bom else [])}
     missing_refs = _missing_component_refs(expected_refs, gate["tracks"].get("footprint_refs"))
+    castellation_violations = _castellation_geometry_violations(state, pcb)
+    if castellation_violations:
+        gate["fab_acceptable"] = False
+        gate.setdefault("reasons", []).extend(castellation_violations)
+    semantic_fab_gates = [
+        diagnostic.code
+        for status in (getattr(state, "stage_status", {}) or {}).values()
+        for diagnostic in (getattr(status, "diagnostics", None) or [])
+        if diagnostic.severity == "fab_gate"
+    ]
+    if semantic_fab_gates and os.environ.get("KICRAFT_STAGE_SEMANTICS", "observe") == "enforce":
+        gate["fab_acceptable"] = False
+        gate.setdefault("reasons", []).append(
+            "unresolved stage fabrication gates: " + ", ".join(sorted(set(semantic_fab_gates)))
+        )
     if verify_summary_out is not None:
         # Caller wants the gate diagnosis regardless of exit path (the
         # manual-route flow persists it so the editor can overlay the

@@ -22,6 +22,10 @@ Slot shape (`Architecture`):
   - `replication_instance` — 1-based index within the group (1 for the representative, 2, 3 …). Null when `replication_group` is null. BOTH MUST BE SET OR BOTH NULL. Cannot be combined with `from_library`.
 - `power_nets`: list of every recognized power/ground net (`VBUS`, `+3V3`, `GND`, etc.). Use canonical names — `VBUS` not `BATT_POSITIVE`, `GND` not `EARTH`. These are nets, NOT sheets — a power/ground functional block maps here, never to `sheets`.
 - `inter_sheet_nets`: every signal that crosses sheet boundaries. Each `InterSheetNet` has `name` and `endpoints` (≥2). Each `SheetPin` endpoint has `sheet` (must match a `Sheet.name`) and `direction` (`input` / `output` / `bidirectional` / `passive`).
+  - For repetitive numeric nets, `inter_sheet_net_ranges` may compactly emit
+    `name_pattern` containing exactly `{n}`, inclusive `start`/`end`, and common
+    endpoints. Ranges are expanded before canonical validation; never overlap an
+    explicit net or another range.
   - Power rails: usually `bidirectional` at both ends.
   - Plain signals: `output` at the source, `input` at the sink.
   - Use `passive` only when direction genuinely doesn't apply (rare).
@@ -67,5 +71,11 @@ This co-locates or separates blocks, it never drops them (see the reminder above
 - **ESP32 family (native-USB or bridged): the BOOT strap needs a pull path during reset.** Ship BOOT+EN/RESET buttons, a USB-UART bridge with DTR/RTS auto-reset, or dedicated strap test pads — a bare USB connector is NOT sufficient for download mode (§9.29 rejects it at commit).
 
 Record the choice in `assumptions` ending `(defaulted)` (e.g. `"MCU: ESP32-S3-MINI-1, flashed over native USB, no bridge (defaulted)"` or `"Programming: onboard CH340C USB-UART per core defaults, auto-reset to EN/IO0 (defaulted)"`) and reflect it in `topologies` (plus a sheet if it is its own block). BOM then adds any bridge/auto-reset parts; wiring connects the path.
+
+**Verified circuit recipes.** `extras.circuit_recipes` lists exact versioned
+recipes. Select one explicitly in `recipe_selections` with its exact `recipe`,
+stable `instance`, required sheet-role mapping, and bounded parameters. Prefer a
+matching recipe over inventing an MCU support circuit. USB and GPIO are
+bidirectional at sheet boundaries. Programming labels alone never prove a path.
 
 Open-question discipline matches earlier stages.

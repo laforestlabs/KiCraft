@@ -2,6 +2,7 @@
 
 Split out of ``compose_subcircuits.py`` (Lever 2.5); re-exported there.
 """
+
 from __future__ import annotations
 
 import shutil
@@ -108,22 +109,26 @@ def _stamp_parent_board(
     silkscreen_json = []
     for elem in board_state.silkscreen or []:
         if elem.kind == "poly":
-            silkscreen_json.append({
-                "kind": "poly",
-                "layer": elem.layer,
-                "points": [{"x": p.x, "y": p.y} for p in elem.points],
-                "stroke_width": elem.stroke_width,
-            })
+            silkscreen_json.append(
+                {
+                    "kind": "poly",
+                    "layer": elem.layer,
+                    "points": [{"x": p.x, "y": p.y} for p in elem.points],
+                    "stroke_width": elem.stroke_width,
+                }
+            )
         elif elem.kind == "text":
-            silkscreen_json.append({
-                "kind": "text",
-                "layer": elem.layer,
-                "text": elem.text,
-                "pos": {"x": elem.pos.x, "y": elem.pos.y},
-                "font_height": elem.font_height,
-                "font_width": elem.font_width,
-                "font_thickness": elem.font_thickness,
-            })
+            silkscreen_json.append(
+                {
+                    "kind": "text",
+                    "layer": elem.layer,
+                    "text": elem.text,
+                    "pos": {"x": elem.pos.x, "y": elem.pos.y},
+                    "font_height": elem.font_height,
+                    "font_width": elem.font_width,
+                    "font_thickness": elem.font_thickness,
+                }
+            )
 
     # Grow the parent outline to enclose all placed geometry BEFORE deriving
     # Edge.Cuts and validating. The constraint-aware outline can snap smaller
@@ -159,6 +164,30 @@ def _stamp_parent_board(
             f"would have been {_shape_fit.get('fitted_size_mm')} mm)",
             file=sys.stderr,
         )
+    # Leaf composition is rigid, but fabrication primitives are parent-board
+    # features: their final pad centers must be re-applied to the final Edge.Cuts
+    # before DRC and parent routing. The castellated leaf has no internal copper,
+    # so moving these terminals here cannot tear a child route.
+    if not state.manual_outline or state.manual_outline.get("shape", "rect") == "rect":
+        from kicraft.autoplacer.brain.leaf_routing import (
+            _place_fabricated_edge_interfaces,
+        )
+
+        state.fabricated_edge_refs = frozenset(
+            str(ref)
+            for interface in cfg.get("edge_interfaces", []) or []
+            for ref in interface.get("refs", []) or []
+        )
+        cfg["ignorable_footprint_refs"] = sorted(
+            set(cfg.get("ignorable_footprint_refs", []) or []) | set(state.fabricated_edge_refs)
+        )
+        _place_fabricated_edge_interfaces(board_state, cfg)
+        by_ref = {row["ref"]: row for row in components_json}
+        for ref, component in board_state.components.items():
+            row = by_ref.get(ref)
+            if row is not None:
+                row["x"] = component.pos.x
+                row["y"] = component.pos.y
 
     # Compute the board outline from the composition
     outline = board_state.board_outline
@@ -174,10 +203,7 @@ def _stamp_parent_board(
         # polyline instead of a 4-segment rectangle. Generated from the
         # board_state outline AABB (not the spec's own min/max) so the
         # stamped shape always brackets exactly the validated outline.
-        if (
-            state.manual_outline is not None
-            and state.manual_outline.get("shape", "rect") != "rect"
-        ):
+        if state.manual_outline is not None and state.manual_outline.get("shape", "rect") != "rect":
             from kicraft.layout_editor.outline import OutlineSpec as _OutlineSpec
 
             _spec = _OutlineSpec.from_dict(
@@ -303,11 +329,7 @@ def _stamp_parent_board(
         if not src_pro.is_file():
             src_pro = next(iter(sorted(project_dir.glob("*.kicad_pro"))), None)
         sibling_pro = output_pcb.with_suffix(".kicad_pro")
-        if (
-            src_pro
-            and src_pro.is_file()
-            and src_pro.resolve() != sibling_pro.resolve()
-        ):
+        if src_pro and src_pro.is_file() and src_pro.resolve() != sibling_pro.resolve():
             shutil.copy2(str(src_pro), str(sibling_pro))
     except OSError:
         pass
@@ -316,13 +338,10 @@ def _stamp_parent_board(
     return output_pcb
 
 
-
 # ---------------------------------------------------------------------------
 # Self-contained pcbnew script executed in a subprocess by
 # _stamp_parent_board(). Lifted to its own file (_parent_stamp_subprocess.py)
 # so import-time errors fire when the file is parsed and so linters / IDEs
 # see the pcbnew API calls.
 # ---------------------------------------------------------------------------
-_PARENT_STAMP_SCRIPT_PATH = str(
-    Path(__file__).parent / "_parent_stamp_subprocess.py"
-)
+_PARENT_STAMP_SCRIPT_PATH = str(Path(__file__).parent / "_parent_stamp_subprocess.py")

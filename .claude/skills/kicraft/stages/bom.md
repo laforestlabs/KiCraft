@@ -9,6 +9,12 @@ Given the `architecture` (available in the `state` field of stage-prep's output)
 
 Either way the wiring stage connects the path, so no programming question reaches it.
 
+When architecture selected a circuit recipe, its owned parts are expanded and
+locked before model groups. Do not duplicate or substitute recipe roles.
+Board-fabricated features such as castellations, edge fingers, vias, and holes
+are never purchasable groups: do not assign them headers, MPNs, sourcing notes,
+or placeholder footprints.
+
 Slot shape:
 
 - `groups`: the only component representation. Each entry has:

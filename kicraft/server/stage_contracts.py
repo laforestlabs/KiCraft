@@ -70,6 +70,31 @@ class WiringStageResponse(BaseModel):
         return self
 
 
+class InterSheetNetRange(BaseModel):
+    """Model-facing compact numeric range expanded before canonical validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name_pattern: str = Field(pattern=r"^[^{}]*\{n\}[^{}]*$")
+    start: int = Field(ge=0)
+    end: int = Field(ge=0)
+    endpoints: list[models.SheetPin] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def _ordered_and_bounded(self):
+        if self.end < self.start:
+            raise ValueError("inter-sheet net range end must be >= start")
+        if self.end - self.start + 1 > 5000:
+            raise ValueError("inter-sheet net range expansion exceeds 5000 nets")
+        return self
+
+
+class ArchitectureStageResponse(models.Architecture):
+    model_config = ConfigDict(extra="forbid")
+
+    inter_sheet_net_ranges: list[InterSheetNetRange] = Field(default_factory=list)
+
+
 class IntentStageResponse(models.IntentSlot):
     model_config = ConfigDict(extra="forbid")
 
@@ -139,17 +164,30 @@ class BomStageResponse(BaseModel):
         return self
 
 
-def _normalize_bom_stage_response(payload: dict) -> tuple[dict, int]:
-    """Expand component groups into the canonical per-part BOM."""
+def _normalize_bom_stage_response(
+    payload: dict, prompt_state: dict | None = None
+) -> tuple[dict, int]:
+    """Expand recipe parts first, then model component groups."""
     response = BomStageResponse.model_validate(payload)
     total = sum(group.quantity for group in response.groups)
     if total > BOM_TOTAL_PART_LIMIT:
         raise ValueError(f"BOM has {total} parts; maximum is {BOM_TOTAL_PART_LIMIT}")
 
+    from kicraft.design.recipes import expand_selections
+    from kicraft.design.recipes.registry import next_reference_numbers
+
+    architecture = (prompt_state or {}).get("architecture") or {}
+    expansions = expand_selections(architecture.get("recipe_selections") or [])
+    recipe_parts = [part for expansion in expansions for part in expansion.parts]
+    recipe_identities = {(part.symbol.lower(), part.value.lower()) for part in recipe_parts}
+    for group in response.groups:
+        if (group.symbol.lower(), group.value.lower()) in recipe_identities:
+            raise ValueError(f"BOM group {group.id!r} duplicates a locked circuit-recipe role")
+
     per_sheet: dict[str, int] = {}
-    next_number: dict[str, int] = {}
+    next_number = next_reference_numbers(recipe_parts)
     refs_by_group: dict[str, list[str]] = {}
-    parts: list[models.BomPart] = []
+    parts: list[models.BomPart] = list(recipe_parts)
     for group in response.groups:
         per_sheet[group.sheet] = per_sheet.get(group.sheet, 0) + group.quantity
         start = next_number.get(group.reference_prefix, 1)
@@ -164,44 +202,69 @@ def _normalize_bom_stage_response(payload: dict) -> tuple[dict, int]:
     oversized = {sheet: count for sheet, count in per_sheet.items() if count > BOM_SHEET_PART_LIMIT}
     if oversized:
         raise ValueError(f"BOM exceeds {BOM_SHEET_PART_LIMIT} parts on a sheet: {oversized}")
-
-    arrays = []
-    for array in response.arrays:
-        data = array.model_dump(exclude={"group_id"}, exclude_none=True)
-        arrays.append(
-            models.ArraySpec.model_validate({"refs": refs_by_group[array.group_id], **data})
+    arrays = [
+        models.ArraySpec.model_validate(
+            {
+                "refs": refs_by_group[array.group_id],
+                **array.model_dump(exclude={"group_id"}, exclude_none=True),
+            }
         )
+        for array in response.arrays
+    ]
     canonical = models.BOM(
         parts=parts,
         arrays=arrays,
         assumptions=response.assumptions,
         substitutions=response.substitutions,
+        connections=[
+            connection for expansion in expansions for connection in expansion.connections
+        ],
+        no_connect_pins=[pin for expansion in expansions for pin in expansion.no_connect_pins],
+        edge_interfaces=[
+            interface for expansion in expansions for interface in expansion.edge_interfaces
+        ],
     )
-    return canonical.model_dump(exclude_none=True), total
+    return canonical.model_dump(exclude_none=True), total + len(recipe_parts)
 
 
 def _normalize_wiring_stage_response(payload: dict, prompt_state: dict) -> dict:
-    """Derive canonical connection rows from final pin assignments."""
+    """Merge project-owned assignments with immutable recipe wiring."""
     response = WiringStageResponse.model_validate(payload)
     bom = prompt_state.get("bom")
     if not isinstance(bom, dict):
         raise ValueError("wiring response requires a committed BOM")
+    from kicraft.design.recipes import locked_no_connect_pins, locked_pin_assignments
+
+    locked = locked_pin_assignments(bom)
+    locked_no_connects = locked_no_connect_pins(bom)
     ref_sheets = {
         str(part.get("ref")): str(part.get("sheet"))
         for part in bom.get("parts") or []
         if isinstance(part, dict) and part.get("ref") and part.get("sheet")
     }
     grouped: dict[tuple[str, str], list[models.PinEndpoint]] = {}
-    no_connect_pins: list[models.PinEndpoint] = []
+    no_connect_pins: list[models.PinEndpoint] = [
+        models.PinEndpoint(ref=ref, pin=pin) for ref, pin in sorted(locked_no_connects)
+    ]
     for assignment in response.pins:
         if assignment.ref not in ref_sheets:
             raise ValueError(f"wiring references unknown component {assignment.ref!r}")
+        if (assignment.ref, assignment.pin) in locked or (
+            assignment.ref,
+            assignment.pin,
+        ) in locked_no_connects:
+            raise ValueError(
+                f"wiring attempted to overwrite recipe-owned pin {assignment.ref}.{assignment.pin}"
+            )
         endpoint = models.PinEndpoint(ref=assignment.ref, pin=assignment.pin)
         if isinstance(assignment, NoConnectPinAssignment):
             no_connect_pins.append(endpoint)
             continue
         key = (ref_sheets[assignment.ref], assignment.net)
         grouped.setdefault(key, []).append(endpoint)
+    for (ref, pin), net in locked.items():
+        key = (ref_sheets[ref], net)
+        grouped.setdefault(key, []).append(models.PinEndpoint(ref=ref, pin=pin))
     connections = [
         models.NetConnection(sheet=sheet, net_name=net, endpoints=endpoints)
         for (sheet, net), endpoints in grouped.items()
@@ -226,6 +289,8 @@ def _slot_response_schema(stage: str) -> dict:
         return BomStageResponse.model_json_schema()
     if stage == "wiring":
         return WiringStageResponse.model_json_schema()
+    if stage == "architecture":
+        return ArchitectureStageResponse.model_json_schema()
     return SLOT_MODEL[stage].model_json_schema()
 
 
@@ -282,7 +347,7 @@ def build_stage_response_contract(stage: str, prompt_state: dict) -> StageRespon
         if not isinstance(sheet, dict):
             raise ValueError("BOM response schema is missing BomComponentGroup.sheet")
         sheet["enum"] = names
-    version = 2 if stage in {"bom", "wiring"} else 1
+    version = 2 if stage in {"architecture", "bom", "wiring"} else 1
     response_format = _json_response_format(f"kicraft_{stage}_response_v{version}", schema)
     return StageResponseContract(stage=stage, schema=schema, response_format=response_format)
 
@@ -301,8 +366,25 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
             return StageQuestionResponse.model_validate(payload).model_dump(exclude_none=True), 0
         if stage == "intent":
             return IntentStageResponse.model_validate(payload).model_dump(exclude_none=True), 0
+        if stage == "architecture":
+            response = ArchitectureStageResponse.model_validate(payload)
+            canonical = response.model_dump(exclude={"inter_sheet_net_ranges"}, exclude_none=True)
+            names = {str(net["name"]) for net in canonical.get("inter_sheet_nets") or []}
+            expanded = []
+            for net_range in response.inter_sheet_net_ranges:
+                for number in range(net_range.start, net_range.end + 1):
+                    name = net_range.name_pattern.replace("{n}", str(number))
+                    if name in names:
+                        raise ValueError(f"duplicate/overlapping inter-sheet net {name!r}")
+                    names.add(name)
+                    expanded.append(
+                        models.InterSheetNet(name=name, endpoints=net_range.endpoints).model_dump()
+                    )
+            canonical["inter_sheet_nets"] = (canonical.get("inter_sheet_nets") or []) + expanded
+            validated = models.Architecture.model_validate(canonical)
+            return validated.model_dump(exclude_none=True), len(expanded)
         if stage == "bom":
-            return _normalize_bom_stage_response(payload)
+            return _normalize_bom_stage_response(payload, prompt_state)
         if stage == "wiring":
             return _normalize_wiring_stage_response(payload, prompt_state), 0
         return SLOT_MODEL[stage].model_validate(payload).model_dump(exclude_none=True), 0

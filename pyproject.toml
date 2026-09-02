@@ -94,6 +94,7 @@ kicraft-eval-web = "kicraft.eval.run_web:main"
 kicraft-eval-batch = "kicraft.eval.self_eval:main"
 kicraft-llm-canary = "kicraft.eval.llm_canary:main"
 kicraft-llm-analysis = "kicraft.eval.llm_analysis:main"
+kicraft-stage-reliability = "kicraft.eval.stage_reliability:main"
 
 # Board manipulation
 move-component = "kicraft.cli.move_component:main"

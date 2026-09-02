@@ -23,7 +23,7 @@ from kicraft.autoplacer.brain.subcircuit_render_diagnostics import (
     generate_stage_diagnostic_artifacts,
     promote_to_round_snapshot,
 )
-from kicraft.autoplacer.brain.types import AntennaEdgeIntent, Component, Layer, Point
+from kicraft.autoplacer.brain.types import AntennaEdgeIntent, BoardState, Component, Layer, Point
 from kicraft.autoplacer.routing_board import (
     import_routed_copper,
     validate_routed_board,
@@ -107,6 +107,7 @@ def _silk_for_leaf(
         _build_leaf_silkscreen,
         _compute_component_bbox,
     )
+
     bbox = _compute_component_bbox(components, traces=traces, vias=vias)
     return _build_leaf_silkscreen(components, bbox, extraction, cfg)
 
@@ -131,6 +132,7 @@ def _outline_around_geometry(
     if not components:
         return None
     from kicraft.autoplacer.brain.subcircuit_solver import _compute_component_bbox
+
     bbox = _compute_component_bbox(components, traces=traces, vias=vias)
     silk_margin = float(cfg.get("silkscreen_margin_mm", 0.5))
     edge_margin = float(cfg.get("leaf_edge_margin_mm", silk_margin))
@@ -181,15 +183,12 @@ def _deterministic_route_signature(board_state: Any, cfg: dict[str, Any]) -> str
     """Stable hash of placement and non-timeout KRT routing options."""
     comps = sorted(board_state.components.values(), key=lambda c: c.ref)
     placement = [
-        (c.ref, round(c.pos.x, 3), round(c.pos.y, 3),
-         round(float(c.rotation), 1), int(c.layer))
+        (c.ref, round(c.pos.x, 3), round(c.pos.y, 3), round(float(c.rotation), 1), int(c.layer))
         for c in comps
     ]
     tl, br = board_state.board_outline
     route_keys = {
-        k: v
-        for k, v in cfg.items()
-        if k.startswith("kicad_routing_tools_") and "timeout" not in k
+        k: v for k, v in cfg.items() if k.startswith("kicad_routing_tools_") and "timeout" not in k
     }
     blob = json.dumps(
         [
@@ -261,9 +260,7 @@ def route_local_subcircuit(
     render_pre_route_board_views = bool(
         cfg.get("subcircuit_render_pre_route_board_views", not fast_smoke_mode)
     )
-    render_routed_board_views = bool(
-        cfg.get("subcircuit_render_routed_board_views", True)
-    )
+    render_routed_board_views = bool(cfg.get("subcircuit_render_routed_board_views", True))
     render_pre_route_drc_overlay = bool(
         cfg.get("subcircuit_render_pre_route_drc_overlay", not fast_smoke_mode)
     )
@@ -289,9 +286,7 @@ def route_local_subcircuit(
     # Only a leaf with no net having >=2 pads on it (e.g. a pass-through
     # connector where every net has a single on-leaf pad) is genuinely trivial.
     routable_on_leaf_nets = [
-        name
-        for name, net in extraction.local_state.nets.items()
-        if len(net.pad_refs) >= 2
+        name for name, net in extraction.local_state.nets.items() if len(net.pad_refs) >= 2
     ]
     if not routable_on_leaf_nets:
         # Trivial leaf: nothing to route, but we still stamp the placed
@@ -326,9 +321,7 @@ def route_local_subcircuit(
         solved_components,
         cfg,
     )
-    route_timing["legality_repair_s"] = round(
-        max(0.0, time.monotonic() - legality_start), 3
-    )
+    route_timing["legality_repair_s"] = round(max(0.0, time.monotonic() - legality_start), 3)
 
     # Reframe recovery: a placement that is internally legal (no overlapping
     # copper) but whose pads spill past the content-sized canvas is a
@@ -374,8 +367,7 @@ def route_local_subcircuit(
         overlap_count = int(diagnostics.get("overlap_count", 0) or 0)
         pad_outside_count = int(diagnostics.get("pad_outside_count", 0) or 0)
         overlap_pairs = [
-            f"{item.get('a', '?')}:{item.get('b', '?')}"
-            for item in diagnostics.get("overlaps", [])
+            f"{item.get('a', '?')}:{item.get('b', '?')}" for item in diagnostics.get("overlaps", [])
         ]
         pad_violations = [
             f"{item.get('ref', '?')}:{item.get('pad_id', '?')}:{','.join(item.get('sides', []))}"
@@ -463,22 +455,18 @@ def route_local_subcircuit(
                     ),
                 },
             }
-            illegal_render_diagnostics["illegal_pre_stamp"] = (
-                generate_stage_diagnostic_artifacts(
-                    pcb_path=str(illegal_board),
-                    validation=illegal_validation,
-                    artifact_dir=artifact_paths.artifact_dir,
-                    stage="illegal_pre_stamp",
-                    render_board_views=not fast_smoke_mode,
-                    write_drc_json=not fast_smoke_mode,
-                    write_drc_report=not fast_smoke_mode,
-                    render_drc_overlay=not fast_smoke_mode,
-                )
+            illegal_render_diagnostics["illegal_pre_stamp"] = generate_stage_diagnostic_artifacts(
+                pcb_path=str(illegal_board),
+                validation=illegal_validation,
+                artifact_dir=artifact_paths.artifact_dir,
+                stage="illegal_pre_stamp",
+                render_board_views=not fast_smoke_mode,
+                write_drc_json=not fast_smoke_mode,
+                write_drc_report=not fast_smoke_mode,
+                render_drc_overlay=not fast_smoke_mode,
             )
         except Exception as exc:
-            illegal_render_diagnostics["errors"].append(
-                f"illegal_pre_stamp_render_failed:{exc}"
-            )
+            illegal_render_diagnostics["errors"].append(f"illegal_pre_stamp_render_failed:{exc}")
 
         # Copy the illegal-pre-stamp PNGs (and the .kicad_pcb) to
         # round_XXXX_pre_route_* names so the GUI's _find_round_renders
@@ -566,9 +554,7 @@ def route_local_subcircuit(
         clear_existing_zones=True,
         remove_unmapped_footprints=True,
     )
-    route_timing["stamp_pre_route_board_s"] = round(
-        max(0.0, time.monotonic() - stamp_start), 3
-    )
+    route_timing["stamp_pre_route_board_s"] = round(max(0.0, time.monotonic() - stamp_start), 3)
 
     routing_start = time.monotonic()
     leaf_routing_cfg = {**cfg, "pcb_path": str(source_pcb)}
@@ -665,9 +651,7 @@ def route_local_subcircuit(
         try:
             from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
 
-            _bo = add_breakout_stubs(
-                str(pre_route_board), _breakout_specs, cfg=cfg
-            )
+            _bo = add_breakout_stubs(str(pre_route_board), _breakout_specs, cfg=cfg)
             if _bo["stubs"] > 0:
                 leaf_routing_cfg["routing_preserve_existing_copper"] = True
                 print(
@@ -680,8 +664,7 @@ def route_local_subcircuit(
             if _arr_specs:
                 _arr_keys = {f"{s.ref}.{s.pad}" for s in _arr_specs}
                 _arr_stamp_skipped = [
-                    s for s in _bo.get("skipped", [])
-                    if s.split(":", 1)[0] in _arr_keys
+                    s for s in _bo.get("skipped", []) if s.split(":", 1)[0] in _arr_keys
                 ]
                 if _arr_stamp_skipped:
                     print(
@@ -693,10 +676,7 @@ def route_local_subcircuit(
             # place a dropped bus segment surfaces).
             if _ring_pwr_specs:
                 _rp_keys = {f"{s.ref}.{s.pad}" for s in _ring_pwr_specs}
-                _rp_skipped = [
-                    s for s in _bo.get("skipped", [])
-                    if s.split(":", 1)[0] in _rp_keys
-                ]
+                _rp_skipped = [s for s in _bo.get("skipped", []) if s.split(":", 1)[0] in _rp_keys]
                 if _rp_skipped:
                     print(
                         f"  ring-power: {len(_rp_skipped)}/{len(_ring_pwr_specs)} "
@@ -714,9 +694,7 @@ def route_local_subcircuit(
     # preview). Reject the leaf fast and loud instead, naming the obstruction, so
     # the real cause surfaces in seconds rather than a silent timeout.
     if _arr_specs and array_stamp_gate_tripped(_arr_specs, _arr_stamp_skipped, cfg):
-        _n_inrow, _n_inrow_skipped = _array_inrow_stamp_stats(
-            _arr_specs, _arr_stamp_skipped
-        )
+        _n_inrow, _n_inrow_skipped = _array_inrow_stamp_stats(_arr_specs, _arr_stamp_skipped)
         _stamped = _n_inrow - _n_inrow_skipped
         _rate = _stamped / _n_inrow
         _min_rate = float(cfg.get("array_min_stamp_rate", 0.5))
@@ -725,7 +703,8 @@ def route_local_subcircuit(
             f"({_rate:.0%} < {_min_rate:.0%}) -- the inter-member data channel "
             "is obstructed (a foreign pad in the data lane?). Rejecting the leaf "
             "BEFORE the autorouter rather than handing it a chain it cannot finish "
-            "in time. Skipped: " + ", ".join(_arr_stamp_skipped[:12])
+            "in time. Skipped: "
+            + ", ".join(_arr_stamp_skipped[:12])
             + (" ..." if len(_arr_stamp_skipped) > 12 else "")
         )
         route_timing["route_local_subcircuit_total_s"] = round(
@@ -760,8 +739,7 @@ def route_local_subcircuit(
                             f"in_row_ties_skipped={_n_inrow_skipped}\n"
                             f"all_array_ties={len(_arr_specs)}\n"
                             f"in_row_stamp_rate={_rate:.3f} (min {_min_rate:.3f})\n"
-                            "skipped="
-                            + ", ".join(_arr_stamp_skipped) + "\n"
+                            "skipped=" + ", ".join(_arr_stamp_skipped) + "\n"
                         ),
                     },
                 },
@@ -775,9 +753,7 @@ def route_local_subcircuit(
         cfg=cfg,
         expected_anchor_names=[port.name for port in extraction.interface_ports],
         actual_anchor_names=[port.name for port in extraction.interface_ports],
-        required_anchor_names=[
-            port.name for port in extraction.interface_ports if port.required
-        ],
+        required_anchor_names=[port.name for port in extraction.interface_ports if port.required],
         timeout_s=int(cfg.get("subcircuit_validation_timeout_s", 30)),
     )
     route_timing["pre_route_validation_s"] = round(
@@ -845,10 +821,7 @@ def route_local_subcircuit(
         shutil.copyfile(_cache_pcb, routed_board)
         routing_stats = json.loads(_cache_meta.read_text())
         routing_stats["route_cache_hit"] = True
-        print(
-            "  [route-cache] deterministic leaf unchanged -> reused routed "
-            "board (skipped KRT)"
-        )
+        print("  [route-cache] deterministic leaf unchanged -> reused routed board (skipped KRT)")
     else:
         routing_stats = route_with_kicad_routing_tools(
             str(pre_route_board),
@@ -859,9 +832,7 @@ def route_local_subcircuit(
             _cache_dir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(routed_board, _cache_pcb)
             _cache_meta.write_text(json.dumps(routing_stats))
-    route_timing["routing_s"] = round(
-        max(0.0, time.monotonic() - routing_start), 3
-    )
+    route_timing["routing_s"] = round(max(0.0, time.monotonic() - routing_start), 3)
 
     if generate_diagnostics and render_intermediate:
         pre_route_render_start = time.monotonic()
@@ -906,9 +877,7 @@ def route_local_subcircuit(
                 pre_route_paths = pre_route_views.get("paths", {})
                 if isinstance(pre_route_paths, dict):
                     for _view in ("front_all", "back_all", "copper_both"):
-                        snap = promote_to_round_snapshot(
-                            pre_route_paths.get(_view), round_index
-                        )
+                        snap = promote_to_round_snapshot(pre_route_paths.get(_view), round_index)
                         if snap is not None:
                             pre_route_paths[f"round_{_view}"] = str(snap)
 
@@ -958,6 +927,7 @@ def route_local_subcircuit(
                 copy_traces_with_translation,
                 copy_vias_with_translation,
             )
+
             routed_state_for_silk.components = copy_components_with_translation(
                 routed_state_for_silk.components, _delta
             )
@@ -1014,9 +984,7 @@ def route_local_subcircuit(
             )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: GND plane step failed: {exc}")
-        route_timing["gnd_pour_s"] = round(
-            max(0.0, time.monotonic() - gnd_pour_start), 3
-        )
+        route_timing["gnd_pour_s"] = round(max(0.0, time.monotonic() - gnd_pour_start), 3)
 
     # Power-plane finishing (default on): pour the primary power rail on the
     # layer opposite GND so paired connector power pads / regulator input / bulk
@@ -1052,9 +1020,7 @@ def route_local_subcircuit(
                     )
         except Exception as exc:  # finishing step must never fail the leaf
             print(f"  WARNING: power plane step failed: {exc}")
-        route_timing["power_pour_s"] = round(
-            max(0.0, time.monotonic() - power_pour_start), 3
-        )
+        route_timing["power_pour_s"] = round(max(0.0, time.monotonic() - power_pour_start), 3)
 
     routed_validation_start = time.monotonic()
     validation = validate_routed_board(
@@ -1062,9 +1028,7 @@ def route_local_subcircuit(
         cfg=cfg,
         expected_anchor_names=[port.name for port in extraction.interface_ports],
         actual_anchor_names=[port.name for port in extraction.interface_ports],
-        required_anchor_names=[
-            port.name for port in extraction.interface_ports if port.required
-        ],
+        required_anchor_names=[port.name for port in extraction.interface_ports if port.required],
         timeout_s=int(cfg.get("subcircuit_validation_timeout_s", 30)),
     )
     # Always record the leaf's interface (inter-sheet) net names so the
@@ -1072,9 +1036,7 @@ def route_local_subcircuit(
     # across the parent at compose, not within the leaf, so an unconnected item
     # on it must not count against the leaf (mirrors poured power/GND nets).
     # Previously set only on the reject path, leaving normal-path leaves blind.
-    validation["interface_port_names"] = [
-        port.name for port in extraction.interface_ports
-    ]
+    validation["interface_port_names"] = [port.name for port in extraction.interface_ports]
     route_timing["routed_validation_s"] = round(
         max(0.0, time.monotonic() - routed_validation_start), 3
     )
@@ -1092,9 +1054,7 @@ def route_local_subcircuit(
             split_unconnected_nets,
         )
 
-        _local_open, _, _ = split_unconnected_nets(
-            validation, acceptance_config_from_dict(cfg)
-        )
+        _local_open, _, _ = split_unconnected_nets(validation, acceptance_config_from_dict(cfg))
         if _local_open and len(_local_open) <= _repair_cap:
             from kicraft.autoplacer.brain.signal_repair_pass import (
                 attempt_signal_unconnected_repair,
@@ -1307,9 +1267,7 @@ def route_local_subcircuit(
         validation["leaf_placed_board"] = str(pre_route_board)
         validation["router"] = "kicad-routing-tools"
         validation["internal_net_names"] = list(sorted(extraction.internal_net_names))
-        validation["interface_port_names"] = [
-            port.name for port in extraction.interface_ports
-        ]
+        validation["interface_port_names"] = [port.name for port in extraction.interface_ports]
         validation["imported_copper_summary"] = {
             "trace_count": int(imported_copper.get("trace_count", 0)),
             "via_count": int(imported_copper.get("via_count", 0)),
@@ -1375,9 +1333,7 @@ def route_local_subcircuit(
             "_trace_segments": [
                 copy.deepcopy(trace) for trace in imported_copper.get("traces", [])
             ],
-            "_via_objects": [
-                copy.deepcopy(via) for via in imported_copper.get("vias", [])
-            ],
+            "_via_objects": [copy.deepcopy(via) for via in imported_copper.get("vias", [])],
             "routing_stats": routing_stats,
             "validation": validation,
             "gnd_pour_summary": copy.deepcopy(gnd_pour_summary),
@@ -1395,6 +1351,51 @@ def route_local_subcircuit(
         },
         route_timing,
     )
+
+
+def _place_fabricated_edge_interfaces(board_state: BoardState, cfg: dict[str, Any]) -> None:
+    """Apply exact edge/pitch datums after trivial-leaf outline reframing."""
+    interfaces = cfg.get("edge_interfaces", []) or []
+    if not interfaces:
+        return
+    tl, br = board_state.board_outline
+    margin = float(cfg.get("edge_margin_mm", 2.0))
+    for interface in interfaces:
+        refs = [str(ref) for ref in interface.get("refs", [])]
+        members = [board_state.components.get(ref) for ref in refs]
+        side = str(interface.get("side", ""))
+        pitch = float(interface.get("pitch_mm", 0.0))
+        if (
+            not refs
+            or side not in {"left", "right", "top", "bottom"}
+            or pitch <= 0
+            or any(member is None or not member.pads for member in members)
+        ):
+            continue
+        span = (len(refs) - 1) * pitch
+        if side in {"left", "right"} and br.y - tl.y < span + 2 * margin:
+            center = (tl.y + br.y) / 2
+            half = (span + 2 * margin) / 2
+            tl, br = Point(tl.x, center - half), Point(br.x, center + half)
+        elif side in {"top", "bottom"} and br.x - tl.x < span + 2 * margin:
+            center = (tl.x + br.x) / 2
+            half = (span + 2 * margin) / 2
+            tl, br = Point(center - half, tl.y), Point(center + half, br.y)
+        start = (tl.y + br.y - span) / 2 if side in {"left", "right"} else (tl.x + br.x - span) / 2
+        for index, member in enumerate(members):
+            pad = member.pads[0]
+            target = Point(
+                tl.x if side == "left" else br.x if side == "right" else start + index * pitch,
+                tl.y if side == "top" else br.y if side == "bottom" else start + index * pitch,
+            )
+            dx, dy = target.x - pad.pos.x, target.y - pad.pos.y
+            member.pos = Point(member.pos.x + dx, member.pos.y + dy)
+            if member.body_center is not None:
+                member.body_center = Point(member.body_center.x + dx, member.body_center.y + dy)
+            for member_pad in member.pads:
+                member_pad.pos = Point(member_pad.pos.x + dx, member_pad.pos.y + dy)
+            member.locked = True
+    board_state.board_outline = (tl, br)
 
 
 def _stamp_trivial_leaf(
@@ -1442,9 +1443,7 @@ def _stamp_trivial_leaf(
         solved_components,
         cfg,
     )
-    route_timing["legality_repair_s"] = round(
-        max(0.0, time.monotonic() - legality_start), 3
-    )
+    route_timing["legality_repair_s"] = round(max(0.0, time.monotonic() - legality_start), 3)
 
     source_pcb = Path(cfg.get("subcircuit_route_source_pcb", cfg.get("pcb_path", "")))
     if not source_pcb.exists():
@@ -1488,11 +1487,15 @@ def _stamp_trivial_leaf(
     # stamp. Apply the same shrink-and-center as the main-path silk re-stamp so the
     # rounded silk hugs Edge.Cuts and the standalone leaf opens centered on its A4
     # page (the parent composer re-bases each leaf on load, so this is placement-safe).
-    _new_outline = _outline_around_geometry(
-        route_input_board.components,
-        cfg,
-        antenna_edge_intents=route_input_board.antenna_edge_intents,
-    )
+    antenna_edge_intents = getattr(route_input_board, "antenna_edge_intents", None)
+    if antenna_edge_intents is None:
+        _new_outline = _outline_around_geometry(route_input_board.components, cfg)
+    else:
+        _new_outline = _outline_around_geometry(
+            route_input_board.components,
+            cfg,
+            antenna_edge_intents=antenna_edge_intents,
+        )
     if _new_outline is not None:
         _new_tl, _new_br = _new_outline
         _delta, _centered_outline = _center_on_leaf_page(_new_tl, _new_br, cfg)
@@ -1500,13 +1503,13 @@ def _stamp_trivial_leaf(
             from kicraft.autoplacer.brain.leaf_geometry import (
                 copy_components_with_translation,
             )
+
             route_input_board.components = copy_components_with_translation(
                 route_input_board.components, _delta
             )
         route_input_board.board_outline = _centered_outline
-    route_input_board.silkscreen = _silk_for_leaf(
-        extraction, route_input_board.components, cfg
-    )
+    _place_fabricated_edge_interfaces(route_input_board, cfg)
+    route_input_board.silkscreen = _silk_for_leaf(extraction, route_input_board.components, cfg)
 
     stamp_start = time.monotonic()
     route_adapter = KiCadAdapter(str(source_pcb), config=cfg)
@@ -1517,9 +1520,7 @@ def _stamp_trivial_leaf(
         clear_existing_zones=True,
         remove_unmapped_footprints=True,
     )
-    route_timing["stamp_pre_route_board_s"] = round(
-        max(0.0, time.monotonic() - stamp_start), 3
-    )
+    route_timing["stamp_pre_route_board_s"] = round(max(0.0, time.monotonic() - stamp_start), 3)
 
     # No the autorouter to run; the placed board IS the routed board.
     shutil.copy2(pre_route_board, routed_board)

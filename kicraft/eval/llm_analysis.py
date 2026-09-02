@@ -12,7 +12,7 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from kicraft.cli.web_cost_report import load_rows, load_stage_runs
+from kicraft.cli.web_cost_report import load_rows, load_stage_attempts, load_stage_runs
 from kicraft.design.models import Architecture, BOM
 from kicraft.design.synthesis.validation import (
     bom_parts_on_unknown_sheets,
@@ -24,7 +24,7 @@ from kicraft.tuning.benchmark import BENCHMARK_PROMPTS
 
 from .llm_canary import COHORT, ENVELOPE_USD, REFERENCE_BATCH
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring", "judge")
 _CLASSIFICATIONS = {
     "operational",
@@ -1071,6 +1071,61 @@ def _recommendation(verdict: str, stop_gates: list[dict]) -> str:
     return "Run a separate three-repeat campaign with the same frozen policy before considering a model migration."
 
 
+def stage_reliability_metrics(attempt_rows: list[dict], stage_statuses: list[dict]) -> dict:
+    """Aggregate availability and semantic outcomes with separate denominators."""
+    by_stage: dict[str, dict] = {}
+    statuses_by_key = {
+        (str(row.get("run_id")), str(row.get("stage"))): row for row in stage_statuses
+    }
+    keys = set(statuses_by_key) | {
+        (str(row.get("run_id")), str(row.get("stage"))) for row in attempt_rows
+    }
+    for run_id, stage in sorted(keys):
+        status = statuses_by_key.get((run_id, stage), {})
+        attempts = [
+            row
+            for row in attempt_rows
+            if str(row.get("run_id")) == run_id and str(row.get("stage")) == stage
+        ]
+        bucket = by_stage.setdefault(
+            stage,
+            {
+                "n": 0,
+                "provider_completed": 0,
+                "schema_valid_first_pass": 0,
+                "commit_first_pass": 0,
+                "semantic_clean_first_pass": 0,
+                "semantic_clean_after_repair": 0,
+                "user_continued": 0,
+                "diagnostics": {},
+                "not_observable": 0,
+            },
+        )
+        bucket["n"] += 1
+        first = min(attempts, key=lambda row: int(row.get("attempt") or 0)) if attempts else None
+        if first is None:
+            bucket["not_observable"] += 1
+        else:
+            outcome = str(first.get("outcome") or "")
+            if not outcome.startswith(("provider_", "transport_")):
+                bucket["provider_completed"] += 1
+            if outcome in {"candidate", "commit_rejected"}:
+                bucket["schema_valid_first_pass"] += 1
+            if outcome == "candidate":
+                bucket["commit_first_pass"] += 1
+            if outcome == "candidate" and not first.get("diagnostic_codes"):
+                bucket["semantic_clean_first_pass"] += 1
+        if status.get("semantic_clean") is True:
+            bucket["semantic_clean_after_repair"] += 1
+        if status.get("ok") is True:
+            bucket["user_continued"] += 1
+        for diagnostic in status.get("diagnostics") or []:
+            code = diagnostic.get("code") if isinstance(diagnostic, dict) else None
+            if code:
+                bucket["diagnostics"][code] = bucket["diagnostics"].get(code, 0) + 1
+    return by_stage
+
+
 def _render_markdown(report: dict) -> str:
     verdict = report["verdict"]
     aggregate = report["aggregates"]
@@ -1165,6 +1220,7 @@ def analyze_batch(
     ledger = Path(ledger or (Path.home() / ".kicraft" / "spend_ledger.db"))
     projects_dir = Path(projects_dir or (Path.home() / ".kicraft" / "projects"))
     spend_rows, stage_rows = _load_ledger(ledger)
+    attempt_rows = load_stage_attempts(ledger) if ledger.is_file() else []
     integrity, loaded = _integrity(batch, spend_rows, stage_rows)
     canary = loaded.get("canary") or {}
     immutable = canary.get("immutable") or {}
@@ -1182,6 +1238,12 @@ def analyze_batch(
                 )
             )
     aggregates = _aggregates(runs)
+    reliability_statuses = [
+        {"run_id": run.get("run_id"), "stage": stage, **(data or {})}
+        for run in runs
+        for stage, data in (run.get("stages") or {}).items()
+    ]
+    reliability = stage_reliability_metrics(attempt_rows, reliability_statuses)
     preflight_cost = round(
         sum(float(row.get("cost_usd") or 0.0) for row in loaded.get("preflight_spend", [])),
         6,
@@ -1225,6 +1287,7 @@ def analyze_batch(
         "cohort": immutable.get("cohort") or [{"slug": slug} for slug in COHORT],
         "runs": runs,
         "aggregates": aggregates,
+        "stage_reliability": reliability,
         "baseline": _baseline(baseline),
         "production": _production(projects_dir),
         "stop_gates": stop_gates,

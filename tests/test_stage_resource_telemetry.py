@@ -136,6 +136,52 @@ def test_failed_intent_records_wall_cpu_but_null_rounds(tmp_path):
     assert row == (None, None)
 
 
+def test_stage_attempt_rows_are_redacted_and_attributable(tmp_path):
+    from kicraft.cli.web_cost_report import load_stage_attempts
+    from kicraft.server.config import Settings
+    from kicraft.server.spend_guard import SpendGuard
+
+    guard = SpendGuard(Settings(api_key="x", ledger_path=tmp_path / "ledger.db"))
+    guard.record_stage_attempt(
+        run_id="run-7",
+        stage="architecture",
+        attempt=1,
+        call_mode="normal",
+        outcome="commit_rejected",
+        model="model",
+        provider="provider",
+        finish_reason="stop",
+        input_tokens=10,
+        output_tokens=20,
+        cost_usd=0.01,
+        diagnostic_codes=["architecture_missing_power_endpoint"],
+    )
+    rows = load_stage_attempts(guard.path)
+    assert rows[0]["run_id"] == "run-7" and rows[0]["stage"] == "architecture"
+    assert rows[0]["diagnostic_codes"] == ["architecture_missing_power_endpoint"]
+    assert not ({"brief", "messages", "reasoning", "candidate", "response"} & rows[0].keys())
+    attempt_aggregates = guard.stage_attempt_aggregates()
+    assert attempt_aggregates == [
+        {
+            "stage": "architecture",
+            "model": "model",
+            "provider": "provider",
+            "outcome": "commit_rejected",
+            "error_code": None,
+            "attempts": 1,
+            "avg_wall_s": None,
+            "cost_usd": 0.01,
+        }
+    ]
+    assert guard.stage_diagnostic_aggregates() == [
+        {
+            "stage": "architecture",
+            "code": "architecture_missing_power_endpoint",
+            "attempts": 1,
+        }
+    ]
+
+
 def test_web_cost_report_aggregates_stage_resources():
     from kicraft.cli.web_cost_report import format_stage_runs, summarize_stage_runs
 

@@ -12,8 +12,10 @@ from typing import Literal
 import requests
 
 from kicraft.design import models
+from kicraft.design.stage_semantics import diagnose_stage
 
 from .config import STAGE_COLLECTION_BOUNDS, STAGE_SERIALIZATION_MAX_TOKENS, StageResponsePolicy
+from .client import classify_provider_exception
 from .stage_bom_tools import BOM_TOOLS, build_bom_executor
 from .stage_contracts import (
     StageResponseContract,
@@ -85,6 +87,48 @@ def _record_stage_ledger(client, *, run_id, stage, **kw) -> None:
         guard.record_stage(run_id=run_id, stage=stage, **kw)
     except Exception:  # ledger trouble must never fail a design run
         pass
+
+
+def _record_stage_attempt(client, *, run_id, stage, **kw) -> None:
+    guard = getattr(client, "guard", None)
+    if guard is None or not hasattr(guard, "record_stage_attempt"):
+        return
+    try:
+        guard.record_stage_attempt(run_id=run_id, stage=stage, **kw)
+    except Exception:
+        pass
+
+
+def _record_attempt_facts(
+    client,
+    *,
+    run_id,
+    stage,
+    attempt,
+    call_mode,
+    outcome,
+    facts=None,
+    error_facts=None,
+    diagnostic_codes=(),
+) -> None:
+    usage = (facts.usage or {}) if facts is not None else {}
+    _record_stage_attempt(
+        client,
+        run_id=run_id,
+        stage=stage,
+        attempt=attempt,
+        call_mode=call_mode,
+        model=_client_model(client),
+        provider=facts.provider if facts is not None else None,
+        finish_reason=facts.finish if facts is not None else None,
+        outcome=outcome,
+        wall_s=facts.wall_s if facts is not None else None,
+        input_tokens=usage.get("prompt_tokens"),
+        output_tokens=usage.get("completion_tokens"),
+        cost_usd=facts.cost_usd if facts is not None else 0.0,
+        diagnostic_codes=diagnostic_codes,
+        **(error_facts or {}),
+    )
 
 
 # Per-stage self-correction budget. Wiring must satisfy whole-board net coverage
@@ -323,9 +367,17 @@ _FAILURE_KIND_ERROR = {
     "invalid_json": "no JSON in reply",
     "invalid_schema": "provider response did not satisfy the required JSON schema",
     "provider_error": "provider error",
-    "transport_error": "transport error",
+    "provider_rate_limited": "provider temporarily rate limited the request",
+    "provider_upstream_5xx": "provider service was temporarily unavailable",
+    "provider_auth": "provider authentication failed",
+    "provider_request_rejected": "provider rejected the request",
+    "provider_response_format_rejected": "provider rejected the response format",
+    "provider_capability_rejected": "provider does not support a required capability",
+    "provider_unknown": "provider request failed",
+    "transport_timeout": "provider request timed out",
+    "transport_connection": "provider connection failed",
+    "transport_stream_interrupted": "provider response stream was interrupted",
 }
-
 
 # Serialization recovery instruction: rebuild the pristine stage task/state and
 # demand ONE compact slot object, no tools, no markdown, no prose. The reply is
@@ -354,6 +406,13 @@ _COLLECTION_LIMIT_RETRY_MSG = (
     "and nothing was committed. {bounds_sentence}Do NOT call any tools. Start "
     "again from the project state and emit ONE compact slot JSON within those "
     "canonical limits. Do not continue or salvage the stopped draft."
+)
+
+_SEMANTIC_REPAIR_MSG = (
+    "The candidate is schema-valid but deterministic semantic checks found the "
+    "following high-confidence defects: {diagnostics}. Preserve all valid content, "
+    "correct only these defects, add no new assumptions, and return one complete "
+    "JSON object matching the same schema. No tools, markdown, or prose."
 )
 
 
@@ -409,6 +468,9 @@ class ProviderFacts:
     collection_limit: dict | None
     loop_abort_reason: str | None
     collection_counts: dict
+    provider: str | None = None
+    usage: dict | None = None
+    wall_s: float | None = None
 
 
 def call_stage_provider(
@@ -425,6 +487,7 @@ def call_stage_provider(
     meta_ctx: dict,
 ) -> ProviderFacts:
     """Make exactly one normal or tool-enabled provider call."""
+    call_t0 = time.monotonic()
     if prepared.tools:
         result = client.chat_with_tools(
             messages,
@@ -469,6 +532,9 @@ def call_stage_provider(
         collection_limit=result.get("collection_limit"),
         loop_abort_reason=result.get("loop_abort_reason"),
         collection_counts=result.get("collection_counts") or {},
+        provider=result.get("provider"),
+        usage=result.get("usage") or {},
+        wall_s=round(time.monotonic() - call_t0, 3),
     )
 
 
@@ -484,6 +550,7 @@ def run_serialization_recovery(
     meta_ctx: dict,
 ) -> ProviderFacts:
     """Make the one tool-free recovery call with the prepared full-slot contract."""
+    call_t0 = time.monotonic()
     result = client.chat(
         messages,
         max_tokens=int(prepared.policy.serialization_max_tokens),
@@ -507,6 +574,9 @@ def run_serialization_recovery(
         collection_limit=result.get("collection_limit"),
         loop_abort_reason=result.get("loop_abort_reason"),
         collection_counts=result.get("collection_counts") or {},
+        provider=result.get("provider"),
+        usage=result.get("usage") or {},
+        wall_s=round(time.monotonic() - call_t0, 3),
     )
 
 
@@ -634,6 +704,14 @@ def finalize_stage(
         tool_calls=tool_calls,
         wall_s=wall_s,
         cpu_s=cpu_s,
+        provider_ok=outcome.get("provider_ok"),
+        schema_ok=outcome.get("schema_ok"),
+        semantic_clean=outcome.get("semantic_clean"),
+        repair_required=outcome.get("repair_required", False),
+        fab_safe=outcome.get("fab_safe"),
+        repair_attempted=outcome.get("repair_attempted", False),
+        repair_adopted=outcome.get("repair_adopted", False),
+        diagnostics=outcome.get("diagnostics") or [],
         error=outcome.get("error"),
         failure_kind=outcome.get("failure_kind"),
     )
@@ -653,6 +731,9 @@ def finalize_stage(
         expanded_component_count=expanded_component_count,
     )
     if progress:
+        for diagnostic in outcome.get("diagnostics") or []:
+            progress({"kind": "stage_diagnostic", "stage": stage, **diagnostic})
+    if progress:
         progress(
             {
                 "kind": "stage_done",
@@ -660,6 +741,9 @@ def finalize_stage(
                 "ok": ok,
                 "cost": cost_usd,
                 "attempts": attempts,
+                "warning": bool(outcome.get("diagnostics")),
+                "semantic_clean": outcome.get("semantic_clean"),
+                "fab_safe": outcome.get("fab_safe"),
             }
         )
     return {
@@ -734,15 +818,25 @@ def drive_stage(
         block = _format_core_defaults_block(core_defaults)
         if block:
             extras["core_defaults_block"] = block
+    if stage in {"architecture", "bom"}:
+        from kicraft.design.recipes import recipe_summaries
+
+        extras["circuit_recipes"] = recipe_summaries()
 
     # Bookkeeping the model has no use for stays out of its prompt.
     prompt_state = dict(prep_json["state"])
     prompt_state.pop("stage_status", None)
-    # Wiring sees only the canonical component digest. Existing connection rows
-    # use a different durable representation and would contradict the final-pin
-    # response contract; a wiring drive deliberately replaces them wholesale.
+    # Wiring sees only the canonical component digest. Recipe provenance stays
+    # so normalization can recreate immutable assignments.
     if stage == "wiring" and isinstance(prompt_state.get("bom"), dict):
         full_bom = prompt_state["bom"]
+        from kicraft.design.recipes import locked_pin_assignments
+
+        locked = locked_pin_assignments(full_bom)
+        if locked:
+            extras["recipe_locked_pins"] = [
+                {"ref": ref, "pin": pin, "net": net} for (ref, pin), net in sorted(locked.items())
+            ]
         prompt_state["bom"] = {
             "parts": [
                 {
@@ -750,6 +844,9 @@ def drive_stage(
                     "sheet": p.get("sheet"),
                     "symbol": p.get("symbol"),
                     "value": p.get("value"),
+                    "recipe_id": p.get("recipe_id"),
+                    "recipe_instance": p.get("recipe_instance"),
+                    "recipe_role": p.get("recipe_role"),
                 }
                 for p in full_bom.get("parts", [])
             ],
@@ -880,6 +977,14 @@ def drive_stage(
     expanded_component_count = 0
     emitted_collection_count = 0
     provider_call_budget = max_retries + 2
+    provider_ok = False
+    schema_ok = False
+    semantic_repair_attempted = False
+    semantic_repair_adopted = False
+    semantic_mode = getattr(getattr(client, "s", None), "stage_semantics", "observe")
+    current_facts = None
+    current_call_mode = "normal"
+    current_attempt_number = 0
 
     def emit_candidate_decoded(
         decoded: AttemptOutcome,
@@ -919,6 +1024,7 @@ def drive_stage(
         call_messages = messages
         call_response_format = response_format
         attempts += 1  # a call IS attempted even when it raises below
+        current_attempt_number = attempts
         try:
             facts = call_stage_provider(
                 client,
@@ -945,26 +1051,30 @@ def drive_stage(
                 max(facts.collection_counts.values(), default=0),
             )
             total_cost += facts.cost_usd
-        except _TRANSPORT_FAILURE_EXC:
-            # Transport retries exhausted: terminal, never sent through JSON
-            # recovery (BudgetExceeded is NOT caught — it propagates to the
-            # guard/caller path).
+            provider_ok = True
+            current_facts = facts
+            current_call_mode = "clean_slate" if was_clean_slate else "normal"
+        except (*_TRANSPORT_FAILURE_EXC, *_PROVIDER_FAILURE_EXC) as exc:
+            failure = classify_provider_exception(exc)
+            kind = failure["failure_kind"]
             last = {
-                "failure_kind": "transport_error",
-                "error": "transport error",
-                "reply_head": (raw or "")[:200],
+                **failure,
+                "error": _FAILURE_KIND_ERROR[kind],
+                "reply_head": "",
                 "rounds": rounds,
                 "tool_calls": tool_calls_ct,
+                "provider_ok": provider_ok,
+                "schema_ok": schema_ok,
             }
-            break
-        except _PROVIDER_FAILURE_EXC:
-            last = {
-                "failure_kind": "provider_error",
-                "error": "provider error",
-                "reply_head": (raw or "")[:200],
-                "rounds": rounds,
-                "tool_calls": tool_calls_ct,
-            }
+            _record_attempt_facts(
+                client,
+                run_id=run_id,
+                stage=stage,
+                attempt=attempts,
+                call_mode="clean_slate" if was_clean_slate else "normal",
+                outcome=kind,
+                error_facts={k: v for k, v in failure.items() if k != "failure_kind"},
+            )
             break
 
         # Reasoning recovery: the in-stream loop detector aborted, the client
@@ -982,6 +1092,15 @@ def drive_stage(
                 "tool_calls": tool_calls_ct,
                 "loop_abort_reason": loop_abort_reason,
             }
+            _record_attempt_facts(
+                client,
+                run_id=run_id,
+                stage=stage,
+                attempt=attempts,
+                call_mode="clean_slate" if was_clean_slate else "normal",
+                outcome="reasoning_loop",
+                facts=facts,
+            )
             if progress:
                 progress(
                     {
@@ -1015,6 +1134,17 @@ def drive_stage(
         if outcome.kind in {"candidate", "questions"}:
             obj = outcome.payload["candidate"]
             expanded_component_count = outcome.payload["expanded_component_count"]
+            schema_ok = True
+        if outcome.kind == "questions":
+            _record_attempt_facts(
+                client,
+                run_id=run_id,
+                stage=stage,
+                attempt=attempts,
+                call_mode="clean_slate" if was_clean_slate else "normal",
+                outcome="question",
+                facts=facts,
+            )
         if schema_error or kind in {"collection_limit", "truncated_json", "invalid_json"}:
             last = {
                 "failure_kind": kind,
@@ -1024,6 +1154,15 @@ def drive_stage(
                 "error": _FAILURE_KIND_ERROR.get(kind, kind),
                 "schema_error": schema_error_detail,
             }
+            _record_attempt_facts(
+                client,
+                run_id=run_id,
+                stage=stage,
+                attempt=attempts,
+                call_mode="clean_slate" if was_clean_slate else "normal",
+                outcome=kind,
+                facts=facts,
+            )
             if progress:
                 progress(
                     {
@@ -1041,6 +1180,7 @@ def drive_stage(
             # instruction (never the BOM tool transcript, never a doubled cap).
             serialization_calls += 1
             attempts += 1  # the serialization completion is a provider call too
+            current_attempt_number = attempts
             sctx = {**ctx, "serialization": True}
             smessages = list(call_messages)
             bounds_sentence = _collection_bounds_sentence(policy.collection_bounds)
@@ -1092,23 +1232,27 @@ def drive_stage(
                     meta_ctx=sctx,
                 )
                 total_cost += sfacts.cost_usd
-            except _TRANSPORT_FAILURE_EXC:
+            except (*_TRANSPORT_FAILURE_EXC, *_PROVIDER_FAILURE_EXC) as exc:
+                failure = classify_provider_exception(exc)
+                skind = failure["failure_kind"]
                 last = {
-                    "failure_kind": "transport_error",
-                    "error": "transport error",
-                    "reply_head": (raw or "")[:200],
+                    **failure,
+                    "error": _FAILURE_KIND_ERROR[skind],
+                    "reply_head": "",
                     "rounds": rounds,
                     "tool_calls": tool_calls_ct,
+                    "provider_ok": provider_ok,
+                    "schema_ok": schema_ok,
                 }
-                break
-            except _PROVIDER_FAILURE_EXC:
-                last = {
-                    "failure_kind": "provider_error",
-                    "error": "provider error",
-                    "reply_head": (raw or "")[:200],
-                    "rounds": rounds,
-                    "tool_calls": tool_calls_ct,
-                }
+                _record_attempt_facts(
+                    client,
+                    run_id=run_id,
+                    stage=stage,
+                    attempt=attempts,
+                    call_mode="serialization",
+                    outcome=skind,
+                    error_facts={k: v for k, v in failure.items() if k != "failure_kind"},
+                )
                 break
             sraw = sfacts.raw
             scollection_limit = sfacts.collection_limit
@@ -1125,6 +1269,21 @@ def drive_stage(
             if serialization_outcome.kind in {"candidate", "questions"}:
                 obj = serialization_outcome.payload["candidate"]
                 expanded_component_count = serialization_outcome.payload["expanded_component_count"]
+                schema_ok = True
+            if serialization_outcome.kind != "candidate":
+                _record_attempt_facts(
+                    client,
+                    run_id=run_id,
+                    stage=stage,
+                    attempt=attempts,
+                    call_mode="serialization",
+                    outcome=(
+                        "question"
+                        if serialization_outcome.kind == "questions"
+                        else skind or "invalid_schema"
+                    ),
+                    facts=sfacts,
+                )
             if schema_error or skind in {
                 "collection_limit",
                 "reasoning_loop",
@@ -1145,6 +1304,8 @@ def drive_stage(
             # A commit rejection may still use remaining commit-correction
             # attempts at the normal stage/tool policy.
             raw = sraw
+            current_facts = sfacts
+            current_call_mode = "serialization"
 
         # A clarifying-question payload parks the stage (no slot this turn). No slot
         # model has a top-level "questions" key, so the shape is unambiguous. Never
@@ -1178,8 +1339,108 @@ def drive_stage(
             )
             continue
 
+        original_obj = obj
+        diagnostics = diagnose_stage(stage, brief=brief, upstream_state=prompt_state, candidate=obj)
+        severe = [d for d in diagnostics if d.severity in {"repair_required", "fab_gate"}]
+        if severe and semantic_mode in {"repair", "enforce"} and not semantic_repair_attempted:
+            semantic_repair_attempted = True
+            attempts += 1
+            repair_message = _SEMANTIC_REPAIR_MSG.format(
+                diagnostics=json.dumps(
+                    [{"code": d.code, "evidence": d.evidence} for d in severe],
+                    separators=(",", ":"),
+                )
+            )
+            repair_messages = _lean_retry(raw, repair_message)
+            try:
+                repair_facts = run_serialization_recovery(
+                    client,
+                    prepared,
+                    messages=repair_messages,
+                    response_format=response_format,
+                    temperature=max(escape_temperature, 0.0),
+                    reasoning_guard=reasoning_guard,
+                    progress=progress,
+                    meta_ctx={
+                        **(meta_ctx or {}),
+                        "stage": stage,
+                        "attempt": attempts,
+                        "semantic_repair": True,
+                    },
+                )
+                total_cost += repair_facts.cost_usd
+                repair_outcome = decode_stage_response(prepared, repair_facts)
+                if repair_outcome.kind == "candidate":
+                    repaired = repair_outcome.payload["candidate"]
+                    repaired_diagnostics = diagnose_stage(
+                        stage, brief=brief, upstream_state=prompt_state, candidate=repaired
+                    )
+                    repaired_severe = [
+                        d
+                        for d in repaired_diagnostics
+                        if d.severity in {"repair_required", "fab_gate"}
+                    ]
+                    if len(repaired_severe) < len(severe):
+                        obj = repaired
+                        diagnostics = repaired_diagnostics
+                        severe = repaired_severe
+                        semantic_repair_adopted = True
+                    _record_attempt_facts(
+                        client,
+                        run_id=run_id,
+                        stage=stage,
+                        attempt=attempts,
+                        call_mode="semantic_repair",
+                        outcome="candidate",
+                        facts=repair_facts,
+                        diagnostic_codes=[d.code for d in repaired_diagnostics],
+                    )
+                else:
+                    repair_kind = repair_outcome.payload.get("failure_kind") or repair_outcome.kind
+                    _record_attempt_facts(
+                        client,
+                        run_id=run_id,
+                        stage=stage,
+                        attempt=attempts,
+                        call_mode="semantic_repair",
+                        outcome=repair_kind,
+                        facts=repair_facts,
+                    )
+            except (*_TRANSPORT_FAILURE_EXC, *_PROVIDER_FAILURE_EXC) as exc:
+                failure = classify_provider_exception(exc)
+                _record_attempt_facts(
+                    client,
+                    run_id=run_id,
+                    stage=stage,
+                    attempt=attempts,
+                    call_mode="semantic_repair",
+                    outcome=failure["failure_kind"],
+                    error_facts={k: v for k, v in failure.items() if k != "failure_kind"},
+                )
+
+        diagnostic_rows = [d.model_dump(exclude_none=True) for d in diagnostics]
         ok, out, obj = commit_candidate(prepared, obj, state_path, brief, workspace)
+        if not ok and semantic_repair_adopted:
+            semantic_repair_adopted = False
+            obj = original_obj
+            diagnostics = diagnose_stage(
+                stage, brief=brief, upstream_state=prompt_state, candidate=obj
+            )
+            severe = [d for d in diagnostics if d.severity in {"repair_required", "fab_gate"}]
+            diagnostic_rows = [d.model_dump(exclude_none=True) for d in diagnostics]
+            ok, out, obj = commit_candidate(prepared, obj, state_path, brief, workspace)
+        _record_attempt_facts(
+            client,
+            run_id=run_id,
+            stage=stage,
+            attempt=current_attempt_number,
+            call_mode=current_call_mode,
+            outcome="candidate" if ok else "commit_rejected",
+            facts=current_facts,
+            diagnostic_codes=[d.code for d in diagnostics],
+        )
         if ok:
+            fab_safe = not any(d.severity == "fab_gate" for d in diagnostics)
             return finalize_stage(
                 client,
                 run_id=run_id,
@@ -1195,9 +1456,27 @@ def drive_stage(
                 tool_calls=tool_calls_ct,
                 emitted_collection_count=emitted_collection_count,
                 expanded_component_count=expanded_component_count,
-                outcome={"commit": out, "slot": obj},
+                outcome={
+                    "commit": out,
+                    "slot": obj,
+                    "provider_ok": provider_ok,
+                    "schema_ok": schema_ok,
+                    "semantic_clean": not diagnostics,
+                    "repair_required": bool(severe),
+                    "fab_safe": fab_safe,
+                    "repair_attempted": semantic_repair_attempted,
+                    "repair_adopted": semantic_repair_adopted,
+                    "diagnostics": diagnostic_rows,
+                },
             )
-        last = {"commit": out}
+        last = {
+            "commit": out,
+            "provider_ok": provider_ok,
+            "schema_ok": schema_ok,
+            "repair_attempted": semantic_repair_attempted,
+            "repair_adopted": semantic_repair_adopted,
+            "diagnostics": diagnostic_rows,
+        }
         if progress:
             progress(
                 {
@@ -1234,6 +1513,8 @@ def drive_stage(
     # failure); every other terminal path already carries its failure_kind.
     if "failure_kind" not in last and last.get("commit") is not None:
         last["failure_kind"] = "commit_rejected"
+    last.setdefault("provider_ok", provider_ok)
+    last.setdefault("schema_ok", schema_ok)
     return finalize_stage(
         client,
         run_id=run_id,

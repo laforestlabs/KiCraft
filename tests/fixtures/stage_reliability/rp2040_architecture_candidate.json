@@ -1,0 +1,687 @@
+{
+  "topologies": {
+    "USB_INPUT": "USB-C receptacle with ESD protection, device-only",
+    "POWER_INPUT": "5V VBUS distribution with bulk decoupling",
+    "LDO_3V3": "Low-dropout linear regulator, 5V to 3.3V",
+    "MCU_RP2040": "RP2040 QFN-56 with decoupling, reset, and boot strapping",
+    "QSPI_FLASH": "QSPI NOR flash, 3.3V",
+    "CLOCK_12MHZ": "12 MHz parallel-resonant crystal with load caps",
+    "GPIO_CASTELLATED": "Castellated edge pads for GPIO breakout"
+  },
+  "rail_voltages": {
+    "VBUS": 5.0,
+    "+3V3": 3.3,
+    "GND": 0.0
+  },
+  "comms_protocols": [
+    "USB 2.0 FS"
+  ],
+  "mcu_present": true,
+  "sheets": [
+    {
+      "name": "USB INPUT",
+      "stem": "USB_INPUT",
+      "function": "USB-C receptacle with ESD protection on VBUS and D+/D- lines",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    },
+    {
+      "name": "POWER 5V",
+      "stem": "POWER_5V",
+      "function": "5V VBUS distribution with bulk decoupling and common ground",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    },
+    {
+      "name": "LDO 3V3",
+      "stem": "LDO_3V3",
+      "function": "LDO regulator converting 5V to 3.3V rail",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    },
+    {
+      "name": "MCU RP2040",
+      "stem": "MCU_RP2040",
+      "function": "RP2040 QFN-56 with decoupling, reset, and boot configuration",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    },
+    {
+      "name": "QSPI FLASH",
+      "stem": "QSPI_FLASH",
+      "function": "QSPI NOR flash connected to RP2040 QSPI interface",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    },
+    {
+      "name": "CLOCK 12MHZ",
+      "stem": "CLOCK_12MHZ",
+      "function": "12 MHz crystal oscillator reference for RP2040",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    },
+    {
+      "name": "GPIO CASTELLATED",
+      "stem": "GPIO_CASTELLATED",
+      "function": "Castellated edge pads exposing RP2040 GPIO pins",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    }
+  ],
+  "power_nets": [
+    "VBUS",
+    "+3V3",
+    "GND"
+  ],
+  "inter_sheet_nets": [
+    {
+      "name": "VBUS",
+      "endpoints": [
+        {
+          "sheet": "USB INPUT",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "POWER 5V",
+          "direction": "bidirectional"
+        }
+      ]
+    },
+    {
+      "name": "GND",
+      "endpoints": [
+        {
+          "sheet": "USB INPUT",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "POWER 5V",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "LDO 3V3",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "MCU RP2040",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "QSPI FLASH",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "CLOCK 12MHZ",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "bidirectional"
+        }
+      ]
+    },
+    {
+      "name": "USB_D_PLUS",
+      "endpoints": [
+        {
+          "sheet": "USB INPUT",
+          "direction": "output"
+        },
+        {
+          "sheet": "MCU RP2040",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "USB_D_MINUS",
+      "endpoints": [
+        {
+          "sheet": "USB INPUT",
+          "direction": "output"
+        },
+        {
+          "sheet": "MCU RP2040",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "+3V3",
+      "endpoints": [
+        {
+          "sheet": "LDO 3V3",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "MCU RP2040",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "QSPI FLASH",
+          "direction": "bidirectional"
+        }
+      ]
+    },
+    {
+      "name": "QSPI_CS",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "QSPI FLASH",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "QSPI_SCK",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "QSPI FLASH",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "QSPI_D0",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "QSPI FLASH",
+          "direction": "bidirectional"
+        }
+      ]
+    },
+    {
+      "name": "QSPI_D1",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "QSPI FLASH",
+          "direction": "bidirectional"
+        }
+      ]
+    },
+    {
+      "name": "QSPI_D2",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "QSPI FLASH",
+          "direction": "bidirectional"
+        }
+      ]
+    },
+    {
+      "name": "QSPI_D3",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "QSPI FLASH",
+          "direction": "bidirectional"
+        }
+      ]
+    },
+    {
+      "name": "XIN",
+      "endpoints": [
+        {
+          "sheet": "CLOCK 12MHZ",
+          "direction": "output"
+        },
+        {
+          "sheet": "MCU RP2040",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "XOUT",
+      "endpoints": [
+        {
+          "sheet": "CLOCK 12MHZ",
+          "direction": "output"
+        },
+        {
+          "sheet": "MCU RP2040",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO0",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO1",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO2",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO3",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO4",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO5",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO6",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO7",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO8",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO9",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO10",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO11",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO12",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO13",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO14",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO15",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO16",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO17",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO18",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO19",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO20",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO21",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO22",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO23",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO24",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO25",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO26",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO27",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO28",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GPIO29",
+      "endpoints": [
+        {
+          "sheet": "MCU RP2040",
+          "direction": "output"
+        },
+        {
+          "sheet": "GPIO CASTELLATED",
+          "direction": "input"
+        }
+      ]
+    }
+  ],
+  "assumptions": [
+    "Board powered solely from USB VBUS 5V (defaulted)",
+    "3.3V rail from single LDO regulator (defaulted)",
+    "RP2040 default boot config with QSPI flash primary (defaulted)",
+    "12 MHz parallel-resonant crystal with internal oscillator (defaulted)",
+    "All 30 GPIO pins exposed on castellated pads (defaulted)",
+    "USB-C device-only, no USB-PD (defaulted)",
+    "No external reset button or user LEDs (defaulted)",
+    "LDO 3.3V <=500mA: ME6211C33 per core defaults (defaulted)",
+    "RP2040: BOOTSEL path via castellated BOOTSEL pad and SWD header (defaulted)",
+    "QSPI flash: W25Q16JV-IQ per core defaults (defaulted)"
+  ]
+}

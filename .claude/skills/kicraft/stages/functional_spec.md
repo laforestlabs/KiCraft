@@ -5,7 +5,7 @@ Given the captured `intent` (available in the `state` field of stage-prep's outp
 Slot shape (`FunctionalSpec`):
 
 - `blocks`: list of `FunctionalBlock`, each with:
-  - `name` — uppercase identifier (e.g. `USB_INPUT`, `CHARGER`, `LDO_3V3`).
+  - `name` — uppercase functional identifier (e.g. `USB_INPUT`, `POWER_CONVERSION`).
   - `category` — one of `sense` / `process` / `drive` / `power` / `interface`.
   - `purpose` — one sentence.
   - `count` — number of identical instances (default 1). Set `count: N` on ONE block when the design asks for N copies of the SAME function (e.g. "3 axes of stepper outputs" → one `STEPPER_AXIS` block with `count: 3`, NOT three near-duplicate blocks). The architecture stage expands a `count`-N block into N grouped sheets that the layout solves once and replicates. Keep genuinely distinct functions as separate blocks.
@@ -19,9 +19,12 @@ Constraints (enforced by Pydantic):
 
 Block-boundary heuristics:
 
-- Each block should map cleanly to one schematic sheet later.
-- A block is "a coherent function someone would describe as a unit" (e.g. "the charger", "the boost converter"), not "an op-amp" or "three caps".
-- Power input, ground, and rail outputs each get their own block if they connect to multiple downstream blocks.
-- Aim for 3-8 blocks total for a typical hobbyist project. More is fine for complex designs.
+- A block is a coherent user-visible function, not a rail, ground, mechanical
+  hole, crystal, passive support network, component, or chosen topology.
+- Do not introduce LDO/buck/boost/ESD/controller choices unless the brief or
+  intent explicitly requires them. Every default introduced here must appear in
+  `assumptions` ending `(defaulted)`.
+- Aim for 3-8 blocks total for a typical hobbyist project. More is fine for
+  complex designs.
 
 Open-question discipline matches Stage 1: `blocking`, `material`, or silent default in `assumptions`.

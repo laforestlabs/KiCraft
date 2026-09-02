@@ -29,6 +29,7 @@ from kicraft.autoplacer.brain.types import (
 # Translation helpers (pure geometry, no pcbnew)
 # ------------------------------------------------------------------
 
+
 def copy_components_with_translation(
     components: dict[str, Component],
     delta: Point,
@@ -79,6 +80,7 @@ def copy_vias_with_translation(vias: list[Any], delta: Point) -> list[Any]:
 # ------------------------------------------------------------------
 # Bounding-box computation
 # ------------------------------------------------------------------
+
 
 def tight_leaf_geometry_bounds(
     extraction: ExtractedSubcircuitBoard,
@@ -195,8 +197,7 @@ def grow_leaf_outline_to_contain_placement(
         extraction.envelope.width_mm = new_br.x - new_tl.x
         extraction.envelope.height_mm = new_br.y - new_tl.y
     extraction.notes = list(extraction.notes) + [
-        "reframed_outline_to_placement="
-        f"{new_br.x - new_tl.x:.1f}x{new_br.y - new_tl.y:.1f}mm"
+        f"reframed_outline_to_placement={new_br.x - new_tl.x:.1f}x{new_br.y - new_tl.y:.1f}mm"
     ]
     return True
 
@@ -204,6 +205,7 @@ def grow_leaf_outline_to_contain_placement(
 # ------------------------------------------------------------------
 # Reduced extraction builder
 # ------------------------------------------------------------------
+
 
 def build_reduced_leaf_extraction(
     extraction: ExtractedSubcircuitBoard,
@@ -243,9 +245,7 @@ def build_reduced_leaf_extraction(
     )
     if reduced.envelope is not None:
         reduced.envelope.top_left = Point(0.0, 0.0)
-        reduced.envelope.bottom_right = Point(
-            local_state.board_width, local_state.board_height
-        )
+        reduced.envelope.bottom_right = Point(local_state.board_width, local_state.board_height)
         reduced.envelope.width_mm = local_state.board_width
         reduced.envelope.height_mm = local_state.board_height
     reduced.notes = list(reduced.notes) + [
@@ -258,6 +258,7 @@ def build_reduced_leaf_extraction(
 # ------------------------------------------------------------------
 # Size-reduction candidate generator
 # ------------------------------------------------------------------
+
 
 def leaf_size_reduction_candidates(
     current_width: float,
@@ -311,6 +312,7 @@ def leaf_size_reduction_candidates(
 # Local component scoring
 # ------------------------------------------------------------------
 
+
 def score_local_components(
     local_state: BoardState,
     components: dict[str, Component],
@@ -331,14 +333,10 @@ def score_local_components(
     raw_overlap_count = legality.get("overlap_count", 0)
     raw_pad_outside_count = legality.get("pad_outside_count", 0)
     overlap_count = (
-        int(raw_overlap_count)
-        if isinstance(raw_overlap_count, (int, float, str))
-        else 0
+        int(raw_overlap_count) if isinstance(raw_overlap_count, (int, float, str)) else 0
     )
     pad_outside_count = (
-        int(raw_pad_outside_count)
-        if isinstance(raw_pad_outside_count, (int, float, str))
-        else 0
+        int(raw_pad_outside_count) if isinstance(raw_pad_outside_count, (int, float, str)) else 0
     )
 
     if overlap_count or pad_outside_count:
@@ -358,6 +356,7 @@ def score_local_components(
 # ------------------------------------------------------------------
 # Placement legality repair
 # ------------------------------------------------------------------
+
 
 def repair_leaf_placement_legality(
     extraction: ExtractedSubcircuitBoard,
@@ -397,6 +396,15 @@ def repair_leaf_placement_legality(
         if comp is not None:
             comp.array_member = True
             comp.locked = True
+    # Castellated pads deliberately straddle Edge.Cuts. They are fabrication
+    # primitives with solver-owned pitch/datums, not ordinary components for the
+    # generic out-of-board legalizer to scatter back inside the leaf.
+    for interface in cfg.get("edge_interfaces", []) or []:
+        for ref in interface.get("refs", []) or []:
+            comp = repaired.get(str(ref))
+            if comp is not None:
+                comp.array_member = True
+                comp.locked = True
     local_state = copy.deepcopy(extraction.local_state)
     local_state.components = repaired
 
