@@ -360,6 +360,17 @@ class StageSchemaError(ValueError):
     pass
 
 
+def _inter_sheet_net_endpoint_signature(endpoints: list[dict]) -> tuple[tuple[str, str], ...]:
+    """Order-independent, multiplicity-preserving endpoint identity.
+
+    Endpoint order is not semantically meaningful for an inter-sheet net, but
+    repeated endpoints are, so the signature is a sorted tuple, never a set.
+    """
+    return tuple(
+        sorted((str(endpoint["sheet"]), str(endpoint["direction"])) for endpoint in endpoints)
+    )
+
+
 def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> tuple[dict, int]:
     try:
         if isinstance(payload.get("questions"), list):
@@ -369,18 +380,35 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
         if stage == "architecture":
             response = ArchitectureStageResponse.model_validate(payload)
             canonical = response.model_dump(exclude={"inter_sheet_net_ranges"}, exclude_none=True)
-            names = {str(net["name"]) for net in canonical.get("inter_sheet_nets") or []}
+            explicit_nets = canonical.get("inter_sheet_nets") or []
+            explicit_by_name = {str(net["name"]): net for net in explicit_nets}
+            # Every name a range emits, whether kept or deduplicated: a second
+            # range over the same name is redundant and stays rejected.
+            range_covered = set()
             expanded = []
             for net_range in response.inter_sheet_net_ranges:
+                range_signature = _inter_sheet_net_endpoint_signature(
+                    [endpoint.model_dump() for endpoint in net_range.endpoints]
+                )
                 for number in range(net_range.start, net_range.end + 1):
                     name = net_range.name_pattern.replace("{n}", str(number))
-                    if name in names:
+                    if name in range_covered:
                         raise ValueError(f"duplicate/overlapping inter-sheet net {name!r}")
-                    names.add(name)
+                    explicit = explicit_by_name.get(name)
+                    if explicit is not None and _inter_sheet_net_endpoint_signature(
+                        explicit["endpoints"]
+                    ) != range_signature:
+                        raise ValueError(f"duplicate/overlapping inter-sheet net {name!r}")
+                    range_covered.add(name)
+                    if explicit is not None:
+                        # Semantically identical to the explicit canonical net
+                        # (same endpoints, any order): keep that one and drop
+                        # only this redundant range expansion.
+                        continue
                     expanded.append(
                         models.InterSheetNet(name=name, endpoints=net_range.endpoints).model_dump()
                     )
-            canonical["inter_sheet_nets"] = (canonical.get("inter_sheet_nets") or []) + expanded
+            canonical["inter_sheet_nets"] = explicit_nets + expanded
             validated = models.Architecture.model_validate(canonical)
             return validated.model_dump(exclude_none=True), len(expanded)
         if stage == "bom":

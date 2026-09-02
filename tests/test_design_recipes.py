@@ -10,7 +10,7 @@ from kicraft.design.models import BOM, RecipeSelection
 from kicraft.design.recipes import expand_recipe, expand_selections
 from kicraft.design.recipes.registry import locked_pin_assignments
 from kicraft.design.synthesis.validation import check_mcu_programming_access, check_net_coverage
-from kicraft.server.stage_contracts import _normalize_stage_response
+from kicraft.server.stage_contracts import StageSchemaError, _normalize_stage_response
 
 
 def _selection(**parameters):
@@ -221,3 +221,109 @@ def test_compact_architecture_range_expands_without_downstream_shape():
     assert expanded == 30
     assert [net["name"] for net in canonical["inter_sheet_nets"]] == [f"GPIO{i}" for i in range(30)]
     assert "inter_sheet_net_ranges" not in canonical
+
+
+def _range_architecture_payload(explicit_nets, ranges):
+    return {
+        "topologies": {},
+        "rail_voltages": {},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [
+            {"name": "MOTOR 1", "stem": "MOTOR1", "function": "motor stage"},
+            {"name": "MOTOR 2", "stem": "MOTOR2", "function": "motor stage"},
+            {"name": "MCU", "stem": "MCU", "function": "controller"},
+        ],
+        "power_nets": [],
+        "inter_sheet_nets": explicit_nets,
+        "inter_sheet_net_ranges": ranges,
+    }
+
+
+_MOTOR1_MCU = [
+    {"sheet": "MOTOR 1", "direction": "bidirectional"},
+    {"sheet": "MCU", "direction": "bidirectional"},
+]
+
+
+def test_compact_architecture_range_deduplicates_identical_explicit_net():
+    # MOTOR1_A is declared explicitly and again through MOTOR{n}_A 1..2 with the
+    # same endpoints in reversed order: endpoint order is not semantically
+    # meaningful, so the redundant range expansion is dropped losslessly.
+    payload = _range_architecture_payload(
+        explicit_nets=[{"name": "MOTOR1_A", "endpoints": _MOTOR1_MCU}],
+        ranges=[
+            {
+                "name_pattern": "MOTOR{n}_A",
+                "start": 1,
+                "end": 2,
+                "endpoints": list(reversed(_MOTOR1_MCU)),
+            }
+        ],
+    )
+    canonical, expanded = _normalize_stage_response("architecture", payload, {})
+    names = [net["name"] for net in canonical["inter_sheet_nets"]]
+    assert names.count("MOTOR1_A") == 1
+    assert names == ["MOTOR1_A", "MOTOR2_A"]
+    assert expanded == 1
+    assert "inter_sheet_net_ranges" not in canonical
+
+
+def test_compact_architecture_range_rejects_conflicting_explicit_net():
+    # Same generated name exists explicitly with different endpoint semantics.
+    payload = _range_architecture_payload(
+        explicit_nets=[
+            {
+                "name": "MOTOR1_A",
+                "endpoints": [
+                    {"sheet": "MOTOR 1", "direction": "output"},
+                    {"sheet": "MCU", "direction": "input"},
+                ],
+            }
+        ],
+        ranges=[
+            {
+                "name_pattern": "MOTOR{n}_A",
+                "start": 1,
+                "end": 2,
+                "endpoints": _MOTOR1_MCU,
+            }
+        ],
+    )
+    with pytest.raises(StageSchemaError, match="duplicate/overlapping inter-sheet net 'MOTOR1_A'"):
+        _normalize_stage_response("architecture", payload, {})
+
+    # Same generated name exists explicitly over a different sheet set.
+    payload = _range_architecture_payload(
+        explicit_nets=[
+            {
+                "name": "MOTOR1_A",
+                "endpoints": [
+                    {"sheet": "MOTOR 2", "direction": "bidirectional"},
+                    {"sheet": "MCU", "direction": "bidirectional"},
+                ],
+            }
+        ],
+        ranges=[
+            {
+                "name_pattern": "MOTOR{n}_A",
+                "start": 1,
+                "end": 2,
+                "endpoints": _MOTOR1_MCU,
+            }
+        ],
+    )
+    with pytest.raises(StageSchemaError, match="duplicate/overlapping inter-sheet net 'MOTOR1_A'"):
+        _normalize_stage_response("architecture", payload, {})
+
+    # A second range covering an already generated name stays rejected even
+    # when both ranges carry identical endpoints.
+    payload = _range_architecture_payload(
+        explicit_nets=[],
+        ranges=[
+            {"name_pattern": "GPIO{n}", "start": 0, "end": 4, "endpoints": _MOTOR1_MCU},
+            {"name_pattern": "GPIO{n}", "start": 3, "end": 9, "endpoints": _MOTOR1_MCU},
+        ],
+    )
+    with pytest.raises(StageSchemaError, match="duplicate/overlapping inter-sheet net 'GPIO3'"):
+        _normalize_stage_response("architecture", payload, {})
