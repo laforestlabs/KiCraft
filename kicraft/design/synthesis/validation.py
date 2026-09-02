@@ -983,6 +983,14 @@ def check_no_dangling_signal_nets(architecture, bom) -> CheckResult:
         SENSOR, one on ESP32).
     Everything else is sheet-local: a (net_name, sheet) wiring fewer than two
     distinct pins is a dangling label.
+
+    Each offender carries the deterministic topology context built by
+    :func:`_dangling_net_context` (pin function, proven series counterpart,
+    same-sheet related-domain nets with translator-channel mates, declared
+    inter-sheet names) so the wiring-correction pass sees candidate
+    endpoints, not just the orphan. The appended text never changes the
+    offender's identity: the lead clause's canonical ``REF.PIN`` stays the
+    only pin token :func:`_offender_identity` can match.
     """
     inter_sheet_names = {n.name for n in architecture.inter_sheet_nets}
     local_pins: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -991,16 +999,43 @@ def check_no_dangling_signal_nets(architecture, bom) -> CheckResult:
             continue
         for ep in c.endpoints:
             local_pins[(c.net_name, c.sheet)].append(f"{ep.ref}.{ep.pin}")
+    # Context indexes, built once per call (never a per-offender scan of
+    # bom.connections).
+    info, pin_count = _pin_info_by_ref(bom)
+    pin_nets: dict[tuple[str, str], set[str]] = defaultdict(set)
+    net_endpoints: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
+    sheet_net_bases: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for c in bom.connections:
+        for ep in c.endpoints:
+            pin_nets[(ep.ref, ep.pin)].add(c.net_name)
+            net_endpoints[c.net_name].add((c.sheet, ep.ref, ep.pin))
+        if not is_power_or_ground_name(c.net_name):
+            sheet_net_bases[(c.sheet, _net_domain_base(c.net_name))].add(c.net_name)
+    inter_names = sorted(inter_sheet_names)
     bad: list[str] = []
     for (net, sheet), pins in sorted(local_pins.items()):
         if len(set(pins)) < 2:
-            bad.append(
+            ref, _, pin = pins[0].rpartition(".")
+            lead = (
                 f"net {net!r} on sheet {sheet!r} wires only {pins[0]} and is "
                 f"neither a power net nor a declared inter-sheet net, so it "
                 f"connects to nothing (wire it to a second pin, mark it "
                 f"no_connect, or declare an inter-sheet net to carry it to "
                 f"another sheet)"
             )
+            ctx = _dangling_net_context(
+                net,
+                sheet,
+                ref,
+                pin,
+                info=info,
+                pin_count=pin_count,
+                pin_nets=pin_nets,
+                net_endpoints=net_endpoints,
+                sheet_net_bases=sheet_net_bases,
+                inter_names=inter_names,
+            )
+            bad.append(f"{lead} -- {ctx}" if ctx else lead)
     return CheckResult(
         name="9.15 no dangling signal nets",
         ok=not bad,
@@ -1142,6 +1177,172 @@ def _nets_by_ref(bom):
         for ep in c.endpoints:
             out[ep.ref][ep.pin] = c.net_name
     return out
+
+# ---------- §9.15 topology-safe offender context (KC-VKUT5H A1) ----------
+#
+# A bare "net X wires only REF.PIN" sentence did not let the wiring stage fix
+# its dangling far sides: on KC-VKUT5H attempts 1-2 left the USB series
+# resistors' far ends single even with the generic series-path NOTE in
+# stage_runtime._retry_feedback, because a NOTE can name the shape but not the
+# candidate destination pins. The context appended per offender is derived
+# ONLY from the frozen BOM/architecture (deterministic, never a guess) and is
+# topology-safe by construction: name similarity locates related context, it
+# NEVER authorizes a merge. `HUB75_C` / `HUB75_C_5V` are the two intentional
+# sides of a level translator; `USB_D_P` / `USB_D_N` are distinct differential
+# lines; `UART0` / `UART1` differ by a bare numeric suffix that is never
+# stripped.
+#
+# Signature invariant (tests/test_stage_driver_retry.py pins it): the lead
+# clause's canonical {pins[0]} is the ONLY token in an offender that matches
+# _offender_identity's REF.PIN / "REF pin N" pin regex; every contextual pin
+# here is written "pin N of REF", which that regex cannot match. Never emit a
+# dotted pin or a "<REF> pin" adjacency in the appended context.
+
+_GENERIC_PIN_NAME_RE = re.compile(r"^(pin_?\d+|passive|unnamed)$", re.I)
+_CHANNEL_PIN_RE = re.compile(r"^([AB])(\d+)$")
+
+# The ONLY domain suffixes stripped for related-net lookup, and only one
+# occurrence of one of them. Bare numeric / one-letter suffixes are never
+# stripped, so UART0/UART1, LED1/LED2, USB_D_P/USB_D_N stay distinct.
+_NET_DOMAIN_SUFFIXES = (
+    "_5V", "_3V3", "_MCU", "_POWER", "_ESP32", "_ISO", "_LV", "_HV",
+)
+
+
+def _net_domain_base(name: str) -> str:
+    u = name.upper()
+    for suf in _NET_DOMAIN_SUFFIXES:
+        if u.endswith(suf) and len(u) > len(suf):
+            return u[: -len(suf)]
+    return u
+
+
+def _pin_function(info, ref: str, pin: str):
+    """A non-trivial pin function for display, or None.
+
+    Empty, numeric-only, bare-`~`, and generic Pin_N / passive names carry no
+    identifying signal, so they are not reported.
+    """
+    nm = ((info.get(ref) or {}).get(pin) or {}).get("name") or ""
+    core = nm.strip().strip("~{} ")
+    if not core or core.isdigit() or _GENERIC_PIN_NAME_RE.match(core):
+        return None
+    return nm.strip()
+
+
+def _pin_label(ref: str, pin: str, func=None) -> str:
+    """Identity-safe contextual pin rendering (see the invariant above)."""
+    return f"pin {pin} of {ref}" + (f" ({func})" if func else "")
+
+
+def _endpoint_labels(refs, info, limit: int = 4) -> str:
+    """Render up to ``limit`` (ref, pin) pairs as sorted identity-safe labels."""
+    picked = sorted(set(refs))[:limit]
+    return ", ".join(
+        _pin_label(r, p, _pin_function(info, r, p)) for r, p in picked
+    )
+
+
+def _dangling_net_context(
+    net: str,
+    sheet: str,
+    ref: str,
+    pin: str,
+    *,
+    info,
+    pin_count,
+    pin_nets,
+    net_endpoints,
+    sheet_net_bases,
+    inter_names,
+) -> str:
+    """Deterministic topology context for one §9.15 dangling endpoint."""
+    bits: list[str] = []
+    func = _pin_function(info, ref, pin)
+    if func:
+        bits.append(f"the wired endpoint is {_pin_label(ref, pin, func)}")
+
+    # -- series branch: proven two-terminal part with a proven single-net other
+    #    terminal (§9.17's exact pin-count invariant; anything ambiguous is
+    #    omitted rather than guessed).
+    if _ref_prefix(ref) in _TWO_TERMINAL_REF_PREFIXES and pin_count.get(ref) == 2:
+        others = [p for p in info.get(ref, {}) if p != pin]
+        other_nets = pin_nets.get((ref, others[0]), set()) if len(others) == 1 else set()
+        if len(others) == 1 and len(other_nets) == 1:
+            other = others[0]
+            onet = next(iter(other_nets))
+            dests = {(r, p) for (_s, r, p) in net_endpoints.get(onet, ()) if r != ref}
+            other_func = _pin_function(info, ref, other)
+            frag = (
+                f"{ref} is a two-terminal series part whose other terminal "
+                f"({_pin_label(ref, other, other_func)}) sits on net {onet!r}"
+            )
+            if dests:
+                frag += (
+                    f"; candidate endpoints on that net: "
+                    f"{_endpoint_labels(dests, info)}. Move the intended "
+                    f"load/destination endpoint from {onet!r} onto {net!r}"
+                )
+            else:
+                frag += (
+                    f" and {onet!r} wires no other pin here either. Complete "
+                    f"the series path from its real source onto {net!r}"
+                )
+            frag += (
+                f", keeping the two terminals of {ref} on different nets -- "
+                f"never merge {onet!r} with {net!r}, and never put both "
+                f"terminals of {ref} on one net (§9.17)"
+            )
+            bits.append(frag)
+
+    # -- related-domain branch: same sheet, same base after stripping one
+    #    explicit suffix. Reported as related context only -- the wording
+    #    forbids the merge a naive reader would take from it.
+    base = _net_domain_base(net)
+    related = [n for n in sorted(sheet_net_bases.get((sheet, base), ())) if n != net]
+    for rel in related[:4]:
+        eps = sorted({(r, p) for (_s, r, p) in net_endpoints.get(rel, ())})
+        frag = (
+            f"related net {rel!r} on the same sheet carries "
+            f"{_endpoint_labels(eps, info) if eps else 'no resolved pin'}"
+        )
+        # 74x245-style channel permutations are exposed deterministically:
+        # an A<n> endpoint names the net its same-ref B<n> mate sits on
+        # (and vice versa).
+        mates = []
+        for r, p in eps[:4]:
+            fm = _pin_function(info, r, p)
+            cm = _CHANNEL_PIN_RE.match(fm or "")
+            if not cm:
+                continue
+            comp = f"{'B' if cm.group(1) == 'A' else 'A'}{cm.group(2)}"
+            for q, pdata in (info.get(r) or {}).items():
+                if q == p:
+                    continue
+                qname = (pdata.get("name") or "").strip().strip("~{} ")
+                if _CHANNEL_PIN_RE.match(qname) and qname == comp:
+                    for mnet in sorted(pin_nets.get((r, q), ())):
+                        mates.append(
+                            f"{_pin_label(r, p, fm)} has its channel mate "
+                            f"{_pin_label(r, q, comp)} on net {mnet!r}"
+                        )
+        if mates:
+            frag += "; " + "; ".join(sorted(set(mates))[:4])
+        frag += (
+            f" -- attach the missing destination on the correct side or "
+            f"repair the channel assignment; do NOT merge {net!r} with "
+            f"{rel!r} across the resistor/buffer/isolator/level-shifter "
+            f"that separates them"
+        )
+        bits.append(frag)
+
+    if inter_names:
+        bits.append(
+            "declared inter-sheet net names: "
+            + ", ".join(inter_names[:8])
+            + " -- reuse an exact one only if this signal must reach another sheet"
+        )
+    return "; ".join(bits)
 
 
 def check_power_pin_polarity(bom) -> CheckResult:

@@ -718,15 +718,225 @@ def test_dangling_signal_nets_flags_soil_usb() -> None:
     arch, bom = _soil_like_design(fixed=False)
     r = check_no_dangling_signal_nets(arch, bom)
     assert not r.ok
-    # Exactly the four USB data nets, and nothing else.
     assert len(r.offenders) == 4
-    blob = " ".join(r.offenders)
+    # The A1 topology context may legitimately *mention* other net names
+    # (declared inter-sheet list); the invariant is that no OTHER net is
+    # flagged: each offender's lead clause must name one of the four USB
+    # singletons, and the healthy nets never open an offender.
+    leads = [o.split(" and is neither")[0] for o in r.offenders]
+    blob = " ".join(leads)
     for net in ("USB_DP_POWER", "USB_DN_POWER", "USB_DP_ESP32", "USB_DN_ESP32"):
-        assert net in blob
+        assert f"net {net!r}" in blob
     # The healthy 2-pin local nets, the inter-sheet stub, and power must NOT
     # be flagged.
     for ok_net in ("CC1", "EN", "ANALOG_OUT", "VBUS", "VCC_3V3", "GND"):
-        assert ok_net not in blob
+        assert f"net {ok_net!r}" not in blob
+
+
+# ---------- A1 (KC-VKUT5H): topology-safe §9.15 offender context ----------
+#
+# The context must (a) name candidate destination endpoints for a proven
+# series far-side, (b) expose 74x245-style A/B channel mates, (c) NEVER
+# suggest merging domain-split nets, and (d) keep the offender's identity
+# (pin tokens) untouched: the lead clause's canonical REF.PIN remains the
+# only match for _offender_identity's pin regex.
+
+import re as _re
+
+# EXACT production regex from stage_runtime._offender_identity.
+_A1_CANON_PIN_RE = _re.compile(
+    r"\b([A-Za-z]+[0-9]+[A-Za-z0-9_-]*)(?:\.|\s+pin\s+)([A-Za-z0-9~_+-]+)\b"
+)
+
+_A1_PINS = {
+    "A:CONN": [("A6", "DP1", "biod"), ("A7", "DM1", "biod"), ("B12", "GND", "pwr")],
+    "A:MCU": [
+        ("14", "IO20/USB_D+", "bidir"),
+        ("13", "IO19/USB_D-", "bidir"),
+        ("16", "SPARE", "bidir"),
+    ],
+    "Device:R": [("1", "1", "passive"), ("2", "2", "passive")],
+    "A:VAR": [("1", "1", "passive"), ("2", "2", "passive"), ("3", "3", "passive")],
+    "A:OCT": [
+        ("1", "A3", "input"),
+        ("2", "B3", "output"),
+        ("20", "VCC", "pwr_in"),
+    ],
+}
+
+
+def _a1_bom(conns, refs) -> BOM:
+    parts = []
+    for ref in refs:
+        symbol = {
+            "J1": "A:CONN",
+            "U3": "A:MCU",
+            "U5": "A:OCT",
+            "RV1": "A:VAR",
+        }.get(ref, "Device:R")
+        parts.append(
+            BomPart(ref=ref, value="x", symbol=symbol,
+                    footprint="Resistor_SMD:R_0402_1005Metric", sheet="MCU")
+        )
+    return BOM(parts=parts, connections=conns)
+
+
+def _a1_arch(inter=()) -> Architecture:
+    sheets = [Sheet(name="MCU", stem="MCU", function="mcu")]
+    if any("OTHER" in {e.sheet for e in n.endpoints} for n in inter):
+        sheets.append(Sheet(name="OTHER", stem="OTHER", function="other"))
+    return Architecture(
+        sheets=sheets,
+        power_nets=["+3V3", "GND"],
+        inter_sheet_nets=list(inter),
+    )
+
+
+def _a1_offenders(monkeypatch, conns, refs, inter=()):
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(_A1_PINS))
+    r = check_no_dangling_signal_nets(_a1_arch(inter), _a1_bom(conns, refs))
+    return {o.split(" on sheet")[0].split("net ")[1].strip("'"): o for o in r.offenders}
+
+
+def _a1_lead(off: str) -> str:
+    return off.split(" -- ")[0]
+
+
+def _assert_identity_safe(off: str) -> None:
+    """Context adds zero REF.PIN / 'REF pin N' tokens beyond the lead clause."""
+    canon = set(_A1_CANON_PIN_RE.findall(_a1_lead(off)))
+    whole = set(_A1_CANON_PIN_RE.findall(off))
+    assert whole == canon, f"context leaked pin tokens: {whole - canon}"
+
+
+def test_a1_series_far_side_names_destination_candidates(monkeypatch) -> None:
+    """The KC-VKUT5H USB case: R3.1 sits on USB_D_P with J1 and U3; R3.2
+    dangles as USB_D_P_MCU. Feedback must list USB_D_P's non-series endpoints
+    as identity-safe pin labels with functions, and demand the move keeps the
+    two part terminals on different nets."""
+    conns = [
+        NetConnection(net_name="USB_D_P", sheet="MCU", endpoints=[PinEndpoint(ref="J1", pin="A6"),
+                                          PinEndpoint(ref="U3", pin="14"),
+                                          PinEndpoint(ref="R3", pin="1")]),
+        NetConnection(net_name="USB_D_P_MCU", sheet="MCU", endpoints=[PinEndpoint(ref="R3", pin="2")]),
+    ]
+    offs = _a1_offenders(monkeypatch, conns, ["J1", "U3", "R3"])
+    o = offs["USB_D_P_MCU"]
+    _assert_identity_safe(o)
+    assert "two-terminal series part" in o
+    assert "pin 1 of R3" in o
+    # Candidates sorted by (ref, pin); functions included even when the pin
+    # NUMBER is trivial.
+    assert "pin A6 of J1 (DP1)" in o
+    assert "pin 14 of U3 (IO20/USB_D+)" in o
+    assert o.index("pin A6 of J1") < o.index("pin 14 of U3")
+    assert "Move the intended load/destination endpoint" in o
+    assert "never merge 'USB_D_P' with 'USB_D_P_MCU'" in o
+    assert "never put both terminals of R3 on one net" in o
+
+
+def test_a1_series_guidance_requires_proven_two_pin_part(monkeypatch) -> None:
+    """A three-pin RV part (prefix in _TWO_TERMINAL_REF_PREFIXES, but 3 pins)
+    gets NO two-terminal series guidance (§9.17's exact pin-count invariant).
+    """
+    conns = [
+        NetConnection(net_name="SIG_IN", sheet="MCU", endpoints=[PinEndpoint(ref="U3", pin="14"),
+                                        PinEndpoint(ref="RV1", pin="1")]),
+        NetConnection(net_name="SIG_MID", sheet="MCU", endpoints=[PinEndpoint(ref="RV1", pin="2")]),
+    ]
+    offs = _a1_offenders(monkeypatch, conns, ["U3", "RV1"])
+    o = offs["SIG_MID"]
+    _assert_identity_safe(o)
+    assert "two-terminal series part" not in o
+
+
+def test_a1_series_guidance_omitted_when_other_terminal_ambiguous(monkeypatch) -> None:
+    """R5.2 on two distinct nets (a §9.19 short) is ambiguous -> no guess."""
+    conns = [
+        NetConnection(net_name="SIG_DANGLE", sheet="MCU", endpoints=[PinEndpoint(ref="R5", pin="1")]),
+        NetConnection(net_name="SIG_A", sheet="MCU", endpoints=[PinEndpoint(ref="R5", pin="2"), PinEndpoint(ref="U3", pin="14")]),
+        NetConnection(net_name="SIG_B", sheet="MCU", endpoints=[PinEndpoint(ref="R5", pin="2")]),
+    ]
+    offs = _a1_offenders(monkeypatch, conns, ["U3", "R5"])
+    o = offs["SIG_DANGLE"]
+    _assert_identity_safe(o)
+    assert "two-terminal series part" not in o
+
+
+def test_a1_translator_channel_mates_exposed(monkeypatch) -> None:
+    """The HUB75 74HCT245 case: dangling HUB75_CLK_5V (U5.2/B3) reports the
+    same-sheet related net HUB75_CLK (U5.1/A3) AND names the channel mate
+    pairing — with an explicit no-merge instruction."""
+    conns = [
+        NetConnection(net_name="HUB75_CLK", sheet="MCU", endpoints=[PinEndpoint(ref="U5", pin="1"),
+                                           PinEndpoint(ref="R6", pin="1")]),
+        NetConnection(net_name="HUB75_CLK_5V", sheet="MCU", endpoints=[PinEndpoint(ref="U5", pin="2")]),
+    ]
+    offs = _a1_offenders(monkeypatch, conns, ["U5", "R6"])
+    o = offs["HUB75_CLK_5V"]
+    _assert_identity_safe(o)
+    assert "related net 'HUB75_CLK'" in o
+    assert "pin 1 of U5 (A3)" in o
+    assert "has its channel mate pin 2 of U5 (B3) on net 'HUB75_CLK_5V'" in o
+    assert "do NOT merge 'HUB75_CLK_5V' with 'HUB75_CLK'" in o
+
+
+def test_a1_negative_normalization(monkeypatch) -> None:
+    """UART0/UART1, LED1/LED2, USB_D_P/USB_D_N never correlate; only an
+    explicit listed domain suffix splits a related pair."""
+    from kicraft.design.synthesis.validation import _net_domain_base
+
+    assert _net_domain_base("UART0") == "UART0"  # numeric suffix never stripped
+    assert _net_domain_base("UART0") != _net_domain_base("UART1")
+    assert _net_domain_base("LED1") != _net_domain_base("LED2")
+    assert _net_domain_base("USB_D_P") != _net_domain_base("USB_D_N")  # one-letter
+    assert _net_domain_base("USB_D_P_MCU") == "USB_D_P"
+    assert _net_domain_base("USB_D_N_MCU") == "USB_D_N"  # ONE suffix only
+    assert _net_domain_base("HUB75_CLK_5V") == _net_domain_base("HUB75_CLK") == "HUB75_CLK"
+    assert _net_domain_base("SIG_ISO") == "SIG"
+    assert _net_domain_base("SIG") == "SIG"
+    conns = [
+        NetConnection(net_name="UART1_TX", sheet="MCU", endpoints=[PinEndpoint(ref="U3", pin="16")]),
+        NetConnection(net_name="UART0_TX", sheet="MCU", endpoints=[PinEndpoint(ref="U3", pin="14"),
+                                          PinEndpoint(ref="U3", pin="13")]),
+    ]
+    offs = _a1_offenders(monkeypatch, conns, ["U3"])
+    o = offs["UART1_TX"]
+    assert "related net" not in o
+
+
+def test_a1_inter_sheet_list_and_determinism(monkeypatch) -> None:
+    """Declared inter-sheet names are appended sorted, capped at eight; the
+    whole offender string is deterministic across repeated calls; an unused
+    GPIO still keeps the lead clause's three valid choices verbatim."""
+    inter = [
+        InterSheetNet(
+            name=n,
+            endpoints=[SheetPin(sheet=s, direction="bidirectional") for s in ("MCU", "OTHER")],
+        )
+        for n in ("ZZ_NET", "ALPHA_NET", "MB", "NB", "OB", "PB", "QB", "RB", "SB")
+    ]
+    conns = [
+        NetConnection(
+            net_name="ESP_UNUSED",
+            sheet="MCU",
+            endpoints=[PinEndpoint(ref="U3", pin="16")],
+        )
+    ]
+    a = _a1_offenders(monkeypatch, conns, ["U3"], inter)
+    b = _a1_offenders(monkeypatch, conns, ["U3"], inter)
+    o = a["ESP_UNUSED"]
+    assert o == b["ESP_UNUSED"]
+    assert (
+        "wire it to a second pin, mark it no_connect, or declare an "
+        "inter-sheet net to carry it to another sheet" in o
+    )
+    assert "declared inter-sheet net names: ALPHA_NET, MB, NB, OB, PB, QB, RB, SB" in o
+    assert "ZZ_NET" not in o
+    assert "two-terminal series part" not in o
+    assert "related net" not in o
+    _assert_identity_safe(o)
+
 
 
 def test_dangling_signal_nets_pass_when_usb_declared_intersheet() -> None:
