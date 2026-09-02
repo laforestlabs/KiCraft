@@ -1451,6 +1451,12 @@ def test_a2_swapped_polarity_fails(monkeypatch) -> None:
     assert "pin 13 of U3 (IO19/USB_D-)" in blob  # identity-safe actual label
     assert "IO20" in blob and "D+" in blob
     assert "pin 14 of U3 (IO20/USB_D+)" in blob and "IO19" in blob
+    # The feedback names the concrete target pin + the swap, not just a
+    # function to hunt for.
+    assert (
+        "the correct endpoint is pin 14 of U3 (IO20/USB_D+), currently on net "
+        "'USB_D_N' (swap the two)" in blob
+    )
 
 
 def test_a2_frozen_candidates_wrong_gpios_fail(monkeypatch) -> None:

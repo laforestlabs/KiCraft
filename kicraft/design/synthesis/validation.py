@@ -1883,15 +1883,35 @@ def _check_known_signal_assignments(part, info, nets) -> list[str]:
                     break  # this pin satisfies the assignment
                 if not nm.strip():
                     break  # function unresolvable/blank -> never guess
+                # Name the concrete target so the correction is a move, not a
+                # search: resolve the wanted function on THIS part's loaded
+                # symbol. Only act on a unique match; report the target pin's
+                # current net when it already carries one (swap context).
+                hits = sorted(
+                    q for q, pdata in pins.items()
+                    if want in (pdata.get("name") or "").upper()
+                )
+                target = ""
+                if len(hits) == 1:
+                    q = hits[0]
+                    target = (
+                        f" -- the correct endpoint is "
+                        f"{_pin_label(part.ref, q, pins[q]['name'])}"
+                    )
+                    cur = wired.get(q)
+                    if cur and cur != net:
+                        target += f", currently on net {cur!r} (swap the two)"
                 bad.append(
                     f"[{assignment.name}] {net!r} is the ESP32-S3's native USB "
                     f"{role} data line (fixed silicon function), but it is wired "
-                    f"to {_pin_label(part.ref, num, nm)} -- move this net's "
-                    f"endpoint onto the pin whose function contains {want!r} "
-                    f"(native USB {role}); do not substitute other GPIOs"
+                    f"to {_pin_label(part.ref, num, nm)}. Move this net's "
+                    f"endpoint onto the pin whose function contains {want!r}"
+                    f" (native USB {role}){target}; do not substitute other GPIOs"
                 )
                 break
     return bad
+
+
 
 
 
