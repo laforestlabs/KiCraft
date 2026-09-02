@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:b05e9f73e48b50e98bca1ffba330a01d0c90b9313b9ac99cdbb51ef1b6725992",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2913202.pdf",
+  "description": "ESPRESSIF(\\xe4\\xb9\\x90\\xe9\\x91\\x9e) ESP32-S3-WROOM-1-N16R8",
+  "footprint_name": "WIRELM-SMD_ESP32-S3-WROOM-1",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "ESP32-S3-WROOM-1-N16R8",
+  "name": "esp32-s3-wroom-1-n16r8",
+  "provenance": {
+    "added_at": "2026-09-02T18:51:01Z",
+    "kicad_version": "9.0.0",
+    "source": "file-import",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2913202"
+  },
+  "symbol_name": "ESP32-S3-WROOM-1",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

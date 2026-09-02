@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:4fee5ea185258fdf713d6a8defb3051ec304d0d9dd88fe4bd84cec30ba9605ca",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C53436288.pdf",
+  "description": "JSMSEMI(\u6770\u76db\u5fae) SN74HCT245PWR-JSM",
+  "footprint_name": "TSSOP-20_L6.5-W4.4-P0.65-LS6.4-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "SN74HCT245PWR-JSM",
+  "name": "sn74hct245",
+  "provenance": {
+    "added_at": "2026-09-02T18:49:37Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C53436288"
+  },
+  "symbol_name": "SN74HCT245PWR-JSM",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

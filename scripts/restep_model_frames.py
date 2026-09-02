@@ -86,6 +86,7 @@ APPLIED_TRANSFORMS: dict[str, tuple[int, tuple[float, float, float]]] = {
     "ds18b20": (0, (0.00, 1.03, 0.00)),
     "esp32-s3-mini-1": (0, (0.00, 2.54, 0.02)),
     "esp32-s3-wroom-1": (0, (0.00, 3.65, 0.01)),
+    "esp32-s3-wroom-1-n16r8": (0, (0.00, 3.65, 0.01)),  # same WIRELM frame as esp32-s3-wroom-1; fit med 0.001 mm
     "esp32-wroom-32e-n4": (0, (-3.78, 0.00, 0.00)),
     "header-male-2-54-1x40": (0, (49.53, 0.00, 0.00)),
     "hs96l03w2c03": (0, (0.00, -12.66, -2.38)),
