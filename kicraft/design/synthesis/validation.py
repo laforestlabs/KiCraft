@@ -1832,17 +1832,84 @@ _FAMILY_CONTRACTS: tuple[_FamilyContract, ...] = (
     ),
 )
 
+# Known SIGNAL nets whose functional pin is fixed by silicon, not by design
+# choice (KC-VKUT5H A2). The frozen candidates of that board bound native USB
+# D+/D- to arbitrary GPIOs (IO11/IO12, later IO13/IO14): §9.15 can be cleared
+# by moving those same wrong endpoints across the series resistors, so only a
+# deterministic function-level gate prevents a §9.15-clean but non-functional
+# commit. Rules are name-based (never physical pin numbers), so a symbol with
+# different numbering but correct function names still passes.
+@dataclass(frozen=True)
+class _SignalAssignment:
+    name: str
+    family: re.Pattern  # matches "<symbol> <value>"
+    signals: tuple  # ((net-name re.Pattern, required pin-function substring, role), ...)
+
+
+_USB_DOMAIN_SUFFIX = r"(?:[-_]?(?:5V|3V3|MCU|POWER|ESP32|ISO|LV|HV))?"
+_KNOWN_SIGNAL_ASSIGNMENTS: tuple[_SignalAssignment, ...] = (
+    _SignalAssignment(
+        name="esp32s3_native_usb",
+        family=re.compile(r"esp32[-_ ]?s3", re.I),
+        signals=(
+            # Exact differential forms with ONE optional known domain suffix;
+            # no loose substring matching (USB_P, USBD, USB_DPH are not D+).
+            (re.compile(rf"^USB_D(?:\+|_?P){_USB_DOMAIN_SUFFIX}$", re.I), "IO20", "D+"),
+            (re.compile(rf"^USB_D(?:-|_?N){_USB_DOMAIN_SUFFIX}$", re.I), "IO19", "D-"),
+        ),
+    ),
+)
+
+
+def _check_known_signal_assignments(part, info, nets) -> list[str]:
+    """One _SignalAssignment pass for a single part (called from §9.20).
+
+    Fires only when the net name unambiguously denotes the fixed-function
+    signal AND the pin's resolvable function contradicts it; an unresolvable
+    symbol, a missing USB-named net, or an ambiguous name fails open."""
+    ident = f"{part.symbol} {part.value}"
+    bad: list[str] = []
+    pins = info.get(part.ref) or {}
+    wired = nets.get(part.ref, {})
+    for assignment in _KNOWN_SIGNAL_ASSIGNMENTS:
+        if not assignment.family.search(ident):
+            continue
+        for num, net in sorted(wired.items()):
+            nm = (pins.get(num) or {}).get("name") or ""
+            for sig_re, want, role in assignment.signals:
+                if not sig_re.match(net):
+                    continue
+                if want in nm.upper():
+                    break  # this pin satisfies the assignment
+                if not nm.strip():
+                    break  # function unresolvable/blank -> never guess
+                bad.append(
+                    f"[{assignment.name}] {net!r} is the ESP32-S3's native USB "
+                    f"{role} data line (fixed silicon function), but it is wired "
+                    f"to {_pin_label(part.ref, num, nm)} -- move this net's "
+                    f"endpoint onto the pin whose function contains {want!r} "
+                    f"(native USB {role}); do not substitute other GPIOs"
+                )
+                break
+    return bad
+
+
 
 def check_family_wiring_contracts(bom) -> CheckResult:
     """§9.20 -- datasheet pin-role contracts for known part families.
 
     See the module comment above _FAMILY_CONTRACTS. Fires only on a wired pin
     that a family's datasheet says must (not) be on a rail/ground and is bound to
-    a clearly-wrong net; correct and filtered rails pass.
+    a clearly-wrong net; correct and filtered rails pass. Also evaluates the
+    fixed-function signal assignments (_KNOWN_SIGNAL_ASSIGNMENTS): a net that
+    unambiguously names a silicon-fixed pin function (ESP32-S3 native USB
+    D+/D-) must reach that exact functional pin.
     """
     info, _ = _pin_info_by_ref(bom)
     nets = _nets_by_ref(bom)
     bad: list[str] = []
+    for part in bom.parts:
+        bad.extend(_check_known_signal_assignments(part, info, nets))
     for part in bom.parts:
         ident = f"{part.symbol} {part.value}"
         for contract in _FAMILY_CONTRACTS:

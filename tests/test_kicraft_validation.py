@@ -1380,6 +1380,113 @@ def test_family_contract_flags_can_rs_on_rail(monkeypatch) -> None:
     assert any("U3.8" in o for o in res.offenders)
 
 
+
+# ---------- A2 (KC-VKUT5H): ESP32-S3 native-USB fixed-function assignment ----
+
+_ESP32S3_PINS = {
+    "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1": [
+        ("13", "IO19/USB_D-", "bidirectional"),
+        ("14", "IO20/USB_D+", "bidirectional"),
+        ("19", "IO11", "bidirectional"),
+        ("20", "IO12", "bidirectional"),
+        ("21", "IO13", "bidirectional"),
+        ("22", "IO14", "bidirectional"),
+    ],
+    "esp32s3-mini:ESP32S3-MINI-1": [
+        ("13", "IO19", "bidirectional"),
+        ("14", "IO20", "bidirectional"),
+        ("19", "IO11", "bidirectional"),
+    ],
+    "esp32:ESP32-WROOM-32": [("13", "IO19", "bidirectional")],
+    "ch340g:CH340G": [("5", "D+", "bidirectional"), ("6", "D-", "bidirectional")],
+}
+
+
+def _usb_bom(ref, symbol, sheet, pins_by_net):
+    return BOM(
+        parts=[
+            _bpart(ref, symbol, sheet=sheet),
+            _bpart("R7", "Device:R", sheet=sheet),
+        ],
+        connections=[
+            NetConnection(
+                net_name=net,
+                sheet=sheet,
+                endpoints=[
+                    PinEndpoint(ref=ref, pin=p),
+                    PinEndpoint(ref="R7", pin=str(i + 1)),
+                ],
+            )
+            for i, (net, p) in enumerate(pins_by_net.items())
+        ],
+    )
+
+
+def _a2(monkeypatch, symbol, pins_by_net, ref="U3"):
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(_ESP32S3_PINS))
+    return check_family_wiring_contracts(_usb_bom(ref, symbol, "MCU", pins_by_net))
+
+
+def test_a2_correct_native_usb_passes_with_aliases(monkeypatch) -> None:
+    """D+ on IO20, D- on IO19 — including the WROOM alias names
+    IO20/USB_D+ / IO19/USB_D- — passes."""
+    res = _a2(
+        monkeypatch,
+        "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1",
+        {"USB_D_P_MCU": "14", "USB_D_N_MCU": "13"},
+    )
+    assert res.ok, res.offenders
+    res = _a2(monkeypatch, "esp32s3-mini:ESP32S3-MINI-1", {"USB_DP": "14", "USB_DN": "13"})
+    assert res.ok, res.offenders
+
+
+def test_a2_swapped_polarity_fails(monkeypatch) -> None:
+    res = _a2(
+        monkeypatch,
+        "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1",
+        {"USB_D_P": "13", "USB_D_N": "14"},
+    )
+    assert not res.ok
+    blob = " ".join(res.offenders)
+    assert "pin 13 of U3 (IO19/USB_D-)" in blob  # identity-safe actual label
+    assert "IO20" in blob and "D+" in blob
+    assert "pin 14 of U3 (IO20/USB_D+)" in blob and "IO19" in blob
+
+
+def test_a2_frozen_candidates_wrong_gpios_fail(monkeypatch) -> None:
+    """Attempts 1-2 (IO11/IO12) and attempt 3 (IO11+IO13 / IO12+IO14) of
+    KC-VKUT5H — every wrong-function binding fires."""
+    for pins in (
+        {"USB_D_P": "19", "USB_D_N": "20"},  # IO11 / IO12
+        {"USB_D_P": "19", "USB_D_N": "21"},  # IO11 / IO13
+        {"USB_D+": "20", "USB_D-": "22"},  # IO12 / IO14
+    ):
+        res = _a2(monkeypatch, "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1", pins)
+        assert not res.ok, pins
+        assert all("native USB" in o for o in res.offenders)
+
+
+def test_a2_classifies_suffixed_net_names(monkeypatch) -> None:
+    """Every exact differential form with one known domain suffix classifies;
+    near-miss names never do (no loose substring matching)."""
+    for net in ("USB_DP_ESP32", "USB_D_P_POWER", "USB_D-5V", "USB_DN_HV"):
+        res = _a2(monkeypatch, "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1", {net: "19"})
+        assert not res.ok, net
+    for net in ("USB_DPH", "USB_P", "D_P", "USBX_D_P", "USB_D_Q", "USB_D"):
+        res = _a2(monkeypatch, "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1", {net: "19"})
+        assert res.ok, net
+
+
+def test_a2_fails_open_for_unrelated_families(monkeypatch) -> None:
+    """CH340's D+/D- pins and a classic ESP32 (non-S3) are outside the
+    contract; no USB-named net on an S3 part is never inferred."""
+    res = _a2(monkeypatch, "ch340g:CH340G", {"USB_D_P": "5", "USB_D_N": "6"})
+    assert res.ok, res.offenders
+    res = _a2(monkeypatch, "esp32:ESP32-WROOM-32", {"USB_D_P": "13"})
+    assert res.ok, res.offenders
+    res = _a2(monkeypatch, "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1", {"SPI_CLK": "19"})
+    assert res.ok, res.offenders
+
 # ---------- §9.21 MCU first-flash / programming path (advisory) ----------
 
 from kicraft.design.synthesis.validation import (  # noqa: E402
