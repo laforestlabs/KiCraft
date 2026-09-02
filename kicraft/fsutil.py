@@ -1,7 +1,7 @@
 """Atomic file-write helper shared by every ``state.json`` writer.
 
 ``state.json`` is the sole IPC channel between the web app, the build worker,
-and the design CLI (see CLAUDE.md): a truncate-then-write leaves a torn or
+and the design CLI: a truncate-then-write leaves a torn or
 empty file if the writer crashes mid-write, and a concurrently-timed reader in
 another process sees partial JSON — after which every ``_load_state`` fails
 with JSONDecodeError and the design session is lost. Write-to-tmp +

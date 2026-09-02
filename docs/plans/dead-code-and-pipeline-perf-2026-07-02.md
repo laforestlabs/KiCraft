@@ -44,8 +44,8 @@ either net-new or explicitly tagged as overlapping an existing phase/lever.
 
 - **`cli/split_schematic.py` (35 KB) + `cli/generate_report.py` (34 KB)** — zero Python
   references; only refs are their `[project.scripts]` entries + the orphaned root SKILL.md +
-  a *wrong* CLAUDE.md line. Synthesis emits hierarchical sheets directly now.
-  **Fix CLAUDE.md's subsystem table when cutting** (it lists both as pipeline members).
+  a *wrong* AGENTS.md line. Synthesis emits hierarchical sheets directly now.
+  **Fix AGENTS.md's subsystem table when cutting** (it lists both as pipeline members).
 - **`electrical-review` subcommand + `_cmd_electrical_review`** — `design/cli_app.py:507-562,
   3912-3923`. Manual/debug surface; the review that actually runs in `build` is
   `_maybe_electrical_review` → `synthesis/electrical_review.review_design` (keep that module).
@@ -81,7 +81,7 @@ either net-new or explicitly tagged as overlapping an existing phase/lever.
   no longer exists; `storage.py:106` "legacy" rationale; `web.py:4526` "view mode (ws=None)"
   comment; GUI-module references in `render/index.py` docstring (moot if deleted),
   `cli/solve_subcircuits.py:701,1236`, `autoplacer/brain/pins.py:66`;
-  `.claude/skills/kicraft/SKILL.md:139` still mentions the Experiment Manager.
+  `.agents/skills/kicraft/SKILL.md:139` still mentions the Experiment Manager.
 
 ### Verified NOT dead (don't re-litigate)
 

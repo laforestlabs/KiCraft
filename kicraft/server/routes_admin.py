@@ -858,7 +858,7 @@ def admin_tidiness_ab_view_page(run: str = ""):
 
 # --------------------------------------------------------------------------- #
 # Admin: support -- failed boards, user-reported highlighting, headless
-# /kicraft-investigate. Every failed run auto-files a support_reports row; the
+# kicraft-investigate Agent Skill. Every failed run auto-files a support_reports row; the
 # ones a user actually reported (Support button, or feedback on a failure) are
 # highlighted. Investigations run via kicraft.server.investigate_runner.
 # --------------------------------------------------------------------------- #
@@ -872,8 +872,8 @@ def _is_user_reported(r) -> bool:
 @ui.page("/admin/support")
 def admin_support_page():
     """Admin: triage failed boards. Lists every support report newest-first,
-    highlights the user-reported ones, and runs /kicraft-investigate headlessly
-    (on-demand, or auto on new user reports per the page toggle)."""
+    highlights the user-reported ones, and runs the kicraft-investigate skill
+    headlessly (on-demand, or automatically for new user reports)."""
     user, redirect = _require_admin()
     if redirect is not None:
         return redirect
@@ -916,8 +916,8 @@ def admin_support_page():
 
             auto.on_value_change(on_toggle)
             ui.label(
-                "A user report launches a headless /kicraft-investigate "
-                "run — each is a real agent session (LLM spend)."
+                "A user report launches the kicraft-investigate skill "
+                "headlessly — each run is a real agent session with LLM spend."
             ).classes("text-xs").style("color:#64748b")
 
         with ui.row().classes("items-center gap-3"):
@@ -1184,7 +1184,7 @@ def admin_support_page():
 # --------------------------------------------------------------------------- #
 # Admin: self-eval batch over the curated example briefs.
 #
-# Drives kicraft.eval.self_eval (the /self-eval harness) as a subprocess writing
+# Drives kicraft.eval.self_eval (the self-eval skill harness) as a subprocess writing
 # to a fresh out dir, then polls that dir to show live per-brief progress, the
 # A-F scorecard (reusing _render_scorecard), and on-demand kicad-cli renders of
 # each leaf board so a failed route can be inspected in-page. One batch at a time
@@ -1207,8 +1207,8 @@ def _self_eval_out_roots() -> list[Path]:
     line:
 
       * ``<projects_dir>/../self_eval`` -- the GUI/harness default (where Run writes);
-      * ``<repo>/logs/self_eval`` -- where the ``/self-eval`` command writes when the
-        batch is launched from the CLI.
+      * ``<repo>/logs/self_eval`` -- where the ``self-eval`` skill writes when
+        the batch is launched from the CLI.
 
     Existing dirs only, de-duplicated by resolved path (the two roots coincide when
     the projects dir is the repo)."""

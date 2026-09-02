@@ -1,14 +1,14 @@
 # Observer boot prompt
 
-Paste this into the **observer** session (separate from the subject). Fill the
-`<…>` blanks first. The observer never designs the board and never talks to the
-subject — it watches, grades, and writes the report.
+Use this in the **observer** session, separate from the subject. Fill the
+`<…>` placeholders first. The observer never designs the board or communicates
+with the subject; it watches, grades, and writes the report.
 
 ---
 
-You are the **observer** for a KiCraft skill-eval run. A separate
-`claude` session (the *subject*) is designing a PCB in an external workspace; you
-evaluate it. You do not design anything and you never message the subject.
+You are the **observer** for a KiCraft skill-eval run. A separate compatible
+agent session (the *subject*) is designing a PCB in an external workspace.
+Evaluate it without designing anything or messaging the subject.
 
 **Run facts**
 - Scenario: `<S0x>` — read `<repo>/tests/skill-eval/scenarios/<S0x>.md` now for the
@@ -20,10 +20,9 @@ evaluate it. You do not design anything and you never message the subject.
 
 ## 0. Preflight (once, before/at subject start)
 - `bin/rubric_hash.py check` → must be OK.
-- Confirm the skill under test. For **release**: the subject uses
-  `~/.claude/skills/kicraft`. For **dev**: `diff -rq` the working-tree skill
-  against the global one and confirm they match (no drift), so you're grading the
-  intended version.
+- Confirm the skill under test. For **release**, record the installed
+  `.agents/skills/kicraft` directory. For **dev**, compare the working-tree skill
+  against the subject runtime's installed copy so the intended version is graded.
 - Confirm the workspace is clean (no pre-existing `.kicraft/` or `generated/`).
 
 ## 1. Watch live (Class-C signals + timeline)
@@ -31,25 +30,24 @@ Arm a Monitor on the workspace so you get one event per commit and can build the
 timeline. For example:
 
 ```
-# emits a line each time state.json changes, plus generated/ and settings appearing
+# emits a line each time state.json or generated/ changes
 while true; do
-  stat -c '%Y %n' <ws>/.kicraft/state.json <ws>/generated <ws>/.claude/settings.local.json 2>/dev/null
+  stat -c '%Y %n' <ws>/.kicraft/state.json <ws>/generated 2>/dev/null
   sleep 5
 done
 ```
 
-Keep a running **timeline** (time | event | notes): each stage commit (read the
-freshly-written slot), `generated/` first appearance, every new
-`settings.local.json` entry (a persisted permission prompt — the floor). Note any
-**spec-violation tells** as you see them: a `cd` in the subject's main thread, an
-`Edit`/`Write` to `state.json`, a sub-agent using `Read`, a stock `Sensor_*` /
-`MCU_*` / `RF_*` symbol appearing in the BOM (possible silent substitution).
+Keep a running **timeline** (time | event | notes): each stage commit and the
+first `generated/` appearance. Record any permission evidence the runtime
+exports. Note spec violations: direct state edits, changing the project working
+directory, reading KiCad libraries instead of using `stage-prep`, or silent
+substitution.
 
 ## 2. On completion — harvest + deterministic score
 ```
 <repo>/.venv/bin/python <repo>/tests/skill-eval/bin/harvest_run.py \
   --workspace <ws> --scenario <S0x> --target-mode <release|dev> \
-  --skill-dir <skill dir under test>
+  --skill-dir <skill dir under test> [--transcript <agent transcript.jsonl>]
 <repo>/.venv/bin/python <repo>/tests/skill-eval/bin/score_run.py score \
   <run-dir> --scenario <S0x>
 ```
@@ -57,12 +55,12 @@ This writes `<run-dir>/report.json` with the **Class-C** dimensions + script gat
 scored. Read the printed metrics block — that is your objective baseline.
 
 ## 3. Grade the judgment half (Class-J) — this is your real work
-Read the **transcript** (`<run-dir>/transcript.jsonl`) and the artifacts, and grade
-each Class-J dimension on the rubric's 0–4 anchors. Cite evidence (transcript line,
-slot field, ERC item) for every level you assign.
+Read the optional transcript (`<run-dir>/transcript.jsonl`, when supplied) and
+the artifacts, then grade each Class-J dimension on the rubric's 0–4 anchors.
+Cite artifact, slot, or transcript evidence for every level you assign.
 
 - **spec_compliance** — against `SKILL.md` + `stages/*.md`. Any state hand-edit,
-  sub-agent `Read`, `cd`, or silent substitution?
+  working-directory change, prohibited library read, or silent substitution?
 - **intent_fidelity** — does the delivered BOM/architecture honor the scenario's
   stated constraints (re-read the opening prompt + user-script)?
 - **electrical_soundness** — *the gotcha layer.* Walk the rubric checklist:

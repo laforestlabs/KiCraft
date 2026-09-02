@@ -108,10 +108,10 @@ async def harness(tmp_path):
         sim_web._STORE = sim_store
         real_fetch = sim_web._safe_fetch  # no live pricing from test threads
         sim_web._safe_fetch = lambda key: sim_web._FETCH_ERROR
-        # Never let a dialog submit spawn a REAL headless `claude` run: this
-        # exact path launched one phantom investigation (real Anthropic
-        # spend, 30-min watchdog) per suite run from 2026-07-12 to
-        # 2026-07-20. enqueue_investigation also refuses under pytest now;
+        # Never let a dialog submit spawn a REAL headless agent run: this exact
+        # path launched one phantom investigation (external provider spend,
+        # 30-min watchdog) per suite run from 2026-07-12 to 2026-07-20.
+        # enqueue_investigation also refuses under pytest now;
         # this records the calls for assertions instead.
         real_auto = sim_web._auto_investigate_if_enabled
         auto_calls: list[int] = []
@@ -288,6 +288,40 @@ def test_run_omp_reports_missing_binary(store, monkeypatch):
     inv = store.create_investigation(report_id=rid, board_code="KC-JKL567")
     rc, out = ir._run_omp(store, inv, "KC-JKL567")
     assert rc is None and "omp" in out.lower()
+
+
+def test_run_omp_activates_generic_investigate_skill(store, monkeypatch):
+    captured = {}
+
+    class FakeProcess:
+        stdout = ["# Investigation\n"]
+
+        def poll(self):
+            return 0
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(ir, "_omp_bin", lambda: "/usr/bin/omp")
+    monkeypatch.setattr(ir.subprocess, "Popen", fake_popen)
+    rid = _user_report(store, board_code="KC-SKL123")
+    inv = store.create_investigation(report_id=rid, board_code="KC-SKL123")
+
+    rc, out = ir._run_omp(store, inv, "KC-SKL123")
+
+    assert rc == 0
+    assert out == "# Investigation"
+    assert captured["cmd"][:3] == [
+        "/usr/bin/omp",
+        "-p",
+        "Use the kicraft-investigate skill to investigate KC-SKL123.",
+    ]
+    assert captured["kwargs"]["cwd"] == str(ir._repo_dir())
 
 
 def test_auto_investigate_respects_toggle(swapped_store, monkeypatch):

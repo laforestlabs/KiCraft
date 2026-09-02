@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Summarize the web server's real OpenRouter spend from its spend ledger.
 
-This is the web counterpart to ``kicraft/cli/token_report.py`` (which prices
-Claude Code transcripts for the offline skill path). The web app records the
-*actual* billed cost of every model call into the SQLite spend ledger
+This is the web counterpart to ``kicraft/cli/token_report.py`` (which estimates
+cost from supported agent transcripts for the portable skill path). The web app
+records the *actual* billed cost of every model call into the SQLite spend ledger
 (``~/.kicraft/spend_ledger.db``) via ``kicraft.server.spend_guard``. Newer rows
 carry a structured JSON ``meta`` (run_id / stage / attempt / provider /
 cached_tokens / finish_reason); older rows carry a bare phase string and are

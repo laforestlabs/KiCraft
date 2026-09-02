@@ -138,7 +138,7 @@ Validation gate for every step: `scripts/replay_corpus.py --mode parent` (golden
 diff) + `tests/test_connector_edge_gap.py` (KICRAFT_REPLAY_E2E=1) +
 `tests/test_geometry.py`. A behaviour change shows as an *expected, located*
 golden move; a no-op refactor must show *zero* drift. **Before merge:** one
-`/self-eval` batch (real $, ~1h) — the corpus is a single board and cannot prove
+`self-eval` skill batch (real $, ~1h) — the corpus is a single board and cannot prove
 the 50-family fleet didn't regress.
 
 - **Phase 1 — RC3 + RC2 together (correctness + robustness).**

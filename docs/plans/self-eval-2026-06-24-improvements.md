@@ -219,7 +219,7 @@ knobs verified in source.
    collision-guarded, re-verified per change. Highest effort, but the only path to lifting the
    `connector_dense_io` / `hi_pin_hierarchical` archetypes off 0/N fab-ready.
 
-## Per-run evidence pointers (for `/kicraft-investigate`)
+## Per-run evidence pointers (for the `kicraft-investigate` skill)
 - A1: `logs/self_eval/20260624T120631Z/run_28_audio-jack-buffer`
 - A2: `logs/self_eval/20260624T120631Z/run_18_dual-rail-supply`
 - B1: `…/run_12_esp32-s3-sensor`, `logs/self_eval/20260623T210902Z/run_10_rp2040-min`

@@ -7,8 +7,8 @@ Two libraries the BOM/architecture stages consult:
 - Parts library — atomic symbol+footprint bundles, four-tier search
   (project / home / vendored / extras).
 
-Each library has a loader + an "available …" markdown formatter the
-relevant stage pastes into its sub-agent prompt.
+Each library has a loader and an “available …” markdown formatter included in
+the relevant stage context.
 """
 from __future__ import annotations
 

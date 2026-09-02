@@ -12,8 +12,8 @@ Token/cost lives in the SQLite spend ledger keyed by ``run_id`` (``p<pid>-<ts>``
 This collector reuses the shared artifact parsers (so pipeline-completion and
 ERC/synthesis cleanliness are scored identically to the offline harness) and
 synthesises the ``transcript`` sub-dict from ``events.jsonl`` so the convergence
-and computing-cleanliness scorers run unchanged. The only ``claude``-only signal,
-permission-prompt friction, has no web analog and is reported as zero excess.
+and computing-cleanliness scorers run unchanged. Optional agent-runtime
+permission evidence has no web analog and is reported as zero excess.
 """
 from __future__ import annotations
 

@@ -170,6 +170,6 @@ today, keeping the env as fallback). Explicit beats ambient.
 ## Non-goals
 
 - No changes to solve/compose/scoring semantics, artifact layout, or `rounds/*.json`
-  payloads (three processes depend on that shape — see CLAUDE.md).
+  payloads (three processes depend on that shape — see AGENTS.md).
 - No attempt to make the scheduler configurable/pluggable. One class, concrete
   policies, in the order they short-circuit. Simple beats general here.

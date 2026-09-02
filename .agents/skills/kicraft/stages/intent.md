@@ -1,4 +1,4 @@
-Stage 1: Intent. You are running inside the KiCraft stage sub-agent. Your job is to draft the `intent` slot of the conversation state and commit it. Follow SKILL.md's "Workflow (follow exactly, in order)" section to do that — this file specifies what the slot must look like.
+Stage 1: Intent. Draft the complete `intent` slot and commit it through the workflow in the parent `SKILL.md`; this file defines the slot contract.
 
 Slot shape (`IntentSlot`):
 

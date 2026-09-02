@@ -29,7 +29,7 @@ Three pipeline facts make this outcome *guaranteed* for any runaway emitter:
    (`kicraft/server/stage_driver.py`) says "compact … fits the output budget" — no
    numeric bound, no feedback about how big the failed attempt was. The retry re-emits
    from the pristine task and runs away again at the larger cap.
-3. **The contract has no bound.** `.claude/skills/kicraft/stages/bom.md` (119 lines)
+3. **The contract has no bound.** `.agents/skills/kicraft/stages/bom.md` (119 lines)
    never states a part-count limit. The pipeline *already* accepts per-sheet caps
    downstream (`DENSE_SHEET_ROUTABLE_MAX = 15` routable parts per sheet in
    `sheet_partition.py`) — it just never applies that philosophy at the stage that
@@ -151,7 +151,7 @@ N characters and was truncated or malformed), so nothing was committed. The `par
 collection must contain at most 500 items total and at most 450 items per `sheet`. ...
 ```
 
-This avoids duplicating numbers in `.claude/skills/kicraft/stages/bom.md`. For a stage
+This avoids duplicating numbers in `.agents/skills/kicraft/stages/bom.md`. For a stage
 without bounds, the only retry-message change is the newly reported prior size.
 
 ### Validation gate

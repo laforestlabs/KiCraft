@@ -6,7 +6,7 @@ import json
 import re
 import resource
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Literal
 
 import requests
@@ -774,6 +774,8 @@ def drive_stage(
     instruction=None,
     meta_ctx=None,
     core_defaults=None,
+    *,
+    review_before_commit: bool = False,
 ) -> dict:
     run_id = (meta_ctx or {}).get("run_id")
     t0 = time.monotonic()
@@ -785,21 +787,22 @@ def drive_stage(
         err = (prep.stderr.strip() or prep.stdout.strip())[:600]
         _wall = round(time.monotonic() - t0, 3)
         _cpu = round(_child_cpu_s() - cpu0, 3)
-        stamp_stage_status(state_path, stage, False, wall_s=_wall, cpu_s=_cpu)
-        _record_stage_ledger(
-            client,
-            run_id=run_id,
-            stage=stage,
-            ok=False,
-            attempts=None,
-            rounds=None,
-            tool_calls=None,
-            wall_s=_wall,
-            cpu_s=_cpu,
-            cost_usd=0.0,
-        )
-        if progress:
-            progress({"kind": "stage_done", "stage": stage, "ok": False})
+        if not review_before_commit:
+            stamp_stage_status(state_path, stage, False, wall_s=_wall, cpu_s=_cpu)
+            _record_stage_ledger(
+                client,
+                run_id=run_id,
+                stage=stage,
+                ok=False,
+                attempts=None,
+                rounds=None,
+                tool_calls=None,
+                wall_s=_wall,
+                cpu_s=_cpu,
+                cost_usd=0.0,
+            )
+            if progress:
+                progress({"kind": "stage_done", "stage": stage, "ok": False})
         return {
             "stage": stage,
             "commit_ok": False,
@@ -877,30 +880,31 @@ def drive_stage(
         wall_s = round(time.monotonic() - t0, 3)
         cpu_s = round(_child_cpu_s() - cpu0, 3)
         error = f"stage contract failed: {exc}"
-        stamp_stage_status(
-            state_path,
-            stage,
-            False,
-            cost_usd=0.0,
-            attempts=0,
-            wall_s=wall_s,
-            cpu_s=cpu_s,
-            error=error,
-        )
-        _record_stage_ledger(
-            client,
-            run_id=run_id,
-            stage=stage,
-            ok=False,
-            attempts=0,
-            rounds=None,
-            tool_calls=None,
-            wall_s=wall_s,
-            cpu_s=cpu_s,
-            cost_usd=0.0,
-        )
-        if progress:
-            progress({"kind": "stage_done", "stage": stage, "ok": False})
+        if not review_before_commit:
+            stamp_stage_status(
+                state_path,
+                stage,
+                False,
+                cost_usd=0.0,
+                attempts=0,
+                wall_s=wall_s,
+                cpu_s=cpu_s,
+                error=error,
+            )
+            _record_stage_ledger(
+                client,
+                run_id=run_id,
+                stage=stage,
+                ok=False,
+                attempts=0,
+                rounds=None,
+                tool_calls=None,
+                wall_s=wall_s,
+                cpu_s=cpu_s,
+                cost_usd=0.0,
+            )
+            if progress:
+                progress({"kind": "stage_done", "stage": stage, "ok": False})
         return {
             "stage": stage,
             "commit_ok": False,
@@ -942,6 +946,31 @@ def drive_stage(
         tools=tools,
         executor=executor,
     )
+
+    def _debug_context(raw_response: str) -> dict:
+        return {
+            "prompt_state": prompt_state,
+            "extras": extras,
+            "base_messages": base_messages,
+            "response_schema": contract.schema,
+            "response_format": response_format,
+            "raw_response": raw_response,
+            "response_policy": {
+                **asdict(policy),
+                "design_temperature": _design_temperature(client),
+                "serialization_escape_temperature": float(
+                    getattr(
+                        getattr(client, "s", None),
+                        "serialization_escape_temperature",
+                        0.4,
+                    )
+                ),
+                "stage_semantics": getattr(
+                    getattr(client, "s", None), "stage_semantics", "observe"
+                ),
+                "max_retries": max_retries,
+            },
+        }
 
     def _lean_retry(assistant_text: str | None, user_msg: str) -> list[dict]:
         msgs = list(base_messages)
@@ -1320,10 +1349,11 @@ def drive_stage(
             # stage's whole budget on a park it can never satisfy (WS6).
             is_reconcile_park = any(q.get("reconcile_target") for q in qs)
             if any(q["blocking"] for q in qs) and (not answers or is_reconcile_park):
-                attach_questions(state_path, stage, qs)
+                if not review_before_commit:
+                    attach_questions(state_path, stage, qs)
                 if progress:
                     progress({"kind": "question", "stage": stage, "questions": qs})
-                return {
+                result = {
                     "stage": stage,
                     "commit_ok": False,
                     "needs_input": True,
@@ -1331,6 +1361,19 @@ def drive_stage(
                     "cost_usd": total_cost,
                     "attempts": attempts,
                 }
+                if review_before_commit:
+                    result.update(
+                        {
+                            "rounds": rounds,
+                            "tool_calls": tool_calls_ct,
+                            "wall_s": round(time.monotonic() - t0, 3),
+                            "cpu_s": round(_child_cpu_s() - cpu0, 3),
+                            "provider_ok": provider_ok,
+                            "schema_ok": schema_ok,
+                            "debug_context": _debug_context(raw),
+                        }
+                    )
+                return result
             messages = _lean_retry(
                 None,
                 "Do not ask more questions. Apply sensible defaults (record each "
@@ -1419,6 +1462,51 @@ def drive_stage(
                 )
 
         diagnostic_rows = [d.model_dump(exclude_none=True) for d in diagnostics]
+        if review_before_commit:
+            _record_attempt_facts(
+                client,
+                run_id=run_id,
+                stage=stage,
+                attempt=current_attempt_number,
+                call_mode=current_call_mode,
+                outcome="candidate_review",
+                facts=current_facts,
+                diagnostic_codes=[d.code for d in diagnostics],
+            )
+            fab_safe = not any(d.severity == "fab_gate" for d in diagnostics)
+            wall_s = round(time.monotonic() - t0, 3)
+            cpu_s = round(_child_cpu_s() - cpu0, 3)
+            if progress:
+                for diagnostic in diagnostic_rows:
+                    progress({"kind": "stage_diagnostic", "stage": stage, **diagnostic})
+                progress(
+                    {
+                        "kind": "candidate_review",
+                        "stage": stage,
+                        "attempt": current_attempt_number,
+                    }
+                )
+            return {
+                "stage": stage,
+                "needs_review": True,
+                "commit_ok": False,
+                "slot": obj,
+                "diagnostics": diagnostic_rows,
+                "cost_usd": total_cost,
+                "attempts": attempts,
+                "rounds": rounds,
+                "tool_calls": tool_calls_ct,
+                "wall_s": wall_s,
+                "cpu_s": cpu_s,
+                "provider_ok": provider_ok,
+                "schema_ok": schema_ok,
+                "semantic_clean": not diagnostics,
+                "repair_required": bool(severe),
+                "fab_safe": fab_safe,
+                "debug_context": _debug_context(
+                    repair_facts.raw if semantic_repair_adopted else raw
+                ),
+            }
         ok, out, obj = commit_candidate(prepared, obj, state_path, brief, workspace)
         if not ok and semantic_repair_adopted:
             semantic_repair_adopted = False
@@ -1515,6 +1603,19 @@ def drive_stage(
         last["failure_kind"] = "commit_rejected"
     last.setdefault("provider_ok", provider_ok)
     last.setdefault("schema_ok", schema_ok)
+    if review_before_commit:
+        return {
+            "stage": stage,
+            "commit_ok": False,
+            "cost_usd": total_cost,
+            "attempts": attempts,
+            "rounds": rounds,
+            "tool_calls": tool_calls_ct,
+            "wall_s": round(time.monotonic() - t0, 3),
+            "cpu_s": round(_child_cpu_s() - cpu0, 3),
+            **last,
+            "debug_context": _debug_context(raw),
+        }
     return finalize_stage(
         client,
         run_id=run_id,

@@ -7,13 +7,14 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from kicraft.design.stage_state import DESIGN_STAGES
+
 from .client import CappedOpenRouterClient, make_client
 from .config import Settings
 from .spend_guard import BudgetExceeded, SpendGuard
 from .stage_runtime import _stage_max_retries, _stage_max_tokens, drive_stage
 from .stage_state_io import KICRAFT, run_design_cli
 
-DESIGN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
 SUPPORTED_STAGES = DESIGN_STAGES
 
 def drive_chain(

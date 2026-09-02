@@ -1,7 +1,7 @@
 """Batch self-evaluation: drive every benchmark brief end to end and grade it.
 
-This is the regression harness behind the ``/self-eval`` command (and the
-``kicraft-eval-batch`` console script). For each brief in
+This is the regression harness used by the ``self-eval`` Agent Skill and the
+``kicraft-eval-batch`` console script. For each brief in
 ``kicraft.tuning.benchmark.BENCHMARK_PROMPTS`` (the shared brief corpus that
 spans the placement/routing stress archetypes — connector density, fine-pitch
 escape, RF keepouts, power/thermal, THT/SMT mix, hierarchy depth, and the
@@ -35,8 +35,8 @@ the remaining briefs cheaply rather than overspending.
 Throughput: briefs run on ``--parallel`` worker threads (default 3 — the heavy
 work is build subprocesses and blocking HTTP, both GIL-releasing) with concurrent
 build subprocesses capped by ``--build-slots`` (default 2) so single-threaded
-routing JVMs don't oversubscribe the cores; every entry point (CLI, ``/self-eval``,
-the admin GUI) inherits these defaults. ``--parallel 1`` forces the strictly
+routing JVMs don't oversubscribe the cores; every entry point (CLI, the
+``self-eval`` skill, the admin GUI) inherits these defaults. ``--parallel 1`` forces the strictly
 sequential baseline. ``summary.json`` is checkpointed after every brief, and
 ``--resume <batch_dir>`` finishes an interrupted batch by reusing completed
 briefs and re-running only errored/missing ones.
@@ -1046,7 +1046,7 @@ def _reusable(rec: dict | None) -> bool:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Drive every benchmark brief end to end and grade it "
-        "(the /self-eval regression loop over the 28-brief corpus)."
+        "(the self-eval skill's regression loop over the 28-brief corpus)."
     )
     ap.add_argument("--limit", type=int, default=None, help="run only the first N benchmark briefs")
     ap.add_argument(

@@ -25,7 +25,7 @@ from ..models import Architecture, BOM
 # component_zone, synthesis injects {edge: DEFAULT_EDGE_CONNECTOR_ZONE} so the
 # composer pins it to the board edge even if the BOM stage didn't say so.
 # Pure name match; orientation is resolved downstream (detect_opening_direction
-# + _best_rotation_for_edge). See .claude/skills/kicraft/stages/bom.md.
+# + _best_rotation_for_edge). See .agents/skills/kicraft/stages/bom.md.
 DEFAULT_EDGE_CONNECTOR_ZONE = "bottom"
 _EDGE_CONNECTOR_FOOTPRINT_PATTERNS = (
     "*usb_c_receptacle*",

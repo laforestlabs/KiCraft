@@ -90,8 +90,8 @@ dimensions:
   scored_by: script
   summary: User questions asked + permission prompts, judged against the scenario's expectation.
   sources:
-  - 'transcript: AskUserQuestion / clarification turns'
-  - settings.local.json permission floor
+  - 'transcript: clarification turns'
+  - optional agent_permissions.json permission evidence
   - scenario.expected_question_band
   notes: 'Friction is contextual. Score user_questions against the scenario''s declared expected_question_band:
     asking when the brief is genuinely ambiguous is GOOD; asking nothing on an ambiguous brief, or interrogating
@@ -110,12 +110,12 @@ dimensions:
   scored_by: observer
   summary: Did the agent obey SKILL.md and the stage specs?
   reference:
-  - .claude/skills/kicraft/SKILL.md
-  - .claude/skills/kicraft/stages/*.md
+  - .agents/skills/kicraft/SKILL.md
+  - .agents/skills/kicraft/stages/*.md
   examples_of_violation:
-  - Edit/Write on .kicraft/state.json
-  - sub-agent used the Read tool
-  - cd in the main thread
+  - Agent directly edits .kicraft/state.json or reads prohibited library files
+  - Agent changed the project working directory during the session
+  - Agent bypassed stage-prep reference data by reading KiCad libraries directly
   - silent substitution despite the BOM do-not-substitute rule
   - hand-patched state to dodge a cascade
   anchors:
@@ -123,7 +123,7 @@ dimensions:
       state.json).
     1: Multiple clear spec violations.
     2: One clear spec violation, recovered.
-    3: A borderline deviation (e.g. used cat where the Read tool was implied) with no consequence.
+    3: A borderline workflow deviation with no consequence.
     4: Fully spec-compliant throughout.
 - id: intent_fidelity
   class: J

@@ -4,7 +4,7 @@ The end-to-end process for running, scoring, and reporting one KiCraft eval.
 Read `README.md` first for the three-way split and the role definitions.
 
 A run has two agents: a **subject** (under test) and an **observer** (evaluator),
-in **separate** `claude` sessions. The observer drives this workflow.
+in separate sessions, which may use any Agent Skills-compatible runtime.
 
 ```
 preflight ─▶ launch subject ─▶ watch live ─▶ harvest ─▶ score (C) ─▶ grade (J) ─▶ finalize ─▶ report
@@ -16,11 +16,11 @@ preflight ─▶ launch subject ─▶ watch live ─▶ harvest ─▶ score (C
    rubric was edited without re-stamping — fix that before scoring anything, or all
    scores are meaningless.
 2. **Choose the target** (what's under test) and record it:
-   - **release** (default, true-user sim): pipx `kicraft` + global
-     `~/.claude/skills/kicraft`. Catches install/packaging bugs.
-   - **dev** (verify an unreleased fix): repo `.venv` CLI + working-tree skill. Sync
-     the skill to global and `diff -rq` to confirm no drift, so you grade the
-     version you think you're grading.
+   - **release** (default, true-user simulation): packaged `kicraft` CLI plus the
+     installed portable skill at `~/.agents/skills/kicraft`.
+   - **dev**: repository `.venv` CLI plus `.agents/skills/kicraft`. Sync the
+     working-tree skill to the subject runtime's discovery root and compare them
+     before grading.
 3. **Pick a scenario** from `scenarios/` and read it fully — the opening prompt,
    user-script, traps, and known design pitfalls are your grading checklist.
 4. **Clean workspace:** an empty dir outside the repo, e.g.
@@ -28,11 +28,11 @@ preflight ─▶ launch subject ─▶ watch live ─▶ harvest ─▶ score (C
 
 ## Phase 1 — Launch the subject (subject session)
 
-Follow `templates/subject_brief.md`. In short: a fresh `claude` in the workspace,
-paste the scenario's opening prompt **verbatim**, answer clarifications only from
-the scenario's **user-script** (in character, minimal), and let the run reach
-synthesis or a clean stop on its own. **Do not coach it and do not push it past
-errors** — how it handles an error is part of the test. Record the session UUID.
+Follow `templates/subject_brief.md`. In short: start a fresh compatible agent in
+the workspace, paste the scenario's opening prompt **verbatim**, answer
+clarifications only from the scenario's **user-script**, and let the run reach
+synthesis or a clean stop on its own. Do not coach it or push it past errors.
+Record an exported transcript path when the runtime provides one.
 
 ## Phase 2 — Watch live (observer)
 
@@ -42,12 +42,11 @@ keep a **timeline** (time | event | notes). Capture, as they happen:
 - each **stage commit** (read the freshly-written slot; sanity-check it against the
   stage spec);
 - **`generated/`** first appearance and the synthesis result;
-- each new **`.claude/settings.local.json`** entry — a persisted permission prompt;
-  this is the permission **floor** (it misses single-shot "Yes" prompts, so report
-  it as "at least N");
-- **spec-violation tells**: a `cd` in the subject's main thread, an `Edit`/`Write`
-  on `state.json`, a sub-agent using `Read`, or a stock `Sensor_*`/`MCU_*`/`RF_*`
-  symbol in the BOM (possible silent substitution).
+- optional permission-prompt evidence exported by the active runtime;
+- **spec-violation tells**: changing the project working directory, editing
+  `state.json` directly, bypassing `stage-prep` to read library files, or using a
+  stock `Sensor_*`/`MCU_*`/`RF_*` symbol in the BOM despite a required library
+  bundle.
 
 Watching is for capturing what the artifacts won't show later; the heavy grading
 happens post-hoc from the transcript.
@@ -58,12 +57,13 @@ When the subject finishes:
 
 ```
 bin/harvest_run.py --workspace <ws> --scenario <S0x> \
-    --target-mode <release|dev> --skill-dir <skill dir under test>
+    --target-mode <release|dev> --skill-dir <skill dir under test> \
+    [--transcript <agent transcript.jsonl>]
 ```
 
-This copies `.kicraft/`, `generated/`, `settings.local.json`, finds the subject's
-transcript (`~/.claude/projects/<mangled-ws>/*.jsonl`), and stamps `run.json`
-(target mode, skill `sha256`, CLI path, session ids). Output: `~/kicraft-eval/runs/<run-id>/`.
+This copies `.kicraft/`, `generated/`, and the optional transcript, then stamps
+`run.json` with target mode, skill hash, CLI path, and provenance. Output:
+`~/kicraft-eval/runs/<run-id>/`.
 
 ## Phase 4 — Deterministic score, Class C (observer)
 
@@ -111,7 +111,7 @@ Every finding is tagged **Class** (who can see it) and **Severity** (how bad).
 - excess permission prompts; thrash (error-driven re-commits/aborts); stalls
 
 **Class J — judgment / strategy / intent** (needs the observer reading the run):
-- **spec violations** — state hand-edit, sub-agent `Read`, `cd`, silent substitution
+- **spec violations** — direct state edit, working-directory change, prohibited library read, silent substitution
 - **intent infidelity** — a stated constraint dropped or contradicted
 - **bad electrical design** — ground loops, missing decoupling/protection, **no MCU
   programming path**, marginal thermal/rail sizing, wrong polarity. *ERC-clean is

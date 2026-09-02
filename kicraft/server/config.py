@@ -348,10 +348,9 @@ class Settings:
     eval_judge_max_tokens: int = 24000
     # --- Layer-3 electrical-review pass (the in-product design "judge") --------
     # Reviews a committed design for topology/value/completeness defects the
-    # deterministic §9 gates cannot judge. Runs the DESIGN model by default
-    # (deepseek-v4-flash -- cheap; Claude is prohibitively expensive for a
-    # product) but with a higher THINKING BUDGET, since the review is a one-shot
-    # reasoning task where extra deliberation is worth far more than it costs.
+    # deterministic §9 gates cannot judge. Runs the inexpensive DESIGN model by
+    # default, with a higher THINKING BUDGET because this one-shot review benefits
+    # from extra deliberation without requiring a premium model.
     # review_model=None reuses `model`. review_reasoning_tokens is the OpenRouter
     # reasoning max_tokens budget (0 disables the reasoning channel).
     # Bakeoff winner (2026-06-19): minimax-m3 gives 100% blocker recall + the

@@ -4,8 +4,8 @@ The shippable home of the scoring contract (``rubric.yaml``), the deterministic
 Class-C scorers, the script gates, and the finalize math. It is shared by two
 front-ends:
 
-  * the offline skill-eval harness in ``tests/skill-eval/bin/`` (subject + human
-    observer, scored from a ``claude`` transcript), and
+  * the offline skill-eval harness in ``tests/skill-eval/bin/`` (portable subject
+    agent plus observer, with an optional agent transcript), and
   * the in-app web self-evaluation (``kicraft.eval.run_web``), where the Class-C
     half scores from the web run's own artifacts and the Class-J half is graded
     by an automated LLM judge (``kicraft.eval.judge``) against the same rubric.

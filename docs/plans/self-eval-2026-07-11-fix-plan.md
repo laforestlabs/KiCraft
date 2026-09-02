@@ -298,7 +298,7 @@ Verify ($0) by replaying run_06.
 generic 100 nF), run_22 (DRV8833: needs VCP–VM 0.1 µF charge-pump cap per chip, distinct from VM
 decoupling). Each missing companion costs a park round; with N3 fixed these become recoverable,
 but the first BOM pass should be complete. Fix: extend the curated IC-companion rules
-(bom stage prompt/core-defaults — `kicraft/server/stage_driver.py` + `.claude/skills/kicraft/stages/bom.md`)
+(BOM stage prompt/core defaults — `kicraft/server/stage_driver.py` + `.agents/skills/kicraft/stages/bom.md`)
 with per-family support-pin checklists (nRF52 DEC*/DCCH, DRV88xx VCP). Keep it curated data, not
 LLM vibes.
 

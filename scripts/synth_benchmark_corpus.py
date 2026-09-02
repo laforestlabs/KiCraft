@@ -84,8 +84,7 @@ def _rebuild_manifest(prompts: list[dict]) -> list:
 def _commit_push(slug: str, n: int, total: int, brief: str) -> None:
     _git("add", str(CORPUS))
     msg = (f"data(tuning): benchmark corpus board {slug} ({n}/{total})\n\n"
-           f"Brief: {brief}\n\n"
-           "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>")
+           f"Brief: {brief}")
     r = _git("commit", "-m", msg)
     if r.returncode != 0 and "nothing to commit" not in (r.stdout + r.stderr):
         _log(f"  git commit warn: {(r.stderr or r.stdout).strip()[:160]}")

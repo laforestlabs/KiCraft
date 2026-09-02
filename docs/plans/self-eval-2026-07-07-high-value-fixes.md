@@ -83,7 +83,7 @@ intact) one at a time with `python -m kicraft.design.cli_app replay --project
 normal time solo → the 40-min timeouts were resource starvation (close as
 environmental; consider `--build-slots` vs core count guard in the harness).
 If a board genuinely routes >40 min solo → open a real congestion investigation
-on that board (`/kicraft-investigate <run dir>`) before changing any timeout.
+on that board (use the `kicraft-investigate` skill with the run directory) before changing any timeout.
 
 **Verify:** four solo replays with times logged in the investigation notes.
 
@@ -97,7 +97,7 @@ zero queue, zero stray JVMs):**
 | run_10 rp2040-min | 46.5 min | rc=7 | genuine (completes, over 40-min budget) |
 | run_27 stepper-a4988 | 58.3 min | rc=6 | genuine — all leaf phase; parent compose insta-fails 0.17 s/round |
 
-Follow-ups: `/kicraft-investigate` on run_07 (worst) and run_27 (leaf-phase
+Follow-ups: use the `kicraft-investigate` skill on run_07 (worst) and run_27 (leaf-phase
 sink + parent-compose failure); consider clamping the harness `--build-slots`
 default to `max(1, cores // 6)` (build_slots.py's own sizing) — 2 slots on a
 2-core box is guaranteed starvation. Per the ground rule, no timeout changes.
@@ -241,7 +241,7 @@ rate moves.
 
 - run_11 fpc-breakout: build label **`netlist faithfulness`** — the routed
   board's netlist diverges from the schematic. Silently-wrong-board class:
-  `/kicraft-investigate logs/self_eval/20260706T224451Z/run_11_fpc-breakout`.
+  use the `kicraft-investigate` skill on `logs/self_eval/20260706T224451Z/run_11_fpc-breakout`.
 - run_23 can-node: 19 ERC errors (`pin_not_connected`×14, `label_dangling`×5) —
   wiring-stage quality on one design; check §2a cross-run scan before calling
   it systematic (`label_dangling` has a known router.py fallback root cause).

@@ -39,7 +39,7 @@ is a single `kicraft-web` restart (no build-worker restart — this is not a pip
 ## Decisions
 
 1. **Render with `ui.echart`'s `graph` series — no new dependency.** ECharts is bundled in the
-   `server` extra and is the project's mandated chart primitive (CLAUDE.md: "Charts in the web app
+   `server` extra and is the project's mandated chart primitive (AGENTS.md: "Charts in the web app
    use NiceGUI's `ui.echart` (not plotly)"). Its `series.type: "graph"` draws node-link diagrams
    natively with categories, legends, directed edges, tooltips, and pan/zoom (`roam`). `ui.mermaid`
    is **not** used anywhere and its availability in this NiceGUI build is unverified; custom

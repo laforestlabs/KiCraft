@@ -7,14 +7,12 @@ experiment management for KiCad projects via the pcbnew Python API.
 
 KiCraft is a multi-layer pipeline. Top-down:
 
-1. **KiCraft** (Claude Code skill + Python helpers) -- turns a natural-
+1. **KiCraft** (portable Agent Skills + Python helpers) -- turns a natural-
    language project description into the hierarchical KiCad 9 file set
-   (root + leaf `.kicad_sch`, `.kicad_pro`, `_autoplacer.json`). The LLM-
-   driven stages (intent / functional_spec / architecture / bom) run as a
-   Claude Code skill at `.claude/skills/kicraft/`, so a Claude Code
-   subscription pays for inference and no API key is required. The
-   deterministic synthesis step is a Python CLI (`kicraft
-   synthesize`). See [KiCraft](#kicraft-chat--kicad-files) below.
+   (root + leaf `.kicad_sch`, `.kicad_pro`, `_autoplacer.json`). The five
+   LLM-authored stages live in standards-compliant skills under
+   `.agents/skills/`; deterministic validation, synthesis, placement, routing,
+   and fab export are Python CLIs. See [KiCraft](#kicraft-chat--kicad-files).
 2. **placement + routing + scoring** (Python, this repo) -- everything below.
 
 ## Installation
@@ -25,8 +23,9 @@ KiCraft is a multi-layer pipeline. Top-down:
 # with `--system-site-packages` so `pcbnew` is visible (see pipx note below).
 pip install -e .
 
-# With KiCraft helpers (pydantic + kicad-skip + easyeda2kicad; the LLM
-# stages run in the Claude Code skill, not in this package — no API key needed)
+# With KiCraft design helpers (Pydantic, kicad-skip, and easyeda2kicad).
+# The ordinary skill uses the active agent's configured LLM; KiCraft itself
+# needs provider credentials only for the provider-backed debug/server path.
 pip install -e ".[design]"
 
 # With all optional dependencies
@@ -35,13 +34,13 @@ pip install -e ".[scoring,experiment,design,tuning,server,loadtest,dev]"
 
 ### End-user install (pipx)
 
-`kicraft synthesize` imports KiCad's bundled `pcbnew`, and
+`kicraft build` imports KiCad's bundled `pcbnew`, and
 `add-part --from-lcsc` imports `easyeda2kicad`. An isolated pipx venv sees
-neither by default, so install with `--system-site-packages` (exposes the
-system `pcbnew`) **and** the `[kicraft]` extra (pulls in `easyeda2kicad`):
+neither by default, so install with `--system-site-packages` and the
+`[design]` extra:
 
 ```bash
-pipx install --system-site-packages "kicraft[kicraft]"
+pipx install --system-site-packages "kicraft[design]"
 ```
 
 Already installed without them? Symptoms are `add-part --from-lcsc` printing
@@ -50,84 +49,92 @@ Already installed without them? Symptoms are `add-part --from-lcsc` printing
 
 ```bash
 pipx reinstall --system-site-packages kicraft
-pipx inject kicraft easyeda2kicad   # only if the [kicraft] extra was omitted
+pipx inject kicraft easyeda2kicad   # only if the [design] extra was omitted
 ```
 
 ## KiCraft (chat -> KiCad files)
 
-A multi-turn chat that takes a project description in plain English and
-emits the hierarchical KiCad 9 file set that the placement / routing
-half of KiCraft ingests. No prior schematic required, and no API key —
-the conversation runs inside Claude Code on the user's subscription.
+A multi-turn agent workflow that takes a project description in plain English
+and emits the hierarchical KiCad 9 file set consumed by placement and routing.
+No prior schematic is required.
 
 ### Architecture
 
-- The four LLM stages (intent / functional_spec / architecture / bom)
-  and the per-turn orchestrator are a Claude Code skill at
-  `.claude/skills/kicraft/`. Claude reads/writes a `.kicraft/state.json`
-  file matching the `ConversationState` Pydantic schema.
-- The deterministic synthesis step (state.json → file set + SS9.1-SS9.6
-  checks) is the `kicraft` CLI.
+- The five design stages (`intent`, `functional_spec`, `architecture`, `bom`,
+  and `wiring`) use the `ConversationState` Pydantic schema in
+  `.kicraft/state.json`.
+- Portable Agent Skills live under `.agents/skills/`. The ordinary `kicraft`
+  skill uses whichever LLM the active agent runtime provides.
+- `.omp/config.yml` points OMP at that generic directory as a custom skill
+  source, so the repository skills override stale user-level copies with the
+  same names.
+- The optional `kicraft-debug` skill calls the production provider-backed stage
+  runtime and pauses before each durable commit for explicit review.
+- The deterministic synthesis/build step is the `kicraft` CLI.
 
 ### Run it
 
-From inside this repo (or any project that has copied the skill into its
-own `.claude/skills/kicraft/`):
+Open this repository in any Agent Skills-compatible coding agent and ask it to
+use the `kicraft` skill:
 
-```bash
-claude                 # start a Claude Code session
-/kicraft           # invokes the skill (or just say "I want to design a PCB")
+```text
+Use the kicraft skill to design a USB-C powered 3.3 V status LED board.
+```
+
+For production-provider stage inspection:
+
+```text
+Use the kicraft-debug skill to walk through each KiCraft LLM stage.
 ```
 
 Describe your project ("USB-C powered 3.3V regulator with status LED,
-JLCPCB target, under $5 BOM"). Claude steps through the stages, writes
-`.kicraft/state.json` as it goes, and validates after every slot update
-via `kicraft validate`. When all four slots are filled, ask
-it to synthesize and it will run:
+JLCPCB target, under $5 BOM"). The ordinary flow steps through all five
+stages and commits each slot. The debug flow uses the production provider
+and retains its prompt, raw response, tool trace, candidate, and diagnostics
+under `.kicraft/debug/`, while keeping `.kicraft/state.json` unchanged until
+explicit acceptance. After wiring is committed, ask the ordinary skill to
+run the deterministic build.
 
 ```bash
-kicraft synthesize .kicraft/state.json ./generated
+kicraft build .kicraft/state.json ./generated --quality good
 ```
 
-### Using the skill in your own project
+### Using the skills in another project
 
-Copy the skill directory into your project's `.claude/`:
+Copy the standards-compliant skill directories into the target project's
+`.agents/skills/` discovery root:
 
 ```bash
-cp -r /path/to/KiCraft/.claude/skills/kicraft your-project/.claude/skills/
-cp /path/to/KiCraft/.claude/commands/kicraft.md your-project/.claude/commands/
+mkdir -p your-project/.agents/skills
+cp -r /path/to/KiCraft/.agents/skills/kicraft your-project/.agents/skills/
+cp -r /path/to/KiCraft/.agents/skills/kicraft-debug your-project/.agents/skills/
 ```
 
-Then `pip install -e /path/to/KiCraft[kicraft]` so the
-`kicraft` CLI is on PATH. The skill activates the next time
-you run `claude` inside your project.
+OMP users should also copy the small discovery bridge:
 
-### Permission model
-
-KiCraft now runs each stage in a sub-agent that uses only two bundled CLI
-commands — `stage-prep` (read-only collector) and `stage-commit` (atomic
-validate + merge + archive). With those pre-allowed in `~/.claude/settings.json`,
-the user only sees interview-style questions, not a stream of permission prompts
-for every tool call. Recommended allowlist entries:
-
-```jsonc
-"permissions": {
-  "allow": [
-    "Bash(kicraft stage-prep *)",
-    "Bash(kicraft stage-commit *)",
-    "Bash(kicraft synthesize *)",
-    "Bash(kicraft validate *)",
-    "Bash(kicraft archive *)",
-    "Bash(kicraft list-leaves)",
-    "Bash(kicraft lookup-symbol *)",
-    "Write(/tmp/kicraft_*.json)",
-    "Write(/tmp/claude/kicraft_*.json)"
-  ]
-}
+```bash
+mkdir -p your-project/.omp
+cp /path/to/KiCraft/.omp/config.yml your-project/.omp/
 ```
 
-Install once via `/update-config` or edit the file directly; the patterns are
-narrow (kicraft CLI only).
+Clients that use a different Agent Skills discovery root can copy the same
+skill directories there unchanged; each skill is self-contained around its
+`SKILL.md`.
+
+Install the ordinary design CLI with
+`pip install -e "/path/to/KiCraft[design]"`. It uses the active agent's LLM
+configuration and does not require a KiCraft provider key. The provider-backed
+`kicraft-debug` skill additionally requires
+`pip install -e "/path/to/KiCraft[server,design]"` and the OpenRouter
+configuration used by the production web stage driver.
+
+### Agent capabilities
+
+The skills use generic capabilities rather than vendor-specific permission
+syntax. Grant the active agent only the capabilities listed in each
+`SKILL.md`: read project/skill files, write `/tmp/kicraft_*`, and run the named
+`kicraft` commands. No slash commands, vendor-specific delegation API, or
+vendor-specific settings file is required.
 
 ### CLI reference
 
@@ -139,10 +146,20 @@ kicraft stage-prep <stage> [STATE]
 
 kicraft stage-commit <stage> --slot-file F.json \
   [--questions-file Q.json] [--history-message M] [--project-stem S] \
-  [STATE] [--no-archive] [--archive-root DIR]
+  [--invalidate-downstream] [STATE] [--no-archive] [--archive-root DIR]
 # Atomic: validate the proposed slot, merge into state.json, append history,
 # archive. Returns {"ok": true, ...} or {"ok": false, "errors": [...]} so the
-# sub-agent can self-correct on validation failures.
+# active agent can correct a rejected candidate.
+
+kicraft-stage-debug debug-draft --workspace PATH --stage STAGE \
+  --brief-file BRIEF [--instruction-file GUIDANCE] [--answers-file ANSWERS]
+# Runs the production provider and atomically saves a pending review artifact
+# without committing or stamping state.json.
+
+kicraft-stage-debug debug-commit --workspace PATH --stage STAGE \
+  --history-message-file MESSAGE
+# Stale-hash checks state.json, commits the exact accepted slot through
+# stage-commit, invalidates downstream stages, and finalizes the debug trace.
 
 kicraft validate .kicraft/state.json
 # prints {ok, project_stem, slots_filled, open_questions, blocking_questions}
@@ -249,7 +266,7 @@ changes, `1.0.0` for breaking ones).
 
 When the skill enters the architecture stage it runs
 `kicraft list-leaves` and reads the result so the model can
-see the curated catalog. Claude picks any matches by setting
+see the curated catalog. The active agent picks matches by setting
 `Sheet.from_library = "<name>@<version>"` and `Sheet.library_instance = N`.
 `kicraft validate` then verifies the leaf's hierarchical-
 label interface matches the sheet's endpoints exactly. Synthesis then:
@@ -506,9 +523,8 @@ from the command line.
 - `kicraft list-leaves` — Print the "Available leaves" markdown
   block the architecture stage shows to the model.
 - `kicraft synthesize STATE.json OUT_DIR [--smoke]` — Emit the
-  KiCad file set from a complete state. The LLM-driven chat itself runs in
-  the Claude Code skill at `.claude/skills/kicraft/`. See
-  [KiCraft](#kicraft-chat--kicad-files).
+  KiCad file set from a complete state. The portable `kicraft` Agent Skill
+  under `.agents/skills/kicraft/` owns the LLM-authored design stages.
 
 ### Core Pipeline
 - `solve-subcircuits` — Hierarchical subcircuit placement and routing
@@ -530,7 +546,7 @@ from the command line.
 - `plot-results` — Plot experiment or scoring dashboards (auto-detects format)
 - `diff-rounds` — Diff between experiment rounds
 - `generate-report` — Generate scoring report
-- `token-report`: Token usage + estimated cost for a KiCraft design session, parsed from its Claude Code transcript
+- `token-report`: Token usage + estimated cost from supported agent transcript JSONL files
 
 ### Board Manipulation
 - `move-component` — Move a component to absolute position
@@ -551,15 +567,20 @@ from the command line.
 ## Package Structure
 
 ```
+.omp/config.yml          # OMP bridge to the generic skill directory
+.agents/skills/           # Portable Agent Skills (SKILL.md standard)
+├── kicraft/              # Five-stage design interview + build handoff
+├── kicraft-debug/        # Provider-backed stage review before commit
+├── kicraft-investigate/  # Artifact-driven failure investigation
+├── self-eval/            # Curated end-to-end regression batch
+└── verify/               # Deterministic place/route replay verification
 kicraft/
-├── kicraft/               # Chat -> KiCad file set
-│   ├── models.py        # Pydantic state slots (intent / functional_spec / architecture / bom)
-│   ├── library.py       # Leaf-library helpers (list / validate picks)
-│   ├── synthesize.py    # Deterministic state -> file set step
-│   ├── synthesis/       # .kicad_sch / .kicad_pro / autoplacer.json emitters + §9 checks
-│   └── cli_app.py       # `kicraft` validate / list-leaves / synthesize
-│   # The LLM-driven stages and per-turn orchestrator live in the
-│   # Claude Code skill at .claude/skills/kicraft/ (not in this package).
+├── design/               # State schema, deterministic stage CLI, synthesis
+│   ├── models.py         # Pydantic state slots
+│   ├── library.py        # Leaf-library helpers
+│   ├── synthesize.py     # Deterministic state -> file set step
+│   ├── synthesis/        # KiCad emitters and deterministic checks
+│   └── cli_app.py        # `kicraft` stage/build commands
 ├── autoplacer/          # Placement and routing engine
 │   ├── config.py        # Default config + project config loader
 │   ├── kicad_routing_tools.py  # pinned KRT adapter and copper custody

@@ -104,8 +104,9 @@ add-gnd-zone = "kicraft.cli.add_gnd_zone:main"
 add-group-labels = "kicraft.cli.add_group_labels:main"
 cleanup-routing = "kicraft.cli.cleanup_routing:main"
 
-# KiCraft design CLI: deterministic helpers; LLM stages run in the Claude Code skill
+# KiCraft deterministic design CLI and provider-backed stage debugger
 kicraft = "kicraft.design.cli_app:main"
+kicraft-stage-debug = "kicraft.server.stage_driver:main"
 
 # Leaf library (read-only — promotion is GUI-driven)
 kicraft-leaf = "kicraft.cli.leaf:main"

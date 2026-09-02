@@ -3,15 +3,15 @@
 **For:** a future session (or you) implementing the rest of the roadmap.
 **Date:** 2026-06-22 (updated after the `routes_admin` cut)
 **Branch:** `refactor/legibility-phase-1-2`.
-**Companion docs:** `docs/plans/refactor-roadmap.md` (the master plan), `CLAUDE.md` (architecture
-map), `docs/plans/view-from-durable-refactor-v2.md` (the Phase 4a detail).
+**Companion docs:** `docs/plans/refactor-roadmap.md` (the master plan), `AGENTS.md`
+(architecture map), `docs/plans/view-from-durable-refactor-v2.md` (the Phase 4a detail).
 
 > **Run the tests with the repo venv:** `.venv/bin/python -m pytest …` (bare `python` is not on
 > PATH → exit 127, a *silent* empty baseline). ruff: `.venv/bin/python -m ruff check`.
 
 ## Done so far (verified zero regressions vs `main`)
 
-Phase 1 (delete GUI), Phase 2 (`CLAUDE.md`), Phase 4c (`events.jsonl` reopen fix), Phase 5
+Phase 1 (delete GUI), Phase 2 (`AGENTS.md`), Phase 4c (`events.jsonl` reopen fix), Phase 5
 (`build_jobs` leak + README install fix), and **four Phase 3 web.py extractions**:
 `storage.py`, `pricing.py`, `render_serving.py`, and **`routes_admin.py` (Phase 3a, commit
 `58701d5`)**. **`web.py`: 7,292 → 5,029 lines** (the admin cut alone removed 1,972).

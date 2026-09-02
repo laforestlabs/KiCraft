@@ -8,7 +8,7 @@ or footprint, list_parts) appends one JSON line here, so we can later see:
 - which queries miss the library and fall back to LCSC or stock KiCad
   (add-to-library candidates that would cut BOM cost and add consistency).
 
-Both the hosted web executor and the offline Claude Code skill drive the same
+Both the hosted web executor and portable Agent Skill drive the same
 ``kicraft`` CLI, so recording at the CLI-handler layer captures every part
 query on a machine. The log is per-machine at ``~/.kicraft/part_queries.jsonl``
 (override with ``$KICRAFT_QUERY_LOG``), next to the web spend ledger. It stores

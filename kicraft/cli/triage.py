@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run triage for KiCraft investigations (the /kicraft-investigate engine).
+"""Artifact-reading engine for the portable kicraft-investigate Agent Skill.
 
 Reads the deterministic artifacts a run leaves behind and prints the failure
 picture the investigate skill used to assemble by hand. Four subcommands, each
@@ -15,7 +15,7 @@ path incl. self-eval ``run_NN_*`` dirs, or nothing = the most recent run):
               substitution ledger, LLM wheel-spin, intent adherence
 
 All subcommands take ``--json``. This module owns the artifact-reading logic
-that ``.claude/commands/kicraft-investigate.md`` narrates; the tests in
+that ``.agents/skills/kicraft-investigate/SKILL.md`` defines; the tests in
 ``tests/test_triage_cli.py`` pin it against artifact-schema drift (the old
 inline version rotted silently — e.g. testing ``routed_validation is not
 None`` on a field that is always a dict).

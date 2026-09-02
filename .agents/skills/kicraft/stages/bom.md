@@ -1,4 +1,4 @@
-Stage 4: BOM. You are running inside the KiCraft stage sub-agent. Your job is to draft the `bom` slot of the conversation state and commit it. Follow SKILL.md's "Workflow (follow exactly, in order)" section — this file specifies what the slot must look like.
+Stage 4: BOM. Draft the complete `bom` slot and commit it through the workflow in the parent `SKILL.md`; this file defines the slot contract.
 
 Given the `architecture` (available in the `state` field of stage-prep's output), pick real parts and assign each to a sheet.
 

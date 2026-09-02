@@ -17,7 +17,7 @@ The first parseable BOM had three model defects:
 The existing commit gates correctly rejected all three. Subsequent completions were malformed or unfinished. Two defects then prevented useful recovery:
 
 - `kicraft/server/stage_driver.py::_json_failure_recovery()` treats parse failure as another ordinary stage attempt. A truncated answer doubles `cur_max_tokens` up to 32,768, while other malformed output retries with the same policy. It has no explicit, tool-free serialization state.
-- `.claude/skills/kicraft/stages/bom.md` says native-USB ESP32 designs need “nothing extra ... beyond the MCU itself,” contradicting the §9.29 BOOT/EN/RESET or strap-access gate.
+- `.agents/skills/kicraft/stages/bom.md` says native-USB ESP32 designs need “nothing extra ... beyond the MCU itself,” contradicting the §9.29 BOOT/EN/RESET or strap-access gate.
 
 Cross-run evidence is broad enough to justify a pipeline fix: at least 23 of 222 scanned run artifacts have design-stage `no JSON in reply` outcomes, and 14 have the ESP32 strap-gate failure.
 
@@ -147,7 +147,7 @@ Every request, including every BOM tool round and the forced final round, must c
 
 ### 3. Align the BOM programming contract with §9.29
 
-**Owner:** `.claude/skills/kicraft/stages/bom.md`
+**Owner:** `.agents/skills/kicraft/stages/bom.md`
 
 Replace the native-USB paragraph with this contract:
 

@@ -359,11 +359,11 @@ Use a deliberately narrow topology vocabulary and existing electrical categories
 
 #### Files
 
-- `.claude/skills/kicraft/stages/intent.md`
-- `.claude/skills/kicraft/stages/functional_spec.md`
-- `.claude/skills/kicraft/stages/architecture.md`
-- `.claude/skills/kicraft/stages/bom.md`
-- `.claude/skills/kicraft/stages/wiring.md`
+- `.agents/skills/kicraft/stages/intent.md`
+- `.agents/skills/kicraft/stages/functional_spec.md`
+- `.agents/skills/kicraft/stages/architecture.md`
+- `.agents/skills/kicraft/stages/bom.md`
+- `.agents/skills/kicraft/stages/wiring.md`
 - `kicraft/server/stage_prompts.py`
 - `tests/test_stage_driver_prompt_examples.py`
 
@@ -562,8 +562,8 @@ Parameters should be bounded and explicit, for example `usb=true`, `programming=
 - `kicraft/design/recipes/rp2040_minimal.py` (new)
 - appropriate reviewed component bundles under `kicraft/parts_library/` if any required part is missing
 - `tests/test_rp2040_recipe.py` (new)
-- `.claude/skills/kicraft/stages/architecture.md`
-- `.claude/skills/kicraft/stages/bom.md`
+- `.agents/skills/kicraft/stages/architecture.md`
+- `.agents/skills/kicraft/stages/bom.md`
 
 #### Acceptance
 
@@ -806,7 +806,7 @@ Rollout:
 - `kicraft/eval/self_eval.py`
 - `kicraft/eval/llm_analysis.py`
 - `kicraft/cli/web_cost_report.py`
-- `.claude/skills/kicraft/stages/*.md`
+- `.agents/skills/kicraft/stages/*.md`
 - affected web/eval tests
 
 ### Acceptance

@@ -12,8 +12,7 @@ stack (#83-#88), which this work assumes is merged.
   easyeda2kicad; network works).
 - Origin is Codeberg/Forgejo: no `gh`. Create PRs with
   `curl --netrc https://codeberg.org/api/v1/repos/LaForestLabs/KiCraft/pulls`.
-  Do NOT self-merge to main; the user merges. No Claude attribution in
-  commits.
+  Do NOT self-merge to main; the user merges. No agent attribution in commits.
 - EasyEDA API rate limit: HTTP 403 after ~17 rapid fetches, ~10 min
   cooldown; space fetches ~20 s apart (each part = 2+ requests: CAD data +
   3D binary).
@@ -184,7 +183,7 @@ registry yet" docstring (it does, since PR #82).
     at the guard flip.
 - Same rewrite in the `BOM_TOOLS` blurb for `add_part_from_lcsc` and the
   CORE DEFAULTS paragraph in `_stage_extra("bom")` (~152-158).
-- Stage specs live at `.claude/skills/kicraft/stages/`:
+- Stage specs live at `.agents/skills/kicraft/stages/`:
   - `bom.md` ~line 47: the "adopt before researching" paragraph currently
     says "fetch its bundle with the given C-number in ONE call"; rewrite
     per the split above.
@@ -398,7 +397,7 @@ sample_projects/*` (no tp4056/ws2812b), `kicraft/leaf_library/`,
 5. Optional: drive one curated example brief (e.g. the WS2812 example in
    `kicraft/server/examples.py`) through the BOM stage and confirm
    bundle-backed defaults are adopted via list_parts with zero
-   `add_part_from_lcsc` calls for vendored rows; or run the `/self-eval`
+   `add_part_from_lcsc` calls for vendored rows; or run the `self-eval`
    loop as the broad regression.
 6. Box (user-driven): deploy PR1, restart `kicraft-web`, check the sync
    diff log and the admin page (bundle column, no edit/delete); after

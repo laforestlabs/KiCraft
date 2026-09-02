@@ -1160,3 +1160,58 @@ def test_response_policy_falls_back_for_mock_clients():
     pol2 = _response_policy(_C(), "bom", 4096)
     assert pol2.serialization_max_tokens == 12345
     assert pol2.normal_reasoning == {"enabled": False}
+
+
+def test_review_candidate_captures_forensics_without_committing(tmp_path):
+    state_path = tmp_path / ".kicraft" / "state.json"
+    events = []
+    result = stage_driver_mod.drive_stage(
+        _ScriptedClient([_ok_intent_reply()]),
+        "intent",
+        "a USB-powered LED",
+        state_path,
+        tmp_path,
+        progress=events.append,
+        review_before_commit=True,
+    )
+
+    assert result["needs_review"] is True
+    assert result["commit_ok"] is False
+    assert result["slot"]["project_stem"] == "USB_LED"
+    assert result["debug_context"]["raw_response"] == _OK_INTENT
+    assert result["debug_context"]["base_messages"][1]["role"] == "user"
+    assert result["debug_context"]["response_schema"]
+    assert result["debug_context"]["response_format"]
+    assert [event["kind"] for event in events][-1] == "candidate_review"
+    assert not state_path.exists()
+
+
+def test_review_question_does_not_persist_open_questions(tmp_path):
+    state_path = tmp_path / ".kicraft" / "state.json"
+    raw = json.dumps(
+        {
+            "questions": [
+                {
+                    "text": "Which supply voltage?",
+                    "stage": "intent",
+                    "blocking": True,
+                    "material": True,
+                }
+            ]
+        }
+    )
+    result = stage_driver_mod.drive_stage(
+        _ScriptedClient(
+            [{"text": raw, "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0}]
+        ),
+        "intent",
+        "an LED board",
+        state_path,
+        tmp_path,
+        review_before_commit=True,
+    )
+
+    assert result["needs_input"] is True
+    assert result["questions"][0]["text"] == "Which supply voltage?"
+    assert result["debug_context"]["raw_response"] == raw
+    assert not state_path.exists()

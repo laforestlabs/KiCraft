@@ -2,18 +2,16 @@
 finalize math (weighted total, gate caps, grade band).
 
 Everything here operates on a generic ``m`` metrics dict and the parsed rubric,
-never on files directly. That is what lets one implementation serve both the
-offline harness (which builds ``m`` from a harvested ``claude`` transcript) and
-the web app (which builds the same ``m`` shape from its own ``events.jsonl`` +
-artifact tree). A front-end supplies ``m`` with these sub-dicts:
+never on files directly. That lets one implementation serve both the offline
+harness (which builds ``m`` from artifacts and an optional agent transcript) and
+the web app (which builds the same shape from ``events.jsonl`` plus artifacts).
 
     state, synth, erc, generated, perm, transcript, latency, token_usage,
     expected_question_band   (see kicraft.eval.artifacts + each collector)
 
-The ``transcript`` sub-dict is a logical run-trace, not literally a ``claude``
-transcript: the web collector synthesises one (present / crashes / failed_commits
-/ ask_questions / synth_attempts) from its event stream so these scorers run
-unchanged.
+The ``transcript`` sub-dict is a logical run trace, not a vendor-specific
+transcript. The web collector synthesises it from events so the same scorers run
+for both sources.
 """
 from __future__ import annotations
 

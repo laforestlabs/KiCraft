@@ -26,8 +26,7 @@ So future work starts from facts, not guesses:
   `metrics.token_usage`.
 - There is a free `/demo` replay (`KICRAFT_WEB_DEMO=1`).
 
-References: memory `project-kicraft-commercialization`; full plan at
-`~/.claude/plans/make-a-plan-to-woolly-bee.md`.
+References: archived commercialization planning notes.
 
 ## 1. Accounts, project persistence, and input capture
 

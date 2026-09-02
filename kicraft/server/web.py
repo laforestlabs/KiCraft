@@ -1625,8 +1625,8 @@ def _file_failure_report(state: dict) -> None:
 
 
 def _investigation_log_dir() -> Path:
-    """Where headless /kicraft-investigate runs tee their stdout: a sibling of
-    the projects dir (not per-project, since a report may have no project)."""
+    """Where headless kicraft-investigate skill runs tee their stdout: a sibling
+    of the projects dir (not per-project, since a report may have no project)."""
     return _store().projects_dir.parent / "support_investigations"
 
 
@@ -1663,7 +1663,7 @@ def _auto_investigate_error_if_enabled(report_id: int | None) -> None:
 
 
 def _auto_investigate_if_enabled(report_id: int) -> None:
-    """Kick off a headless /kicraft-investigate run for a report a *user* filed
+    """Kick off a headless kicraft-investigate skill run for a report a user filed
     (the manual Support button or feedback attached to a failed run), gated by
     the admin toggle. Not called for the silent per-failure auto-file, which
     would investigate every failed build. Best-effort: triage must never break

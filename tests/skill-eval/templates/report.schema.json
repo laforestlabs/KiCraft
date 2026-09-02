@@ -36,7 +36,7 @@
         "transcript_present": {"type": "boolean"},
         "token_usage": {
           "type": ["object", "null"],
-          "description": "LLM token totals + estimated USD cost for the session, summed across main + sub-agent turns and de-duped by requestId. Observability only, NOT a scored dimension, so it does not affect the rubric hash. Source: kicraft.cli.token_report.",
+          "description": "LLM token totals + estimated USD cost for the session, summed across agent turns and de-duplicated by requestId. Observability only, not a scored dimension. Source: kicraft.cli.token_report.",
           "properties": {
             "input_tokens": {"type": "integer"},
             "output_tokens": {"type": "integer"},

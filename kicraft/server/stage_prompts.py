@@ -26,7 +26,7 @@ def _bundle_sourcing_lcsc(bundle: str) -> str:
 _REPO = Path(__file__).resolve().parents[2]
 _SPEC_DIRS = [
     _REPO / "kicraft" / "skill_assets" / "skill" / "stages",  # packaged (preferred)
-    _REPO / ".claude" / "skills" / "kicraft" / "stages",  # current dev location
+    _REPO / ".agents" / "skills" / "kicraft" / "stages",  # repository Agent Skill
 ]
 
 
@@ -355,11 +355,11 @@ def build_system(
     spec = _spec_text(stage)
     schema = json.dumps(contract.schema)
     return (
-        f"You are the '{stage}' stage of KiCraft, a PCB design assistant running as a server "
-        f"(not Claude Code). Draft the '{stage}' slot of the design state.\n\n"
+        f"You are the '{stage}' stage of KiCraft, a PCB design assistant running in "
+        f"the provider-backed server runtime. Draft the '{stage}' slot of the design state.\n\n"
         "Output ONLY a single JSON object: no prose, no markdown fences.\n\n"
-        "Follow this stage specification (ignore references to SKILL.md or sub-agents; you "
-        "produce the slot JSON and may use the listed tools):\n"
+        "Follow this stage specification. Ignore interactive Agent Skill workflow "
+        "instructions; produce the slot JSON and use only the listed tools:\n"
         f"=== SPEC ===\n{spec}\n=== END SPEC ==="
         f"{_bounded_output_contract(stage, collection_bounds)}\n\n"
         "The JSON MUST validate against this Pydantic JSON schema (enums, required fields, and "

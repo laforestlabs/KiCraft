@@ -16,7 +16,7 @@ Delete these comments when filling in.
 | Target mode | release / dev |
 | Skill provenance | `skill_sha256:<…>` (from run.json) |
 | CLI | `<path>` |
-| Subject session | `<claude session uuid>` |
+| Subject session | `<agent runtime + session id>` |
 | Transcript | `<run-dir>/transcript.jsonl` |
 
 > Scores are only comparable to other runs under the **same rubric sha256**.
@@ -91,7 +91,7 @@ token usage        : … tok over … call(s)  est ~$…
 
 For each of intent / functional_spec / architecture / bom / wiring / synthesis:
 **PASS / FAIL** + one paragraph judged against
-`.claude/skills/kicraft/stages/<stage>.md`.
+`.agents/skills/kicraft/stages/<stage>.md`.
 
 - **intent** — PASS/FAIL: …
 - **functional_spec** — …

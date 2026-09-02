@@ -185,7 +185,7 @@ only; owned by the C1 workstream.
   Synthesis produced nothing buildable; the batch's `unprogrammable_mcu` and
   `silent_substitution` gates each fired once. Investigate per-design.
 - **run_25 gpio-expander (rc5) — `pin_not_driven`.** A power/driver ERC, *not*
-  the GAP 1 emitter class (§2b of `/kicraft-investigate`); MCP23017 rail without a
+  the GAP 1 emitter class (§2b of the `kicraft-investigate` skill); MCP23017 rail without a
   PWR_FLAG or an undriven feed pin.
 - **usb-a-power-splitter — footprint `annular_width`/`padstack` (1 design).**
   A `.kicad_mod` pad/annular fix if it recurs.

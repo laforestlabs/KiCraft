@@ -3,7 +3,7 @@
 **Picking the LLM for KiCraft's Layer-4 fab gate**
 
 `2026-06-19` · 7 models × 3 reasoning arms (off / medium / high) × 27 designs × K=1
-· **566/567 reviews** · **$12.53 LLM spend** · graded by Claude Code
+· **566/567 reviews** · **$12.53 LLM spend** · graded by independent agent sessions
 · corpus `logs/bakeoff/20260618T200126Z`
 
 ---
@@ -14,9 +14,9 @@ We empirically compared seven mid-range LLMs as the reviewer for KiCraft's
 electrical-review fab gate — the Layer-4 check that reads a finished design's
 netlist/BOM digest and blocks fabrication (`rc7`) if it finds an electrically
 **broken-but-DRC-clean** board. Each model reviewed a frozen, hand-labeled corpus
-(6 real blocker designs, 17 sound, 4 synthetic) at three reasoning efforts; Claude
-Code graders (separate context, matching-only) converted raw block-flags into true
-recall against the labeled defects.
+(6 real blocker designs, 17 sound, 4 synthetic) at three reasoning efforts;
+separate-context agent graders converted raw block flags into true recall
+against the labeled defects.
 
 **Bottom line:**
 

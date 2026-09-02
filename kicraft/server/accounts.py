@@ -296,8 +296,8 @@ class SupportReport:
 
 @dataclass
 class SupportInvestigation:
-    """One run of the /kicraft-investigate skill against a support report,
-    driven headlessly (see kicraft.server.investigate_runner). `report_md` is
+    """One headless run of the kicraft-investigate Agent Skill against a support
+    report (see kicraft.server.investigate_runner). `report_md` is
     the captured Markdown deliverable; `status` mirrors a build job's lifecycle
     (queued -> running -> done|failed) so the admin page can show it live."""
     id: int
@@ -517,7 +517,7 @@ class AccountStore:
                 "CREATE INDEX IF NOT EXISTS idx_support_reports_status "
                 "ON support_reports(status, id)"
             )
-            # Headless /kicraft-investigate runs against a support report (see
+            # Headless kicraft-investigate Agent Skill runs against a support report (see
             # SupportInvestigation / investigate_runner). Kept in the DB so the
             # admin support page can render the cached Markdown deliverable and
             # show a run's live status without re-driving the skill.
@@ -1405,7 +1405,7 @@ class AccountStore:
                                (report_id,)).fetchone()
         return self._row_to_support_report(row) if row else None
 
-    # ---- support investigations (headless /kicraft-investigate) ------------
+    # ---- support investigations (headless kicraft-investigate skill) --------
 
     @staticmethod
     def _row_to_investigation(row: sqlite3.Row) -> SupportInvestigation:

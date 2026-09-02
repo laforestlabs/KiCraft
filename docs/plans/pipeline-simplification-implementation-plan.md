@@ -11,7 +11,7 @@ changes (R1–R6) · low-risk perf wave only (persistent-pcbnew-worker DEFERRED 
 dead-code Tiers 1+2 (Tier 3 product decisions EXCLUDED, stale-string sweep included).
 
 **Background evidence:** `docs/plans/dead-code-and-pipeline-perf-2026-07-02.md` (audit + measured
-profile). Architecture map: `CLAUDE.md`. This plan is self-contained — every item names its
+profile). Architecture map: `AGENTS.md`. This plan is self-contained — every item names its
 mechanism, files, and acceptance criteria. Implement phases in order; one item per commit.
 
 ---
@@ -92,7 +92,7 @@ cli_app, `cli/solve_hierarchy.py`, `render_drc_overlay`, `web_cost_report`, `tok
 
 - `cli/split_schematic.py` + `cli/generate_report.py` + their `[project.scripts]` entries
   (`split-schematic` pyproject:98, `generate-report` pyproject:71) + any `test_cli_help` cases.
-  **Fix `CLAUDE.md` line ~55** — it wrongly lists both as pipeline subprocesses.
+  **Fix `AGENTS.md` line ~55** — it wrongly lists both as pipeline subprocesses.
 - `design/cli_app.py` — `electrical-review` subcommand: handler `_cmd_electrical_review`
   (:507-562) + argparse wiring (:3912-3923). Keep `synthesis/electrical_review.py` (live via
   `_maybe_electrical_review`).
@@ -114,7 +114,7 @@ cli_app, `cli/solve_hierarchy.py`, `render_drc_overlay`, `web_cost_report`, `tok
 - `server/session.py:59,116-120` — docstrings describing multi-layout state resolution that no
   longer exists; `server/storage.py:106` "legacy" rationale; `server/web.py:4526` comment.
 - `cli/solve_subcircuits.py:701,1236`, `autoplacer/brain/pins.py:66` — comments referencing
-  deleted GUI modules. `.claude/skills/kicraft/SKILL.md:139` — Experiment Manager sentence.
+  deleted GUI modules. `.agents/skills/kicraft/SKILL.md:139` — Experiment Manager sentence.
 - `scripts/tboard.py:23` — `DEFAULT_DB=/data/runs/i8` → make the arg required or point at a
   non-VOID iteration. `deploy/tuning-i7/` — re-point `RUN_ID` defaults off VOID i7/i10 (rename
   dir only if trivially safe).

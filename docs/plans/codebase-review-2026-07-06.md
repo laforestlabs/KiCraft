@@ -320,7 +320,7 @@
   - **Severity:** high · **Status:** NEEDS-VERIFICATION
   - **Failure scenario:**
     state.json is the sole IPC channel between the web app, the build worker, and this CLI (per
-    CLAUDE.md), yet _cmd_stage_commit — whose docstring says 'Atomic stage commit' — persists it
+    AGENTS.md), yet _cmd_stage_commit — whose docstring says 'Atomic stage commit' — persists it
     with a bare truncating write_text (open 'w' truncates, then writes ~100KB of JSON): a crash,
     OOM-kill, or disk-full between truncate and completion leaves a permanently corrupted/partial
     state.json, after which every _load_state (validate/stage-prep/stage-commit/build, and the web
@@ -1128,7 +1128,7 @@
     duality' — the collapse shipped in Phase 4a), and web.py:3134-3136 ('older ones have kicraft/ or
     a top-level copy' — such projects were nuked and _state_path checks only .kicraft/state.json).
     Cost: an agent or dev trusting these docstrings re-introduces a no-dot 'kicraft/' fallback that
-    CLAUDE.md's storage model explicitly forbids ('One name, no fallback'), or wastes time hunting
+    AGENTS.md's storage model explicitly forbids ('One name, no fallback'), or wastes time hunting
     for a fallback path that does not exist in the code.
 
 - [x] **C13** `kicraft/autoplacer/brain/subcircuit_composer.py:1059` — _build_merged_nets dedupes pad refs with a linear `pad_ref not in net.pad_refs` list-membership per pad, making net assembly O(pads^2) per net; _append_pad_ref (line 1244) repeats the pattern.
@@ -1173,7 +1173,7 @@
     An agent or developer asked to promote a leaf follows the module's own pointer, greps for
     kicraft/gui/pages/leaf_library.py, finds nothing, and burns a session re-deriving that
     extract_leaf in kicraft/leaf_library/extractor.py is the only remaining promote entry point — in
-    a codebase whose CLAUDE.md explicitly maintains docs as the map for agents.
+    a codebase whose AGENTS.md explicitly maintains docs as the map for agents.
 
 - [x] **V2** `kicraft/server/routes_admin.py:835` — _self_eval_leaf_boards hand-globs '.experiments/subcircuits/*/leaf_routed.kicad_pcb', hard-coding the artifact layout and filename instead of importing LEAF_ROUTED/artifact_root from kicraft/cli/artifact_paths.py.
   - **Severity:** low · **Status:** NEEDS-VERIFICATION
@@ -1345,7 +1345,7 @@
     Read ci.yml (test job installs only [dev]; security job comment: 'Full extras so the abuse tests
     actually run rather than skip'), pyproject.toml (empty base deps, stripe in `server`, matplotlib
     in `experiment`), counted 21 pcbnew importorskip files in tests/, and confirmed
-    tests/test_web_browse.py has a bare top-level web import. The place/route engine that CLAUDE.md
+    tests/test_web_browse.py has a bare top-level web import. The place/route engine that AGENTS.md
     calls the product's actual value is never tested in CI.
 
 - [ ] **I2** Burn the 27-failure local test baseline down to zero and retire the stash-diff regression gate
@@ -1429,7 +1429,7 @@
     5,304 (+36%) with its parts_cli cut still pending. Add a tiny CI step (or pre-commit check) with
     a checked-in ratchet file mapping tracked monoliths to their max allowed line counts, failing
     when a file exceeds its ratchet and auto-lowering when it shrinks. Also refresh the stale counts
-    in CLAUDE.md/roadmap from the same source so the map agents load each session stays honest.
+    in AGENTS.md/roadmap from the same source so the map agents load each session stays honest.
   - **Why:**
     Measured `wc -l` today (web.py 5,613, cli_app.py 5,304) against the roadmap's recorded baselines
     and post-cut counts; the roadmap's whole premise is that these files' size caused multi-hour

@@ -6,8 +6,8 @@
 > source of truth. If the two ever disagree, **`rubric.yaml` wins.** Regenerate the
 > stamp above with `bin/rubric_hash.py compute` after any scoring change.
 
-This rubric scores a single **KiCraft run** — one subject `claude` session
-that took a PCB brief through the pipeline. It does **not** score PCB-layout
+This rubric scores one **KiCraft run** in which a subject agent takes a PCB
+brief through the pipeline. It does **not** score PCB-layout
 quality (that is `kicraft/scoring/`, a different thing).
 
 A score is **only comparable to other scores carrying the same `sha256`.** When
@@ -46,14 +46,14 @@ the rubric changes, the hash changes, and old scores move to a separate cohort.
   count); penalties only for the agent's *own* error-driven re-commits.
 - `interaction_friction`: scored **relative to the scenario's
   `expected_question_band`** — asking on an ambiguous brief is good; interrogating
-  a clear one, or skipping a needed interview, is bad. Permission prompts above
-  the documented allowlist floor are always friction.
+  a clear one, or skipping a needed interview, is bad. Runtime permission
+  prompts are optional evidence and count as friction when captured.
 
 ## Class J — judgment (54 pts, scored by the observer)
 
 | Dimension | Wt | What it measures |
 |---|---|---|
-| `spec_compliance` | 10 | Obeyed SKILL.md + stage specs (no state hand-edits, no sub-agent `Read`, no `cd`, no silent substitution) |
+| `spec_compliance` | 10 | Obeyed SKILL.md + stage specs (no state hand-edits, working-directory changes, prohibited library reads, or silent substitutions) |
 | `intent_fidelity` | 10 | Output honors stated constraints/preferences |
 | `electrical_soundness` | 16 | **The gotcha dimension** — grounding/ground-loops, decoupling, MCU programming path, protection, strap resistors, thermal, rail sizing |
 | `part_selection_quality` | 8 | Right part, right source, sane footprint/symbol, ratings fit |

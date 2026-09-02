@@ -18,6 +18,11 @@ import json
 import re
 from pathlib import Path
 
+
+from kicraft.design.stage_state import (
+    downstream_stages as _downstream_stages,
+    invalidate_downstream,
+)
 from kicraft.fsutil import atomic_write_text
 
 from .stage_pipeline import DESIGN_STAGES, drive_chain
@@ -172,16 +177,11 @@ def derive_stage_statuses(
 
 def downstream_stages(stage: str) -> list[str]:
     """The stages after `stage` (what editing `stage` invalidates and must re-run)."""
-    stages = list(DESIGN_STAGES)
-    if stage not in stages:
-        return []
-    return stages[stages.index(stage) + 1 :]
+    return list(_downstream_stages(stage))
 
 
 def read_state(ws) -> dict:
-    """Best-effort load of a committed state.json (or {} if absent). The path is
-    always ``<ws>/.kicraft/state.json`` via ``_state_path`` -- one layout, no
-    fallback (Phase 4a; see CLAUDE.md "Storage model")."""
+    """Best-effort load of the canonical ``<ws>/.kicraft/state.json``."""
     p = _state_path(Path(ws))
     try:
         return json.loads(p.read_text(encoding="utf-8"))
@@ -241,21 +241,7 @@ def null_downstream(ws, stage: str) -> list[str]:
         # (which would wipe every slot) or silently skip the clear (which
         # would leave stale downstream data behind an edit).
         raise RuntimeError(f"state.json unreadable in {ws}; cannot edit stages")
-    cleared = downstream_stages(stage)
-    for s in cleared:
-        if s == "wiring":
-            bom = sj.get("bom")
-            if isinstance(bom, dict):
-                bom["connections"] = []
-                bom["no_connect_pins"] = []
-        else:
-            sj[s] = None
-        ss = sj.get("stage_status")
-        if isinstance(ss, dict):  # the stage's recorded outcome is stale too
-            ss.pop(s, None)
-    sj["open_questions"] = [
-        q for q in (sj.get("open_questions") or []) if q.get("stage") not in cleared
-    ]
+    cleared = list(invalidate_downstream(sj, stage))
     atomic_write_text(state_path, json.dumps(sj, indent=2) + "\n")
     return cleared
 

@@ -72,7 +72,7 @@ def run_scoring(pcb_path, config):
         if os.path.isfile(path):
             sz = os.path.getsize(path)
             image_bytes += sz
-            # Claude vision: ~1 token per 750 bytes for PNG images
+            # Coarse multimodal-context heuristic: ~1 token per 750 PNG bytes.
             image_tokens += sz // 750
 
     token_usage = {
@@ -157,7 +157,7 @@ def main():
     parser.add_argument("--compare", help="Path to previous result JSON for comparison")
     parser.add_argument("--no-save", action="store_true", help="Don't save JSON result")
     parser.add_argument("--no-render", action="store_true", help="Skip visual rendering")
-    parser.add_argument("--review", action="store_true", help="Print render paths for visual review by Claude")
+    parser.add_argument("--review", action="store_true", help="Print render paths for multimodal review")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -189,7 +189,7 @@ def main():
         print("  The following renders are ready for visual inspection:")
         for view, path in render_paths.items():
             print(f"    READ: {os.path.abspath(path)}")
-        print("  Use Claude's Read tool to view each PNG and evaluate the checklist.\n")
+        print("  Ask a multimodal agent or human to view each PNG and evaluate the checklist.\n")
 
     # Comparison
     if args.compare:

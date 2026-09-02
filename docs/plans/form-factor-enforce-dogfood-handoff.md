@@ -90,7 +90,7 @@ ERC, so this is the real validation:
 ```bash
 cat "$RUN"/generated/*/*_erc.rpt | .venv/bin/python -c "import json,sys; d=json.load(sys.stdin); \
 print('ERC errors:', sum(1 for s in d['sheets'] for v in s['violations'] if v['severity']=='error'))"
-# or just: /kicraft-investigate <the run dir>
+# or ask the agent to use the kicraft-investigate skill on the run directory
 ```
 - **ERC = 0 errors → the electrical reconcile is validated. Proceed to Phase 2.**
 - **ERC errors → this is the finding to fix.** Likely suspects and fixes:
@@ -180,5 +180,5 @@ Then flip **PR3**: run `check_conformance` at promote and fail/downgrade a non-c
 - Tests (all green, gate off): `tests/test_form_factor*.py` (95 tests).
 - Commits this line of work: `ab89e0f`(GAP1) `3f12c73`(registry) `7fa4ee6`(datum) `e725de8`(emit)
   `ad33434`(conformance) `590c6fa`(§8.5) `b7393b0`(compose Half 1) `dddb49a`+`e6ca872`(Half 2 electrical).
-- Investigate any failure with `/kicraft-investigate <run dir>` — its §8.5 audit already reports
-  form-factor conformance.
+- Investigate any failure with the `kicraft-investigate` skill against the run
+  directory — its §8.5 audit already reports

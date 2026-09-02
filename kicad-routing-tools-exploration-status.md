@@ -13,7 +13,7 @@ Last updated: 2026-08-12
 
 - Branch: `experiment/kicad-routing-tools`.
 - Required `skill://verify` instructions were read. The final verification must use the real `kicraft.design.cli_app replay` build tail and app artifact resolver, followed by fresh `kicad-cli pcb drc` output.
-- The working tree already contained unrelated modifications. Do not touch `.claude/commands/kicraft-investigate.md`, `kicraft/server/*`, `tests/test_stagetabs_helpers.py`, `tests/test_web_support_reports.py`, or `scripts/self_eval_model_compare.py`.
+- The working tree already contained unrelated modifications. Do not touch `.agents/skills/kicraft-investigate/SKILL.md`, `kicraft/server/*`, `tests/test_stagetabs_helpers.py`, `tests/test_web_support_reports.py`, or `scripts/self_eval_model_compare.py`.
 - Todo state: all five approved implementation/evidence steps complete.
 
 ### Work completed in this session
@@ -185,7 +185,7 @@ Run from `/home/kicraft/KiCraft` unless a command says otherwise.
 
 ## Assumptions & contingencies
 
-- Treat all current working-tree modifications as pre-existing work. Modify only the routing runner, FreeRouting sidecar helper, leaf cache/error callsites, focused tests, and existing experiment document named above; leave `.claude/commands/kicraft-investigate.md`, `kicraft/server/*`, `tests/test_stagetabs_helpers.py`, `tests/test_web_support_reports.py`, and `scripts/self_eval_model_compare.py` untouched.
+- Treat all current working-tree modifications as pre-existing work. Modify only the routing runner, FreeRouting sidecar helper, leaf cache/error callsites, focused tests, and existing experiment document named above; leave `.agents/skills/kicraft-investigate/SKILL.md`, `kicraft/server/*`, `tests/test_stagetabs_helpers.py`, `tests/test_web_support_reports.py`, and `scripts/self_eval_model_compare.py` untouched.
 - `/tmp/KiCadRoutingTools` and `/tmp/krt-venv` are disposable but currently complete and pinned. If either disappears during execution, recreate the source checkout at commit `3ceb773722bea67aa3685e7ee430c0c0d17ef38d`, install its pinned requirements, and run upstream `python build_router.py --tag v0.20.2` for the separately versioned native component; never claim `3ceb...` is the tag commit or substitute a newer source revision mid-comparison.
 - If the KRT full replay stops before parent composition, retain that failure as the leaf result and use the `PARENT_LOCAL_CONN` ablation for parent coverage. Do not weaken rules, increase rip authority, or enable upstream plane finalization to force a green result.
 - If the fresh FreeRouting replay also fails, use its observed same-project result as the baseline and limit the conclusion to relative evidence; the historical project-696 success is context, not a substitute for the new run. KRT still cannot be called promising unless it satisfies every hard preservation/short/artifact criterion above.

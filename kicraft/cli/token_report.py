@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """Summarize token usage and estimated cost for a KiCraft design session.
 
-Parses one or more Claude Code transcripts (``.jsonl``) and sums token usage
-across every assistant turn, including sub-agent sidechains, to report the true
-start-to-finish cost of a design session.
+Parses one or more supported agent transcripts (``.jsonl``) and sums token
+usage across every assistant turn, including delegated sidechains, to report
+the true start-to-finish cost of a design session.
 
-KiCraft itself spends no LLM tokens: the deterministic pipeline (synthesize ->
-place -> route -> fab) is pure Python. All token cost lives in the Claude Code
-agent that runs the design interview, and Claude Code records per-turn usage in
-its transcript. This tool reads that record so you can measure what a design
-actually costs before pricing it.
+KiCraft's deterministic pipeline (synthesize -> place -> route -> fab) spends no
+LLM tokens. Token cost belongs to the agent runtime that performs the design
+interview. This tool reads transcript records carrying assistant-message usage
+objects so the session can be measured before pricing it.
 
 Deliberately pure-stdlib (no kicraft, pcbnew, or pydantic imports) so the
 skill-eval harness can reuse :func:`summarize_transcripts` without pulling in
@@ -48,7 +47,7 @@ UNKNOWN_MODEL = "unknown"
 
 
 def price_for_model(model_id, prices=None):
-    """Map a transcript model id (e.g. 'claude-opus-4-8') to (family, price_entry).
+    """Map a transcript model id (e.g. 'provider-model-version') to (family, price_entry).
 
     Matching is by family substring so version suffixes are irrelevant. Returns
     (UNKNOWN_MODEL, None) when no family matches, which marks the cost estimate
@@ -97,9 +96,9 @@ def _iter_assistant_usage(path):
 def _collect_unique_usage(paths):
     """Return {request_key: (model_id, usage)} de-duplicated across all paths.
 
-    Claude Code can log the same API call more than once; keying by requestId
+    Agent runtimes may log one API call more than once. Keying by requestId
     (falling back to the message id, then a file+line tag) counts each distinct
-    call exactly once while preserving every sidechain call as its own request.
+    call exactly once while preserving sidechain calls.
     """
     seen = {}
     for fi, path in enumerate(paths):
@@ -270,7 +269,7 @@ def _expand_paths(raw_paths):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Summarize token usage and estimated cost for a KiCraft "
-                    "design session from its Claude Code transcript(s).")
+                    "design session from supported agent transcript JSONL files.")
     parser.add_argument("transcript", nargs="+",
                         help="Transcript .jsonl file(s), a directory of them, or a glob. "
                              "Multiple are summed (a design that spanned sessions).")

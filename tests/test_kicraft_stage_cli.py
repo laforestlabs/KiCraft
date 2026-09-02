@@ -325,6 +325,98 @@ def test_stage_commit_intent_happy_path(tmp_path, capsys):
     assert written["project_stem"] == "ESP32_WEATHER_TEST"
 
 
+def test_stage_commit_atomically_invalidates_stale_downstream_state(tmp_path, capsys):
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "project_stem": "WEATHER",
+                "intent": _valid_intent(),
+                "functional_spec": _valid_functional_spec(),
+                "architecture": _valid_architecture(),
+                "bom": _valid_bom(),
+                "open_questions": [
+                    {
+                        "text": "Current-stage note",
+                        "stage": "functional_spec",
+                        "blocking": False,
+                        "material": True,
+                    },
+                    {
+                        "text": "Stale architecture question",
+                        "stage": "architecture",
+                        "blocking": True,
+                        "material": True,
+                    },
+                ],
+                "stage_status": {
+                    stage: {"ok": True}
+                    for stage in (
+                        "intent",
+                        "functional_spec",
+                        "architecture",
+                        "bom",
+                        "wiring",
+                    )
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    slot = _write_slot(tmp_path, "functional_spec-redraft", _valid_functional_spec())
+
+    rc, payload = _run(
+        capsys,
+        "stage-commit",
+        "functional_spec",
+        "--slot-file",
+        str(slot),
+        "--invalidate-downstream",
+        "--no-archive",
+        str(state_path),
+    )
+
+    assert rc == 0, payload
+    assert payload["invalidated_stages"] == ["architecture", "bom", "wiring"]
+    written = json.loads(state_path.read_text(encoding="utf-8"))
+    assert written["intent"] is not None
+    assert written["functional_spec"] is not None
+    assert written["architecture"] is None
+    assert written["bom"] is None
+    assert written["open_questions"] == []
+    assert set(written["stage_status"]) == {"intent", "functional_spec"}
+
+
+def test_rejected_invalidating_commit_preserves_existing_state_bytes(tmp_path, capsys):
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps({"project_stem": "KEEP", "intent": _valid_intent()}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    before = state_path.read_bytes()
+    slot = _write_slot(
+        tmp_path,
+        "bad-intent-redraft",
+        _valid_intent() | {"inferred_expertise": "wizard"},
+    )
+
+    rc, payload = _run(
+        capsys,
+        "stage-commit",
+        "intent",
+        "--slot-file",
+        str(slot),
+        "--invalidate-downstream",
+        "--no-archive",
+        str(state_path),
+    )
+
+    assert rc == 3
+    assert payload["ok"] is False
+    assert state_path.read_bytes() == before
+
+
 def test_stage_commit_rejects_malformed_intent(tmp_path, capsys):
     state_path = tmp_path / "state.json"
     slot = _write_slot(

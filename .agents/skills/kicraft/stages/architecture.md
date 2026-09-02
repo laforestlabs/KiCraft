@@ -1,4 +1,4 @@
-Stage 3: Architecture. You are running inside the KiCraft stage sub-agent. Your job is to draft the `architecture` slot of the conversation state and commit it. Follow SKILL.md's "Workflow (follow exactly, in order)" section — this file specifies what the slot must look like.
+Stage 3: Architecture. Draft the complete `architecture` slot and commit it through the workflow in the parent `SKILL.md`; this file defines the slot contract.
 
 Given the captured `intent` and `functional_spec` (both available in the `state` field of stage-prep's output), commit to concrete topologies, regulation strategy, MCU presence, comms protocols, rail voltages, and crucially the SHEET HIERARCHY plus inter-sheet connectivity.
 

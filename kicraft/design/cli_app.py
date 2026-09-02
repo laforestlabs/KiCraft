@@ -1,6 +1,6 @@
-"""`kicraft` — non-interactive helpers used by the Claude Code skill.
+"""`kicraft` — deterministic helpers used by the portable KiCraft Agent Skill.
 
-The skill at ``.claude/skills/kicraft/`` drives the LLM conversation;
+The skill at ``.agents/skills/kicraft/`` drives the LLM-authored conversation;
 this CLI handles the deterministic side: validating a state file,
 listing reusable leaves the skill can show to the model, and emitting
 the KiCad project once the four slots are populated.
@@ -68,6 +68,7 @@ from .models import (
     ReviewFinding,
     StageStatus,
 )
+from .stage_state import invalidate_downstream
 
 from .synthesize import SynthesisInputError, run as run_synth
 from .synthesis.fab_export import extract_lcsc_pin
@@ -1490,9 +1491,9 @@ def _cmd_lookup_lcsc_id(args: argparse.Namespace) -> int:
     Order: explicit C-number in the query (offline), parts-library manifests
     (offline, authoritative), the offline JLC catalog (jlcparts dump: stock,
     Basic/Extended, qty-1 price), then an easyeda.com keyword search (network).
-    Prints JSON; exits 0 when a single LCSC id is resolved, 4 otherwise (with
-    a candidate list to choose from). Lets the BOM sub-agent own MPN->LCSC
-    resolution without the main thread reaching for WebSearch.
+    Prints JSON; exits 0 when a single LCSC id is resolved, 4 otherwise (with a
+    candidate list to choose from). Lets the BOM stage own MPN->LCSC resolution
+    without ad-hoc web lookup outside the deterministic resolver.
     """
     mpn = args.mpn
     target = mpn.strip().upper()
@@ -3300,10 +3301,10 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
                 continue
             pinouts[sym] = info
         # Fail loudly rather than emitting a partial dict with {"error": ...}
-        # entries: a silent gap is what drove the wiring sub-agent to read
-        # /usr/share/kicad/symbols directly (a hard-rule violation). The
-        # sub-agent must fix the BOM (re-fetch / correct the symbol) and
-        # retry, or surface a question — never fall back to Read.
+        # entries: a silent gap previously tempted the wiring stage to read
+        # /usr/share/kicad/symbols directly. The agent must fix the BOM
+        # (re-fetch / correct the symbol) and retry, or surface a question —
+        # never bypass stage-prep's canonical pin data.
         if unresolved:
             print(
                 json.dumps(
@@ -3554,6 +3555,12 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
 
     if args.history_message:
         state.history.append(ChatMsg(role="assistant", content=args.history_message))
+
+    invalidated_stages: tuple[str, ...] = ()
+    if args.invalidate_downstream:
+        candidate = state.model_dump()
+        invalidated_stages = invalidate_downstream(candidate, stage)
+        state = ConversationState.model_validate(candidate)
 
     try:
         state = ConversationState.model_validate(state.model_dump())
@@ -3942,6 +3949,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         ],
         "open_questions": len(state.open_questions),
         "blocking_questions": sum(1 for q in state.open_questions if q.blocking),
+        "invalidated_stages": list(invalidated_stages),
     }
     if archive_warning:
         summary["archive_warning"] = archive_warning
@@ -7102,10 +7110,9 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="kicraft",
         description=(
-            "Deterministic helpers for the KiCraft skill. The LLM-driven "
-            "conversation lives in the Claude Code skill at "
-            ".claude/skills/kicraft/; this CLI handles state validation, "
-            "leaf-library listing, and file synthesis."
+            "Deterministic helpers for the KiCraft Agent Skill. The LLM-authored "
+            "conversation lives in .agents/skills/kicraft/; this CLI handles "
+            "state validation, leaf-library listing, and file synthesis."
         ),
     )
     sub = ap.add_subparsers(dest="command", required=True)
@@ -7617,6 +7624,11 @@ def main(argv: list[str] | None = None) -> int:
         nargs="?",
         default=".kicraft/state.json",
         help="path to state.json (default .kicraft/state.json)",
+    )
+    p_commit.add_argument(
+        "--invalidate-downstream",
+        action="store_true",
+        help="atomically clear every design stage made stale by this commit",
     )
     p_commit.add_argument(
         "--no-archive",

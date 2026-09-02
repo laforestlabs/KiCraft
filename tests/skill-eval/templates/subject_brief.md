@@ -1,64 +1,42 @@
 # Launching a subject session
 
-The **subject** is a fresh `claude` session that runs KiCraft as a real user
-would. It is the thing under test; it must know nothing about this eval harness,
-the rubric, or that it is being observed. Do not coach it.
+The **subject** is a fresh Agent Skills-compatible session that runs KiCraft as a real user would. It is the system under test and must know nothing about the eval harness, rubric, or observer. Do not coach it.
 
-## 1. Pick the target (what's under test)
+## 1. Pick the target
 
 | mode | CLI | skill | use when |
 |---|---|---|---|
-| **release** (default) | pipx `kicraft` | global `~/.claude/skills/kicraft` | simulating a real user; catches packaging/install bugs |
-| **dev** | repo `.venv/bin/kicraft` | working-tree `.claude/skills/kicraft` synced to global | verifying an unreleased fix |
+| **release** | packaged/pipx `kicraft` | installed `.agents/skills/kicraft` | simulate a real user and catch installation defects |
+| **dev** | repository `.venv/bin/kicraft` | working-tree `.agents/skills/kicraft` copied to the subject runtime's discovery root | verify an unreleased change |
 
-For **dev** mode, sync the skill so the global copy matches the working tree, and
-record it:
-
-```
-diff -rq <repo>/.claude/skills/kicraft ~/.claude/skills/kicraft   # confirm/sync
-```
-
-The observer records the resulting `skill_sha256` via `harvest_run.py --skill-dir`.
+For dev mode, compare the installed skill directory with `<repo>/.agents/skills/kicraft` before starting. The observer records the tested directory's `skill_sha256` through `harvest_run.py --skill-dir`.
 
 ## 2. Make a clean external workspace
 
-**Never run the subject inside the KiCraft repo** (it masks install bugs and the
-subject can wander into the source tree). Use a throwaway dir outside it:
+Never run the subject inside the KiCraft repository; that masks installation defects and exposes source files a real user would not have. Use an empty external directory:
 
-```
-mkdir -p ~/kicraft-eval/workspaces/<S0x>-<UTCstamp>
-cd       ~/kicraft-eval/workspaces/<S0x>-<UTCstamp>
+```text
+~/kicraft-eval/workspaces/<S0x>-<UTCstamp>
 ```
 
-This dir must contain no KiCraft source and no prior `.kicraft/`.
+It must contain no KiCraft source, `.kicraft/`, or prior `generated/` directory.
 
 ## 3. Launch and drive
 
-```
-claude
-```
+Start any Agent Skills-compatible coding agent in the workspace. Confirm it discovers the `kicraft` skill, then paste the scenario's opening prompt verbatim from `scenarios/<S0x>.md`.
 
-Paste the scenario's **opening prompt verbatim** (from `scenarios/<S0x>.md`). Then
-follow the scenario's **user-script**: when the subject asks a clarifying
-question, answer with the script's canned answer for that fork — and nothing more.
-If the subject asks something the script doesn't anticipate, answer minimally and
-in character (a real user of the stated expertise level), and note the
-off-script question for the observer. Let the run proceed to synthesis (or to a
-clean stop) on its own; do not nudge it past errors.
+Follow only the scenario's user script. When the subject asks a clarification, answer with the canned answer for that fork and nothing more. If the script does not anticipate a question, answer minimally in character and record the off-script question. Let the run proceed to build or a clean stop without nudging it past errors.
 
-Record the **session UUID** (top of the `claude` session, or the newest file in
-`~/.claude/projects/<mangled-workspace-path>/`) so the observer can grab the
-transcript.
+If the runtime can export a JSONL transcript containing assistant usage/tool records, save its path for `harvest_run.py --transcript`. Transcript capture is optional; artifact grading still works without it.
 
-## 4. When it ends
+## 4. Hand off
 
-Hand off to the observer:
-
-```
+```text
 <repo>/.venv/bin/python <repo>/tests/skill-eval/bin/harvest_run.py \
   --workspace ~/kicraft-eval/workspaces/<S0x>-<UTCstamp> \
   --scenario <S0x> --target-mode <release|dev> \
-  --skill-dir <skill dir under test>
+  --skill-dir <skill dir under test> \
+  [--transcript <agent transcript.jsonl>]
 ```
 
-Then the observer scores and writes the report (see `observer_prompt.md`).
+The observer then scores the run and writes the report using `observer_prompt.md`.

@@ -514,7 +514,7 @@ empty-pad-set path, round-loop acceptance on courtyard/timeout DRC results.
    numeric anchoring, sheet-name punctuation. A/B measurement = the next self-eval batch's
    retry counts. **Also shipped alongside (out-of-plan, found via parallel-session memory):
    `3da6b95` test-suite live-store isolation** — every full-suite run had been spawning one
-   REAL headless claude investigation + spamming the live accounts.db; conftest autouse
+   REAL headless agent investigation + spamming the live accounts.db; conftest autouse
    guard + PYTEST_CURRENT_TEST spawn gate + harness stub; live-DB junk-row DELETE left to
    the user (342 error_auto rows for projects 7/9).
 7. **PR-G (eval integrity) — SHIPPED `f9417bc` 2026-07-20** (done before PR-E/F so the next

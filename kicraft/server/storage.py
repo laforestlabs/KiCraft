@@ -3,7 +3,7 @@
 Extracted from web.py (refactor roadmap Phase 3). Since Phase 4a
 (build-in-place) a project lives AND builds in projects_dir/<uid>/<pid>/ with
 its metadata always under `.kicraft/` -- one name, no fallback, no
-workspace<->durable duality (see CLAUDE.md "Storage model"). What remains of
+workspace<->durable duality. What remains of
 "workspaces" is KICRAFT_WORK_DIR tempdirs for id-less/admin runs only.
 
 NOTE: persistence (``_persist_project``) still lives in web.py for now because
@@ -23,7 +23,7 @@ from .config import Settings
 
 def _kicraft_dir(root: Path) -> Path:
     """The run-metadata dir for a project: always ``<root>/.kicraft/`` (state.json,
-    fetched parts, check files). One name, no fallback -- see CLAUDE.md "Storage model"."""
+    fetched parts, check files). One name, no fallback."""
     return root / ".kicraft"
 
 

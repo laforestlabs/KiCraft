@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """Harvest a finished subject run from its external workspace into a run record.
 
-A KiCraft eval run happens in a throwaway *workspace* outside the repo
-(e.g. ~/kicraft-eval/workspaces/<id>/). When the subject session finishes, this
-copies the evidence into a *run record* (~/kicraft-eval/runs/<id>/), locates the
-subject's Claude Code transcript, and stamps run.json with provenance so the run
-is reproducible. score_run.py then reads the run record.
+A KiCraft eval run happens in a throwaway *workspace* outside the repository.
+When the subject session finishes, this copies evidence into a durable run
+record, optionally copies an explicitly supplied agent transcript, and stamps
+``run.json`` with provenance for ``score_run.py``.
 
     .venv/bin/python tests/skill-eval/bin/harvest_run.py \\
         --workspace ~/kicraft-eval/workspaces/S02-20260530-1 \\
         --scenario S02 --target-mode release \\
-        [--skill-dir ~/.claude/skills/kicraft] [--runs-root ~/kicraft-eval/runs]
+        --skill-dir ~/.agents/skills/kicraft \\
+        [--transcript /path/to/agent-session.jsonl] \\
+        [--runs-root ~/kicraft-eval/runs]
 
-Copies: .kicraft/, generated/, .claude/settings.local.json. Finds the transcript
-under ~/.claude/projects/<mangled-workspace-path>/*.jsonl (newest, or --session).
-Nothing is written inside the KiCraft repo.
+Copies ``.kicraft/``, ``generated/``, and the optional transcript. Nothing is
+written inside the KiCraft repository.
 """
 from __future__ import annotations
 
@@ -22,27 +22,11 @@ import argparse
 import datetime as dt
 import hashlib
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
 
 
-def mangle_cwd(path: Path) -> str:
-    """Claude Code project-dir name: every non-alphanumeric char -> '-'."""
-    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
-
-
-def find_transcript(workspace: Path, session: str | None) -> Path | None:
-    proj = Path.home() / ".claude" / "projects" / mangle_cwd(workspace)
-    if not proj.is_dir():
-        return None
-    jsonls = list(proj.glob("*.jsonl"))
-    if session:
-        for j in jsonls:
-            if session in j.stem:
-                return j
-    return max(jsonls, key=lambda p: p.stat().st_mtime) if jsonls else None
 
 
 def dir_content_hash(d: Path) -> str | None:
@@ -87,7 +71,7 @@ def main(argv=None) -> int:
     ap.add_argument("--run-id", help="run record name (default <scenario>-<UTCstamp>)")
     ap.add_argument("--runs-root", default=str(Path.home() / "kicraft-eval" / "runs"))
     ap.add_argument("--skill-dir", help="skill dir under test, for provenance hash")
-    ap.add_argument("--session", help="Claude session id substring to disambiguate transcript")
+    ap.add_argument("--transcript", help="optional agent transcript JSONL to preserve")
     args = ap.parse_args(argv)
 
     workspace = Path(args.workspace).expanduser().resolve()
@@ -106,15 +90,18 @@ def main(argv=None) -> int:
         copied.append(".kicraft/")
     if copy_if(workspace / "generated", run_dir / "generated"):
         copied.append("generated/")
-    if copy_if(workspace / ".claude" / "settings.local.json",
-               run_dir / ".claude" / "settings.local.json"):
-        copied.append(".claude/settings.local.json")
+    if copy_if(
+        workspace / ".agent-eval" / "permissions.json",
+        run_dir / "agent_permissions.json",
+    ):
+        copied.append("agent_permissions.json")
 
-    transcript = find_transcript(workspace, args.session)
-    if transcript:
+    transcript = Path(args.transcript).expanduser().resolve() if args.transcript else None
+    if transcript is not None:
+        if not transcript.is_file():
+            raise SystemExit(f"transcript not found: {transcript}")
         shutil.copy2(transcript, run_dir / "transcript.jsonl")
         copied.append(f"transcript.jsonl (from {transcript.name})")
-
     skill_dir = Path(args.skill_dir).expanduser() if args.skill_dir else None
     kicraft_session = None
     sid = workspace / ".kicraft" / "session_id"
@@ -128,7 +115,7 @@ def main(argv=None) -> int:
         "workspace": str(workspace),
         "captured_at": stamp,
         "kicraft_session_id": kicraft_session,
-        "claude_transcript": transcript.name if transcript else None,
+        "agent_transcript": transcript.name if transcript else None,
         "skill_dir": str(skill_dir) if skill_dir else None,
         "skill_sha256": dir_content_hash(skill_dir) if skill_dir else None,
         "cli": cli_info(),
@@ -139,9 +126,8 @@ def main(argv=None) -> int:
     print(f"harvested -> {run_dir}")
     for c in copied:
         print(f"  + {c}")
-    if not transcript:
-        print(f"  ! no transcript found under ~/.claude/projects/{mangle_cwd(workspace)}/")
-        print("    (latency / #questions / re-commit metrics will be partial)")
+    if transcript is None:
+        print("  ! no agent transcript supplied; latency, question, and re-commit metrics may be partial")
     print(f"\nnext: score_run.py score {run_dir}"
           + (f" --scenario {args.scenario}" if args.scenario else ""))
     return 0

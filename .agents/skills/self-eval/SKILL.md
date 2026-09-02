@@ -1,6 +1,7 @@
 ---
-description: Self-eval regression loop — drive every curated example brief (examples.py EXAMPLE_PROMPTS) end to end, auto-answering any clarifying questions, then grade each with the kicraft.eval rubric and compile a saved report.
-argument-hint: "[--limit N | --only 1,3,5 | --no-judge | --judge-model M | --build-timeout S | --parallel N | --build-slots M | --resume DIR] (optional; default: all briefs, full A–F judge)"
+name: self-eval
+description: Run KiCraft's curated end-to-end self-evaluation batch, monitor it, and interpret the saved scorecard. Use for regression sweeps, selected example briefs, resumed evaluations, or requests to compare fab readiness and rubric grades.
+compatibility: Requires the KiCraft server and evaluation dependencies, configured provider credentials, routing tools, and permission to spend provider budget.
 ---
 
 Run the KiCraft **self-eval** loop: for every brief in `EXAMPLE_PROMPTS`
@@ -9,7 +10,7 @@ board — auto-answering any parked clarifying question with the model's own fir
 suggested option — then score the run with the existing `kicraft.eval` rubric
 (Class-C metrics + LLM judge → an A–F grade) and compile a cross-brief report.
 The mechanical loop lives in `kicraft.eval.self_eval` (`kicraft-eval-batch`); this
-command runs it and interprets the results. Extra flags: `$ARGUMENTS`.
+skill runs it and interprets the results. Derive `<USER_FLAGS>` from the user's request, using no extra flags when none were supplied.
 
 > **Cost & time.** This drives real LLM pipelines (BOM part-resolution dominates
 > the spend) plus a deterministic place-and-route per board, so the default run
@@ -33,12 +34,10 @@ OUT="$REPO/logs/self_eval/$(date -u +%Y%m%dT%H%M%SZ)"; mkdir -p "$OUT"
 echo "OUT=$OUT"
 ```
 
-Then start the harness **in the background** (set the Bash tool's
-`run_in_background: true`), writing both streams to `$OUT/run.log`. Paste the
-`OUT` value literally (shell vars do not persist between Bash calls):
+Then start the harness using the active agent runtime's supervised background-process facility, writing both streams to `<OUT>/run.log`. Paste the resolved output path literally because shell variables may not persist between command calls:
 
 ```bash
-"$PY" -m kicraft.eval.self_eval --out "<OUT>" $ARGUMENTS > "<OUT>/run.log" 2>&1
+"$PY" -m kicraft.eval.self_eval --out "<OUT>" <USER_FLAGS> > "<OUT>/run.log" 2>&1
 ```
 
 Tell the user it is running, name `<OUT>`, and note you'll report when it
@@ -89,8 +88,7 @@ For each errored / low-grade / not-fab-ready brief, the run dir
 levels + judge rationale), `events.jsonl`, `.kicraft/state.json`, and the
 generated KiCad tree with the ERC report. Hand the user a ready next move:
 
-> `/kicraft-investigate <OUT>/run_NN_…` — to root-cause that run (verdict + ERC
-> errors at ×100-corrected coords, code-bug vs model-output).
+> Activate the `kicraft-investigate` skill on `<OUT>/run_NN_…` to root-cause that run (verdict + ERC errors at ×100-corrected coordinates, code bug vs model output).
 
 Keep the final message decision-useful: lead with the headline and the spend,
 then the table, then the short "needs attention" list with the investigate

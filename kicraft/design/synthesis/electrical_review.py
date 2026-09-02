@@ -11,8 +11,8 @@ clean) but functionally wrong.
 This module asks a capable model to review the committed design for exactly that
 class, using ONLY structured design data: the intent, the BOM, and the netlist
 rendered with pin FUNCTION NAMES. It deliberately never sees schematic geometry
--- ad-hoc geometry reading is what made the Claude-Code self-eval judges
-hallucinate "pin scrambles" that the exported netlist showed were correct.
+-- ad-hoc geometry reading made earlier self-evaluation judges hallucinate
+"pin scrambles" that the exported netlist showed were correct.
 
 The client is injected (same contract as the eval judge):
 ``chat(messages, model=, max_tokens=, temperature=, meta_ctx=) ->

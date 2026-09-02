@@ -3,8 +3,8 @@
 This check renders the PCB to PNG images via the unified
 ``kicraft.render.render_views`` pipeline and stores them alongside the
 scoring results. It does NOT auto-score from pixels — the images are
-meant to be reviewed by Claude (multimodal) or a human to catch issues
-that programmatic checks miss:
+meant to be reviewed by a multimodal agent or a human to catch issues that
+programmatic checks miss:
 
 - Trace routing aesthetics (90° corners, unnecessary detours)
 - Ground plane fragmentation visible on B.Cu render

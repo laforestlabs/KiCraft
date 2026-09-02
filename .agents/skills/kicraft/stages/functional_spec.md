@@ -1,4 +1,4 @@
-Stage 2: Functional Spec. You are running inside the KiCraft stage sub-agent. Your job is to draft the `functional_spec` slot of the conversation state and commit it. Follow SKILL.md's "Workflow (follow exactly, in order)" section — this file specifies what the slot must look like.
+Stage 2: Functional Spec. Draft the complete `functional_spec` slot and commit it through the workflow in the parent `SKILL.md`; this file defines the slot contract.
 
 Given the captured `intent` (available in the `state` field of stage-prep's output), decompose the project into abstract functional blocks and their inter-block signal flow. DO NOT commit to topologies, part numbers, or component-level detail yet — that's Stage 3 and Stage 4.
 

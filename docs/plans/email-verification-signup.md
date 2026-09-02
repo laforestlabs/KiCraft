@@ -196,7 +196,7 @@ Run: `pytest tests/test_accounts.py -q` (pure Python + SQLite, no network).
 4. Submit signup 6× from the same session/IP → 6th is throttled.
 5. Click **Resend** twice within 60s → second is a silent no-op (cooldown), neutral toast.
 
-**Deploy note:** per CLAUDE.md, restarting **both** `kicraft-web` and the build worker is
+**Deploy note:** per AGENTS.md, restarting **both** `kicraft-web` and the build worker is
 only needed for *pipeline* changes — this is web/DB only, so restarting `kicraft-web`
 (`deploy/restart-web.sh`) suffices. The schema migration runs automatically on
 `AccountStore` init.

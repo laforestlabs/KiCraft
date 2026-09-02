@@ -46,7 +46,7 @@ bridge and preserve.
 - `kicraft/autoplacer/brain/placement_solver.py` — 4,232 (core algorithm; leave alone).
 - `kicraft/cli/` — ~19k lines / 42 files; `kicraft/server/` — 14.5k / 21 files.
 - Runtime is **files-as-IPC**: web process → build-worker process → CLI subprocesses, all
-  communicating through `state.json` + the workspace tree. (See `CLAUDE.md` for the full map.)
+  communicating through `state.json` + the workspace tree. (See `AGENTS.md` for the full map.)
 
 ---
 
@@ -62,8 +62,8 @@ Removed:
 - `kicraft/gui/` (entire package).
 - GUI-only tests: `test_pipeline_state.py`, `test_presets_builtin.py`, `test_leaf_status_badge.py`,
   `test_gui_per_component_overrides.py`, `test_run_artifact_cleanup.py`.
-- `.claude/commands/launch-gui.md` (the slash command).
-- The "Live view (Experiment Manager GUI)" section of `.claude/skills/kicraft/SKILL.md` — it was
+- the obsolete vendor-specific GUI launch command;
+- the "Live view (Experiment Manager GUI)" section of the old KiCraft skill, which was
   *instructing every agent* to launch a now-deleted module (a direct cause of agent confusion).
 - The dead `gui` extra in `pyproject.toml`.
 
@@ -79,11 +79,10 @@ Breadcrumbed (recoverable via git history): README launch instructions removed a
 
 ## Phase 2 — Architecture map ✅ DONE
 
-Created `CLAUDE.md` at the repo root (auto-loaded into every Claude Code session): the
-subsystem map, the 3-process runtime topology, the files-as-IPC contract, the storage model
-(`.kicraft` vs `kicraft`), and a "**to change X, look in Y**" index. This is the single
-highest-leverage anti-confusion artifact — it stops every agent from re-deriving the
-architecture from scratch each session.
+Created `AGENTS.md` at the repository root with the subsystem map, runtime
+topology, file-IPC contract, storage model, and a “to change X, look in Y”
+index. Agent runtimes load this shared operating context instead of relying on
+vendor-specific project instructions.
 
 ---
 

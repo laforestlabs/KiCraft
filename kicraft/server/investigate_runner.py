@@ -1,27 +1,20 @@
-"""Run the /kicraft-investigate skill headlessly against a support report.
+"""Run the portable ``kicraft-investigate`` skill against a support report.
 
-The skill is a Claude Code slash command (an LLM agent procedure, no code
-entrypoint), so we drive the installed ``omp`` CLI in print mode::
+The skill is an Agent Skills procedure with no Python entry point, so the web
+service drives the installed ``omp`` agent CLI in print mode::
 
-    omp -p "/kicraft-investigate KC-XXXX" --auto-approve
+    omp -p "Use the kicraft-investigate skill to investigate KC-XXXX." --auto-approve
 
-from the repo root (the skill's bash block resolves the run via ``git
-rev-parse`` + ``accounts.db``), capturing the Markdown deliverable into
-``support_investigations.report_md``. OMP loads the Claude Code slash command
-from ``.claude/commands/`` via the ``claude`` discovery provider
-(``commands.enableClaudeProject=true``); auth comes from the kicraft OMP
-profile's stored credentials, not a Claude subscription. ``-p`` print mode
-emits only the final assistant message, which is what lands in
-``report_md``. Both entry points -- the admin support page's on-demand button
-and the web app's auto-trigger on a user report -- go through
-:func:`enqueue_investigation`.
+The process runs from the repository root, where OMP discovers
+``.agents/skills/kicraft-investigate/SKILL.md``. Its final Markdown response is
+stored in ``support_investigations.report_md``. Both the admin support page and
+the automatic user-report trigger go through :func:`enqueue_investigation`.
 
-Each run is a real agent session (LLM spend + minutes), so a module-level
-semaphore bounds concurrency and :func:`enqueue_investigation` de-dups against
-any already queued/running investigation for the same report. ``--auto-approve``
-is deliberate: this is admin/owner-triggered and the skill only runs read-only
-Bash/Read/Grep, but running headless still needs it (no TTY to approve tool
-calls).
+Each run is a real agent session with LLM spend, so a module-level semaphore
+bounds concurrency and :func:`enqueue_investigation` de-duplicates queued or
+running investigations for the same report. ``--auto-approve`` is deliberate:
+the owner-triggered skill uses read-only investigation commands, while a
+headless process has no TTY for permission prompts.
 """
 from __future__ import annotations
 
@@ -62,17 +55,16 @@ def _omp_bin() -> str | None:
 
 
 def _repo_dir() -> Path:
-    """The repo the skill resolves against (its bash block runs ``git rev-parse``
-    from cwd). Overridable via KICRAFT_REPO_DIR; defaults to this package's repo
-    root (kicraft/server/investigate_runner.py -> three parents up)."""
+    """Repository root containing the project-level Agent Skills directory.
+
+    Overridable via KICRAFT_REPO_DIR; defaults to this package's repository root.
+    """
     env = os.environ.get("KICRAFT_REPO_DIR")
     return Path(env) if env else Path(__file__).resolve().parents[2]
 
 
 def _resolve_target(store: AccountStore, report: SupportReport) -> str | None:
-    """The argument passed to /kicraft-investigate: prefer the board code (the
-    skill maps KC-XXXX -> run dir via accounts.db), else the project's on-disk
-    dir_path, else None (nothing locatable to investigate)."""
+    """Target described to the skill: board code first, then project path."""
     if report.board_code:
         return report.board_code
     if report.project_id is not None:
@@ -145,10 +137,11 @@ def _run_omp(store: AccountStore, inv_id: int, target: str):
     inv = store.get_investigation(inv_id)
     log_path = Path(inv.log_path) if inv and inv.log_path else None
     repo = _repo_dir()
-    cmd = [omp, "-p", f"/kicraft-investigate {target}", "--auto-approve"]
+    prompt = f"Use the kicraft-investigate skill to investigate {target}."
+    cmd = [omp, "-p", prompt, "--auto-approve"]
     model = os.environ.get("KICRAFT_INVESTIGATE_MODEL") or _DEFAULT_MODEL
     cmd += ["--model", model]
-    _log(f"inv {inv_id}: /kicraft-investigate {target} (cwd={repo})")
+    _log(f"inv {inv_id}: kicraft-investigate {target} (cwd={repo})")
     chunks: list[str] = []
     logf = log_path.open("a", encoding="utf-8") if log_path else None
     try:

@@ -18,7 +18,7 @@ repo. This separates three concerns:
    the workflow, the rubric, the scenario library, the report templates, and the
    scripts. Reviewed in PRs; evolves with the skill.
 2. **Workspace** — a throwaway dir **outside the repo** (`~/kicraft-eval/workspaces/<id>/`)
-   where the subject `claude` session actually runs `/kicraft`, exactly like a
+   where a fresh subject agent uses the portable `kicraft` skill exactly like a
    real user's project. Disposable. No KiCraft source nearby.
 3. **Run record** — the harvested evidence + the written report for one run, also
    **outside the repo** (`~/kicraft-eval/runs/<id>/`). Disposable; only a report is
@@ -30,7 +30,7 @@ tree (a real failure mode in the old runs).
 
 ## Three roles
 
-- **Subject** — fresh `claude` session under test. Knows nothing about the eval.
+- **Subject** — fresh agent session under test. Knows nothing about the eval.
   → `templates/subject_brief.md`
 - **Observer** — separate session that watches the subject, scores it, writes the
   report. Does the Class-J judgment. → `templates/observer_prompt.md`
@@ -41,8 +41,8 @@ tree (a real failure mode in the old runs).
 One weighted **0–100** score (+ hard-fail gates) per run, from two halves:
 
 - **Class C — deterministic** (`bin/score_run.py`): latency, #user-questions,
-  re-commits/aborts, ERC errors/warnings, failed synthesis checks, permission
-  floor. Reproducible; the baseline you trend.
+  re-commits/aborts, ERC errors/warnings, failed synthesis checks, and optional
+  runtime permission evidence. Reproducible; the baseline you trend.
 - **Class J — judgment** (observer agent): grounding/ground-loops, part selection,
   electrical soundness, intent fidelity, spec compliance. The gotcha layer.
 
@@ -63,12 +63,14 @@ PY=$REPO/.venv/bin/python
 $PY $REPO/tests/skill-eval/bin/rubric_hash.py check
 
 # 1. run a subject in a clean external workspace (see templates/subject_brief.md)
-mkdir -p ~/kicraft-eval/workspaces/S02-run1 && cd ~/kicraft-eval/workspaces/S02-run1
-claude            # paste scenarios/S02 opening prompt, follow its user-script
+mkdir -p ~/kicraft-eval/workspaces/S02-run1
+# Launch any Agent Skills-compatible client in that workspace and use the
+# scenario's opening prompt.
 
 # 2. harvest + deterministic score (see templates/observer_prompt.md)
 $PY $REPO/tests/skill-eval/bin/harvest_run.py --workspace ~/kicraft-eval/workspaces/S02-run1 \
-    --scenario S02 --target-mode release --skill-dir ~/.claude/skills/kicraft
+    --scenario S02 --target-mode release --skill-dir ~/.agents/skills/kicraft
+# Add --transcript /path/to/agent-session.jsonl when the client exports one.
 $PY $REPO/tests/skill-eval/bin/score_run.py score ~/kicraft-eval/runs/S02-<stamp> --scenario S02
 
 # 3. observer grades Class-J in report.json, then:
@@ -91,8 +93,8 @@ templates/
   report.schema.json   shape of report.json
 bin/
   rubric_hash.py       compute/check the rubric hash (CLI over kicraft.eval.rubric)
-  score_run.py         harness front-end: builds metrics from a claude transcript,
-                       drives the shared kicraft.eval scorer + finalize
+  score_run.py         harness front-end: builds metrics from an optional agent
+                       transcript, drives the shared scorer, and finalizes
   harvest_run.py       workspace -> run record + provenance
   fixtures/            scorer regression fixtures
 ```

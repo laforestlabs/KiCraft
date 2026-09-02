@@ -37,7 +37,15 @@ def _fallback_stem(brief: str) -> str:
 
 
 def commit_stage(
-    stage, slot, state_path, brief, project_stem=None, workspace=None
+    stage,
+    slot,
+    state_path,
+    brief,
+    project_stem=None,
+    workspace=None,
+    *,
+    invalidate_downstream: bool = False,
+    history_message: str | None = None,
 ) -> tuple[bool, dict]:
     sf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
     json.dump(slot, sf)
@@ -47,6 +55,10 @@ def commit_stage(
     cmd = KICRAFT + ["stage-commit", stage, str(state_path), "--slot-file", sf.name, "--no-archive"]
     if stage == "intent":
         cmd += ["--project-stem", project_stem or _fallback_stem(brief)]
+    if invalidate_downstream:
+        cmd.append("--invalidate-downstream")
+    if history_message:
+        cmd += ["--history-message", history_message]
     proc = run_design_cli(cmd, workspace)
     Path(sf.name).unlink(missing_ok=True)
     try:

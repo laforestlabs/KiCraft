@@ -4,9 +4,9 @@
 The scoring contract (rubric), the Class-C dimension scorers, the script gates,
 and the finalize math now live in the shippable :mod:`kicraft.eval` package, so
 the offline harness and the in-app web self-evaluation score identically. This
-script is the harness front-end: it builds the metrics dict ``m`` from a harvested
-run record (whose run-trace is a ``claude`` ``transcript.jsonl``) and drives the
-shared scorer.
+script is the harness front-end: it builds the metrics dict ``m`` from a
+harvested run record and its optional agent ``transcript.jsonl``, then drives
+the shared scorer.
 
 Two modes:
 
@@ -32,9 +32,9 @@ source is missing):
   - <run-dir>/**/synthesis_check.json   (status, failed_checks, 9.x checks)
   - <run-dir>/**/*_erc.rpt              (KiCad erc.v1.json; severity counts)
   - <run-dir>/**/state.json            (slots, history, open_questions, bom)
-  - <run-dir>/**/settings.local.json   (permission-prompt floor)
-  - <run-dir>/transcript.jsonl         (latency, #questions, re-commits/aborts)
-  - <run-dir>/run.json                 (target mode, scenario, perm baseline)
+  - <run-dir>/agent_permissions.json    (optional runtime permission evidence)
+  - <run-dir>/transcript.jsonl          (latency, #questions, re-commits/aborts)
+  - <run-dir>/run.json                  (target mode, scenario, permission baseline)
 """
 from __future__ import annotations
 
@@ -67,14 +67,16 @@ SKILL_EVAL_DIR = Path(__file__).resolve().parent.parent
 
 
 # --------------------------------------------------------------------------- #
-# permission floor (claude-only signal; no web analog)
+# optional permission evidence (runtime-neutral; no web analog)
 # --------------------------------------------------------------------------- #
 def perm_floor(run_dir: Path, baseline: int) -> dict:
-    p = _find_one(run_dir, "settings.local.json")
-    data = _load_json(p)
-    allow = ((data or {}).get("permissions") or {}).get("allow") or []
+    p = run_dir / "agent_permissions.json"
+    data = _load_json(p) if p.is_file() else None
+    allow = (data or {}).get("allow")
+    if not isinstance(allow, list):
+        allow = ((data or {}).get("permissions") or {}).get("allow") or []
     n = len(allow)
-    return {"present": p is not None, "count": n, "excess": max(0, n - baseline), "entries": allow}
+    return {"present": p.is_file(), "count": n, "excess": max(0, n - baseline), "entries": allow}
 
 
 # --------------------------------------------------------------------------- #
@@ -297,7 +299,7 @@ def _print_score_summary(report, rubric, final=False):
               f"(Class-J + final pending)")
         gates = report.get("gates", {}).get("triggered", [])
         if gates:
-            print(f"  script gates fired: " + ", ".join(f"{g['id']}≤{g['cap']} ({g['why']})" for g in gates))
+            print("  script gates fired: " + ", ".join(f"{g['id']}≤{g['cap']} ({g['why']})" for g in gates))
 
 
 def main(argv=None) -> int:

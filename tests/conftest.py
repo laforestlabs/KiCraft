@@ -11,9 +11,9 @@ behavior install a fake module object (monkeypatching the importing module's
 Live-store isolation (2026-07-20): ``web._STORE`` lazily builds the
 PRODUCTION store from .env whenever any test touches a ``_store()`` path
 without swapping it — which silently spammed the live ``accounts.db`` with
-342 junk error_auto support rows and spawned 46 REAL headless ``claude``
-investigations (real Anthropic-side spend, invisible to the OpenRouter
-ledger). The autouse guard points the store env at a per-test tmp dir
+342 junk error_auto support rows and spawned 46 REAL headless agent
+investigations (external provider spend not visible in the OpenRouter ledger).
+The autouse guard points the store env at a per-test tmp dir
 (exported vars beat .env) and resets the lazy singleton, so no test can
 reach the live DB or projects tree by accident again.
 """

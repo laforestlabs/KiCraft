@@ -1,9 +1,10 @@
 ---
-description: Investigate why a KiCraft run failed — across BOTH the schematic (ERC) and the PCB placement/routing (DRC) — and audit design quality on every run (pass or fail). Locates the run, prints the build verdict, localizes the ERC/DRC failures, classifies systematic code/footprint bugs vs per-design model gaps across all runs, and recommends a generalizable fix. Also audits part-library provenance, BOM realness + the substitution ledger, and LLM thinking-trace wheel-spin. Deliverable: a ranked pipeline-gap report — each finding deduped against known/deferred issues, replay-reproduced on current code, and mapped to its owning module and the gate that should have caught it.
-argument-hint: "[KC-XXXXXX board code | uid/pid | pid | /path/to/run] (optional; default: most recent run)"
+name: kicraft-investigate
+description: Investigate why a KiCraft run failed across schematic, PCB, and design-quality gates. Use for a board code, project/run path, account project ID, or a request to diagnose the most recent run and identify a generalizable pipeline fix.
+compatibility: Requires the KiCraft repository, its Python virtual environment, KiCad command-line tools, and access to the target run artifacts.
 ---
 
-Investigate a failed KiCraft run and hand back a fast, accurate picture of **why** it failed and **whether the fix is generalizable** (a synthesis/layout-code or footprint-library bug that hits *every* design) **or per-design** (this design's model output). Target run: `$ARGUMENTS` (may be empty → most recent run).
+Investigate a failed KiCraft run and hand back a fast, accurate picture of **why** it failed and **whether the fix is generalizable** (a synthesis/layout-code or footprint-library bug that hits *every* design) **or per-design** (this design's model output). Derive `<TARGET>` from the user's request; it may be a bare `KC-XXXXXX`, `uid/pid`, project ID, run path, or empty for the most recent run.
 
 **The board is the witness, not the patient.** This skill exists to find **pipeline gaps** — the code/gate/library/prompt changes that improve every *future* board — not to hand-fix this board. A candidate finding is not reportable until it passes §6 (prior-art dedup + replay reproduction on current code) and lands in §7's gap contract with an owning module, the gate that should have caught it, and a verification recipe.
 
@@ -11,9 +12,9 @@ Investigate a failed KiCraft run and hand back a fast, accurate picture of **why
 
 ```bash
 REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo "$HOME/KiCraft"); PY="$REPO/.venv/bin/python"
-"$PY" -m kicraft.cli.triage locate "$ARGUMENTS"    # RUN dir + accounts.db row (paste RUN into later steps)
-"$PY" -m kicraft.cli.triage run    "$ARGUMENTS"    # the unified failure verdict (start here)
-"$PY" -m kicraft.cli.triage audits "$ARGUMENTS"    # design-quality audits (run EVERY time, even rc0)
+"$PY" -m kicraft.cli.triage locate "<TARGET>"    # RUN dir + accounts.db row (paste RUN into later steps)
+"$PY" -m kicraft.cli.triage run    "<TARGET>"    # the unified failure verdict (start here)
+"$PY" -m kicraft.cli.triage audits "<TARGET>"    # design-quality audits (run EVERY time, even rc0)
 "$PY" -m kicraft.cli.triage scan                   # cross-run systematic-vs-per-design ranking
 ```
 
@@ -28,7 +29,7 @@ sqlite3 "$HOME/.kicraft/accounts.db" \
 
 Gotchas (the previous version rotted here — `resolve_run` in `kicraft/cli/triage.py` only matches the literal `KC-` prefix):
 
-- Pass the **bare code** to every triage subcommand (`KC-6THC46`), never a phrase like `"failed board id KC-6THC46"` — that fails with `could not resolve … under …/projects`. `$ARGUMENTS` frequently *arrives* as natural language; strip it to the `KC-XXXXXX` token before the first triage call.
+- Pass the **bare code** to every triage subcommand (`KC-6THC46`), never a phrase like `"failed board id KC-6THC46"` — that fails with `could not resolve … under …/projects`. User requests may arrive as natural language; extract the `KC-XXXXXX` token before the first triage call.
 - A code with no DB row → the build never persisted a board (or the id is wrong). Fall back to `triage locate` with no argument (= most recent run) and read the DB row's `brief`/`stem` to confirm it is the board you were asked about.
 - `dir_path` missing on disk → the row exists but the workspace was cleaned; report "board recorded but run dir gone", do not guess a path.
 
@@ -171,11 +172,7 @@ Fallback for deployed web runs with no build.log: `journalctl -u kicraft-web` ar
 
 ## 6. Gate every candidate finding — NEW, LIVE, REPRODUCIBLE?
 
-**(a) Prior-art dedup.** Grep the auto-memory index + plans for the failure signature:
-
-```bash
-grep -rli '<signature>' ~/.claude/projects/-home-kicraft-KiCraft/memory/ ~/.omp/agent/sessions/ "$REPO/docs/plans/" 2>/dev/null | head
-```
+**(a) Prior-art dedup.** Search the repository's issue tracker, current plans, and any agent-memory index exposed by the active runtime for the failure signature. Do not assume a vendor-specific memory path.
 
 - **KNOWN-FIXED**: all affected runs predate the fix → stale, one appendix line. Any hit after → **REGRESSION**, name the commit.
 - **KNOWN-DEFERRED** (current live set: N5b mouth alignment / run_10 GPIO fan-out, GND strand (run_14), reconcile advancing-chain + crystal-donor deaths, shaped-nesting bbox circumscription (run_29)): report "known-deferred, +N runs since <date>", cite the plan/memory, and do **NOT** invent a workaround — masking gates and post-route band-aids are rejected on principle (fix-at-source).

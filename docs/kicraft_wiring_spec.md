@@ -108,7 +108,7 @@ Five concrete artifacts need to be added or changed. Each is independent enough 
               │
               ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ .claude/skills/kicraft/stages/wiring.md (NEW):                      │
+│ .agents/skills/kicraft/stages/wiring.md (NEW):                      │
 │   New 5th LLM stage. Reads architecture + bom, emits connections.       │
 │ Calls `lookup-symbol` per part. Pydantic-validates pin existence.       │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -228,7 +228,7 @@ Apply to `PinEndpoint.pin` via a field_validator.
 
 ## 6. New LLM stage: `wiring`
 
-New file: `.claude/skills/kicraft/stages/wiring.md`. Slots in between BOM and synthesis. Promote it to a first-class stage in `SKILL.md` so the per-turn workflow knows about it.
+New file: `.agents/skills/kicraft/stages/wiring.md`. Slots in between BOM and synthesis. Promote it to a first-class stage in `SKILL.md` so the per-turn workflow knows about it.
 
 ### Stage contract
 
@@ -687,7 +687,7 @@ Ship criterion: `kicraft lookup-symbol Device:R` returns the expected JSON.
 
 ### Phase 2 — Wiring stage (LLM-side, no synthesis changes yet)
 
-- Write `.claude/skills/kicraft/stages/wiring.md` (full prompt).
+- Write `.agents/skills/kicraft/stages/wiring.md` (full prompt).
 - Update `SKILL.md`: add `wiring` to the stage ordering and per-turn workflow.
 - Update `cli_app.py`'s `validate` subcommand: if `bom.connections` is non-empty, cross-check pin existence (§9.10) and net coverage (§9.11).
 
@@ -736,7 +736,7 @@ Ship criterion: synthesizing a deliberately broken state (e.g. a wiring stage th
 
 ### Phase 8 — Smoke: full end-to-end
 
-- Run a fresh `/kicraft` session for a small project (3-sheet LDO + ESP32 + LED).
+- Run a fresh `kicraft` skill session for a small project (3-sheet LDO + ESP32 + LED).
 - Confirm: synthesis exits 0, `kicad-cli sch erc` reports 0 errors, `autoexperiment` runs to non-zero scores, KiCad opens the schematic and a human can read signal flow in <2 minutes per sheet.
 
 ---
@@ -745,7 +745,7 @@ Ship criterion: synthesizing a deliberately broken state (e.g. a wiring stage th
 
 Per-phase ship criteria are above. End-to-end acceptance test:
 
-1. Fresh session: `/kicraft` from a blank directory. Describe a USB-C powered ESP32-S3 board with a 3V3 LDO and a 5-LED indicator chain.
+1. Fresh session: ask the agent to use the `kicraft` skill from a blank directory. Describe a USB-C powered ESP32-S3 board with a 3V3 LDO and a 5-LED indicator chain.
 2. Walk through all five stages (intent → functional_spec → architecture → bom → wiring), let the skill archive at each boundary.
 3. Synthesize.
 4. Open `<project>.kicad_pro` in KiCad 9.
