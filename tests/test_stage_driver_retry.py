@@ -979,6 +979,277 @@ def test_repeated_commit_rejection_gets_one_pristine_escape_then_stops(tmp_path,
     )
 
 
+def test_a1_enriched_915_offender_keeps_legacy_commit_signature(monkeypatch):
+    """Cross-module contract (validation.py owns the formatting rule): the
+    REAL enriched §9.15 offender must signature-match the lead-only offender,
+    so clean-slate arming/terminating logic is unaffected by A1."""
+    import kicraft.design.synthesis.symbol_pinout as sp
+    from kicraft.design.models import (
+        BOM,
+        Architecture,
+        BomPart,
+        InterSheetNet,
+        NetConnection,
+        PinEndpoint,
+        Sheet,
+        SheetPin,
+    )
+    from kicraft.design.synthesis.validation import check_no_dangling_signal_nets
+
+    pinmap = {
+        "A:R": [("1", "1", "passive"), ("2", "2", "passive")],
+        "A:IC": [("5", "OUT", "output")],
+    }
+
+    def _lookup(lib_id, *a, **k):
+        if lib_id not in pinmap:
+            raise sp.SymbolNotFoundError(lib_id)
+        return {
+            "symbol": lib_id,
+            "unit_count": 1,
+            "pins": [
+                {"number": n, "name": m, "electrical_type": t} for n, m, t in pinmap[lib_id]
+            ],
+        }
+
+    monkeypatch.setattr(sp, "lookup_pins", _lookup)
+    arch = Architecture(
+        sheets=[
+            Sheet(name="MCU", stem="MCU", function="mcu"),
+            Sheet(name="IO", stem="IO", function="io"),
+        ],
+        power_nets=[],
+        inter_sheet_nets=[
+            InterSheetNet(
+                name="X_NET",
+                endpoints=[
+                    SheetPin(sheet="MCU", direction="output"),
+                    SheetPin(sheet="IO", direction="input"),
+                ],
+            )
+        ],
+    )
+    bom = BOM(
+        parts=[
+            BomPart(ref="R3", value="1k", symbol="A:R", footprint="F:F", sheet="MCU"),
+            BomPart(ref="U1", value="x", symbol="A:IC", footprint="F:F", sheet="MCU"),
+        ],
+        connections=[
+            NetConnection(
+                net_name="SIG_IN",
+                sheet="MCU",
+                endpoints=[
+                    PinEndpoint(ref="U1", pin="5"),
+                    PinEndpoint(ref="R3", pin="1"),
+                ],
+            ),
+            NetConnection(
+                net_name="SIG_OUT", sheet="MCU", endpoints=[PinEndpoint(ref="R3", pin="2")]
+            ),
+        ],
+    )
+    offenders = check_no_dangling_signal_nets(arch, bom).offenders
+    assert len(offenders) == 1
+    enriched = offenders[0]
+    assert " -- " in enriched  # the topology context really fired
+    lead = enriched.split(" -- ")[0]
+    errors = ["9.15 no dangling signal nets: 1 signal net(s) wire a single pin"]
+    legacy = _commit_rejection_signature({"errors": errors, "offenders": [lead]})
+    modern = _commit_rejection_signature({"errors": errors, "offenders": [enriched]})
+    assert legacy == modern
+
+
+# ---------- KC-VKUT5H A3: one-clean-slate bounded-continuation state machine ----------
+
+
+def _a3_sig(letter: str) -> dict:
+    # Offender identity IS the canonical pin, so a distinct signature must
+    # move a distinct pin (A1.2, B1.2, ...) — renaming only the net is not
+    # enough for _offender_identity.
+    return {
+        "ok": False,
+        "errors": ["9.15 no dangling signal nets: 1 signal net(s) wire a single pin"],
+        "offenders": [f"net 'SIG_{letter}' on sheet 'MCU' wires only {letter}1.2 and is dangling"],
+    }
+
+
+def _a3_wiring_state(tmp_path, monkeypatch):
+    state = {
+        "architecture": {"power_nets": [], "inter_sheet_nets": []},
+        "bom": {
+            "parts": [
+                {"ref": "U1", "sheet": "MAIN", "symbol": "Test:U", "value": "IC"},
+                {"ref": "R1", "sheet": "MAIN", "symbol": "Test:R", "value": "1k"},
+            ],
+            "connections": [],
+            "no_connect_pins": [],
+        },
+    }
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    prep = {
+        "state": state,
+        "extras": {
+            "symbol_pinouts": {
+                "Test:U": {"pins": [{"number": "1"}, {"number": "2"}]},
+                "Test:R": {"pins": [{"number": "1"}, {"number": "2"}]},
+            }
+        },
+    }
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc", (), {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""}
+        )(),
+    )
+    return state_path
+
+
+def _a3_run(tmp_path, monkeypatch, rejects, max_retries=4, extra_ok_reply=True):
+    """Drive wiring; commit rejects with _a3_sig(letter) per entry, then OK."""
+    state_path = _a3_wiring_state(tmp_path, monkeypatch)
+    n = {"i": 0}
+
+    def fake_commit(stage, slot, *args, **kwargs):
+        i = n["i"]
+        n["i"] += 1
+        if i < len(rejects):
+            return False, _a3_sig(rejects[i])
+        return True, {"ok": True}
+
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", fake_commit)
+    reply = {
+        "text": json.dumps(
+            {
+                "pins": [
+                    {"ref": "U1", "pin": "1", "net": "A"},
+                    {"ref": "R1", "pin": "1", "net": "A"},
+                    {"ref": "R1", "pin": "2", "net": "B"},
+                    {"ref": "U1", "pin": "2", "net": "B"},
+                ]
+            }
+        ),
+        "reasoning": "",
+        "finish_reason": "stop",
+        "cost_usd": 0.0,
+    }
+    replies = [dict(reply) for _ in rejects] + ([dict(reply)] if extra_ok_reply else [])
+    client = _ScriptedClient(replies)
+    client.s = Settings(api_key="test")
+    result = stage_driver_mod.drive_stage(
+        client,
+        "wiring",
+        "test",
+        state_path,
+        tmp_path,
+        max_retries=max_retries,
+    )
+    return result, client
+
+
+def _escape_call(client, idx):
+    """The clean-slate call carries pristine base messages (no assistant echo)
+    at the escape temperature; the preserving retry echoes the rejected reply."""
+    call = client.calls[idx]
+    is_escape = call["temperature"] == 0.4 and [m["role"] for m in call["messages"]] == [
+        "system",
+        "user",
+        "user",
+    ]
+    return is_escape
+
+
+def test_a3_escape_then_changed_signature_commits(tmp_path, monkeypatch):
+    """A, A -> clean slate -> B -> normal preserving retry -> commit OK."""
+    result, client = _a3_run(tmp_path, monkeypatch, ["A", "A", "B"])
+    assert result["commit_ok"] is True
+    assert result["attempts"] == 4
+    assert _escape_call(client, 2)
+    assert not _escape_call(client, 3)  # preserving correction, with echo
+    assert [m["role"] for m in client.calls[3]["messages"]] == ["system", "user", "assistant", "user"]
+
+
+def test_a3_escape_repeating_arming_signature_terminates(tmp_path, monkeypatch):
+    """A, A -> clean slate -> A -> terminal (the no-progress regression)."""
+    result, client = _a3_run(tmp_path, monkeypatch, ["A", "A", "A"], extra_ok_reply=False)
+    assert result["commit_ok"] is False
+    assert result["failure_kind"] == "commit_rejected"
+    assert result["attempts"] == 3
+    assert len(client.calls) == 3  # terminated, not a fourth call
+    assert _escape_call(client, 2)
+
+
+def test_a3_post_escape_repeat_terminates_without_second_escape(tmp_path, monkeypatch):
+    """A, A -> clean slate -> B -> B -> terminal, and the escape never re-arms."""
+    result, client = _a3_run(tmp_path, monkeypatch, ["A", "A", "B", "B"], extra_ok_reply=False)
+    assert result["commit_ok"] is False
+    assert result["attempts"] == 4
+    assert len(client.calls) == 4
+    assert _escape_call(client, 2)
+    assert not _escape_call(client, 3)  # a post-escape repeat terminates, it does NOT escape again
+
+
+def test_a3_post_escape_changed_signatures_consume_only_loop_budget(tmp_path, monkeypatch):
+    """A, A -> clean slate -> B -> C -> D: every signature differs, so normal
+    corrections continue until the OUTER LOOP bound (max_retries + 1 = 5
+    iterations) and no second clean slate fires."""
+    result, client = _a3_run(
+        tmp_path, monkeypatch, ["A", "A", "B", "C", "D"], max_retries=4, extra_ok_reply=False
+    )
+    assert result["commit_ok"] is False
+    assert result["attempts"] == 5
+    assert len(client.calls) == 5
+    escapes = [i for i in range(len(client.calls)) if _escape_call(client, i)]
+    assert escapes == [2]  # exactly one clean slate, ever
+
+
+def test_a3_serialization_recovery_plus_rejections_never_exceed_call_budget(
+    tmp_path, monkeypatch
+):
+    """Nested recovery calls count toward provider_call_budget =
+    max_retries + 2; the loop stops there, not at the commit path."""
+    state_path = _a3_wiring_state(tmp_path, monkeypatch)
+    n = {"i": 0}
+
+    def fake_commit(stage, slot, *args, **kwargs):
+        i = n["i"]
+        n["i"] += 1
+        if i < 5:
+            return False, _a3_sig("ABCDE"[i])
+        return True, {"ok": True}
+
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", fake_commit)
+    good = {
+        "pins": [
+            {"ref": "U1", "pin": "1", "net": "A"},
+            {"ref": "R1", "pin": "1", "net": "A"},
+            {"ref": "R1", "pin": "2", "net": "B"},
+            {"ref": "U1", "pin": "2", "net": "B"},
+        ]
+    }
+    client = _ScriptedClient(
+        [
+            {"text": "{\"pins\": [", "reasoning": "", "finish_reason": "length", "cost_usd": 0.0},
+            {"text": json.dumps(good), "finish_reason": "stop", "cost_usd": 0.0},
+        ]
+        + [
+            {"text": json.dumps(good), "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0}
+            for _ in range(5)
+        ]
+    )
+    client.s = Settings(api_key="test")
+    result = stage_driver_mod.drive_stage(
+        client, "wiring", "test", state_path, tmp_path, max_retries=2
+    )
+    assert result["commit_ok"] is False
+    # provider_call_budget = max_retries(2) + 2 = 4: 1 normal + 1
+    # serialization + 2 more rejections.
+    assert result["attempts"] == 4
+    assert len(client.calls) == 4
+
+
+
 def test_wiring_rejection_uses_complete_same_schema_correction(tmp_path, monkeypatch):
     state = {
         "architecture": {

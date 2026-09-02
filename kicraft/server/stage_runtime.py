@@ -665,12 +665,40 @@ def next_attempt(
     prior_signature: tuple | None,
     *,
     was_clean_slate: bool,
+    clean_slate_spent: bool = False,
+    clean_slate_armed_signature: tuple | None = None,
 ) -> tuple[tuple, bool, bool]:
-    """Classify preserving correction, one clean-slate escape, or terminal rejection."""
+    """Classify a commit rejection: preserving correction, the one clean-slate
+    escape, or terminal rejection (KC-VKUT5H A3 bounded continuation).
+
+    State machine (the caller owns ``clean_slate_spent`` /
+    ``clean_slate_armed_signature``; the escape is armed at most once):
+
+    * ordinary response, signature EQUAL to the prior one and the escape is
+      not yet spent -> arm exactly one clean-slate call and record the arming
+      signature;
+    * ordinary response, signature equal and the escape already spent ->
+      TERMINAL (an adjacent repeat after the escape is churn, not progress);
+    * the clean-slate response itself (``was_clean_slate``): the escape is
+      spent either way. A signature equal to the arming signature is no
+      progress -> TERMINAL. A DIFFERENT signature is bounded churn, not
+      proven improvement: it may consume remaining ordinary preserving
+      iterations, but it can never arm a second clean slate;
+    * any other case -> ordinary preserving correction feedback.
+
+    Outer-loop and provider-call bounds are the caller's; this function only
+    classifies.
+    """
     signature = _commit_rejection_signature(rejection)
     if was_clean_slate:
-        return signature, False, True
-    return signature, signature == prior_signature, False
+        if clean_slate_armed_signature is not None and signature == clean_slate_armed_signature:
+            return signature, False, True  # escape repeated the arming defect
+        return signature, False, False
+    if signature == prior_signature:
+        if clean_slate_spent:
+            return signature, False, True
+        return signature, True, False
+    return signature, False, False
 
 
 def finalize_stage(
@@ -999,6 +1027,14 @@ def drive_stage(
     loop_retries = 0
     prior_rejection_signature = None
     clean_slate_next = False
+    # KC-VKUT5H A3: the pristine escape may be armed exactly once. ``spent``
+    # is set when the escape is armed (so the clean-slate response itself is
+    # classified through the post-escape rules), and ``armed`` remembers the
+    # signature that triggered it — a clean-slate response repeating that
+    # signature is no progress and stays terminal, while a different one may
+    # continue with ordinary preserving corrections (never a second escape).
+    clean_slate_spent = False
+    clean_slate_armed_signature: tuple | None = None
     serialization_calls = 0
     attempts = 0
     rounds = None
@@ -1578,11 +1614,15 @@ def drive_stage(
             out,
             prior_rejection_signature,
             was_clean_slate=was_clean_slate,
+            clean_slate_spent=clean_slate_spent,
+            clean_slate_armed_signature=clean_slate_armed_signature,
         )
         if terminal:
             break
         prior_rejection_signature = signature
         if clean_slate_next:
+            clean_slate_spent = True
+            clean_slate_armed_signature = signature
             reasoning = {"enabled": False}
             temperature = max(escape_temperature, 0.0)
             messages = _lean_retry(
@@ -1590,9 +1630,9 @@ def drive_stage(
                 _retry_feedback(out, stage=stage, valid_refs=None),
             )
             continue
-        prior_rejection_signature = signature
-        # Echo the complete rejected response with structured commit feedback.
-        # Correction uses the same stage schema; no alternate patch contract.
+        # Bounded continuation: a post-escape response with a NEW signature
+        # (or a first-seen signature) gets the ordinary preserving correction
+        # feedback; it cannot re-arm the escape (clean_slate_spent stays True).
         _valid_refs = committed_bom_refs(state_path) if stage == "wiring" else None
         messages = _lean_retry(raw, _retry_feedback(out, stage=stage, valid_refs=_valid_refs))
 
