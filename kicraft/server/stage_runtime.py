@@ -7,7 +7,7 @@ import re
 import resource
 import time
 from dataclasses import asdict, dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 import requests
 
@@ -135,7 +135,7 @@ def _record_attempt_facts(
 # (§9.11) in a single slot; on a complex board the model needs more correction
 # passes than the simpler, smaller-slot stages, so they floor higher (BOM must
 # also resolve every symbol/footprint to a real library entry within its budget).
-_STAGE_MIN_RETRIES = {"wiring": 4, "bom": 4}
+_STAGE_MIN_RETRIES = {"wiring": 7, "bom": 4}
 
 # In-stream reasoning-loop breakout budget: when the client aborts a completion
 # (finish_reason="reasoning_loop"), retry once with reasoning disabled + higher
@@ -230,10 +230,11 @@ def _retry_feedback(
         if "9.15 no dangling signal nets" in rejection_text:
             msg += (
                 " NOTE: if the sole pin is one terminal of a two-terminal series part, "
-                "do not rename that terminal or put both part pins on one net. Complete the "
-                "path by moving the destination pin that currently shares the OTHER terminal's "
-                "net onto the dangling terminal's net. Pattern: source + Rn.1 = SIG_IN; "
-                "Rn.2 + destination = SIG_OUT. Both SIG_IN and SIG_OUT must have two pins."
+                "do not rename that terminal or put both part pins on one net. Keep the "
+                "two terminals on different nets and make both sides complete: each side "
+                "has the resistor terminal plus a non-resistor endpoint. Use architecture "
+                "direction and resolved pin function to keep endpoints on the correct side. "
+                "Do not assume the populated side is the source or blindly move its endpoint."
             )
         if "9.17 two-terminal self-short" in rejection_text:
             msg += (
@@ -308,6 +309,65 @@ def _normalize_questions(raw_list, stage: str) -> list[dict]:
 def _client_model(client) -> str | None:
     """Best-effort display name of the model a client will call (shown in the UI)."""
     return getattr(getattr(client, "s", None), "model", None)
+
+
+def _trace_candidate(stage: str, candidate: dict | None) -> dict | None:
+    """Return only the normalized design slot; never provider request/response data."""
+    if candidate is None:
+        return None
+    if stage == "wiring":
+        return {
+            key: candidate[key]
+            for key in ("connections", "no_connect_pins", "questions")
+            if key in candidate
+        }
+    return candidate
+
+
+def _observe_attempt(
+    observer: Callable[[dict], None] | None,
+    *,
+    client,
+    stage: str,
+    provider_attempt: int,
+    call_mode: str,
+    outcome: str,
+    facts: ProviderFacts | None = None,
+    candidate: dict | None = None,
+    commit_result: dict | None = None,
+    rejection_signature: tuple | None = None,
+    clean_slate_armed: bool = False,
+    clean_slate_used: bool = False,
+    escalated: bool = False,
+    provider_fallback: bool = False,
+) -> None:
+    """Emit one sanitized, normalized attempt record to an opt-in observer."""
+    if observer is None:
+        return
+    settings = getattr(client, "s", None)
+    signature = rejection_signature
+    observer(
+        {
+            "version": 1,
+            "stage": stage,
+            "provider_attempt": provider_attempt,
+            "call_mode": call_mode,
+            "outcome": outcome,
+            "model": _client_model(client),
+            "design_profile": getattr(settings, "design_profile", None),
+            "provider": facts.provider if facts is not None else None,
+            "provider_order": list(getattr(settings, "provider_order", ()) or ()),
+            "candidate": _trace_candidate(stage, candidate),
+            "commit_result": commit_result,
+            "rejection_signature": (
+                [list(signature[0]), list(signature[1])] if signature is not None else None
+            ),
+            "clean_slate_armed": clean_slate_armed,
+            "clean_slate_used": clean_slate_used,
+            "escalated": escalated,
+            "provider_fallback": provider_fallback,
+        }
+    )
 
 
 def _design_temperature(client) -> float:
@@ -804,8 +864,10 @@ def drive_stage(
     core_defaults=None,
     *,
     review_before_commit: bool = False,
+    attempt_observer: Callable[[dict], None] | None = None,
 ) -> dict:
     run_id = (meta_ctx or {}).get("run_id")
+    active_client = client
     t0 = time.monotonic()
     cpu0 = _child_cpu_s()
     if progress:
@@ -985,16 +1047,16 @@ def drive_stage(
             "raw_response": raw_response,
             "response_policy": {
                 **asdict(policy),
-                "design_temperature": _design_temperature(client),
+                "design_temperature": _design_temperature(active_client),
                 "serialization_escape_temperature": float(
                     getattr(
-                        getattr(client, "s", None),
+                        getattr(active_client, "s", None),
                         "serialization_escape_temperature",
                         0.4,
                     )
                 ),
                 "stage_semantics": getattr(
-                    getattr(client, "s", None), "stage_semantics", "observe"
+                    getattr(active_client, "s", None), "stage_semantics", "observe"
                 ),
                 "max_retries": max_retries,
             },
@@ -1013,11 +1075,11 @@ def drive_stage(
     # serialization retry consume the same immutable collection bounds.
     normal_cap = int(policy.normal_max_tokens)
     serialization_budget = max(0, int(policy.serialization_retries))
-    temperature = _design_temperature(client)
+    temperature = _design_temperature(active_client)
     reasoning = policy.normal_reasoning
     reasoning_guard = policy.reasoning_guard
     escape_temperature = float(
-        getattr(getattr(client, "s", None), "serialization_escape_temperature", 0.4)
+        getattr(getattr(active_client, "s", None), "serialization_escape_temperature", 0.4)
     )
     # Recovery budgets are independent: reasoning recovery gets ONE
     # reasoning-disabled retry, serialization recovery gets exactly ONE plain
@@ -1046,10 +1108,14 @@ def drive_stage(
     schema_ok = False
     semantic_repair_attempted = False
     semantic_repair_adopted = False
-    semantic_mode = getattr(getattr(client, "s", None), "stage_semantics", "observe")
+    semantic_mode = getattr(getattr(active_client, "s", None), "stage_semantics", "observe")
     current_facts = None
     current_call_mode = "normal"
     current_attempt_number = 0
+    escalation_pending = False
+    escalation_done = False
+    provider_fallback_spent = False
+    provider_fallback_active = False
 
     def emit_candidate_decoded(
         decoded: AttemptOutcome,
@@ -1076,6 +1142,30 @@ def drive_stage(
     for attempt in range(max_retries + 1):
         if attempts >= provider_call_budget:
             break
+        if escalation_pending:
+            profile_name = getattr(getattr(active_client, "s", None), "escalation_profile", "")
+            switch_profile = getattr(active_client, "with_design_profile", None)
+            if (
+                profile_name
+                and profile_name
+                != getattr(getattr(active_client, "s", None), "design_profile", None)
+                and callable(switch_profile)
+            ):
+                prior_model = _client_model(active_client)
+                active_client = switch_profile(profile_name)
+                escalation_done = True
+                if progress:
+                    progress(
+                        {
+                            "kind": "escalation",
+                            "stage": "wiring",
+                            "from": prior_model,
+                            "to": _client_model(active_client),
+                            "attempt": attempts + 1,
+                            "reason": "repeated_commit_signature",
+                        }
+                    )
+            escalation_pending = False
         ctx = {**(meta_ctx or {}), "stage": stage, "attempt": attempt}
         tool_calls_ct = None
         raw = ""
@@ -1088,58 +1178,132 @@ def drive_stage(
         clean_slate_next = False
         call_messages = messages
         call_response_format = response_format
-        attempts += 1  # a call IS attempted even when it raises below
-        current_attempt_number = attempts
-        try:
-            facts = call_stage_provider(
-                client,
-                prepared,
-                messages=call_messages,
-                response_format=call_response_format,
-                max_tokens=normal_cap,
-                temperature=temperature,
-                reasoning=reasoning,
-                reasoning_guard=reasoning_guard,
-                progress=progress,
-                meta_ctx=ctx,
-            )
-            raw = facts.raw
-            finish = facts.finish
-            rounds = facts.rounds
-            tool_calls_ct = facts.tool_calls
-            had_content = facts.had_content
-            loop_detected = facts.loop_detected
-            collection_limit = facts.collection_limit
-            loop_abort_reason = facts.loop_abort_reason
-            emitted_collection_count = max(
-                emitted_collection_count,
-                max(facts.collection_counts.values(), default=0),
-            )
-            total_cost += facts.cost_usd
-            provider_ok = True
-            current_facts = facts
-            current_call_mode = "clean_slate" if was_clean_slate else "normal"
-        except (*_TRANSPORT_FAILURE_EXC, *_PROVIDER_FAILURE_EXC) as exc:
-            failure = classify_provider_exception(exc)
-            kind = failure["failure_kind"]
-            last = {
-                **failure,
-                "error": _FAILURE_KIND_ERROR[kind],
-                "reply_head": "",
-                "rounds": rounds,
-                "tool_calls": tool_calls_ct,
-                "provider_ok": provider_ok,
-                "schema_ok": schema_ok,
-            }
-            _record_attempt_facts(
-                client,
-                run_id=run_id,
-                stage=stage,
-                attempt=attempts,
-                call_mode="clean_slate" if was_clean_slate else "normal",
-                outcome=kind,
-                error_facts={k: v for k, v in failure.items() if k != "failure_kind"},
-            )
+        transport_terminal = False
+        while True:
+            if attempts >= provider_call_budget:
+                transport_terminal = True
+                break
+            attempts += 1  # a call IS attempted even when it raises below
+            current_attempt_number = attempts
+            try:
+                facts = call_stage_provider(
+                    active_client,
+                    prepared,
+                    messages=call_messages,
+                    response_format=call_response_format,
+                    max_tokens=normal_cap,
+                    temperature=temperature,
+                    reasoning=reasoning,
+                    reasoning_guard=reasoning_guard,
+                    progress=progress,
+                    meta_ctx=ctx,
+                )
+                raw = facts.raw
+                finish = facts.finish
+                rounds = facts.rounds
+                tool_calls_ct = facts.tool_calls
+                had_content = facts.had_content
+                loop_detected = facts.loop_detected
+                collection_limit = facts.collection_limit
+                loop_abort_reason = facts.loop_abort_reason
+                emitted_collection_count = max(
+                    emitted_collection_count,
+                    max(facts.collection_counts.values(), default=0),
+                )
+                total_cost += facts.cost_usd
+                provider_ok = True
+                current_facts = facts
+                current_call_mode = "clean_slate" if was_clean_slate else "normal"
+                break
+            except (*_TRANSPORT_FAILURE_EXC, *_PROVIDER_FAILURE_EXC) as exc:
+                failure = classify_provider_exception(exc)
+                kind = failure["failure_kind"]
+                last = {
+                    **failure,
+                    "error": _FAILURE_KIND_ERROR[kind],
+                    "reply_head": "",
+                    "rounds": rounds,
+                    "tool_calls": tool_calls_ct,
+                    "provider_ok": provider_ok,
+                    "schema_ok": schema_ok,
+                }
+                _observe_attempt(
+                    attempt_observer,
+                    client=active_client,
+                    stage=stage,
+                    provider_attempt=attempts,
+                    call_mode="clean_slate" if was_clean_slate else "normal",
+                    outcome=kind,
+                    clean_slate_used=was_clean_slate,
+                    escalated=escalation_done,
+                    provider_fallback=provider_fallback_active,
+                )
+                _record_attempt_facts(
+                    active_client,
+                    run_id=run_id,
+                    stage=stage,
+                    attempt=attempts,
+                    call_mode="clean_slate" if was_clean_slate else "normal",
+                    outcome=kind,
+                    error_facts={k: v for k, v in failure.items() if k != "failure_kind"},
+                )
+                fallback_profile = getattr(
+                    getattr(active_client, "s", None),
+                    "provider_fallback_profile",
+                    "",
+                )
+                switch_profile = getattr(active_client, "with_design_profile", None)
+                can_fallback = (
+                    kind == "provider_rate_limited"
+                    and not provider_fallback_spent
+                    and attempts < provider_call_budget
+                    and fallback_profile
+                    and fallback_profile
+                    != getattr(getattr(active_client, "s", None), "design_profile", None)
+                    and callable(switch_profile)
+                )
+                if not can_fallback:
+                    transport_terminal = True
+                    break
+                provider_fallback_spent = True
+                prior_model = _client_model(active_client)
+                prior_profile = getattr(getattr(active_client, "s", None), "design_profile", None)
+                prior_providers = list(
+                    getattr(getattr(active_client, "s", None), "provider_order", ())
+                )
+                active_client = switch_profile(fallback_profile)
+                provider_fallback_active = True
+                if progress:
+                    progress(
+                        {
+                            "kind": "retry",
+                            "stage": stage,
+                            "errors": [last["error"]],
+                            "failure_kind": kind,
+                            "model": prior_model,
+                        }
+                    )
+                    progress(
+                        {
+                            "kind": "provider_fallback",
+                            "stage": stage,
+                            "from": prior_model,
+                            "to": _client_model(active_client),
+                            "from_profile": prior_profile,
+                            "to_profile": fallback_profile,
+                            "from_providers": prior_providers,
+                            "to_providers": list(
+                                getattr(
+                                    getattr(active_client, "s", None),
+                                    "provider_order",
+                                    (),
+                                )
+                            ),
+                            "attempt": attempts + 1,
+                            "reason": "provider_rate_limited",
+                        }
+                    )
+        if transport_terminal:
             break
 
         # Reasoning recovery: the in-stream loop detector aborted, the client
@@ -1157,8 +1321,20 @@ def drive_stage(
                 "tool_calls": tool_calls_ct,
                 "loop_abort_reason": loop_abort_reason,
             }
+            _observe_attempt(
+                attempt_observer,
+                client=active_client,
+                stage=stage,
+                provider_attempt=attempts,
+                call_mode="clean_slate" if was_clean_slate else "normal",
+                outcome="reasoning_loop",
+                facts=facts,
+                clean_slate_used=was_clean_slate,
+                escalated=escalation_done,
+                provider_fallback=provider_fallback_active,
+            )
             _record_attempt_facts(
-                client,
+                active_client,
                 run_id=run_id,
                 stage=stage,
                 attempt=attempts,
@@ -1176,6 +1352,7 @@ def drive_stage(
                             + (f" ({loop_abort_reason})" if loop_abort_reason else "")
                             + " — retrying with reasoning disabled"
                         ],
+                        "model": _client_model(active_client),
                     }
                 )
             if loop_retries >= _MAX_LOOP_RETRIES:
@@ -1202,13 +1379,26 @@ def drive_stage(
             schema_ok = True
         if outcome.kind == "questions":
             _record_attempt_facts(
-                client,
+                active_client,
                 run_id=run_id,
                 stage=stage,
                 attempt=attempts,
                 call_mode="clean_slate" if was_clean_slate else "normal",
                 outcome="question",
                 facts=facts,
+            )
+        if outcome.kind == "recoverable_failure":
+            _observe_attempt(
+                attempt_observer,
+                client=active_client,
+                stage=stage,
+                provider_attempt=attempts,
+                call_mode="clean_slate" if was_clean_slate else "normal",
+                outcome=kind or "invalid_schema",
+                facts=facts,
+                clean_slate_used=was_clean_slate,
+                escalated=escalation_done,
+                provider_fallback=provider_fallback_active,
             )
         if schema_error or kind in {"collection_limit", "truncated_json", "invalid_json"}:
             last = {
@@ -1220,7 +1410,7 @@ def drive_stage(
                 "schema_error": schema_error_detail,
             }
             _record_attempt_facts(
-                client,
+                active_client,
                 run_id=run_id,
                 stage=stage,
                 attempt=attempts,
@@ -1235,6 +1425,7 @@ def drive_stage(
                         "stage": stage,
                         "errors": [last["error"]],
                         "failure_kind": kind,
+                        "model": _client_model(active_client),
                     }
                 )
             if serialization_calls >= serialization_budget or attempts >= provider_call_budget:
@@ -1287,7 +1478,7 @@ def drive_stage(
                 )
             try:
                 sfacts = run_serialization_recovery(
-                    client,
+                    active_client,
                     prepared,
                     messages=smessages,
                     response_format=call_response_format,
@@ -1309,8 +1500,19 @@ def drive_stage(
                     "provider_ok": provider_ok,
                     "schema_ok": schema_ok,
                 }
+                _observe_attempt(
+                    attempt_observer,
+                    client=active_client,
+                    stage=stage,
+                    provider_attempt=attempts,
+                    call_mode="serialization",
+                    outcome=skind,
+                    clean_slate_used=was_clean_slate,
+                    escalated=escalation_done,
+                    provider_fallback=provider_fallback_active,
+                )
                 _record_attempt_facts(
-                    client,
+                    active_client,
                     run_id=run_id,
                     stage=stage,
                     attempt=attempts,
@@ -1337,7 +1539,7 @@ def drive_stage(
                 schema_ok = True
             if serialization_outcome.kind != "candidate":
                 _record_attempt_facts(
-                    client,
+                    active_client,
                     run_id=run_id,
                     stage=stage,
                     attempt=attempts,
@@ -1348,6 +1550,27 @@ def drive_stage(
                         else skind or "invalid_schema"
                     ),
                     facts=sfacts,
+                )
+                _observe_attempt(
+                    attempt_observer,
+                    client=active_client,
+                    stage=stage,
+                    provider_attempt=attempts,
+                    call_mode="serialization",
+                    outcome=(
+                        "question"
+                        if serialization_outcome.kind == "questions"
+                        else skind or "invalid_schema"
+                    ),
+                    facts=sfacts,
+                    candidate=(
+                        serialization_outcome.payload.get("candidate")
+                        if serialization_outcome.kind == "questions"
+                        else None
+                    ),
+                    clean_slate_used=was_clean_slate,
+                    escalated=escalation_done,
+                    provider_fallback=provider_fallback_active,
                 )
             if schema_error or skind in {
                 "collection_limit",
@@ -1378,6 +1601,20 @@ def drive_stage(
         qpayload = obj.get("questions") if isinstance(obj, dict) else None
         if isinstance(qpayload, list) and qpayload:
             qs = _normalize_questions(qpayload, stage)
+            if current_call_mode != "serialization":
+                _observe_attempt(
+                    attempt_observer,
+                    client=active_client,
+                    stage=stage,
+                    provider_attempt=current_attempt_number,
+                    call_mode=current_call_mode,
+                    outcome="question",
+                    facts=current_facts,
+                    candidate=obj,
+                    clean_slate_used=was_clean_slate,
+                    escalated=escalation_done,
+                    provider_fallback=provider_fallback_active,
+                )
             # A reconcile_target park is the pipeline's ESCALATION (a BOM shortfall
             # wiring can't fix), not a user question. Surface it even after answers
             # were applied, so the shared bom-reconcile re-drive can add the parts
@@ -1433,7 +1670,7 @@ def drive_stage(
             repair_messages = _lean_retry(raw, repair_message)
             try:
                 repair_facts = run_serialization_recovery(
-                    client,
+                    active_client,
                     prepared,
                     messages=repair_messages,
                     response_format=response_format,
@@ -1465,7 +1702,7 @@ def drive_stage(
                         severe = repaired_severe
                         semantic_repair_adopted = True
                     _record_attempt_facts(
-                        client,
+                        active_client,
                         run_id=run_id,
                         stage=stage,
                         attempt=attempts,
@@ -1477,7 +1714,7 @@ def drive_stage(
                 else:
                     repair_kind = repair_outcome.payload.get("failure_kind") or repair_outcome.kind
                     _record_attempt_facts(
-                        client,
+                        active_client,
                         run_id=run_id,
                         stage=stage,
                         attempt=attempts,
@@ -1488,7 +1725,7 @@ def drive_stage(
             except (*_TRANSPORT_FAILURE_EXC, *_PROVIDER_FAILURE_EXC) as exc:
                 failure = classify_provider_exception(exc)
                 _record_attempt_facts(
-                    client,
+                    active_client,
                     run_id=run_id,
                     stage=stage,
                     attempt=attempts,
@@ -1500,7 +1737,7 @@ def drive_stage(
         diagnostic_rows = [d.model_dump(exclude_none=True) for d in diagnostics]
         if review_before_commit:
             _record_attempt_facts(
-                client,
+                active_client,
                 run_id=run_id,
                 stage=stage,
                 attempt=current_attempt_number,
@@ -1554,7 +1791,7 @@ def drive_stage(
             diagnostic_rows = [d.model_dump(exclude_none=True) for d in diagnostics]
             ok, out, obj = commit_candidate(prepared, obj, state_path, brief, workspace)
         _record_attempt_facts(
-            client,
+            active_client,
             run_id=run_id,
             stage=stage,
             attempt=current_attempt_number,
@@ -1564,9 +1801,23 @@ def drive_stage(
             diagnostic_codes=[d.code for d in diagnostics],
         )
         if ok:
+            _observe_attempt(
+                attempt_observer,
+                client=active_client,
+                stage=stage,
+                provider_attempt=current_attempt_number,
+                call_mode=current_call_mode,
+                outcome="committed",
+                facts=current_facts,
+                candidate=obj,
+                commit_result=out,
+                clean_slate_used=was_clean_slate,
+                escalated=escalation_done,
+                provider_fallback=provider_fallback_active,
+            )
             fab_safe = not any(d.severity == "fab_gate" for d in diagnostics)
             return finalize_stage(
-                client,
+                active_client,
                 run_id=run_id,
                 stage=stage,
                 state_path=state_path,
@@ -1608,6 +1859,7 @@ def drive_stage(
                     "stage": stage,
                     "errors": out.get("errors"),
                     "offenders": out.get("offenders"),
+                    "model": _client_model(active_client),
                 }
             )
         signature, clean_slate_next, terminal = next_attempt(
@@ -1617,12 +1869,29 @@ def drive_stage(
             clean_slate_spent=clean_slate_spent,
             clean_slate_armed_signature=clean_slate_armed_signature,
         )
+        _observe_attempt(
+            attempt_observer,
+            client=active_client,
+            stage=stage,
+            provider_attempt=current_attempt_number,
+            call_mode=current_call_mode,
+            outcome="commit_rejected",
+            facts=current_facts,
+            candidate=obj,
+            commit_result=out,
+            rejection_signature=signature,
+            clean_slate_armed=clean_slate_next,
+            clean_slate_used=was_clean_slate,
+            escalated=escalation_done,
+            provider_fallback=provider_fallback_active,
+        )
         if terminal:
             break
         prior_rejection_signature = signature
         if clean_slate_next:
             clean_slate_spent = True
             clean_slate_armed_signature = signature
+            escalation_pending = stage == "wiring" and attempts + 1 >= 3 and not escalation_done
             reasoning = {"enabled": False}
             temperature = max(escape_temperature, 0.0)
             messages = _lean_retry(
@@ -1657,7 +1926,7 @@ def drive_stage(
             "debug_context": _debug_context(raw),
         }
     return finalize_stage(
-        client,
+        active_client,
         run_id=run_id,
         stage=stage,
         state_path=state_path,

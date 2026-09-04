@@ -181,6 +181,18 @@ def _resolved_design_profile() -> tuple[str, dict[str, object]]:
     return name, profile
 
 
+def _resolved_optional_design_profile(env_name: str, active_profile: str) -> str:
+    """Resolve an optional named recovery route, disabled by empty/same."""
+    name = os.environ.get(env_name, "pro").strip().lower()
+    if not name or name == active_profile:
+        return ""
+    if name not in DESIGN_PROFILES:
+        raise SystemExit(
+            f"{env_name} must be empty or one of {sorted(DESIGN_PROFILES)}, got {name!r}"
+        )
+    return name
+
+
 def _stage_semantics_mode(value: str) -> Literal["observe", "repair", "enforce"]:
     mode = str(value).strip().lower()
     if mode not in {"observe", "repair", "enforce"}:
@@ -215,6 +227,8 @@ class Settings:
     api_key: str
     model: str = "deepseek/deepseek-v4-flash-0731"
     design_profile: str = "custom"
+    escalation_profile: str = "pro"
+    provider_fallback_profile: str = "pro"
     base_url: str = "https://openrouter.ai/api/v1"
     max_tokens_per_call: int = 1024
     daily_usd_ceiling: float = 5.0
@@ -411,6 +425,12 @@ class Settings:
             api_key=key,
             model=str(profile["model"]),
             design_profile=profile_name,
+            escalation_profile=_resolved_optional_design_profile(
+                "KICRAFT_ESCALATION_PROFILE", profile_name
+            ),
+            provider_fallback_profile=_resolved_optional_design_profile(
+                "KICRAFT_PROVIDER_FALLBACK_PROFILE", profile_name
+            ),
             max_tokens_per_call=int(
                 os.environ.get("KICRAFT_MAX_TOKENS_PER_CALL", cls.max_tokens_per_call)
             ),
@@ -670,6 +690,8 @@ class Settings:
         return {
             "model": self.model,
             "design_profile": self.design_profile,
+            "escalation_profile": self.escalation_profile,
+            "provider_fallback_profile": self.provider_fallback_profile,
             "base_url": self.base_url,
             "max_tokens_per_call": self.max_tokens_per_call,
             "daily_usd_ceiling": self.daily_usd_ceiling,

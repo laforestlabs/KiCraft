@@ -757,6 +757,11 @@ _A1_PINS = {
     ],
     "Device:R": [("1", "1", "passive"), ("2", "2", "passive")],
     "A:VAR": [("1", "1", "passive"), ("2", "2", "passive"), ("3", "3", "passive")],
+    "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1": [
+        ("14", "IO20/USB_D+", "bidir"),
+        ("36", "RXD0", "bidir"),
+        ("37", "TXD0", "bidir"),
+    ],
     "A:OCT": [
         ("1", "A3", "input"),
         ("2", "B3", "output"),
@@ -775,8 +780,13 @@ def _a1_bom(conns, refs) -> BOM:
             "RV1": "A:VAR",
         }.get(ref, "Device:R")
         parts.append(
-            BomPart(ref=ref, value="x", symbol=symbol,
-                    footprint="Resistor_SMD:R_0402_1005Metric", sheet="MCU")
+            BomPart(
+                ref=ref,
+                value="x",
+                symbol=symbol,
+                footprint="Resistor_SMD:R_0402_1005Metric",
+                sheet="MCU",
+            )
         )
     return BOM(parts=parts, connections=conns)
 
@@ -815,10 +825,18 @@ def test_a1_series_far_side_names_destination_candidates(monkeypatch) -> None:
     as identity-safe pin labels with functions, and demand the move keeps the
     two part terminals on different nets."""
     conns = [
-        NetConnection(net_name="USB_D_P", sheet="MCU", endpoints=[PinEndpoint(ref="J1", pin="A6"),
-                                          PinEndpoint(ref="U3", pin="14"),
-                                          PinEndpoint(ref="R3", pin="1")]),
-        NetConnection(net_name="USB_D_P_MCU", sheet="MCU", endpoints=[PinEndpoint(ref="R3", pin="2")]),
+        NetConnection(
+            net_name="USB_D_P",
+            sheet="MCU",
+            endpoints=[
+                PinEndpoint(ref="J1", pin="A6"),
+                PinEndpoint(ref="U3", pin="14"),
+                PinEndpoint(ref="R3", pin="1"),
+            ],
+        ),
+        NetConnection(
+            net_name="USB_D_P_MCU", sheet="MCU", endpoints=[PinEndpoint(ref="R3", pin="2")]
+        ),
     ]
     offs = _a1_offenders(monkeypatch, conns, ["J1", "U3", "R3"])
     o = offs["USB_D_P_MCU"]
@@ -830,9 +848,87 @@ def test_a1_series_far_side_names_destination_candidates(monkeypatch) -> None:
     assert "pin A6 of J1 (DP1)" in o
     assert "pin 14 of U3 (IO20/USB_D+)" in o
     assert o.index("pin A6 of J1") < o.index("pin 14 of U3")
-    assert "Move the intended load/destination endpoint" in o
+    assert "Do not assume which side is source or destination" in o
+    assert "Move the intended load/destination endpoint" not in o
     assert "never merge 'USB_D_P' with 'USB_D_P_MCU'" in o
     assert "never put both terminals of R3 on one net" in o
+
+
+def test_a1_series_filters_wrong_fixed_signal_candidate(monkeypatch) -> None:
+    """Board 783 shape: keep IO20, but never offer TXD0 as a D+ endpoint."""
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(_A1_PINS))
+    bom = BOM(
+        parts=[
+            _bpart("J1", "A:CONN", sheet="MCU"),
+            _bpart("R9", "Device:R", sheet="MCU"),
+            _bpart(
+                "U3",
+                "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1",
+                sheet="MCU",
+            ),
+        ],
+        connections=[
+            NetConnection(
+                net_name="USB_DP",
+                sheet="MCU",
+                endpoints=[
+                    PinEndpoint(ref="J1", pin="A6"),
+                    PinEndpoint(ref="R9", pin="1"),
+                    PinEndpoint(ref="U3", pin="14"),
+                    PinEndpoint(ref="U3", pin="37"),
+                ],
+            ),
+            NetConnection(
+                net_name="USB_DP_MCU",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="R9", pin="2")],
+            ),
+        ],
+    )
+    result = check_no_dangling_signal_nets(_a1_arch(), bom)
+    offender = next(o for o in result.offenders if "USB_DP_MCU" in _a1_lead(o))
+    _assert_identity_safe(offender)
+    candidates = offender.split("candidate endpoints on that net:", 1)[1].split(
+        ". Keep each endpoint", 1
+    )[0]
+    assert "IO20" in candidates
+    assert "TXD0" not in candidates
+    assert "required fixed function: IO20" in offender
+    assert "cannot carry either accepted name variant 'USB_DP' or 'USB_DP_MCU'" in offender
+    assert "keeping the two terminals of R9 on different nets" in offender
+
+
+def test_a1_series_candidate_filter_fails_open_when_pin_unresolved(monkeypatch) -> None:
+    pinmap = {key: value for key, value in _A1_PINS.items() if "esp32-s3" not in key}
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(pinmap))
+    bom = BOM(
+        parts=[
+            _bpart("R9", "Device:R", sheet="MCU"),
+            _bpart(
+                "U3",
+                "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1",
+                sheet="MCU",
+            ),
+        ],
+        connections=[
+            NetConnection(
+                net_name="USB_DP",
+                sheet="MCU",
+                endpoints=[
+                    PinEndpoint(ref="R9", pin="1"),
+                    PinEndpoint(ref="U3", pin="37"),
+                ],
+            ),
+            NetConnection(
+                net_name="USB_DP_MCU",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="R9", pin="2")],
+            ),
+        ],
+    )
+    offender = check_no_dangling_signal_nets(_a1_arch(), bom).offenders[0]
+    assert "candidate endpoints on that net: pin 37 of U3" in offender
+    assert "Rejected wrong-function candidate" not in offender
 
 
 def test_a1_series_guidance_requires_proven_two_pin_part(monkeypatch) -> None:
@@ -840,8 +936,11 @@ def test_a1_series_guidance_requires_proven_two_pin_part(monkeypatch) -> None:
     gets NO two-terminal series guidance (§9.17's exact pin-count invariant).
     """
     conns = [
-        NetConnection(net_name="SIG_IN", sheet="MCU", endpoints=[PinEndpoint(ref="U3", pin="14"),
-                                        PinEndpoint(ref="RV1", pin="1")]),
+        NetConnection(
+            net_name="SIG_IN",
+            sheet="MCU",
+            endpoints=[PinEndpoint(ref="U3", pin="14"), PinEndpoint(ref="RV1", pin="1")],
+        ),
         NetConnection(net_name="SIG_MID", sheet="MCU", endpoints=[PinEndpoint(ref="RV1", pin="2")]),
     ]
     offs = _a1_offenders(monkeypatch, conns, ["U3", "RV1"])
@@ -853,8 +952,14 @@ def test_a1_series_guidance_requires_proven_two_pin_part(monkeypatch) -> None:
 def test_a1_series_guidance_omitted_when_other_terminal_ambiguous(monkeypatch) -> None:
     """R5.2 on two distinct nets (a §9.19 short) is ambiguous -> no guess."""
     conns = [
-        NetConnection(net_name="SIG_DANGLE", sheet="MCU", endpoints=[PinEndpoint(ref="R5", pin="1")]),
-        NetConnection(net_name="SIG_A", sheet="MCU", endpoints=[PinEndpoint(ref="R5", pin="2"), PinEndpoint(ref="U3", pin="14")]),
+        NetConnection(
+            net_name="SIG_DANGLE", sheet="MCU", endpoints=[PinEndpoint(ref="R5", pin="1")]
+        ),
+        NetConnection(
+            net_name="SIG_A",
+            sheet="MCU",
+            endpoints=[PinEndpoint(ref="R5", pin="2"), PinEndpoint(ref="U3", pin="14")],
+        ),
         NetConnection(net_name="SIG_B", sheet="MCU", endpoints=[PinEndpoint(ref="R5", pin="2")]),
     ]
     offs = _a1_offenders(monkeypatch, conns, ["U3", "R5"])
@@ -868,9 +973,14 @@ def test_a1_translator_channel_mates_exposed(monkeypatch) -> None:
     same-sheet related net HUB75_CLK (U5.1/A3) AND names the channel mate
     pairing — with an explicit no-merge instruction."""
     conns = [
-        NetConnection(net_name="HUB75_CLK", sheet="MCU", endpoints=[PinEndpoint(ref="U5", pin="1"),
-                                           PinEndpoint(ref="R6", pin="1")]),
-        NetConnection(net_name="HUB75_CLK_5V", sheet="MCU", endpoints=[PinEndpoint(ref="U5", pin="2")]),
+        NetConnection(
+            net_name="HUB75_CLK",
+            sheet="MCU",
+            endpoints=[PinEndpoint(ref="U5", pin="1"), PinEndpoint(ref="R6", pin="1")],
+        ),
+        NetConnection(
+            net_name="HUB75_CLK_5V", sheet="MCU", endpoints=[PinEndpoint(ref="U5", pin="2")]
+        ),
     ]
     offs = _a1_offenders(monkeypatch, conns, ["U5", "R6"])
     o = offs["HUB75_CLK_5V"]
@@ -896,9 +1006,14 @@ def test_a1_negative_normalization(monkeypatch) -> None:
     assert _net_domain_base("SIG_ISO") == "SIG"
     assert _net_domain_base("SIG") == "SIG"
     conns = [
-        NetConnection(net_name="UART1_TX", sheet="MCU", endpoints=[PinEndpoint(ref="U3", pin="16")]),
-        NetConnection(net_name="UART0_TX", sheet="MCU", endpoints=[PinEndpoint(ref="U3", pin="14"),
-                                          PinEndpoint(ref="U3", pin="13")]),
+        NetConnection(
+            net_name="UART1_TX", sheet="MCU", endpoints=[PinEndpoint(ref="U3", pin="16")]
+        ),
+        NetConnection(
+            net_name="UART0_TX",
+            sheet="MCU",
+            endpoints=[PinEndpoint(ref="U3", pin="14"), PinEndpoint(ref="U3", pin="13")],
+        ),
     ]
     offs = _a1_offenders(monkeypatch, conns, ["U3"])
     o = offs["UART1_TX"]
@@ -936,7 +1051,6 @@ def test_a1_inter_sheet_list_and_determinism(monkeypatch) -> None:
     assert "two-terminal series part" not in o
     assert "related net" not in o
     _assert_identity_safe(o)
-
 
 
 def test_dangling_signal_nets_pass_when_usb_declared_intersheet() -> None:
@@ -1380,7 +1494,6 @@ def test_family_contract_flags_can_rs_on_rail(monkeypatch) -> None:
     assert any("U3.8" in o for o in res.offenders)
 
 
-
 # ---------- A2 (KC-VKUT5H): ESP32-S3 native-USB fixed-function assignment ----
 
 _ESP32S3_PINS = {
@@ -1391,6 +1504,7 @@ _ESP32S3_PINS = {
         ("20", "IO12", "bidirectional"),
         ("21", "IO13", "bidirectional"),
         ("22", "IO14", "bidirectional"),
+        ("37", "TXD0", "bidirectional"),
     ],
     "esp32s3-mini:ESP32S3-MINI-1": [
         ("13", "IO19", "bidirectional"),
@@ -1459,6 +1573,28 @@ def test_a2_swapped_polarity_fails(monkeypatch) -> None:
     )
 
 
+def test_a2_same_signal_variants_remove_wrong_pin_without_merge(monkeypatch) -> None:
+    """Attempts 4/5: both names mean D+, so swapping them cannot fix TXD0."""
+    res = _a2(
+        monkeypatch,
+        "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1",
+        {"USB_DP": "37", "USB_DP_MCU": "14"},
+    )
+    assert not res.ok
+    assert len(res.offenders) == 1
+    offender = res.offenders[0]
+    assert "remove pin 37 of U3 (TXD0) from every accepted name" in offender
+    assert "swap the two" not in offender
+    assert "do not merge 'USB_DP' with 'USB_DP_MCU'" in offender
+    assert "keep any proven series-part terminals on different nets" in offender
+    assert "otherwise mark it no_connect" in offender
+    signature = _re.findall(
+        r"\b([A-Za-z]+\d+[A-Za-z0-9_-]*)(?:\.|\s+pin\s+)([A-Za-z0-9~_+-]+)\b",
+        offender,
+    )
+    assert signature == []
+
+
 def test_a2_frozen_candidates_wrong_gpios_fail(monkeypatch) -> None:
     """Attempts 1-2 (IO11/IO12) and attempt 3 (IO11+IO13 / IO12+IO14) of
     KC-VKUT5H — every wrong-function binding fires."""
@@ -1492,6 +1628,7 @@ def test_a2_fails_open_for_unrelated_families(monkeypatch) -> None:
     assert res.ok, res.offenders
     res = _a2(monkeypatch, "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1", {"SPI_CLK": "19"})
     assert res.ok, res.offenders
+
 
 # ---------- §9.21 MCU first-flash / programming path (advisory) ----------
 
@@ -2015,3 +2152,38 @@ def test_prog_access_non_updi_mcu_not_judged_at_wiring(monkeypatch) -> None:
         ],
     )
     assert check_mcu_programming_access(bom).ok
+
+
+def test_a1_usb_dm_rejects_uart_endpoint_without_prescribing_direction(monkeypatch) -> None:
+    """Board 783: USB_DM is D-, so RXD0 cannot be moved across R10 to fix a dangle."""
+    monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup(_A1_PINS))
+    bom = BOM(
+        parts=[
+            _bpart("R10", "Device:R", sheet="MCU"),
+            _bpart(
+                "U3",
+                "esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1",
+                sheet="MCU",
+            ),
+        ],
+        connections=[
+            NetConnection(
+                net_name="USB_DM",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="R10", pin="1")],
+            ),
+            NetConnection(
+                net_name="USB_DM_MCU",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="R10", pin="2"), PinEndpoint(ref="U3", pin="36")],
+            ),
+        ],
+    )
+
+    offender = check_no_dangling_signal_nets(_a1_arch(), bom).offenders[0]
+    _assert_identity_safe(offender)
+    assert "required fixed function: IO19" in offender
+    assert "RXD0" in offender
+    assert "Rejected wrong-function candidate" in offender
+    assert "Move the intended load/destination endpoint" not in offender
+    assert "do not assume which side is source or destination" in offender

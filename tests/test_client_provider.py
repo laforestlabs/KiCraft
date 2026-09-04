@@ -120,6 +120,27 @@ def test_provider_block_from_settings():
     assert pb["max_price"] == {"prompt": 0.11, "completion": 0.24}
 
 
+def test_design_profile_clone_reuses_guard_and_changes_only_route():
+    guard = _RecordingGuard()
+    settings = Settings(
+        api_key="k",
+        design_profile="flash",
+        escalation_profile="pro",
+        request_timeout_s=17,
+    )
+    original = CappedOpenRouterClient(settings, guard=guard)
+    escalated = original.with_design_profile("pro")
+    profile = DESIGN_PROFILES["pro"]
+    assert escalated is not original
+    assert escalated.guard is guard
+    assert escalated.s.model == profile["model"]
+    assert escalated.s.provider_order == profile["provider_order"]
+    assert escalated.s.max_price_prompt == profile["max_price_prompt"]
+    assert escalated.s.max_price_completion == profile["max_price_completion"]
+    assert escalated.s.request_timeout_s == 17
+    assert original.s.design_profile == "flash"
+
+
 def test_provider_block_omits_zero_price_cap():
     s = Settings(api_key="k", max_price_prompt=0.0, max_price_completion=0.0)
     pb = CappedOpenRouterClient(s, guard=_RecordingGuard())._provider_block()
@@ -971,6 +992,8 @@ def test_stream_collection_limit_stops_before_overflow_object(monkeypatch):
 def _clear_profile_env(monkeypatch):
     for name in (
         "KICRAFT_DESIGN_PROFILE",
+        "KICRAFT_ESCALATION_PROFILE",
+        "KICRAFT_PROVIDER_FALLBACK_PROFILE",
         "KICRAFT_MODEL",
         "KICRAFT_PROVIDER_ORDER",
         "KICRAFT_MAX_PRICE_PROMPT",
@@ -990,6 +1013,41 @@ def test_design_profiles_resolve_dated_models_and_finite_caps(monkeypatch):
         assert settings.max_price_prompt > 0
         assert settings.max_price_completion > 0
         assert settings.provider_allow_fallbacks is False
+
+
+def test_escalation_profile_defaults_to_pro_and_can_be_disabled(monkeypatch):
+    _clear_profile_env(monkeypatch)
+    settings = Settings.from_env(dotenv=False)
+    assert settings.design_profile == "flash"
+    assert settings.escalation_profile == "pro"
+    monkeypatch.setenv("KICRAFT_ESCALATION_PROFILE", "")
+    assert Settings.from_env(dotenv=False).escalation_profile == ""
+
+
+def test_provider_fallback_profile_defaults_to_pro_and_can_be_disabled(monkeypatch):
+    _clear_profile_env(monkeypatch)
+    settings = Settings.from_env(dotenv=False)
+    assert settings.provider_fallback_profile == "pro"
+    monkeypatch.setenv("KICRAFT_PROVIDER_FALLBACK_PROFILE", "")
+    assert Settings.from_env(dotenv=False).provider_fallback_profile == ""
+
+
+def test_escalation_profile_same_route_disables_and_unknown_fails(monkeypatch):
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "pro")
+    assert Settings.from_env(dotenv=False).escalation_profile == ""
+    monkeypatch.setenv("KICRAFT_ESCALATION_PROFILE", "unknown")
+    with pytest.raises(SystemExit, match="KICRAFT_ESCALATION_PROFILE"):
+        Settings.from_env(dotenv=False)
+
+
+def test_provider_fallback_same_route_disables_and_unknown_fails(monkeypatch):
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "pro")
+    assert Settings.from_env(dotenv=False).provider_fallback_profile == ""
+    monkeypatch.setenv("KICRAFT_PROVIDER_FALLBACK_PROFILE", "unknown")
+    with pytest.raises(SystemExit, match="KICRAFT_PROVIDER_FALLBACK_PROFILE"):
+        Settings.from_env(dotenv=False)
 
 
 def test_known_profile_rejects_mixed_model_or_price_cap(monkeypatch):

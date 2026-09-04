@@ -1002,6 +1002,7 @@ def check_no_dangling_signal_nets(architecture, bom) -> CheckResult:
     # Context indexes, built once per call (never a per-offender scan of
     # bom.connections).
     info, pin_count = _pin_info_by_ref(bom)
+    ref_identities = {part.ref: f"{part.symbol} {part.value}" for part in bom.parts}
     pin_nets: dict[tuple[str, str], set[str]] = defaultdict(set)
     net_endpoints: dict[str, set[tuple[str, str, str]]] = defaultdict(set)
     sheet_net_bases: dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -1030,6 +1031,7 @@ def check_no_dangling_signal_nets(architecture, bom) -> CheckResult:
                 pin,
                 info=info,
                 pin_count=pin_count,
+                ref_identities=ref_identities,
                 pin_nets=pin_nets,
                 net_endpoints=net_endpoints,
                 sheet_net_bases=sheet_net_bases,
@@ -1178,6 +1180,7 @@ def _nets_by_ref(bom):
             out[ep.ref][ep.pin] = c.net_name
     return out
 
+
 # ---------- §9.15 topology-safe offender context (KC-VKUT5H A1) ----------
 #
 # A bare "net X wires only REF.PIN" sentence did not let the wiring stage fix
@@ -1205,7 +1208,14 @@ _CHANNEL_PIN_RE = re.compile(r"^([AB])(\d+)$")
 # occurrence of one of them. Bare numeric / one-letter suffixes are never
 # stripped, so UART0/UART1, LED1/LED2, USB_D_P/USB_D_N stay distinct.
 _NET_DOMAIN_SUFFIXES = (
-    "_5V", "_3V3", "_MCU", "_POWER", "_ESP32", "_ISO", "_LV", "_HV",
+    "_5V",
+    "_3V3",
+    "_MCU",
+    "_POWER",
+    "_ESP32",
+    "_ISO",
+    "_LV",
+    "_HV",
 )
 
 
@@ -1238,9 +1248,7 @@ def _pin_label(ref: str, pin: str, func=None) -> str:
 def _endpoint_labels(refs, info, limit: int = 4) -> str:
     """Render up to ``limit`` (ref, pin) pairs as sorted identity-safe labels."""
     picked = sorted(set(refs))[:limit]
-    return ", ".join(
-        _pin_label(r, p, _pin_function(info, r, p)) for r, p in picked
-    )
+    return ", ".join(_pin_label(r, p, _pin_function(info, r, p)) for r, p in picked)
 
 
 def _dangling_net_context(
@@ -1251,6 +1259,7 @@ def _dangling_net_context(
     *,
     info,
     pin_count,
+    ref_identities,
     pin_nets,
     net_endpoints,
     sheet_net_bases,
@@ -1272,27 +1281,56 @@ def _dangling_net_context(
             other = others[0]
             onet = next(iter(other_nets))
             dests = {(r, p) for (_s, r, p) in net_endpoints.get(onet, ()) if r != ref}
+            kept_dests = set()
+            rejected_dests: list[tuple[str, str, str]] = []
+            for candidate_ref, candidate_pin in dests:
+                candidate_func = _pin_function(info, candidate_ref, candidate_pin)
+                matched = _match_known_signal_assignment(
+                    ref_identities.get(candidate_ref),
+                    onet,
+                    candidate_func,
+                )
+                if matched is not None and candidate_func is not None and not matched[2]:
+                    rejected_dests.append((candidate_ref, candidate_pin, matched[1][1]))
+                else:
+                    # Fail open when identity/function resolution is incomplete,
+                    # and retain connectors/passives outside a known family.
+                    kept_dests.add((candidate_ref, candidate_pin))
             other_func = _pin_function(info, ref, other)
             frag = (
                 f"{ref} is a two-terminal series part whose other terminal "
                 f"({_pin_label(ref, other, other_func)}) sits on net {onet!r}"
             )
-            if dests:
+            if kept_dests:
                 frag += (
                     f"; candidate endpoints on that net: "
-                    f"{_endpoint_labels(dests, info)}. Move the intended "
-                    f"load/destination endpoint from {onet!r} onto {net!r}"
+                    f"{_endpoint_labels(kept_dests, info)}. Keep each endpoint on the "
+                    "side required by architecture direction and resolved pin function; "
+                    "add or move the missing endpoint so both nets are complete. Do not "
+                    "assume which side is source or destination"
                 )
             else:
                 frag += (
-                    f" and {onet!r} wires no other pin here either. Complete "
-                    f"the series path from its real source onto {net!r}"
+                    f" and {onet!r} has no proven function-compatible non-part endpoint. "
+                    "Restore one compatible non-part endpoint on each side; do not assume "
+                    "which side is source or destination"
                 )
             frag += (
                 f", keeping the two terminals of {ref} on different nets -- "
                 f"never merge {onet!r} with {net!r}, and never put both "
                 f"terminals of {ref} on one net (§9.17)"
             )
+            if rejected_dests:
+                rejected_labels = ", ".join(
+                    _pin_label(r, p, _pin_function(info, r, p))
+                    for r, p, _want in sorted(rejected_dests)
+                )
+                required = ", ".join(sorted({want for _r, _p, want in rejected_dests}))
+                frag += (
+                    f"; required fixed function: {required}. Rejected wrong-function "
+                    f"candidate(s) {rejected_labels} cannot carry either accepted "
+                    f"name variant {onet!r} or {net!r}"
+                )
             bits.append(frag)
 
     # -- related-domain branch: same sheet, same base after stripping one
@@ -1832,6 +1870,7 @@ _FAMILY_CONTRACTS: tuple[_FamilyContract, ...] = (
     ),
 )
 
+
 # Known SIGNAL nets whose functional pin is fixed by silicon, not by design
 # choice (KC-VKUT5H A2). The frozen candidates of that board bound native USB
 # D+/D- to arbitrary GPIOs (IO11/IO12, later IO13/IO14): §9.15 can be cleared
@@ -1855,10 +1894,33 @@ _KNOWN_SIGNAL_ASSIGNMENTS: tuple[_SignalAssignment, ...] = (
             # Exact differential forms with ONE optional known domain suffix;
             # no loose substring matching (USB_P, USBD, USB_DPH are not D+).
             (re.compile(rf"^USB_D(?:\+|_?P){_USB_DOMAIN_SUFFIX}$", re.I), "IO20", "D+"),
-            (re.compile(rf"^USB_D(?:-|_?N){_USB_DOMAIN_SUFFIX}$", re.I), "IO19", "D-"),
+            (re.compile(rf"^USB_D(?:-|_?[NM]){_USB_DOMAIN_SUFFIX}$", re.I), "IO19", "D-"),
         ),
     ),
 )
+
+
+def _match_known_signal_assignment(
+    part_identity: str | None,
+    net_name: str,
+    pin_function: str | None,
+) -> tuple[_SignalAssignment, tuple, bool] | None:
+    """Return the fixed-signal rule matching ``part_identity``/``net_name``.
+
+    The boolean reports whether the resolved pin function satisfies the rule.
+    Missing identity or function information fails open at the caller.
+    """
+    if not part_identity:
+        return None
+    for assignment in _KNOWN_SIGNAL_ASSIGNMENTS:
+        if not assignment.family.search(part_identity):
+            continue
+        for signal in assignment.signals:
+            sig_re, want, _role = signal
+            if sig_re.match(net_name):
+                satisfies = pin_function is not None and want in pin_function.upper()
+                return assignment, signal, satisfies
+    return None
 
 
 def _check_known_signal_assignments(part, info, nets) -> list[str]:
@@ -1871,48 +1933,51 @@ def _check_known_signal_assignments(part, info, nets) -> list[str]:
     bad: list[str] = []
     pins = info.get(part.ref) or {}
     wired = nets.get(part.ref, {})
-    for assignment in _KNOWN_SIGNAL_ASSIGNMENTS:
-        if not assignment.family.search(ident):
+    for num, net in sorted(wired.items()):
+        nm = (pins.get(num) or {}).get("name") or ""
+        matched = _match_known_signal_assignment(ident, net, nm or None)
+        if matched is None:
             continue
-        for num, net in sorted(wired.items()):
-            nm = (pins.get(num) or {}).get("name") or ""
-            for sig_re, want, role in assignment.signals:
-                if not sig_re.match(net):
-                    continue
-                if want in nm.upper():
-                    break  # this pin satisfies the assignment
-                if not nm.strip():
-                    break  # function unresolvable/blank -> never guess
-                # Name the concrete target so the correction is a move, not a
-                # search: resolve the wanted function on THIS part's loaded
-                # symbol. Only act on a unique match; report the target pin's
-                # current net when it already carries one (swap context).
-                hits = sorted(
-                    q for q, pdata in pins.items()
-                    if want in (pdata.get("name") or "").upper()
-                )
-                target = ""
-                if len(hits) == 1:
-                    q = hits[0]
-                    target = (
-                        f" -- the correct endpoint is "
-                        f"{_pin_label(part.ref, q, pins[q]['name'])}"
+        assignment, signal, satisfies = matched
+        sig_re, want, role = signal
+        if satisfies or not nm.strip():
+            continue
+        # Name the concrete target so the correction is a move, not a
+        # search: resolve the wanted function on THIS part's loaded symbol.
+        # Only act on a unique match; report the target pin's current net.
+        hits = sorted(q for q, pdata in pins.items() if want in (pdata.get("name") or "").upper())
+        action = (
+            f"Move this net's endpoint onto the pin whose function contains {want!r} "
+            f"(native USB {role})"
+        )
+        target = ""
+        if len(hits) == 1:
+            q = hits[0]
+            target = f" -- the correct endpoint is {_pin_label(part.ref, q, pins[q]['name'])}"
+            cur = wired.get(q)
+            if cur and cur != net:
+                current_match = _match_known_signal_assignment(ident, cur, pins[q]["name"])
+                if current_match is not None and current_match[1][0] is sig_re:
+                    action = (
+                        f"Keep the uniquely resolved required-function endpoint ({want}) "
+                        f"on its existing USB net {cur!r}; remove "
+                        f"{_pin_label(part.ref, num, nm)} from every accepted name "
+                        f"for native USB {role}; do not merge {net!r} "
+                        f"with {cur!r}; keep any proven series-part terminals on "
+                        f"different nets. Connect the removed {nm!r} pin to a separately "
+                        "named functional net only if another real endpoint requires "
+                        "that function; otherwise mark it no_connect"
                     )
-                    cur = wired.get(q)
-                    if cur and cur != net:
-                        target += f", currently on net {cur!r} (swap the two)"
-                bad.append(
-                    f"[{assignment.name}] {net!r} is the ESP32-S3's native USB "
-                    f"{role} data line (fixed silicon function), but it is wired "
-                    f"to {_pin_label(part.ref, num, nm)}. Move this net's "
-                    f"endpoint onto the pin whose function contains {want!r}"
-                    f" (native USB {role}){target}; do not substitute other GPIOs"
-                )
-                break
+                    target += f", currently on accepted {role} net {cur!r}"
+                else:
+                    target += f", currently on net {cur!r} (swap the two)"
+        bad.append(
+            f"[{assignment.name}] {net!r} is the ESP32-S3's native USB "
+            f"{role} data line (fixed silicon function), but it is wired "
+            f"to {_pin_label(part.ref, num, nm)}. {action}{target}; "
+            "do not substitute other GPIOs"
+        )
     return bad
-
-
-
 
 
 def check_family_wiring_contracts(bom) -> CheckResult:

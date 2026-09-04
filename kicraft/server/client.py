@@ -7,15 +7,16 @@ caps cannot be bypassed by a new code path.
 """
 
 from __future__ import annotations
-
 import json
 import os
 import re
 import time
+from dataclasses import replace
+
 
 import requests
 
-from .config import CollectionBound, ReasoningGuardPolicy, Settings
+from .config import CollectionBound, DESIGN_PROFILES, ReasoningGuardPolicy, Settings
 from .spend_guard import SpendGuard
 
 # Transient failures worth a bounded retry (before any token is streamed): all
@@ -282,6 +283,20 @@ class CappedOpenRouterClient:
     def __init__(self, settings: Settings | None = None, guard: SpendGuard | None = None):
         self.s = settings or Settings.from_env()
         self.guard = guard or SpendGuard(self.s)
+
+    def with_design_profile(self, profile_name: str) -> "CappedOpenRouterClient":
+        """Clone this route while retaining the run's one shared spend guard."""
+        profile = DESIGN_PROFILES[profile_name]
+        settings = replace(
+            self.s,
+            model=str(profile["model"]),
+            design_profile=profile_name,
+            provider_order=list(profile["provider_order"]),
+            provider_allow_fallbacks=False,
+            max_price_prompt=float(profile["max_price_prompt"]),
+            max_price_completion=float(profile["max_price_completion"]),
+        )
+        return CappedOpenRouterClient(settings, guard=self.guard)
 
     def _provider_block(self) -> dict | None:
         """OpenRouter `provider` routing block (cost safety). Prefers the caching

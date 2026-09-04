@@ -4,6 +4,7 @@ Pure units, no network: the per-run budget guard, the mock-mode budget client,
 and the frozen-state seeding + brief recovery of ``drive_replay`` (via a
 monkeypatched ``drive_chain`` so no stage-prep subprocess or model call runs).
 """
+
 from __future__ import annotations
 
 import json
@@ -68,9 +69,17 @@ def test_budget_guard_delegates_other_methods():
     g = _BudgetGuard(base, 0.25)
     assert g.status()["spent_total_usd"] == 0.0
     g.record("m", 1, 1, 0.0)
-    g.record_stage(run_id=None, stage="intent", ok=True, attempts=1,
-                   rounds=None, tool_calls=None, wall_s=0.0, cpu_s=0.0,
-                   cost_usd=0.0)
+    g.record_stage(
+        run_id=None,
+        stage="intent",
+        ok=True,
+        attempts=1,
+        rounds=None,
+        tool_calls=None,
+        wall_s=0.0,
+        cpu_s=0.0,
+        cost_usd=0.0,
+    )
 
 
 def test_make_budget_client_mock_mode_skips_wrapper(monkeypatch):
@@ -96,8 +105,7 @@ def test_drive_replay_bad_stage(tmp_path):
 
 
 def test_drive_replay_seeds_temp_workspace_and_recovers_brief(tmp_path, monkeypatch):
-    state = {"intent": {"goal": "Build a CAN bus node"},
-             "bom": {"parts": [], "connections": []}}
+    state = {"intent": {"goal": "Build a CAN bus node"}, "bom": {"parts": [], "connections": []}}
     sp = tmp_path / "state.json"
     sp.write_text(json.dumps(state))
 
@@ -108,8 +116,11 @@ def test_drive_replay_seeds_temp_workspace_and_recovers_brief(tmp_path, monkeypa
         captured["brief"] = brief
         captured["workspace"] = str(workspace)
         captured["client_is_fake"] = kw.get("client") is fake_client
-        return ([{"stage": stages[0], "commit_ok": True}],
-                {"spent_total_usd": 0.0}, str(workspace / ".kicraft" / "state.json"))
+        return (
+            [{"stage": stages[0], "commit_ok": True}],
+            {"spent_total_usd": 0.0},
+            str(workspace / ".kicraft" / "state.json"),
+        )
 
     monkeypatch.setattr(sd, "drive_chain", _fake_drive_chain)
     fake_client = object()
@@ -124,3 +135,38 @@ def test_drive_replay_seeds_temp_workspace_and_recovers_brief(tmp_path, monkeypa
     # source untouched, replay workspace holds a copy
     assert sp.read_text() == json.dumps(state)
     assert captured["workspace"] != str(tmp_path)
+
+
+@pytest.mark.parametrize("with_trace", [False, True])
+def test_replay_cli_writes_trace_only_when_requested(tmp_path, monkeypatch, capsys, with_trace):
+    from kicraft.server import stage_driver
+
+    trace_path = tmp_path / "attempts.jsonl"
+    captured = {}
+
+    def fake_drive_replay(*args, **kwargs):
+        captured["observer"] = kwargs.get("attempt_observer")
+        if captured["observer"] is not None:
+            captured["observer"]({"provider_attempt": 1, "candidate": {"connections": []}})
+            captured["observer"]({"provider_attempt": 2, "commit_result": {"ok": True}})
+        return {
+            "workspace": str(tmp_path / "workspace"),
+            "state_path": str(tmp_path / "workspace" / ".kicraft" / "state.json"),
+            "all_committed": True,
+        }
+
+    monkeypatch.setattr(stage_driver, "drive_replay", fake_drive_replay)
+    argv = ["replay", "--state", "state.json", "--stage", "wiring"]
+    if with_trace:
+        argv += ["--trace-jsonl", str(trace_path)]
+    assert stage_driver.main(argv) == 0
+
+    output = capsys.readouterr().out
+    if with_trace:
+        rows = [json.loads(line) for line in trace_path.read_text().splitlines()]
+        assert [row["provider_attempt"] for row in rows] == [1, 2]
+        assert f"trace: {trace_path.resolve()}" in output
+    else:
+        assert captured["observer"] is None
+        assert not trace_path.exists()
+        assert "trace:" not in output

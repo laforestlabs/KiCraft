@@ -1,4 +1,5 @@
 """Stable stage-driving facade and command-line interface."""
+
 from __future__ import annotations
 
 import argparse
@@ -28,6 +29,7 @@ __all__ = [
     "drive_replay",
     "make_budget_client",
 ]
+
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
@@ -71,6 +73,10 @@ def main(argv=None) -> int:
     )
     p_replay.add_argument("--max-retries", type=int, default=2)
     p_replay.add_argument("--budget", type=float, default=0.25)
+    p_replay.add_argument(
+        "--trace-jsonl",
+        help="write sanitized normalized provider attempts and commit results as JSONL",
+    )
     p_replay.set_defaults(func=_cmd_replay)
 
     p_draft = sub.add_parser(
@@ -126,16 +132,51 @@ def _cmd_run(args) -> int:
     return 0 if out["all_committed"] else 1
 
 
+class _JsonlAttemptTrace:
+    """Synchronous sanitized replay trace; each call is durable before returning."""
+
+    def __init__(self, path: str):
+        self.path = Path(path).expanduser().resolve()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.path.open("w", encoding="utf-8")
+
+    def __call__(self, record: dict) -> None:
+        self._file.write(json.dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n")
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
+
+
 def _cmd_replay(args) -> int:
     print(f"replaying stage {args.stage!r} from {args.state!r} (LLM budget ${args.budget:.2f})\n")
-    out = drive_replay(args.state, args.stage, budget_usd=args.budget, max_retries=args.max_retries)
+    trace = None
+    try:
+        trace = _JsonlAttemptTrace(args.trace_jsonl) if args.trace_jsonl else None
+        out = drive_replay(
+            args.state,
+            args.stage,
+            budget_usd=args.budget,
+            max_retries=args.max_retries,
+            attempt_observer=trace,
+        )
+    except OSError as exc:
+        print(f"could not write replay trace: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if trace is not None:
+            trace.close()
     if "error" in out:
         print(f"replay failed: {out['error']}", file=sys.stderr)
+        if trace is not None:
+            print(f"trace: {trace.path}")
         return 2
     # drive_chain already printed the per-stage [ok/FAIL] line; only add the
     # replay-specific footer here.
     print(f"\nworkspace: {out['workspace']}  (source state untouched)")
     print(f"state: {out['state_path']}")
+    if trace is not None:
+        print(f"trace: {trace.path}")
     return 0 if out["all_committed"] else 1
 
 
@@ -277,9 +318,7 @@ def _cmd_debug_commit(args) -> int:
     artifact_path = _debug_artifact_path(workspace, args.stage)
     try:
         artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
-        history_message = _read_text_file(
-            args.history_message_file, "history-message-file"
-        ).strip()
+        history_message = _read_text_file(args.history_message_file, "history-message-file").strip()
         if not history_message:
             raise ValueError("history-message-file must not be empty")
         if artifact.get("version") != 1:

@@ -1,4 +1,5 @@
 """Stage-chain, replay, budget-client, and full-pipeline sequencing."""
+
 from __future__ import annotations
 
 import json
@@ -17,6 +18,7 @@ from .stage_state_io import KICRAFT, run_design_cli
 
 SUPPORTED_STAGES = DESIGN_STAGES
 
+
 def drive_chain(
     stages,
     brief,
@@ -30,6 +32,7 @@ def drive_chain(
     instruction=None,
     run_id=None,
     core_defaults=None,
+    attempt_observer=None,
 ):
     ws = Path(workspace)
     (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
@@ -56,6 +59,7 @@ def drive_chain(
             instruction=(instruction if i == 0 else None),
             meta_ctx=base_ctx,
             core_defaults=core_defaults,
+            attempt_observer=attempt_observer,
         )
         results.append(r)
         if on_stage:
@@ -172,6 +176,7 @@ def drive_replay(
     progress=None,
     core_defaults=None,
     client=None,
+    attempt_observer=None,
 ) -> dict:
     """Re-run ONE design stage from a frozen, already-committed state.json — the
     LLM-side repro harness for prompt/guardrail changes (mirrors ``cli_app
@@ -208,6 +213,7 @@ def drive_replay(
         client=client,
         progress=progress,
         core_defaults=core_defaults,
+        attempt_observer=attempt_observer,
     )
     return {
         "brief": brief,
