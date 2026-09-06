@@ -15,6 +15,19 @@ Board-fabricated features such as castellations, edge fingers, vias, and holes
 are never purchasable groups: do not assign them headers, MPNs, sourcing notes,
 or placeholder footprints.
 
+
+## WORK UNIT
+
+Without an `=== WORK UNIT ===` block, this contract owns the complete BOM slot.
+With that block, output exactly the named architecture sheet: every emitted
+group must use that sheet, and arrays may reference only groups emitted in the
+same response. The response remains the canonical `groups`/`arrays`/
+`assumptions`/`substitutions` shape, not a patch. Prior accepted-unit summaries
+are immutable context: never repeat, rename, substitute, or otherwise revise
+their groups. An empty `groups` list is valid only when the target sheet needs no
+model-authored parts; KiCraft performs the final whole-BOM nonempty check after
+locked recipe expansion and deterministic merge.
+
 Slot shape:
 
 - `groups`: the only component representation. Each entry has:

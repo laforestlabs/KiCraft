@@ -21,7 +21,7 @@ Use the production KiCraft stage driver, paused immediately before durable commi
 
 ## Resume selection
 
-At the start of a turn, read state and inspect `.kicraft/debug/<stage>.json` only for the current stage. Resume a pending artifact with status `needs_review` or `needs_input`. Otherwise choose the first incomplete stage in canonical order. Wiring is incomplete when `bom.connections` is empty. Do not introduce the next stage in the same turn that accepts the current stage.
+At the start of a turn, read state and inspect `.kicraft/debug/<stage>.json` only for the current stage. Resume a pending artifact with status `needs_review` or `needs_input`. Otherwise choose the first incomplete stage in canonical order. Wiring is incomplete when `bom.connections` is empty. After accepting a stage, immediately prepare the next incomplete stage and present its input checkpoint in the same turn.
 
 ## State machine
 
@@ -36,7 +36,7 @@ Before spending provider budget:
    - relevant `extras` supplied by stage prep;
    - decisions this stage is allowed to make;
    - decisions forbidden as premature or owned by another stage.
-4. Stop and wait for confirmation or correction. Do not call `debug-draft` in this turn.
+4. Request one focused confirmation or correction, then wait. Treat an unambiguous request to proceed, continue, or drive toward completion as confirmation; do not repeat an already confirmed checkpoint. Do not call `debug-draft` before that confirmation.
 
 ### 2. Draft
 
@@ -59,6 +59,14 @@ kicraft-stage-debug debug-draft --workspace . --stage <stage> \
 
 If the command reports a provider/config failure, report the actual prerequisite or error. Never fall back to another LLM.
 
+### Progress discipline
+
+- Every user turn must advance the current stage through the next actionable state transition: prepare, draft, review, repair, redraft, or commit. Never answer with status or workflow explanation alone.
+- Continue automatically through successful commands and pipeline repairs until reaching a required user review or decision boundary.
+- At each boundary, state the reviewed decision in plain language and end with the exact next action the user can approve. Do not create extra pauses between a result and its review.
+- Preserve constant oversight: never auto-accept a stage, skip a review facet, answer a material design question for the user, or spend provider budget before the input checkpoint is confirmed.
+
+
 ### 3. Guided candidate review
 
 Do not dump prompt, raw response, tool trace, or full candidate JSON by default. Present one facet, include diagnostic `code` and `evidence` beside the affected decision, then stop and wait before the next facet.
@@ -78,7 +86,23 @@ Review facets:
 - `bom`: one sheet at a time. For each sheet review roles, ratings, stock/provenance, quantities, support parts, substitutions, and arrays.
 - `wiring`: one sheet at a time. For each sheet review power, programming, feedback, decoupling, series nets, and no-connects; finish with whole-board pin/net coverage.
 
-### 4. Questions and feedback
+### 4. Pipeline gap repair loop
+
+Treat unexpected omissions, invalid decisions, repeated questions, and misleading diagnostics as possible production-pipeline gaps, not merely candidate feedback.
+
+1. Maintain `.kicraft/debug/findings.json` as the running list for the debug run. For each gap record the stage and facet, observed failure and diagnostic evidence, suspected root cause, proposed production patch, status (`observed`, `patching`, `validated`, or `unresolved`), and validation evidence. This file is diagnostic bookkeeping only; never copy its contents into `.kicraft/state.json`.
+2. Decide whether the gap is candidate-specific or generalizable. Inspect the pending artifact trace and the production prompt, schema, validator, and stage code as needed. Explain the gap in plain language.
+3. For a generalizable gap, patch the production source on the fly and add or update the smallest focused regression test that reproduces it. Never patch the pending candidate JSON.
+4. Re-run that test, then run a fresh `debug-draft` for the same stage with the same brief, answers, budget, and accepted upstream state. Do not add an instruction that merely tells the provider to avoid the failure; the unchanged input is required to validate the pipeline patch.
+5. Compare the replacement artifact with the recorded failure. Mark the finding `validated` only when the focused test passes and the original failure is absent from the fresh candidate. Otherwise keep it open, record the evidence, and continue diagnosis.
+6. Resume guided review at the facet that exposed the gap and call out any other candidate facets changed by the redraft.
+
+Candidate-specific preferences still use the feedback flow below. A pipeline repair does not grant commit permission and must leave `.kicraft/state.json` byte-for-byte unchanged.
+
+At the end of the debug run, present the findings list with each patch and its validation result before handing control back to the ordinary `kicraft` skill.
+
+
+### 5. Questions and feedback
 
 If artifact status is `needs_input`, explain each question and its stage consequence, then wait. Put the user's answer in `--answers-file` and produce a fresh complete draft.
 
@@ -86,7 +110,7 @@ A wiring question with `reconcile_target: "bom"` is a visible BOM repair escalat
 
 Any user correction requires a new complete `debug-draft` with `--instruction-file`; never patch the pending slot. Restart review at the changed facet and call out every other facet that changed. The words “continue” and “looks plausible”, and ordinary feedback, are not commit permission.
 
-### 5. Acceptance
+### 6. Acceptance
 
 Only explicit `accept`, `approve`, or `commit this stage` permits a commit.
 
@@ -100,7 +124,7 @@ kicraft-stage-debug debug-commit --workspace . --stage <stage> \
 
 3. Report `invalidated_stages` from stdout.
 4. Re-read `.kicraft/state.json` and verify the accepted stage is present.
-5. Stop. Do not begin the next stage's input checkpoint until another user turn.
+5. If another stage remains, immediately run its input checkpoint and present it in the same turn. After wiring acceptance, proceed to the completion boundary.
 
 If deterministic commit rejects the candidate, show the exact `errors` and `offenders`, connect them to the reviewed facet they invalidate, and wait for guidance. Never silently retry, auto-correct, or commit a replacement.
 

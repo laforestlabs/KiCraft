@@ -28,3 +28,10 @@ Block-boundary heuristics:
   complex designs.
 
 Open-question discipline matches Stage 1: `blocking`, `material`, or silent default in `assumptions`.
+
+External-load power boundary:
+
+- If the board drives a display, LED string, motor, heater, or other potentially
+  high-current external load and the accepted intent does not explicitly say
+  whether the board supplies that load's power, return one `blocking: true`
+  question before drafting. Do not silently add a board-to-load power connection.

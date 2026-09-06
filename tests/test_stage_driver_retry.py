@@ -12,6 +12,7 @@ from dataclasses import replace
 import pytest
 import requests
 
+from kicraft.design.models import StageDiagnostic
 from kicraft.server import stage_runtime as stage_driver_mod
 from kicraft.server.config import DESIGN_PROFILES, Settings
 from kicraft.server.stage_bom_tools import BOM_TOOLS
@@ -405,6 +406,7 @@ def test_retry_feedback_no_reconcile_note_for_non_wiring_stage():
 
 def test_retry_feedback_power_name_as_ref_teaches_net_name_shape():
     # KC-6DCV66: the model wrote '+3V3'/'GND' as an endpoint.ref and got a raw
+
     # Pydantic regex dump. Feedback must name the fix (rails are net_name values,
     # not component refs), not just echo the regex.
     err = (
@@ -419,6 +421,23 @@ def test_retry_feedback_power_name_as_ref_teaches_net_name_shape():
     msg = _retry_feedback({"ok": False, "errors": [err]}, stage="wiring")
     assert "is a net name" in msg
     assert "+3V3" in msg and "GND" in msg
+
+
+def test_semantic_repair_explains_missing_esp32_supply_source():
+    message = stage_driver_mod._semantic_repair_message(
+        "architecture",
+        [
+            StageDiagnostic(
+                code="architecture_rail_source_unspecified",
+                severity="repair_required",
+                message="missing source",
+                evidence=["+3V3"],
+                detector_version=1,
+            )
+        ],
+    )
+    assert "5V-to-3.3V regulator" in message
+    assert "at least 1A" in message
 
 
 def test_retry_feedback_power_name_as_ref_skipped_for_other_stages():
@@ -684,6 +703,132 @@ class _ScriptedClient:
 
 def _ok_intent_reply():
     return {"text": _OK_INTENT, "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0}
+
+
+def test_default_semantic_mode_repairs_explicit_intent_classification(tmp_path):
+    brief = (
+        "make a board with USB C PD power input (configured for 5V) to an "
+        "ESP32-S3-WROOM-1-N16R8 that drives a HUB75 display"
+    )
+    initial = {
+        "goal": brief,
+        "constraints": [],
+        "named_parts": [],
+        "inferred_expertise": "intermediate",
+        "assumptions": [],
+        "project_stem": "ESP32S3_HUB75_DRIVER_BOARD_5V_US",
+    }
+    client = _ScriptedClient(
+        [
+            {
+                "text": json.dumps(initial),
+                "reasoning": "",
+                "finish_reason": "stop",
+                "cost_usd": 0.0,
+            }
+        ]
+    )
+    client.s = Settings(api_key="test")
+
+    result = run_session(tmp_path, brief, ["intent"], client=client)
+
+    stage = result["results"][0]
+    assert result["status"] == "ok"
+    assert stage["repair_attempted"] is False
+    schema = json.dumps(client.calls[0]["response_format"])
+    assert "Every explicit package" in schema
+    assert "Every exact MPN" in schema
+    assert stage["diagnostics"] == []
+    assert stage["slot"]["constraints"] == [brief]
+    assert stage["slot"]["named_parts"] == ["ESP32-S3-WROOM-1-N16R8"]
+    state = json.loads((tmp_path / ".kicraft" / "state.json").read_text())
+    assert state["project_stem"] == "ESP32S3_HUB75_DRIVER"
+    assert len(client.calls) == 1
+
+
+def test_semantic_repair_allows_two_progressive_passes(tmp_path):
+    brief = "USB-C 5V controller with a speaker output"
+    intent = {
+        "goal": brief,
+        "constraints": ["USB-C input", "5V input", "speaker output"],
+        "named_parts": [],
+        "inferred_expertise": "intermediate",
+        "assumptions": [],
+        "project_stem": "USB_SPEAKER",
+    }
+    blocks = [
+        {
+            "name": "CONTROLLER",
+            "category": "process",
+            "purpose": "Generates an amplified PWM audio output.",
+        },
+        {"name": "SPEAKER", "category": "drive", "purpose": "Drives the speaker output."},
+        {"name": "POWER", "category": "power", "purpose": "Powers the controller"},
+    ]
+    connection = {
+        "from_block": "CONTROLLER",
+        "to_block": "SPEAKER",
+        "signal_type": "analog",
+        "description": "Audio output",
+    }
+    power_connection = {
+        "from_block": "POWER",
+        "to_block": "SPEAKER",
+        "signal_type": "power",
+        "description": "Speaker power",
+    }
+    initial = {
+        "blocks": blocks,
+        "connections": [connection, power_connection],
+        "assumptions": ["USB-C input is configured for 5V (defaulted)."],
+    }
+    first_repair = {
+        **initial,
+        "blocks": [
+            {
+                "name": "CONTROLLER",
+                "category": "process",
+                "purpose": "Generates the speaker control signal.",
+            },
+            blocks[1],
+            blocks[2],
+        ],
+    }
+    second_repair = {
+        **first_repair,
+        "connections": [
+            {
+                **connection,
+                "signal_type": "other",
+                "description": "Speaker control signal",
+            },
+            power_connection,
+        ],
+        "assumptions": [],
+    }
+
+    def reply(payload):
+        return {
+            "text": json.dumps(payload),
+            "reasoning": "",
+            "finish_reason": "stop",
+            "cost_usd": 0.0,
+        }
+
+    client = _ScriptedClient(
+        [reply(intent), reply(initial), reply(first_repair), reply(second_repair)]
+    )
+    client.s = Settings(api_key="test")
+
+    result = run_session(tmp_path, brief, ["intent", "functional_spec"], client=client)
+
+    functional = result["results"][1]
+    assert result["status"] == "ok"
+    assert functional["attempts"] == 3
+    assert functional["repair_attempted"] is True
+    assert functional["repair_adopted"] is True
+    assert functional["diagnostics"] == []
+    assert len(client.calls) == 4
 
 
 def test_rate_limit_falls_back_once_with_shared_guard_and_pristine_messages(tmp_path):
@@ -1007,7 +1152,7 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
     assert client.calls[1]["reasoning"] == {"enabled": False}
     retry_message = client.calls[1]["messages"][-1]["content"]
     assert "about 16 characters" in retry_message
-    assert client.calls[1]["response_format"]["json_schema"]["name"] == "kicraft_bom_response_v2"
+    assert client.calls[1]["response_format"]["json_schema"]["name"] == "kicraft_bom_response_v3"
     assert res["results"][-1]["failure_kind"] == "invalid_json"
 
 
@@ -1257,7 +1402,11 @@ def _a3_sig(letter: str) -> dict:
 
 def _a3_wiring_state(tmp_path, monkeypatch):
     state = {
-        "architecture": {"power_nets": [], "inter_sheet_nets": []},
+        "architecture": {
+            "sheets": [{"name": "MAIN"}],
+            "power_nets": [],
+            "inter_sheet_nets": [],
+        },
         "bom": {
             "parts": [
                 {"ref": "U1", "sheet": "MAIN", "symbol": "Test:U", "value": "IC"},
@@ -1349,15 +1498,12 @@ def _a3_run(
 
 
 def _escape_call(client, idx):
-    """The clean-slate call carries pristine base messages (no assistant echo)
-    at the escape temperature; the preserving retry echoes the rejected reply."""
+    """A clean-slate unit replacement omits the rejected assistant serialization."""
     call = client.calls[idx]
-    is_escape = call["temperature"] == 0.4 and [m["role"] for m in call["messages"]] == [
+    return call["temperature"] == 0.4 and [message["role"] for message in call["messages"]] == [
         "system",
         "user",
-        "user",
     ]
-    return is_escape
 
 
 def test_a3_escape_then_changed_signature_commits(tmp_path, monkeypatch):
@@ -1407,7 +1553,7 @@ def test_a3_escape_then_changed_signature_commits(tmp_path, monkeypatch):
     assert result["attempts"] == 4
     assert _escape_call(client, 2)
     assert not _escape_call(client, 3)
-    assert [m["role"] for m in client.calls[2]["messages"]] == ["system", "user", "user"]
+    assert [m["role"] for m in client.calls[2]["messages"]] == ["system", "user"]
     assert client.calls[2]["reasoning"] == {"enabled": False}
     assert client.calls[2]["model"] == DESIGN_PROFILES["pro"]["model"]
     assert client.calls[3]["model"] == DESIGN_PROFILES["pro"]["model"]
@@ -1429,12 +1575,8 @@ def test_a3_escape_then_changed_signature_commits(tmp_path, monkeypatch):
         Settings(api_key="x").model,
         DESIGN_PROFILES["pro"]["model"],
     ]
-    assert [m["role"] for m in client.calls[3]["messages"]] == [
-        "system",
-        "user",
-        "assistant",
-        "user",
-    ]
+    assert [m["role"] for m in client.calls[3]["messages"]] == ["system", "user"]
+    assert "aggregate_commit_rejection" in client.calls[3]["messages"][-1]["content"]
 
 
 def test_changed_signature_does_not_escalate(tmp_path, monkeypatch):
@@ -1482,8 +1624,8 @@ def test_eight_distinct_wiring_rejections_use_full_outer_budget(tmp_path, monkey
     )
     assert result["commit_ok"] is False
     assert result["failure_kind"] == "commit_rejected"
-    assert result["attempts"] == 8
-    assert len(client.calls) == 8
+    assert result["attempts"] == 6
+    assert len(client.calls) == 6
 
 
 def test_escalated_budget_refusal_has_no_flash_fallback(tmp_path, monkeypatch):
@@ -1580,9 +1722,10 @@ def test_a3_post_escape_changed_signatures_consume_only_loop_budget(tmp_path, mo
     assert escapes == [2]  # exactly one clean slate, ever
 
 
-def test_a3_serialization_recovery_plus_rejections_never_exceed_call_budget(tmp_path, monkeypatch):
-    """Nested recovery calls count toward provider_call_budget =
-    max_retries + 2; the loop stops there, not at the commit path."""
+def test_a3_serialization_recovery_plus_rejections_respects_work_unit_repair_bound(
+    tmp_path, monkeypatch
+):
+    """Serialization recovery plus three configured minimum repair rounds is bounded."""
     state_path = _a3_wiring_state(tmp_path, monkeypatch)
     n = {"i": 0}
 
@@ -1617,15 +1760,15 @@ def test_a3_serialization_recovery_plus_rejections_never_exceed_call_budget(tmp_
         client, "wiring", "test", state_path, tmp_path, max_retries=2
     )
     assert result["commit_ok"] is False
-    # provider_call_budget = max_retries(2) + 2 = 4: 1 normal + 1
-    # serialization + 2 more rejections.
-    assert result["attempts"] == 4
-    assert len(client.calls) == 4
+    # Initial generation + one serialization recovery + three aggregate repairs.
+    assert result["attempts"] == 5
+    assert len(client.calls) == 5
 
 
 def test_wiring_rejection_uses_complete_same_schema_correction(tmp_path, monkeypatch):
     state = {
         "architecture": {
+            "sheets": [{"name": "MAIN"}],
             "power_nets": [],
             "inter_sheet_nets": [],
         },
@@ -1706,11 +1849,10 @@ def test_wiring_rejection_uses_complete_same_schema_correction(tmp_path, monkeyp
         max_retries=4,
     )
     assert result["commit_ok"] is True
-    assert result["attempts"] == 2
     assert result["expanded_component_count"] == 0
     assert client.calls[0]["reasoning"] == {"enabled": False}
     assert all(
-        call["response_format"]["json_schema"]["name"] == "kicraft_wiring_response_v2"
+        call["response_format"]["json_schema"]["name"] == "kicraft_wiring_response_v3"
         for call in client.calls
     )
 
@@ -1872,17 +2014,15 @@ def test_attempt_trace_associates_candidates_rejections_and_escape(tmp_path, mon
     assert result["failure_kind"] == "commit_rejected"
     assert [row["provider_attempt"] for row in records] == [1, 2, 3]
     assert [row["call_mode"] for row in records] == ["normal", "normal", "clean_slate"]
-    assert [row["outcome"] for row in records] == ["commit_rejected"] * 3
-    assert [row["clean_slate_armed"] for row in records] == [False, True, False]
-    assert [row["clean_slate_used"] for row in records] == [False, False, True]
-    assert [row["escalated"] for row in records] == [False, False, True]
+    assert [row["outcome"] for row in records] == ["provider_response"] * 3
+    assert [row["version"] for row in records] == [2, 2, 2]
+    assert [row["unit_id"] for row in records] == ["wiring-u000"] * 3
+    assert [row["aggregate_round"] for row in records] == [None, 1, 2]
     assert records[0]["design_profile"] == "flash"
     assert records[2]["design_profile"] == "pro"
-    assert records[0]["rejection_signature"] == records[1]["rejection_signature"]
-    assert records[1]["rejection_signature"] == records[2]["rejection_signature"]
+    assert records[0]["aggregate_signature"] is None
+    assert records[1]["aggregate_signature"] == records[2]["aggregate_signature"]
     for row in records:
-        assert set(row["candidate"]) == {"connections", "no_connect_pins"}
-        assert row["commit_result"]["offenders"]
         assert "raw" not in row and "messages" not in row and "reasoning" not in row
 
 
@@ -1908,6 +2048,7 @@ def test_neutral_series_feedback_allows_commit_progression(tmp_path, monkeypatch
             {"ref": "U1", "pin": "1", "net": "A"},
             {"ref": "R1", "pin": "1", "net": "A"},
             {"ref": "R1", "pin": "2", "net": "B"},
+            {"ref": "U1", "pin": "2", "net": "B"},
         ]
     }
     corrected = {
@@ -1940,6 +2081,254 @@ def test_neutral_series_feedback_allows_commit_progression(tmp_path, monkeypatch
     feedback = client.calls[1]["messages"][-1]["content"]
     assert "Do not assume the populated side is the source" in feedback
     assert "moving the destination pin" not in feedback
-    assert [row["outcome"] for row in records] == ["commit_rejected", "committed"]
-    assert records[0]["rejection_signature"] is not None
-    assert records[1]["rejection_signature"] is None
+    assert [row["outcome"] for row in records] == [
+        "provider_response",
+        "provider_response",
+    ]
+    assert records[0]["aggregate_signature"] is None
+    assert records[1]["aggregate_signature"] is not None
+
+
+# ---------- bounded BOM/wiring work-unit orchestration ----------
+
+
+def _work_unit_state(tmp_path, monkeypatch):
+    state = {
+        "architecture": {
+            "sheets": [{"name": "A"}, {"name": "B"}],
+            "power_nets": [],
+            "inter_sheet_nets": [],
+        },
+        "bom": {
+            "parts": [
+                {"ref": "U1", "sheet": "A", "symbol": "Test:U", "value": "IC"},
+                {"ref": "R1", "sheet": "B", "symbol": "Test:R", "value": "1k"},
+            ]
+        },
+    }
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state))
+    prep = {
+        "state": state,
+        "extras": {
+            "symbol_pinouts": {
+                "U1": {"symbol": "Test:U", "pins": [{"number": "1"}]},
+                "R1": {"symbol": "Test:R", "pins": [{"number": "1"}]},
+            }
+        },
+    }
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc", (), {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""}
+        )(),
+    )
+    return state_path
+
+
+def _unit_reply(ref, net="N"):
+    return {
+        "text": json.dumps({"pins": [{"ref": ref, "pin": "1", "net": net}]}),
+        "reasoning": "",
+        "finish_reason": "stop",
+        "cost_usd": 0.0,
+    }
+
+
+def _unit_client(replies):
+    client = _ScriptedClient(replies)
+    client.s = Settings(
+        api_key="test",
+        design_profile="flash",
+        stage_semantics="observe",
+        provider_fallback_profile="",
+    )
+    return client
+
+
+def test_work_units_make_one_initial_call_each_before_one_full_commit(tmp_path, monkeypatch):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    client = _unit_client([_unit_reply("U1"), _unit_reply("R1")])
+    commits = []
+
+    def commit(stage, slot, *args, **kwargs):
+        commits.append(slot)
+        assert len(client.calls) == 2
+        return True, {"ok": True}
+
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", commit)
+    result = stage_driver_mod.drive_stage(client, "wiring", "test", state_path, tmp_path)
+
+    assert result["commit_ok"] is True
+    assert result["work_units"] == 2
+    assert len(client.calls) == 2
+    assert len(commits) == 1
+
+
+@pytest.mark.parametrize(
+    ("rejection", "repair_refs"),
+    [
+        ({"ok": False, "errors": ["gate"], "offenders": ["U1.1"]}, ["U1"]),
+        ({"ok": False, "errors": ["unscoped"], "offenders": []}, ["U1", "R1"]),
+    ],
+)
+def test_work_unit_commit_repair_redrafts_only_mapped_owners(
+    tmp_path, monkeypatch, rejection, repair_refs
+):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    replies = [_unit_reply("U1"), _unit_reply("R1")] + [
+        _unit_reply(ref, "FIXED") for ref in repair_refs
+    ]
+    client = _unit_client(replies)
+    commits = {"count": 0}
+
+    def commit(*args, **kwargs):
+        commits["count"] += 1
+        return (False, rejection) if commits["count"] == 1 else (True, {"ok": True})
+
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", commit)
+    result = stage_driver_mod.drive_stage(client, "wiring", "test", state_path, tmp_path)
+
+    assert result["commit_ok"] is True
+    assert len(client.calls) == 2 + len(repair_refs)
+    for call, ref in zip(client.calls[2:], repair_refs, strict=True):
+        assert f'"owned_refs":["{ref}"]' in call["messages"][0]["content"]
+
+
+def test_work_unit_question_discards_checkpoint_but_provider_failure_retains_it(
+    tmp_path, monkeypatch
+):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    question_client = _unit_client(
+        [
+            _unit_reply("U1"),
+            {
+                "text": json.dumps(
+                    {
+                        "questions": [
+                            {
+                                "text": "Choose?",
+                                "options": ["A", "B"],
+                                "blocking": True,
+                            }
+                        ]
+                    }
+                ),
+                "finish_reason": "stop",
+                "cost_usd": 0.0,
+            },
+        ]
+    )
+    result = stage_driver_mod.drive_stage(question_client, "wiring", "test", state_path, tmp_path)
+    draft_path = tmp_path / "drafts" / "wiring-units.json"
+    assert result["needs_input"] is True
+    assert not draft_path.exists()
+
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    failure_client = _unit_client([_unit_reply("U1"), requests.exceptions.Timeout("down")])
+    result = stage_driver_mod.drive_stage(failure_client, "wiring", "test", state_path, tmp_path)
+    assert result["failure_kind"] == "transport_timeout"
+    assert draft_path.exists()
+    saved = json.loads(draft_path.read_text())
+    assert list(saved["candidates"]) == ["wiring-u000"]
+
+
+def test_work_unit_debug_review_and_observer_v2_are_redacted(tmp_path, monkeypatch):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    client = _unit_client([_unit_reply("U1"), _unit_reply("R1")])
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "commit_stage",
+        lambda *args, **kwargs: pytest.fail("review mode must not commit"),
+    )
+    observed = []
+    result = stage_driver_mod.drive_stage(
+        client,
+        "wiring",
+        "test",
+        state_path,
+        tmp_path,
+        review_before_commit=True,
+        attempt_observer=observed.append,
+    )
+
+    assert result["needs_review"] is True
+    assert result["work_units"] == 2
+    assert [row["unit_id"] for row in observed] == ["wiring-u000", "wiring-u001"]
+    assert all(row["version"] == 2 for row in observed)
+    assert all(
+        forbidden not in row
+        for row in observed
+        for forbidden in ("prompt", "brief", "reasoning", "raw_reply", "tool_output")
+    )
+
+
+def test_work_unit_repeated_commit_signature_escalates_once_then_stops(tmp_path, monkeypatch):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    client = _unit_client(
+        [
+            _unit_reply("U1"),
+            _unit_reply("R1"),
+            _unit_reply("U1", "PRESERVED"),
+            _unit_reply("U1", "PRISTINE"),
+        ]
+    )
+    client.s = replace(client.s, escalation_profile="pro")
+    commits = {"count": 0}
+
+    def reject(*args, **kwargs):
+        commits["count"] += 1
+        return False, {"ok": False, "errors": ["same gate"], "offenders": ["U1.1"]}
+
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", reject)
+    result = stage_driver_mod.drive_stage(
+        client, "wiring", "test", state_path, tmp_path, max_retries=99
+    )
+
+    assert result["failure_kind"] == "commit_rejected"
+    assert len(client.calls) == 4
+    assert commits["count"] == 3
+    assert result["attempts"] <= 64
+    assert client.calls[-1]["reasoning"] == {"enabled": False}
+
+
+def test_work_unit_bom_reconcile_question_keeps_pipeline_park_shape(tmp_path, monkeypatch):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    client = _unit_client(
+        [
+            {
+                "text": json.dumps(
+                    {
+                        "questions": [
+                            {
+                                "text": "Add C1 before wiring",
+                                "options": ["Add it"],
+                                "blocking": True,
+                                "reconcile_target": "bom",
+                            }
+                        ]
+                    }
+                ),
+                "finish_reason": "stop",
+                "cost_usd": 0.0,
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "commit_stage",
+        lambda *args, **kwargs: pytest.fail("reconcile park must not commit"),
+    )
+
+    result = stage_driver_mod.drive_stage(
+        client,
+        "wiring",
+        "test",
+        state_path,
+        tmp_path,
+        answers=[{"text": "prior", "answer": "yes"}],
+    )
+
+    assert result["needs_input"] is True
+    assert result["questions"][0]["reconcile_target"] == "bom"

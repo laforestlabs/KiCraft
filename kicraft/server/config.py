@@ -274,9 +274,9 @@ class Settings:
         default_factory=lambda: dict(STAGE_COLLECTION_BOUNDS)
     )
 
-    # Temporary rollout switch: observe diagnostics, attempt one repair, or
-    # enable supported-family fabrication enforcement.
-    stage_semantics: Literal["observe", "repair", "enforce"] = "observe"
+    # Semantic diagnostics attempt one bounded repair by default. Operators may
+    # select observe-only rollout or supported-family fabrication enforcement.
+    stage_semantics: Literal["observe", "repair", "enforce"] = "repair"
     # --- Design-stage reasoning budget + in-stream loop breaker ---------------
     # Reasoning budget for the design stages. Intent/functional_spec (small,
     # serialization-critical, and the observed loop site) always run with the

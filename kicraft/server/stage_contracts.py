@@ -112,7 +112,7 @@ class BomComponentGroup(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,71}$")
     reference_prefix: str = Field(pattern=r"^[A-Z]+$")
     quantity: int = Field(ge=1, le=BOM_SHEET_PART_LIMIT)
     value: str
@@ -145,7 +145,7 @@ class BomStageResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    groups: list[BomComponentGroup] = Field(min_length=1, max_length=BOM_TOTAL_PART_LIMIT)
+    groups: list[BomComponentGroup] = Field(default_factory=list, max_length=BOM_TOTAL_PART_LIMIT)
     arrays: list[BomArrayGroup] = Field(default_factory=list, max_length=100)
     assumptions: list[str] = Field(default_factory=list)
     substitutions: list[models.Substitution] = Field(default_factory=list)
@@ -164,10 +164,16 @@ class BomStageResponse(BaseModel):
         return self
 
 
-def _normalize_bom_stage_response(
+def _expand_bom_groups(
     payload: dict, prompt_state: dict | None = None
-) -> tuple[dict, int]:
-    """Expand recipe parts first, then model component groups."""
+) -> tuple[
+    BomStageResponse,
+    list[models.BomPart],
+    list[models.ArraySpec],
+    dict[str, list[str]],
+    list,
+]:
+    """Validate and deterministically allocate recipe and model-authored BOM groups."""
     response = BomStageResponse.model_validate(payload)
     total = sum(group.quantity for group in response.groups)
     if total > BOM_TOTAL_PART_LIMIT:
@@ -179,6 +185,8 @@ def _normalize_bom_stage_response(
     architecture = (prompt_state or {}).get("architecture") or {}
     expansions = expand_selections(architecture.get("recipe_selections") or [])
     recipe_parts = [part for expansion in expansions for part in expansion.parts]
+    if not response.groups and not recipe_parts:
+        raise ValueError("BOM must contain at least one component group or circuit-recipe part")
     recipe_identities = {(part.symbol.lower(), part.value.lower()) for part in recipe_parts}
     for group in response.groups:
         if (group.symbol.lower(), group.value.lower()) in recipe_identities:
@@ -211,6 +219,15 @@ def _normalize_bom_stage_response(
         )
         for array in response.arrays
     ]
+    return response, parts, arrays, refs_by_group, expansions
+
+
+def _normalize_bom_stage_response(
+    payload: dict, prompt_state: dict | None = None
+) -> tuple[dict, int]:
+    """Expand recipe parts first, then model component groups."""
+    response, parts, arrays, _refs_by_group, expansions = _expand_bom_groups(payload, prompt_state)
+    recipe_part_count = sum(len(expansion.parts) for expansion in expansions)
     canonical = models.BOM(
         parts=parts,
         arrays=arrays,
@@ -224,7 +241,8 @@ def _normalize_bom_stage_response(
             interface for expansion in expansions for interface in expansion.edge_interfaces
         ],
     )
-    return canonical.model_dump(exclude_none=True), total + len(recipe_parts)
+    model_part_count = sum(group.quantity for group in response.groups)
+    return canonical.model_dump(exclude_none=True), model_part_count + recipe_part_count
 
 
 def _normalize_wiring_stage_response(payload: dict, prompt_state: dict) -> dict:
@@ -334,10 +352,19 @@ def _architecture_sheet_names(prompt_state: dict) -> tuple[str, ...]:
     return tuple(names)
 
 
-def build_stage_response_contract(stage: str, prompt_state: dict) -> StageResponseContract:
+def build_stage_response_contract(
+    stage: str,
+    prompt_state: dict,
+    *,
+    bom_sheet: str | None = None,
+    wiring_refs: tuple[str, ...] | None = None,
+) -> StageResponseContract:
     schema = _response_schema(stage)
     if stage == "bom":
-        names = list(_architecture_sheet_names(prompt_state))
+        architecture_names = _architecture_sheet_names(prompt_state)
+        if bom_sheet is not None and bom_sheet not in architecture_names:
+            raise ValueError(f"unknown BOM work-unit sheet {bom_sheet!r}")
+        names = [bom_sheet] if bom_sheet is not None else list(architecture_names)
         definitions = schema.get("$defs")
         if not isinstance(definitions, dict):
             raise ValueError("BOM response schema is missing $defs")
@@ -347,7 +374,18 @@ def build_stage_response_contract(stage: str, prompt_state: dict) -> StageRespon
         if not isinstance(sheet, dict):
             raise ValueError("BOM response schema is missing BomComponentGroup.sheet")
         sheet["enum"] = names
-    version = 2 if stage in {"architecture", "bom", "wiring"} else 1
+    elif stage == "wiring" and wiring_refs is not None:
+        definitions = schema.get("$defs")
+        if not isinstance(definitions, dict):
+            raise ValueError("wiring response schema is missing $defs")
+        for name in ("ConnectedPinAssignment", "NoConnectPinAssignment"):
+            definition = definitions.get(name)
+            properties = definition.get("properties") if isinstance(definition, dict) else None
+            ref = properties.get("ref") if isinstance(properties, dict) else None
+            if not isinstance(ref, dict):
+                raise ValueError(f"wiring response schema is missing {name}.ref")
+            ref["enum"] = list(wiring_refs)
+    version = 3 if stage in {"bom", "wiring"} else (2 if stage == "architecture" else 1)
     response_format = _json_response_format(f"kicraft_{stage}_response_v{version}", schema)
     return StageResponseContract(stage=stage, schema=schema, response_format=response_format)
 
@@ -395,9 +433,11 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
                     if name in range_covered:
                         raise ValueError(f"duplicate/overlapping inter-sheet net {name!r}")
                     explicit = explicit_by_name.get(name)
-                    if explicit is not None and _inter_sheet_net_endpoint_signature(
-                        explicit["endpoints"]
-                    ) != range_signature:
+                    if (
+                        explicit is not None
+                        and _inter_sheet_net_endpoint_signature(explicit["endpoints"])
+                        != range_signature
+                    ):
                         raise ValueError(f"duplicate/overlapping inter-sheet net {name!r}")
                     range_covered.add(name)
                     if explicit is not None:

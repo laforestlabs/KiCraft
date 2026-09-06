@@ -63,9 +63,18 @@ def commit_stage(
     Path(sf.name).unlink(missing_ok=True)
     try:
         out = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        out = {"ok": False, "errors": [proc.stdout.strip() or proc.stderr.strip()]}
-    return (proc.returncode == 0 and bool(out.get("ok"))), out
+    except (json.JSONDecodeError, TypeError):
+        out = None
+    if not isinstance(out, dict) or not isinstance(out.get("ok"), bool):
+        detail = (proc.stdout.strip() or proc.stderr.strip() or "no subprocess output")[:1200]
+        out = {
+            "ok": False,
+            "process_failure": True,
+            "failure_kind": "commit_process_failed",
+            "returncode": proc.returncode,
+            "errors": [f"stage-commit returned invalid process output: {detail}"],
+        }
+    return (proc.returncode == 0 and out["ok"]), out
 
 
 def stamp_stage_status(
@@ -89,6 +98,9 @@ def stamp_stage_status(
     repair_attempted=False,
     repair_adopted=False,
     diagnostics=None,
+    work_units=None,
+    reused_work_units=None,
+    aggregate_repair_rounds=None,
 ) -> None:
     """Atomically record the durable operational and semantic stage outcome."""
     p = Path(state_path)
@@ -124,6 +136,12 @@ def stamp_stage_status(
         entry["rounds"] = int(rounds)
     if tool_calls is not None:
         entry["tool_calls"] = int(tool_calls)
+    if work_units is not None:
+        entry["work_units"] = int(work_units)
+    if reused_work_units is not None:
+        entry["reused_work_units"] = int(reused_work_units)
+    if aggregate_repair_rounds is not None:
+        entry["aggregate_repair_rounds"] = int(aggregate_repair_rounds)
     if error is not None:
         entry["error"] = str(error)
     if failure_kind is not None:

@@ -12,7 +12,13 @@ from typing import Callable, Literal
 import requests
 
 from kicraft.design import models
-from kicraft.design.stage_semantics import diagnose_stage
+from kicraft.design.stage_semantics import (
+    complete_intent_classification,
+    diagnose_stage,
+    normalize_project_stem,
+    remove_mislabeled_architecture_defaults,
+    remove_mislabeled_functional_defaults,
+)
 
 from .config import STAGE_COLLECTION_BOUNDS, STAGE_SERIALIZATION_MAX_TOKENS, StageResponsePolicy
 from .client import classify_provider_exception
@@ -29,6 +35,18 @@ from .stage_prompts import (
     _collection_bounds_sentence,
     _format_core_defaults_block,
     build_system,
+    stage_spec_sha256,
+)
+from .stage_work_units import (
+    StageDraftStore,
+    StageWorkUnit,
+    WorkUnitValidationError,
+    merge_bom_units,
+    merge_wiring_units,
+    plan_stage_work_units,
+    route_work_unit_ids,
+    stage_draft_fingerprint,
+    validate_unit_candidate,
 )
 from .stage_state_io import (
     KICRAFT,
@@ -110,6 +128,9 @@ def _record_attempt_facts(
     facts=None,
     error_facts=None,
     diagnostic_codes=(),
+    unit_id=None,
+    unit_attempt=None,
+    aggregate_round=None,
 ) -> None:
     usage = (facts.usage or {}) if facts is not None else {}
     _record_stage_attempt(
@@ -127,6 +148,9 @@ def _record_attempt_facts(
         output_tokens=usage.get("completion_tokens"),
         cost_usd=facts.cost_usd if facts is not None else 0.0,
         diagnostic_codes=diagnostic_codes,
+        unit_id=unit_id,
+        unit_attempt=unit_attempt,
+        aggregate_round=aggregate_round,
         **(error_facts or {}),
     )
 
@@ -340,6 +364,11 @@ def _observe_attempt(
     clean_slate_used: bool = False,
     escalated: bool = False,
     provider_fallback: bool = False,
+    unit_id: str | None = None,
+    unit_attempt: int | None = None,
+    unit_index: int | None = None,
+    unit_total: int | None = None,
+    aggregate_round: int | None = None,
 ) -> None:
     """Emit one sanitized, normalized attempt record to an opt-in observer."""
     if observer is None:
@@ -348,7 +377,7 @@ def _observe_attempt(
     signature = rejection_signature
     observer(
         {
-            "version": 1,
+            "version": 2,
             "stage": stage,
             "provider_attempt": provider_attempt,
             "call_mode": call_mode,
@@ -366,6 +395,11 @@ def _observe_attempt(
             "clean_slate_used": clean_slate_used,
             "escalated": escalated,
             "provider_fallback": provider_fallback,
+            "unit_id": unit_id,
+            "unit_attempt": unit_attempt,
+            "unit_index": unit_index,
+            "unit_total": unit_total,
+            "aggregate_round": aggregate_round,
         }
     )
 
@@ -474,6 +508,61 @@ _SEMANTIC_REPAIR_MSG = (
     "correct only these defects, add no new assumptions, and return one complete "
     "JSON object matching the same schema. No tools, markdown, or prose."
 )
+_MAX_SEMANTIC_REPAIR_ROUNDS = 3
+
+
+def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnostic]) -> str:
+    message = _SEMANTIC_REPAIR_MSG.format(
+        diagnostics=json.dumps(
+            [{"code": d.code, "evidence": d.evidence} for d in diagnostics],
+            separators=(",", ":"),
+        )
+    )
+    if stage == "intent":
+        message += (
+            " For the intent stage, re-read the original brief: constraints must "
+            "classify every explicit voltage, interface, inclusion or exclusion, "
+            "and mechanical requirement; named_parts must contain every exact "
+            "part or family named by the user. Do not leave either list empty "
+            "when the brief contains those facts."
+        )
+    if any(d.code == "functional_spec_external_load_power_assumed" for d in diagnostics):
+        message += (
+            " Do not guess whether the board powers the external display or LED "
+            "load. Return a questions object with one blocking question asking "
+            "whether those loads use board-supplied or separate power."
+        )
+    if any(d.code == "architecture_external_load_current_unspecified" for d in diagnostics):
+        message += (
+            " Do not guess the external-load current. Return a questions object "
+            "with one blocking question asking for the maximum total 5V output "
+            "current for the HUB75 panel and LED string."
+        )
+    if any(
+        d.code
+        in {
+            "architecture_rail_source_unspecified",
+            "architecture_mcu_regulator_incomplete",
+        }
+        for d in diagnostics
+    ):
+        message += (
+            " Add a REGULATOR_3V3 topology naming a 5V-to-3.3V regulator rated "
+            "for at least 1A. Add a separate 3V3 REGULATOR sheet for that IC and "
+            "connect +5V into it and +3V3 from it in inter_sheet_nets. Keep the "
+            "+3V3 rail and do not cite a core default unless one was supplied."
+        )
+    if any(d.code == "architecture_unsupported_esp32s3_dac" for d in diagnostics):
+        message += (
+            " ESP32-S3 has no internal DAC. Replace direct analog audio with an "
+            "I2S digital amplifier topology or an explicitly filtered PWM path."
+        )
+    return message
+
+
+def _semantic_defect_score(diagnostics: list[models.StageDiagnostic]) -> int:
+    """Count concrete offenders so a repair that shrinks one diagnostic can progress."""
+    return sum(max(1, len(diagnostic.evidence)) for diagnostic in diagnostics)
 
 
 def _response_policy(client, stage: str, normal_max_tokens: int) -> StageResponsePolicy:
@@ -538,7 +627,7 @@ def call_stage_provider(
     prepared: PreparedStage,
     *,
     messages: list[dict],
-    response_format: dict,
+    response_format: dict | None,
     max_tokens: int,
     temperature: float,
     reasoning: dict | None,
@@ -603,7 +692,7 @@ def run_serialization_recovery(
     prepared: PreparedStage,
     *,
     messages: list[dict],
-    response_format: dict,
+    response_format: dict | None,
     temperature: float,
     reasoning_guard,
     progress,
@@ -802,6 +891,9 @@ def finalize_stage(
         diagnostics=outcome.get("diagnostics") or [],
         error=outcome.get("error"),
         failure_kind=outcome.get("failure_kind"),
+        work_units=outcome.get("work_units"),
+        reused_work_units=outcome.get("reused_work_units"),
+        aggregate_repair_rounds=outcome.get("aggregate_repair_rounds"),
     )
     _record_stage_ledger(
         client,
@@ -817,6 +909,9 @@ def finalize_stage(
         failure_kind=outcome.get("failure_kind"),
         emitted_collection_count=emitted_collection_count,
         expanded_component_count=expanded_component_count,
+        work_units=outcome.get("work_units"),
+        reused_work_units=outcome.get("reused_work_units"),
+        aggregate_repair_rounds=outcome.get("aggregate_repair_rounds"),
     )
     if progress:
         for diagnostic in outcome.get("diagnostics") or []:
@@ -849,6 +944,876 @@ def finalize_stage(
     }
 
 
+WORK_UNIT_MIN_REPAIR_ROUNDS = 3
+WORK_UNIT_MAX_REPAIR_ROUNDS = 5
+
+
+def _work_unit_summary(units: tuple[StageWorkUnit, ...], candidates: dict[str, dict]) -> list[dict]:
+    summaries: list[dict] = []
+    for unit in units:
+        candidate = candidates.get(unit.unit_id)
+        if candidate is None:
+            continue
+        if unit.stage == "bom":
+            content = {
+                "groups": [
+                    {
+                        key: group[key]
+                        for key in ("id", "reference_prefix", "quantity", "value", "sheet")
+                        if key in group
+                    }
+                    for group in candidate.get("groups") or []
+                ]
+            }
+        else:
+            nets: dict[str, list[str]] = {}
+            no_connects: list[str] = []
+            for row in candidate.get("pins") or []:
+                endpoint = f"{row['ref']}.{row['pin']}"
+                if row.get("no_connect") is True:
+                    no_connects.append(endpoint)
+                else:
+                    nets.setdefault(str(row.get("net")), []).append(endpoint)
+            content = {"nets": nets, "no_connects": no_connects}
+        summaries.append({"unit_id": unit.unit_id, "sheet": unit.sheet, **content})
+    return summaries
+
+
+def _work_unit_instructions(unit: StageWorkUnit, unit_index: int, unit_total: int) -> str:
+    boundary = {
+        "unit_id": unit.unit_id,
+        "unit_index": unit_index,
+        "unit_total": unit_total,
+        "target_sheet": unit.sheet,
+    }
+    if unit.stage == "bom":
+        boundary["owned_output"] = (
+            "groups and arrays for exactly this sheet; assumptions/substitutions "
+            "introduced by this sheet"
+        )
+    else:
+        boundary["owned_refs"] = list(unit.refs)
+        boundary["owned_pins"] = [{"ref": ref, "pin": pin} for ref, pin in unit.expected_pins]
+    return json.dumps(boundary, separators=(",", ":"))
+
+
+def _work_unit_extras(unit: StageWorkUnit, extras: dict) -> dict:
+    if unit.stage == "bom":
+        return dict(extras)
+    refs = set(unit.refs)
+    pinouts = extras.get("symbol_pinouts") or {}
+    filtered = {ref: info for ref, info in pinouts.items() if ref in refs}
+    if not filtered:
+        filtered = dict(pinouts)
+    result = {"symbol_pinouts": filtered}
+    for key in ("locked_pin_assignments", "locked_no_connect_pins", "recipe_locked_pins"):
+        if key in extras:
+            result[key] = [
+                row
+                for row in extras.get(key) or []
+                if isinstance(row, dict) and str(row.get("ref")) in refs
+            ]
+    return result
+
+
+def _work_unit_user_prompt(
+    *,
+    stage: str,
+    brief: str,
+    prompt_state: dict,
+    extras: dict,
+    unit: StageWorkUnit,
+    accepted_summary: list[dict],
+    answers,
+    instruction,
+    feedback: dict | str | None,
+) -> str:
+    user = (
+        f"PROJECT BRIEF:\n{brief}\n\n"
+        f"CURRENT DESIGN STATE (JSON):\n{json.dumps(prompt_state, separators=(',', ':'))}\n\n"
+        "WORK-UNIT REFERENCE DATA (complete, not truncated):\n"
+        f"{json.dumps(_work_unit_extras(unit, extras), separators=(',', ':'))}\n\n"
+        "PRIOR ACCEPTED WORK UNITS (read-only):\n"
+        f"{json.dumps(accepted_summary, separators=(',', ':'))}"
+    )
+    if answers:
+        qa = "\n".join(
+            f"Q: {answer.get('text', '')}\nA: {answer.get('answer', '')}" for answer in answers
+        )
+        user += f"\n\nThe user answered earlier clarifying questions:\n{qa}"
+    if instruction:
+        user += f"\n\nUser change request for {stage}: {instruction}"
+    if stage == "bom":
+        user += _bom_part_hints(
+            brief,
+            instruction or "",
+            *(str(answer.get("answer", "")) for answer in (answers or [])),
+        )
+    if feedback is not None:
+        rendered = feedback if isinstance(feedback, str) else json.dumps(feedback, default=str)
+        user += (
+            "\n\nAGGREGATE OR LOCAL DEFECTS TO REPAIR:\n"
+            f"{rendered}\nReturn a complete replacement for only this work unit."
+        )
+    return user + f"\n\nProduce the {stage} work-unit JSON now."
+
+
+def _drive_work_unit_stage(
+    client,
+    stage: str,
+    brief: str,
+    state_path,
+    workspace,
+    *,
+    prompt_state: dict,
+    extras: dict,
+    max_tokens: int,
+    max_retries: int,
+    progress,
+    answers,
+    instruction,
+    meta_ctx: dict | None,
+    review_before_commit: bool,
+    attempt_observer: Callable[[dict], None] | None,
+    t0: float,
+    cpu0: float,
+) -> dict:
+    """Drive bounded BOM/wiring replacements, then normalize and commit once."""
+    run_id = (meta_ctx or {}).get("run_id")
+    units = plan_stage_work_units(stage, prompt_state, extras)
+    unit_by_id = {unit.unit_id: unit for unit in units}
+    repair_rounds = min(
+        WORK_UNIT_MAX_REPAIR_ROUNDS,
+        max(WORK_UNIT_MIN_REPAIR_ROUNDS, int(max_retries)),
+    )
+    call_budget = min(64, (repair_rounds + 3) * len(units) + 6)
+    policy = _response_policy(client, stage, max_tokens)
+    executor = build_bom_executor(workspace, run_design_cli, KICRAFT) if stage == "bom" else None
+    candidates: dict[str, dict] = {}
+    contracts_by_unit = {
+        unit.unit_id: build_stage_response_contract(
+            stage,
+            prompt_state,
+            bom_sheet=unit.sheet if stage == "bom" else None,
+            wiring_refs=unit.refs if stage == "wiring" else None,
+        )
+        for unit in units
+    }
+    response_contract_names = tuple(
+        contracts_by_unit[unit.unit_id].response_format["json_schema"]["name"] for unit in units
+    )
+    if not response_contract_names:
+        response_contract_names = (
+            build_stage_response_contract(stage, prompt_state).response_format["json_schema"][
+                "name"
+            ],
+        )
+    draft_store = StageDraftStore(state_path, stage)
+    draft_fingerprint = stage_draft_fingerprint(
+        stage=stage,
+        brief=brief,
+        prompt_state=prompt_state,
+        answers=answers,
+        instruction=instruction,
+        stage_spec_sha256=stage_spec_sha256(stage),
+        response_contract_names=response_contract_names,
+        units=units,
+        extras=extras,
+    )
+    loaded_candidates = draft_store.load(draft_fingerprint, units)
+    for unit in units:
+        loaded = loaded_candidates.get(unit.unit_id)
+        if loaded is None:
+            continue
+        try:
+            candidates[unit.unit_id] = validate_unit_candidate(unit, loaded, prompt_state, extras)
+        except (WorkUnitValidationError, TypeError, ValueError):
+            candidates.clear()
+            break
+    reused_work_units = len(candidates)
+    total_cost = 0.0
+    attempts = 0
+    rounds_total = 0 if stage == "bom" else None
+    tool_calls_total = 0 if stage == "bom" else None
+    stage_client = client
+    provider_ok = False
+    schema_ok = False
+    expanded_component_count = 0
+    aggregate_repair_rounds = 0
+    last: dict = {}
+
+    def record(
+        active_client,
+        *,
+        unit: StageWorkUnit,
+        unit_attempt: int,
+        call_mode: str,
+        outcome: str,
+        facts: ProviderFacts | None = None,
+        error_facts: dict | None = None,
+        aggregate_round: int | None = None,
+        aggregate_signature: tuple | None = None,
+    ) -> None:
+        _record_attempt_facts(
+            active_client,
+            run_id=run_id,
+            stage=stage,
+            attempt=attempts,
+            call_mode=call_mode,
+            outcome=outcome,
+            facts=facts,
+            error_facts=error_facts,
+            unit_id=unit.unit_id,
+            unit_attempt=unit_attempt,
+            aggregate_round=aggregate_round,
+        )
+        if attempt_observer is not None:
+            settings = getattr(active_client, "s", None)
+            attempt_observer(
+                {
+                    "version": 2,
+                    "stage": stage,
+                    "provider_attempt": attempts,
+                    "call_mode": call_mode,
+                    "outcome": outcome,
+                    "model": _client_model(active_client),
+                    "design_profile": getattr(settings, "design_profile", None),
+                    "provider": facts.provider if facts is not None else None,
+                    "provider_order": list(getattr(settings, "provider_order", ()) or ()),
+                    "unit_id": unit.unit_id,
+                    "unit_attempt": unit_attempt,
+                    "unit_index": units.index(unit) + 1,
+                    "unit_total": len(units),
+                    "aggregate_round": aggregate_round,
+                    "aggregate_signature": (
+                        [list(aggregate_signature[0]), list(aggregate_signature[1])]
+                        if aggregate_signature is not None
+                        else None
+                    ),
+                }
+            )
+
+    def invoke(
+        unit: StageWorkUnit,
+        *,
+        unit_attempt: int,
+        feedback: dict | str | None,
+        pristine: bool,
+        serialization: bool,
+        aggregate_round: int | None,
+    ) -> tuple[str, dict | None, ProviderFacts | None, str | None]:
+        nonlocal attempts, total_cost, rounds_total, tool_calls_total, provider_ok, stage_client
+        aggregate_signature = (
+            _commit_rejection_signature(feedback["aggregate_commit_rejection"])
+            if isinstance(feedback, dict)
+            and isinstance(feedback.get("aggregate_commit_rejection"), dict)
+            else None
+        )
+        contract = contracts_by_unit[unit.unit_id]
+        instructions = _work_unit_instructions(unit, units.index(unit) + 1, len(units))
+        user = _work_unit_user_prompt(
+            stage=stage,
+            brief=brief,
+            prompt_state=prompt_state,
+            extras=extras,
+            unit=unit,
+            accepted_summary=_work_unit_summary(units, candidates),
+            answers=answers,
+            instruction=instruction,
+            feedback=feedback,
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": build_system(
+                    contract,
+                    policy.collection_bounds,
+                    work_unit_instructions=instructions,
+                ),
+            },
+            {"role": "user", "content": user},
+        ]
+        active_client = stage_client
+        if pristine:
+            profile = getattr(getattr(stage_client, "s", None), "escalation_profile", "")
+            switch = getattr(stage_client, "with_design_profile", None)
+            if (
+                profile
+                and profile != getattr(getattr(stage_client, "s", None), "design_profile", None)
+                and callable(switch)
+            ):
+                prior_model = _client_model(stage_client)
+                stage_client = switch(profile)
+                active_client = stage_client
+                if progress:
+                    progress(
+                        {
+                            "kind": "escalation",
+                            "stage": stage,
+                            "from": prior_model,
+                            "to": _client_model(active_client),
+                            "attempt": attempts + 1,
+                            "reason": "repeated_commit_signature",
+                        }
+                    )
+        prepared = PreparedStage(
+            stage=stage,
+            prompt_state=prompt_state,
+            extras=extras,
+            base_messages=tuple(messages),
+            contract=contract,
+            policy=policy,
+            tools=BOM_TOOLS if stage == "bom" else None,
+            executor=executor,
+        )
+        response_format: dict | None = contract.response_format
+        fallback_spent = False
+        schema_less_spent = False
+        call_mode = "serialization" if serialization else "clean_slate" if pristine else "normal"
+        while attempts < call_budget:
+            attempts += 1
+            ctx = {
+                **(meta_ctx or {}),
+                "stage": stage,
+                "attempt": attempts,
+                "unit_id": unit.unit_id,
+                "unit_sheet": unit.sheet,
+                "unit_refs": list(unit.refs),
+                "expected_pins": [list(pin) for pin in unit.expected_pins],
+                "unit_attempt": unit_attempt,
+                "aggregate_round": aggregate_round,
+                "serialization": serialization,
+            }
+            try:
+                if serialization:
+                    facts = run_serialization_recovery(
+                        active_client,
+                        prepared,
+                        messages=list(messages),
+                        response_format=response_format,
+                        temperature=_design_temperature(active_client),
+                        reasoning_guard=policy.reasoning_guard,
+                        progress=progress,
+                        meta_ctx=ctx,
+                    )
+                else:
+                    facts = call_stage_provider(
+                        active_client,
+                        prepared,
+                        messages=list(messages),
+                        response_format=response_format,
+                        max_tokens=int(policy.normal_max_tokens),
+                        temperature=(
+                            max(
+                                float(
+                                    getattr(
+                                        getattr(active_client, "s", None),
+                                        "serialization_escape_temperature",
+                                        0.4,
+                                    )
+                                ),
+                                0.0,
+                            )
+                            if pristine
+                            else _design_temperature(active_client)
+                        ),
+                        reasoning={"enabled": False} if pristine else policy.normal_reasoning,
+                        reasoning_guard=policy.reasoning_guard,
+                        progress=progress,
+                        meta_ctx=ctx,
+                    )
+            except (*_TRANSPORT_FAILURE_EXC, *_PROVIDER_FAILURE_EXC) as exc:
+                failure = classify_provider_exception(exc)
+                kind = failure["failure_kind"]
+                record(
+                    active_client,
+                    unit=unit,
+                    unit_attempt=unit_attempt,
+                    call_mode=call_mode,
+                    outcome=kind,
+                    error_facts={
+                        key: value for key, value in failure.items() if key != "failure_kind"
+                    },
+                    aggregate_round=aggregate_round,
+                    aggregate_signature=aggregate_signature,
+                )
+                if (
+                    kind
+                    in {
+                        "provider_response_format_rejected",
+                        "provider_capability_rejected",
+                        "provider_request_rejected",
+                    }
+                    and response_format is not None
+                    and not schema_less_spent
+                ):
+                    response_format = None
+                    schema_less_spent = True
+                    continue
+                transient = kind in {
+                    "provider_rate_limited",
+                    "provider_upstream_5xx",
+                    "transport_timeout",
+                    "transport_connection",
+                    "transport_stream_interrupted",
+                }
+                fallback_profile = getattr(
+                    getattr(active_client, "s", None),
+                    "provider_fallback_profile",
+                    "",
+                )
+                switch = getattr(active_client, "with_design_profile", None)
+                if transient and not fallback_spent and fallback_profile and callable(switch):
+                    active_client = switch(fallback_profile)
+                    fallback_spent = True
+                    continue
+                return "terminal", failure, None, kind
+            total_cost += facts.cost_usd
+            provider_ok = True
+            if stage == "bom":
+                rounds_total += int(facts.rounds or 0)
+                tool_calls_total += int(facts.tool_calls or 0)
+            record(
+                active_client,
+                unit=unit,
+                unit_attempt=unit_attempt,
+                call_mode=call_mode,
+                outcome="provider_response",
+                facts=facts,
+                aggregate_round=aggregate_round,
+                aggregate_signature=aggregate_signature,
+            )
+            if facts.finish == "collection_limit":
+                return "recoverable", None, facts, "collection_limit"
+            try:
+                parsed = _extract_json(facts.raw)
+            except (json.JSONDecodeError, ValueError):
+                return (
+                    "recoverable",
+                    None,
+                    facts,
+                    _classify_parse_failure(facts.finish, facts.had_content),
+                )
+            if isinstance(parsed.get("questions"), list):
+                return "questions", parsed, facts, None
+            try:
+                validated = validate_unit_candidate(unit, parsed, prompt_state, extras)
+            except (WorkUnitValidationError, TypeError, ValueError) as exc:
+                return "recoverable", parsed, facts, str(exc)
+            return "candidate", validated, facts, None
+        return "terminal", None, None, "provider_call_budget_exhausted"
+
+    def draft(
+        unit: StageWorkUnit,
+        *,
+        feedback: dict | str | None = None,
+        force_pristine: bool = False,
+        aggregate_round: int | None = None,
+    ) -> tuple[str, dict | None]:
+        prior_signature: str | None = None
+        escalated = force_pristine
+        local_feedback = feedback
+        serialization_next = False
+        serialization_spent = False
+        for unit_attempt in range(1, repair_rounds + 2):
+            used_serialization = serialization_next
+            kind, payload, _facts, error = invoke(
+                unit,
+                unit_attempt=unit_attempt,
+                feedback=local_feedback,
+                pristine=escalated,
+                serialization=used_serialization,
+                aggregate_round=aggregate_round,
+            )
+            serialization_next = False
+            if kind == "candidate":
+                return kind, payload
+            if kind == "questions":
+                questions = _normalize_questions(payload.get("questions") or [], stage)
+                reconcile = any(question.get("reconcile_target") for question in questions)
+                if any(question["blocking"] for question in questions) and (
+                    not answers or reconcile
+                ):
+                    return kind, {"questions": questions}
+                local_feedback = (
+                    "Do not ask more questions. Apply sensible defaults, record each "
+                    "assumption ending '(defaulted)', and return this unit."
+                )
+                continue
+            if kind == "terminal":
+                return kind, {"failure_kind": error or "provider_failure"}
+            if used_serialization and error in {
+                "collection_limit",
+                "truncated_json",
+                "invalid_json",
+                "reasoning_loop",
+            }:
+                return "terminal", {"failure_kind": error}
+            if (
+                not serialization_spent
+                and not used_serialization
+                and error
+                in {
+                    "collection_limit",
+                    "truncated_json",
+                    "invalid_json",
+                    "reasoning_loop",
+                }
+            ):
+                serialization_spent = True
+                serialization_next = True
+                bounds_sentence = _collection_bounds_sentence(policy.collection_bounds)
+                local_feedback = _SERIALIZATION_RETRY_MSG.format(
+                    prior_chars=len(_facts.raw if _facts is not None else ""),
+                    bounds_sentence=(bounds_sentence + " ") if bounds_sentence else "",
+                )
+                continue
+            signature = str(error)
+            if signature == prior_signature:
+                if escalated:
+                    return "terminal", {
+                        "failure_kind": "repeated_unit_defect",
+                        "error": signature,
+                    }
+                escalated = True
+                local_feedback = {
+                    "defect": signature,
+                    "instruction": (
+                        "Pristine redraft: reason from the source state and replace only "
+                        "this unit. Do not preserve the rejected serialization."
+                    ),
+                }
+            else:
+                local_feedback = {
+                    "defect": signature,
+                    "rejected_unit": payload,
+                    "instruction": "Correct every listed defect in this complete unit replacement.",
+                }
+            prior_signature = signature
+        return "terminal", {
+            "failure_kind": "unit_repair_exhausted",
+            "error": str(local_feedback),
+        }
+
+    def stop_for_question(payload: dict) -> dict:
+        questions = payload["questions"]
+        draft_store.delete()
+        if not review_before_commit:
+            attach_questions(state_path, stage, questions)
+        if progress:
+            progress({"kind": "question", "stage": stage, "questions": questions})
+        return {
+            "stage": stage,
+            "commit_ok": False,
+            "needs_input": True,
+            "questions": questions,
+            "cost_usd": total_cost,
+            "attempts": attempts,
+            "rounds": rounds_total,
+            "tool_calls": tool_calls_total,
+            "work_units": len(units),
+            "reused_work_units": reused_work_units,
+            "aggregate_repair_rounds": aggregate_repair_rounds,
+        }
+
+    for unit in units:
+        if unit.unit_id in candidates:
+            continue
+        kind, payload = draft(unit)
+        if kind == "questions":
+            return stop_for_question(payload)
+        if kind != "candidate":
+            last = payload or {"failure_kind": "unit_generation_failed"}
+            break
+        candidates[unit.unit_id] = payload
+        draft_store.save(draft_fingerprint, units, candidates)
+    else:
+        last = {}
+
+    def aggregate():
+        nonlocal expanded_component_count
+        if stage == "bom":
+            merged, ref_to_unit = merge_bom_units(units, candidates, prompt_state)
+            normalized, expanded_component_count = _normalize_stage_response(
+                stage, merged, prompt_state
+            )
+            return normalized, ref_to_unit, {}, {}
+        merged, pin_to_unit, ref_to_unit_ids = merge_wiring_units(units, candidates)
+        normalized, _expanded = _normalize_stage_response(stage, merged, prompt_state)
+        return normalized, {}, pin_to_unit, ref_to_unit_ids
+
+    if not last:
+        try:
+            candidate, ref_to_unit, pin_to_unit, ref_to_unit_ids = aggregate()
+            schema_ok = True
+        except (StageSchemaError, TypeError, ValueError) as exc:
+            last = {"failure_kind": "invalid_schema", "error": str(exc)}
+    if last:
+        return finalize_stage(
+            client,
+            run_id=run_id,
+            stage=stage,
+            state_path=state_path,
+            progress=progress,
+            ok=False,
+            t0=t0,
+            cpu0=cpu0,
+            cost_usd=total_cost,
+            attempts=attempts,
+            rounds=rounds_total,
+            tool_calls=tool_calls_total,
+            emitted_collection_count=0,
+            expanded_component_count=expanded_component_count,
+            outcome={
+                **last,
+                "provider_ok": provider_ok,
+                "schema_ok": schema_ok,
+                "work_units": len(units),
+                "reused_work_units": reused_work_units,
+                "aggregate_repair_rounds": aggregate_repair_rounds,
+            },
+        )
+
+    semantic_state = {
+        **prompt_state,
+        "_stage_answers": list(answers or []),
+        "_stage_extras": extras,
+    }
+    diagnostics = diagnose_stage(
+        stage, brief=brief, upstream_state=semantic_state, candidate=candidate
+    )
+    severe = [
+        diagnostic
+        for diagnostic in diagnostics
+        if diagnostic.severity in {"repair_required", "fab_gate"}
+    ]
+    semantic_mode = getattr(getattr(client, "s", None), "stage_semantics", "observe")
+    for semantic_round in range(1, _MAX_SEMANTIC_REPAIR_ROUNDS + 1):
+        if not severe or semantic_mode not in {"repair", "enforce"}:
+            break
+        targeted = route_work_unit_ids(
+            [diagnostic.model_dump(exclude_none=True) for diagnostic in severe],
+            units,
+            ref_to_unit=ref_to_unit,
+            pin_to_unit=pin_to_unit,
+            ref_to_unit_ids=ref_to_unit_ids,
+        )
+        prior_candidates = dict(candidates)
+        for unit_id in targeted:
+            unit = unit_by_id[unit_id]
+            kind, payload = draft(
+                unit,
+                feedback={
+                    "aggregate_diagnostics": [
+                        diagnostic.model_dump(exclude_none=True) for diagnostic in severe
+                    ],
+                    "aggregate_summary": _work_unit_summary(units, candidates),
+                },
+                aggregate_round=semantic_round,
+            )
+            if kind == "questions":
+                return stop_for_question(payload)
+            if kind != "candidate":
+                candidates = prior_candidates
+                break
+            candidates[unit_id] = payload
+            draft_store.save(draft_fingerprint, units, candidates)
+        else:
+            repaired, new_ref_map, new_pin_map, new_ref_units = aggregate()
+            repaired_diagnostics = diagnose_stage(
+                stage,
+                brief=brief,
+                upstream_state=semantic_state,
+                candidate=repaired,
+            )
+            repaired_severe = [
+                diagnostic
+                for diagnostic in repaired_diagnostics
+                if diagnostic.severity in {"repair_required", "fab_gate"}
+            ]
+            if _semantic_defect_score(repaired_severe) < _semantic_defect_score(severe):
+                candidate = repaired
+                diagnostics = repaired_diagnostics
+                severe = repaired_severe
+                ref_to_unit = new_ref_map
+                pin_to_unit = new_pin_map
+                ref_to_unit_ids = new_ref_units
+                continue
+            candidates = prior_candidates
+        break
+
+    diagnostic_rows = [diagnostic.model_dump(exclude_none=True) for diagnostic in diagnostics]
+    if review_before_commit:
+        return {
+            "stage": stage,
+            "needs_review": True,
+            "commit_ok": False,
+            "slot": candidate,
+            "diagnostics": diagnostic_rows,
+            "cost_usd": total_cost,
+            "attempts": attempts,
+            "rounds": rounds_total,
+            "tool_calls": tool_calls_total,
+            "wall_s": round(time.monotonic() - t0, 3),
+            "cpu_s": round(_child_cpu_s() - cpu0, 3),
+            "provider_ok": provider_ok,
+            "schema_ok": schema_ok,
+            "semantic_clean": not diagnostics,
+            "repair_required": bool(severe),
+            "fab_safe": not any(diagnostic.severity == "fab_gate" for diagnostic in diagnostics),
+            "work_units": len(units),
+            "reused_work_units": reused_work_units,
+            "aggregate_repair_rounds": aggregate_repair_rounds,
+            "debug_context": {
+                "prompt_state": prompt_state,
+                "extras": extras,
+                "work_units": [asdict(unit) for unit in units],
+                "accepted_units": _work_unit_summary(units, candidates),
+            },
+        }
+
+    prior_signature = None
+    escalation_spent = False
+    for aggregate_round in range(repair_rounds + 1):
+        ok, commit_result = commit_stage(stage, dict(candidate), state_path, brief, None, workspace)
+        if ok:
+            draft_store.delete()
+            return finalize_stage(
+                client,
+                run_id=run_id,
+                stage=stage,
+                state_path=state_path,
+                progress=progress,
+                ok=True,
+                t0=t0,
+                cpu0=cpu0,
+                cost_usd=total_cost,
+                attempts=attempts,
+                rounds=rounds_total,
+                tool_calls=tool_calls_total,
+                emitted_collection_count=0,
+                expanded_component_count=expanded_component_count,
+                outcome={
+                    "commit": commit_result,
+                    "slot": candidate,
+                    "provider_ok": provider_ok,
+                    "schema_ok": schema_ok,
+                    "semantic_clean": not diagnostics,
+                    "repair_required": bool(severe),
+                    "fab_safe": not any(
+                        diagnostic.severity == "fab_gate" for diagnostic in diagnostics
+                    ),
+                    "diagnostics": diagnostic_rows,
+                    "work_units": len(units),
+                    "reused_work_units": reused_work_units,
+                    "aggregate_repair_rounds": aggregate_repair_rounds,
+                },
+            )
+        if commit_result.get("failure_kind") == "commit_process_failed":
+            last = {
+                "failure_kind": "commit_process_failed",
+                "error": (commit_result.get("errors") or ["stage-commit process failed"])[0],
+                "commit": commit_result,
+            }
+            break
+        if progress:
+            progress(
+                {
+                    "kind": "retry",
+                    "stage": stage,
+                    "errors": commit_result.get("errors"),
+                    "offenders": commit_result.get("offenders"),
+                    "model": _client_model(stage_client),
+                }
+            )
+        signature = _commit_rejection_signature(commit_result)
+        repeated = signature == prior_signature
+        if repeated and escalation_spent:
+            last = {
+                "failure_kind": "commit_rejected",
+                "commit": commit_result,
+            }
+            break
+        pristine = repeated
+        if pristine:
+            escalation_spent = True
+        if aggregate_round >= repair_rounds:
+            last = {
+                "failure_kind": "commit_rejected",
+                "commit": commit_result,
+            }
+            break
+        targeted = route_work_unit_ids(
+            commit_result,
+            units,
+            ref_to_unit=ref_to_unit,
+            pin_to_unit=pin_to_unit,
+            ref_to_unit_ids=ref_to_unit_ids,
+        )
+        aggregate_repair_rounds += 1
+        prior_candidates = dict(candidates)
+        for unit_id in targeted:
+            kind, payload = draft(
+                unit_by_id[unit_id],
+                feedback={
+                    "aggregate_commit_rejection": commit_result,
+                    "aggregate_summary": _work_unit_summary(units, candidates),
+                    "repair_instruction": _retry_feedback(
+                        commit_result,
+                        stage=stage,
+                        valid_refs=(committed_bom_refs(state_path) if stage == "wiring" else None),
+                    ),
+                },
+                force_pristine=pristine,
+                aggregate_round=aggregate_repair_rounds,
+            )
+            if kind == "questions":
+                return stop_for_question(payload)
+            if kind != "candidate":
+                last = payload or {"failure_kind": "unit_generation_failed"}
+                break
+            candidates[unit_id] = payload
+            draft_store.save(draft_fingerprint, units, candidates)
+        else:
+            try:
+                candidate, ref_to_unit, pin_to_unit, ref_to_unit_ids = aggregate()
+            except (StageSchemaError, TypeError, ValueError) as exc:
+                candidates = prior_candidates
+                last = {"failure_kind": "invalid_schema", "error": str(exc)}
+                break
+            prior_signature = signature
+            continue
+        candidates = prior_candidates
+        break
+    else:
+        last = {"failure_kind": "commit_rejected"}
+    return finalize_stage(
+        client,
+        run_id=run_id,
+        stage=stage,
+        state_path=state_path,
+        progress=progress,
+        ok=False,
+        t0=t0,
+        cpu0=cpu0,
+        cost_usd=total_cost,
+        attempts=attempts,
+        rounds=rounds_total,
+        tool_calls=tool_calls_total,
+        emitted_collection_count=0,
+        expanded_component_count=expanded_component_count,
+        outcome={
+            **last,
+            "provider_ok": provider_ok,
+            "schema_ok": schema_ok,
+            "diagnostics": diagnostic_rows,
+            "work_units": len(units),
+            "reused_work_units": reused_work_units,
+            "aggregate_repair_rounds": aggregate_repair_rounds,
+        },
+    )
+
+
 def drive_stage(
     client,
     stage,
@@ -872,24 +1837,33 @@ def drive_stage(
     cpu0 = _child_cpu_s()
     if progress:
         progress({"kind": "stage_start", "stage": stage, "model": _client_model(client)})
-    prep = prepare_stage(stage, state_path, workspace)
-    if prep.returncode != 0:
-        err = (prep.stderr.strip() or prep.stdout.strip())[:600]
-        _wall = round(time.monotonic() - t0, 3)
-        _cpu = round(_child_cpu_s() - cpu0, 3)
+
+    def operational_failure(failure_kind: str, error: str) -> dict:
+        wall_s = round(time.monotonic() - t0, 3)
+        cpu_s = round(_child_cpu_s() - cpu0, 3)
         if not review_before_commit:
-            stamp_stage_status(state_path, stage, False, wall_s=_wall, cpu_s=_cpu)
+            stamp_stage_status(
+                state_path,
+                stage,
+                False,
+                attempts=0,
+                wall_s=wall_s,
+                cpu_s=cpu_s,
+                error=error,
+                failure_kind=failure_kind,
+            )
             _record_stage_ledger(
                 client,
                 run_id=run_id,
                 stage=stage,
                 ok=False,
-                attempts=None,
+                attempts=0,
                 rounds=None,
                 tool_calls=None,
-                wall_s=_wall,
-                cpu_s=_cpu,
+                wall_s=wall_s,
+                cpu_s=cpu_s,
                 cost_usd=0.0,
+                failure_kind=failure_kind,
             )
             if progress:
                 progress({"kind": "stage_done", "stage": stage, "ok": False})
@@ -897,11 +1871,29 @@ def drive_stage(
             "stage": stage,
             "commit_ok": False,
             "cost_usd": 0.0,
-            "wall_s": _wall,
-            "cpu_s": _cpu,
-            "error": f"stage-prep failed: {err}",
+            "attempts": 0,
+            "wall_s": wall_s,
+            "cpu_s": cpu_s,
+            "error": error,
+            "failure_kind": failure_kind,
         }
-    prep_json = json.loads(prep.stdout)
+
+    prep = prepare_stage(stage, state_path, workspace)
+    if prep.returncode != 0:
+        err = (prep.stderr.strip() or prep.stdout.strip() or "no subprocess output")[:600]
+        return operational_failure("stage_prep_failed", f"stage-prep failed: {err}")
+    try:
+        prep_json = json.loads(prep.stdout)
+        if not isinstance(prep_json, dict) or not isinstance(prep_json.get("state"), dict):
+            raise ValueError("stage-prep output is missing the state object")
+        raw_extras = prep_json.get("extras")
+        if raw_extras is not None and not isinstance(raw_extras, dict):
+            raise ValueError("stage-prep extras must be an object")
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return operational_failure(
+            "stage_prep_failed",
+            f"stage-prep returned invalid process output: {exc}",
+        )
     extras = prep_json.get("extras") or {}
 
     # Core-components registry (admin-curated default parts): rendered fresh from
@@ -944,6 +1936,33 @@ def drive_stage(
                 for p in full_bom.get("parts", [])
             ],
         }
+    if stage in {"bom", "wiring"}:
+        try:
+            return _drive_work_unit_stage(
+                client,
+                stage,
+                brief,
+                state_path,
+                workspace,
+                prompt_state=prompt_state,
+                extras=extras,
+                max_tokens=max_tokens,
+                max_retries=max_retries,
+                progress=progress,
+                answers=answers,
+                instruction=instruction,
+                meta_ctx=meta_ctx,
+                review_before_commit=review_before_commit,
+                attempt_observer=attempt_observer,
+                t0=t0,
+                cpu0=cpu0,
+            )
+        except ValueError as exc:
+            return operational_failure(
+                "stage_contract_failed",
+                f"stage contract failed: {exc}",
+            )
+
     user = f"PROJECT BRIEF:\n{brief}\n\nCURRENT DESIGN STATE (JSON):\n{json.dumps(prompt_state)}"
     if extras:
         # bom carries the full parts table + core defaults (the adoption rule
@@ -953,6 +1972,11 @@ def drive_stage(
     if answers:
         qa = "\n".join(f"Q: {a.get('text', '')}\nA: {a.get('answer', '')}" for a in answers)
         user += f"\n\nThe user answered your earlier clarifying question(s):\n{qa}"
+    semantic_state = {
+        **prompt_state,
+        "_stage_answers": list(answers or []),
+        "_stage_extras": extras,
+    }
     if instruction:
         user += (
             f"\n\nThe user requests this change to the {stage}: {instruction}\n"
@@ -967,43 +1991,10 @@ def drive_stage(
     try:
         contract = build_stage_response_contract(stage, prompt_state)
     except ValueError as exc:
-        wall_s = round(time.monotonic() - t0, 3)
-        cpu_s = round(_child_cpu_s() - cpu0, 3)
-        error = f"stage contract failed: {exc}"
-        if not review_before_commit:
-            stamp_stage_status(
-                state_path,
-                stage,
-                False,
-                cost_usd=0.0,
-                attempts=0,
-                wall_s=wall_s,
-                cpu_s=cpu_s,
-                error=error,
-            )
-            _record_stage_ledger(
-                client,
-                run_id=run_id,
-                stage=stage,
-                ok=False,
-                attempts=0,
-                rounds=None,
-                tool_calls=None,
-                wall_s=wall_s,
-                cpu_s=cpu_s,
-                cost_usd=0.0,
-            )
-            if progress:
-                progress({"kind": "stage_done", "stage": stage, "ok": False})
-        return {
-            "stage": stage,
-            "commit_ok": False,
-            "cost_usd": 0.0,
-            "attempts": 0,
-            "wall_s": wall_s,
-            "cpu_s": cpu_s,
-            "error": error,
-        }
+        return operational_failure(
+            "stage_contract_failed",
+            f"stage contract failed: {exc}",
+        )
     policy = _response_policy(client, stage, max_tokens)
 
     messages = [
@@ -1108,6 +2099,8 @@ def drive_stage(
     schema_ok = False
     semantic_repair_attempted = False
     semantic_repair_adopted = False
+    semantic_repair_rounds = 0
+    adopted_repair_facts: ProviderFacts | None = None
     semantic_mode = getattr(getattr(active_client, "s", None), "stage_semantics", "observe")
     current_facts = None
     current_call_mode = "normal"
@@ -1655,19 +2648,29 @@ def drive_stage(
             )
             continue
 
+        if stage == "intent":
+            obj = complete_intent_classification(brief, obj)
+            obj["project_stem"] = normalize_project_stem(obj.get("project_stem", ""))
+        elif stage == "functional_spec":
+            obj = remove_mislabeled_functional_defaults(brief, semantic_state, obj)
+        elif stage == "architecture":
+            obj = remove_mislabeled_architecture_defaults(semantic_state, obj)
         original_obj = obj
-        diagnostics = diagnose_stage(stage, brief=brief, upstream_state=prompt_state, candidate=obj)
+        diagnostics = diagnose_stage(
+            stage, brief=brief, upstream_state=semantic_state, candidate=obj
+        )
         severe = [d for d in diagnostics if d.severity in {"repair_required", "fab_gate"}]
-        if severe and semantic_mode in {"repair", "enforce"} and not semantic_repair_attempted:
+        repair_source_raw = raw
+        while (
+            severe
+            and semantic_mode in {"repair", "enforce"}
+            and semantic_repair_rounds < _MAX_SEMANTIC_REPAIR_ROUNDS
+        ):
             semantic_repair_attempted = True
+            semantic_repair_rounds += 1
             attempts += 1
-            repair_message = _SEMANTIC_REPAIR_MSG.format(
-                diagnostics=json.dumps(
-                    [{"code": d.code, "evidence": d.evidence} for d in severe],
-                    separators=(",", ":"),
-                )
-            )
-            repair_messages = _lean_retry(raw, repair_message)
+            repair_message = _semantic_repair_message(stage, severe)
+            repair_messages = _lean_retry(repair_source_raw, repair_message)
             try:
                 repair_facts = run_serialization_recovery(
                     active_client,
@@ -1688,19 +2691,20 @@ def drive_stage(
                 repair_outcome = decode_stage_response(prepared, repair_facts)
                 if repair_outcome.kind == "candidate":
                     repaired = repair_outcome.payload["candidate"]
+                    if stage == "functional_spec":
+                        repaired = remove_mislabeled_functional_defaults(
+                            brief, semantic_state, repaired
+                        )
+                    elif stage == "architecture":
+                        repaired = remove_mislabeled_architecture_defaults(semantic_state, repaired)
                     repaired_diagnostics = diagnose_stage(
-                        stage, brief=brief, upstream_state=prompt_state, candidate=repaired
+                        stage, brief=brief, upstream_state=semantic_state, candidate=repaired
                     )
                     repaired_severe = [
                         d
                         for d in repaired_diagnostics
                         if d.severity in {"repair_required", "fab_gate"}
                     ]
-                    if len(repaired_severe) < len(severe):
-                        obj = repaired
-                        diagnostics = repaired_diagnostics
-                        severe = repaired_severe
-                        semantic_repair_adopted = True
                     _record_attempt_facts(
                         active_client,
                         run_id=run_id,
@@ -1711,17 +2715,50 @@ def drive_stage(
                         facts=repair_facts,
                         diagnostic_codes=[d.code for d in repaired_diagnostics],
                     )
-                else:
-                    repair_kind = repair_outcome.payload.get("failure_kind") or repair_outcome.kind
-                    _record_attempt_facts(
-                        active_client,
-                        run_id=run_id,
-                        stage=stage,
-                        attempt=attempts,
-                        call_mode="semantic_repair",
-                        outcome=repair_kind,
-                        facts=repair_facts,
-                    )
+                    if _semantic_defect_score(repaired_severe) >= _semantic_defect_score(severe):
+                        break
+                    obj = repaired
+                    diagnostics = repaired_diagnostics
+                    severe = repaired_severe
+                    semantic_repair_adopted = True
+                    adopted_repair_facts = repair_facts
+                    repair_source_raw = repair_facts.raw
+                    continue
+
+                if repair_outcome.kind == "questions":
+                    qs = repair_outcome.payload["candidate"]["questions"]
+                    if any(question["blocking"] for question in qs):
+                        if not review_before_commit:
+                            attach_questions(state_path, stage, qs)
+                        if progress:
+                            progress({"kind": "question", "stage": stage, "questions": qs})
+                        return {
+                            "stage": stage,
+                            "commit_ok": False,
+                            "needs_input": True,
+                            "questions": qs,
+                            "cost_usd": total_cost,
+                            "attempts": attempts,
+                            "rounds": rounds,
+                            "tool_calls": tool_calls_ct,
+                            "wall_s": round(time.monotonic() - t0, 3),
+                            "cpu_s": round(_child_cpu_s() - cpu0, 3),
+                            "provider_ok": provider_ok,
+                            "schema_ok": schema_ok,
+                            "debug_context": _debug_context(repair_facts.raw),
+                        }
+
+                repair_kind = repair_outcome.payload.get("failure_kind") or repair_outcome.kind
+                _record_attempt_facts(
+                    active_client,
+                    run_id=run_id,
+                    stage=stage,
+                    attempt=attempts,
+                    call_mode="semantic_repair",
+                    outcome=repair_kind,
+                    facts=repair_facts,
+                )
+                break
             except (*_TRANSPORT_FAILURE_EXC, *_PROVIDER_FAILURE_EXC) as exc:
                 failure = classify_provider_exception(exc)
                 _record_attempt_facts(
@@ -1733,6 +2770,7 @@ def drive_stage(
                     outcome=failure["failure_kind"],
                     error_facts={k: v for k, v in failure.items() if k != "failure_kind"},
                 )
+                break
 
         diagnostic_rows = [d.model_dump(exclude_none=True) for d in diagnostics]
         if review_before_commit:
@@ -1777,19 +2815,42 @@ def drive_stage(
                 "repair_required": bool(severe),
                 "fab_safe": fab_safe,
                 "debug_context": _debug_context(
-                    repair_facts.raw if semantic_repair_adopted else raw
+                    adopted_repair_facts.raw if adopted_repair_facts is not None else raw
                 ),
             }
         ok, out, obj = commit_candidate(prepared, obj, state_path, brief, workspace)
-        if not ok and semantic_repair_adopted:
+        if (
+            not ok
+            and out.get("failure_kind") != "commit_process_failed"
+            and semantic_repair_adopted
+        ):
             semantic_repair_adopted = False
             obj = original_obj
             diagnostics = diagnose_stage(
-                stage, brief=brief, upstream_state=prompt_state, candidate=obj
+                stage, brief=brief, upstream_state=semantic_state, candidate=obj
             )
             severe = [d for d in diagnostics if d.severity in {"repair_required", "fab_gate"}]
             diagnostic_rows = [d.model_dump(exclude_none=True) for d in diagnostics]
             ok, out, obj = commit_candidate(prepared, obj, state_path, brief, workspace)
+        if not ok and out.get("failure_kind") == "commit_process_failed":
+            _record_attempt_facts(
+                active_client,
+                run_id=run_id,
+                stage=stage,
+                attempt=current_attempt_number,
+                call_mode=current_call_mode,
+                outcome="commit_process_failed",
+                facts=current_facts,
+            )
+            last = {
+                "failure_kind": "commit_process_failed",
+                "error": (out.get("errors") or ["stage-commit process failed"])[0],
+                "commit": out,
+                "provider_ok": provider_ok,
+                "schema_ok": schema_ok,
+                "diagnostics": diagnostic_rows,
+            }
+            break
         _record_attempt_facts(
             active_client,
             run_id=run_id,

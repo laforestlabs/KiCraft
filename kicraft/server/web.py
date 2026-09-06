@@ -443,7 +443,7 @@ def _erc_offenders(ws: Path) -> list[str]:
 
 # Single source of truth lives in kicraft.server.session (shared with the
 # self-eval driver, WS6); kept re-exported here for back-compat callers/tests.
-from .session import bom_reconcile_instruction as _bom_reconcile_instruction  # noqa: E402
+from .session import bom_reconcile_instruction as _bom_reconcile_instruction  # noqa: E402,F401
 
 
 def _synth_check_failures(ws: Path | None) -> list[str]:
@@ -4689,7 +4689,7 @@ def index(prompt: str = "", project: str = ""):
         # their signup email. The Design button (managed in refresh_account_ui)
         # stays disabled until they verify; the Resend button mints a fresh link.
         with ui.row().classes("items-center gap-2 kc-unverified") as unverified_row:
-            unverified_label = ui.label(
+            ui.label(
                 "Verify your email to start designing. Check your inbox for the "
                 "confirmation link.").classes("text-xs").style("color:#f59e0b")
 

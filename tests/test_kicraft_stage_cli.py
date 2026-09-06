@@ -242,10 +242,13 @@ def test_stage_prep_wiring_batches_pinouts(tmp_path, capsys):
     rc, payload = _run(capsys, "stage-prep", "wiring", str(state_path))
     assert rc == 0
     pinouts = payload["extras"]["symbol_pinouts"]
-    # two distinct symbols in the BOM -> two batched lookups, no per-part calls
-    assert set(pinouts.keys()) == {"Device:R", "Device:C"}
-    for sym, info in pinouts.items():
-        assert "pins" in info, f"{sym}: expected pin list, got {info!r}"
+    # Symbol lookups remain batched, but ownership expands to exact BOM refs.
+    assert list(pinouts) == ["U1", "C1", "J3", "U2"]
+    assert {info["symbol"] for info in pinouts.values()} == {"Device:R", "Device:C"}
+    for ref, info in pinouts.items():
+        assert "pins" in info, f"{ref}: expected pin list, got {info!r}"
+    assert payload["extras"]["locked_pin_assignments"] == []
+    assert payload["extras"]["locked_no_connect_pins"] == []
 
 
 @pytest.mark.skipif(
@@ -292,10 +295,10 @@ def test_stage_prep_wiring_accepts_pinless_mechanical_symbol(tmp_path, capsys):
     rc, payload = _run(capsys, "stage-prep", "wiring", str(state_path))
     assert rc == 0, payload
     pinouts = payload["extras"]["symbol_pinouts"]
-    # The pin-less symbol is skipped, not offered to the wiring model...
-    assert "Mechanical:MountingHole" not in pinouts
-    # ...and the wireable symbols still batch through.
-    assert set(pinouts.keys()) == {"Device:R", "Device:C"}
+    # The pin-less reference is skipped, while every wireable BOM ref has its
+    # own exact pin inventory even when several refs share one symbol lookup.
+    assert "H1" not in pinouts
+    assert list(pinouts) == ["U1", "C1", "J3", "U2"]
 
 
 # ---------- stage-commit ----------

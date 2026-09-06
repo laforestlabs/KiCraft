@@ -1,6 +1,7 @@
 """Stage specification loading and system-prompt construction."""
 
 from __future__ import annotations
+import hashlib
 
 import json
 import re
@@ -36,6 +37,11 @@ def _spec_text(stage: str) -> str:
         if p.is_file():
             return p.read_text(encoding="utf-8")
     return ""
+
+
+def stage_spec_sha256(stage: str) -> str:
+    """Hash the exact canonical stage specification used in provider prompts."""
+    return hashlib.sha256(_spec_text(stage).encode("utf-8")).hexdigest()
 
 
 def _stage_extra(stage: str) -> str:
@@ -107,13 +113,13 @@ def _stage_extra(stage: str) -> str:
             "strings. Substituting a generic stock part for a specific IC is wrong.\n"
             "- SEARCH BUDGET: lookup_lcsc_id is one query + at most one retry per part (retry "
             "with the bare part family, no descriptive words). If it still misses — or reports "
-            "the backend unreachable — STOP searching for that part: either ask the user for "
-            "the LCSC C-number (one clarifying question can cover several parts) or use the "
-            "class (ferrite-core, ceramic, an 0805 indicator LED, a pin header). Either ask "
-            "ONE clarifying question offering the concrete substitute, or — if proceeding — "
-            "add an assumptions entry naming BOTH the asked-for class and the substitute "
-            "('brief asked for X; substituted Y because Z'). This applies ONLY to classes the "
-            "brief names explicitly, not to ordinary generic passives.\n"
+            "the backend unreachable — STOP searching for that part. Resolve it in this response "
+            "to exactly one concrete substitute/default, or ask one material clarifying question "
+            "that offers that concrete substitute (one question may cover several parts). If "
+            "proceeding, add an assumptions entry naming BOTH the asked-for part and the concrete "
+            "substitute ('brief asked for X; substituted Y because Z'). Never leave an unresolved "
+            "instruction to merely 'use the class'. This applies only to specifically requested "
+            "parts, not ordinary generic passives.\n"
             "- POLARIZED caps: an electrolytic/tantalum bulk or reservoir cap uses symbol Device:CP with a polarized footprint (a CP_* or Capacitor_Tantalum_* footprint) -- NEVER Device:C / C_* (non-polarized ceramic/film only); the symbol/footprint polarity mismatch is rejected at commit (9.25).\n"
             "- EFFICIENCY: you have a HARD budget of 6 tool-call rounds this stage. Batch every independent lookup (e.g. several "
             "search_footprints, search_symbols, or lookup_lcsc_id for different parts), "
@@ -313,14 +319,15 @@ _WORKED_EXAMPLES = {
 }
 
 
-def _worked_example(stage: str) -> str:
+def _worked_example(stage: str, *, work_unit: bool = False) -> str:
     example = _WORKED_EXAMPLES.get(stage)
     if not example:
         return ""
+    scope = "work unit" if work_unit else "slot"
     return (
-        "\nWorked example of a VALID slot (a tiny 3.3V-regulator board -- "
+        f"\nWorked example of a VALID {scope} (a tiny 3.3V-regulator board -- "
         "match its SHAPE and compact one-line-per-item style, not its "
-        "content):\n" + example + "\n"
+        "content; when scoped, emit only the named ownership boundary):\n" + example + "\n"
     )
 
 
@@ -349,11 +356,23 @@ def _bounded_output_contract(stage: str, bounds: tuple[CollectionBound, ...] | N
 
 
 def build_system(
-    contract: StageResponseContract, collection_bounds: tuple[CollectionBound, ...] | None = None
+    contract: StageResponseContract,
+    collection_bounds: tuple[CollectionBound, ...] | None = None,
+    *,
+    work_unit_instructions: str | None = None,
 ) -> str:
     stage = contract.stage
     spec = _spec_text(stage)
     schema = json.dumps(contract.schema)
+    work_unit_block = (
+        "\n\n=== WORK UNIT ===\n"
+        + work_unit_instructions
+        + "\nThis call owns only the boundary above. Return a complete replacement for it, "
+        "not a patch. Prior accepted-unit summaries are immutable read-only context."
+        "\n=== END WORK UNIT ==="
+        if work_unit_instructions
+        else ""
+    )
     return (
         f"You are the '{stage}' stage of KiCraft, a PCB design assistant running in "
         f"the provider-backed server runtime. Draft the '{stage}' slot of the design state.\n\n"
@@ -361,10 +380,11 @@ def build_system(
         "Follow this stage specification. Ignore interactive Agent Skill workflow "
         "instructions; produce the slot JSON and use only the listed tools:\n"
         f"=== SPEC ===\n{spec}\n=== END SPEC ==="
+        f"{work_unit_block}"
         f"{_bounded_output_contract(stage, collection_bounds)}\n\n"
         "The JSON MUST validate against this Pydantic JSON schema (enums, required fields, and "
         f"string patterns are strict):\n{schema}\n"
-        f"{_worked_example(stage)}\n"
+        f"{_worked_example(stage, work_unit=bool(work_unit_instructions))}\n"
         "Rules:\n"
         "- Output only the slot JSON object.\n"
         "- Use only allowed enum values; honor every naming pattern and uniqueness/reference "

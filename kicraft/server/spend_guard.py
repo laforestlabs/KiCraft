@@ -79,7 +79,10 @@ class SpendGuard:
                 "cost_usd REAL,"
                 "failure_kind TEXT,"
                 "emitted_collection_count INTEGER,"
-                "expanded_component_count INTEGER)"
+                "expanded_component_count INTEGER,"
+                "work_units INTEGER,"
+                "reused_work_units INTEGER,"
+                "aggregate_repair_rounds INTEGER)"
             )
             # Backward-compatible migration: ledgers created before failure_kind
             # existed keep their rows and gain the column via ALTER TABLE --
@@ -91,6 +94,9 @@ class SpendGuard:
             for column in (
                 "emitted_collection_count INTEGER",
                 "expanded_component_count INTEGER",
+                "work_units INTEGER",
+                "reused_work_units INTEGER",
+                "aggregate_repair_rounds INTEGER",
             ):
                 name = column.split()[0]
                 if name not in cols:
@@ -114,8 +120,20 @@ class SpendGuard:
                 "input_tokens INTEGER,"
                 "output_tokens INTEGER,"
                 "cost_usd REAL,"
-                "diagnostic_codes TEXT)"
+                "diagnostic_codes TEXT,"
+                "unit_id TEXT,"
+                "unit_attempt INTEGER,"
+                "aggregate_round INTEGER)"
             )
+            attempt_cols = {row[1] for row in conn.execute("PRAGMA table_info(stage_attempts)")}
+            for column in (
+                "unit_id TEXT",
+                "unit_attempt INTEGER",
+                "aggregate_round INTEGER",
+            ):
+                name = column.split()[0]
+                if name not in attempt_cols:
+                    conn.execute(f"ALTER TABLE stage_attempts ADD COLUMN {column}")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS stage_attempts_run_stage "
                 "ON stage_attempts(run_id, stage, attempt)"
@@ -169,11 +187,12 @@ class SpendGuard:
         cutoff = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)).isoformat()
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT stage,model,provider,outcome,error_code,COUNT(*) AS attempts,"
-                "AVG(wall_s) AS avg_wall_s,SUM(cost_usd) AS cost_usd "
+                "SELECT stage,model,provider,outcome,error_code,unit_id,"
+                "COUNT(*) AS attempts,AVG(wall_s) AS avg_wall_s,"
+                "SUM(cost_usd) AS cost_usd "
                 "FROM stage_attempts WHERE ts >= ? "
-                "GROUP BY stage,model,provider,outcome,error_code "
-                "ORDER BY attempts DESC,stage,model,provider,outcome",
+                "GROUP BY stage,model,provider,outcome,error_code,unit_id "
+                "ORDER BY attempts DESC,stage,model,provider,outcome,unit_id",
                 (cutoff,),
             ).fetchall()
         return [
@@ -183,9 +202,10 @@ class SpendGuard:
                 "provider": row[2],
                 "outcome": row[3],
                 "error_code": row[4],
-                "attempts": int(row[5]),
-                "avg_wall_s": float(row[6]) if row[6] is not None else None,
-                "cost_usd": float(row[7] or 0.0),
+                **({"unit_id": row[5]} if row[5] is not None else {}),
+                "attempts": int(row[6]),
+                "avg_wall_s": float(row[7]) if row[7] is not None else None,
+                "cost_usd": float(row[8] or 0.0),
             }
             for row in rows
         ]
@@ -266,6 +286,9 @@ class SpendGuard:
         failure_kind: str | None = None,
         emitted_collection_count: int | None = None,
         expanded_component_count: int | None = None,
+        work_units: int | None = None,
+        reused_work_units: int | None = None,
+        aggregate_repair_rounds: int | None = None,
     ) -> None:
         """Append one completed stage to ``stage_runs`` — the durable per-stage
         resource record. ``wall_s``/``cpu_s`` are the gap metrics: a stage's
@@ -286,8 +309,9 @@ class SpendGuard:
             conn.execute(
                 "INSERT INTO stage_runs (ts, run_id, stage, ok, attempts, rounds, "
                 "tool_calls, wall_s, cpu_s, cost_usd, failure_kind, "
-                "emitted_collection_count, expanded_component_count) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "emitted_collection_count, expanded_component_count, work_units, "
+                "reused_work_units, aggregate_repair_rounds) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     _utcnow_iso(),
                     run_id,
@@ -302,6 +326,9 @@ class SpendGuard:
                     str(failure_kind) if failure_kind is not None else None,
                     int(emitted_collection_count) if emitted_collection_count is not None else None,
                     int(expanded_component_count) if expanded_component_count is not None else None,
+                    int(work_units) if work_units is not None else None,
+                    int(reused_work_units) if reused_work_units is not None else None,
+                    int(aggregate_repair_rounds) if aggregate_repair_rounds is not None else None,
                 ),
             )
 
@@ -324,6 +351,9 @@ class SpendGuard:
         output_tokens: int | None = None,
         cost_usd: float | None = None,
         diagnostic_codes=(),
+        unit_id: str | None = None,
+        unit_attempt: int | None = None,
+        aggregate_round: int | None = None,
     ) -> None:
         """Append redacted per-call facts; never stores prompts or responses."""
         codes = sorted({str(code) for code in diagnostic_codes if code})
@@ -331,8 +361,9 @@ class SpendGuard:
             conn.execute(
                 "INSERT INTO stage_attempts (ts,run_id,stage,attempt,call_mode,"
                 "model,provider,finish_reason,outcome,http_status,error_code,"
-                "request_id,wall_s,input_tokens,output_tokens,cost_usd,diagnostic_codes)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "request_id,wall_s,input_tokens,output_tokens,cost_usd,diagnostic_codes,"
+                "unit_id,unit_attempt,aggregate_round)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     _utcnow_iso(),
                     run_id,
@@ -351,5 +382,8 @@ class SpendGuard:
                     output_tokens,
                     float(cost_usd or 0.0),
                     json.dumps(codes, separators=(",", ":")),
+                    unit_id,
+                    int(unit_attempt) if unit_attempt is not None else None,
+                    int(aggregate_round) if aggregate_round is not None else None,
                 ),
             )

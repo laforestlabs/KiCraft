@@ -335,11 +335,11 @@ class CappedOpenRouterClient:
     def _open_stream(self, payload: dict):
         """POST and return a streamed Response with a non-retryable status.
 
-        Retries TRANSIENT failures (HTTP >=500 / 429, connection reset, timeout)
-        with exponential backoff BEFORE any token is consumed, so a one-off 503
-        no longer drops the call. Once a 2xx response is returned, streaming
-        proceeds in ``_stream`` and is never retried (it could double-emit). Other
-        4xx errors raise immediately via ``raise_for_status`` (not transient)."""
+        Retries transient HTTP/network failures before any token is consumed.
+        In-band stream failures are handled by ``_stream`` because it owns the
+        partial buffers that must be discarded before a safe repost.
+        Authenticated and other non-transient 4xx failures are never retried.
+        """
         url = f"{self.s.base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.s.api_key}",
@@ -350,6 +350,7 @@ class CappedOpenRouterClient:
         backoff = float(getattr(self.s, "llm_retry_backoff_s", 1.0))
         for attempt in range(max_retries + 1):
             try:
+                self.guard.preflight()
                 resp = requests.post(
                     url,
                     headers=headers,
@@ -418,7 +419,6 @@ class CappedOpenRouterClient:
         the real cost from the final usage chunk. Returns (assembled_message,
         cost). preflight() runs before any spend, so the caps still apply.
         """
-        self.guard.preflight()  # hard cap check BEFORE any spend
         # Internal "_"-prefixed keys (_meta, _meta_ctx) are control data, not API
         # fields: keep them out of the request body sent to OpenRouter.
         meta_phase = body.get("_meta", "stream")
@@ -479,9 +479,21 @@ class CappedOpenRouterClient:
                         if chunk.get("error"):
                             error = chunk["error"]
                             detail = error.get("message") if isinstance(error, dict) else str(error)
-                            raise requests.exceptions.HTTPError(
-                                f"OpenRouter stream error: {detail}"
+                            status = error.get("code") if isinstance(error, dict) else None
+                            try:
+                                status = int(status)
+                            except (TypeError, ValueError):
+                                status = None
+                            error_response = None
+                            if status is not None and 100 <= status <= 599:
+                                error_response = requests.Response()
+                                error_response.status_code = status
+                            stream_error = requests.exceptions.HTTPError(
+                                f"OpenRouter stream error: {detail}",
+                                response=error_response,
                             )
+                            stream_error._kicraft_in_band = True
+                            raise stream_error
                         if chunk.get("provider"):
                             provider = chunk["provider"]
                         if chunk.get("usage"):
@@ -533,7 +545,45 @@ class CappedOpenRouterClient:
                                 break
                         if loop_abort_reason or collection_limit:
                             break
-            except _RETRY_NETWORK_EXC:
+            except (*_RETRY_NETWORK_EXC, requests.exceptions.HTTPError) as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if isinstance(exc, requests.exceptions.HTTPError) and not getattr(
+                    exc, "_kicraft_in_band", False
+                ):
+                    raise
+                if (
+                    isinstance(exc, requests.exceptions.HTTPError)
+                    and status is not None
+                    and status != 429
+                    and status < 500
+                ):
+                    raise
+                prompt_chars = len(
+                    json.dumps(
+                        payload.get("messages") or [],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                )
+                retry_input_tokens = max(1, prompt_chars // 4)
+                retry_output_tokens = max(1, (reasoning_chars + content_chars) // 4)
+                retry_cost = estimate_cost(
+                    payload["model"], retry_input_tokens, retry_output_tokens
+                )
+                self.guard.record(
+                    payload["model"],
+                    retry_input_tokens,
+                    retry_output_tokens,
+                    retry_cost,
+                    meta={
+                        "phase": meta_phase,
+                        "finish_reason": "stream_retry_discarded",
+                        "http_status": status,
+                        "content_chars": content_chars,
+                        "reasoning_chars": reasoning_chars,
+                        **meta_ctx,
+                    },
+                )
                 if stream_attempt >= max_stream_retries:
                     raise
                 time.sleep(stream_backoff * (2**stream_attempt))

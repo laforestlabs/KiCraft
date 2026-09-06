@@ -16,7 +16,7 @@
 
 meta:
   version: 2
-  sha256: "4ad2c2ceacb88417b4fee89e39f8554eaee94c58f920d6f4c31c5f50707718c8"
+  sha256: "b2f9009995cc44d0c3c6fdc933fcc632d692e3536c8db367fb22b430a153ad2b"
   scale_note: 'Every dimension is scored on an anchored 0-4 level. Weighted score = sum(weight_i * level_i
     / 4) over all dimensions; weights sum to 100, so a flawless run scores 100. The final score is then
     capped by the lowest hard-fail gate that triggered: final = min(weighted, min(triggered gate caps)).'

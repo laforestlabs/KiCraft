@@ -4,6 +4,18 @@ Use `intent`, `functional_spec`, `architecture`, and the committed canonical BOM
 `extras.symbol_pinouts` is the authoritative pin inventory. Use exact pin
 numbers; never invent pins, use pin names as numbers, or read symbol files.
 
+
+## WORK UNIT
+
+Without an `=== WORK UNIT ===` block, this contract owns every project-authored
+pin in the complete wiring slot. With that block, output exactly the listed
+owned `(ref, pin-number)` set and no other pins. The response remains the
+canonical `{"pins": [...]}` shape, not a patch. Prior accepted-unit net and
+endpoint summaries are immutable context: use them to join cross-unit and
+cross-sheet nets, but never re-emit or revise their pins. KiCraft runs coverage
+and every electrical invariant against the deterministic full aggregate after
+all units merge.
+
 Slot shape:
 
 ```json
@@ -23,9 +35,10 @@ Wire every repeated component instance and every required supply, programming,
 feedback, sense, bypass, pull, and sheet-local signal. Use architecture power and
 inter-sheet net names verbatim where applicable.
 
-`extras.recipe_locked_pins` are already wired deterministically. Do not emit
-those `(ref,pin)` pairs; assign only project-owned pins. KiCraft merges and checks
-the complete graph after normalization.
+`extras.locked_pin_assignments` and `extras.locked_no_connect_pins` are owned
+deterministically by circuit recipes. Do not emit those `(ref,pin)` pairs;
+assign only the work unit's project-owned pins. KiCraft merges and checks the
+complete graph after normalization.
 
 Every two-terminal series component must separate two distinct nets. A resistor,
 capacitor, inductor, ferrite, diode, or fuse with both pins assigned to the same

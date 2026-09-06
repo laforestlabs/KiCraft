@@ -3215,8 +3215,8 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
     plus stage-specific extras the LLM stage needs to draft its slot:
       - architecture: ``leaves_block`` (rendered "Available leaves" markdown)
       - bom:          ``parts_block`` (rendered "Available parts" markdown)
-      - wiring:       ``symbol_pinouts`` mapping every distinct BomPart.symbol
-                      to its pin inventory (one batched lookup instead of N)
+      - wiring:       ``symbol_pinouts`` mapping every BomPart.ref to its exact
+                      symbol and pin inventory (symbol lookups remain batched)
     """
     stage = args.stage
     if stage not in KNOWN_STAGES:
@@ -3268,38 +3268,36 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 4
+        symbol_pinouts: dict[str, dict] = {}
         pinouts: dict[str, dict] = {}
         unresolved: list[str] = []
-        seen: set[str] = set()
         for part in state.bom.parts:
             sym = part.symbol
-            if sym in seen:
-                continue
-            seen.add(sym)
-            try:
-                # all_units: a multi-unit symbol (dual op-amp, quad gate)
-                # must surface EVERY unit's pins to the wiring model and to
-                # §9.11 -- the single-unit default fed them only unit A, so
-                # a TL072's unit-B pins (5,6,7) were invisible, §9.11
-                # validated against the partial list, and the board shipped
-                # with a dead second channel (live board 637; 2026-07-19
-                # review §6.1).
-                info = lookup_pins(sym, all_units=True)
-            except (SymbolNotFoundError, ValueError) as e:
-                unresolved.append(f"{sym}: {e}")
-                continue
-            if not info.get("pins"):
-                # Mirror _unresolved_symbols: a RESOLVED zero-pin Mechanical
-                # symbol (MountingHole, Fiducial, logos) has nothing to wire.
-                # BOM commit already accepts these; treating them as fatal
-                # here killed the run before the wiring model started
-                # (rc=4, no retry -- self-eval run_20 encoder-oled-panel,
-                # both 2026-07 batches).
-                if (sym or "").partition(":")[0] == "Mechanical":
+            if sym not in symbol_pinouts:
+                try:
+                    # all_units: a multi-unit symbol (dual op-amp, quad gate)
+                    # must surface EVERY unit's pins to the wiring model and to
+                    # §9.11 -- the single-unit default fed them only unit A, so
+                    # a TL072's unit-B pins (5,6,7) were invisible, §9.11
+                    # validated against the partial list, and the board shipped
+                    # with a dead second channel (live board 637; 2026-07-19
+                    # review §6.1).
+                    info = lookup_pins(sym, all_units=True)
+                except (SymbolNotFoundError, ValueError) as e:
+                    unresolved.append(f"{sym}: {e}")
                     continue
-                unresolved.append(f"{sym}: resolved but exposes no pins")
-                continue
-            pinouts[sym] = info
+                if not info.get("pins"):
+                    # Mirror _unresolved_symbols: a RESOLVED zero-pin Mechanical
+                    # symbol (MountingHole, Fiducial, logos) has nothing to wire.
+                    if (sym or "").partition(":")[0] == "Mechanical":
+                        symbol_pinouts[sym] = {}
+                        continue
+                    unresolved.append(f"{sym}: resolved but exposes no pins")
+                    continue
+                symbol_pinouts[sym] = info
+            info = symbol_pinouts.get(sym)
+            if info:
+                pinouts[part.ref] = {**info, "symbol": sym}
         # Fail loudly rather than emitting a partial dict with {"error": ...}
         # entries: a silent gap previously tempted the wiring stage to read
         # /usr/share/kicad/symbols directly. The agent must fix the BOM
@@ -3320,7 +3318,17 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
                 )
             )
             return 4
+        from .recipes import locked_no_connect_pins, locked_pin_assignments
+
+        bom_payload = state.bom.model_dump(exclude_none=True)
         extras["symbol_pinouts"] = pinouts
+        extras["locked_pin_assignments"] = [
+            {"ref": ref, "pin": pin, "net": net}
+            for (ref, pin), net in sorted(locked_pin_assignments(bom_payload).items())
+        ]
+        extras["locked_no_connect_pins"] = [
+            {"ref": ref, "pin": pin} for ref, pin in sorted(locked_no_connect_pins(bom_payload))
+        ]
 
     output = {
         "stage": stage,

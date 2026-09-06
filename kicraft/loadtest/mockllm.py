@@ -219,10 +219,36 @@ class MockClient:
         return self._transcript.get("stages") or {}
 
     def _text_for(self, meta_ctx: dict | None) -> str:
-        stage = (meta_ctx or {}).get("stage")
+        context = meta_ctx or {}
+        stage = context.get("stage")
         stages = self._stages()
         if stage in stages:
-            return stages[stage]
+            text = stages[stage]
+            if not context.get("unit_id"):
+                return text
+            payload = json.loads(text)
+            if stage == "bom":
+                sheet = context.get("unit_sheet")
+                selected_groups = [
+                    group for group in payload.get("groups") or [] if group.get("sheet") == sheet
+                ]
+                selected_ids = {
+                    str(group.get("id")) for group in selected_groups if group.get("id")
+                }
+                payload["groups"] = selected_groups
+                payload["arrays"] = [
+                    array
+                    for array in payload.get("arrays") or []
+                    if set(map(str, array.get("group_ids") or [])) <= selected_ids
+                ]
+            elif stage == "wiring":
+                owned = {(str(ref), str(pin)) for ref, pin in context.get("expected_pins") or []}
+                payload["pins"] = [
+                    assignment
+                    for assignment in payload.get("pins") or []
+                    if (str(assignment.get("ref")), str(assignment.get("pin"))) in owned
+                ]
+            return json.dumps(payload, separators=(",", ":"))
         # No recorded slot for this stage: return an empty object so the commit
         # rejects it and the harness records a stage failure (loud, not silent).
         return "{}"

@@ -78,4 +78,18 @@ stable `instance`, required sheet-role mapping, and bounded parameters. Prefer a
 matching recipe over inventing an MCU support circuit. USB and GPIO are
 bidirectional at sheet boundaries. Programming labels alone never prove a path.
 
+**External-load power budget.** When the accepted functional spec says the board
+supplies power to a display, LED string, motor, heater, or other external load,
+the architecture must include an explicit maximum output-current budget. If the
+brief and prior answers do not supply one, return one `blocking: true` question
+before choosing the USB-C/PD sink or power-path topology. Never size an external
+load path from an unrelated regulator rating.
+
+**Rail-source completeness.** Every declared non-input power rail must name the
+regulator or converter topology that generates it. A distinct regulator IC is
+its own physical sheet and connects to its source and output rails through
+`inter_sheet_nets`. An ESP32-S3 design must declare a 3.3V rail and a
+5V-to-3.3V regulator sized for at least 1A; never silently drop the rail or leave
+its source for the BOM stage to invent.
+
 Open-question discipline matches earlier stages.

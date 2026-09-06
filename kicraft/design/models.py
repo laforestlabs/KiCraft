@@ -170,8 +170,21 @@ class FormFactor(BaseModel):
 
 class IntentSlot(BaseModel):
     goal: str
-    constraints: list[str] = Field(default_factory=list)
-    named_parts: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Every explicit package, quantity, voltage, frequency, interface, "
+            "inclusion, exclusion, and mechanical requirement stated by the user. "
+            "Do not leave empty when the brief contains any such requirement."
+        ),
+    )
+    named_parts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Every exact MPN, IC, module, connector, battery, or named component "
+            "family stated by the user. Do not leave empty when one is named."
+        ),
+    )
     inferred_expertise: Literal["beginner", "intermediate", "expert"] = "intermediate"
     assumptions: list[str] = Field(default_factory=list)
     # Requested non-rectangular board shape, when the brief asks for one. Set by

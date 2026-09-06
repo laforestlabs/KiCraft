@@ -753,6 +753,55 @@ def test_stream_gives_up_after_max_retries(monkeypatch):
         c._stream({"messages": [{"role": "user", "content": "x"}]})
 
 
+def test_stream_retries_transient_in_band_http_error_and_discards_partial(monkeypatch):
+    settings = Settings(api_key="k", llm_max_retries=1, llm_retry_backoff_s=0.0)
+    guard = _RecordingGuard()
+    client = CappedOpenRouterClient(settings, guard=guard)
+    attempts = []
+    good = [
+        {"choices": [{"delta": {"content": "complete"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        _usage_chunk(),
+    ]
+
+    def open_stream(payload):
+        attempts.append(1)
+        if len(attempts) == 1:
+            return _FakeResp(
+                [
+                    {"choices": [{"delta": {"content": "partial"}}]},
+                    {"error": {"code": 429, "message": "rate limited"}},
+                ]
+            )
+        return _FakeResp(good)
+
+    monkeypatch.setattr(client, "_open_stream", open_stream)
+    message, _cost = client._stream({"messages": [{"role": "user", "content": "x"}]})
+
+    assert len(attempts) == 2
+    assert message["content"] == "complete"
+    assert len(guard.records) == 2
+    assert guard.records[0]["meta"]["finish_reason"] == "stream_retry_discarded"
+
+
+@pytest.mark.parametrize("status", [400, 401, 403])
+def test_stream_does_not_retry_in_band_authenticated_or_other_4xx(monkeypatch, status):
+    client = CappedOpenRouterClient(
+        Settings(api_key="k", llm_max_retries=2, llm_retry_backoff_s=0.0),
+        guard=_RecordingGuard(),
+    )
+    attempts = []
+
+    def open_stream(payload):
+        attempts.append(1)
+        return _FakeResp([{"error": {"code": status, "message": "rejected"}}])
+
+    monkeypatch.setattr(client, "_open_stream", open_stream)
+    with pytest.raises(requests.exceptions.HTTPError):
+        client._stream({"messages": [{"role": "user", "content": "x"}]})
+    assert len(attempts) == 1
+
+
 # ---- in-stream reasoning-loop breaker (KC-VWW5X7) --------------------------
 
 

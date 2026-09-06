@@ -111,3 +111,32 @@ def test_question_branch_and_non_bom_contracts_are_unchanged():
 def test_bom_contract_rejects_missing_duplicate_and_malformed_architecture(architecture):
     with pytest.raises(ValueError):
         build_stage_response_contract("bom", {"architecture": architecture})
+
+
+def test_work_unit_contracts_are_v3_scoped_and_prompt_examples_are_unit_shaped():
+    state = {
+        "architecture": {
+            "sheets": [{"name": "POWER"}, {"name": "MCU"}],
+        }
+    }
+    bom = build_stage_response_contract("bom", state, bom_sheet="MCU")
+    wiring = build_stage_response_contract("wiring", state, wiring_refs=("U1", "R1"))
+
+    assert bom.response_format["json_schema"]["name"] == "kicraft_bom_response_v3"
+    assert bom.schema["$defs"]["BomComponentGroup"]["properties"]["sheet"]["enum"] == ["MCU"]
+    assert wiring.response_format["json_schema"]["name"] == "kicraft_wiring_response_v3"
+    for definition in ("ConnectedPinAssignment", "NoConnectPinAssignment"):
+        assert wiring.schema["$defs"][definition]["properties"]["ref"]["enum"] == [
+            "U1",
+            "R1",
+        ]
+
+    prompt = _build_system(
+        wiring,
+        work_unit_instructions=(
+            '{"unit_id":"wiring-u000","target_sheet":"MCU","owned_refs":["U1","R1"]}'
+        ),
+    )
+    assert "=== WORK UNIT ===" in prompt
+    assert "Prior accepted-unit summaries are immutable" in prompt
+    assert "VALID work unit" in prompt
