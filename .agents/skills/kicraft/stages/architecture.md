@@ -73,10 +73,17 @@ This co-locates or separates blocks, it never drops them (see the reminder above
 Record the choice in `assumptions` ending `(defaulted)` (e.g. `"MCU: ESP32-S3-MINI-1, flashed over native USB, no bridge (defaulted)"` or `"Programming: onboard CH340C USB-UART per core defaults, auto-reset to EN/IO0 (defaulted)"`) and reflect it in `topologies` (plus a sheet if it is its own block). BOM then adds any bridge/auto-reset parts; wiring connects the path.
 
 **Verified circuit recipes.** `extras.circuit_recipes` lists exact versioned
-recipes. Select one explicitly in `recipe_selections` with its exact `recipe`,
-stable `instance`, required sheet-role mapping, and bounded parameters. Prefer a
-matching recipe over inventing an MCU support circuit. USB and GPIO are
-bidirectional at sheet boundaries. Programming labels alone never prove a path.
+recipes. When a family and exact part listed there are named, KiCraft resolves
+the recipe deterministically at commit — you do not have to emit
+`recipe_selections` for it. The current production ESP32 example is the exact
+`ESP32-S3-MINI-1-N8`; do not assume another MCU family or package is registered.
+If you select a listed recipe explicitly, use its exact `recipe`, a stable
+`instance`, the required sheet-role mapping, and bounded parameters. An
+unsupported member of a protected family (for example an unregistered
+ESP32-S3-WROOM variant) stops with a blocking diagnostic instead of falling
+through to BOM/wiring. Prefer a matching recipe over inventing an MCU support
+circuit. USB and GPIO are bidirectional at sheet boundaries. Programming labels
+alone never prove a path.
 
 **External-load power budget.** When the accepted functional spec says the board
 supplies power to a display, LED string, motor, heater, or other external load,

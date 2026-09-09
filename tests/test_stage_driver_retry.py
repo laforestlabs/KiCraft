@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 import requests
@@ -1235,6 +1236,164 @@ def test_explicit_bom_topology_skips_provider_call(tmp_path, monkeypatch):
         "work_unit_plan",
         "work_unit_done",
     ]
+
+
+def test_recipe_complete_mcu_bom_and_wiring_skip_provider_calls(
+    tmp_path, monkeypatch
+):
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "recipe_coverage"
+        / "mcu_only_architecture.json"
+    )
+    state = {
+        "intent": {"named_parts": ["ESP32-S3-MINI-1-N8"]},
+        "architecture": json.loads(fixture.read_text(encoding="utf-8")),
+    }
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    def prepare(*args, **kwargs):
+        parts = (state.get("bom") or {}).get("parts") or []
+        extras = {
+            "symbol_pinouts": {
+                part["ref"]: {"symbol": part["symbol"], "pins": []}
+                for part in parts
+            }
+        }
+        return type(
+            "Proc",
+            (),
+            {
+                "returncode": 0,
+                "stdout": json.dumps({"state": state, "extras": extras}),
+                "stderr": "",
+            },
+        )()
+
+    committed = {}
+
+    def commit(stage, slot, *args, **kwargs):
+        committed[stage] = slot
+        state[stage] = slot
+        return True, {"ok": True}
+
+    monkeypatch.setattr(stage_driver_mod, "prepare_stage", prepare)
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", commit)
+    progress = []
+    client = _unit_client([])
+
+    bom_result = stage_driver_mod.drive_stage(
+        client,
+        "bom",
+        "ESP32-S3-MINI-1-N8 native USB controller",
+        state_path,
+        tmp_path,
+        progress=progress.append,
+    )
+    wiring_result = stage_driver_mod.drive_stage(
+        client,
+        "wiring",
+        "ESP32-S3-MINI-1-N8 native USB controller",
+        state_path,
+        tmp_path,
+        progress=progress.append,
+    )
+
+    assert bom_result["commit_ok"] is wiring_result["commit_ok"] is True
+    assert bom_result["work_units"] == wiring_result["work_units"] == 0
+    assert bom_result["attempts"] == wiring_result["attempts"] == 0
+    assert client.calls == []
+    assert all(
+        part["recipe_id"] == "esp32-s3-mini-1-minimal@1"
+        for part in committed["bom"]["parts"]
+    )
+    assert committed["bom"]["recipe_ownership"][0]["pins"]
+    assert committed["wiring"]["connections"]
+    assert committed["wiring"]["no_connect_pins"]
+    recipe_events = [event for event in progress if event.get("kind") == "recipe_selected"]
+    assert [event["stage"] for event in recipe_events] == ["bom", "wiring"]
+    assert all(event["owned_call_count"] == 0 for event in recipe_events)
+    assert all(
+        event["resolution"][0]["requirement_id"] == "auto_esp32_s3_module"
+        for event in recipe_events
+    )
+
+
+def test_mixed_recipe_sheet_calls_provider_once_for_only_novel_role(
+    tmp_path, monkeypatch
+):
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "recipe_coverage"
+        / "mixed_architecture.json"
+    )
+    state = {
+        "intent": {"named_parts": ["ESP32-S3-MINI-1-N8"]},
+        "architecture": json.loads(fixture.read_text(encoding="utf-8")),
+    }
+    prep = {"state": state, "extras": {}}
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc", (), {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""}
+        )(),
+    )
+    committed = []
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "commit_stage",
+        lambda stage, slot, *args, **kwargs: (
+            committed.append(slot) or True,
+            {"ok": True},
+        ),
+    )
+    reply = {
+        "text": json.dumps(
+            {
+                "groups": [
+                    {
+                        "id": "threshold_resistor",
+                        "reference_prefix": "R",
+                        "quantity": 1,
+                        "value": "100k",
+                        "symbol": "Device:R",
+                        "footprint": "Resistor_SMD:R_0603_1608Metric",
+                        "sheet": "MCU",
+                    }
+                ],
+                "arrays": [],
+                "assumptions": [],
+                "substitutions": [],
+            }
+        ),
+        "reasoning": "",
+        "finish_reason": "stop",
+        "cost_usd": 0.001,
+    }
+    client = _unit_client([reply])
+    result = stage_driver_mod.drive_stage(
+        client,
+        "bom",
+        "ESP32-S3-MINI-1-N8 with a novel analog threshold detector",
+        tmp_path / "state.json",
+        tmp_path,
+    )
+
+    assert result["commit_ok"] is True
+    assert result["work_units"] == result["attempts"] == len(client.calls) == 1
+    system_prompt = client.calls[0]["messages"][0]["content"]
+    assert '"owned_roles":["analog_block"]' in system_prompt
+    assert '"recipe_ids":["esp32-s3-mini-1-minimal@1"]' in system_prompt
+    assert any(part.get("recipe_id") for part in committed[0]["parts"])
+    assert [
+        part["resolution_source"]
+        for part in committed[0]["parts"]
+        if not part.get("recipe_id")
+    ] == ["llm"]
 
 
 def test_invalid_bom_architecture_fails_before_provider_call(tmp_path, monkeypatch):

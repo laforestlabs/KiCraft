@@ -36,9 +36,9 @@ feedback, sense, bypass, pull, and sheet-local signal. Use architecture power an
 inter-sheet net names verbatim where applicable.
 
 `extras.locked_pin_assignments` and `extras.locked_no_connect_pins` are owned
-deterministically by circuit recipes. Do not emit those `(ref,pin)` pairs;
-assign only the work unit's project-owned pins. KiCraft merges and checks the
-complete graph after normalization.
+deterministically by circuit recipes and the pin allocator. Do not emit those
+`(ref,pin)` pairs; assign only the work unit's project-owned pins. KiCraft
+merges and checks the complete graph after normalization.
 
 Every two-terminal series component must separate two distinct nets. A resistor,
 capacitor, inductor, ferrite, diode, or fuse with both pins assigned to the same

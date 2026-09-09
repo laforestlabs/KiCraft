@@ -188,18 +188,38 @@ def _expand_bom_groups(
     if total > BOM_TOTAL_PART_LIMIT:
         raise ValueError(f"BOM has {total} parts; maximum is {BOM_TOTAL_PART_LIMIT}")
 
-    from kicraft.design.recipes import expand_selections
+    from kicraft.design.recipes import (
+        expand_selections,
+        protected_identity_matches,
+    )
     from kicraft.design.recipes.registry import next_reference_numbers
 
     architecture = (prompt_state or {}).get("architecture") or {}
     expansions = expand_selections(architecture.get("recipe_selections") or [])
     recipe_parts = [part for expansion in expansions for part in expansion.parts]
     if not response.groups and not recipe_parts:
-        raise ValueError("BOM must contain at least one component group or circuit-recipe part")
-    recipe_identities = {(part.symbol.lower(), part.value.lower()) for part in recipe_parts}
+        raise ValueError(
+            "BOM must contain at least one component group or circuit-recipe part"
+        )
+    recipe_identities = {
+        (part.symbol.lower(), part.value.lower()) for part in recipe_parts
+    }
     for group in response.groups:
+        protected = protected_identity_matches(
+            group.id,
+            group.symbol,
+            group.value,
+            group.mpn,
+        )
+        if protected:
+            raise ValueError(
+                "model_authored_protected_identity: "
+                f"BOM group {group.id!r} contains {list(protected)!r}"
+            )
         if (group.symbol.lower(), group.value.lower()) in recipe_identities:
-            raise ValueError(f"BOM group {group.id!r} duplicates a locked circuit-recipe role")
+            raise ValueError(
+                f"BOM group {group.id!r} duplicates a locked circuit-recipe role"
+            )
 
     per_sheet: dict[str, int] = {}
     next_number = next_reference_numbers(recipe_parts)
@@ -249,6 +269,7 @@ def _normalize_bom_stage_response(
         edge_interfaces=[
             interface for expansion in expansions for interface in expansion.edge_interfaces
         ],
+        recipe_ownership=[expansion.ownership for expansion in expansions],
     )
     model_part_count = sum(group.quantity for group in response.groups)
     return canonical.model_dump(exclude_none=True), model_part_count + recipe_part_count
@@ -522,8 +543,14 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
                         models.InterSheetNet(name=name, endpoints=net_range.endpoints).model_dump()
                     )
             canonical["inter_sheet_nets"] = explicit_nets + expanded
+            from kicraft.design.recipes import apply_architecture_recipe_resolution
+
             validated = models.Architecture.model_validate(canonical)
-            return validated.model_dump(exclude_none=True), len(expanded)
+            resolved = apply_architecture_recipe_resolution(
+                validated,
+                prompt_state.get("intent") or {},
+            )
+            return resolved.model_dump(exclude_none=True), len(expanded)
         if stage == "bom":
             return _normalize_bom_stage_response(payload, prompt_state)
         if stage == "wiring":

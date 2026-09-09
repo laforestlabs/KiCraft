@@ -557,3 +557,82 @@ def test_replacing_one_candidate_preserves_unaffected_unit():
             "net": "STABLE",
         }
     )
+
+
+def test_recipe_complete_requirement_omits_bom_work_unit():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "mcu_core",
+            "sheet": "A",
+            "role": "mcu_core",
+            "family": "esp32-s3-module",
+        }
+    ]
+    state["architecture"]["recipe_selections"] = [
+        {
+            "recipe": "esp32-s3-mini-1-minimal@1",
+            "instance": "mcu_core",
+            "sheets": {"mcu": "A"},
+            "requirement_ids": ["mcu_core"],
+        }
+    ]
+    assert plan_stage_work_units("bom", state, {}) == ()
+
+
+def test_mixed_recipe_sheet_plans_only_unresolved_role():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "mcu_core",
+            "sheet": "A",
+            "role": "mcu_core",
+            "family": "esp32-s3-module",
+        },
+        {
+            "id": "novel_analog",
+            "sheet": "A",
+            "role": "analog_block",
+            "family": "application-specific",
+        },
+    ]
+    state["architecture"]["recipe_selections"] = [
+        {
+            "recipe": "esp32-s3-mini-1-minimal@1",
+            "instance": "mcu_core",
+            "sheets": {"mcu": "A"},
+            "requirement_ids": ["mcu_core"],
+        }
+    ]
+    units = plan_stage_work_units("bom", state, {})
+    assert len(units) == 1
+    assert units[0].requirement_ids == ("novel_analog",)
+    assert units[0].owned_roles == ("analog_block",)
+    assert units[0].recipe_ids == ("esp32-s3-mini-1-minimal@1",)
+
+
+def test_bom_unit_rejects_protected_identity_before_merge():
+    unit = StageWorkUnit(
+        "bom-r000",
+        "bom",
+        "A",
+        requirement_ids=("novel_analog",),
+    )
+    payload = {
+        "groups": [
+            {
+                "id": "esp32_s3_support",
+                "reference_prefix": "C",
+                "quantity": 1,
+                "value": "100nF",
+                "symbol": "Device:C",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+                "sheet": "A",
+            }
+        ]
+    }
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, payload, _state(), {})
+    assert caught.value.defects["model_authored_protected_identity"] == [
+        "esp32_s3_support"
+    ]

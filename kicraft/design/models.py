@@ -337,6 +337,89 @@ class InterSheetNet(BaseModel):
 
 JsonScalar = str | int | float | bool | None
 
+CircuitRole = Literal[
+    "mcu_core",
+    "power_input",
+    "regulator",
+    "programming",
+    "bus_interface",
+    "sensor",
+    "driver",
+    "analog_block",
+    "user_io",
+    "connector",
+]
+
+
+class CircuitRequirement(BaseModel):
+    """Bounded implementation requirement emitted by architecture.
+
+    Requirements describe what a circuit must provide. Exact component pins and
+    support networks remain owned by recipes, lowerers, and pin allocators.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    sheet: str
+    role: CircuitRole
+    family: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    exact_part: str | None = None
+    parameters: dict[str, JsonScalar] = Field(default_factory=dict)
+    ports: dict[str, str] = Field(default_factory=dict)
+    interfaces: list[str] = Field(default_factory=list)
+
+
+class RecipePinAllocation(BaseModel):
+    """One deterministic application-net to exact component-pin assignment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    net: str
+    pin: str
+    capability: str
+
+
+class RecipeResolutionRecord(BaseModel):
+    """Durable, provider-free explanation of architecture recipe resolution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requirement_id: str
+    recipe: str
+    exact_part: str
+    assumptions: list[str] = Field(default_factory=list)
+
+
+class PinOwnership(BaseModel):
+    """One pin excluded from model wiring by a deterministic owner."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str
+    pin: str
+    net: str | None = None
+    owner: Literal["recipe", "allocator", "lowerer"]
+    owner_id: str
+    requirement_id: str | None = None
+
+
+class RecipeOwnershipManifest(BaseModel):
+    """Complete ordinary-state ownership emitted by one recipe expansion."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipe: str
+    instance: str
+    requirement_ids: list[str] = Field(default_factory=list)
+    refs: list[str]
+    pins: list[PinOwnership] = Field(default_factory=list)
+    internal_nets: list[str] = Field(default_factory=list)
+    port_bindings: dict[str, str] = Field(default_factory=dict)
+    pin_allocations: list[RecipePinAllocation] = Field(default_factory=list)
+    placement_constraints: list[dict[str, object]] = Field(default_factory=list)
+    assertions: list[str] = Field(default_factory=list)
+
 
 class RecipeSelection(BaseModel):
     """Explicit versioned circuit recipe selected by architecture."""
@@ -347,6 +430,9 @@ class RecipeSelection(BaseModel):
     instance: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
     sheets: dict[str, str]
     parameters: dict[str, JsonScalar] = Field(default_factory=dict)
+    port_bindings: dict[str, str] = Field(default_factory=dict)
+    requirement_ids: list[str] = Field(default_factory=list)
+    pin_allocations: list[RecipePinAllocation] = Field(default_factory=list)
 
 
 class Architecture(BaseModel):
@@ -359,6 +445,10 @@ class Architecture(BaseModel):
     inter_sheet_nets: list[InterSheetNet]
     assumptions: list[str] = Field(default_factory=list)
     recipe_selections: list[RecipeSelection] = Field(default_factory=list)
+    requirements: list[CircuitRequirement] = Field(default_factory=list)
+    recipe_resolution: list[RecipeResolutionRecord] = Field(default_factory=list)
+    unresolved_requirement_ids: list[str] = Field(default_factory=list)
+    protected_identities: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _sheets_unique(self):
@@ -382,6 +472,41 @@ class Architecture(BaseModel):
                 raise ValueError(
                     f"recipe {selection.instance!r} maps unknown sheets: {sorted(unknown)}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _requirements_unique_and_mapped(self):
+        ids = [requirement.id for requirement in self.requirements]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Architecture.requirements ids must be unique")
+        sheet_names = {sheet.name for sheet in self.sheets}
+        unknown = {
+            requirement.sheet
+            for requirement in self.requirements
+            if requirement.sheet not in sheet_names
+        }
+        if unknown:
+            raise ValueError(
+                f"Architecture.requirements map unknown sheets: {sorted(unknown)}"
+            )
+        requirement_ids = set(ids)
+        selected = {
+            requirement_id
+            for selection in self.recipe_selections
+            for requirement_id in selection.requirement_ids
+        }
+        unknown_selected = selected - requirement_ids
+        if unknown_selected:
+            raise ValueError(
+                "recipe selections reference unknown requirements: "
+                f"{sorted(unknown_selected)}"
+            )
+        unknown_unresolved = set(self.unresolved_requirement_ids) - requirement_ids
+        if unknown_unresolved:
+            raise ValueError(
+                "unresolved requirement ids are unknown: "
+                f"{sorted(unknown_unresolved)}"
+            )
         return self
 
     @model_validator(mode="after")
@@ -430,6 +555,9 @@ class BomPart(BaseModel):
     recipe_id: str | None = None
     recipe_instance: str | None = None
     recipe_role: str | None = None
+    # Canonical ownership source. Model-facing BOM groups cannot author these.
+    resolution_source: Literal["recipe", "lowerer", "llm", "reuse"] | None = None
+    resolution_id: str | None = None
     # False means a routed/validated board-fabricated feature omitted from
     # assembly BOM and position exports.
     assembly: bool = True
@@ -673,6 +801,7 @@ class BOM(BaseModel):
     connections: list[NetConnection] = Field(default_factory=list)
     no_connect_pins: list[PinEndpoint] = Field(default_factory=list)
     edge_interfaces: list[EdgeInterface] = Field(default_factory=list)
+    recipe_ownership: list[RecipeOwnershipManifest] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _refs_unique(self):
@@ -726,6 +855,43 @@ class BOM(BaseModel):
                 raise ValueError(
                     f"edge interface {interface.name!r} references unknown refs: {sorted(unknown)}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _recipe_ownership_is_disjoint_and_known(self):
+        ref_set = {part.ref for part in self.parts}
+        owned_refs: set[str] = set()
+        owned_pins: set[tuple[str, str]] = set()
+        internal_nets: set[str] = set()
+        for manifest in self.recipe_ownership:
+            unknown_refs = set(manifest.refs) - ref_set
+            if unknown_refs:
+                raise ValueError(
+                    f"recipe ownership references unknown refs: {sorted(unknown_refs)}"
+                )
+            overlap_refs = owned_refs & set(manifest.refs)
+            if overlap_refs:
+                raise ValueError(
+                    f"recipe ownership overlaps refs: {sorted(overlap_refs)}"
+                )
+            owned_refs.update(manifest.refs)
+            overlap_nets = internal_nets & set(manifest.internal_nets)
+            if overlap_nets:
+                raise ValueError(
+                    f"recipe ownership internal nets collide: {sorted(overlap_nets)}"
+                )
+            internal_nets.update(manifest.internal_nets)
+            for ownership in manifest.pins:
+                key = (ownership.ref, ownership.pin)
+                if ownership.ref not in ref_set:
+                    raise ValueError(
+                        f"recipe ownership pin references unknown ref {ownership.ref!r}"
+                    )
+                if key in owned_pins:
+                    raise ValueError(
+                        f"recipe ownership pin overlaps: {ownership.ref}.{ownership.pin}"
+                    )
+                owned_pins.add(key)
         return self
 
     @model_validator(mode="after")

@@ -1104,6 +1104,20 @@ def _work_unit_summary(units: tuple[StageWorkUnit, ...], candidates: dict[str, d
     return summaries
 
 
+def _work_unit_provenance(unit: StageWorkUnit) -> dict:
+    return {
+        "requirement_ids": list(unit.requirement_ids),
+        "owned_roles": list(unit.owned_roles),
+        "excluded_refs": list(unit.excluded_refs),
+        "excluded_pins": [
+            {"ref": ref, "pin": pin} for ref, pin in unit.excluded_pins
+        ],
+        "planned_resolution_source": unit.planned_resolution_source,
+        "recipe_ids": list(unit.recipe_ids),
+        "lowerer_ids": list(unit.lowerer_ids),
+    }
+
+
 def _work_unit_instructions(
     unit: StageWorkUnit,
     unit_index: int,
@@ -1115,6 +1129,15 @@ def _work_unit_instructions(
         "unit_index": unit_index,
         "unit_total": unit_total,
         "target_sheet": unit.sheet,
+        "requirement_ids": list(unit.requirement_ids),
+        "owned_roles": list(unit.owned_roles),
+        "excluded_refs": list(unit.excluded_refs),
+        "excluded_pins": [
+            {"ref": ref, "pin": pin} for ref, pin in unit.excluded_pins
+        ],
+        "planned_resolution_source": unit.planned_resolution_source,
+        "recipe_ids": list(unit.recipe_ids),
+        "lowerer_ids": list(unit.lowerer_ids),
     }
     if unit.stage == "bom":
         architecture_sheets = (prompt_state.get("architecture") or {}).get("sheets") or []
@@ -1256,6 +1279,7 @@ def _drive_work_unit_stage(
     policy = _response_policy(client, stage, max_tokens)
     executor = build_bom_executor(workspace, run_design_cli, KICRAFT) if stage == "bom" else None
     candidates: dict[str, dict] = {}
+    unit_sources: dict[str, str] = {}
     contracts_by_unit = {
         unit.unit_id: build_stage_response_contract(
             stage,
@@ -1293,8 +1317,10 @@ def _drive_work_unit_stage(
             continue
         try:
             candidates[unit.unit_id] = validate_unit_candidate(unit, loaded, prompt_state, extras)
+            unit_sources[unit.unit_id] = "reuse"
         except (WorkUnitValidationError, TypeError, ValueError):
             candidates.clear()
+            unit_sources.clear()
             break
     reused_work_units = len(candidates)
     architecture = prompt_state.get("architecture") or {}
@@ -1320,6 +1346,17 @@ def _drive_work_unit_stage(
                     "instance": selection.get("instance"),
                     "sheets": selection.get("sheets") or {},
                     "parameters": selection.get("parameters") or {},
+                    "requirement_ids": selection.get("requirement_ids") or [],
+                    "port_bindings": selection.get("port_bindings") or {},
+                    "pin_allocations": selection.get("pin_allocations") or [],
+                    "owned_call_count": 0,
+                    "resolution": [
+                        record
+                        for record in architecture.get("recipe_resolution") or []
+                        if isinstance(record, dict)
+                        and record.get("requirement_id")
+                        in (selection.get("requirement_ids") or [])
+                    ],
                 }
             )
     for unit in units:
@@ -1335,6 +1372,7 @@ def _drive_work_unit_stage(
                         "source": "reused_validated_draft",
                         "refs": list(unit.refs),
                         "expected_pin_count": len(unit.expected_pins),
+                        **_work_unit_provenance(unit),
                     }
                 )
                 progress(
@@ -1345,6 +1383,7 @@ def _drive_work_unit_stage(
                         "unit_id": unit.unit_id,
                         "unit_sheet": unit.sheet,
                         "source": "reused_validated_draft",
+                        **_work_unit_provenance(unit),
                     }
                 )
             continue
@@ -1367,6 +1406,7 @@ def _drive_work_unit_stage(
                         ),
                         "refs": list(unit.refs),
                         "expected_pin_count": len(unit.expected_pins),
+                        **_work_unit_provenance(unit),
                     }
                 )
             continue
@@ -1381,6 +1421,7 @@ def _drive_work_unit_stage(
                     "source": "deterministic_architecture_lowering",
                     "refs": list(unit.refs),
                     "expected_pin_count": len(unit.expected_pins),
+                    **_work_unit_provenance(unit),
                 }
             )
         candidates[unit.unit_id] = validate_unit_candidate(
@@ -1389,6 +1430,7 @@ def _drive_work_unit_stage(
             prompt_state,
             extras,
         )
+        unit_sources[unit.unit_id] = "lowerer"
         if progress:
             progress(
                 {
@@ -1398,6 +1440,7 @@ def _drive_work_unit_stage(
                     "unit_id": unit.unit_id,
                     "unit_sheet": unit.sheet,
                     "source": "deterministic_architecture_lowering",
+                    **_work_unit_provenance(unit),
                 }
             )
     total_cost = 0.0
@@ -1895,6 +1938,7 @@ def _drive_work_unit_stage(
             last = payload or {"failure_kind": "unit_generation_failed"}
             break
         candidates[unit.unit_id] = payload
+        unit_sources[unit.unit_id] = "llm"
         draft_store.save(draft_fingerprint, units, candidates)
     else:
         last = {}
@@ -1906,6 +1950,13 @@ def _drive_work_unit_stage(
             normalized, expanded_component_count = _normalize_stage_response(
                 stage, merged, prompt_state
             )
+            for part in normalized.get("parts") or []:
+                if part.get("recipe_id"):
+                    continue
+                unit_id = ref_to_unit.get(str(part.get("ref")))
+                if unit_id:
+                    part["resolution_source"] = unit_sources.get(unit_id, "llm")
+                    part["resolution_id"] = unit_id
             return normalized, ref_to_unit, {}, {}
         merged, pin_to_unit, ref_to_unit_ids = merge_wiring_units(units, candidates)
         normalized, _expanded = _normalize_stage_response(stage, merged, prompt_state)
@@ -2315,6 +2366,7 @@ def drive_stage(
                 }
                 for p in full_bom.get("parts", [])
             ],
+            "recipe_ownership": full_bom.get("recipe_ownership") or [],
         }
     if stage in {"bom", "wiring"}:
         try:

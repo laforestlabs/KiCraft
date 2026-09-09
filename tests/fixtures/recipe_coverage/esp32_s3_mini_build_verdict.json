@@ -1,0 +1,35 @@
+{
+  "recipe": "esp32-s3-mini-1-minimal@1",
+  "state_sha256": "f96526621dbac2078c7dc5b905b4f2b7c35f685e48d6932716255f62dae80fd6",
+  "quality": "good",
+  "synthesis": {
+    "erc_clean": true,
+    "components": 9
+  },
+  "route": {
+    "shorts": 0,
+    "unconnected": 0,
+    "courtyard": 0,
+    "keepout": 0,
+    "traces": 213,
+    "vias": 56
+  },
+  "placement": {
+    "antenna_edge_target": "top",
+    "antenna_source": "footprint_rule_area",
+    "antenna_source_id": "antenna_keepout",
+    "antenna_contract_violations": 0
+  },
+  "artifact": {
+    "fresh": true,
+    "run_id": "6019610883b9",
+    "routed_md5": "f091c85a306946a69bcc07433736e086",
+    "fab_exported": true
+  },
+  "sourcing": {
+    "lcsc": "C2913206",
+    "retail_stock_at_verification": 0,
+    "retail_check_disabled_for_build_tail": true,
+    "normal_bom_commit_blocks_while_out_of_stock": true
+  }
+}

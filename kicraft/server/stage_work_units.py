@@ -45,6 +45,13 @@ class StageWorkUnit:
     sheet: str
     refs: tuple[str, ...] = ()
     expected_pins: tuple[tuple[str, str], ...] = ()
+    requirement_ids: tuple[str, ...] = ()
+    owned_roles: tuple[str, ...] = ()
+    excluded_refs: tuple[str, ...] = ()
+    excluded_pins: tuple[tuple[str, str], ...] = ()
+    planned_resolution_source: str = "llm"
+    recipe_ids: tuple[str, ...] = ()
+    lowerer_ids: tuple[str, ...] = ()
 
 
 def _architecture_sheets(prompt_state: dict) -> tuple[str, ...]:
@@ -119,10 +126,50 @@ def plan_stage_work_units(
     stage: str, prompt_state: dict, extras: dict
 ) -> tuple[StageWorkUnit, ...]:
     """Plan deterministic sheet-local BOM or bounded exact-pin wiring units."""
+    architecture = prompt_state.get("architecture") or {}
     sheets = _architecture_sheets(prompt_state)
     if stage == "bom":
+        requirements = [
+            requirement
+            for requirement in architecture.get("requirements") or []
+            if isinstance(requirement, dict)
+        ]
+        if requirements:
+            selected = {
+                str(requirement_id)
+                for selection in architecture.get("recipe_selections") or []
+                if isinstance(selection, dict)
+                for requirement_id in selection.get("requirement_ids") or []
+            }
+            recipe_ids_by_sheet: dict[str, set[str]] = {}
+            for selection in architecture.get("recipe_selections") or []:
+                if not isinstance(selection, dict):
+                    continue
+                for sheet in (selection.get("sheets") or {}).values():
+                    recipe_ids_by_sheet.setdefault(str(sheet), set()).add(
+                        str(selection.get("recipe"))
+                    )
+            return tuple(
+                StageWorkUnit(
+                    unit_id=f"bom-r{index:03d}",
+                    stage="bom",
+                    sheet=str(requirement["sheet"]),
+                    requirement_ids=(str(requirement["id"]),),
+                    owned_roles=(str(requirement["role"]),),
+                    planned_resolution_source="llm",
+                    recipe_ids=tuple(
+                        sorted(recipe_ids_by_sheet.get(str(requirement["sheet"]), set()))
+                    ),
+                )
+                for index, requirement in enumerate(requirements)
+                if str(requirement.get("id")) not in selected
+            )
         return tuple(
-            StageWorkUnit(unit_id=f"bom-s{index:03d}", stage="bom", sheet=sheet)
+            StageWorkUnit(
+                unit_id=f"bom-s{index:03d}",
+                stage="bom",
+                sheet=sheet,
+            )
             for index, sheet in enumerate(sheets)
         )
     if stage != "wiring":
@@ -143,6 +190,23 @@ def plan_stage_work_units(
             raise ValueError(f"BOM ref {part['ref']!r} uses unknown architecture sheet {sheet!r}")
         parts_by_sheet[sheet].append(part)
 
+    recipe_manifests = [
+        manifest
+        for manifest in bom.get("recipe_ownership") or []
+        if isinstance(manifest, dict)
+    ]
+    excluded_refs = tuple(
+        sorted(
+            {
+                str(ref)
+                for manifest in recipe_manifests
+                for ref in manifest.get("refs") or []
+            }
+        )
+    )
+    recipe_ids = tuple(
+        sorted({str(manifest.get("recipe")) for manifest in recipe_manifests})
+    )
     units: list[StageWorkUnit] = []
     unit_index = 0
     for sheet in sheets:
@@ -160,6 +224,9 @@ def plan_stage_work_units(
                     sheet=sheet,
                     refs=tuple(pending_refs),
                     expected_pins=tuple(pending_pins),
+                    excluded_refs=excluded_refs,
+                    excluded_pins=tuple(sorted(locked)),
+                    recipe_ids=recipe_ids,
                 )
             )
             unit_index += 1
@@ -168,13 +235,23 @@ def plan_stage_work_units(
 
         for part in parts_by_sheet[sheet]:
             ref = str(part["ref"])
-            ref_pins = [(ref, pin) for pin in inventory.get(ref, ()) if (ref, pin) not in locked]
+            ref_pins = [
+                (ref, pin)
+                for pin in inventory.get(ref, ())
+                if (ref, pin) not in locked
+            ]
             if not ref_pins:
                 continue
             if len(ref_pins) > WORK_UNIT_WIRING_PIN_LIMIT:
                 flush()
-                for start in range(0, len(ref_pins), WORK_UNIT_WIRING_PIN_LIMIT):
-                    pin_slice = tuple(ref_pins[start : start + WORK_UNIT_WIRING_PIN_LIMIT])
+                for start in range(
+                    0,
+                    len(ref_pins),
+                    WORK_UNIT_WIRING_PIN_LIMIT,
+                ):
+                    pin_slice = tuple(
+                        ref_pins[start : start + WORK_UNIT_WIRING_PIN_LIMIT]
+                    )
                     units.append(
                         StageWorkUnit(
                             unit_id=f"wiring-u{unit_index:03d}",
@@ -182,11 +259,18 @@ def plan_stage_work_units(
                             sheet=sheet,
                             refs=(ref,),
                             expected_pins=pin_slice,
+                            excluded_refs=excluded_refs,
+                            excluded_pins=tuple(sorted(locked)),
+                            recipe_ids=recipe_ids,
                         )
                     )
                     unit_index += 1
                 continue
-            if pending_pins and len(pending_pins) + len(ref_pins) > WORK_UNIT_WIRING_PIN_LIMIT:
+            if (
+                pending_pins
+                and len(pending_pins) + len(ref_pins)
+                > WORK_UNIT_WIRING_PIN_LIMIT
+            ):
                 flush()
             pending_refs.append(ref)
             pending_pins.extend(ref_pins)
@@ -573,6 +657,13 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
         for part in expansion.parts
     ]
     recipe_identities = {(part.symbol.lower(), part.value.lower()) for part in recipe_parts}
+    from kicraft.design.recipes import protected_identity_matches
+
+    protected_groups = [
+        group.id
+        for group in groups
+        if protected_identity_matches(group.id, group.symbol, group.value, group.mpn)
+    ]
     recipe_sheets = {part.sheet for part in recipe_parts}
     defects = {
         "wrong-sheet": [
@@ -588,7 +679,12 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
             for group in groups
             if (group.symbol.lower(), group.value.lower()) in recipe_identities
         ],
-        "empty-sheet": [unit.sheet] if not groups and unit.sheet not in recipe_sheets else [],
+        "model_authored_protected_identity": protected_groups,
+        "empty-sheet": (
+            [unit.sheet]
+            if not groups and (unit.requirement_ids or unit.sheet not in recipe_sheets)
+            else []
+        ),
     }
     if any(defects.values()):
         raise WorkUnitValidationError(unit.unit_id, defects)
@@ -901,7 +997,6 @@ def merge_bom_units(
     prompt_state: dict,
 ) -> tuple[dict, dict[str, str]]:
     """Merge sheet replacements and return model-authored ref provenance."""
-    sheet_indexes = {sheet: index for index, sheet in enumerate(_architecture_sheets(prompt_state))}
     groups: list[dict] = []
     arrays: list[dict] = []
     assumptions: list[str] = []
@@ -913,7 +1008,7 @@ def merge_bom_units(
         candidate = candidates.get(unit.unit_id)
         if candidate is None:
             raise ValueError(f"missing validated candidate for {unit.unit_id}")
-        prefix = f"s{sheet_indexes[unit.sheet]:03d}_"
+        prefix = f"{unit.unit_id.removeprefix('bom-')}_"
         local_to_global: dict[str, str] = {}
         for group in candidate.get("groups") or []:
             local_id = str(group["id"])

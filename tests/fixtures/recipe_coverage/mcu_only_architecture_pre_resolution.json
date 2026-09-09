@@ -1,0 +1,14 @@
+{
+  "assumptions": ["External +3V3 source provides at least 500mA"],
+  "comms_protocols": ["UART"],
+  "inter_sheet_nets": [],
+  "mcu_present": true,
+  "power_nets": ["+3V3"],
+  "rail_voltages": {"+3V3": 3.3},
+  "sheets": [
+    {"function": "ESP32-S3-MINI-1-N8 controller", "name": "MCU", "stem": "MCU"}
+  ],
+  "topologies": {
+    "MCU": "ESP32-S3-MINI-1-N8 controller; +3V3 supplied externally; UART programming and BOOT/reset recovery"
+  }
+}

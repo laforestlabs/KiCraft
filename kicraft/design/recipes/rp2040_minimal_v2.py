@@ -1,0 +1,111 @@
+"""RP2040 minimal recipe on the composable port and ownership contract."""
+
+from .models import (
+    RecipeDefinition,
+    RecipeElectricalAssertion as Assertion,
+    RecipePlacementConstraint as PlacementConstraint,
+    RecipePort as Port,
+    RecipeSourceDocument as SourceDocument,
+)
+from .rp2040_minimal import RP2040_MINIMAL
+
+
+_INTERNAL_NETS = (
+    "QSPI_CS",
+    "QSPI_SCLK",
+    "QSPI_SD0",
+    "QSPI_SD1",
+    "QSPI_SD2",
+    "QSPI_SD3",
+    "XIN",
+    "XOUT_RAW",
+    "XOUT",
+    "SWCLK",
+    "SWDIO",
+    "DVDD_1V1",
+)
+
+
+RP2040_MINIMAL_V2: RecipeDefinition = RP2040_MINIMAL.model_copy(
+    update={
+        "recipe": "rp2040-minimal@2",
+        "family": "rp2040",
+        "exact_part": "RP2040",
+        "default_for_family": True,
+        "maturity": "production",
+        "identity_aliases": (
+            "RP2040",
+            "MCU_RaspberryPi:RP2040",
+        ),
+        "protected_aliases": ("Raspberry Pi RP2040",),
+        "ports": (
+            Port(name="vdd", direction="power"),
+            Port(name="gnd", direction="power"),
+            Port(name="usb_dm", direction="bidirectional", required=False),
+            Port(name="usb_dp", direction="bidirectional", required=False),
+            *(
+                Port(name=f"gpio{index}", direction="bidirectional", required=False)
+                for index in range(30)
+            ),
+        ),
+        "internal_nets": _INTERNAL_NETS,
+        "pins": tuple(
+            pin.model_copy(
+                update={
+                    "net": (
+                        "vdd"
+                        if pin.net == "3V3"
+                        else "gnd"
+                        if pin.net == "GND"
+                        else "usb_dm"
+                        if pin.net == "USB_DM"
+                        else "usb_dp"
+                        if pin.net == "USB_DP"
+                        else pin.net.lower()
+                        if pin.net.startswith("GPIO")
+                        else pin.net
+                    )
+                }
+            )
+            for pin in RP2040_MINIMAL.pins
+        ),
+        "placement_constraints": (
+            PlacementConstraint(
+                kind="decoupling_proximity",
+                role="io_decoupling",
+                parameters={"anchor_role": "mcu", "max_mm": 3.0},
+            ),
+            PlacementConstraint(
+                kind="crystal_proximity",
+                role="crystal",
+                parameters={"anchor_role": "mcu", "max_mm": 8.0},
+            ),
+        ),
+        "electrical_assertions": (
+            Assertion(
+                code="rp2040_bootsel_access",
+                message="QSPI chip select has a physical BOOTSEL path",
+            ),
+            Assertion(
+                code="rp2040_swd_access",
+                message="SWDIO, SWCLK, VDD, and GND reach the SWD header",
+            ),
+        ),
+        "source_documents": (
+            SourceDocument(
+                url="https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf",
+                title="RP2040 Datasheet",
+                revision="build-date 2025-02-20",
+                reviewed_date="2026-09-09",
+                sections=("2.1 Pinout", "5.2.3 USB", "5.2.4 QSPI"),
+            ),
+            SourceDocument(
+                url="https://datasheets.raspberrypi.com/rp2040/hardware-design-with-rp2040.pdf",
+                title="Hardware design with RP2040",
+                revision="build-date 2023-03-01",
+                reviewed_date="2026-09-09",
+                sections=("2 Power supplies", "3 Flash", "4 Crystal", "5 USB"),
+            ),
+        ),
+    }
+)

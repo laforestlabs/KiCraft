@@ -1,0 +1,68 @@
+{
+  "assumptions": [
+    "External +3V3 source provides at least 500mA",
+    "mcu_core: native_usb=False from registered circuit recipe"
+  ],
+  "comms_protocols": ["UART"],
+  "inter_sheet_nets": [],
+  "mcu_present": true,
+  "power_nets": ["+3V3"],
+  "protected_identities": [
+    "esp32s3",
+    "esp32s3mini1",
+    "esp32s3mini1esp32s3mini1n8",
+    "esp32s3mini1n8",
+    "esp32s3module",
+    "mcuraspberrypirp2040",
+    "raspberrypirp2040",
+    "rp2040"
+  ],
+  "rail_voltages": {"+3V3": 3.3},
+  "recipe_resolution": [
+    {
+      "assumptions": ["mcu_core: native_usb=False from registered circuit recipe"],
+      "exact_part": "ESP32-S3-MINI-1-N8",
+      "recipe": "esp32-s3-mini-1-minimal@1",
+      "requirement_id": "mcu_core"
+    }
+  ],
+  "recipe_selections": [
+    {
+      "instance": "mcu_core",
+      "parameters": {"native_usb": false},
+      "pin_allocations": [],
+      "port_bindings": {"gnd": "GND", "vdd": "+3V3"},
+      "recipe": "esp32-s3-mini-1-minimal@1",
+      "requirement_ids": ["mcu_core"],
+      "sheets": {"mcu": "MCU"}
+    }
+  ],
+  "requirements": [
+    {
+      "exact_part": "ESP32-S3-MINI-1-N8",
+      "family": "esp32-s3-module",
+      "id": "mcu_core",
+      "interfaces": [],
+      "parameters": {},
+      "ports": {"gnd": "GND", "vdd": "+3V3"},
+      "role": "mcu_core",
+      "sheet": "MCU"
+    },
+    {
+      "family": "application-specific",
+      "id": "novel_analog",
+      "interfaces": [],
+      "parameters": {},
+      "ports": {},
+      "role": "analog_block",
+      "sheet": "MCU"
+    }
+  ],
+  "sheets": [
+    {"function": "ESP32-S3-MINI-1-N8 controller", "name": "MCU", "stem": "MCU"}
+  ],
+  "topologies": {
+    "MCU": "ESP32-S3-MINI-1-N8 controller; +3V3 supplied externally; UART programming and BOOT/reset recovery; novel analog threshold detector"
+  },
+  "unresolved_requirement_ids": ["novel_analog"]
+}
