@@ -70,6 +70,7 @@ class CollectionBound:
     total: int
     per_group: int | None = None
     group_key: str | None = None
+    unique_key: str | None = None
 
     def __post_init__(self) -> None:
         if self.total <= 0:
@@ -106,16 +107,58 @@ class ReasoningGuardPolicy:
 
 BOM_TOTAL_PART_LIMIT = 500
 BOM_SHEET_PART_LIMIT = 450
+BOM_GROUP_LIMIT = 64
+BOM_ARRAY_LIMIT = 100
+BOM_NOTE_LIMIT = 32
+DESIGN_NOTE_LIMIT = 32
+FUNCTIONAL_BLOCK_LIMIT = 32
+FUNCTIONAL_CONNECTION_LIMIT = 128
+ARCHITECTURE_SHEET_LIMIT = 32
+ARCHITECTURE_NET_LIMIT = 128
 
 
 STAGE_COLLECTION_BOUNDS: dict[str, tuple[CollectionBound, ...]] = {
+    "intent": (
+        CollectionBound(field="constraints", total=64),
+        CollectionBound(field="named_parts", total=32),
+        CollectionBound(field="assumptions", total=DESIGN_NOTE_LIMIT),
+    ),
+    "functional_spec": (
+        CollectionBound(
+            field="blocks",
+            total=FUNCTIONAL_BLOCK_LIMIT,
+            unique_key="name",
+        ),
+        CollectionBound(field="connections", total=FUNCTIONAL_CONNECTION_LIMIT),
+        CollectionBound(field="assumptions", total=DESIGN_NOTE_LIMIT),
+    ),
+    "architecture": (
+        CollectionBound(field="comms_protocols", total=32),
+        CollectionBound(
+            field="sheets",
+            total=ARCHITECTURE_SHEET_LIMIT,
+            unique_key="name",
+        ),
+        CollectionBound(field="power_nets", total=32),
+        CollectionBound(
+            field="inter_sheet_nets",
+            total=ARCHITECTURE_NET_LIMIT,
+            unique_key="name",
+        ),
+        CollectionBound(field="assumptions", total=DESIGN_NOTE_LIMIT),
+        CollectionBound(field="recipe_selections", total=32),
+    ),
     "bom": (
         CollectionBound(
             field="groups",
-            total=BOM_TOTAL_PART_LIMIT,
-            per_group=BOM_SHEET_PART_LIMIT,
+            total=BOM_GROUP_LIMIT,
+            per_group=BOM_GROUP_LIMIT,
             group_key="sheet",
+            unique_key="id",
         ),
+        CollectionBound(field="arrays", total=BOM_ARRAY_LIMIT),
+        CollectionBound(field="assumptions", total=BOM_NOTE_LIMIT),
+        CollectionBound(field="substitutions", total=BOM_NOTE_LIMIT),
     ),
 }
 
@@ -138,7 +181,7 @@ STAGE_SERIALIZATION_MAX_TOKENS = {
 DESIGN_PROFILES: dict[str, dict[str, object]] = {
     "flash": {
         "model": "deepseek/deepseek-v4-flash-0731",
-        "provider_order": ["deepinfra/fp8"],
+        "provider_order": ["open-inference/fp8"],
         "max_price_prompt": 0.11,
         "max_price_completion": 0.24,
     },
@@ -183,7 +226,7 @@ def _resolved_design_profile() -> tuple[str, dict[str, object]]:
 
 def _resolved_optional_design_profile(env_name: str, active_profile: str) -> str:
     """Resolve an optional named recovery route, disabled by empty/same."""
-    name = os.environ.get(env_name, "pro").strip().lower()
+    name = os.environ.get(env_name, "").strip().lower()
     if not name or name == active_profile:
         return ""
     if name not in DESIGN_PROFILES:
@@ -227,12 +270,13 @@ class Settings:
     api_key: str
     model: str = "deepseek/deepseek-v4-flash-0731"
     design_profile: str = "custom"
-    escalation_profile: str = "pro"
-    provider_fallback_profile: str = "pro"
+    escalation_profile: str = ""
+    provider_fallback_profile: str = ""
     base_url: str = "https://openrouter.ai/api/v1"
     max_tokens_per_call: int = 1024
     daily_usd_ceiling: float = 5.0
     total_usd_ceiling: float = 50.0
+    project_llm_budget_usd: float = 0.10
     ledger_path: Path = Path.home() / ".kicraft" / "spend_ledger.db"
     users_db_path: Path = Path.home() / ".kicraft" / "accounts.db"
     projects_dir: Path = Path.home() / ".kicraft" / "projects"
@@ -278,12 +322,11 @@ class Settings:
     # select observe-only rollout or supported-family fabrication enforcement.
     stage_semantics: Literal["observe", "repair", "enforce"] = "repair"
     # --- Design-stage reasoning budget + in-stream loop breaker ---------------
-    # Reasoning budget for the design stages. Intent/functional_spec (small,
-    # serialization-critical, and the observed loop site) always run with the
-    # reasoning channel DISABLED; the topology/part/netlist stages get a small
-    # budget so deliberation is bounded. 0 disables reasoning for ALL design
-    # stages. KICRAFT_DESIGN_REASONING_TOKENS.
-    design_reasoning_tokens: int = 2048
+    # Structured design stages default to reasoning disabled. Operators may
+    # opt in for architecture/BOM experiments, but recovery does not pay for a
+    # known reasoning loop before asking for the required JSON.
+    # KICRAFT_DESIGN_REASONING_TOKENS.
+    design_reasoning_tokens: int = 0
     # Hard per-call reasoning ceiling enforced IN-STREAM by the client (provider-
     # independent): a reasoning-only stream that exceeds this many tokens with no
     # answer content is aborted. max_tokens does NOT bound DeepSeek's reasoning
@@ -341,7 +384,7 @@ class Settings:
     # ``Settings.from_env`` resolves the selected dated designer profile into
     # these existing fields before client construction. Direct Settings(...)
     # construction remains available to tests and one-off admin tools as the
-    provider_order: list[str] = field(default_factory=lambda: ["deepinfra/fp8"])
+    provider_order: list[str] = field(default_factory=lambda: ["open-inference/fp8"])
     provider_allow_fallbacks: bool = False
     max_price_prompt: float = 0.11
     max_price_completion: float = 0.24
@@ -439,6 +482,12 @@ class Settings:
             ),
             total_usd_ceiling=float(
                 os.environ.get("KICRAFT_TOTAL_USD_CEILING", cls.total_usd_ceiling)
+            ),
+            project_llm_budget_usd=float(
+                os.environ.get(
+                    "KICRAFT_PROJECT_LLM_BUDGET_USD",
+                    cls.project_llm_budget_usd,
+                )
             ),
             ledger_path=Path(os.environ.get("KICRAFT_SPEND_LEDGER", str(cls.ledger_path))),
             users_db_path=Path(os.environ.get("KICRAFT_USERS_DB", str(cls.users_db_path))),
@@ -696,6 +745,7 @@ class Settings:
             "max_tokens_per_call": self.max_tokens_per_call,
             "daily_usd_ceiling": self.daily_usd_ceiling,
             "total_usd_ceiling": self.total_usd_ceiling,
+            "project_llm_budget_usd": self.project_llm_budget_usd,
             "ledger_path": str(self.ledger_path),
             "kill_switch": self.kill_switch,
             "public_url": self.public_url,

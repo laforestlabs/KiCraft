@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import resource
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Callable, Literal
 
 import requests
@@ -14,13 +15,18 @@ import requests
 from kicraft.design import models
 from kicraft.design.stage_semantics import (
     complete_intent_classification,
+    complete_unsourced_external_rails,
     diagnose_stage,
     normalize_project_stem,
     remove_mislabeled_architecture_defaults,
     remove_mislabeled_functional_defaults,
 )
-
-from .config import STAGE_COLLECTION_BOUNDS, STAGE_SERIALIZATION_MAX_TOKENS, StageResponsePolicy
+from .config import (
+    STAGE_COLLECTION_BOUNDS,
+    STAGE_SERIALIZATION_MAX_TOKENS,
+    CollectionBound,
+    StageResponsePolicy,
+)
 from .client import classify_provider_exception
 from .stage_bom_tools import BOM_TOOLS, build_bom_executor
 from .stage_contracts import (
@@ -41,6 +47,8 @@ from .stage_work_units import (
     StageDraftStore,
     StageWorkUnit,
     WorkUnitValidationError,
+    deterministic_bom_candidate,
+    deterministic_wiring_candidate,
     merge_bom_units,
     merge_wiring_units,
     plan_stage_work_units,
@@ -69,6 +77,11 @@ _TRANSPORT_FAILURE_EXC = (
     requests.exceptions.ChunkedEncodingError,
 )
 _PROVIDER_FAILURE_EXC = (requests.exceptions.HTTPError,)
+NONINTERACTIVE_DEFAULTS_INSTRUCTION = (
+    "This is a non-interactive evaluation. Apply sensible electrical defaults, "
+    "record each in assumptions ending '(defaulted)', and return a complete draft "
+    "without asking questions."
+)
 
 
 def _child_cpu_s() -> float:
@@ -131,6 +144,9 @@ def _record_attempt_facts(
     unit_id=None,
     unit_attempt=None,
     aggregate_round=None,
+    commit_result=None,
+    candidate_retained: bool | None = None,
+    fallback_reason: str | None = None,
 ) -> None:
     usage = (facts.usage or {}) if facts is not None else {}
     _record_stage_attempt(
@@ -147,10 +163,17 @@ def _record_attempt_facts(
         input_tokens=usage.get("prompt_tokens"),
         output_tokens=usage.get("completion_tokens"),
         cost_usd=facts.cost_usd if facts is not None else 0.0,
+        provider_profile=getattr(getattr(client, "s", None), "design_profile", None),
+        fallback_reason=fallback_reason,
+        reasoning_failure_kind=_reasoning_failure_kind(facts),
         diagnostic_codes=diagnostic_codes,
         unit_id=unit_id,
         unit_attempt=unit_attempt,
         aggregate_round=aggregate_round,
+        **_redacted_rejection_facts(
+            commit_result,
+            candidate_retained=candidate_retained,
+        ),
         **(error_facts or {}),
     )
 
@@ -173,12 +196,11 @@ def _stage_max_retries(stage: str, default: int) -> int:
     return max(default, _STAGE_MIN_RETRIES.get(stage, 0))
 
 
-# Tool-loop round budget for the BOM stage. The default (12) lets a weak model
-# burn a dozen round-trips re-verifying a trivial 9-part BOM; 6 is plenty to
-# resolve real parts, and client.chat_with_tools converges earlier when the
-# model thrashes (identical-call cache + forced-final). Each stage attempt gets
-# its own loop, so this is per-attempt.
-_BOM_MAX_ROUNDS = 6
+# One optional batched lookup round followed by one schema-bound final response.
+# The stage-prep parts block and verified generic defaults should let most work
+# units finish on the first response; a model may spend the second only when a
+# genuinely missing part needs resolution.
+_BOM_MAX_ROUNDS = 2
 
 
 # Per-stage output token budget. Wiring emits the whole-board netlist in one
@@ -304,6 +326,52 @@ def _commit_rejection_signature(out: dict) -> tuple[tuple[str, ...], tuple[str, 
         gate_ids = errors
     offenders = tuple(sorted(_offender_identity(item) for item in (out.get("offenders") or [])))
     return tuple(gate_ids), offenders
+
+
+def _redacted_rejection_facts(
+    commit_result: dict | None,
+    *,
+    candidate_retained: bool | None,
+) -> dict:
+    """Ledger-safe deterministic rejection attribution."""
+    if not isinstance(commit_result, dict):
+        return {"candidate_retained": candidate_retained}
+    gate_ids, offenders = _commit_rejection_signature(commit_result)
+    stable_gates: list[str] = []
+    for gate in gate_ids:
+        match = re.fullmatch(r"9\.\d+", str(gate))
+        if match:
+            stable_gates.append(match.group(0))
+            continue
+        digest = hashlib.sha256(str(gate).encode("utf-8")).hexdigest()[:12]
+        stable_gates.append(f"unclassified_{digest}")
+    if commit_result.get("failure_kind") == "commit_process_failed":
+        stable_gates = ["commit_process_failed"]
+    signature_payload = json.dumps(
+        [stable_gates, list(offenders)],
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return {
+        "commit_gate_codes": stable_gates,
+        "offender_count": len(commit_result.get("offenders") or []),
+        "rejection_signature": hashlib.sha256(signature_payload.encode("utf-8")).hexdigest(),
+        "candidate_retained": candidate_retained,
+    }
+
+
+def _reasoning_failure_kind(facts) -> str | None:
+    if facts is None:
+        return None
+    if facts.loop_abort_reason == "wall_stall":
+        return "provider_wall_stall"
+    if facts.loop_abort_reason == "repetition":
+        return "repeated_reasoning"
+    if facts.loop_abort_reason == "hard_ceiling":
+        return "reasoning_token_exhaustion"
+    if facts.finish == "length" and not facts.had_content:
+        return "output_token_exhaustion"
+    return None
 
 
 def _normalize_questions(raw_list, stage: str) -> list[dict]:
@@ -508,7 +576,7 @@ _SEMANTIC_REPAIR_MSG = (
     "correct only these defects, add no new assumptions, and return one complete "
     "JSON object matching the same schema. No tools, markdown, or prose."
 )
-_MAX_SEMANTIC_REPAIR_ROUNDS = 3
+_MAX_SEMANTIC_REPAIR_ROUNDS = 1
 
 
 def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnostic]) -> str:
@@ -538,6 +606,34 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
             "with one blocking question asking for the maximum total 5V output "
             "current for the HUB75 panel and LED string."
         )
+    if any(
+        d.code
+        in {
+            "architecture_external_load_source_capacity_unspecified",
+            "architecture_external_load_source_has_no_headroom",
+            "architecture_usb_pd_current_exceeds_standard",
+            "architecture_5v_converter_capacity_unspecified",
+            "architecture_5v_converter_has_no_headroom",
+        }
+        for d in diagnostics
+    ):
+        message += (
+            " Size the input contract above the 5V external-load power budget, "
+            "including board and conversion overhead. USB-PD is limited to 5A: "
+            "for a 5V/5A load, negotiate a higher voltage at no more than 5A and "
+            "use a dedicated buck converter rated above 5A to generate the "
+            "regulated 5V rail. If the user's 5V wording could refer either to "
+            "the PD contract or the load rail, return one blocking question "
+            "asking which meaning is required."
+        )
+
+    if any(d.code == "architecture_duplicate_voltage_rails_unrelated" for d in diagnostics):
+        message += (
+            " Use one canonical net for a direct same-voltage connection. Keep "
+            "two same-voltage rail names only when a named fuse, switch, filter, "
+            "net tie, or converter explicitly connects them."
+        )
+
     if any(
         d.code
         in {
@@ -812,42 +908,11 @@ def commit_candidate(prepared: PreparedStage, candidate: dict, state_path, brief
 def next_attempt(
     rejection: dict,
     prior_signature: tuple | None,
-    *,
-    was_clean_slate: bool,
-    clean_slate_spent: bool = False,
-    clean_slate_armed_signature: tuple | None = None,
+    **_legacy_state,
 ) -> tuple[tuple, bool, bool]:
-    """Classify a commit rejection: preserving correction, the one clean-slate
-    escape, or terminal rejection (KC-VKUT5H A3 bounded continuation).
-
-    State machine (the caller owns ``clean_slate_spent`` /
-    ``clean_slate_armed_signature``; the escape is armed at most once):
-
-    * ordinary response, signature EQUAL to the prior one and the escape is
-      not yet spent -> arm exactly one clean-slate call and record the arming
-      signature;
-    * ordinary response, signature equal and the escape already spent ->
-      TERMINAL (an adjacent repeat after the escape is churn, not progress);
-    * the clean-slate response itself (``was_clean_slate``): the escape is
-      spent either way. A signature equal to the arming signature is no
-      progress -> TERMINAL. A DIFFERENT signature is bounded churn, not
-      proven improvement: it may consume remaining ordinary preserving
-      iterations, but it can never arm a second clean slate;
-    * any other case -> ordinary preserving correction feedback.
-
-    Outer-loop and provider-call bounds are the caller's; this function only
-    classifies.
-    """
+    """Stop immediately when deterministic gates and offenders do not change."""
     signature = _commit_rejection_signature(rejection)
-    if was_clean_slate:
-        if clean_slate_armed_signature is not None and signature == clean_slate_armed_signature:
-            return signature, False, True  # escape repeated the arming defect
-        return signature, False, False
-    if signature == prior_signature:
-        if clean_slate_spent:
-            return signature, False, True
-        return signature, True, False
-    return signature, False, False
+    return signature, False, signature == prior_signature
 
 
 def finalize_stage(
@@ -927,6 +992,13 @@ def finalize_stage(
                 "warning": bool(outcome.get("diagnostics")),
                 "semantic_clean": outcome.get("semantic_clean"),
                 "fab_safe": outcome.get("fab_safe"),
+                "failure_kind": outcome.get("failure_kind"),
+                "retryable": outcome.get("failure_kind") == "provider_rate_limited",
+                "retry_action": (
+                    "retry_stage"
+                    if outcome.get("failure_kind") == "provider_rate_limited"
+                    else None
+                ),
             }
         )
     return {
@@ -944,8 +1016,8 @@ def finalize_stage(
     }
 
 
-WORK_UNIT_MIN_REPAIR_ROUNDS = 3
-WORK_UNIT_MAX_REPAIR_ROUNDS = 5
+WORK_UNIT_MIN_REPAIR_ROUNDS = 1
+WORK_UNIT_MAX_REPAIR_ROUNDS = 1
 
 
 def _work_unit_summary(units: tuple[StageWorkUnit, ...], candidates: dict[str, dict]) -> list[dict]:
@@ -979,7 +1051,12 @@ def _work_unit_summary(units: tuple[StageWorkUnit, ...], candidates: dict[str, d
     return summaries
 
 
-def _work_unit_instructions(unit: StageWorkUnit, unit_index: int, unit_total: int) -> str:
+def _work_unit_instructions(
+    unit: StageWorkUnit,
+    unit_index: int,
+    unit_total: int,
+    prompt_state: dict,
+) -> str:
     boundary = {
         "unit_id": unit.unit_id,
         "unit_index": unit_index,
@@ -987,9 +1064,44 @@ def _work_unit_instructions(unit: StageWorkUnit, unit_index: int, unit_total: in
         "target_sheet": unit.sheet,
     }
     if unit.stage == "bom":
+        architecture_sheets = (prompt_state.get("architecture") or {}).get("sheets") or []
+        target = next(
+            (
+                sheet
+                for sheet in architecture_sheets
+                if isinstance(sheet, dict) and sheet.get("name") == unit.sheet
+            ),
+            {},
+        )
+        def topology_key(value: object) -> str:
+            return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+        target_tokens = {
+            topology_key(unit.sheet),
+            topology_key(target.get("stem") or ""),
+        }
+        topologies = (prompt_state.get("architecture") or {}).get("topologies") or {}
+        target_topology = next(
+            (
+                value
+                for key, value in topologies.items()
+                if topology_key(key) in target_tokens
+            ),
+            None,
+        )
+        boundary["target_topology"] = target_topology
+        boundary["target_function"] = target.get("function")
+        boundary["excluded_sheets"] = [
+            sheet.get("name")
+            for sheet in architecture_sheets
+            if isinstance(sheet, dict) and sheet.get("name") != unit.sheet
+        ]
         boundary["owned_output"] = (
-            "groups and arrays for exactly this sheet; assumptions/substitutions "
-            "introduced by this sheet"
+            "Only components physically installed in target_sheet to implement "
+            "target_function and target_topology. Emit at least one group unless "
+            "a locked circuit recipe already populates this sheet. Never recreate "
+            "the whole-board BOM, another sheet's parts, or any component listed "
+            "in PRIOR ACCEPTED WORK UNITS."
         )
     else:
         boundary["owned_refs"] = list(unit.refs)
@@ -1131,6 +1243,32 @@ def _drive_work_unit_stage(
             candidates.clear()
             break
     reused_work_units = len(candidates)
+    for unit in units:
+        if unit.unit_id in candidates:
+            continue
+        deterministic = (
+            deterministic_bom_candidate(unit, prompt_state)
+            if stage == "bom"
+            else deterministic_wiring_candidate(unit, prompt_state, extras)
+        )
+        if deterministic is None:
+            continue
+        candidates[unit.unit_id] = validate_unit_candidate(
+            unit,
+            deterministic,
+            prompt_state,
+            extras,
+        )
+        if progress:
+            progress(
+                {
+                    "kind": "work_unit_done",
+                    "stage": stage,
+                    "unit_id": unit.unit_id,
+                    "unit_sheet": unit.sheet,
+                    "source": "deterministic_architecture_lowering",
+                }
+            )
     total_cost = 0.0
     attempts = 0
     rounds_total = 0 if stage == "bom" else None
@@ -1141,6 +1279,7 @@ def _drive_work_unit_stage(
     expanded_component_count = 0
     aggregate_repair_rounds = 0
     last: dict = {}
+    validated_invocation_cache: dict[str, dict] = {}
 
     def record(
         active_client,
@@ -1153,6 +1292,9 @@ def _drive_work_unit_stage(
         error_facts: dict | None = None,
         aggregate_round: int | None = None,
         aggregate_signature: tuple | None = None,
+        commit_result: dict | None = None,
+        candidate_retained: bool | None = None,
+        fallback_reason: str | None = None,
     ) -> None:
         _record_attempt_facts(
             active_client,
@@ -1166,6 +1308,9 @@ def _drive_work_unit_stage(
             unit_id=unit.unit_id,
             unit_attempt=unit_attempt,
             aggregate_round=aggregate_round,
+            commit_result=commit_result,
+            candidate_retained=candidate_retained,
+            fallback_reason=fallback_reason,
         )
         if attempt_observer is not None:
             settings = getattr(active_client, "s", None)
@@ -1209,8 +1354,26 @@ def _drive_work_unit_stage(
             and isinstance(feedback.get("aggregate_commit_rejection"), dict)
             else None
         )
+        unit_policy = (
+            replace(
+                policy,
+                collection_bounds=(
+                    CollectionBound(
+                        field="pins",
+                        total=max(1, len(unit.expected_pins)),
+                    ),
+                ),
+            )
+            if stage == "wiring"
+            else policy
+        )
         contract = contracts_by_unit[unit.unit_id]
-        instructions = _work_unit_instructions(unit, units.index(unit) + 1, len(units))
+        instructions = _work_unit_instructions(
+            unit,
+            units.index(unit) + 1,
+            len(units),
+            prompt_state,
+        )
         user = _work_unit_user_prompt(
             stage=stage,
             brief=brief,
@@ -1227,42 +1390,20 @@ def _drive_work_unit_stage(
                 "role": "system",
                 "content": build_system(
                     contract,
-                    policy.collection_bounds,
+                    unit_policy.collection_bounds,
                     work_unit_instructions=instructions,
                 ),
             },
             {"role": "user", "content": user},
         ]
         active_client = stage_client
-        if pristine:
-            profile = getattr(getattr(stage_client, "s", None), "escalation_profile", "")
-            switch = getattr(stage_client, "with_design_profile", None)
-            if (
-                profile
-                and profile != getattr(getattr(stage_client, "s", None), "design_profile", None)
-                and callable(switch)
-            ):
-                prior_model = _client_model(stage_client)
-                stage_client = switch(profile)
-                active_client = stage_client
-                if progress:
-                    progress(
-                        {
-                            "kind": "escalation",
-                            "stage": stage,
-                            "from": prior_model,
-                            "to": _client_model(active_client),
-                            "attempt": attempts + 1,
-                            "reason": "repeated_commit_signature",
-                        }
-                    )
         prepared = PreparedStage(
             stage=stage,
             prompt_state=prompt_state,
             extras=extras,
             base_messages=tuple(messages),
             contract=contract,
-            policy=policy,
+            policy=unit_policy,
             tools=BOM_TOOLS if stage == "bom" else None,
             executor=executor,
         )
@@ -1270,6 +1411,30 @@ def _drive_work_unit_stage(
         fallback_spent = False
         schema_less_spent = False
         call_mode = "serialization" if serialization else "clean_slate" if pristine else "normal"
+        cache_payload = {
+            "stage": stage,
+            "unit_id": unit.unit_id,
+            "messages": messages,
+            "response_format": response_format,
+            "call_mode": call_mode,
+            "model": _client_model(active_client),
+            "profile": getattr(getattr(active_client, "s", None), "design_profile", None),
+        }
+        cache_key = hashlib.sha256(
+            json.dumps(
+                cache_payload,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if cache_key in validated_invocation_cache:
+            return (
+                "candidate",
+                json.loads(json.dumps(validated_invocation_cache[cache_key])),
+                None,
+                None,
+            )
         while attempts < call_budget:
             attempts += 1
             ctx = {
@@ -1283,6 +1448,7 @@ def _drive_work_unit_stage(
                 "unit_attempt": unit_attempt,
                 "aggregate_round": aggregate_round,
                 "serialization": serialization,
+                "call_mode": call_mode,
             }
             try:
                 if serialization:
@@ -1291,7 +1457,16 @@ def _drive_work_unit_stage(
                         prepared,
                         messages=list(messages),
                         response_format=response_format,
-                        temperature=_design_temperature(active_client),
+                        temperature=max(
+                            float(
+                                getattr(
+                                    getattr(active_client, "s", None),
+                                    "serialization_escape_temperature",
+                                    0.4,
+                                )
+                            ),
+                            0.0,
+                        ),
                         reasoning_guard=policy.reasoning_guard,
                         progress=progress,
                         meta_ctx=ctx,
@@ -1350,13 +1525,7 @@ def _drive_work_unit_stage(
                     response_format = None
                     schema_less_spent = True
                     continue
-                transient = kind in {
-                    "provider_rate_limited",
-                    "provider_upstream_5xx",
-                    "transport_timeout",
-                    "transport_connection",
-                    "transport_stream_interrupted",
-                }
+                transient = kind == "provider_rate_limited"
                 fallback_profile = getattr(
                     getattr(active_client, "s", None),
                     "provider_fallback_profile",
@@ -1373,33 +1542,90 @@ def _drive_work_unit_stage(
             if stage == "bom":
                 rounds_total += int(facts.rounds or 0)
                 tool_calls_total += int(facts.tool_calls or 0)
+            if facts.finish == "collection_limit":
+                record(
+                    active_client,
+                    unit=unit,
+                    unit_attempt=unit_attempt,
+                    call_mode=call_mode,
+                    outcome="collection_limit",
+                    facts=facts,
+                    aggregate_round=aggregate_round,
+                    aggregate_signature=aggregate_signature,
+                    commit_result=(
+                        feedback.get("aggregate_commit_rejection")
+                        if isinstance(feedback, dict)
+                        else None
+                    ),
+                    candidate_retained=False,
+                    fallback_reason=("provider_rate_limited" if fallback_spent else None),
+                )
+                return "recoverable", None, facts, "collection_limit"
+            try:
+                parsed = _extract_json(facts.raw)
+            except (json.JSONDecodeError, ValueError):
+                parse_kind = _classify_parse_failure(facts.finish, facts.had_content)
+                record(
+                    active_client,
+                    unit=unit,
+                    unit_attempt=unit_attempt,
+                    call_mode=call_mode,
+                    outcome=parse_kind,
+                    facts=facts,
+                    aggregate_round=aggregate_round,
+                    aggregate_signature=aggregate_signature,
+                    candidate_retained=False,
+                    fallback_reason=("provider_rate_limited" if fallback_spent else None),
+                )
+                return "recoverable", None, facts, parse_kind
+            if isinstance(parsed.get("questions"), list):
+                record(
+                    active_client,
+                    unit=unit,
+                    unit_attempt=unit_attempt,
+                    call_mode=call_mode,
+                    outcome="question",
+                    facts=facts,
+                    aggregate_round=aggregate_round,
+                    aggregate_signature=aggregate_signature,
+                    candidate_retained=False,
+                    fallback_reason=("provider_rate_limited" if fallback_spent else None),
+                )
+                return "questions", parsed, facts, None
+            try:
+                validated = validate_unit_candidate(unit, parsed, prompt_state, extras)
+            except (WorkUnitValidationError, TypeError, ValueError) as exc:
+                record(
+                    active_client,
+                    unit=unit,
+                    unit_attempt=unit_attempt,
+                    call_mode=call_mode,
+                    outcome="invalid_work_unit",
+                    facts=facts,
+                    aggregate_round=aggregate_round,
+                    aggregate_signature=aggregate_signature,
+                    candidate_retained=False,
+                    fallback_reason=("provider_rate_limited" if fallback_spent else None),
+                )
+                return "recoverable", parsed, facts, str(exc)
             record(
                 active_client,
                 unit=unit,
                 unit_attempt=unit_attempt,
                 call_mode=call_mode,
-                outcome="provider_response",
+                outcome="candidate",
                 facts=facts,
                 aggregate_round=aggregate_round,
                 aggregate_signature=aggregate_signature,
+                commit_result=(
+                    feedback.get("aggregate_commit_rejection")
+                    if isinstance(feedback, dict)
+                    else None
+                ),
+                candidate_retained=True,
+                fallback_reason=("provider_rate_limited" if fallback_spent else None),
             )
-            if facts.finish == "collection_limit":
-                return "recoverable", None, facts, "collection_limit"
-            try:
-                parsed = _extract_json(facts.raw)
-            except (json.JSONDecodeError, ValueError):
-                return (
-                    "recoverable",
-                    None,
-                    facts,
-                    _classify_parse_failure(facts.finish, facts.had_content),
-                )
-            if isinstance(parsed.get("questions"), list):
-                return "questions", parsed, facts, None
-            try:
-                validated = validate_unit_candidate(unit, parsed, prompt_state, extras)
-            except (WorkUnitValidationError, TypeError, ValueError) as exc:
-                return "recoverable", parsed, facts, str(exc)
+            validated_invocation_cache[cache_key] = json.loads(json.dumps(validated))
             return "candidate", validated, facts, None
         return "terminal", None, None, "provider_call_budget_exhausted"
 
@@ -1411,17 +1637,16 @@ def _drive_work_unit_stage(
         aggregate_round: int | None = None,
     ) -> tuple[str, dict | None]:
         prior_signature: str | None = None
-        escalated = force_pristine
         local_feedback = feedback
         serialization_next = False
         serialization_spent = False
-        for unit_attempt in range(1, repair_rounds + 2):
+        for unit_attempt in range(1, repair_rounds + 3):
             used_serialization = serialization_next
-            kind, payload, _facts, error = invoke(
+            kind, payload, facts, error = invoke(
                 unit,
                 unit_attempt=unit_attempt,
                 feedback=local_feedback,
-                pristine=escalated,
+                pristine=False,
                 serialization=used_serialization,
                 aggregate_round=aggregate_round,
             )
@@ -1432,7 +1657,7 @@ def _drive_work_unit_stage(
                 questions = _normalize_questions(payload.get("questions") or [], stage)
                 reconcile = any(question.get("reconcile_target") for question in questions)
                 if any(question["blocking"] for question in questions) and (
-                    not answers or reconcile
+                    (not answers and not instruction) or reconcile
                 ):
                     return kind, {"questions": questions}
                 local_feedback = (
@@ -1442,53 +1667,34 @@ def _drive_work_unit_stage(
                 continue
             if kind == "terminal":
                 return kind, {"failure_kind": error or "provider_failure"}
-            if used_serialization and error in {
+            serialization_errors = {
                 "collection_limit",
                 "truncated_json",
                 "invalid_json",
                 "reasoning_loop",
-            }:
+            }
+            if used_serialization and error in serialization_errors:
                 return "terminal", {"failure_kind": error}
-            if (
-                not serialization_spent
-                and not used_serialization
-                and error
-                in {
-                    "collection_limit",
-                    "truncated_json",
-                    "invalid_json",
-                    "reasoning_loop",
-                }
-            ):
+            if not serialization_spent and not used_serialization and error in serialization_errors:
                 serialization_spent = True
                 serialization_next = True
                 bounds_sentence = _collection_bounds_sentence(policy.collection_bounds)
                 local_feedback = _SERIALIZATION_RETRY_MSG.format(
-                    prior_chars=len(_facts.raw if _facts is not None else ""),
+                    prior_chars=len(facts.raw if facts is not None else ""),
                     bounds_sentence=(bounds_sentence + " ") if bounds_sentence else "",
                 )
                 continue
             signature = str(error)
             if signature == prior_signature:
-                if escalated:
-                    return "terminal", {
-                        "failure_kind": "repeated_unit_defect",
-                        "error": signature,
-                    }
-                escalated = True
-                local_feedback = {
-                    "defect": signature,
-                    "instruction": (
-                        "Pristine redraft: reason from the source state and replace only "
-                        "this unit. Do not preserve the rejected serialization."
-                    ),
+                return "terminal", {
+                    "failure_kind": "repeated_unit_defect",
+                    "error": signature,
                 }
-            else:
-                local_feedback = {
-                    "defect": signature,
-                    "rejected_unit": payload,
-                    "instruction": "Correct every listed defect in this complete unit replacement.",
-                }
+            local_feedback = {
+                "defect": signature,
+                "rejected_unit": payload,
+                "instruction": "Correct every listed defect in this complete unit replacement.",
+            }
             prior_signature = signature
         return "terminal", {
             "failure_kind": "unit_repair_exhausted",
@@ -1673,7 +1879,6 @@ def _drive_work_unit_stage(
         }
 
     prior_signature = None
-    escalation_spent = False
     for aggregate_round in range(repair_rounds + 1):
         ok, commit_result = commit_stage(stage, dict(candidate), state_path, brief, None, workspace)
         if ok:
@@ -1709,6 +1914,20 @@ def _drive_work_unit_stage(
                     "aggregate_repair_rounds": aggregate_repair_rounds,
                 },
             )
+        _record_attempt_facts(
+            stage_client,
+            run_id=run_id,
+            stage=stage,
+            attempt=max(1, attempts),
+            call_mode="deterministic_commit",
+            outcome=(
+                "commit_process_failed"
+                if commit_result.get("failure_kind") == "commit_process_failed"
+                else "commit_rejected"
+            ),
+            commit_result=commit_result,
+            candidate_retained=True,
+        )
         if commit_result.get("failure_kind") == "commit_process_failed":
             last = {
                 "failure_kind": "commit_process_failed",
@@ -1728,15 +1947,13 @@ def _drive_work_unit_stage(
             )
         signature = _commit_rejection_signature(commit_result)
         repeated = signature == prior_signature
-        if repeated and escalation_spent:
+        if repeated:
             last = {
                 "failure_kind": "commit_rejected",
                 "commit": commit_result,
             }
             break
-        pristine = repeated
-        if pristine:
-            escalation_spent = True
+        pristine = False
         if aggregate_round >= repair_rounds:
             last = {
                 "failure_kind": "commit_rejected",
@@ -1989,7 +2206,14 @@ def drive_stage(
     user += f"\n\nProduce the {stage} slot JSON now."
 
     try:
-        contract = build_stage_response_contract(stage, prompt_state)
+        contract = build_stage_response_contract(
+            stage,
+            prompt_state,
+            allow_questions=not (
+                stage == "architecture"
+                and instruction == NONINTERACTIVE_DEFAULTS_INSTRUCTION
+            ),
+        )
     except ValueError as exc:
         return operational_failure(
             "stage_contract_failed",
@@ -2094,7 +2318,7 @@ def drive_stage(
     tool_calls_ct = None
     expanded_component_count = 0
     emitted_collection_count = 0
-    provider_call_budget = max_retries + 2
+    provider_call_budget = max_retries + 1
     provider_ok = False
     schema_ok = False
     semantic_repair_attempted = False
@@ -2159,7 +2383,12 @@ def drive_stage(
                         }
                     )
             escalation_pending = False
-        ctx = {**(meta_ctx or {}), "stage": stage, "attempt": attempt}
+        ctx = {
+            **(meta_ctx or {}),
+            "stage": stage,
+            "attempt": attempt,
+            "call_mode": "clean_slate" if clean_slate_next else "normal",
+        }
         tool_calls_ct = None
         raw = ""
         finish = None
@@ -2239,6 +2468,7 @@ def drive_stage(
                     call_mode="clean_slate" if was_clean_slate else "normal",
                     outcome=kind,
                     error_facts={k: v for k, v in failure.items() if k != "failure_kind"},
+                    fallback_reason=("provider_rate_limited" if provider_fallback_active else None),
                 )
                 fallback_profile = getattr(
                     getattr(active_client, "s", None),
@@ -2334,7 +2564,17 @@ def drive_stage(
                 call_mode="clean_slate" if was_clean_slate else "normal",
                 outcome="reasoning_loop",
                 facts=facts,
+                fallback_reason=("provider_rate_limited" if provider_fallback_active else None),
             )
+            reasoning_was_enabled = not (
+                isinstance(reasoning, dict) and reasoning.get("enabled") is False
+            )
+            if (
+                not reasoning_was_enabled
+                or loop_retries >= _MAX_LOOP_RETRIES
+                or attempts >= provider_call_budget
+            ):
+                break
             if progress:
                 progress(
                     {
@@ -2343,13 +2583,11 @@ def drive_stage(
                         "errors": [
                             "reasoning loop detected"
                             + (f" ({loop_abort_reason})" if loop_abort_reason else "")
-                            + " — retrying with reasoning disabled"
+                            + " — retrying once with reasoning disabled"
                         ],
                         "model": _client_model(active_client),
                     }
                 )
-            if loop_retries >= _MAX_LOOP_RETRIES:
-                break
             loop_retries += 1
             reasoning = {"enabled": False}
             temperature = max(temperature + 0.4, 0.4)
@@ -2430,7 +2668,7 @@ def drive_stage(
             serialization_calls += 1
             attempts += 1  # the serialization completion is a provider call too
             current_attempt_number = attempts
-            sctx = {**ctx, "serialization": True}
+            sctx = {**ctx, "serialization": True, "call_mode": "serialization"}
             smessages = list(call_messages)
             bounds_sentence = _collection_bounds_sentence(policy.collection_bounds)
             if kind == "collection_limit":
@@ -2614,7 +2852,9 @@ def drive_stage(
             # -- otherwise the "do not ask more questions" retry below burns the
             # stage's whole budget on a park it can never satisfy (WS6).
             is_reconcile_park = any(q.get("reconcile_target") for q in qs)
-            if any(q["blocking"] for q in qs) and (not answers or is_reconcile_park):
+            if any(q["blocking"] for q in qs) and (
+                (not answers and not instruction) or is_reconcile_park
+            ):
                 if not review_before_commit:
                     attach_questions(state_path, stage, qs)
                 if progress:
@@ -2659,12 +2899,34 @@ def drive_stage(
         diagnostics = diagnose_stage(
             stage, brief=brief, upstream_state=semantic_state, candidate=obj
         )
+        provider_diagnostic_codes = [diagnostic.code for diagnostic in diagnostics]
+        if progress:
+            for diagnostic in diagnostics:
+                progress(
+                    {
+                        "kind": "stage_diagnostic",
+                        "stage": stage,
+                        "attempt": current_attempt_number,
+                        **diagnostic.model_dump(exclude_none=True),
+                    }
+                )
+        if stage == "architecture":
+            completed_obj = complete_unsourced_external_rails(obj, diagnostics)
+            if completed_obj is not obj:
+                obj = completed_obj
+                diagnostics = diagnose_stage(
+                    stage,
+                    brief=brief,
+                    upstream_state=semantic_state,
+                    candidate=obj,
+                )
         severe = [d for d in diagnostics if d.severity in {"repair_required", "fab_gate"}]
         repair_source_raw = raw
         while (
             severe
             and semantic_mode in {"repair", "enforce"}
             and semantic_repair_rounds < _MAX_SEMANTIC_REPAIR_ROUNDS
+            and attempts < provider_call_budget
         ):
             semantic_repair_attempted = True
             semantic_repair_rounds += 1
@@ -2697,6 +2959,16 @@ def drive_stage(
                         )
                     elif stage == "architecture":
                         repaired = remove_mislabeled_architecture_defaults(semantic_state, repaired)
+                        initial_repaired_diagnostics = diagnose_stage(
+                            stage,
+                            brief=brief,
+                            upstream_state=semantic_state,
+                            candidate=repaired,
+                        )
+                        repaired = complete_unsourced_external_rails(
+                            repaired,
+                            initial_repaired_diagnostics,
+                        )
                     repaired_diagnostics = diagnose_stage(
                         stage, brief=brief, upstream_state=semantic_state, candidate=repaired
                     )
@@ -2782,7 +3054,7 @@ def drive_stage(
                 call_mode=current_call_mode,
                 outcome="candidate_review",
                 facts=current_facts,
-                diagnostic_codes=[d.code for d in diagnostics],
+                diagnostic_codes=provider_diagnostic_codes,
             )
             fab_safe = not any(d.severity == "fab_gate" for d in diagnostics)
             wall_s = round(time.monotonic() - t0, 3)
@@ -2841,6 +3113,9 @@ def drive_stage(
                 call_mode=current_call_mode,
                 outcome="commit_process_failed",
                 facts=current_facts,
+                commit_result=out,
+                candidate_retained=True,
+                fallback_reason=("provider_rate_limited" if provider_fallback_active else None),
             )
             last = {
                 "failure_kind": "commit_process_failed",
@@ -2859,7 +3134,10 @@ def drive_stage(
             call_mode=current_call_mode,
             outcome="candidate" if ok else "commit_rejected",
             facts=current_facts,
-            diagnostic_codes=[d.code for d in diagnostics],
+            diagnostic_codes=provider_diagnostic_codes,
+            commit_result=out if not ok else None,
+            candidate_retained=True,
+            fallback_reason=("provider_rate_limited" if provider_fallback_active else None),
         )
         if ok:
             _observe_attempt(

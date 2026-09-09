@@ -223,6 +223,45 @@ def test_compact_architecture_range_expands_without_downstream_shape():
     assert "inter_sheet_net_ranges" not in canonical
 
 
+def test_architecture_normalizes_sheet_stems_used_as_endpoint_names():
+    payload = {
+        "topologies": {},
+        "rail_voltages": {},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [
+            {
+                "name": "DIGITAL_INPUT_HEADER",
+                "stem": "DIGITAL_INPUT_HEADER",
+                "function": "logic input",
+            },
+            {"name": "R2R LADDER", "stem": "R2R_LADDER", "function": "DAC ladder"},
+        ],
+        "power_nets": [],
+        "inter_sheet_nets": [
+            {
+                "name": "D0",
+                "endpoints": [
+                    {"sheet": "DIGITAL_INPUT_HEADER", "direction": "output"},
+                    {"sheet": "R2R_LADDER", "direction": "input"},
+                ],
+            }
+        ],
+    }
+
+    canonical, expanded = _normalize_stage_response("architecture", payload, {})
+
+    assert expanded == 0
+    assert [sheet["name"] for sheet in canonical["sheets"]] == [
+        "DIGITAL INPUT HEADER",
+        "R2R LADDER",
+    ]
+    assert [endpoint["sheet"] for endpoint in canonical["inter_sheet_nets"][0]["endpoints"]] == [
+        "DIGITAL INPUT HEADER",
+        "R2R LADDER",
+    ]
+
+
 def _range_architecture_payload(explicit_nets, ranges):
     return {
         "topologies": {},

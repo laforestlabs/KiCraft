@@ -69,6 +69,7 @@ from kicraft.server.session import (
     remaining_stages,
     run_session,
 )
+from kicraft.server.stage_runtime import NONINTERACTIVE_DEFAULTS_INSTRUCTION
 from kicraft.tuning.benchmark import BENCHMARK_PROMPTS as BRIEFS
 from kicraft.tuning.benchmark import SHAPED_OUTLINE_PROMPTS
 
@@ -252,8 +253,8 @@ def _write_campaign_manifest(
         "judge_provider_order": list(settings.judge_provider_order),
         "response_policies": {
             "design": "kicraft_<stage>_response_v1",
-            "architecture": "kicraft_architecture_response_v2",
-            "bom_and_wiring": "kicraft_<stage>_response_v2",
+            "architecture": "kicraft_architecture_response_v2_noninteractive",
+            "bom_and_wiring": "kicraft_<stage>_response_v3",
             "review": "kicraft_electrical_review_v1",
             "judge": "kicraft_eval_judge_v1",
         },
@@ -363,6 +364,8 @@ def run_design(
     *,
     max_park_rounds: int = 12,
     run_id: str | None = None,
+    max_provider_retries: int = 5,
+    provider_retry_delay_s: float = 60.0,
 ) -> dict:
     """Drive the five design stages to completion over ``rundir``, auto-answering
     any parked clarifying question. Returns
@@ -378,6 +381,7 @@ def run_design(
     n_questions = 0
     pending = None
     bom_passes = 0
+    provider_retries = 0
 
     def _add_cost(r_dict: dict) -> None:
         nonlocal cost
@@ -385,6 +389,24 @@ def run_design(
             c = r.get("cost_usd")
             if isinstance(c, (int, float)):
                 cost += c
+
+    def _retry_provider_busy(result: dict, last: dict) -> bool:
+        nonlocal provider_retries
+        failure_kind = result.get("failure_kind") or last.get("failure_kind")
+        if failure_kind != "provider_rate_limited" or provider_retries >= max_provider_retries:
+            return False
+        provider_retries += 1
+        progress(
+            {
+                "kind": "top_level_retry",
+                "failure_kind": failure_kind,
+                "retry_action": "retry_stage",
+                "retry_attempt": provider_retries,
+                "delay_s": provider_retry_delay_s,
+            }
+        )
+        time.sleep(provider_retry_delay_s)
+        return True
 
     for round_no in range(max_park_rounds):
         rem = remaining_stages(read_state(rundir))
@@ -397,7 +419,14 @@ def run_design(
                 "error": None,
             }
         res = run_session(
-            rundir, brief, rem, answers=pending, client=client, progress=progress, run_id=run_id
+            rundir,
+            brief,
+            rem,
+            answers=pending,
+            instruction=NONINTERACTIVE_DEFAULTS_INSTRUCTION,
+            client=client,
+            progress=progress,
+            run_id=run_id,
         )
         _add_cost(res)
         status = res.get("status")
@@ -458,6 +487,9 @@ def run_design(
             if status != "awaiting_input":
                 # Reconcile turned the park into a hard failure -- report it.
                 last = (res.get("results") or [{}])[-1]
+                if _retry_provider_busy(res, last):
+                    pending = None
+                    continue
                 err = last.get("error") or last.get("commit") or "stage failed to commit"
                 return {
                     "status": "failed",
@@ -465,18 +497,23 @@ def run_design(
                     "questions": n_questions,
                     "rounds": round_no + 1,
                     "error": str(err)[:500],
+                    "failure_kind": res.get("failure_kind") or last.get("failure_kind"),
                 }
             n_questions += len(qs)
             pending = _auto_answers(qs)
             record_answers(rundir, res.get("last_stage"), pending)
             continue
         last = (res.get("results") or [{}])[-1]
+        if _retry_provider_busy(res, last):
+            pending = None
+            continue
         err = last.get("error") or last.get("commit") or "stage failed to commit"
         return {
             "status": "failed",
             "cost_usd": cost,
             "questions": n_questions,
             "rounds": round_no + 1,
+            "failure_kind": res.get("failure_kind") or last.get("failure_kind"),
             "error": str(err)[:500],
         }
     return {
@@ -605,6 +642,7 @@ def evaluate_one(
             design_cost_usd=round(d["cost_usd"], 6),
             questions=d["questions"],
             design_error=d["error"],
+            design_failure_kind=d.get("failure_kind"),
         )
         state_doc = {}
         try:
@@ -1033,11 +1071,25 @@ def _load_prior_records(out_dir: Path) -> dict[str, dict]:
         return {}
 
 
+def _resume_corpus_slugs(out_dir: Path, prior: dict[str, dict]) -> set[str]:
+    """Recover the full frozen corpus, including briefs not yet checkpointed."""
+    manifest = out_dir / "campaign_manifest.json"
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        corpus = (payload.get("immutable") or {}).get("corpus") or []
+        slugs = {str(row["slug"]) for row in corpus if row.get("slug")}
+        if slugs:
+            return slugs
+    except (OSError, ValueError, TypeError):
+        pass
+    return {str(row["slug"]) for row in prior.values() if row.get("slug")}
+
+
 def _reusable(rec: dict | None) -> bool:
     """Under ``--resume``, a prior record is kept iff it finished scoring: no harness
     error and its eval report still on disk. Design failures and bad build rcs are
     legitimate *results* (regression signal), not candidates for a re-run."""
-    if not rec or rec.get("error"):
+    if not rec or rec.get("error") or rec.get("design_failure_kind") == "provider_rate_limited":
         return False
     report = rec.get("report_path")
     return bool(report) and Path(report).exists()
@@ -1189,10 +1241,11 @@ def main(argv=None) -> int:
     reps = [None] if repeats == 1 else list(range(1, repeats + 1))
 
     prior = _load_prior_records(out_dir) if resume_dir else {}
-    if resume_dir and prior and not args.only and args.limit is None:
-        # default a resume to the batch's own brief set, not the whole catalog
-        prior_slugs = {r["slug"] for r in prior.values() if r.get("slug")}
-        selected = [(i, e) for i, e in selected if e["slug"] in prior_slugs]
+    if resume_dir and not args.only and args.limit is None:
+        # The checkpoint may be partial. Recover the complete frozen manifest
+        # corpus rather than silently shrinking the resumed campaign.
+        resume_slugs = _resume_corpus_slugs(out_dir, prior)
+        selected = [(i, entry) for i, entry in selected if entry["slug"] in resume_slugs]
     manifest_path = _write_campaign_manifest(
         out_dir,
         settings=s,

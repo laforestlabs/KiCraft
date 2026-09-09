@@ -1,0 +1,36 @@
+{
+  "topologies": {
+    "USB_PD_INPUT": "USB-C PD sink controller negotiating a 15 V / 3 A input contract with fused protection",
+    "5V_BUCK": "Synchronous buck converter from 15 V to regulated 5 V rated 6 A",
+    "3V3_BUCK": "Dedicated synchronous buck converter from 5 V to regulated 3.3 V rated 1 A",
+    "MCU": "ESP32-S3-MINI-1 with native USB flashing, BOOT strap, and reset controls",
+    "HUB75_OUTPUT": "HUB75 connector and 3.3 V to 5 V level shifter",
+    "LED_STRING_OUTPUT": "Addressable LED string power and data connector"
+  },
+  "rail_voltages": {
+    "VBUS": 15.0,
+    "+5V": 5.0,
+    "+3V3": 3.3
+  },
+  "comms_protocols": ["USB 2.0 FS"],
+  "mcu_present": true,
+  "sheets": [
+    {"name": "USB PD INPUT", "stem": "USB_PD_INPUT", "function": "USB-C PD sink controller, input connector, fuse, and protection"},
+    {"name": "5V BUCK", "stem": "5V_BUCK", "function": "Dedicated 15 V to regulated 5 V 6 A buck converter IC and support parts"},
+    {"name": "3V3 BUCK", "stem": "3V3_BUCK", "function": "Dedicated 5 V to regulated 3.3 V 1 A buck converter IC and support parts"},
+    {"name": "MCU", "stem": "MCU", "function": "ESP32-S3-MINI-1 with native USB flashing, BOOT strap, and reset controls"},
+    {"name": "HUB75 OUTPUT", "stem": "HUB75_OUTPUT", "function": "HUB75 connector and level shifter"},
+    {"name": "LED STRING OUTPUT", "stem": "LED_STRING_OUTPUT", "function": "Addressable LED string power and data connector"}
+  ],
+  "power_nets": ["VBUS", "+5V", "+3V3", "GND"],
+  "inter_sheet_nets": [
+    {"name": "VBUS", "endpoints": [{"sheet": "USB PD INPUT", "direction": "output"}, {"sheet": "5V BUCK", "direction": "input"}]},
+    {"name": "+5V", "endpoints": [{"sheet": "5V BUCK", "direction": "output"}, {"sheet": "3V3 BUCK", "direction": "input"}, {"sheet": "HUB75 OUTPUT", "direction": "input"}, {"sheet": "LED STRING OUTPUT", "direction": "input"}]},
+    {"name": "+3V3", "endpoints": [{"sheet": "3V3 BUCK", "direction": "output"}, {"sheet": "MCU", "direction": "input"}, {"sheet": "HUB75 OUTPUT", "direction": "input"}]},
+    {"name": "USB_D_P", "endpoints": [{"sheet": "USB PD INPUT", "direction": "bidirectional"}, {"sheet": "MCU", "direction": "bidirectional"}]},
+    {"name": "USB_D_N", "endpoints": [{"sheet": "USB PD INPUT", "direction": "bidirectional"}, {"sheet": "MCU", "direction": "bidirectional"}]},
+    {"name": "HUB75_DATA", "endpoints": [{"sheet": "MCU", "direction": "output"}, {"sheet": "HUB75 OUTPUT", "direction": "input"}]},
+    {"name": "LED_DATA", "endpoints": [{"sheet": "MCU", "direction": "output"}, {"sheet": "LED STRING OUTPUT", "direction": "input"}]}
+  ],
+  "assumptions": []
+}

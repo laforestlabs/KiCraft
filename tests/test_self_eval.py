@@ -266,11 +266,21 @@ _FULL_STATE = {
 def test_run_design_parks_then_resumes_with_suggested_option(tmp_path, monkeypatch):
     rundir = tmp_path / "run"
     (rundir / ".kicraft").mkdir(parents=True)
-    seen_answers, calls = [], {"n": 0}
+    seen_answers, seen_instructions, calls = [], [], {"n": 0}
 
-    def fake_run_session(ws, brief, stages, answers=None, client=None, progress=None, run_id=None):
+    def fake_run_session(
+        ws,
+        brief,
+        stages,
+        answers=None,
+        instruction=None,
+        client=None,
+        progress=None,
+        run_id=None,
+    ):
         calls["n"] += 1
         seen_answers.append(answers)
+        seen_instructions.append(instruction)
         if progress:
             progress({"kind": "stage_start", "stage": stages[0]})
         if calls["n"] == 1:  # first pass: park on a question
@@ -300,6 +310,7 @@ def test_run_design_parks_then_resumes_with_suggested_option(tmp_path, monkeypat
     assert round(d["cost_usd"], 4) == 0.03  # park attempt + resume both billed
     assert seen_answers[0] is None  # opening pass asks nothing
     assert seen_answers[1] == [{"text": "Battery?", "answer": "LiPo 1S"}]
+    assert seen_instructions == [se.NONINTERACTIVE_DEFAULTS_INSTRUCTION] * 2
     kinds = [json.loads(line)["kind"] for line in events.read_text().splitlines()]
     assert "question" in kinds and "stage_done" in kinds
 
@@ -311,6 +322,7 @@ def test_run_design_failed_stage_stops_and_reports_error(tmp_path, monkeypatch):
         return {
             "status": "failed",
             "last_stage": "bom",
+            "failure_kind": "commit_rejected",
             "results": [{"cost_usd": 0.04, "error": "stage-commit rejected"}],
             "questions": None,
         }
@@ -318,6 +330,78 @@ def test_run_design_failed_stage_stops_and_reports_error(tmp_path, monkeypatch):
     monkeypatch.setattr(se, "run_session", fake_run_session)
     d = se.run_design(object(), "x", tmp_path, lambda ev: None)
     assert d["status"] == "failed" and "rejected" in d["error"] and d["cost_usd"] == 0.04
+    assert d["failure_kind"] == "commit_rejected"
+
+
+def test_run_design_retries_provider_busy_at_top_level(tmp_path, monkeypatch):
+    (tmp_path / ".kicraft").mkdir(parents=True)
+    calls = {"count": 0}
+    delays = []
+    events = []
+
+    def fake_run_session(ws, brief, stages, **kw):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {
+                "status": "failed",
+                "last_stage": "intent",
+                "failure_kind": "provider_rate_limited",
+                "results": [
+                    {
+                        "cost_usd": 0.0,
+                        "error": "provider temporarily rate limited the request",
+                    }
+                ],
+            }
+        Path(ws, ".kicraft", "state.json").write_text(json.dumps(_FULL_STATE))
+        return {"status": "ok", "last_stage": "wiring", "results": []}
+
+    monkeypatch.setattr(se, "run_session", fake_run_session)
+    monkeypatch.setattr(se.time, "sleep", delays.append)
+    result = se.run_design(object(), "x", tmp_path, events.append)
+    assert result["status"] == "ok"
+    assert calls["count"] == 2 and delays == [60.0]
+    assert events == [
+        {
+            "kind": "top_level_retry",
+            "failure_kind": "provider_rate_limited",
+            "retry_action": "retry_stage",
+            "retry_attempt": 1,
+            "delay_s": 60.0,
+        }
+    ]
+
+
+def test_rate_limited_result_is_rerun_on_resume(tmp_path):
+    report = tmp_path / "report.json"
+    report.write_text("{}")
+    assert not se._reusable(
+        {
+            "report_path": str(report),
+            "design_failure_kind": "provider_rate_limited",
+        }
+    )
+
+
+def test_resume_corpus_comes_from_manifest_not_partial_checkpoint(tmp_path):
+    (tmp_path / "campaign_manifest.json").write_text(
+        json.dumps(
+            {
+                "immutable": {
+                    "corpus": [
+                        {"slug": "alpha"},
+                        {"slug": "beta"},
+                        {"slug": "gamma"},
+                    ]
+                }
+            }
+        )
+    )
+    assert se._resume_corpus_slugs(tmp_path, {"alpha": {"slug": "alpha"}}) == {
+        "alpha",
+        "beta",
+        "gamma",
+    }
 
 
 # --------------------------------------------------------------------------- #

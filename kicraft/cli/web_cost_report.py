@@ -238,6 +238,9 @@ def load_stage_runs(db_path, since=None) -> list[dict]:
                 "failure_kind",
                 "emitted_collection_count",
                 "expanded_component_count",
+                "work_units",
+                "reused_work_units",
+                "aggregate_repair_rounds",
             )
             if name in cols
         ]
@@ -269,6 +272,9 @@ def load_stage_runs(db_path, since=None) -> list[dict]:
                     "failure_kind": row.get("failure_kind"),
                     "emitted_collection_count": row.get("emitted_collection_count"),
                     "expanded_component_count": row.get("expanded_component_count"),
+                    "work_units": row.get("work_units"),
+                    "reused_work_units": row.get("reused_work_units"),
+                    "aggregate_repair_rounds": row.get("aggregate_repair_rounds"),
                 }
             )
         return rows
@@ -305,6 +311,16 @@ def load_stage_attempts(db_path, since=None) -> list[dict]:
                 "output_tokens",
                 "cost_usd",
                 "diagnostic_codes",
+                "unit_id",
+                "unit_attempt",
+                "aggregate_round",
+                "commit_gate_codes",
+                "offender_count",
+                "rejection_signature",
+                "provider_profile",
+                "fallback_reason",
+                "candidate_retained",
+                "reasoning_failure_kind",
             )
             if name in cols
         ]
@@ -317,16 +333,151 @@ def load_stage_attempts(db_path, since=None) -> list[dict]:
         rows = []
         for values in conn.execute(query, params):
             row = dict(zip(selected, values))
-            try:
-                row["diagnostic_codes"] = json.loads(row.get("diagnostic_codes") or "[]")
-            except (json.JSONDecodeError, TypeError):
-                row["diagnostic_codes"] = []
+            for field in ("diagnostic_codes", "commit_gate_codes"):
+                try:
+                    row[field] = json.loads(row.get(field) or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    row[field] = []
+            if row.get("candidate_retained") is not None:
+                row["candidate_retained"] = bool(row["candidate_retained"])
             rows.append(row)
         return rows
     except sqlite3.OperationalError:
         return []
     finally:
         conn.close()
+
+
+def _attempt_cost_bucket() -> dict:
+    return {"calls": 0, "cost": 0.0}
+
+
+def _add_attempt(bucket: dict, row: dict) -> None:
+    if row.get("call_mode") != "deterministic_commit":
+        bucket["calls"] += 1
+    bucket["cost"] += float(row.get("cost_usd") or 0.0)
+
+
+def summarize_stage_attempts(rows: list[dict]) -> dict:
+    """Rank redacted paid outcomes and deterministic rejection causes."""
+    dimensions: dict[str, dict] = defaultdict(_attempt_cost_bucket)
+    stage_profile: dict[str, dict] = defaultdict(_attempt_cost_bucket)
+    outcomes: dict[str, dict] = defaultdict(_attempt_cost_bucket)
+    gates: dict[str, dict] = defaultdict(lambda: {"rejections": 0, "repair_calls": 0, "cost": 0.0})
+    signatures: dict[tuple[str, str, str], dict] = {}
+    work_unit_passes: dict[str, dict] = defaultdict(
+        lambda: {"attempts": 0, "successes": 0, "cost": 0.0}
+    )
+    total_provider_cost = 0.0
+    for row in rows:
+        run = str(row.get("run_id") or "?")
+        stage = str(row.get("stage") or "?")
+        profile = str(row.get("provider_profile") or "custom")
+        mode = str(row.get("call_mode") or "?")
+        outcome = str(row.get("outcome") or "?")
+        dimension = "|".join((run, stage, profile, mode, outcome))
+        _add_attempt(dimensions[dimension], row)
+        _add_attempt(stage_profile[f"{stage}|{profile}"], row)
+        _add_attempt(outcomes[outcome], row)
+        cost = float(row.get("cost_usd") or 0.0)
+        total_provider_cost += cost
+        gate_codes = row.get("commit_gate_codes") or []
+        for gate in gate_codes:
+            bucket = gates[str(gate)]
+            if outcome in {"commit_rejected", "commit_process_failed"}:
+                bucket["rejections"] += 1
+            elif mode != "deterministic_commit":
+                bucket["repair_calls"] += 1
+            bucket["cost"] += cost
+        signature = row.get("rejection_signature")
+        if signature:
+            key = (run, stage, str(signature))
+            bucket = signatures.setdefault(
+                key,
+                {
+                    "run_id": run,
+                    "stage": stage,
+                    "signature": str(signature),
+                    "occurrences": 0,
+                    "cost": 0.0,
+                    "gate_codes": list(gate_codes),
+                },
+            )
+            bucket["occurrences"] += 1
+            bucket["cost"] += cost
+        unit_id = row.get("unit_id")
+        if unit_id and mode != "deterministic_commit":
+            aggregate_round = row.get("aggregate_round")
+            unit_attempt = int(row.get("unit_attempt") or 1)
+            if aggregate_round is not None:
+                pass_name = "aggregate_repair"
+            elif unit_attempt > 1:
+                pass_name = "repair"
+            else:
+                pass_name = "first"
+            bucket = work_unit_passes[f"{stage}|{pass_name}"]
+            bucket["attempts"] += 1
+            bucket["successes"] += int(bool(row.get("candidate_retained")))
+            bucket["cost"] += cost
+    for bucket in work_unit_passes.values():
+        bucket["success_rate"] = (
+            bucket["successes"] / bucket["attempts"] if bucket["attempts"] else 0.0
+        )
+    repeated = sorted(
+        (bucket for bucket in signatures.values() if bucket["occurrences"] > 1),
+        key=lambda bucket: (-bucket["cost"], -bucket["occurrences"], bucket["signature"]),
+    )
+    return {
+        "provider_cost_usd": total_provider_cost,
+        "by_full_dimension": dict(dimensions),
+        "by_stage_profile": dict(stage_profile),
+        "by_terminal_outcome": dict(outcomes),
+        "commit_gates": dict(sorted(gates.items(), key=lambda item: (-item[1]["cost"], item[0]))),
+        "repeated_rejection_signatures": repeated,
+        "work_unit_passes": dict(work_unit_passes),
+    }
+
+
+def format_stage_attempts(summary: dict) -> str:
+    if not summary.get("by_full_dimension"):
+        return ""
+    out = ["", "  " + "-" * 68, "  Paid attempts by stage/profile:"]
+    for key, bucket in sorted(
+        summary["by_stage_profile"].items(),
+        key=lambda item: (-item[1]["cost"], item[0]),
+    ):
+        out.append(f"    {key:<30} ${bucket['cost']:>8.4f}  {bucket['calls']:>4} calls")
+    if summary["commit_gates"]:
+        out.append("  Commit rejection gates:")
+        for gate, bucket in list(summary["commit_gates"].items())[:12]:
+            out.append(
+                f"    {gate:<20} ${bucket['cost']:>8.4f}  "
+                f"{bucket['rejections']:>4} rejects  {bucket['repair_calls']:>4} repairs"
+            )
+    out.append("  Paid attempts by terminal outcome:")
+    for key, bucket in sorted(
+        summary["by_terminal_outcome"].items(),
+        key=lambda item: (-item[1]["cost"], item[0]),
+    ):
+        out.append(f"    {key:<30} ${bucket['cost']:>8.4f}  {bucket['calls']:>4} calls")
+    if summary["work_unit_passes"]:
+        out.append("  Work-unit passes:")
+        for key, bucket in sorted(summary["work_unit_passes"].items()):
+            out.append(
+                f"    {key:<30} ${bucket['cost']:>8.4f}  "
+                f"{bucket['successes']}/{bucket['attempts']} retained "
+                f"({bucket['success_rate']:.1%})"
+            )
+    repeated = summary.get("repeated_rejection_signatures") or []
+    if repeated:
+        out.append("  Repeated rejection signatures:")
+        for bucket in repeated[:12]:
+            out.append(
+                f"    {bucket['run_id']:<20} {bucket['stage']:<12} "
+                f"{bucket['signature'][:12]}  x{bucket['occurrences']}  "
+                f"${bucket['cost']:.4f}"
+            )
+    return "\n".join(out)
 
 
 def summarize_stage_runs(rows) -> dict:
@@ -455,6 +606,8 @@ def main(argv=None) -> int:
     summary = summarize(rows, spike_threshold=args.spike_threshold)
     stage_runs = load_stage_runs(args.ledger, since=args.since)
     summary["stage_runs"] = summarize_stage_runs(stage_runs)
+    stage_attempts = summarize_stage_attempts(load_stage_attempts(args.ledger, since=args.since))
+    summary["stage_attempts"] = stage_attempts
     if args.json:
         print(json.dumps(summary, indent=2, default=str))
     else:
@@ -462,6 +615,9 @@ def main(argv=None) -> int:
         extra = format_stage_runs(stage_runs)
         if extra:
             print(extra)
+        attempt_report = format_stage_attempts(stage_attempts)
+        if attempt_report:
+            print(attempt_report)
     return 0
 
 

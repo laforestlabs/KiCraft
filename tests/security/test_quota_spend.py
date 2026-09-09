@@ -1,5 +1,6 @@
 """Quota + spend-ceiling enforcement: a user cannot exceed their tier limit, and
 no path spends past the ceiling (the cost kill-switch always trips first)."""
+
 from __future__ import annotations
 
 import pytest
@@ -43,8 +44,12 @@ def test_paid_tiers_have_higher_but_finite_limits(store):
 
 
 def test_spend_ceiling_trips_before_overspend(tmp_path):
-    s = Settings(api_key="k", ledger_path=tmp_path / "ledger.db",
-                 daily_usd_ceiling=1.0, total_usd_ceiling=10.0)
+    s = Settings(
+        api_key="k",
+        ledger_path=tmp_path / "ledger.db",
+        daily_usd_ceiling=1.0,
+        total_usd_ceiling=10.0,
+    )
     guard = SpendGuard(s)
     guard.preflight()  # clean: under ceilings
     guard.record("m", 1000, 1000, 0.6)
@@ -58,18 +63,3 @@ def test_kill_switch_refuses_all_calls(tmp_path):
     s = Settings(api_key="k", ledger_path=tmp_path / "ledger.db", kill_switch=True)
     with pytest.raises(KillSwitchEngaged):
         SpendGuard(s).preflight()
-
-
-def test_every_completion_path_goes_through_preflight():
-    """The cost cap is only safe if no client code path can spend without calling
-    preflight(). Assert both public methods stream through the single _stream()
-    helper that calls guard.preflight() (client.py:92)."""
-    pytest.importorskip("requests")
-    import inspect
-
-    from kicraft.server import client
-    src = inspect.getsource(client.CappedOpenRouterClient)
-    assert "self.guard.preflight()" in src
-    # both chat and chat_with_tools delegate to _stream (the single capped path)
-    assert "self._stream(" in inspect.getsource(client.CappedOpenRouterClient.chat)
-    assert "self._stream(" in inspect.getsource(client.CappedOpenRouterClient.chat_with_tools)

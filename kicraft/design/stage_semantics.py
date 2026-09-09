@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Iterable
 
-from kicraft.design.models import StageDiagnostic
+from kicraft.design.models import Architecture, BOM, StageDiagnostic
 from kicraft.design.synthesis.validation import named_part_tokens
 
 DETECTOR_VERSION = 1
@@ -62,9 +63,7 @@ def complete_intent_classification(brief: str, candidate: dict) -> dict:
     completed = dict(candidate)
     expected = named_part_tokens([brief])
     supplied = {_norm_token(part) for part in completed.get("named_parts") or []}
-    missing_parts = [
-        token for token in expected.values() if _norm_token(token) not in supplied
-    ]
+    missing_parts = [token for token in expected.values() if _norm_token(token) not in supplied]
     if missing_parts:
         completed["named_parts"] = [*(completed.get("named_parts") or []), *missing_parts]
 
@@ -90,7 +89,7 @@ def normalize_project_stem(value: str) -> str:
         selected.append(word)
     if selected:
         return "_".join(selected)
-    return (words[0][:32] if words else "PROJECT")
+    return words[0][:32] if words else "PROJECT"
 
 
 def _intent(brief: str, candidate: dict) -> list[StageDiagnostic]:
@@ -176,9 +175,7 @@ def _mislabeled_functional_defaults(
     return mislabeled
 
 
-def remove_mislabeled_functional_defaults(
-    brief: str, upstream: dict, candidate: dict
-) -> dict:
+def remove_mislabeled_functional_defaults(brief: str, upstream: dict, candidate: dict) -> dict:
     """Remove assumptions that merely relabel user requirements as defaults."""
     completed = dict(candidate)
     assumptions = [str(item) for item in completed.get("assumptions") or []]
@@ -188,6 +185,7 @@ def remove_mislabeled_functional_defaults(
             assumption for assumption in assumptions if assumption not in mislabeled
         ]
     return completed
+
 
 def remove_mislabeled_architecture_defaults(upstream: dict, candidate: dict) -> dict:
     """Remove architecture assumptions that merely repeat a stage answer."""
@@ -206,6 +204,55 @@ def remove_mislabeled_architecture_defaults(upstream: dict, candidate: dict) -> 
     return completed
 
 
+def complete_unsourced_external_rails(
+    candidate: dict,
+    diagnostics: list[StageDiagnostic],
+) -> dict:
+    """Default an otherwise unsourced low-voltage rail to a simple external input."""
+    implicated = {
+        str(evidence).lower()
+        for diagnostic in diagnostics
+        if diagnostic.code == "architecture_rail_source_unspecified"
+        for evidence in diagnostic.evidence
+    }
+    rails = sorted(
+        str(rail)
+        for rail in (candidate.get("rail_voltages") or {})
+        if str(rail).lower() in implicated
+    )
+    if not rails:
+        return candidate
+    completed = copy.deepcopy(candidate)
+    assumptions = [str(item) for item in completed.get("assumptions") or []]
+    for rail in rails:
+        note = f"{rail} is supplied externally through the power input (defaulted)"
+        if note not in assumptions:
+            assumptions.append(note)
+    completed["assumptions"] = assumptions
+    sheets = list(completed.get("sheets") or [])
+    if not any(
+        isinstance(sheet, dict) and sheet.get("name") == "POWER INPUT" for sheet in sheets
+    ):
+        sheets.append(
+            {
+                "name": "POWER INPUT",
+                "stem": "POWER_INPUT",
+                "function": f"Two-pin external {'/'.join(rails)} and GND power input",
+                "from_library": None,
+                "library_instance": None,
+                "replication_group": None,
+                "replication_instance": None,
+            }
+        )
+    completed["sheets"] = sheets
+    topologies = dict(completed.get("topologies") or {})
+    topologies.setdefault(
+        "POWER INPUT",
+        f"2-pin header for external {'/'.join(rails)} and GND",
+    )
+    completed["topologies"] = topologies
+    return completed
+
 
 def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     diagnostics: list[StageDiagnostic] = []
@@ -214,9 +261,7 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
     assumption_rows = [str(item) for item in candidate.get("assumptions") or []]
     assumptions = " ".join(assumption_rows).lower()
 
-    introduced = sorted(
-        {m.group(1).lower() for m in _TOPOLOGY_RE.finditer(_text(candidate))}
-    )
+    introduced = sorted({m.group(1).lower() for m in _TOPOLOGY_RE.finditer(_text(candidate))})
     premature = [term for term in introduced if term not in allowed]
     if premature:
         diagnostics.append(
@@ -228,9 +273,7 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
             )
         )
 
-    mislabeled_defaults = _mislabeled_functional_defaults(
-        brief, upstream, assumption_rows
-    )
+    mislabeled_defaults = _mislabeled_functional_defaults(brief, upstream, assumption_rows)
     if mislabeled_defaults:
         diagnostics.append(
             _diag(
@@ -266,15 +309,17 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
         )
         answer_text = _text(upstream.get("_stage_answers", [])).lower()
         answered_board_power = (
-            "board supplies power to both" in answer_text
-            or "power both from board" in answer_text
+            "board supplies power to both" in answer_text or "power both from board" in answer_text
         )
-        explicitly_powered = re.search(
-            rf"\bpower(?:s|ed|ing)?\b[^.]{{0,40}}\b(?:{target_terms})\b|"
-            rf"\b(?:{target_terms})\b[^.]*\bpowered\s+(?:by|from)\b",
-            brief,
-            re.I,
-        ) or answered_board_power
+        explicitly_powered = (
+            re.search(
+                rf"\bpower(?:s|ed|ing)?\b[^.]{{0,40}}\b(?:{target_terms})\b|"
+                rf"\b(?:{target_terms})\b[^.]*\bpowered\s+(?:by|from)\b",
+                brief,
+                re.I,
+            )
+            or answered_board_power
+        )
         if not explicitly_powered:
             external_power_assumptions.append(target)
     if external_power_assumptions:
@@ -297,9 +342,7 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
         if connection.get("signal_type") == "power"
     }
     drive_blocks = {
-        name
-        for name, block in blocks_by_name.items()
-        if block.get("category") == "drive"
+        name for name, block in blocks_by_name.items() if block.get("category") == "drive"
     }
     missing_drive_power = sorted(drive_blocks - incoming_power)
     if missing_drive_power:
@@ -320,9 +363,7 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
             str(connection.get("to_block") or "") for connection in ground_connections
         }
         expected_ground = {
-            name
-            for name, block in blocks_by_name.items()
-            if block.get("category") != "power"
+            name for name, block in blocks_by_name.items() if block.get("category") != "power"
         }
         missing_ground = sorted(expected_ground - ground_targets)
         if missing_ground:
@@ -334,8 +375,6 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
                     missing_ground,
                 )
             )
-
-
 
     for block in candidate.get("blocks") or []:
         if not isinstance(block, dict):
@@ -386,9 +425,8 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
             f"{name} {function}",
             re.I,
         )
-        looks_like_power_only = (
-            bool(block and block.get("category") == "power")
-            or bool(_POWER_RE.search(name))
+        looks_like_power_only = bool(block and block.get("category") == "power") or bool(
+            _POWER_RE.search(name)
         )
         if looks_like_power_only and not physical_power_domain:
             diagnostics.append(
@@ -417,9 +455,7 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     candidate_text = _text(candidate)
     intent_text = _text(upstream.get("intent", {}))
     rail_voltages = candidate.get("rail_voltages") or {}
-    has_3v3_rail = any(
-        abs(float(voltage) - 3.3) <= 0.05 for voltage in rail_voltages.values()
-    )
+    has_3v3_rail = any(abs(float(voltage) - 3.3) <= 0.05 for voltage in rail_voltages.values())
     if re.search(r"esp32[- ]?s3", intent_text, re.I) and not has_3v3_rail:
         diagnostics.append(
             _diag(
@@ -477,10 +513,9 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
         for connection in functional_connections
         if isinstance(connection, dict) and connection.get("signal_type") == "power"
     }
-    functional_powers_external = (
-        any("hub75" in target or "display" in target for target in functional_power_targets)
-        and any("led" in target for target in functional_power_targets)
-    )
+    functional_powers_external = any(
+        "hub75" in target or "display" in target for target in functional_power_targets
+    ) and any("led" in target for target in functional_power_targets)
     board_powers_external = functional_powers_external or bool(
         re.search(
             r"board supplies power to both|power both from board",
@@ -504,12 +539,215 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                 ["hub75", "led string", "5v"],
             )
         )
+    external_load_currents = [
+        float(match.group(1))
+        for match in re.finditer(
+            r"(\d+(?:\.\d+)?)\s*a\b",
+            answer_text,
+            re.I,
+        )
+    ]
+    if board_powers_external and external_load_currents:
+        external_load_power_w = 5.0 * max(external_load_currents)
+        source_power_profiles: list[tuple[float, float, float, str]] = []
+        for name, description in (candidate.get("topologies") or {}).items():
+            source_text = f"{name} {description}"
+            source_topology = bool(
+                re.search(r"\b(?:usb|pd|input|source)\b", str(name), re.I)
+                or re.search(
+                    r"\busb(?:-c)?\b|\bpd\b[^.;]{0,40}\bcontract\b",
+                    str(description),
+                    re.I,
+                )
+            )
+            if not source_topology:
+                continue
+
+            contract_match = None
+            for pattern in (
+                r"(\d+(?:\.\d+)?)\s*v(?:dc)?[^.;]{0,40}?"
+                r"(\d+(?:\.\d+)?)\s*a\b[^.;]{0,30}\bcontract\b",
+                r"(\d+(?:\.\d+)?)\s*v(?:dc)?[^.;]{0,40}\bcontract\b"
+                r"[^.;]{0,40}?(\d+(?:\.\d+)?)\s*a\b",
+            ):
+                contract_match = re.search(pattern, source_text, re.I)
+                if contract_match:
+                    break
+            source_match = contract_match or re.search(
+                r"(\d+(?:\.\d+)?)\s*v(?:dc)?[^.;]{0,80}?"
+                r"(\d+(?:\.\d+)?)\s*a\b",
+                source_text,
+                re.I,
+            )
+            if source_match:
+                source_voltage_v = float(source_match.group(1))
+                source_current_a = float(source_match.group(2))
+                source_power_profiles.append(
+                    (
+                        source_voltage_v * source_current_a,
+                        source_voltage_v,
+                        source_current_a,
+                        source_text,
+                    )
+                )
+        if not source_power_profiles:
+            diagnostics.append(
+                _diag(
+                    "architecture_external_load_source_capacity_unspecified",
+                    "repair_required",
+                    "The external-load budget has no explicit input-source power capacity.",
+                    [f"external loads: {external_load_power_w:g}w"],
+                )
+            )
+        else:
+            source_power_w, _, _, source_text = max(source_power_profiles)
+            if source_power_w <= external_load_power_w:
+                diagnostics.append(
+                    _diag(
+                        "architecture_external_load_source_has_no_headroom",
+                        "repair_required",
+                        "Input-source capacity must exceed the external-load budget so the board and conversion losses are also powered.",
+                        [
+                            f"external loads: {external_load_power_w:g}w",
+                            f"input source: {source_power_w:g}w",
+                            source_text,
+                        ],
+                    )
+                )
+            overcurrent_profiles = [
+                (source_current_a, source_text)
+                for _, _, source_current_a, source_text in source_power_profiles
+                if source_current_a > 5.0 and re.search(r"\b(?:usb|pd)\b", source_text, re.I)
+            ]
+            if overcurrent_profiles:
+                diagnostics.append(
+                    _diag(
+                        "architecture_usb_pd_current_exceeds_standard",
+                        "repair_required",
+                        "A USB-PD contract cannot supply more than 5 A; use a higher-voltage contract and convert down for a 5 V high-current load.",
+                        [
+                            f"{source_current_a:g}a: {source_text}"
+                            for source_current_a, source_text in overcurrent_profiles
+                        ],
+                    )
+                )
+            if max(external_load_currents) >= 5.0:
+                converter_currents = [
+                    float(match.group(1))
+                    for name, description in (candidate.get("topologies") or {}).items()
+                    if "5v" in str(name).lower()
+                    and re.search(r"\b(?:buck|convert)", str(description), re.I)
+                    for match in re.finditer(
+                        r"(\d+(?:\.\d+)?)\s*a\b",
+                        str(description),
+                        re.I,
+                    )
+                ]
+                if not converter_currents:
+                    diagnostics.append(
+                        _diag(
+                            "architecture_5v_converter_capacity_unspecified",
+                            "repair_required",
+                            "The 5 V converter has no explicit output-current rating.",
+                            [f"external loads: {max(external_load_currents):g}a"],
+                        )
+                    )
+                elif max(converter_currents) <= max(external_load_currents):
+                    diagnostics.append(
+                        _diag(
+                            "architecture_5v_converter_has_no_headroom",
+                            "repair_required",
+                            "The regulated 5 V converter must exceed the external-load current budget so onboard loads are also powered.",
+                            [
+                                f"external loads: {max(external_load_currents):g}a",
+                                f"5v converter: {max(converter_currents):g}a",
+                            ],
+                        )
+                    )
+                if converter_currents:
+                    converter_power_w = 5.0 * max(converter_currents)
+                    unused_power_w = source_power_w - converter_power_w
+                    if source_power_w >= 2.0 * converter_power_w and unused_power_w >= 30.0:
+                        diagnostics.append(
+                            _diag(
+                                "architecture_input_power_grossly_overprovisioned",
+                                "advisory",
+                                "Input-source capacity is grossly larger than the regulated 5 V converter capacity; right-size the contract or name the load that needs the margin.",
+                                [
+                                    f"input source: {source_power_w:g}w",
+                                    f"5v converter: {converter_power_w:g}w",
+                                    f"unused capacity: {unused_power_w:g}w",
+                                ],
+                            )
+                        )
+
+    inter_sheet_nets = [
+        net for net in candidate.get("inter_sheet_nets") or [] if isinstance(net, dict)
+    ]
+    topology_descriptions = [
+        str(description) for description in (candidate.get("topologies") or {}).values()
+    ]
+    topology_descriptions.extend(
+        str(sheet.get("function") or "") for sheet in sheets if isinstance(sheet, dict)
+    )
+    relation_terms = re.compile(
+        r"\b(?:fuse|switch|net[- ]?tie|filter|ideal diode|converter|regulator|"
+        r"buck|boost|power path)\b",
+        re.I,
+    )
+    voltage_groups: dict[float, list[str]] = {}
+    for rail_name, voltage in rail_voltages.items():
+        voltage_groups.setdefault(round(float(voltage), 3), []).append(str(rail_name))
+    for voltage, rail_names in voltage_groups.items():
+        for index, left_name in enumerate(rail_names):
+            for right_name in rail_names[index + 1 :]:
+                left_endpoints = {
+                    str(endpoint.get("sheet") or "")
+                    for net in inter_sheet_nets
+                    if str(net.get("name") or "") == left_name
+                    for endpoint in net.get("endpoints") or []
+                    if isinstance(endpoint, dict)
+                }
+                right_endpoints = {
+                    str(endpoint.get("sheet") or "")
+                    for net in inter_sheet_nets
+                    if str(net.get("name") or "") == right_name
+                    for endpoint in net.get("endpoints") or []
+                    if isinstance(endpoint, dict)
+                }
+                common_endpoints = left_endpoints & right_endpoints
+                left_token = _norm_token(left_name)
+                right_token = _norm_token(right_name)
+                relationship_defined = any(
+                    left_token in _norm_token(description)
+                    and right_token in _norm_token(description)
+                    and relation_terms.search(description)
+                    for description in topology_descriptions
+                )
+                if not relationship_defined:
+                    diagnostics.append(
+                        _diag(
+                            "architecture_duplicate_voltage_rails_unrelated",
+                            "repair_required",
+                            "Same-voltage rails need one canonical net or an explicit component relationship.",
+                            [
+                                f"{left_name}/{right_name}: {voltage:g}v",
+                                *common_endpoints,
+                            ],
+                        )
+                    )
+
     for rail, voltage in (candidate.get("rail_voltages") or {}).items():
         if abs(float(voltage) - 3.3) > 0.05:
             continue
         rail_name = str(rail)
-        rail_pattern = r"(?:3v3|33v)"
-        source_pattern = r"ldo|regulat|buck|convert"
+        rail_token = re.escape(_norm_token(rail_name))
+        rail_pattern = rf"(?:3v3|33v|{rail_token})"
+        source_pattern = (
+            r"ldo|regulat|buck|convert|externallysupplied|suppliedexternally|"
+            r"externallyprovided|providedexternally|externalsource|suppliedvia|"
+            r"externalpowerinput|powerinput|inputrail"
+        )
         normalized_candidate = _norm_token(candidate_text)
         has_source = re.search(
             rf"(?:{source_pattern}).{{0,60}}{rail_pattern}|"
@@ -522,31 +760,43 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                 _diag(
                     "architecture_rail_source_unspecified",
                     "repair_required",
-                    "A declared 3.3V rail has no regulator or converter topology.",
+                    "A declared 3.3V rail has no regulator, converter, or external input source.",
                     [rail_name],
                 )
             )
     if re.search(r"esp32[- ]?s3", intent_text, re.I) and has_3v3_rail:
         regulator_terms = re.compile(r"\b(?:ldo|regulat|buck|convert)", re.I)
-        topology_text = _text(candidate.get("topologies") or {})
+        regulator_topology_text = " ".join(
+            f"{name} {description}"
+            for name, description in (candidate.get("topologies") or {}).items()
+            if re.search(r"(?:3v3|3\.3v|3 v3)", f"{name} {description}", re.I)
+        )
         regulator_sheets = [
             sheet
             for sheet in sheets
             if isinstance(sheet, dict)
-            and regulator_terms.search(
-                f"{sheet.get('name', '')} {sheet.get('function', '')}"
+            and regulator_terms.search(f"{sheet.get('name', '')} {sheet.get('function', '')}")
+            and re.search(
+                r"(?:3v3|3\.3v|3 v3)",
+                f"{sheet.get('name', '')} {sheet.get('function', '')}",
+                re.I,
             )
             and not re.search(
                 r"\b(?:mcu|esp32)\b",
-                f"{sheet.get('name', '')} {sheet.get('function', '')}",
+                f"{sheet.get('name', '')} {sheet.get('stem', '')}",
                 re.I,
             )
         ]
         has_sized_source = bool(
-            regulator_terms.search(topology_text)
-            and re.search(r"\b(?:1(?:\.0+)?|[2-9](?:\.\d+)?)\s*a\b", topology_text, re.I)
+            regulator_terms.search(regulator_topology_text)
+            and re.search(
+                r"\b(?:1(?:\.0+)?|[2-9](?:\.\d+)?)\s*a\b",
+                regulator_topology_text,
+                re.I,
+            )
             and regulator_sheets
         )
+
         if not has_sized_source:
             diagnostics.append(
                 _diag(
@@ -582,8 +832,7 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                 for sheet in sheets
                 if isinstance(sheet, dict)
                 and net_token
-                and net_token
-                in _norm_token(f"{sheet.get('name', '')} {sheet.get('function', '')}")
+                and net_token in _norm_token(f"{sheet.get('name', '')} {sheet.get('function', '')}")
             }
             missing = sorted(expected - endpoint_names)
             if missing:
@@ -610,7 +859,7 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     return diagnostics
 
 
-def _bom(candidate: dict) -> list[StageDiagnostic]:
+def _bom(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     diagnostics: list[StageDiagnostic] = []
     placeholders = [
         str(p.get("ref"))
@@ -628,11 +877,84 @@ def _bom(candidate: dict) -> list[StageDiagnostic]:
                 placeholders,
             )
         )
+    architecture = upstream.get("architecture") or {}
+    parts_by_sheet: dict[str, list[dict]] = {}
+    for part in candidate.get("parts") or []:
+        if isinstance(part, dict):
+            parts_by_sheet.setdefault(str(part.get("sheet") or ""), []).append(part)
+    ic_role = re.compile(
+        r"\b(?:controller|mcu|regulator|converter|buck|boost|amplifier|"
+        r"level shifter|sensor|bridge|driver|hub)\b",
+        re.I,
+    )
+    unsupported_roles: list[str] = []
+    for sheet in architecture.get("sheets") or []:
+        if not isinstance(sheet, dict):
+            continue
+        sheet_name = str(sheet.get("name") or "")
+        role_text = f"{sheet_name} {sheet.get('function', '')}"
+        if not ic_role.search(role_text):
+            continue
+        sheet_parts = parts_by_sheet.get(sheet_name, [])
+        if not any(str(part.get("ref") or "").startswith("U") for part in sheet_parts):
+            unsupported_roles.append(sheet_name)
+    if unsupported_roles:
+        diagnostics.append(
+            _diag(
+                "bom_architecture_role_unsupported",
+                "repair_required",
+                "An architecture IC role has no corresponding U-reference implementation on its sheet.",
+                sorted(unsupported_roles),
+            )
+        )
     return diagnostics
 
 
+def _shared_wiring_gate_diagnostics(
+    upstream: dict,
+    candidate: dict,
+) -> list[StageDiagnostic]:
+    """Run the same pure graph gates used by final commit before provider retry."""
+    architecture_payload = upstream.get("architecture")
+    bom_payload = upstream.get("bom")
+    if not isinstance(architecture_payload, dict) or not isinstance(bom_payload, dict):
+        return []
+    try:
+        architecture = Architecture.model_validate(architecture_payload)
+        bom = BOM.model_validate(
+            {
+                **bom_payload,
+                "connections": candidate.get("connections") or [],
+                "no_connect_pins": candidate.get("no_connect_pins") or [],
+            }
+        )
+    except (TypeError, ValueError):
+        return []
+    from kicraft.design.synthesis.validation import (
+        check_inter_sheet_nets_realized,
+        check_mcu_programming_access,
+        check_net_coverage,
+        check_no_dangling_signal_nets,
+    )
+
+    checks = (
+        ("wiring_gate_9_11", check_net_coverage(bom)),
+        ("wiring_gate_9_14", check_inter_sheet_nets_realized(architecture, bom)),
+        ("wiring_gate_9_15", check_no_dangling_signal_nets(architecture, bom)),
+        ("wiring_gate_9_29", check_mcu_programming_access(bom)),
+    )
+    return [
+        _diag(code, "fab_gate", result.message, list(result.offenders))
+        for code, result in checks
+        if not result.ok
+    ]
+
+
 def _wiring(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
-    diagnostics: list[StageDiagnostic] = []
+    diagnostics: list[StageDiagnostic] = _shared_wiring_gate_diagnostics(
+        upstream,
+        candidate,
+    )
     bom = dict(upstream.get("bom") or {})
     bom.update(candidate)
     parts = {str(p.get("ref")): p for p in bom.get("parts") or [] if isinstance(p, dict)}
@@ -685,7 +1007,7 @@ def diagnose_stage(
     elif stage == "architecture":
         findings = _architecture(upstream_state, candidate)
     elif stage == "bom":
-        findings = _bom(candidate)
+        findings = _bom(upstream_state, candidate)
     elif stage == "wiring":
         findings = _wiring(upstream_state, candidate)
     else:

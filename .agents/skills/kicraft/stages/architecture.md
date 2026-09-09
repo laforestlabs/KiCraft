@@ -13,8 +13,8 @@ Slot shape (`Architecture`):
 - `comms_protocols`: list (e.g. `["I2C", "USB 2.0 FS"]`).
 - `mcu_present`: bool.
 - `sheets`: one `Sheet` per functional block (typically). Each Sheet has:
-  - `name` — uppercase with spaces, regex `^[A-Z][A-Z0-9 ]*[A-Z0-9]$` (e.g. `"USB INPUT"`, `"BOOST 5V"`). NO hyphens or punctuation — `"AUDIO CHANNEL 1-2"` is invalid; use a space (`"AUDIO CHANNEL 1 2"`) or spell it out (`"AUDIO CHANNEL 1 AND 2"`).
-  - `stem` — uppercase with underscores, regex `^[A-Z][A-Z0-9_]*$` (e.g. `"USB_INPUT"`, `"BOOST_5V"`). KiCraft uses this as the filename stem.
+  - `name` — uppercase letters/digits with spaces, regex `^[A-Z0-9](?:[A-Z0-9 ]*[A-Z0-9])?$` (e.g. `"USB INPUT"` or `"5V BUCK"`). NO hyphens or punctuation — `"AUDIO CHANNEL 1-2"` is invalid; use a space (`"AUDIO CHANNEL 1 2"`) or spell it out (`"AUDIO CHANNEL 1 AND 2"`).
+  - `stem` — uppercase with underscores, regex `^[A-Z0-9][A-Z0-9_]*$` (e.g. `"USB_INPUT"` or `"5V_BUCK"`). KiCraft uses this as the filename stem.
   - `function` — one-sentence description.
   - `from_library` — `"<name>@<version>"` when reusing a leaf, else null.
   - `library_instance` — 1 for the first instance of a reused leaf, 2 for the second, etc. Null when `from_library` is null. BOTH MUST BE SET OR BOTH NULL.
@@ -80,10 +80,29 @@ bidirectional at sheet boundaries. Programming labels alone never prove a path.
 
 **External-load power budget.** When the accepted functional spec says the board
 supplies power to a display, LED string, motor, heater, or other external load,
-the architecture must include an explicit maximum output-current budget. If the
-brief and prior answers do not supply one, return one `blocking: true` question
-before choosing the USB-C/PD sink or power-path topology. Never size an external
-load path from an unrelated regulator rating.
+the architecture must include both the maximum output-current budget and an
+input-source power budget with headroom for the board and conversion losses. If
+the brief and prior answers do not supply the output current, return one
+`blocking: true` question before choosing the USB-C/PD sink or power-path
+topology. Never equate the external-load current with input current: a 5 V / 5 A
+external-load budget needs a higher-voltage input contract and a dedicated buck
+converter because USB-PD contracts cannot exceed 5 A. The regulated 5 V
+converter's output-current rating must also exceed the external-load current so
+the onboard circuits retain headroom. Include the negotiated input
+voltage/current and the regulated output voltage/current explicitly. When
+a phrase such as "configured for 5 V" could mean either the PD contract or the
+regulated load output, ask which is required instead of guessing. Never size an
+external load path from an unrelated regulator rating.
+
+**Right-size the input contract.** Choose the smallest common source contract
+that covers the named regulated-output budget, onboard load, realistic conversion
+loss, and transient margin. Do not maximize source voltage/current merely because
+USB-PD offers it: for a 30 W regulated load, a common 15 V / 3 A contract is
+normally preferred over 20 V / 5 A unless another requirement consumes the extra
+55 W. State the margin and the requirement that justifies it. Treat a source
+contract at least 2× the downstream converter capacity with at least 30 W of
+unused capacity as gross overprovision that must be corrected or explicitly
+justified.
 
 **Rail-source completeness.** Every declared non-input power rail must name the
 regulator or converter topology that generates it. A distinct regulator IC is
@@ -92,4 +111,15 @@ its own physical sheet and connects to its source and output rails through
 5V-to-3.3V regulator sized for at least 1A; never silently drop the rail or leave
 its source for the BOM stage to invent.
 
-Open-question discipline matches earlier stages.
+**Power-net identity.** Use one canonical net name for a direct electrical
+connection. Two same-voltage rails such as `VBUS` and `+5V` are distinct nets;
+keep both only when the architecture names the fuse, switch, filter, net tie, or
+converter that connects them. Do not emit both as unexplained outputs of one
+sheet or distribute different loads between them without that relationship.
+
+
+Open-question discipline matches earlier stages. If a question has a safe
+default, it is not blocking: apply that default in the first draft and record
+the choice in `assumptions` ending `(defaulted)`. Return a blocking question
+only when no safe default exists and the answer materially changes the board;
+never ask merely to confirm a default you can already state.

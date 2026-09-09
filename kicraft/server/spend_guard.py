@@ -1,10 +1,10 @@
 """The spend gate: the single enforcement point for model cost (plan B0).
 
-Every model call runs `preflight()` (refuse if over a ceiling or kill-switched),
-then spends, then `record()` the actual cost. Ceilings are checked against a
-persistent SQLite ledger, so the limit survives restarts and is shared across
-worker processes. Combined with a bounded `max_tokens` per call, the worst case
-is a single small overshoot past a ceiling, never an unbounded bill.
+Every model call runs `preflight()` with its configured call-cost ceiling
+(refuse if the remaining global/project budget cannot cover it or when
+kill-switched), then spends, then `record()` stores actual cost. Ceilings use a
+persistent SQLite ledger shared across worker processes, so bounded calls do not
+cross a configured budget merely because accounting happens after dispatch.
 """
 
 from __future__ import annotations
@@ -123,13 +123,27 @@ class SpendGuard:
                 "diagnostic_codes TEXT,"
                 "unit_id TEXT,"
                 "unit_attempt INTEGER,"
-                "aggregate_round INTEGER)"
+                "aggregate_round INTEGER,"
+                "commit_gate_codes TEXT,"
+                "offender_count INTEGER,"
+                "rejection_signature TEXT,"
+                "provider_profile TEXT,"
+                "fallback_reason TEXT,"
+                "candidate_retained INTEGER,"
+                "reasoning_failure_kind TEXT)"
             )
             attempt_cols = {row[1] for row in conn.execute("PRAGMA table_info(stage_attempts)")}
             for column in (
                 "unit_id TEXT",
                 "unit_attempt INTEGER",
                 "aggregate_round INTEGER",
+                "commit_gate_codes TEXT",
+                "offender_count INTEGER",
+                "rejection_signature TEXT",
+                "provider_profile TEXT",
+                "fallback_reason TEXT",
+                "candidate_retained INTEGER",
+                "reasoning_failure_kind TEXT",
             ):
                 name = column.split()[0]
                 if name not in attempt_cols:
@@ -165,6 +179,15 @@ class SpendGuard:
         return self._sum(
             "WHERE json_valid(meta) AND json_extract(meta, '$.run_id') LIKE ?",
             (f"p{int(project_id)}-%",),
+        )
+
+    def spent_for_run(self, run_id: str | None) -> float:
+        """Actual provider cost attributed to one exact pipeline run."""
+        if not run_id:
+            return 0.0
+        return self._sum(
+            "WHERE json_valid(meta) AND json_extract(meta, '$.run_id') = ?",
+            (str(run_id),),
         )
 
     def spent_by_day(self, days: int = 30) -> list[tuple[str, float]]:
@@ -231,24 +254,39 @@ class SpendGuard:
             "daily_remaining_usd": round(self.s.daily_usd_ceiling - day, 6),
             "total_remaining_usd": round(self.s.total_usd_ceiling - total, 6),
             "kill_switch": self.s.kill_switch,
+            "project_llm_budget_usd": float(getattr(self.s, "project_llm_budget_usd", 0.0) or 0.0),
         }
 
-    def preflight(self) -> None:
-        """Refuse before spending if kill-switched or a ceiling is already reached."""
+    def preflight(
+        self,
+        call_ceiling_usd: float = 0.0,
+        run_id: str | None = None,
+    ) -> None:
+        """Reserve enough remaining budget for one configured bounded call."""
         if self.s.kill_switch:
             raise KillSwitchEngaged("KICRAFT_KILL_SWITCH is engaged; refusing all model calls.")
+        reserve = max(0.0, float(call_ceiling_usd or 0.0))
         total = self.spent_total()
-        if total >= self.s.total_usd_ceiling:
+        if total >= self.s.total_usd_ceiling or total + reserve > self.s.total_usd_ceiling:
             raise BudgetExceeded(
-                f"total spend ${total:.4f} has reached the ceiling "
-                f"${self.s.total_usd_ceiling:.2f}; refusing."
+                f"total remaining budget cannot cover call ceiling ${reserve:.4f} "
+                f"(spent ${total:.4f} of ${self.s.total_usd_ceiling:.2f}); refusing."
             )
         day = self.spent_today()
-        if day >= self.s.daily_usd_ceiling:
+        if day >= self.s.daily_usd_ceiling or day + reserve > self.s.daily_usd_ceiling:
             raise BudgetExceeded(
-                f"today's spend ${day:.4f} has reached the daily ceiling "
-                f"${self.s.daily_usd_ceiling:.2f}; refusing."
+                f"daily remaining budget cannot cover call ceiling ${reserve:.4f} "
+                f"(spent ${day:.4f} of ${self.s.daily_usd_ceiling:.2f}); refusing."
             )
+        project_budget = float(getattr(self.s, "project_llm_budget_usd", 0.0) or 0.0)
+        if run_id and project_budget > 0:
+            run_spend = self.spent_for_run(run_id)
+            if run_spend + reserve > project_budget:
+                raise BudgetExceeded(
+                    f"project run {run_id} remaining budget cannot cover call ceiling "
+                    f"${reserve:.4f} (spent ${run_spend:.4f} of "
+                    f"${project_budget:.2f}); refusing."
+                )
 
     def record(self, model: str, input_tokens, output_tokens, cost_usd: float, meta="") -> None:
         """Append one billed call. `meta` may be a bare phase string (legacy) or a
@@ -354,16 +392,26 @@ class SpendGuard:
         unit_id: str | None = None,
         unit_attempt: int | None = None,
         aggregate_round: int | None = None,
+        commit_gate_codes=(),
+        offender_count: int | None = None,
+        rejection_signature: str | None = None,
+        provider_profile: str | None = None,
+        fallback_reason: str | None = None,
+        candidate_retained: bool | None = None,
+        reasoning_failure_kind: str | None = None,
     ) -> None:
         """Append redacted per-call facts; never stores prompts or responses."""
         codes = sorted({str(code) for code in diagnostic_codes if code})
+        gate_codes = list(dict.fromkeys(str(code) for code in commit_gate_codes if code))
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO stage_attempts (ts,run_id,stage,attempt,call_mode,"
                 "model,provider,finish_reason,outcome,http_status,error_code,"
                 "request_id,wall_s,input_tokens,output_tokens,cost_usd,diagnostic_codes,"
-                "unit_id,unit_attempt,aggregate_round)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "unit_id,unit_attempt,aggregate_round,commit_gate_codes,offender_count,"
+                "rejection_signature,provider_profile,fallback_reason,candidate_retained,"
+                "reasoning_failure_kind)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     _utcnow_iso(),
                     run_id,
@@ -385,5 +433,12 @@ class SpendGuard:
                     unit_id,
                     int(unit_attempt) if unit_attempt is not None else None,
                     int(aggregate_round) if aggregate_round is not None else None,
+                    json.dumps(gate_codes, separators=(",", ":")),
+                    int(offender_count) if offender_count is not None else None,
+                    rejection_signature,
+                    provider_profile,
+                    fallback_reason,
+                    int(candidate_retained) if candidate_retained is not None else None,
+                    reasoning_failure_kind,
                 ),
             )

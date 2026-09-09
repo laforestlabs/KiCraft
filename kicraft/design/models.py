@@ -21,8 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 REF_RE = re.compile(r"^[A-Z]+[0-9]+[A-Z0-9_-]*$")
 FOOTPRINT_RE = re.compile(r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.,+-]+$")
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.+-]+$")
-SHEET_NAME_RE = re.compile(r"^[A-Z][A-Z0-9 ]*[A-Z0-9]$")
-SHEET_STEM_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+SHEET_NAME_RE = re.compile(r"^[A-Z0-9](?:[A-Z0-9 ]*[A-Z0-9])?$")
+SHEET_STEM_RE = re.compile(r"^[A-Z0-9][A-Z0-9_]*$")
 # `'` allows prime-notation pin numbers (e.g. a transformer's 1'/2', or LCSC
 # symbols that label mirrored pads 1'/2'); the net-coverage check still enforces
 # that the pin actually exists on the symbol, so widening this can't mask a typo.
@@ -271,7 +271,7 @@ class Sheet(BaseModel):
     def _name_shape(cls, v: str) -> str:
         if not SHEET_NAME_RE.match(v):
             raise ValueError(
-                f"Sheet.name {v!r} must be uppercase with optional spaces (e.g. 'USB INPUT')"
+                f"Sheet.name {v!r} must contain only uppercase letters, digits, and optional spaces (e.g. 'USB INPUT' or '5V BUCK')"
             )
         return v
 
@@ -280,7 +280,7 @@ class Sheet(BaseModel):
     def _stem_shape(cls, v: str) -> str:
         if not SHEET_STEM_RE.match(v):
             raise ValueError(
-                f"Sheet.stem {v!r} must be uppercase with underscores (e.g. 'USB_INPUT')"
+                f"Sheet.stem {v!r} must contain only uppercase letters, digits, and underscores (e.g. 'USB_INPUT' or '5V_BUCK')"
             )
         return v
 

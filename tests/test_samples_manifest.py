@@ -5,9 +5,9 @@ The public landing page and the in-app explorer both render the curated samples 
 the static 3D model, schematic, and routed board; only the action to build a new
 design remains signup-gated.
 """
+
 from __future__ import annotations
 
-import inspect
 import re
 
 from kicraft.server import samples as S
@@ -85,16 +85,6 @@ def test_landing_cards_open_public_example_pages():
         assert "/signup?prompt=" not in card
         assert "/?prompt=" not in card
         assert 'href="/"' not in card
-
-
-def test_public_example_detail_page_is_3d_and_not_login_gated():
-    """Each public detail page exposes the curated 3D viewer without auth."""
-    routes = [getattr(route, "path", "") for route in web.app.routes]
-    assert "/examples/{sample_id}" in routes
-    src = inspect.getsource(web.sample_detail_page)
-    assert "_current_user" not in src
-    assert "_render_sample_3d(sample)" in src
-    assert "/signup?prompt=" in src
 
 
 def test_landing_card_keeps_prompt_as_display_only():

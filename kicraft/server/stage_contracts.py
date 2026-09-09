@@ -11,7 +11,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kicraft.design import models
 
-from .config import BOM_SHEET_PART_LIMIT, BOM_TOTAL_PART_LIMIT
+from .config import (
+    BOM_ARRAY_LIMIT,
+    BOM_GROUP_LIMIT,
+    BOM_NOTE_LIMIT,
+    BOM_SHEET_PART_LIMIT,
+    BOM_TOTAL_PART_LIMIT,
+)
 
 # Canonical stage -> slot model, mirroring cli_app._apply_slot's owned-field map.
 SLOT_MODEL = {
@@ -145,10 +151,13 @@ class BomStageResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    groups: list[BomComponentGroup] = Field(default_factory=list, max_length=BOM_TOTAL_PART_LIMIT)
-    arrays: list[BomArrayGroup] = Field(default_factory=list, max_length=100)
-    assumptions: list[str] = Field(default_factory=list)
-    substitutions: list[models.Substitution] = Field(default_factory=list)
+    groups: list[BomComponentGroup] = Field(default_factory=list, max_length=BOM_GROUP_LIMIT)
+    arrays: list[BomArrayGroup] = Field(default_factory=list, max_length=BOM_ARRAY_LIMIT)
+    assumptions: list[str] = Field(default_factory=list, max_length=BOM_NOTE_LIMIT)
+    substitutions: list[models.Substitution] = Field(
+        default_factory=list,
+        max_length=BOM_NOTE_LIMIT,
+    )
 
     @model_validator(mode="after")
     def _ids_unique(self):
@@ -357,9 +366,10 @@ def build_stage_response_contract(
     prompt_state: dict,
     *,
     bom_sheet: str | None = None,
+    allow_questions: bool = True,
     wiring_refs: tuple[str, ...] | None = None,
 ) -> StageResponseContract:
-    schema = _response_schema(stage)
+    schema = _response_schema(stage) if allow_questions else _slot_response_schema(stage)
     if stage == "bom":
         architecture_names = _architecture_sheet_names(prompt_state)
         if bom_sheet is not None and bom_sheet not in architecture_names:
@@ -386,7 +396,10 @@ def build_stage_response_contract(
                 raise ValueError(f"wiring response schema is missing {name}.ref")
             ref["enum"] = list(wiring_refs)
     version = 3 if stage in {"bom", "wiring"} else (2 if stage == "architecture" else 1)
-    response_format = _json_response_format(f"kicraft_{stage}_response_v{version}", schema)
+    contract_name = f"kicraft_{stage}_response_v{version}"
+    if not allow_questions:
+        contract_name += "_noninteractive"
+    response_format = _json_response_format(contract_name, schema)
     return StageResponseContract(stage=stage, schema=schema, response_format=response_format)
 
 
@@ -409,6 +422,65 @@ def _inter_sheet_net_endpoint_signature(endpoints: list[dict]) -> tuple[tuple[st
     )
 
 
+def _normalize_architecture_sheet_aliases(payload: dict) -> dict:
+    """Canonicalize the model's common sheet-name/stem interchange.
+
+    ``Sheet.name`` is the human label (spaces); ``Sheet.stem`` is the filesystem
+    identifier (underscores). Structured-output schemas cannot express the
+    Architecture model's cross-field endpoint check, so models sometimes put a
+    valid stem in ``SheetPin.sheet`` or use the stem spelling for ``Sheet.name``.
+    Both identify the same declared sheet and need no paid repair call.
+    """
+    raw_sheets = payload.get("sheets")
+    if not isinstance(raw_sheets, list):
+        return payload
+    aliases: dict[str, str] = {}
+    sheets: list[object] = []
+    for raw_sheet in raw_sheets:
+        if not isinstance(raw_sheet, dict):
+            sheets.append(raw_sheet)
+            continue
+        sheet = dict(raw_sheet)
+        raw_name = sheet.get("name")
+        if isinstance(raw_name, str):
+            canonical_name = re.sub(r"\s+", " ", raw_name.replace("_", " ")).strip()
+            sheet["name"] = canonical_name
+            aliases[raw_name] = canonical_name
+            raw_stem = sheet.get("stem")
+            if isinstance(raw_stem, str):
+                aliases[raw_stem] = canonical_name
+        sheets.append(sheet)
+
+    normalized = dict(payload)
+    normalized["sheets"] = sheets
+    for field in ("inter_sheet_nets", "inter_sheet_net_ranges"):
+        raw_nets = payload.get(field)
+        if not isinstance(raw_nets, list):
+            continue
+        nets: list[object] = []
+        for raw_net in raw_nets:
+            if not isinstance(raw_net, dict):
+                nets.append(raw_net)
+                continue
+            net = dict(raw_net)
+            raw_endpoints = net.get("endpoints")
+            if isinstance(raw_endpoints, list):
+                endpoints: list[object] = []
+                for raw_endpoint in raw_endpoints:
+                    if not isinstance(raw_endpoint, dict):
+                        endpoints.append(raw_endpoint)
+                        continue
+                    endpoint = dict(raw_endpoint)
+                    raw_ref = endpoint.get("sheet")
+                    if isinstance(raw_ref, str) and raw_ref in aliases:
+                        endpoint["sheet"] = aliases[raw_ref]
+                    endpoints.append(endpoint)
+                net["endpoints"] = endpoints
+            nets.append(net)
+        normalized[field] = nets
+    return normalized
+
+
 def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> tuple[dict, int]:
     try:
         if isinstance(payload.get("questions"), list):
@@ -416,6 +488,7 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
         if stage == "intent":
             return IntentStageResponse.model_validate(payload).model_dump(exclude_none=True), 0
         if stage == "architecture":
+            payload = _normalize_architecture_sheet_aliases(payload)
             response = ArchitectureStageResponse.model_validate(payload)
             canonical = response.model_dump(exclude={"inter_sheet_net_ranges"}, exclude_none=True)
             explicit_nets = canonical.get("inter_sheet_nets") or []

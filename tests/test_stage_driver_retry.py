@@ -14,6 +14,7 @@ import requests
 
 from kicraft.design.models import StageDiagnostic
 from kicraft.server import stage_runtime as stage_driver_mod
+from kicraft.server import stage_pipeline
 from kicraft.server.config import DESIGN_PROFILES, Settings
 from kicraft.server.stage_bom_tools import BOM_TOOLS
 from kicraft.server.stage_contracts import (
@@ -26,6 +27,7 @@ from kicraft.server.stage_prompts import build_system as _build_system
 from kicraft.server.stage_runtime import (
     _classify_parse_failure,
     _commit_rejection_signature,
+    _redacted_rejection_facts,
     _design_reasoning,
     _normalize_questions,
     _retry_feedback,
@@ -597,6 +599,9 @@ def test_design_reasoning_policy_selection():
     assert _design_reasoning(_C(), "intent") == {"enabled": False}
     assert _design_reasoning(_C(), "functional_spec") == {"enabled": False}
     assert _design_reasoning(_C(), "architecture") == {"max_tokens": 2048}
+    defaults = Settings(api_key="test")
+    assert defaults.design_reasoning_tokens == 0
+    assert defaults.design_reasoning("architecture") == {"enabled": False}
     assert _design_reasoning(object(), "intent") is None  # mock: no .s policy
 
 
@@ -746,7 +751,7 @@ def test_default_semantic_mode_repairs_explicit_intent_classification(tmp_path):
     assert len(client.calls) == 1
 
 
-def test_semantic_repair_allows_two_progressive_passes(tmp_path):
+def test_semantic_repair_is_bounded_to_one_correction(tmp_path):
     brief = "USB-C 5V controller with a speaker output"
     intent = {
         "goal": brief,
@@ -820,15 +825,30 @@ def test_semantic_repair_allows_two_progressive_passes(tmp_path):
     )
     client.s = Settings(api_key="test")
 
-    result = run_session(tmp_path, brief, ["intent", "functional_spec"], client=client)
+    events = []
+    result = run_session(
+        tmp_path,
+        brief,
+        ["intent", "functional_spec"],
+        client=client,
+        progress=events.append,
+    )
 
     functional = result["results"][1]
     assert result["status"] == "ok"
-    assert functional["attempts"] == 3
+    assert functional["attempts"] == 2
     assert functional["repair_attempted"] is True
     assert functional["repair_adopted"] is True
-    assert functional["diagnostics"] == []
-    assert len(client.calls) == 4
+    assert [item["code"] for item in functional["diagnostics"]] == [
+        "functional_spec_premature_topology"
+    ]
+    assert len(client.calls) == 3
+    assert any(
+        event.get("kind") == "stage_diagnostic"
+        and event.get("code") == "functional_spec_premature_topology"
+        and event.get("attempt") == 1
+        for event in events
+    )
 
 
 def test_rate_limit_falls_back_once_with_shared_guard_and_pristine_messages(tmp_path):
@@ -949,6 +969,9 @@ def test_empty_provider_fallback_profile_preserves_terminal_rate_limit(tmp_path)
     )
     assert result["status"] == "failed"
     assert len(client.calls) == 1
+    assert result["failure_kind"] == "provider_rate_limited"
+    assert result["retryable"] is True
+    assert result["retry_action"] == "retry_stage"
 
 
 def test_provider_fallback_budget_refusal_does_not_return_to_initial_route(tmp_path):
@@ -1021,7 +1044,7 @@ def test_truncated_json_triggers_one_plain_tool_free_serialization_call(tmp_path
     assert serial["max_tokens"] == 2 * first["max_tokens"]  # ... which is 2x the 4096 normal
     retry_message = serial["messages"][-1]["content"]
     assert "about 23 characters" in retry_message
-    assert "collection must contain" not in retry_message
+    assert "`constraints` collection must contain at most 64 items total" in retry_message
     # the cap is the policy's fixed value, never doubled AGAIN: a truncated
     # serialization result would go terminal, not raise to 16384.
     recovery = next(event for event in events if event["kind"] == "serialization_recovery")
@@ -1156,6 +1179,58 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
     assert res["results"][-1]["failure_kind"] == "invalid_json"
 
 
+def test_explicit_bom_topology_skips_provider_call(tmp_path, monkeypatch):
+    state = {
+        "architecture": {
+            "topologies": {"INPUT": "8-pin header"},
+            "rail_voltages": {},
+            "sheets": [
+                {
+                    "name": "INPUT",
+                    "stem": "INPUT",
+                    "function": "Eight digital inputs",
+                }
+            ],
+            "power_nets": ["GND"],
+            "inter_sheet_nets": [],
+            "recipe_selections": [],
+        }
+    }
+    prep = {"state": state, "extras": {}}
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc", (), {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""}
+        )(),
+    )
+    commits = []
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "commit_stage",
+        lambda stage, slot, *args, **kwargs: (commits.append(slot) or True, {"ok": True}),
+    )
+    progress = []
+    client = _unit_client([])
+
+    result = stage_driver_mod.drive_stage(
+        client,
+        "bom",
+        "eight digital inputs",
+        tmp_path / "state.json",
+        tmp_path,
+        progress=progress.append,
+    )
+
+    assert result["commit_ok"] is True
+    assert result["attempts"] == 0
+    assert client.calls == []
+    assert len(commits[0]["parts"]) == 1
+    assert any(
+        event.get("source") == "deterministic_architecture_lowering" for event in progress
+    )
+
+
 def test_invalid_bom_architecture_fails_before_provider_call(tmp_path, monkeypatch):
     prep = {"state": {"architecture": {"sheets": []}}, "extras": {}}
     monkeypatch.setattr(
@@ -1287,7 +1362,22 @@ def test_commit_rejection_signature_normalizes_gate_ids_and_offenders():
     assert _commit_rejection_signature(first) == _commit_rejection_signature(second)
 
 
-def test_repeated_commit_rejection_gets_one_pristine_escape_then_stops(tmp_path, monkeypatch):
+def test_commit_rejection_facts_keep_gates_and_hash_part_identifiers():
+    facts = _redacted_rejection_facts(
+        {
+            "ok": False,
+            "errors": ["9.14 inter-sheet net missing", "9.29 programming path absent"],
+            "offenders": ["U7.12 on CUSTOMER_NET", "J4.3"],
+        },
+        candidate_retained=True,
+    )
+    assert facts["commit_gate_codes"] == ["9.14", "9.29"]
+    assert facts["offender_count"] == 2
+    assert len(facts["rejection_signature"]) == 64
+    assert "U7" not in facts["rejection_signature"]
+
+
+def test_repeated_commit_rejection_stops_without_pristine_escape(tmp_path, monkeypatch):
     rejected = {
         "ok": False,
         "errors": ["9.15 multi-net pin short"],
@@ -1295,17 +1385,13 @@ def test_repeated_commit_rejection_gets_one_pristine_escape_then_stops(tmp_path,
     }
     monkeypatch.setattr(stage_driver_mod, "commit_stage", lambda *args, **kwargs: (False, rejected))
     client = _ScriptedClient([_ok_intent_reply(), _ok_intent_reply(), _ok_intent_reply()])
+    client.s = Settings(api_key="test")
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     last = res["results"][-1]
     assert last["failure_kind"] == "commit_rejected"
-    assert last["attempts"] == 3
-    assert client.calls[2]["reasoning"] == {"enabled": False}
-    assert client.calls[2]["temperature"] == 0.4
-    roles = [message["role"] for message in client.calls[2]["messages"]]
-    assert roles == ["system", "user", "user"]
-    assert all(
-        call["response_format"] is client.calls[0]["response_format"] for call in client.calls
-    )
+    assert last["attempts"] == 2
+    assert len(client.calls) == 2
+    assert {call["model"] for call in client.calls} == {client.s.model}
 
 
 def test_a1_enriched_915_offender_keeps_legacy_commit_signature(monkeypatch):
@@ -1497,28 +1583,55 @@ def _a3_run(
     return result, client
 
 
-def _escape_call(client, idx):
-    """A clean-slate unit replacement omits the rejected assistant serialization."""
-    call = client.calls[idx]
-    return call["temperature"] == 0.4 and [message["role"] for message in call["messages"]] == [
-        "system",
-        "user",
-    ]
+def test_work_unit_repeated_signature_stops_after_one_aggregate_repair(
+    tmp_path,
+    monkeypatch,
+):
+    result, client = _a3_run(
+        tmp_path,
+        monkeypatch,
+        ["A", "A"],
+        max_retries=99,
+        extra_ok_reply=False,
+    )
+    assert result["commit_ok"] is False
+    assert result["failure_kind"] == "commit_rejected"
+    assert result["aggregate_repair_rounds"] == 1
+    assert result["attempts"] == 2
+    assert len(client.calls) == 2
 
 
-def test_a3_escape_then_changed_signature_commits(tmp_path, monkeypatch):
-    """A, A -> pro clean slate -> B -> preserving pro retry -> commit OK."""
-    events = []
+def test_work_unit_changed_signature_still_stops_after_one_aggregate_repair(
+    tmp_path,
+    monkeypatch,
+):
+    result, client = _a3_run(
+        tmp_path,
+        monkeypatch,
+        ["A", "B"],
+        max_retries=99,
+        extra_ok_reply=False,
+    )
+    assert result["commit_ok"] is False
+    assert result["aggregate_repair_rounds"] == 1
+    assert result["attempts"] == 2
+    assert len(client.calls) == 2
+
+
+def test_work_unit_commit_process_failure_has_no_followup_call(tmp_path, monkeypatch):
     state_path = _a3_wiring_state(tmp_path, monkeypatch)
-    rejects = iter(["A", "A", "B"])
-
-    def fake_commit(stage, slot, *args, **kwargs):
-        try:
-            return False, _a3_sig(next(rejects))
-        except StopIteration:
-            return True, {"ok": True}
-
-    monkeypatch.setattr(stage_driver_mod, "commit_stage", fake_commit)
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "commit_stage",
+        lambda *args, **kwargs: (
+            False,
+            {
+                "ok": False,
+                "failure_kind": "commit_process_failed",
+                "errors": ["stage-commit exited 7"],
+            },
+        ),
+    )
     reply = {
         "text": json.dumps(
             {
@@ -1534,235 +1647,19 @@ def test_a3_escape_then_changed_signature_commits(tmp_path, monkeypatch):
         "finish_reason": "stop",
         "cost_usd": 0.0,
     }
-    client = _ScriptedClient([dict(reply) for _ in range(4)])
-    client.s = Settings(
-        api_key="test",
-        design_profile="flash",
-        escalation_profile="pro",
-    )
+    client = _ScriptedClient([reply])
+    client.s = Settings(api_key="test")
     result = stage_driver_mod.drive_stage(
         client,
         "wiring",
         "test",
         state_path,
         tmp_path,
-        max_retries=7,
-        progress=events.append,
+        max_retries=99,
     )
-    assert result["commit_ok"] is True
-    assert result["attempts"] == 4
-    assert _escape_call(client, 2)
-    assert not _escape_call(client, 3)
-    assert [m["role"] for m in client.calls[2]["messages"]] == ["system", "user"]
-    assert client.calls[2]["reasoning"] == {"enabled": False}
-    assert client.calls[2]["model"] == DESIGN_PROFILES["pro"]["model"]
-    assert client.calls[3]["model"] == DESIGN_PROFILES["pro"]["model"]
-    assert all(call["guard"] is client.guard for call in client.calls)
-    escalations = [event for event in events if event["kind"] == "escalation"]
-    assert escalations == [
-        {
-            "kind": "escalation",
-            "stage": "wiring",
-            "from": Settings(api_key="x").model,
-            "to": DESIGN_PROFILES["pro"]["model"],
-            "attempt": 3,
-            "reason": "repeated_commit_signature",
-        }
-    ]
-    retries = [event for event in events if event["kind"] == "retry"]
-    assert [event["model"] for event in retries] == [
-        Settings(api_key="x").model,
-        Settings(api_key="x").model,
-        DESIGN_PROFILES["pro"]["model"],
-    ]
-    assert [m["role"] for m in client.calls[3]["messages"]] == ["system", "user"]
-    assert "aggregate_commit_rejection" in client.calls[3]["messages"][-1]["content"]
-
-
-def test_changed_signature_does_not_escalate(tmp_path, monkeypatch):
-    events = []
-    result, client = _a3_run(
-        tmp_path,
-        monkeypatch,
-        ["A", "B"],
-        progress=events.append,
-    )
-    assert result["commit_ok"] is True
-    assert len(client.calls) == 3
-    assert not [event for event in events if event["kind"] == "escalation"]
-
-
-@pytest.mark.parametrize(
-    ("design_profile", "escalation_profile"),
-    [("flash", ""), ("pro", "pro")],
-)
-def test_disabled_escalation_uses_initial_route(
-    tmp_path,
-    monkeypatch,
-    design_profile,
-    escalation_profile,
-):
-    result, client = _a3_run(
-        tmp_path,
-        monkeypatch,
-        ["A", "A", "B"],
-        design_profile=design_profile,
-        escalation_profile=escalation_profile,
-    )
-    assert result["commit_ok"] is True
-
-    assert {call["model"] for call in client.calls} == {DESIGN_PROFILES[design_profile]["model"]}
-
-
-def test_eight_distinct_wiring_rejections_use_full_outer_budget(tmp_path, monkeypatch):
-    result, client = _a3_run(
-        tmp_path,
-        monkeypatch,
-        list("ABCDEFGH"),
-        max_retries=7,
-        extra_ok_reply=False,
-    )
-    assert result["commit_ok"] is False
-    assert result["failure_kind"] == "commit_rejected"
-    assert result["attempts"] == 6
-    assert len(client.calls) == 6
-
-
-def test_escalated_budget_refusal_has_no_flash_fallback(tmp_path, monkeypatch):
-    from kicraft.server.spend_guard import BudgetExceeded
-
-    class RefusingEscalatedClient(_ScriptedClient):
-        def chat(self, *args, **kwargs):
-            if self.s.design_profile == "pro":
-                self.calls.append(
-                    {
-                        "model": self.s.model,
-                        "guard": self.guard,
-                        "messages": list(args[0]),
-                    }
-                )
-                raise BudgetExceeded("run budget exhausted")
-            return super().chat(*args, **kwargs)
-
-    state_path = _a3_wiring_state(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        stage_driver_mod,
-        "commit_stage",
-        lambda *args, **kwargs: (False, _a3_sig("A")),
-    )
-    wiring_reply = {
-        "text": json.dumps(
-            {
-                "pins": [
-                    {"ref": "U1", "pin": "1", "net": "A"},
-                    {"ref": "R1", "pin": "1", "net": "A"},
-                    {"ref": "R1", "pin": "2", "net": "B"},
-                    {"ref": "U1", "pin": "2", "net": "B"},
-                ]
-            }
-        ),
-        "reasoning": "",
-        "finish_reason": "stop",
-        "cost_usd": 0.0,
-    }
-    client = RefusingEscalatedClient([dict(wiring_reply), dict(wiring_reply)])
-    client.s = Settings(
-        api_key="test",
-        design_profile="flash",
-        escalation_profile="pro",
-    )
-    with pytest.raises(BudgetExceeded):
-        stage_driver_mod.drive_stage(
-            client,
-            "wiring",
-            "test",
-            state_path,
-            tmp_path,
-            max_retries=7,
-        )
-    assert len(client.calls) == 3
-    assert [call["model"] for call in client.calls] == [
-        Settings(api_key="x").model,
-        Settings(api_key="x").model,
-        DESIGN_PROFILES["pro"]["model"],
-    ]
-
-
-def test_a3_escape_repeating_arming_signature_terminates(tmp_path, monkeypatch):
-    """A, A -> clean slate -> A -> terminal (the no-progress regression)."""
-    result, client = _a3_run(tmp_path, monkeypatch, ["A", "A", "A"], extra_ok_reply=False)
-    assert result["commit_ok"] is False
-    assert result["failure_kind"] == "commit_rejected"
-    assert result["attempts"] == 3
-    assert len(client.calls) == 3  # terminated, not a fourth call
-    assert _escape_call(client, 2)
-
-
-def test_a3_post_escape_repeat_terminates_without_second_escape(tmp_path, monkeypatch):
-    """A, A -> clean slate -> B -> B -> terminal, and the escape never re-arms."""
-    result, client = _a3_run(tmp_path, monkeypatch, ["A", "A", "B", "B"], extra_ok_reply=False)
-    assert result["commit_ok"] is False
-    assert result["attempts"] == 4
-    assert len(client.calls) == 4
-    assert _escape_call(client, 2)
-    assert not _escape_call(client, 3)  # a post-escape repeat terminates, it does NOT escape again
-
-
-def test_a3_post_escape_changed_signatures_consume_only_loop_budget(tmp_path, monkeypatch):
-    """A, A -> clean slate -> B -> C -> D: every signature differs, so normal
-    corrections continue until the OUTER LOOP bound (max_retries + 1 = 5
-    iterations) and no second clean slate fires."""
-    result, client = _a3_run(
-        tmp_path, monkeypatch, ["A", "A", "B", "C", "D"], max_retries=4, extra_ok_reply=False
-    )
-    assert result["commit_ok"] is False
-    assert result["attempts"] == 5
-    assert len(client.calls) == 5
-    escapes = [i for i in range(len(client.calls)) if _escape_call(client, i)]
-    assert escapes == [2]  # exactly one clean slate, ever
-
-
-def test_a3_serialization_recovery_plus_rejections_respects_work_unit_repair_bound(
-    tmp_path, monkeypatch
-):
-    """Serialization recovery plus three configured minimum repair rounds is bounded."""
-    state_path = _a3_wiring_state(tmp_path, monkeypatch)
-    n = {"i": 0}
-
-    def fake_commit(stage, slot, *args, **kwargs):
-        i = n["i"]
-        n["i"] += 1
-        if i < 5:
-            return False, _a3_sig("ABCDE"[i])
-        return True, {"ok": True}
-
-    monkeypatch.setattr(stage_driver_mod, "commit_stage", fake_commit)
-    good = {
-        "pins": [
-            {"ref": "U1", "pin": "1", "net": "A"},
-            {"ref": "R1", "pin": "1", "net": "A"},
-            {"ref": "R1", "pin": "2", "net": "B"},
-            {"ref": "U1", "pin": "2", "net": "B"},
-        ]
-    }
-    client = _ScriptedClient(
-        [
-            {"text": '{"pins": [', "reasoning": "", "finish_reason": "length", "cost_usd": 0.0},
-            {"text": json.dumps(good), "finish_reason": "stop", "cost_usd": 0.0},
-        ]
-        + [
-            {"text": json.dumps(good), "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0}
-            for _ in range(5)
-        ]
-    )
-    client.s = Settings(api_key="test")
-    result = stage_driver_mod.drive_stage(
-        client, "wiring", "test", state_path, tmp_path, max_retries=2
-    )
-    assert result["commit_ok"] is False
-    # Initial generation + one serialization recovery + three aggregate repairs.
-    assert result["attempts"] == 5
-    assert len(client.calls) == 5
+    assert result["failure_kind"] == "commit_process_failed"
+    assert result["attempts"] == 1
+    assert len(client.calls) == 1
 
 
 def test_wiring_rejection_uses_complete_same_schema_correction(tmp_path, monkeypatch):
@@ -1928,10 +1825,15 @@ def test_response_policy_falls_back_for_mock_clients():
     assert pol.normal_reasoning is None  # no .s -> no reasoning control
     assert pol.serialization_max_tokens == 32768
     assert pol.serialization_retries == 1
-    assert len(pol.collection_bounds) == 1
-    assert pol.collection_bounds[0].field == "groups"
-    assert pol.collection_bounds[0].total == 500
-    assert pol.collection_bounds[0].per_group == 450
+    assert [bound.field for bound in pol.collection_bounds] == [
+        "groups",
+        "arrays",
+        "assumptions",
+        "substitutions",
+    ]
+    assert pol.collection_bounds[0].total == 64
+    assert pol.collection_bounds[0].per_group == 64
+    assert [bound.total for bound in pol.collection_bounds[1:]] == [100, 32, 32]
     # a HIGHER caller cap is preserved (never floored down)
     assert _response_policy(object(), "bom", 20000).normal_max_tokens == 20000
 
@@ -1972,6 +1874,36 @@ def test_review_candidate_captures_forensics_without_committing(tmp_path):
     assert not state_path.exists()
 
 
+def test_complete_instruction_suppresses_repeated_blocking_question(tmp_path):
+    question = {
+        "text": json.dumps(
+            {
+                "questions": [
+                    {
+                        "text": "Which input contract?",
+                        "options": ["15 V / 3 A", "20 V / 5 A"],
+                        "blocking": True,
+                    }
+                ]
+            }
+        ),
+        "reasoning": "",
+        "finish_reason": "stop",
+        "cost_usd": 0.0,
+    }
+    client = _ScriptedClient([question, _ok_intent_reply()])
+    result = run_session(
+        tmp_path,
+        "USB-PD input",
+        ["intent"],
+        client=client,
+        instruction="Use a 15 V / 3 A USB-PD input contract.",
+    )
+    assert result["status"] == "ok"
+    assert len(client.calls) == 2
+    assert "Do not ask more questions" in client.calls[1]["messages"][-1]["content"]
+
+
 def test_review_question_does_not_persist_open_questions(tmp_path):
     state_path = tmp_path / ".kicraft" / "state.json"
     raw = json.dumps(
@@ -2001,7 +1933,7 @@ def test_review_question_does_not_persist_open_questions(tmp_path):
     assert not state_path.exists()
 
 
-def test_attempt_trace_associates_candidates_rejections_and_escape(tmp_path, monkeypatch):
+def test_attempt_trace_associates_candidates_with_one_bounded_repair(tmp_path, monkeypatch):
     records = []
     result, _client = _a3_run(
         tmp_path,
@@ -2012,16 +1944,15 @@ def test_attempt_trace_associates_candidates_rejections_and_escape(tmp_path, mon
     )
 
     assert result["failure_kind"] == "commit_rejected"
-    assert [row["provider_attempt"] for row in records] == [1, 2, 3]
-    assert [row["call_mode"] for row in records] == ["normal", "normal", "clean_slate"]
-    assert [row["outcome"] for row in records] == ["provider_response"] * 3
-    assert [row["version"] for row in records] == [2, 2, 2]
-    assert [row["unit_id"] for row in records] == ["wiring-u000"] * 3
-    assert [row["aggregate_round"] for row in records] == [None, 1, 2]
-    assert records[0]["design_profile"] == "flash"
-    assert records[2]["design_profile"] == "pro"
+    assert [row["provider_attempt"] for row in records] == [1, 2]
+    assert [row["call_mode"] for row in records] == ["normal", "normal"]
+    assert [row["outcome"] for row in records] == ["candidate", "candidate"]
+    assert [row["version"] for row in records] == [2, 2]
+    assert [row["unit_id"] for row in records] == ["wiring-u000"] * 2
+    assert [row["aggregate_round"] for row in records] == [None, 1]
+    assert [row["design_profile"] for row in records] == ["flash", "flash"]
     assert records[0]["aggregate_signature"] is None
-    assert records[1]["aggregate_signature"] == records[2]["aggregate_signature"]
+    assert records[1]["aggregate_signature"] is not None
     for row in records:
         assert "raw" not in row and "messages" not in row and "reasoning" not in row
 
@@ -2082,8 +2013,8 @@ def test_neutral_series_feedback_allows_commit_progression(tmp_path, monkeypatch
     assert "Do not assume the populated side is the source" in feedback
     assert "moving the destination pin" not in feedback
     assert [row["outcome"] for row in records] == [
-        "provider_response",
-        "provider_response",
+        "candidate",
+        "candidate",
     ]
     assert records[0]["aggregate_signature"] is None
     assert records[1]["aggregate_signature"] is not None
@@ -2163,6 +2094,9 @@ def test_work_units_make_one_initial_call_each_before_one_full_commit(tmp_path, 
     assert result["commit_ok"] is True
     assert result["work_units"] == 2
     assert len(client.calls) == 2
+    assert [
+        call["collection_bounds"][0].total for call in client.calls
+    ] == [1, 1]
     assert len(commits) == 1
 
 
@@ -2264,17 +2198,19 @@ def test_work_unit_debug_review_and_observer_v2_are_redacted(tmp_path, monkeypat
     )
 
 
-def test_work_unit_repeated_commit_signature_escalates_once_then_stops(tmp_path, monkeypatch):
+def test_work_unit_repeated_commit_signature_stops_after_one_repair(
+    tmp_path,
+    monkeypatch,
+):
     state_path = _work_unit_state(tmp_path, monkeypatch)
     client = _unit_client(
         [
             _unit_reply("U1"),
             _unit_reply("R1"),
             _unit_reply("U1", "PRESERVED"),
-            _unit_reply("U1", "PRISTINE"),
+            _unit_reply("U1", "UNUSED"),
         ]
     )
-    client.s = replace(client.s, escalation_profile="pro")
     commits = {"count": 0}
 
     def reject(*args, **kwargs):
@@ -2287,10 +2223,9 @@ def test_work_unit_repeated_commit_signature_escalates_once_then_stops(tmp_path,
     )
 
     assert result["failure_kind"] == "commit_rejected"
-    assert len(client.calls) == 4
-    assert commits["count"] == 3
-    assert result["attempts"] <= 64
-    assert client.calls[-1]["reasoning"] == {"enabled": False}
+    assert result["aggregate_repair_rounds"] == 1
+    assert len(client.calls) == 3
+    assert commits["count"] == 2
 
 
 def test_work_unit_bom_reconcile_question_keeps_pipeline_park_shape(tmp_path, monkeypatch):
@@ -2332,3 +2267,33 @@ def test_work_unit_bom_reconcile_question_keeps_pipeline_park_shape(tmp_path, mo
 
     assert result["needs_input"] is True
     assert result["questions"][0]["reconcile_target"] == "bom"
+
+
+def test_noninteractive_default_policy_applies_to_every_stage(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_drive_stage(_client, stage, _brief, _state_path, _workspace, *args, **kwargs):
+        seen.append((stage, kwargs["instruction"]))
+        return {"stage": stage, "commit_ok": True, "cost_usd": 0.0}
+
+    class FakeGuard:
+        @staticmethod
+        def status():
+            return {}
+
+    class FakeClient:
+        guard = FakeGuard()
+
+    monkeypatch.setattr(stage_pipeline, "drive_stage", fake_drive_stage)
+    stages = ["intent", "functional_spec", "architecture"]
+    stage_pipeline.drive_chain(
+        stages,
+        "brief",
+        tmp_path,
+        client=FakeClient(),
+        instruction=stage_driver_mod.NONINTERACTIVE_DEFAULTS_INSTRUCTION,
+    )
+
+    assert seen == [
+        (stage, stage_driver_mod.NONINTERACTIVE_DEFAULTS_INSTRUCTION) for stage in stages
+    ]

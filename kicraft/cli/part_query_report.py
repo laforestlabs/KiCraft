@@ -17,6 +17,7 @@ This is the parts-library counterpart to ``web-cost-report`` (spend) and
     part-query-report --since 2026-06-01 --top 30
     part-query-report /path/to/part_queries.jsonl --json
 """
+
 from __future__ import annotations
 
 import argparse
@@ -43,12 +44,12 @@ def _is_bundle_lib(lib) -> bool:
 def summarize(events) -> dict:
     tools: Counter = Counter()
     callers: Counter = Counter()
-    lib_hits: Counter = Counter()      # bundle -> times referenced (popularity)
-    fetches: Counter = Counter()       # lcsc -> times fetched into the library
-    fetch_name: dict = {}              # lcsc -> bundle slug it was saved as
-    jlcpcb: Counter = Counter()        # lcsc -> times resolved via JLCPCB (a miss)
-    unresolved: Counter = Counter()    # mpn -> times no LCSC id was found at all
-    search_miss: Counter = Counter()   # (tool, keyword) -> empty stock searches
+    lib_hits: Counter = Counter()  # bundle -> times referenced (popularity)
+    fetches: Counter = Counter()  # lcsc -> times fetched into the library
+    fetch_name: dict = {}  # lcsc -> bundle slug it was saved as
+    jlcpcb: Counter = Counter()  # lcsc -> times resolved via JLCPCB (a miss)
+    unresolved: Counter = Counter()  # mpn -> times no LCSC id was found at all
+    search_miss: Counter = Counter()  # (tool, keyword) -> empty stock searches
     n = 0
     for e in events:
         n += 1
@@ -60,8 +61,11 @@ def summarize(events) -> dict:
         ln = e.get("library_name")
         if tool == "lookup_lcsc_id" and outcome == "hit" and ln:
             lib_hits[ln] += 1
-        elif tool in ("lookup_symbol", "lookup_footprint") and outcome == "hit" \
-                and _is_bundle_lib(e.get("lib")):
+        elif (
+            tool in ("lookup_symbol", "lookup_footprint")
+            and outcome == "hit"
+            and _is_bundle_lib(e.get("lib"))
+        ):
             lib_hits[e["lib"]] += 1
         if tool == "add_part_from_lcsc" and outcome == "fetched":
             lcsc = e.get("lcsc") or e.get("query") or "?"
@@ -73,6 +77,11 @@ def summarize(events) -> dict:
             unresolved[e.get("query") or "?"] += 1
         if tool in ("search_symbols", "search_footprints") and outcome == "miss":
             search_miss[f"{tool}:{e.get('query') or '?'}"] += 1
+    vendoring_priority = [
+        {"lcsc": lcsc, "misses": count}
+        for lcsc, count in sorted(jlcpcb.items(), key=lambda item: (-item[1], item[0]))
+        if not fetches.get(lcsc)
+    ]
     return {
         "n_events": n,
         "tools": dict(tools),
@@ -83,6 +92,7 @@ def summarize(events) -> dict:
         "jlcpcb": dict(jlcpcb),
         "unresolved": dict(unresolved),
         "search_miss": dict(search_miss),
+        "vendoring_priority": vendoring_priority,
     }
 
 
@@ -93,6 +103,7 @@ def _current_maturities() -> dict:
     goes wrong so the report still works without the kicraft library present."""
     try:
         from kicraft.parts_library import load_all_with_overrides
+
         active, _shadowed, _broken = load_all_with_overrides(None)
         return {p.manifest.name: p.manifest.maturity for p in active}
     except Exception:  # noqa: BLE001
@@ -108,7 +119,9 @@ def format_report(s: dict, top: int = 20) -> str:
         tools = "  ".join(f"{k}={v}" for k, v in sorted(s["tools"].items(), key=lambda kv: -kv[1]))
         out.append("  by tool:   " + tools)
     if s["callers"]:
-        callers = "  ".join(f"{k}={v}" for k, v in sorted(s["callers"].items(), key=lambda kv: -kv[1]))
+        callers = "  ".join(
+            f"{k}={v}" for k, v in sorted(s["callers"].items(), key=lambda kv: -kv[1])
+        )
         out.append("  by caller: " + callers)
 
     maturities = _current_maturities()
@@ -161,21 +174,28 @@ def format_report(s: dict, top: int = 20) -> str:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Summarize the parts-library query log: which curated bundles "
-                    "are popular (polish/promote candidates) and which queries miss "
-                    "the library (add-to-library candidates).")
-    ap.add_argument("log", nargs="?", default=None,
-                    help=f"path to part_queries.jsonl (default: {log_path()})")
-    ap.add_argument("--since", metavar="ISO_TS",
-                    help="only count events with ts >= this ISO timestamp (e.g. 2026-06-01)")
-    ap.add_argument("--caller", metavar="TAG",
-                    help="only count events from this caller (e.g. web / cli)")
+        "are popular (polish/promote candidates) and which queries miss "
+        "the library (add-to-library candidates)."
+    )
+    ap.add_argument(
+        "log", nargs="?", default=None, help=f"path to part_queries.jsonl (default: {log_path()})"
+    )
+    ap.add_argument(
+        "--since",
+        metavar="ISO_TS",
+        help="only count events with ts >= this ISO timestamp (e.g. 2026-06-01)",
+    )
+    ap.add_argument(
+        "--caller", metavar="TAG", help="only count events from this caller (e.g. web / cli)"
+    )
     ap.add_argument("--top", type=int, default=20, help="rows per section (default 20)")
     ap.add_argument("--json", action="store_true", help="emit the summary as JSON")
     args = ap.parse_args(argv)
 
     path = Path(args.log) if args.log else log_path()
     events = [
-        e for e in read_events(path)
+        e
+        for e in read_events(path)
         if (not args.since or str(e.get("ts", "")) >= args.since)
         and (not args.caller or e.get("caller") == args.caller)
     ]

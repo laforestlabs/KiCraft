@@ -13,7 +13,12 @@ from kicraft.design.stage_state import DESIGN_STAGES
 from .client import CappedOpenRouterClient, make_client
 from .config import Settings
 from .spend_guard import BudgetExceeded, SpendGuard
-from .stage_runtime import _stage_max_retries, _stage_max_tokens, drive_stage
+from .stage_runtime import (
+    NONINTERACTIVE_DEFAULTS_INSTRUCTION,
+    _stage_max_retries,
+    _stage_max_tokens,
+    drive_stage,
+)
 from .stage_state_io import KICRAFT, run_design_cli
 
 SUPPORTED_STAGES = DESIGN_STAGES
@@ -43,9 +48,12 @@ def drive_chain(
         client = make_client()
     base_ctx = {"run_id": run_id} if run_id else {}
     results = []
+    noninteractive_defaults = instruction == NONINTERACTIVE_DEFAULTS_INSTRUCTION
     for i, stage in enumerate(stages):
-        # answers/instruction belong to the stage being resumed or edited, which
-        # is the first stage of this chain; downstream stages re-draft cleanly.
+        # User answers/instructions belong only to the stage being resumed or
+        # edited. The internal self-eval policy applies to every stage so the
+        # fixed corpus cannot park for input.
+        stage_instruction = instruction if i == 0 or noninteractive_defaults else None
         r = drive_stage(
             client,
             stage,
@@ -56,7 +64,7 @@ def drive_chain(
             _stage_max_retries(stage, max_retries),
             progress=progress,
             answers=(answers if i == 0 else None),
-            instruction=(instruction if i == 0 else None),
+            instruction=stage_instruction,
             meta_ctx=base_ctx,
             core_defaults=core_defaults,
             attempt_observer=attempt_observer,
@@ -84,13 +92,7 @@ def drive_chain(
 
 
 class _BudgetGuard:
-    """Wrap a SpendGuard with a per-run USD ceiling on top of the global ones.
-
-    ``preflight()`` (called before every model completion) refuses once this
-    run's delta past the snapshot reaches ``budget_usd``. Granularity is one
-    completion, so a run may overshoot by at most a single call. Everything
-    else (record / record_stage / status / spent_*) delegates to the base.
-    """
+    """Add an explicit per-run ceiling to the persistent global/project guard."""
 
     def __init__(self, base: SpendGuard, budget_usd: float):
         self._base = base
@@ -100,11 +102,17 @@ class _BudgetGuard:
     def _delta(self) -> float:
         return self._base.spent_total() - self._start
 
-    def preflight(self) -> None:
-        self._base.preflight()
-        if self._delta() >= self._budget:
+    def preflight(
+        self,
+        call_ceiling_usd: float = 0.0,
+        run_id: str | None = None,
+    ) -> None:
+        reserve = max(0.0, float(call_ceiling_usd or 0.0))
+        self._base.preflight(reserve, run_id)
+        if self._delta() + reserve > self._budget:
             raise BudgetExceeded(
-                f"run budget ${self._budget:.2f} exhausted (spent ${self._delta():.4f})"
+                f"run remaining budget cannot cover next call ceiling ${reserve:.4f} "
+                f"(spent ${self._delta():.4f} of ${self._budget:.2f})"
             )
 
     def __getattr__(self, name):

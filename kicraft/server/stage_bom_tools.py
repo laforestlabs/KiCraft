@@ -1,4 +1,5 @@
 """Whitelisted BOM lookup tools and per-invocation executor state."""
+
 from __future__ import annotations
 
 import json
@@ -125,6 +126,27 @@ BOM_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "resolve_and_bundle",
+            "description": "Resolve one exact manufacturer part number or LCSC C-number and, when unambiguous, fetch its symbol+footprint bundle into the reusable HOME library in one call. Returns the exact symbol and footprint strings. Use this as the primary path for a non-core IC; use lookup_lcsc_id separately only when resolution is ambiguous.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mpn": {
+                        "type": "string",
+                        "description": "Exact MPN or LCSC C-number (C#####).",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Optional stable library slug.",
+                    },
+                },
+                "required": ["mpn"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "add_part_from_lcsc",
             "description": "Fetch a real symbol+footprint bundle from LCSC into the project parts "
             "library. Afterwards call list_parts to get the exact '<name>:<symbol>' "
@@ -145,6 +167,7 @@ BOM_TOOLS = [
 # LCSC ids users paste into briefs/answers — bare (C7386355) or inside an
 # lcsc.com / jlcpcb.com product URL. Mirrors cli_app._LCSC_ID_RE.
 _LCSC_ID_RE = re.compile(r"(?<![A-Za-z0-9])C\d{4,8}(?![A-Za-z0-9])", re.IGNORECASE)
+
 
 # A part's MPN spelling variants all mean the same lookup: normalize before the
 # per-MPN budget key and the resolution cache. Strip whitespace, uppercase, and
@@ -204,11 +227,73 @@ def _new_bundle_rows(list_parts_stdout: str, lcsc_id: str, name: str | None) -> 
         return header + "\n(new row not located; call list_parts for the full table)"
     return (header + "\n" + "\n".join(rows))[:8000]
 
+
+def _bundle_identity_from_rows(rows_text: str, lcsc_id: str) -> tuple[str, str] | None:
+    """Read symbol/footprint by header name, independent of optional columns."""
+    table_rows = [
+        [column.strip().strip("`") for column in line.split("|")[1:-1]]
+        for line in (rows_text or "").splitlines()
+        if line.lstrip().startswith("|")
+    ]
+    if len(table_rows) < 3:
+        return None
+    headers = [column.lower() for column in table_rows[0]]
+    try:
+        sourcing_index = headers.index("sourcing")
+        symbol_index = headers.index("symbol")
+        footprint_index = headers.index("footprint")
+    except ValueError:
+        return None
+    for columns in table_rows[2:]:
+        if (
+            len(columns) > max(sourcing_index, symbol_index, footprint_index)
+            and lcsc_id.upper() in columns[sourcing_index].upper()
+        ):
+            return columns[symbol_index], columns[footprint_index]
+    return None
+
+
 def build_bom_executor(workspace: Path, runner: Callable, command_prefix: list[str]):
     """Return an executor(name, args) -> str backed by the kicraft CLI (cwd=workspace)."""
     lcsc_calls: dict[str, int] = {}  # normalized MPN -> attempts this stage (search budget)
     memo: dict[tuple[str, str], str] = {}  # read-only lookups, deduped per stage
     resolution_ledger: dict[str, dict[str, str]] = {}
+    resolved_bundle_cache: dict[tuple[str, str], str] = {}
+
+    def add_resolved_part(
+        lcsc_id: str,
+        name: str | None,
+        *,
+        requested_part: str,
+        source_tool: str,
+    ) -> str:
+        cmd = ["add-part", "--from-lcsc", lcsc_id, "--into", "home"]
+        if name:
+            cmd += ["--name", name]
+        added = runner(command_prefix + cmd, workspace)
+        add_output = (added.stdout + "\n" + added.stderr).strip()
+        if added.returncode != 0:
+            return f"add-part exit={added.returncode}\n{add_output[:1500]}"
+        listed = runner(command_prefix + ["list-parts"], workspace)
+        if listed.returncode != 0:
+            list_output = (listed.stdout + "\n" + listed.stderr).strip()
+            return f"list-parts exit={listed.returncode}\n{list_output[:1500]}"
+        new_rows = _new_bundle_rows(listed.stdout, lcsc_id, name)
+        identity = _bundle_identity_from_rows(new_rows, lcsc_id)
+        if identity is not None:
+            exact_symbol, exact_footprint = identity
+            resolution_ledger[_normalize_mpn(requested_part)] = {
+                "requested_part": requested_part,
+                "accepted_lcsc_id": lcsc_id.upper(),
+                "exact_symbol": exact_symbol,
+                "exact_footprint": exact_footprint,
+                "source_tool": source_tool,
+            }
+        return (
+            f"add-part exit=0\n{add_output[:1500]}"
+            f"\n\nNEWLY ADDED BUNDLE (use these strings verbatim; call "
+            f"list_parts for the full library):\n{new_rows}"
+        )
 
     def execute(name: str, args: dict) -> str:
         ckey: tuple[str, str] | None = None
@@ -245,10 +330,14 @@ def build_bom_executor(workspace: Path, runner: Callable, command_prefix: list[s
             r = runner(command_prefix + ["search-symbols", str(args.get("query", ""))], workspace)
             return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])
         if name == "search_footprints":
-            r = runner(command_prefix + ["search-footprints", str(args.get("query", ""))], workspace)
+            r = runner(
+                command_prefix + ["search-footprints", str(args.get("query", ""))], workspace
+            )
             return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])
         if name == "lookup_footprint":
-            r = runner(command_prefix + ["lookup-footprint", str(args.get("footprint", ""))], workspace)
+            r = runner(
+                command_prefix + ["lookup-footprint", str(args.get("footprint", ""))], workspace
+            )
             return memo.setdefault(ckey, (r.stdout or r.stderr)[:3000])
         if name == "lookup_lcsc_id":
             mpn = str(args.get("mpn", ""))
@@ -283,44 +372,60 @@ def build_bom_executor(workspace: Path, runner: Callable, command_prefix: list[s
                     "source_tool": "lookup_lcsc_id",
                 }
             return out
+        if name == "resolve_and_bundle":
+            mpn = str(args.get("mpn", ""))
+            bundle_name = str(args["name"]) if args.get("name") else None
+            key = _normalize_mpn(mpn)
+            cache_key = (key, bundle_name or "")
+            if cache_key in resolved_bundle_cache:
+                return resolved_bundle_cache[cache_key]
+            lcsc_calls[key] = lcsc_calls.get(key, 0) + 1
+            if lcsc_calls[key] > _BOM_MPN_QUERY_CAP:
+                return (
+                    f"Resolution for '{mpn}' has already been attempted "
+                    f"{_BOM_MPN_QUERY_CAP} times; STOP retrying this part."
+                )
+            resolved_result = runner(
+                command_prefix + ["lookup-lcsc-id", mpn],
+                workspace,
+            )
+            resolved_output = (resolved_result.stdout or resolved_result.stderr)[:3000]
+            if resolved_result.returncode != 0:
+                return f"lookup-lcsc-id exit={resolved_result.returncode}\n{resolved_output}"
+            try:
+                resolved = json.loads(resolved_output)
+            except (TypeError, json.JSONDecodeError):
+                return f"lookup-lcsc-id returned invalid JSON\n{resolved_output}"
+            if not resolved.get("ok") or not resolved.get("lcsc"):
+                return resolved_output
+            lcsc_id = str(resolved["lcsc"]).upper()
+            out = add_resolved_part(
+                lcsc_id,
+                bundle_name,
+                requested_part=mpn,
+                source_tool="resolve_and_bundle",
+            )
+            if out.startswith("add-part exit=0"):
+                resolved_bundle_cache[cache_key] = out
+            return out
         if name == "add_part_from_lcsc":
-            # Persist fetched parts to the shared HOME tier (not project): a part
-            # the model needs once is then reused by every later design as a
-            # `prototype`-badged bundle, so the catalog self-grows and repeated
-            # LCSC fetches (the dominant BOM cost) amortize away.
+            # Persist fetched parts to the shared HOME tier so later designs
+            # reuse the verified bundle without another network resolution.
             lcsc_id = str(args.get("lcsc_id", ""))
-            name = str(args["name"]) if args.get("name") else None
-            cmd = ["add-part", "--from-lcsc", lcsc_id, "--into", "home"]
-            if name:
-                cmd += ["--name", name]
-            r = runner(command_prefix + cmd, workspace)
-            lp = runner(command_prefix + ["list-parts"], workspace)
-            new_rows = _new_bundle_rows(lp.stdout, lcsc_id, name)
-            for line in new_rows.splitlines():
-                columns = [column.strip().strip("`") for column in line.split("|")[1:-1]]
-                if len(columns) >= 7 and lcsc_id.upper() in columns[2].upper():
-                    ledger_key = next(
-                        (
-                            key
-                            for key, row in resolution_ledger.items()
-                            if row["accepted_lcsc_id"].upper() == lcsc_id.upper()
-                        ),
-                        _normalize_mpn(lcsc_id),
-                    )
-                    resolution_ledger[ledger_key] = {
-                        "requested_part": resolution_ledger.get(ledger_key, {}).get(
-                            "requested_part", lcsc_id
-                        ),
-                        "accepted_lcsc_id": lcsc_id.upper(),
-                        "exact_symbol": columns[5],
-                        "exact_footprint": columns[6],
-                        "source_tool": "add_part_from_lcsc",
-                    }
-                    break
-            return (
-                f"add-part exit={r.returncode}\n{(r.stdout + chr(10) + r.stderr).strip()[:1500]}"
-                f"\n\nNEWLY ADDED BUNDLE (use these strings verbatim; call "
-                f"list_parts for the full library):\n{new_rows}"
+            bundle_name = str(args["name"]) if args.get("name") else None
+            requested_part = next(
+                (
+                    row["requested_part"]
+                    for row in resolution_ledger.values()
+                    if row["accepted_lcsc_id"].upper() == lcsc_id.upper()
+                ),
+                lcsc_id,
+            )
+            return add_resolved_part(
+                lcsc_id,
+                bundle_name,
+                requested_part=requested_part,
+                source_tool="add_part_from_lcsc",
             )
         return f"unknown tool: {name}"
 

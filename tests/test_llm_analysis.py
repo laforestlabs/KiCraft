@@ -474,3 +474,71 @@ def test_production_last_25_plus_witness_selection_is_redacted(tmp_path):
     assert set(analysis._WITNESSES) <= ids
     assert SENTINEL not in json.dumps(result)
     assert result["unknown_sheet_references"] >= 4
+
+
+def test_recovery_gate_enforces_cost_profile_and_attribution_contract():
+    stages = {
+        "architecture": {"wall_s": 50.0},
+        "bom": {"cost_usd": 0.019},
+        "wiring": {"cost_usd": 0.014},
+    }
+    runs = [
+        {
+            "identity": {"run_id": f"run-{index}", "slug": f"fixture-{index}"},
+            "classification": "design_complete",
+            "build_outcome": "fab_ready",
+            "failed_stage": None,
+            "failure_kind": None,
+            "cost_usd": 0.04,
+            "stages": stages,
+        }
+        for index in range(9)
+    ]
+    attempts = [
+        {
+            "run_id": run["identity"]["run_id"],
+            "stage": stage,
+            "unit_id": stage if stage in {"bom", "wiring"} else None,
+            "unit_attempt": 1,
+            "call_mode": "normal",
+            "outcome": "candidate",
+            "provider_profile": "flash",
+            "candidate_retained": True,
+        }
+        for run in runs
+        for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
+    ]
+    gates = {
+        gate["name"]: gate
+        for gate in analysis._recovery_gates(runs, attempts, configured_profile="flash")
+    }
+    assert not [gate for gate in gates.values() if gate["triggered"]]
+
+    runs[0]["cost_usd"] = 0.11
+    attempts.append(
+        {
+            "run_id": "run-0",
+            "stage": "wiring",
+            "call_mode": "deterministic_commit",
+            "outcome": "commit_rejected",
+            "provider_profile": "flash",
+            "candidate_retained": True,
+        }
+    )
+    attempts.append(
+        {
+            "run_id": "run-0",
+            "stage": "wiring",
+            "call_mode": "normal",
+            "outcome": "candidate",
+            "provider_profile": "pro",
+            "candidate_retained": True,
+        }
+    )
+    gates = {
+        gate["name"]: gate
+        for gate in analysis._recovery_gates(runs, attempts, configured_profile="flash")
+    }
+    assert gates["recovery_cost_max_usd"]["triggered"]
+    assert gates["recovery_elevated_provider_profile"]["triggered"]
+    assert gates["recovery_unattributed_commit_rejections"]["triggered"]

@@ -8,6 +8,7 @@ disappear), while DB-owned runtime state (enabled, price/stock snapshots)
 survives syncs. The catalog guard at the bottom is the CI tripwire for the
 catalog file itself.
 """
+
 import pytest
 
 from kicraft.parts_library.core_blocks import (
@@ -33,11 +34,11 @@ def _reopen(tmp_path) -> AccountStore:
 
 
 def _catalog_of(*blocks: dict) -> CoreBlockCatalog:
-    return CoreBlockCatalog.model_validate(
-        {"schema_version": "1", "blocks": list(blocks)})
+    return CoreBlockCatalog.model_validate({"schema_version": "1", "blocks": list(blocks)})
 
 
 # ---- sync: catalog -> DB ------------------------------------------------------
+
 
 def test_sync_populates_fresh_store(store):
     rows = store.list_core_components()
@@ -49,19 +50,16 @@ def test_sync_populates_fresh_store(store):
     passives = [r for r in rows if r["category"] == "passives"]
     assert passives and all(r["default_lcsc"] is None for r in passives)
     # Snapshots are runtime state, never synced from the catalog.
-    assert all(r["price_usd"] is None and r["snapshot_date"] is None
-               for r in rows)
+    assert all(r["price_usd"] is None and r["snapshot_date"] is None for r in rows)
 
 
 def test_sync_idempotent_across_restarts(store, tmp_path):
     before = {r["function_key"]: r for r in store.list_core_components()}
-    after = {r["function_key"]: r
-             for r in _reopen(tmp_path).list_core_components()}
+    after = {r["function_key"]: r for r in _reopen(tmp_path).list_core_components()}
     assert after == before  # a no-op sync does not even touch updated_at
 
 
-def test_sync_preserves_runtime_state_but_reverts_canonical_fields(
-        store, tmp_path):
+def test_sync_preserves_runtime_state_but_reverts_canonical_fields(store, tmp_path):
     row = store.get_core_component("ldo-3v3-1a")
     store.update_core_component(row["id"], enabled=False)
     store.record_core_component_snapshot(row["id"], price_usd=0.5, stock=42)
@@ -103,13 +101,22 @@ def test_bundle_rows_derive_from_manifests(store):
 
 def test_two_rows_may_share_one_bundle(store, tmp_path, monkeypatch):
     cat = _catalog_of(
-        {"function_key": "fn-one", "display_name": "One", "category": "sensors",
-         "bundle": "mpu6050"},
-        {"function_key": "fn-two", "display_name": "Two", "category": "sensors",
-         "bundle": "mpu6050"},
+        {
+            "function_key": "fn-one",
+            "display_name": "One",
+            "category": "sensors",
+            "bundle": "mpu6050",
+        },
+        {
+            "function_key": "fn-two",
+            "display_name": "Two",
+            "category": "sensors",
+            "bundle": "mpu6050",
+        },
     )
-    monkeypatch.setattr("kicraft.parts_library.core_blocks.load_core_catalog",
-                        lambda path=None: cat)
+    monkeypatch.setattr(
+        "kicraft.parts_library.core_blocks.load_core_catalog", lambda path=None: cat
+    )
     fresh = _reopen(tmp_path)
     rows = fresh.list_core_components()
     assert {r["function_key"] for r in rows} == {"fn-one", "fn-two"}
@@ -122,8 +129,7 @@ def test_sync_survives_unreadable_catalog(store, tmp_path, monkeypatch):
     def boom(path=None):
         raise OSError("no catalog")
 
-    monkeypatch.setattr(
-        "kicraft.parts_library.core_blocks.load_core_catalog", boom)
+    monkeypatch.setattr("kicraft.parts_library.core_blocks.load_core_catalog", boom)
     assert len(_reopen(tmp_path).list_core_components()) == n  # rows kept
 
 
@@ -139,14 +145,16 @@ def test_sync_keeps_row_when_bundle_unresolvable(store, tmp_path, monkeypatch):
             d["bundle"] = "no-such-bundle"
         blocks.append(d)
     cat = _catalog_of(*blocks)
-    monkeypatch.setattr("kicraft.parts_library.core_blocks.load_core_catalog",
-                        lambda path=None: cat)
+    monkeypatch.setattr(
+        "kicraft.parts_library.core_blocks.load_core_catalog", lambda path=None: cat
+    )
     after = _reopen(tmp_path).get_core_component("ldo-3v3-1a")
     assert after is not None
     assert after["default_mpn"] == before["default_mpn"]
 
 
 # ---- runtime mutations (the surface the admin page still owns) ------------------
+
 
 def test_get_is_case_insensitive(store):
     assert store.get_core_component("LDO-3V3-1A")["function_key"] == "ldo-3v3-1a"
@@ -156,8 +164,9 @@ def test_get_is_case_insensitive(store):
 
 def test_update_validates(store):
     row = store.get_core_component("ldo-3v3-1a")
-    u = store.update_core_component(row["id"], qualifier="  q1  ",
-                                    enabled=False, default_lcsc="14259")
+    u = store.update_core_component(
+        row["id"], qualifier="  q1  ", enabled=False, default_lcsc="14259"
+    )
     assert u["qualifier"] == "q1"
     assert u["enabled"] is False
     assert u["default_lcsc"] == "C14259"
@@ -180,8 +189,7 @@ def test_update_validates(store):
 def test_record_snapshot(store):
     row = store.get_core_component("ldo-3v3-1a")
     assert row["snapshot_date"] is None
-    s = store.record_core_component_snapshot(row["id"], price_usd=0.5,
-                                             stock=1000)
+    s = store.record_core_component_snapshot(row["id"], price_usd=0.5, stock=1000)
     assert s["price_usd"] == 0.5 and s["stock"] == 1000
     assert s["snapshot_date"] and len(s["snapshot_date"]) == 10  # ISO date
 
@@ -192,6 +200,7 @@ def test_create_and_delete_are_gone():
 
 
 # ---- listing -------------------------------------------------------------------
+
 
 def test_list_ordering_and_filters(store):
     rows = store.list_core_components()
@@ -210,6 +219,7 @@ def test_list_ordering_and_filters(store):
 
 
 # ---- catalog guard (packaging/CI tripwire) --------------------------------------
+
 
 def test_catalog_is_valid_and_every_block_is_bundle_or_stock():
     """Every catalog block resolves: a bundle row points at a loadable
@@ -232,15 +242,22 @@ def test_catalog_is_valid_and_every_block_is_bundle_or_stock():
 
 def test_lcsc_only_catalog_row_is_rejected():
     with pytest.raises(Exception):
-        _catalog_of({"function_key": "lcsc-only", "display_name": "X",
-                     "category": "power", "default_lcsc": "C123",
-                     "default_mpn": "MPN1"})
+        _catalog_of(
+            {
+                "function_key": "lcsc-only",
+                "display_name": "X",
+                "category": "power",
+                "default_lcsc": "C123",
+                "default_mpn": "MPN1",
+            }
+        )
 
 
 # ---- KC-T6ERHM regression rows: generic-hardware families the R1 parts_block
 # filter must keep visible (the filter keeps only core-default bundles, which
 # used to hide the curated screw terminal + schottky and let the BOM stage
 # freestyle unverified MPNs).
+
 
 def test_catalog_covers_screw_terminal_and_schottky():
     catalog = load_core_catalog()
@@ -257,3 +274,46 @@ def test_new_core_bundles_resolve_in_the_parts_library():
     active, _broken = _load_library_parts(Path(__file__).resolve().parents[1])
     names = {p.manifest.name for p in active}
     assert {"screw-terminal-5mm-2p", "ss14"} <= names
+
+
+def test_bom_core_categories_follow_functional_blocks_and_keep_support():
+    from kicraft.design.cli_app import _bom_core_categories
+    from kicraft.design.models import ConversationState
+
+    sensor_state = ConversationState.model_validate(
+        {
+            "functional_spec": {
+                "blocks": [
+                    {"name": "POWER", "category": "power", "purpose": "Input rail"},
+                    {"name": "SENSOR", "category": "sense", "purpose": "Measure"},
+                    {"name": "MCU", "category": "process", "purpose": "Control"},
+                ]
+            }
+        }
+    )
+    categories = _bom_core_categories(sensor_state)
+    assert categories == {"power", "sensors", "interface", "passives"}
+
+    opamp_state = ConversationState.model_validate(
+        {
+            "functional_spec": {
+                "blocks": [
+                    {
+                        "name": "BUFFER",
+                        "category": "process",
+                        "purpose": "Unity-gain op-amp buffer",
+                    }
+                ]
+            }
+        }
+    )
+    assert "drivers" in _bom_core_categories(opamp_state)
+
+    no_spec = ConversationState()
+    assert _bom_core_categories(no_spec) == {
+        "power",
+        "sensors",
+        "drivers",
+        "interface",
+        "passives",
+    }

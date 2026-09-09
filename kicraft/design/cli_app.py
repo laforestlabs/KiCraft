@@ -3208,6 +3208,30 @@ def _apply_slot(
         raise ValueError(f"unknown stage {stage!r}; expected one of {KNOWN_STAGES}")
 
 
+def _bom_core_categories(state: ConversationState) -> set[str]:
+    """Limit BOM prompt defaults to functional categories the design can use."""
+    spec = state.functional_spec
+    if spec is None or not spec.blocks:
+        return {"power", "sensors", "drivers", "interface", "passives"}
+    mapping = {
+        "sense": "sensors",
+        "drive": "drivers",
+        "power": "power",
+        "interface": "interface",
+        "process": "interface",
+    }
+    categories = {"passives"}
+    categories.update(mapping[block.category] for block in spec.blocks if block.category in mapping)
+    design_text = spec.model_dump_json().lower()
+    if state.architecture is not None:
+        design_text += " " + state.architecture.model_dump_json().lower()
+    if any(term in design_text for term in ("usb", "connector", "program", "header")):
+        categories.add("interface")
+    if any(term in design_text for term in ("op-amp", "opamp", "amplifier", "buffer")):
+        categories.add("drivers")
+    return categories
+
+
 def _cmd_stage_prep(args: argparse.Namespace) -> int:
     """Single-shot collector for a stage. Side-effect free.
 
@@ -3255,8 +3279,14 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
             from kicraft.parts_library.core_blocks import load_core_catalog
 
             _catalog = load_core_catalog()
-            _core_names = {b.bundle for b in _catalog.blocks if b.bundle}
-            parts = [p for p in parts if p.manifest.name in _core_names]
+            _categories = _bom_core_categories(state)
+            _core_names = {
+                block.bundle
+                for block in _catalog.blocks
+                if block.bundle and block.category in _categories
+            }
+            parts = [part for part in parts if part.manifest.name in _core_names]
+            extras["core_categories"] = sorted(_categories)
         except Exception:  # noqa: BLE001
             pass  # catalog unavailable — don't filter
         extras["parts_block"] = _format_available_parts_block(parts, stock_floor=_bom_stock_floor())

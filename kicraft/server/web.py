@@ -2173,6 +2173,9 @@ def _run_design(state: dict, stages, answers=None) -> None:
         state["awaiting_input"] = False
         state["questions"] = []
         if res["status"] != "ok":
+            state["failure_kind"] = res.get("failure_kind")
+            state["retryable"] = bool(res.get("retryable"))
+            state["retry_action"] = res.get("retry_action")
             state["ok"] = False
             return
         # R3: LLM electrical review post-wiring, BEFORE the build. The review

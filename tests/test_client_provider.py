@@ -84,9 +84,10 @@ class _FakeResp:
 class _RecordingGuard:
     def __init__(self):
         self.records = []
+        self.preflights = []
 
-    def preflight(self):
-        pass
+    def preflight(self, call_ceiling_usd=0.0, run_id=None):
+        self.preflights.append((call_ceiling_usd, run_id))
 
     def record(self, model, intok, outtok, cost, meta=""):
         self.records.append(
@@ -115,7 +116,7 @@ def _usage_chunk(cached=0, cost=0.001, intok=1000, outtok=50):
 def test_provider_block_from_settings():
     c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
     pb = c._provider_block()
-    assert pb["order"] == ["deepinfra/fp8"]
+    assert pb["order"] == ["open-inference/fp8"]
     assert pb["allow_fallbacks"] is False
     assert pb["max_price"] == {"prompt": 0.11, "completion": 0.24}
 
@@ -195,7 +196,7 @@ def test_stream_sends_provider_block_and_records_structured_meta(monkeypatch):
         }
     )
     p = captured["payload"]
-    assert p["provider"]["order"] == ["deepinfra/fp8"]  # dated Flash route pinned
+    assert p["provider"]["order"] == ["open-inference/fp8"]  # dated Flash route pinned
     assert p["provider"]["max_price"]["prompt"] == 0.11
     assert "_meta" not in p and "_meta_ctx" not in p  # control keys stripped
     assert isinstance(p["messages"][0]["content"], list)  # cache breakpoint applied
@@ -290,6 +291,24 @@ def test_open_stream_does_not_retry_4xx(monkeypatch):
     assert calls["n"] == 1  # client error: no retry
 
 
+def test_open_stream_returns_429_to_top_level_without_retry(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        calls["n"] += 1
+        return _FakeResp([], status_code=429, reason="Too Many Requests")
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    monkeypatch.setattr(client_mod.time, "sleep", lambda s: pytest.fail("unexpected sleep"))
+    client = CappedOpenRouterClient(
+        Settings(api_key="k", llm_max_retries=3),
+        guard=_RecordingGuard(),
+    )
+    with pytest.raises(requests.exceptions.HTTPError):
+        client._stream({"messages": [{"role": "user", "content": "hi"}]})
+    assert calls["n"] == 1
+
+
 def test_open_stream_raises_after_exhausting_retries(monkeypatch):
     calls = {"n": 0}
 
@@ -304,6 +323,36 @@ def test_open_stream_raises_after_exhausting_retries(monkeypatch):
     with pytest.raises(requests.exceptions.HTTPError):
         c._stream({"messages": [{"role": "user", "content": "hi"}]})
     assert calls["n"] == 3  # 1 initial + 2 retries, then give up
+
+
+def test_stream_preflight_reserves_configured_call_ceiling_and_run(monkeypatch):
+    monkeypatch.setattr(
+        client_mod.requests,
+        "post",
+        lambda *a, **k: _FakeResp(
+            [
+                {"choices": [{"delta": {"content": "{}"}, "finish_reason": "stop"}]},
+                _usage_chunk(cost=0.001),
+            ]
+        ),
+    )
+    settings = Settings(
+        api_key="k",
+        llm_max_retries=0,
+        max_tokens_per_call=1_000,
+        max_price_prompt=1.0,
+        max_price_completion=2.0,
+    )
+    guard = _RecordingGuard()
+    CappedOpenRouterClient(settings, guard=guard)._stream(
+        {
+            "messages": [{"role": "user", "content": "reserve this call"}],
+            "_meta_ctx": {"run_id": "p7-run"},
+        }
+    )
+    [(reserved, run_id)] = guard.preflights
+    assert run_id == "p7-run"
+    assert 0.002 < reserved < 0.0021
 
 
 # ---- design temperature (D3) ----------------------------------------------
@@ -564,6 +613,38 @@ def test_chat_with_tools_rounds_carry_telemetry(monkeypatch):
     assert r["finish_reason"] == "stop"
 
 
+def test_tool_capable_first_response_is_schema_bound_and_can_finish_directly(monkeypatch):
+    client = CappedOpenRouterClient(
+        settings=types.SimpleNamespace(), guard=types.SimpleNamespace(status=lambda: {})
+    )
+    calls = []
+
+    def fake_stream(body, on_delta=None):
+        calls.append(body)
+        return (
+            {
+                "role": "assistant",
+                "content": '{"groups": []}',
+                "finish_reason": "stop",
+            },
+            0.0,
+        )
+
+    monkeypatch.setattr(client, "_stream", fake_stream)
+    response_format = {"type": "json_schema", "json_schema": {"name": "bom"}}
+    result = client.chat_with_tools(
+        [{"role": "user", "content": "go"}],
+        tools=[],
+        executor=lambda n, a: "ok",
+        max_rounds=2,
+        response_format=response_format,
+    )
+
+    assert result["rounds"] == 1
+    assert calls[0]["tool_choice"] == "auto"
+    assert calls[0]["response_format"] is response_format
+
+
 def test_chat_with_tools_forced_final_carries_telemetry(monkeypatch):
     client = CappedOpenRouterClient(
         settings=types.SimpleNamespace(), guard=types.SimpleNamespace(status=lambda: {})
@@ -726,7 +807,7 @@ def test_stream_retries_mid_stream_disconnect(monkeypatch):
     ]
     attempts = []
 
-    def _fake_open(payload):
+    def _fake_open(payload, **kwargs):
         attempts.append(1)
         if len(attempts) == 1:
             return _BrokenMidStreamResp([{"choices": [{"delta": {"content": "par"}}]}])
@@ -747,41 +828,34 @@ def test_stream_gives_up_after_max_retries(monkeypatch):
     monkeypatch.setattr(
         c,
         "_open_stream",
-        lambda payload: _BrokenMidStreamResp([{"choices": [{"delta": {"content": "par"}}]}]),
+        lambda payload, **kwargs: _BrokenMidStreamResp(
+            [{"choices": [{"delta": {"content": "par"}}]}]
+        ),
     )
     with pytest.raises(requests.exceptions.ChunkedEncodingError):
         c._stream({"messages": [{"role": "user", "content": "x"}]})
 
 
-def test_stream_retries_transient_in_band_http_error_and_discards_partial(monkeypatch):
+def test_stream_returns_in_band_429_to_top_level_without_retry(monkeypatch):
     settings = Settings(api_key="k", llm_max_retries=1, llm_retry_backoff_s=0.0)
     guard = _RecordingGuard()
     client = CappedOpenRouterClient(settings, guard=guard)
     attempts = []
-    good = [
-        {"choices": [{"delta": {"content": "complete"}}]},
-        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
-        _usage_chunk(),
-    ]
 
-    def open_stream(payload):
+    def open_stream(payload, **kwargs):
         attempts.append(1)
-        if len(attempts) == 1:
-            return _FakeResp(
-                [
-                    {"choices": [{"delta": {"content": "partial"}}]},
-                    {"error": {"code": 429, "message": "rate limited"}},
-                ]
-            )
-        return _FakeResp(good)
+        return _FakeResp(
+            [
+                {"choices": [{"delta": {"content": "partial"}}]},
+                {"error": {"code": 429, "message": "rate limited"}},
+            ]
+        )
 
     monkeypatch.setattr(client, "_open_stream", open_stream)
-    message, _cost = client._stream({"messages": [{"role": "user", "content": "x"}]})
-
-    assert len(attempts) == 2
-    assert message["content"] == "complete"
-    assert len(guard.records) == 2
-    assert guard.records[0]["meta"]["finish_reason"] == "stream_retry_discarded"
+    with pytest.raises(requests.exceptions.HTTPError):
+        client._stream({"messages": [{"role": "user", "content": "x"}]})
+    assert len(attempts) == 1
+    assert guard.records == []
 
 
 @pytest.mark.parametrize("status", [400, 401, 403])
@@ -792,7 +866,7 @@ def test_stream_does_not_retry_in_band_authenticated_or_other_4xx(monkeypatch, s
     )
     attempts = []
 
-    def open_stream(payload):
+    def open_stream(payload, **kwargs):
         attempts.append(1)
         return _FakeResp([{"error": {"code": status, "message": "rejected"}}])
 
@@ -1002,6 +1076,25 @@ def test_collection_guard_enforces_per_group_bound_without_full_response_copy():
     assert accepted.endswith('{"ref":"R3","sheet":"ARRAY"}')
 
 
+def test_collection_guard_stops_on_duplicate_unique_key():
+    guard = _StreamingCollectionGuard(
+        (CollectionBound(field="groups", total=500, unique_key="id"),)
+    )
+    text = '{"groups":[{"id":"header"},{"id":"header"},{"id":"unreachable"}]}'
+
+    accepted, overflow = guard.consume(text)
+
+    assert overflow == {
+        "field": "groups",
+        "observed_count": 2,
+        "configured_total": 500,
+        "limit_scope": "duplicate",
+        "unique_key": "id",
+        "duplicate_value": "header",
+    }
+    assert accepted.endswith('{"id":"header"}')
+
+
 def test_collection_guard_accepts_empty_and_large_in_bound_arrays():
     guard = _StreamingCollectionGuard((CollectionBound(field="parts", total=500),))
     text = '{"parts":[' + ",".join(f'{{"ref":"D{i}"}}' for i in range(400)) + "]}"
@@ -1038,6 +1131,66 @@ def test_stream_collection_limit_stops_before_overflow_object(monkeypatch):
     assert cost > 0.0
 
 
+def test_stream_closes_exact_wiring_unit_prefix_at_collection_bound(monkeypatch):
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        return _FakeResp(
+            [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": (
+                                    '{"pins":[{"ref":"J1","pin":"1","net":"D0"},'
+                                    '{"ref":"J1","pin":"2","net":"D1"},'
+                                )
+                            }
+                        }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "content": '{"ref":"J1","pin":"1","net":"D0"}]}'
+                            }
+                        }
+                    ]
+                },
+            ]
+        )
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    c = CappedOpenRouterClient(Settings(api_key="k"), guard=_RecordingGuard())
+
+    msg, _cost = c._stream(
+        {
+            "messages": [{"role": "user", "content": "x"}],
+            "_collection_bounds": (CollectionBound(field="pins", total=2),),
+        }
+    )
+
+    assert msg["finish_reason"] == "stop"
+    assert json.loads(msg["content"]) == {
+        "pins": [
+            {"ref": "J1", "pin": "1", "net": "D0"},
+            {"ref": "J1", "pin": "2", "net": "D1"},
+        ]
+    }
+
+
+def test_stream_cost_estimate_uses_selected_provider_prices():
+    c = CappedOpenRouterClient(
+        Settings(
+            api_key="k",
+            max_price_prompt=0.05,
+            max_price_completion=0.16,
+        ),
+        guard=_RecordingGuard(),
+    )
+
+    assert c._estimated_cost("unknown", 10_000, 1_000) == pytest.approx(0.00066)
+
+
 def _clear_profile_env(monkeypatch):
     for name in (
         "KICRAFT_DESIGN_PROFILE",
@@ -1064,21 +1217,21 @@ def test_design_profiles_resolve_dated_models_and_finite_caps(monkeypatch):
         assert settings.provider_allow_fallbacks is False
 
 
-def test_escalation_profile_defaults_to_pro_and_can_be_disabled(monkeypatch):
+def test_escalation_profile_defaults_disabled_and_can_be_enabled(monkeypatch):
     _clear_profile_env(monkeypatch)
     settings = Settings.from_env(dotenv=False)
     assert settings.design_profile == "flash"
-    assert settings.escalation_profile == "pro"
-    monkeypatch.setenv("KICRAFT_ESCALATION_PROFILE", "")
-    assert Settings.from_env(dotenv=False).escalation_profile == ""
+    assert settings.escalation_profile == ""
+    monkeypatch.setenv("KICRAFT_ESCALATION_PROFILE", "pro")
+    assert Settings.from_env(dotenv=False).escalation_profile == "pro"
 
 
-def test_provider_fallback_profile_defaults_to_pro_and_can_be_disabled(monkeypatch):
+def test_provider_fallback_profile_defaults_disabled_and_can_be_enabled(monkeypatch):
     _clear_profile_env(monkeypatch)
     settings = Settings.from_env(dotenv=False)
-    assert settings.provider_fallback_profile == "pro"
-    monkeypatch.setenv("KICRAFT_PROVIDER_FALLBACK_PROFILE", "")
-    assert Settings.from_env(dotenv=False).provider_fallback_profile == ""
+    assert settings.provider_fallback_profile == ""
+    monkeypatch.setenv("KICRAFT_PROVIDER_FALLBACK_PROFILE", "pro")
+    assert Settings.from_env(dotenv=False).provider_fallback_profile == "pro"
 
 
 def test_escalation_profile_same_route_disables_and_unknown_fails(monkeypatch):
@@ -1134,9 +1287,9 @@ def test_model_preflight_rejects_missing_schema_capability_before_smoke():
             "endpoints": [
                 {
                     "model_id": settings.model,
-                    "provider_name": "DeepInfra",
-                    "tag": "deepinfra/fp8",
-                    "pricing": {"prompt": "0.00000008", "completion": "0.00000018"},
+                    "provider_name": "OpenInference",
+                    "tag": "open-inference/fp8",
+                    "pricing": {"prompt": "0.00000005", "completion": "0.00000016"},
                     "supported_parameters": ["reasoning", "tools", "tool_choice"],
                 }
             ],
@@ -1161,9 +1314,9 @@ def test_model_preflight_merges_campaign_metadata_into_fixed_role_context():
             "endpoints": [
                 {
                     "model_id": settings.model,
-                    "provider_name": "DeepInfra",
-                    "tag": "deepinfra/fp8",
-                    "pricing": {"prompt": "0.00000008", "completion": "0.00000018"},
+                    "provider_name": "OpenInference",
+                    "tag": "open-inference/fp8",
+                    "pricing": {"prompt": "0.00000005", "completion": "0.00000016"},
                     "supported_parameters": [
                         "reasoning",
                         "response_format",
@@ -1185,7 +1338,7 @@ def test_model_preflight_merges_campaign_metadata_into_fixed_role_context():
             return {
                 "text": '{"ok": true}',
                 "cost_usd": 0.001,
-                "provider": "DeepInfra",
+                "provider": "OpenInference",
                 "model": settings.model,
                 "finish_reason": "stop",
             }

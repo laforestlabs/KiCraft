@@ -63,10 +63,23 @@ def test_examples_ride_the_system_prompt():
 
 def test_bom_system_prompt_carries_collection_bounds() -> None:
     prompt = build_system("bom")
-    assert "`groups` collection must contain at most 500 items total" in prompt
-    assert "at most 450 items per `sheet`" in prompt
+    assert "`groups` collection must contain at most 64 items total" in prompt
+    assert "at most 64 items per `sheet`" in prompt
+    assert "`arrays` collection must contain at most 100 items total" in prompt
+    assert "`assumptions` collection must contain at most 32 items total" in prompt
+    assert "`substitutions` collection must contain at most 32 items total" in prompt
     assert "BOUNDED OUTPUT POLICY" not in build_system("wiring")
     assert "BOUNDED OUTPUT POLICY" not in build_system("bom", ())
+
+
+def test_structured_stage_prompts_carry_degeneracy_bounds() -> None:
+    functional = build_system("functional_spec")
+    architecture = build_system("architecture")
+
+    assert "`blocks` collection must contain at most 32 items total" in functional
+    assert "every `name` value must be unique" in functional
+    assert "`sheets` collection must contain at most 32 items total" in architecture
+    assert "`inter_sheet_nets` collection must contain at most 128 items total" in architecture
 
 
 def test_bom_contract_closes_group_sheet_and_reuses_schema_object():
@@ -94,6 +107,17 @@ def test_question_branch_and_non_bom_contracts_are_unchanged():
     assert contract.schema["anyOf"][1] == {
         key: value for key, value in question.items() if key != "$defs"
     }
+
+
+def test_noninteractive_contract_requires_a_complete_slot():
+    contract = build_stage_response_contract("architecture", {}, allow_questions=False)
+
+    assert "anyOf" not in contract.schema
+    assert "sheets" in contract.schema["required"]
+    assert (
+        contract.response_format["json_schema"]["name"]
+        == "kicraft_architecture_response_v2_noninteractive"
+    )
 
 
 @pytest.mark.parametrize(

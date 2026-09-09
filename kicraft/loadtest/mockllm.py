@@ -162,7 +162,7 @@ class _NullGuard:
     def record(self, *a, **k) -> None:  # pragma: no cover - trivial no-op
         pass
 
-    def preflight(self) -> None:  # pragma: no cover - trivial no-op
+    def preflight(self, *args, **kwargs) -> None:  # pragma: no cover - trivial no-op
         pass
 
 

@@ -12,7 +12,12 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from kicraft.cli.web_cost_report import load_rows, load_stage_attempts, load_stage_runs
+from kicraft.cli.web_cost_report import (
+    load_rows,
+    load_stage_attempts,
+    load_stage_runs,
+    summarize_stage_attempts,
+)
 from kicraft.design.models import Architecture, BOM
 from kicraft.design.synthesis.validation import (
     bom_parts_on_unknown_sheets,
@@ -1055,6 +1060,227 @@ def _stop_gates(runs: list[dict], integrity: dict) -> list[dict]:
     return gates
 
 
+def _recovery_gates(
+    runs: list[dict],
+    attempt_rows: list[dict],
+    *,
+    configured_profile: str,
+) -> list[dict]:
+    """Evaluate the fixed recovery-corpus rollout contract."""
+    gates: list[dict] = []
+
+    def add(
+        name: str,
+        value,
+        *,
+        threshold,
+        comparator: str,
+        triggered: bool,
+        observed: bool = True,
+    ) -> None:
+        gates.append(
+            {
+                "name": name,
+                "triggered": bool(triggered) if observed else False,
+                "observed": observed,
+                "value": value,
+                "threshold": threshold,
+                "comparator": comparator,
+            }
+        )
+
+    run_count = len(runs)
+    complete = sum(run["classification"] == "design_complete" for run in runs)
+    builds_observed = any(run["build_outcome"] != "not_run" for run in runs)
+    fab_ready = sum(run["build_outcome"] == "fab_ready" for run in runs)
+    completion_rate = complete / run_count if run_count else None
+    fab_ready_rate = fab_ready / run_count if run_count and builds_observed else None
+    add(
+        "recovery_stage_completion",
+        completion_rate,
+        threshold=0.9,
+        comparator=">=",
+        triggered=completion_rate is not None and completion_rate < 0.9,
+        observed=completion_rate is not None,
+    )
+    add(
+        "recovery_fab_ready",
+        fab_ready_rate,
+        threshold=0.8,
+        comparator=">=",
+        triggered=fab_ready_rate is not None and fab_ready_rate < 0.8,
+        observed=fab_ready_rate is not None,
+    )
+
+    costs = [float(run.get("cost_usd") or 0.0) for run in runs]
+    cost_p95 = _quantile(costs, 0.95) if costs else None
+    max_cost = max(costs) if costs else None
+    add(
+        "recovery_cost_p95_usd",
+        cost_p95,
+        threshold=0.05,
+        comparator="<=",
+        triggered=isinstance(cost_p95, (int, float)) and cost_p95 > 0.05,
+        observed=bool(costs),
+    )
+    add(
+        "recovery_cost_max_usd",
+        max_cost,
+        threshold=0.1,
+        comparator="<=",
+        triggered=max_cost is not None and max_cost > 0.1,
+        observed=max_cost is not None,
+    )
+
+    provider_rows = [row for row in attempt_rows if row.get("call_mode") != "deterministic_commit"]
+    configured_rank = {"flash": 0, "pro": 1}.get(configured_profile)
+    elevated_profiles = sorted(
+        {
+            str(row.get("provider_profile"))
+            for row in provider_rows
+            if row.get("provider_profile")
+            and configured_rank is not None
+            and {"flash": 0, "pro": 1}.get(str(row.get("provider_profile")), configured_rank)
+            > configured_rank
+        }
+    )
+    add(
+        "recovery_elevated_provider_profile",
+        elevated_profiles,
+        threshold=[],
+        comparator="==",
+        triggered=bool(elevated_profiles),
+        observed=bool(provider_rows),
+    )
+
+    commit_rejections = [
+        row
+        for row in attempt_rows
+        if str(row.get("outcome") or "") in {"commit_rejected", "commit_process_failed"}
+    ]
+    unattributed_rejections = [
+        row
+        for row in commit_rejections
+        if not row.get("commit_gate_codes") or not row.get("rejection_signature")
+    ]
+    add(
+        "recovery_unattributed_commit_rejections",
+        len(unattributed_rejections),
+        threshold=0,
+        comparator="==",
+        triggered=bool(unattributed_rejections),
+        observed=bool(attempt_rows),
+    )
+
+    attempt_summary = summarize_stage_attempts(attempt_rows)
+    repeated = attempt_summary["repeated_rejection_signatures"]
+    add(
+        "recovery_repeated_rejection_signatures",
+        len(repeated),
+        threshold=0,
+        comparator="==",
+        triggered=bool(repeated),
+        observed=bool(attempt_rows),
+    )
+
+    failed_runs = [run for run in runs if run["classification"] != "design_complete"]
+    failed_without_evidence = []
+    for run in failed_runs:
+        run_id = str(run["identity"].get("run_id"))
+        failed_stage = str(run.get("failed_stage") or "")
+        terminal = [
+            row
+            for row in attempt_rows
+            if str(row.get("run_id")) == run_id
+            and str(row.get("stage")) == failed_stage
+            and row.get("terminal_outcome")
+        ]
+        if (
+            not run.get("failure_kind")
+            or len(terminal) != 1
+            or not terminal[0].get("candidate_retained")
+        ):
+            failed_without_evidence.append(run["identity"].get("slug"))
+    add(
+        "recovery_failed_candidate_evidence",
+        failed_without_evidence,
+        threshold=[],
+        comparator="==",
+        triggered=bool(failed_without_evidence),
+        observed=bool(failed_runs),
+    )
+
+    architecture_walls = [
+        float(run["stages"]["architecture"].get("wall_s") or 0.0)
+        for run in runs
+        if run["stages"].get("architecture")
+    ]
+    architecture_p95 = _quantile(architecture_walls, 0.95) if architecture_walls else None
+    add(
+        "recovery_architecture_wall_p95_s",
+        architecture_p95,
+        threshold=60.0,
+        comparator="<",
+        triggered=isinstance(architecture_p95, (int, float)) and architecture_p95 >= 60.0,
+        observed=bool(architecture_walls),
+    )
+    reasoning_loops = [
+        row
+        for row in provider_rows
+        if str(row.get("reasoning_failure_kind") or "") == "reasoning_repetition"
+    ]
+    reasoning_rate = len(reasoning_loops) / len(provider_rows) if provider_rows else None
+    add(
+        "recovery_reasoning_loop_incidence",
+        reasoning_rate,
+        threshold=0.02,
+        comparator="<",
+        triggered=reasoning_rate is not None and reasoning_rate >= 0.02,
+        observed=reasoning_rate is not None,
+    )
+
+    for stage, threshold in (("bom", 0.02), ("wiring", 0.015)):
+        stage_costs = [
+            float(run["stages"][stage].get("cost_usd") or 0.0)
+            for run in runs
+            if run["stages"].get(stage)
+        ]
+        value = _quantile(stage_costs, 0.95) if stage_costs else None
+        add(
+            f"recovery_{stage}_cost_p95_usd",
+            value,
+            threshold=threshold,
+            comparator="<",
+            triggered=isinstance(value, (int, float)) and value >= threshold,
+            observed=bool(stage_costs),
+        )
+
+    bom_unit_rows = [
+        row for row in provider_rows if row.get("stage") == "bom" and row.get("unit_id")
+    ]
+    bom_units = {(str(row.get("run_id")), str(row.get("unit_id"))) for row in bom_unit_rows}
+    bom_mean_calls = len(bom_unit_rows) / len(bom_units) if bom_units else None
+    add(
+        "recovery_bom_mean_calls_per_work_unit",
+        bom_mean_calls,
+        threshold=1.5,
+        comparator="<=",
+        triggered=bom_mean_calls is not None and bom_mean_calls > 1.5,
+        observed=bom_mean_calls is not None,
+    )
+    wiring_first = attempt_summary["work_unit_passes"].get("wiring|first")
+    wiring_first_rate = wiring_first.get("success_rate") if wiring_first else None
+    add(
+        "recovery_wiring_first_candidate_rate",
+        wiring_first_rate,
+        threshold=0.9,
+        comparator=">=",
+        triggered=wiring_first_rate is not None and wiring_first_rate < 0.9,
+        observed=wiring_first_rate is not None,
+    )
+    return gates
+
+
 def _recommendation(verdict: str, stop_gates: list[dict]) -> str:
     if verdict == "INVALID_CAMPAIGN":
         return "Repair the first campaign-integrity error and resume the same frozen directory only if identity remains valid."
@@ -1068,6 +1294,12 @@ def _recommendation(verdict: str, stop_gates: list[dict]) -> str:
     for gate in stop_gates:
         if gate["triggered"] and gate["name"] in keyed:
             return keyed[gate["name"]]
+    for gate in stop_gates:
+        if gate["triggered"] and gate["name"].startswith("recovery_"):
+            return (
+                f"Do not deploy: `{gate['name']}` missed the fixed recovery-corpus "
+                "threshold. Correct that failure class without weakening the gate."
+            )
     return "Run a separate three-repeat campaign with the same frozen policy before considering a model migration."
 
 
@@ -1085,7 +1317,9 @@ def stage_reliability_metrics(attempt_rows: list[dict], stage_statuses: list[dic
         attempts = [
             row
             for row in attempt_rows
-            if str(row.get("run_id")) == run_id and str(row.get("stage")) == stage
+            if str(row.get("run_id")) == run_id
+            and str(row.get("stage")) == stage
+            and row.get("call_mode") != "deterministic_commit"
         ]
         bucket = by_stage.setdefault(
             stage,
@@ -1099,6 +1333,8 @@ def stage_reliability_metrics(attempt_rows: list[dict], stage_statuses: list[dic
                 "user_continued": 0,
                 "diagnostics": {},
                 "not_observable": 0,
+                "reasoning_failures": {},
+                "provider_profiles": {},
             },
         )
         bucket["n"] += 1
@@ -1123,6 +1359,14 @@ def stage_reliability_metrics(attempt_rows: list[dict], stage_statuses: list[dic
             code = diagnostic.get("code") if isinstance(diagnostic, dict) else None
             if code:
                 bucket["diagnostics"][code] = bucket["diagnostics"].get(code, 0) + 1
+        for attempt in attempts:
+            reasoning_kind = attempt.get("reasoning_failure_kind")
+            if reasoning_kind:
+                bucket["reasoning_failures"][reasoning_kind] = (
+                    bucket["reasoning_failures"].get(reasoning_kind, 0) + 1
+                )
+            profile = str(attempt.get("provider_profile") or "custom")
+            bucket["provider_profiles"][profile] = bucket["provider_profiles"].get(profile, 0) + 1
     return by_stage
 
 
@@ -1189,6 +1433,17 @@ def _render_markdown(report: dict) -> str:
     lines.extend(
         f"- `{name}`: {count}/{len(report['runs'])}" for name, count in sorted(builds.items())
     )
+    if report["recovery_gates"]:
+        lines.extend(["", "# Recovery rollout gates", ""])
+        for gate in report["recovery_gates"]:
+            if not gate["observed"]:
+                lines.append(f"- `NOT OBSERVED` `{gate['name']}`")
+                continue
+            outcome = "FAIL" if gate["triggered"] else "PASS"
+            lines.append(
+                f"- `{outcome}` `{gate['name']}`: {gate['value']} "
+                f"{gate['comparator']} {gate['threshold']}"
+            )
     lines.extend(
         [
             "",
@@ -1237,9 +1492,11 @@ def analyze_batch(
                     loaded["stage_by_run"].get(run_id, []),
                 )
             )
+    run_ids = {str(run["identity"].get("run_id")) for run in runs if run["identity"].get("run_id")}
+    attempt_rows = [row for row in attempt_rows if str(row.get("run_id") or "") in run_ids]
     aggregates = _aggregates(runs)
     reliability_statuses = [
-        {"run_id": run.get("run_id"), "stage": stage, **(data or {})}
+        {"run_id": run["identity"].get("run_id"), "stage": stage, **(data or {})}
         for run in runs
         for stage, data in (run.get("stages") or {}).items()
     ]
@@ -1248,15 +1505,34 @@ def analyze_batch(
         sum(float(row.get("cost_usd") or 0.0) for row in loaded.get("preflight_spend", [])),
         6,
     )
+    attempt_attribution = summarize_stage_attempts(attempt_rows)
+    aggregates["attributed_provider_cost_usd"] = round(
+        float(attempt_attribution["provider_cost_usd"]),
+        6,
+    )
     aggregates["preflight_cost_usd"] = preflight_cost
     aggregates["campaign_total_cost_usd"] = round(
         float(aggregates["total_cost_usd"]) + preflight_cost,
         6,
     )
     stop_gates = _stop_gates(runs, integrity)
+    configured_profile = str((immutable.get("designer") or {}).get("profile") or "flash")
+    recovery_gates = (
+        _recovery_gates(
+            runs,
+            attempt_rows,
+            configured_profile=configured_profile,
+        )
+        if immutable.get("recovery_gate") == "pipeline_recovery_2026_09_08"
+        else []
+    )
     if not integrity["valid"]:
         verdict = "INVALID_CAMPAIGN"
-    elif any(gate["triggered"] for gate in stop_gates if gate["name"] != "campaign_integrity"):
+    elif any(
+        gate["triggered"]
+        for gate in (*stop_gates, *recovery_gates)
+        if gate["name"] != "campaign_integrity"
+    ):
         verdict = "FAIL_LLM"
     else:
         findings = any(
@@ -1288,10 +1564,12 @@ def analyze_batch(
         "runs": runs,
         "aggregates": aggregates,
         "stage_reliability": reliability,
+        "attempt_attribution": attempt_attribution,
         "baseline": _baseline(baseline),
         "production": _production(projects_dir),
         "stop_gates": stop_gates,
-        "recommendation": _recommendation(verdict, stop_gates),
+        "recovery_gates": recovery_gates,
+        "recommendation": _recommendation(verdict, [*stop_gates, *recovery_gates]),
     }
     _write_json(batch / "llm_analysis.json", report)
     (batch / "llm_analysis.md").write_text(_render_markdown(report), encoding="utf-8")

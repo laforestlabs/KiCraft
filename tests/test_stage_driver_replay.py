@@ -29,7 +29,7 @@ class _FakeBase:
     def spent_total(self) -> float:
         return self.spent
 
-    def preflight(self) -> None:  # no-op base ceilings
+    def preflight(self, call_ceiling_usd=0.0, run_id=None) -> None:  # no-op base ceilings
         return None
 
     def status(self) -> dict:
@@ -45,10 +45,10 @@ class _FakeBase:
 def test_budget_guard_refuses_once_budget_exhausted():
     base = _FakeBase(0.0)
     g = _BudgetGuard(base, 0.25)
-    g.preflight()  # under budget -> ok
+    g.preflight(call_ceiling_usd=0.001)  # under budget -> ok
     base.spent = 0.25
     with pytest.raises(BudgetExceeded):
-        g.preflight()
+        g.preflight(call_ceiling_usd=0.001)
 
 
 def test_budget_guard_measures_only_its_own_run():
@@ -56,12 +56,21 @@ def test_budget_guard_measures_only_its_own_run():
     # does not count against this run's budget.
     base = _FakeBase(spent=12.40)
     g = _BudgetGuard(base, 0.25)
-    g.preflight()  # delta 0.0 -> ok
+    g.preflight(call_ceiling_usd=0.001)  # delta 0.0 -> ok
     base.spent = 12.40 + 0.24
-    g.preflight()  # delta 0.24 -> ok
+    g.preflight(call_ceiling_usd=0.001)  # reservation still fits
     base.spent = 12.40 + 0.25
     with pytest.raises(BudgetExceeded):
-        g.preflight()
+        g.preflight(call_ceiling_usd=0.001)
+
+
+def test_budget_guard_reserves_full_next_call_before_dispatch():
+    base = _FakeBase(spent=5.0)
+    guard = _BudgetGuard(base, 0.25)
+    base.spent = 5.19
+    guard.preflight(call_ceiling_usd=0.05)
+    with pytest.raises(BudgetExceeded, match="next call ceiling"):
+        guard.preflight(call_ceiling_usd=0.061)
 
 
 def test_budget_guard_delegates_other_methods():

@@ -494,6 +494,16 @@
       "bundle": "pj-320d"
     },
     {
+      "function_key": "opamp-single-general",
+      "display_name": "Single op-amp (general/unity-gain buffer)",
+      "category": "drivers",
+      "qualifier": "rail-to-rail I/O, 1.8-6V single supply, 1MHz GBW",
+      "package": "SOT-23-5",
+      "selection_notes": "MCP6001T-I/OT. Default for one-channel low-voltage buffers; use a multi-channel op-amp only when the design needs multiple independent sections.",
+      "sort_order": 279,
+      "bundle": "mcp6001"
+    },
+    {
       "function_key": "opamp-quad-general",
       "display_name": "Quad op-amp (general/unity-gain buffer)",
       "category": "drivers",

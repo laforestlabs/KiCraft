@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kicraft.server.spend_guard import SpendGuard
+from kicraft.server.spend_guard import BudgetExceeded, SpendGuard
 
 
 @pytest.fixture
@@ -48,6 +48,22 @@ def test_spent_for_project_ignores_legacy_bare_meta(guard):
 
 def test_spent_for_project_none_is_zero(guard):
     assert guard.spent_for_project(None) == 0.0
+
+
+def test_preflight_reserves_call_against_project_run_budget(tmp_path):
+    settings = SimpleNamespace(
+        ledger_path=str(tmp_path / "ledger.db"),
+        kill_switch=False,
+        daily_usd_ceiling=10.0,
+        total_usd_ceiling=10.0,
+        project_llm_budget_usd=0.10,
+    )
+    guarded = SpendGuard(settings)
+    _rec(guarded, "p7-run", 0.07)
+    guarded.preflight(call_ceiling_usd=0.03, run_id="p7-run")
+    with pytest.raises(BudgetExceeded, match="project run p7-run remaining budget"):
+        guarded.preflight(call_ceiling_usd=0.031, run_id="p7-run")
+    guarded.preflight(call_ceiling_usd=0.09, run_id="another-run")
 
 
 def test_spent_by_day_counts_all_calls(guard):
@@ -220,23 +236,101 @@ def test_work_unit_stage_and_attempt_metrics_are_redacted_and_persisted(guard):
         unit_id="wiring-u001",
         unit_attempt=2,
         aggregate_round=1,
+        commit_gate_codes=["9.11", "9.29"],
+        offender_count=3,
+        rejection_signature="0123456789abcdef",
+        provider_profile="flash",
+        fallback_reason="provider_rate_limited",
+        candidate_retained=True,
+        reasoning_failure_kind="reasoning_token_exhaustion",
     )
     with sqlite3.connect(guard.path) as connection:
         run = connection.execute(
             "SELECT work_units,reused_work_units,aggregate_repair_rounds FROM stage_runs"
         ).fetchone()
         attempt = connection.execute(
-            "SELECT unit_id,unit_attempt,aggregate_round FROM stage_attempts"
+            "SELECT unit_id,unit_attempt,aggregate_round,commit_gate_codes,"
+            "offender_count,rejection_signature,provider_profile,fallback_reason,"
+            "candidate_retained,reasoning_failure_kind FROM stage_attempts"
         ).fetchone()
         attempt_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(stage_attempts)")
         }
     assert run == (2, 1, 1)
-    assert attempt == ("wiring-u001", 2, 1)
-    assert {"unit_id", "unit_attempt", "aggregate_round"} <= attempt_columns
+    assert attempt == (
+        "wiring-u001",
+        2,
+        1,
+        '["9.11","9.29"]',
+        3,
+        "0123456789abcdef",
+        "flash",
+        "provider_rate_limited",
+        1,
+        "reasoning_token_exhaustion",
+    )
+    assert {
+        "unit_id",
+        "unit_attempt",
+        "aggregate_round",
+        "commit_gate_codes",
+        "offender_count",
+        "rejection_signature",
+        "provider_profile",
+        "fallback_reason",
+        "candidate_retained",
+        "reasoning_failure_kind",
+    } <= attempt_columns
     aggregate = guard.stage_attempt_aggregates()[0]
     assert aggregate["unit_id"] == "wiring-u001"
     assert not ({"prompt", "response", "brief"} & aggregate.keys())
+
+
+def test_cost_report_attributes_gate_signature_profile_and_work_unit(tmp_path):
+    from kicraft.cli.web_cost_report import load_stage_attempts, summarize_stage_attempts
+
+    guarded = SpendGuard(SimpleNamespace(ledger_path=str(tmp_path / "ledger.db")))
+    common = {
+        "run_id": "p4-run",
+        "stage": "wiring",
+        "unit_id": "wiring-u001",
+        "provider_profile": "flash",
+        "commit_gate_codes": ["9.15"],
+        "offender_count": 1,
+        "rejection_signature": "deadbeef",
+    }
+    guarded.record_stage_attempt(
+        **common,
+        attempt=1,
+        call_mode="deterministic_commit",
+        outcome="commit_rejected",
+        cost_usd=0.0,
+        candidate_retained=True,
+    )
+    guarded.record_stage_attempt(
+        **common,
+        attempt=2,
+        call_mode="normal",
+        outcome="candidate",
+        unit_attempt=2,
+        aggregate_round=1,
+        cost_usd=0.012,
+        candidate_retained=True,
+    )
+
+    summary = summarize_stage_attempts(load_stage_attempts(str(tmp_path / "ledger.db")))
+    assert summary["provider_cost_usd"] == pytest.approx(0.012)
+    assert summary["by_stage_profile"]["wiring|flash"] == {
+        "calls": 1,
+        "cost": pytest.approx(0.012),
+    }
+    assert summary["commit_gates"]["9.15"] == {
+        "rejections": 1,
+        "repair_calls": 1,
+        "cost": pytest.approx(0.012),
+    }
+    assert summary["repeated_rejection_signatures"][0]["occurrences"] == 2
+    assert summary["work_unit_passes"]["wiring|aggregate_repair"]["success_rate"] == 1.0
 
 
 def test_work_unit_columns_migrate_legacy_stage_tables(tmp_path):

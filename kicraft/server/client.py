@@ -126,6 +126,25 @@ class _StreamingCollectionGuard:
         return {counter.bound.field: counter.count for counter in self._counters}
 
 
+def _complete_bounded_wiring_json(content: str, limit: dict | None) -> str | None:
+    """Close a valid top-level `pins` prefix when the exact unit bound is reached."""
+    if not limit or limit.get("field") != "pins" or limit.get("limit_scope"):
+        return None
+    prefix = content.rstrip()
+    if not prefix.endswith(","):
+        return None
+    completed = prefix[:-1] + "]}"
+    try:
+        payload = json.loads(completed)
+    except json.JSONDecodeError:
+        return None
+    pins = payload.get("pins") if isinstance(payload, dict) else None
+    if not isinstance(pins, list) or len(pins) != int(limit.get("configured_total") or 0):
+        return None
+    return completed
+
+
+
 class _TopLevelArrayCounter:
     """Streaming lexer for one direct child array of the root JSON object."""
 
@@ -143,19 +162,36 @@ class _TopLevelArrayCounter:
         self.count = 0
         self.member_buf: list[str] | None = None
         self.group_counts: dict[str, int] = {}
+        self.unique_values: set[str] = set()
 
     def _finish_member(self) -> dict | None:
         if self.member_buf is None:
             return None
         raw = "".join(self.member_buf).strip()
         self.member_buf = None
-        if not raw or self.bound.per_group is None or self.bound.group_key is None:
+        if not raw:
             return None
         try:
             member = json.loads(raw)
         except json.JSONDecodeError:
             return None
-        if not isinstance(member, dict) or self.bound.group_key not in member:
+        if not isinstance(member, dict):
+            return None
+        if self.bound.unique_key is not None and self.bound.unique_key in member:
+            value = str(member[self.bound.unique_key])
+            if value in self.unique_values:
+                return {
+                    "field": self.bound.field,
+                    "observed_count": self.count,
+                    "configured_total": self.bound.total,
+                    "limit_scope": "duplicate",
+                    "unique_key": self.bound.unique_key,
+                    "duplicate_value": value,
+                }
+            self.unique_values.add(value)
+        if self.bound.per_group is None or self.bound.group_key is None:
+            return None
+        if self.bound.group_key not in member:
             return None
         group = str(member[self.bound.group_key])
         observed = self.group_counts.get(group, 0) + 1
@@ -332,13 +368,63 @@ class CappedOpenRouterClient:
                 ]
             break
 
-    def _open_stream(self, payload: dict):
+    def _configured_call_ceiling_usd(
+        self,
+        payload: dict,
+        reasoning_guard: ReasoningGuardPolicy | None,
+    ) -> float:
+        """Conservative price-cap reservation for one outbound completion."""
+        prompt_chars = len(
+            json.dumps(
+                payload.get("messages") or [],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        prompt_tokens = max(1, (prompt_chars + 3) // 4)
+        output_tokens = max(0, int(payload.get("max_tokens") or 0))
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, dict) and reasoning.get("enabled") is not False:
+            reasoning_tokens = reasoning.get("max_tokens")
+            if reasoning_tokens is None and reasoning_guard is not None:
+                reasoning_tokens = reasoning_guard.hard_max_tokens
+            output_tokens += max(0, int(reasoning_tokens or 0))
+        prompt_price = max(0.0, float(getattr(self.s, "max_price_prompt", 0.0) or 0.0))
+        completion_price = max(
+            0.0,
+            float(getattr(self.s, "max_price_completion", 0.0) or 0.0),
+        )
+        return (prompt_tokens * prompt_price + output_tokens * completion_price) / 1_000_000
+
+    def _estimated_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
+        """Estimate using the selected provider profile before model-family fallback."""
+        prompt_price = max(
+            0.0,
+            float(getattr(self.s, "max_price_prompt", 0.0) or 0.0),
+        )
+        completion_price = max(
+            0.0,
+            float(getattr(self.s, "max_price_completion", 0.0) or 0.0),
+        )
+        if prompt_price or completion_price:
+            return (
+                input_tokens * prompt_price + output_tokens * completion_price
+            ) / 1_000_000
+        return estimate_cost(model, input_tokens, output_tokens)
+
+    def _open_stream(
+        self,
+        payload: dict,
+        *,
+        run_id: str | None = None,
+        call_ceiling_usd: float = 0.0,
+    ):
         """POST and return a streamed Response with a non-retryable status.
 
-        Retries transient HTTP/network failures before any token is consumed.
-        In-band stream failures are handled by ``_stream`` because it owns the
-        partial buffers that must be discarded before a safe repost.
-        Authenticated and other non-transient 4xx failures are never retried.
+        Retries 5xx/network failures before any token is consumed. Rate limits
+        are returned immediately to the top-level retry action; consuming local
+        retries on 429 extends the provider's rolling window. Authenticated and
+        other non-transient 4xx failures are never retried.
         """
         url = f"{self.s.base_url}/chat/completions"
         headers = {
@@ -350,7 +436,7 @@ class CappedOpenRouterClient:
         backoff = float(getattr(self.s, "llm_retry_backoff_s", 1.0))
         for attempt in range(max_retries + 1):
             try:
-                self.guard.preflight()
+                self.guard.preflight(call_ceiling_usd, run_id)
                 resp = requests.post(
                     url,
                     headers=headers,
@@ -358,7 +444,13 @@ class CappedOpenRouterClient:
                     timeout=self.s.request_timeout_s,
                     stream=True,
                 )
-                if resp.status_code >= 500 or resp.status_code == 429:
+                if resp.status_code == 429:
+                    limited = requests.exceptions.HTTPError(
+                        f"{resp.status_code} {resp.reason}", response=resp
+                    )
+                    resp.close()
+                    raise limited
+                if resp.status_code >= 500:
                     transient = requests.exceptions.HTTPError(
                         f"{resp.status_code} {resp.reason}", response=resp
                     )
@@ -374,13 +466,11 @@ class CappedOpenRouterClient:
                 resp.encoding = "utf-8"
                 return resp
             except (*_RETRY_NETWORK_EXC, requests.exceptions.HTTPError) as e:
-                # Only 5xx/429 HTTPErrors reach here as retryable; a 4xx
-                # raise_for_status raised above is also an HTTPError, but it was
-                # already returned... so distinguish: a 4xx has a response with a
-                # client-error code and must NOT retry.
+                # Only 5xx HTTP errors and network failures are retried here.
+                # Every 4xx, including 429, belongs to the top-level action.
                 code = getattr(getattr(e, "response", None), "status_code", None)
                 is_http = isinstance(e, requests.exceptions.HTTPError)
-                if is_http and code is not None and code < 500 and code != 429:
+                if is_http and code is not None and code < 500:
                     raise
                 if attempt >= max_retries:
                     raise
@@ -440,6 +530,8 @@ class CappedOpenRouterClient:
             payload["provider"] = prov
         if self.s.enable_prompt_cache and isinstance(payload.get("messages"), list):
             self._apply_cache_control(payload["messages"])
+        call_ceiling_usd = self._configured_call_ceiling_usd(payload, reasoning_guard)
+        run_id = meta_ctx.get("run_id")
         # Mid-stream retry: _open_stream retries transient failures only up to
         # the 2xx header; a connection dropped DURING iter_lines (e.g.
         # "Connection broken: InvalidChunkLength" -- live board 625) used to
@@ -464,7 +556,11 @@ class CappedOpenRouterClient:
             collection_guard = _StreamingCollectionGuard(collection_bounds)
             stream_t0 = time.monotonic()
             try:
-                resp = self._open_stream(payload)
+                resp = self._open_stream(
+                    payload,
+                    run_id=str(run_id) if run_id else None,
+                    call_ceiling_usd=call_ceiling_usd,
+                )
                 with resp:
                     for raw in resp.iter_lines(decode_unicode=True):
                         if not raw or not raw.startswith("data:"):
@@ -551,6 +647,8 @@ class CappedOpenRouterClient:
                     exc, "_kicraft_in_band", False
                 ):
                     raise
+                if isinstance(exc, requests.exceptions.HTTPError) and status == 429:
+                    raise
                 if (
                     isinstance(exc, requests.exceptions.HTTPError)
                     and status is not None
@@ -567,7 +665,7 @@ class CappedOpenRouterClient:
                 )
                 retry_input_tokens = max(1, prompt_chars // 4)
                 retry_output_tokens = max(1, (reasoning_chars + content_chars) // 4)
-                retry_cost = estimate_cost(
+                retry_cost = self._estimated_cost(
                     payload["model"], retry_input_tokens, retry_output_tokens
                 )
                 self.guard.record(
@@ -590,13 +688,22 @@ class CappedOpenRouterClient:
                 continue
             break  # stream ended cleanly or by a client-owned policy abort
 
-        if loop_abort_reason:
+        content_text = "".join(content)
+        bounded_completion = _complete_bounded_wiring_json(
+            content_text,
+            collection_limit,
+        )
+        if bounded_completion is not None:
+            content_text = bounded_completion
+            content_chars = len(content_text)
+            finish = "stop"
+        elif loop_abort_reason:
             finish = "reasoning_loop"
         elif collection_limit:
             finish = "collection_limit"
         msg = {
             "role": "assistant",
-            "content": "".join(content) or None,
+            "content": content_text or None,
             "reasoning": "".join(reasoning) or None,
             "finish_reason": finish,
         }
@@ -639,7 +746,7 @@ class CappedOpenRouterClient:
         cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
         cost = float(usage.get("cost") or 0.0)
         if cost <= 0.0:  # never record 0 for real spend, or the ceiling under-counts
-            cost = estimate_cost(payload["model"], in_tok, out_tok)
+            cost = self._estimated_cost(payload["model"], in_tok, out_tok)
         response_policy = (payload.get("response_format") or {}).get("json_schema") or {}
         rec_meta = {
             "phase": meta_phase,
@@ -648,6 +755,7 @@ class CappedOpenRouterClient:
             "finish_reason": finish,
             "cached_tokens": int(cached or 0),
             "loop_detected": bool(loop_abort_reason),
+            "bounded_collection_completed": bounded_completion is not None,
             "loop_abort_reason": loop_abort_reason,
             "reasoning_policy_name": reasoning_guard.name if reasoning_guard else None,
             "response_policy_name": response_policy.get("name"),
@@ -792,7 +900,7 @@ class CappedOpenRouterClient:
                 body["max_tokens"] = max_tokens
             if reasoning:
                 body["reasoning"] = reasoning
-            if response_format and final_response:
+            if response_format:
                 body["response_format"] = response_format
             msg, cost = self._stream(body, on_delta=on_delta)
             total_cost += cost
@@ -810,12 +918,6 @@ class CappedOpenRouterClient:
                 reasoning = {"enabled": False}
                 continue
 
-            if not tcs and response_format and not final_response:
-                # Tool rounds are ordinary calls. Discard any unconstrained final
-                # prose/JSON and buy exactly one tool-free schema-bound response.
-                force_final = True
-                reasoning = {"enabled": False}
-                continue
             if not tcs:
                 return {
                     "text": msg.get("content") or "",

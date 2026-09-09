@@ -38,8 +38,7 @@ def test_fixed_cohort_order_archetypes_and_hashes():
     assert len({row["archetype"] for row in rows}) == 9
     by_slug = {entry["slug"]: entry for entry in BENCHMARK_PROMPTS}
     assert [row["brief_sha256"] for row in rows] == [
-        hashlib.sha256(by_slug[slug]["brief"].encode()).hexdigest()
-        for slug in canary.COHORT
+        hashlib.sha256(by_slug[slug]["brief"].encode()).hexdigest() for slug in canary.COHORT
     ]
 
 
@@ -78,10 +77,47 @@ def test_campaign_headroom_refusal(status, message):
         canary._require_headroom(status, canary.ENVELOPE_USD)
 
 
+def test_preflight_retries_provider_busy_at_top_level(monkeypatch):
+    class Response:
+        status_code = 429
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {}
+
+    class BusyError(RuntimeError):
+        response = Response()
+
+    calls = {"count": 0}
+    delays = []
+
+    def fake_preflight(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise BusyError("busy")
+        return {"ok": True}
+
+    monkeypatch.setattr(canary, "preflight_role", fake_preflight)
+    monkeypatch.setattr(canary.time, "sleep", delays.append)
+    result = canary._preflight_role_with_retry(
+        _settings(),
+        role="designer",
+        model="model",
+        campaign_id="campaign",
+        max_retries=1,
+        retry_delay_s=17.0,
+    )
+    assert result == {"ok": True}
+    assert calls["count"] == 2 and delays == [17.0]
+
+
 def test_occupied_slot_refuses_before_paid_preflight(tmp_path, monkeypatch):
     paid = []
     monkeypatch.setattr(canary.Settings, "from_env", classmethod(lambda cls: _settings()))
-    monkeypatch.setattr(canary, "_manifest_identity", lambda settings, campaign_id: {"campaign_id": campaign_id})
+    monkeypatch.setattr(
+        canary, "_manifest_identity", lambda settings, campaign_id: {"campaign_id": campaign_id}
+    )
     monkeypatch.setattr(canary, "probe_build_slots", lambda: [1])
     monkeypatch.setattr(canary, "preflight_role", lambda *a, **k: paid.append(True))
     assert canary._run_new(tmp_path / "batch") == 2
@@ -191,10 +227,14 @@ def test_resume_rejects_identity_and_cohort_drift(tmp_path, monkeypatch):
 def test_partial_harness_failure_updates_status_without_replacing_identity(tmp_path, monkeypatch):
     identity = {"campaign_id": "c1", "frozen": True}
     manifest = tmp_path / "canary_manifest.json"
-    manifest.write_text(json.dumps({"schema_version": 1, "immutable": identity, "run_status": "ready"}))
+    manifest.write_text(
+        json.dumps({"schema_version": 1, "immutable": identity, "run_status": "ready"})
+    )
     settings = SimpleNamespace(api_key="secret", ledger_path=tmp_path / "ledger.db")
     monkeypatch.setattr(canary, "probe_build_slots", lambda: [])
-    monkeypatch.setattr(canary, "_tee_subprocess", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(
+        canary, "_tee_subprocess", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
     assert canary._run_batch(tmp_path, manifest, resume=False, settings=settings) == 2
     saved = json.loads(manifest.read_text())
     assert saved["immutable"] == identity

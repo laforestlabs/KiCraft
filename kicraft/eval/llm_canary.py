@@ -12,11 +12,13 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
 from kicraft.build_slots import host_cpu_count, slot_count, slots_dir
 from kicraft.cli.model_preflight import preflight_role
+from kicraft.server.client import classify_provider_exception
 from kicraft.server.config import DESIGN_PROFILES, Settings
 from kicraft.server.session import DESIGN_STAGES
 from kicraft.server.spend_guard import SpendGuard
@@ -33,7 +35,7 @@ COHORT = (
     "servo-driver-16",
     "round-led-ring",
 )
-REFERENCE_BATCH = Path("/home/kicraft/.kicraft/self_eval/20260825T033602Z")
+REFERENCE_BATCH = Path("/home/kicraft/.kicraft/self_eval/20260827T024701Z_llm_canary")
 ENVELOPE_USD = 0.70
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -76,9 +78,7 @@ def _checkout_identity() -> dict:
         paths.append(path)
     paths = sorted(set(paths))
     if paths:
-        raise RuntimeError(
-            "checkout has uncommitted runtime/config changes: " + ", ".join(paths)
-        )
+        raise RuntimeError("checkout has uncommitted runtime/config changes: " + ", ".join(paths))
     return {
         "commit": commit,
         "dirty_paths": [],
@@ -229,6 +229,39 @@ def _sanitize_preflight(result: dict) -> dict:
     return clean(result)
 
 
+def _preflight_role_with_retry(
+    settings: Settings,
+    *,
+    role: str,
+    model: str,
+    campaign_id: str,
+    max_retries: int = 2,
+    retry_delay_s: float = 60.0,
+) -> dict:
+    """Execute explicit top-level retries for a provider-busy preflight."""
+    for attempt in range(max_retries + 1):
+        try:
+            return preflight_role(
+                settings,
+                role=role,
+                model=model,
+                meta_ctx={"campaign_id": campaign_id},
+            )
+        except BaseException as exc:
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            facts = classify_provider_exception(exc)
+            if facts.get("failure_kind") != "provider_rate_limited" or attempt >= max_retries:
+                raise
+            print(
+                f"{role} preflight provider busy; retrying at top level "
+                f"({attempt + 1}/{max_retries})",
+                flush=True,
+            )
+            time.sleep(retry_delay_s)
+    raise AssertionError("unreachable")
+
+
 def _manifest_identity(settings: Settings, campaign_id: str) -> dict:
     designer, judge = _resolved_roles(settings)
     reference_summary = REFERENCE_BATCH / "summary.json"
@@ -251,6 +284,7 @@ def _manifest_identity(settings: Settings, campaign_id: str) -> dict:
         "designer": designer,
         "judge": judge,
         "design_stage_policy": _policy_rows(settings),
+        "recovery_gate": "pipeline_recovery_2026_09_08",
         "judge_max_tokens": settings.eval_judge_max_tokens,
         "envelope_usd": ENVELOPE_USD,
     }
@@ -385,19 +419,19 @@ def _run_new(batch: Path) -> int:
     designer_path = batch / "preflight-designer.json"
     judge_path = batch / "preflight-judge.json"
     try:
-        designer_result = preflight_role(
+        designer_result = _preflight_role_with_retry(
             settings,
             role="designer",
             model=settings.model,
-            meta_ctx={"campaign_id": campaign_id},
+            campaign_id=campaign_id,
         )
         _json_write(designer_path, _sanitize_preflight(designer_result))
         judge_settings = settings.for_judge()
-        judge_result = preflight_role(
+        judge_result = _preflight_role_with_retry(
             judge_settings,
             role="judge",
             model=settings.eval_judge_model,
-            meta_ctx={"campaign_id": campaign_id},
+            campaign_id=campaign_id,
         )
         _json_write(judge_path, _sanitize_preflight(judge_result))
         after = guard.status()

@@ -9,6 +9,7 @@ exact-repeat churn, but a part re-spelled three ways (VL53L1X / VL53L1C /
 VL53L1CXV0FY/1) is three distinct keys; that re-spelling churn is addressed by
 vendoring the part, not here.
 """
+
 from __future__ import annotations
 
 import json
@@ -18,6 +19,8 @@ import types
 from kicraft.parts_library import mpn_cache
 from kicraft.server import stage_state_io as stage_driver
 from kicraft.server.stage_bom_tools import (
+    BOM_TOOLS,
+    _bundle_identity_from_rows,
     _new_bundle_rows,
     _normalize_mpn,
     build_bom_executor,
@@ -53,8 +56,9 @@ def test_new_bundle_rows_keeps_only_the_fetched_row():
 
 
 def test_new_bundle_rows_matches_by_slug_and_handles_url_lcsc():
-    out = _new_bundle_rows(_LIST_PARTS_SAMPLE,
-                           "https://lcsc.com/product-detail/C970725.html", "ch224k")
+    out = _new_bundle_rows(
+        _LIST_PARTS_SAMPLE, "https://lcsc.com/product-detail/C970725.html", "ch224k"
+    )
     assert "ch224k:CH224K" in out
     assert "bmp280" not in out
 
@@ -70,19 +74,19 @@ def test_new_bundle_rows_falls_back_when_row_absent():
 def test_key_for_folds_whitespace_case_and_lcsc_url(monkeypatch):
     monkeypatch.setenv(mpn_cache.ENV_PATH, "/tmp/_kicraft_mpn_key_test.json")
     assert mpn_cache.key_for("  bmp280  ") == "BMP280"
-    assert mpn_cache.key_for("BMP280") == "BMP280"            # case-folded
+    assert mpn_cache.key_for("BMP280") == "BMP280"  # case-folded
     # a pasted product URL collapses to the bare LCSC C-number
-    assert mpn_cache.key_for(
-        "https://www.lcsc.com/product-detail/C7386355.html?s_z=n") == "C7386355"
+    assert (
+        mpn_cache.key_for("https://www.lcsc.com/product-detail/C7386355.html?s_z=n") == "C7386355"
+    )
 
 
 def test_mpncache_put_get_roundtrip_persists_across_loads(monkeypatch, tmp_path):
     monkeypatch.setenv(mpn_cache.ENV_PATH, str(tmp_path / "cache.json"))
-    assert mpn_cache.get("BMP280") is None            # empty -> None, no crash
+    assert mpn_cache.get("BMP280") is None  # empty -> None, no crash
     mpn_cache.put("BMP280", "C83291", "parts-library")
-    got = mpn_cache.get("bmp280")                     # case-insensitive lookup
-    assert got == {"lcsc": "C83291", "source": "parts-library",
-                   "ts": got["ts"]}
+    got = mpn_cache.get("bmp280")  # case-insensitive lookup
+    assert got == {"lcsc": "C83291", "source": "parts-library", "ts": got["ts"]}
     # the file on disk is plain JSON a human can audit
     data = json.loads((tmp_path / "cache.json").read_text())
     assert data["BMP280"]["lcsc"] == "C83291"
@@ -91,7 +95,7 @@ def test_mpncache_put_get_roundtrip_persists_across_loads(monkeypatch, tmp_path)
 def test_mpncache_survives_corrupt_file(monkeypatch, tmp_path):
     monkeypatch.setenv(mpn_cache.ENV_PATH, str(tmp_path / "cache.json"))
     (tmp_path / "cache.json").write_text("{not json")
-    assert mpn_cache.get("anything") is None          # corrupt -> empty, no raise
+    assert mpn_cache.get("anything") is None  # corrupt -> empty, no raise
 
 
 def test_cacheable_only_freezes_precise_identifiers():
@@ -117,8 +121,11 @@ def test_mpncache_put_noops_for_fuzzy_keyword(monkeypatch, tmp_path):
     assert mpn_cache.get("SPDT slide switch SMD") is None
     # a precise MPN resolved by the same network tier still caches
     mpn_cache.put("CH224K", "C970725", "easyeda")
-    assert mpn_cache.get("CH224K") == {"lcsc": "C970725", "source": "easyeda",
-                                       "ts": mpn_cache.get("CH224K")["ts"]}
+    assert mpn_cache.get("CH224K") == {
+        "lcsc": "C970725",
+        "source": "easyeda",
+        "ts": mpn_cache.get("CH224K")["ts"],
+    }
 
 
 def _executor(monkeypatch, tmp_path):
@@ -136,7 +143,7 @@ def test_bom_executor_caps_repeated_lookup_per_mpn(monkeypatch, tmp_path):
     ex = _executor(monkeypatch, tmp_path)
     first = ex("lookup_lcsc_id", {"mpn": "C190004"})
     assert json.loads(first)["ok"] is True and json.loads(first)["lcsc"] == "C190004"
-    second = ex("lookup_lcsc_id", {"mpn": "c190004"})   # case-folded = same part
+    second = ex("lookup_lcsc_id", {"mpn": "c190004"})  # case-folded = same part
     assert json.loads(second)["ok"] is True
     third = ex("lookup_lcsc_id", {"mpn": "C190004"})
     assert "already been attempted" in third and "STOP retrying" in third
@@ -150,7 +157,7 @@ def test_bom_executor_budget_is_per_spelling(monkeypatch, tmp_path):
     ex = _executor(monkeypatch, tmp_path)
     first = ex("lookup_lcsc_id", {"mpn": "C190004"})
     assert json.loads(first)["ok"] is True
-    ex("lookup_lcsc_id", {"mpn": "C190004"})            # second C190004
+    ex("lookup_lcsc_id", {"mpn": "C190004"})  # second C190004
     capped = ex("lookup_lcsc_id", {"mpn": "C190004"})  # third -> capped
     assert "already been attempted" in capped
     # a DIFFERENT part still resolves normally on its first call
@@ -178,18 +185,84 @@ def test_read_only_lookups_memoized_within_stage(monkeypatch, tmp_path):
     ex = _bom_executor(tmp_path)
 
     a = ex("lookup_symbol", {"symbol": "Device:R"})
-    b = ex("lookup_symbol", {"symbol": "Device:R"})      # exact repeat -> memo
+    b = ex("lookup_symbol", {"symbol": "Device:R"})  # exact repeat -> memo
     assert a == b
-    assert sum("lookup-symbol" in c for c in calls) == 1   # only one subprocess
+    assert sum("lookup-symbol" in c for c in calls) == 1  # only one subprocess
 
-    ex("lookup_symbol", {"symbol": "Device:C"})          # different arg -> runs
+    ex("lookup_symbol", {"symbol": "Device:C"})  # different arg -> runs
     assert sum("lookup-symbol" in c for c in calls) == 2
 
     ex("search_footprints", {"query": "0603"})
-    ex("search_footprints", {"query": "0603"})           # memoized
+    ex("search_footprints", {"query": "0603"})  # memoized
     assert sum("search-footprints" in c for c in calls) == 1
 
     # list_parts mutates conceptually (a fetch can add bundles) -> never memoized
     ex("list_parts", {})
     ex("list_parts", {})
     assert sum("list-parts" in c for c in calls) == 2
+
+
+def test_bundle_identity_uses_named_columns():
+    assert _bundle_identity_from_rows(_LIST_PARTS_SAMPLE, "C83291") == (
+        "bmp280-bosch-sensor:BMP280",
+        "bmp280-bosch-sensor:LGA-8",
+    )
+
+
+def test_resolve_and_bundle_is_primary_atomic_tool_and_caches_success(tmp_path):
+    names = {tool["function"]["name"] for tool in BOM_TOOLS}
+    assert "resolve_and_bundle" in names
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, cwd=None):
+        calls.append(cmd)
+        if "lookup-lcsc-id" in cmd:
+            return types.SimpleNamespace(
+                stdout=json.dumps({"ok": True, "lcsc": "C83291"}),
+                stderr="",
+                returncode=0,
+            )
+        if "add-part" in cmd:
+            return types.SimpleNamespace(stdout="added", stderr="", returncode=0)
+        if "list-parts" in cmd:
+            return types.SimpleNamespace(
+                stdout=_LIST_PARTS_SAMPLE,
+                stderr="",
+                returncode=0,
+            )
+        raise AssertionError(cmd)
+
+    execute = build_bom_executor(tmp_path, fake_run, ["kicraft"])
+    first = execute("resolve_and_bundle", {"mpn": "BMP280"})
+    second = execute("resolve_and_bundle", {"mpn": "bmp280"})
+    assert first == second
+    assert "bmp280-bosch-sensor:BMP280" in first
+    assert len(calls) == 3
+    assert execute.resolution_ledger["BMP280"] == {
+        "requested_part": "BMP280",
+        "accepted_lcsc_id": "C83291",
+        "exact_symbol": "bmp280-bosch-sensor:BMP280",
+        "exact_footprint": "bmp280-bosch-sensor:LGA-8",
+        "source_tool": "resolve_and_bundle",
+    }
+
+
+def test_resolve_and_bundle_stops_immediately_on_add_process_failure(tmp_path):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, cwd=None):
+        calls.append(cmd)
+        if "lookup-lcsc-id" in cmd:
+            return types.SimpleNamespace(
+                stdout=json.dumps({"ok": True, "lcsc": "C83291"}),
+                stderr="",
+                returncode=0,
+            )
+        return types.SimpleNamespace(stdout="", stderr="network failed", returncode=7)
+
+    result = build_bom_executor(tmp_path, fake_run, ["kicraft"])(
+        "resolve_and_bundle",
+        {"mpn": "BMP280"},
+    )
+    assert "add-part exit=7" in result
+    assert not any("list-parts" in command for command in calls)

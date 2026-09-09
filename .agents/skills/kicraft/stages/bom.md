@@ -24,9 +24,9 @@ group must use that sheet, and arrays may reference only groups emitted in the
 same response. The response remains the canonical `groups`/`arrays`/
 `assumptions`/`substitutions` shape, not a patch. Prior accepted-unit summaries
 are immutable context: never repeat, rename, substitute, or otherwise revise
-their groups. An empty `groups` list is valid only when the target sheet needs no
-model-authored parts; KiCraft performs the final whole-BOM nonempty check after
-locked recipe expansion and deterministic merge.
+their groups. An empty `groups` list is valid only when locked circuit-recipe
+parts already populate the target sheet; every other architecture sheet must
+emit at least one physical component in its own work unit.
 
 Slot shape:
 
@@ -101,21 +101,11 @@ Beyond the parts block, the following default-install KiCad 9 stock libraries (a
 
 This is the case to handle deliberately — never silently substitute an inferior part. Route based on the captured `state.intent.inferred_expertise`:
 
-- **`beginner` or `intermediate`** — auto-fetch from LCSC (since the default fab is JLCPCB). First resolve the MPN to an LCSC part number — don't guess the `C<NNNNN>`:
+- **`beginner` or `intermediate`** — auto-fetch from LCSC (since the default fab is JLCPCB). For an exact MPN or pasted C-number, call `resolve_and_bundle` once. It resolves the LCSC id, vendors the reusable HOME-tier bundle, and returns the exact symbol and footprint strings in one result. Use those strings verbatim.
 
-  ```
-  kicraft lookup-lcsc-id "<MPN>"
-  ```
+  If `resolve_and_bundle` returns an ambiguous candidates list, inspect it once; call `lookup_lcsc_id` only when the ambiguity genuinely needs a separate decision. Never repeat a failed spelling. If resolution or add-part returns a process error, stop that part immediately and surface a `material: true` question listing the MPN, attempted LCSC number when known, and the failure mode. Do not substitute.
 
-  On a clean hit it prints `{"ok": true, "lcsc": "C<NNNNN>", ...}`. If it returns `"ok": false` with a `candidates` list, choose the right one (or surface a `material: true` question if you can't tell). Then fetch:
-
-  ```
-  kicraft add-part --from-lcsc C<NNNNN> --into project
-  ```
-
-  This writes a bundle to `<project>/.kicraft/parts/<name>/` and the resolver picks it up immediately. Re-run `stage-prep bom` after the fetch so the new part appears in `extras.parts_block`. Record what you did in `assumptions`, ending the line with `(defaulted)` — e.g. `"Auto-added IP2368 from LCSC C2837135 to the project parts library (defaulted)"`.
-
-  If `add-part` fails (network error, LCSC ID unknown, parser failure on the EasyEDA data), fall through to the expert path below: surface a `material: true` question listing the missing MPN, the attempted LCSC number, and the failure mode. Do not substitute.
+  Record a successful auto-add in `assumptions`, ending the line with `(defaulted)`, for example `"Auto-added IP2368 from LCSC C2837135 to the reusable parts library (defaulted)"`.
 
 - **`expert`** — never auto-fetch silently. Surface a `material: true` open question that names the gap and the concrete choices, WITHOUT shell commands (the user answering may have no terminal):
 

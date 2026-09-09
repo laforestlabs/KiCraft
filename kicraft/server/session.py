@@ -298,6 +298,11 @@ def run_session(
         "state_path": state_path,
         "questions": (last.get("questions") if last else None),
         "last_stage": (last.get("stage") if last else None),
+        "failure_kind": (last.get("failure_kind") if last else None),
+        "retryable": bool(last and last.get("failure_kind") == "provider_rate_limited"),
+        "retry_action": (
+            "retry_stage" if last and last.get("failure_kind") == "provider_rate_limited" else None
+        ),
     }
 
 

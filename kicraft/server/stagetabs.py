@@ -373,9 +373,18 @@ class StagePanel:
                 msg += f" · est. ~{max(1, round(eta_s / 60))} min"
             ui.label(msg).classes("text-xs").style(f"color:{_DIM}")
 
-    def set_status(self, ok: bool, cost=None, attempts=None, *, warning=False) -> None:
+    def set_status(
+        self,
+        ok: bool,
+        cost=None,
+        attempts=None,
+        *,
+        warning=False,
+        failure_kind=None,
+        retryable=False,
+    ) -> None:
         self._status_slot.clear()
-        color = _WARN if warning else _OK if ok else _FAIL
+        color = _WARN if retryable or warning else _OK if ok else _FAIL
         with self._status_slot:
             if ok:
                 ui.icon("warning" if warning else "check_circle").style(
@@ -385,6 +394,9 @@ class StagePanel:
                     ui.label("committed with findings").classes("text-xs").style(f"color:{_WARN}")
                 if self._show_cost and isinstance(cost, (int, float)):
                     ui.label(f"${cost:.4f}").classes("text-xs font-mono").style(f"color:{_DIM}")
+            elif retryable and failure_kind == "provider_rate_limited":
+                ui.icon("schedule").style(f"color:{_WARN};font-size:1.1rem")
+                ui.label("provider busy — Retry").classes("text-xs").style(f"color:{_WARN}")
             else:
                 ui.icon("cancel").style(f"color:{_FAIL};font-size:1.1rem")
                 ui.label("failed").classes("text-xs").style(f"color:{_FAIL}")
@@ -1009,6 +1021,8 @@ class StageTabs:
                 e.get("cost"),
                 e.get("attempts"),
                 warning=bool(e.get("warning")),
+                failure_kind=e.get("failure_kind"),
+                retryable=bool(e.get("retryable")),
             )
         elif k == "question":
             # The stage parked on a clarifying question: stop the spinner, say
@@ -1045,12 +1059,32 @@ class StageTabs:
                 self._set_current("intent")
             self.panels[self._current].push(e)
 
-    def _finish(self, key: str | None, ok: bool, cost, attempts=None, *, warning=False) -> None:
+    def _finish(
+        self,
+        key: str | None,
+        ok: bool,
+        cost,
+        attempts=None,
+        *,
+        warning=False,
+        failure_kind=None,
+        retryable=False,
+    ) -> None:
         if key is None or key not in self.panels:
             return
         self.panels[key].end_runs()
-        self.panels[key].set_status(ok, cost, attempts, warning=warning)
-        self._set_tab_status(key, "warning" if ok and warning else "done" if ok else "failed")
+        self.panels[key].set_status(
+            ok,
+            cost,
+            attempts,
+            warning=warning,
+            failure_kind=failure_kind,
+            retryable=retryable,
+        )
+        self._set_tab_status(
+            key,
+            "warning" if retryable or ok and warning else "done" if ok else "failed",
+        )
 
     def flush(self) -> None:
         for p in self.panels.values():

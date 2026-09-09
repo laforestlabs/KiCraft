@@ -161,6 +161,11 @@ def test_sheet_ok() -> None:
     assert s.stem == "BOOST_5V"
 
 
+def test_sheet_allows_leading_voltage_name() -> None:
+    sheet = Sheet(name="5V BUCK", stem="5V_BUCK", function="5V buck converter")
+    assert sheet.name == "5V BUCK"
+
+
 def test_functional_block_count_defaults_one_and_must_be_positive() -> None:
     assert FunctionalBlock(name="A", category="drive", purpose="x").count == 1
     b = FunctionalBlock(name="STEPPER", category="drive", purpose="x", count=3)
