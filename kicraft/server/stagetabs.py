@@ -10,8 +10,8 @@ tab, and inside each tab lays out three windows:
     plus the native KiCad view / download for the build phases.
   * THINKING - the model's reasoning stream for the stage, in
     collapsible runs that auto-fold as the stage moves on.
-  * ACTIVITY / LOG - tool calls, tool results, retries, and (for
-    the build phases) the build-log lines.
+  * EXECUTION / LOG - recipe selection, deterministic/LLM work-unit provenance,
+    tool calls, retries, diagnostics, and build-log lines.
 
 The arrangement depends on the phase. The LLM design stages have no KiCad view
 and lead with the reasoning stream, so they keep the inspector-left /
@@ -26,9 +26,10 @@ The caller drives it from the page's 0.2s timer exactly like before:
 supplied separately via ``set_inspector(stage, spec)`` (the page reads
 ``state.json`` and builds the spec; this module only renders it).
 
-Event kinds handled (shapes unchanged from the agent loop):
+Event kinds handled include:
   stage_start{stage} reasoning_delta{text} answer_delta{text} tool{name,args}
   tool_result{output} retry{stage,errors} stage_done{stage,ok,cost}
+  recipe_selected work_unit_plan work_unit_attempt work_unit_done
   build_start queue{position,depth,eta_s} build_log{text} build_done{ok}
 Both ``reasoning_delta`` (the model's reasoning channel) and ``answer_delta`` (its
 content draft) stream into the Thinking window so it fills live even for models /
@@ -75,6 +76,21 @@ _STATUS_COLOR = {
     "failed": "#f87171",
 }
 _RESULT_FOLD_OVER = 300  # tool results longer than this fold into an expansion
+_PROVENANCE_SOURCE = {
+    "recipe": ("Circuit recipe", "verified", "#c084fc"),
+    "deterministic_architecture_lowering": ("Deterministic", "functions", "#22d3ee"),
+    "reused_validated_draft": ("Reused", "cached", "#60a5fa"),
+    "recipe_plus_llm": ("Recipe + LLM", "schema", "#c084fc"),
+    "llm": ("LLM", "smart_toy", "#fbbf24"),
+}
+_PROVENANCE_EVENT_KINDS = frozenset(
+    {"recipe_selected", "work_unit_plan", "work_unit_attempt", "work_unit_done"}
+)
+
+
+def _provenance_source(source: object) -> tuple[str, str, str]:
+    """Stable user-facing label, icon, and color for an execution source."""
+    return _PROVENANCE_SOURCE.get(str(source), (str(source or "Unknown"), "help", _DIM))
 
 
 def _follow_head() -> None:
@@ -185,7 +201,7 @@ class StagePanel:
                     self._think = ui.column().classes("w-full p-2 gap-0")
 
             def _activity() -> None:
-                ui.label("Activity / log").classes(
+                ui.label("Execution / log").classes(
                     "text-xs font-bold uppercase tracking-wide mt-1"
                 ).style(f"color:{_DIM}")
                 with (
@@ -312,6 +328,14 @@ class StagePanel:
             self._on_retry(e.get("errors"))
         elif k == "stage_diagnostic":
             self._on_stage_diagnostic(e)
+        elif k == "recipe_selected":
+            self._on_recipe_selected(e)
+        elif k == "work_unit_plan":
+            self._on_work_unit_plan(e)
+        elif k == "work_unit_attempt":
+            self._on_work_unit_attempt(e)
+        elif k == "work_unit_done":
+            self._on_work_unit_done(e)
         elif k == "build_log":
             self._on_build_log(e.get("text", ""))
         # stage_start/stage_done/build_* are handled by StageTabs (tab status).
@@ -382,6 +406,8 @@ class StagePanel:
         warning=False,
         failure_kind=None,
         retryable=False,
+        work_units=None,
+        reused_work_units=None,
     ) -> None:
         self._status_slot.clear()
         color = _WARN if retryable or warning else _OK if ok else _FAIL
@@ -394,6 +420,11 @@ class StagePanel:
                     ui.label("committed with findings").classes("text-xs").style(f"color:{_WARN}")
                 if self._show_cost and isinstance(cost, (int, float)):
                     ui.label(f"${cost:.4f}").classes("text-xs font-mono").style(f"color:{_DIM}")
+                if isinstance(work_units, int) and work_units > 0:
+                    unit_text = f"{work_units} unit{'s' if work_units != 1 else ''}"
+                    if isinstance(reused_work_units, int) and reused_work_units > 0:
+                        unit_text += f" · {reused_work_units} reused"
+                    ui.label(unit_text).classes("text-xs font-mono").style(f"color:{_DIM}")
             elif retryable and failure_kind == "provider_rate_limited":
                 ui.icon("schedule").style(f"color:{_WARN};font-size:1.1rem")
                 ui.label("provider busy — Retry").classes("text-xs").style(f"color:{_WARN}")
@@ -561,6 +592,112 @@ class StagePanel:
                 ui.label(message).classes("text-xs").style(f"color:{_DIM}")
                 if evidence:
                     ui.label(evidence).classes("text-xs font-mono").style(f"color:{_DIMMER}")
+
+    def _provenance_card(
+        self,
+        source: object,
+        title: str,
+        detail: str,
+        *,
+        outcome: str | None = None,
+        failed: bool = False,
+    ) -> None:
+        self._active_run = None
+        self._act_ready()
+        label, icon, color = _provenance_source(source)
+        border = _FAIL if failed else color
+        with self._act:
+            with (
+                ui.column()
+                .classes("w-full gap-1 px-2 py-1.5 rounded")
+                .style(
+                    f"background:{border}12;border:1px solid {border}55"
+                )
+            ):
+                with ui.row().classes("w-full items-center gap-2 flex-nowrap"):
+                    ui.icon(icon).style(f"color:{color};font-size:1rem")
+                    ui.label(label).classes(
+                        "text-xs font-bold uppercase tracking-wide shrink-0"
+                    ).style(f"color:{color}")
+                    ui.label(title).classes(
+                        "text-xs font-mono truncate min-w-0"
+                    ).style(f"color:{_DIM}")
+                    if outcome:
+                        ui.label(outcome).classes(
+                            "text-xs font-mono ml-auto shrink-0"
+                        ).style(f"color:{_FAIL if failed else _OK}")
+                if detail:
+                    ui.label(detail).classes(
+                        "text-xs font-mono whitespace-normal"
+                    ).style(f"color:{_DIMMER}")
+
+    def _on_recipe_selected(self, event: dict) -> None:
+        sheets = ", ".join(
+            f"{role}→{sheet}" for role, sheet in (event.get("sheets") or {}).items()
+        )
+        parameters = ", ".join(
+            f"{name}={value}" for name, value in (event.get("parameters") or {}).items()
+        )
+        detail = " · ".join(value for value in (sheets, parameters) if value)
+        self._provenance_card(
+            "recipe",
+            f"{event.get('recipe') or 'unknown'} · {event.get('instance') or 'instance'}",
+            detail,
+        )
+
+    def _on_work_unit_plan(self, event: dict) -> None:
+        refs = event.get("refs") or []
+        pin_count = int(event.get("expected_pin_count") or 0)
+        facts = []
+        if refs:
+            facts.append(f"{len(refs)} refs: {', '.join(str(ref) for ref in refs)}")
+        if pin_count:
+            facts.append(f"{pin_count} unresolved pins")
+        self._provenance_card(
+            event.get("source"),
+            f"{event.get('unit_id') or 'unit'} · {event.get('unit_sheet') or 'unknown sheet'}",
+            " · ".join(facts) or "sheet-local generation unit",
+            outcome="planned",
+        )
+
+    def _on_work_unit_attempt(self, event: dict) -> None:
+        outcome = str(event.get("outcome") or "unknown")
+        failed = outcome not in {"candidate", "ok"}
+        provider = " / ".join(
+            str(value) for value in (event.get("provider"), event.get("model")) if value
+        )
+        metrics = []
+        if event.get("wall_s") is not None:
+            metrics.append(f"{float(event['wall_s']):.1f}s")
+        if event.get("input_tokens") is not None or event.get("output_tokens") is not None:
+            metrics.append(
+                f"{int(event.get('input_tokens') or 0):,} in / "
+                f"{int(event.get('output_tokens') or 0):,} out"
+            )
+        if self._show_cost and event.get("cost_usd") is not None:
+            metrics.append(f"${float(event['cost_usd']):.4f}")
+        if event.get("error_code"):
+            metrics.append(f"error {event['error_code']}")
+        if event.get("request_id"):
+            metrics.append(f"request {event['request_id']}")
+        self._provenance_card(
+            "llm",
+            (
+                f"{event.get('unit_id') or 'unit'} · attempt "
+                f"{int(event.get('unit_attempt') or 1)}"
+            ),
+            " · ".join(value for value in (provider, *metrics) if value),
+            outcome=outcome,
+            failed=failed,
+        )
+
+    def _on_work_unit_done(self, event: dict) -> None:
+        self._provenance_card(
+            event.get("source"),
+            f"{event.get('unit_id') or 'unit'} · {event.get('unit_sheet') or 'unknown sheet'}",
+            "Candidate validated and retained for aggregate commit.",
+            outcome="accepted",
+        )
 
     def _on_build_log(self, text: str) -> None:
         self._act_ready()
@@ -1023,6 +1160,8 @@ class StageTabs:
                 warning=bool(e.get("warning")),
                 failure_kind=e.get("failure_kind"),
                 retryable=bool(e.get("retryable")),
+                work_units=e.get("work_units"),
+                reused_work_units=e.get("reused_work_units"),
             )
         elif k == "question":
             # The stage parked on a clarifying question: stop the spinner, say
@@ -1033,6 +1172,14 @@ class StageTabs:
                 p.end_runs()
                 p.set_parked()
                 self._set_tab_status(stg, "parked")
+        elif k in _PROVENANCE_EVENT_KINDS:
+            # Crash-journal events can be replayed without their in-memory
+            # stage_start. Route by the event's durable stage identity instead
+            # of whichever historical tab happened to finish last.
+            stg = e.get("stage") or self._current
+            panel = self.panels.get(stg)
+            if panel is not None:
+                panel.push(e)
         elif k == "build_start":
             self._set_current("synthesize")
         elif k == "queue":
@@ -1069,6 +1216,8 @@ class StageTabs:
         warning=False,
         failure_kind=None,
         retryable=False,
+        work_units=None,
+        reused_work_units=None,
     ) -> None:
         if key is None or key not in self.panels:
             return
@@ -1080,6 +1229,8 @@ class StageTabs:
             warning=warning,
             failure_kind=failure_kind,
             retryable=retryable,
+            work_units=work_units,
+            reused_work_units=reused_work_units,
         )
         self._set_tab_status(
             key,
@@ -1123,9 +1274,22 @@ class StageTabs:
             self._set_tab_status(key, st)
             e = meta.get(key) if isinstance(meta.get(key), dict) else {}
             if st == "done":
-                p.set_status(True, cost=e.get("cost_usd"), attempts=e.get("attempts"))
+                p.set_status(
+                    True,
+                    cost=e.get("cost_usd"),
+                    attempts=e.get("attempts"),
+                    work_units=e.get("work_units"),
+                    reused_work_units=e.get("reused_work_units"),
+                )
             elif st == "warning":
-                p.set_status(True, cost=e.get("cost_usd"), attempts=e.get("attempts"), warning=True)
+                p.set_status(
+                    True,
+                    cost=e.get("cost_usd"),
+                    attempts=e.get("attempts"),
+                    warning=True,
+                    work_units=e.get("work_units"),
+                    reused_work_units=e.get("reused_work_units"),
+                )
             elif st == "failed":
                 p.set_status(False)
             elif st == "parked":
@@ -1244,6 +1408,37 @@ def demo_events() -> list[dict]:
     ev.append({"kind": "stage_done", "stage": "architecture", "ok": True, "cost": 0.0048})
 
     ev.append({"kind": "stage_start", "stage": "bom", "model": _MODEL})
+    ev.append(
+        {
+            "kind": "work_unit_plan",
+            "stage": "bom",
+            "unit_id": "bom-s000",
+            "unit_sheet": "POWER INPUT",
+            "source": "deterministic_architecture_lowering",
+            "refs": [],
+            "expected_pin_count": 0,
+        }
+    )
+    ev.append(
+        {
+            "kind": "work_unit_done",
+            "stage": "bom",
+            "unit_id": "bom-s000",
+            "unit_sheet": "POWER INPUT",
+            "source": "deterministic_architecture_lowering",
+        }
+    )
+    ev.append(
+        {
+            "kind": "work_unit_plan",
+            "stage": "bom",
+            "unit_id": "bom-s001",
+            "unit_sheet": "MAIN",
+            "source": "llm",
+            "refs": [],
+            "expected_pin_count": 0,
+        }
+    )
     ev += think(
         "I need real symbols and footprints. Start from the curated library, ",
         "then resolve the charger and USB-C connector from LCSC.",
@@ -1272,7 +1467,43 @@ def demo_events() -> list[dict]:
         '{"ref": "J1", "value": "USB-C", "symbol": "usb-c-16p:TYPE-C-31-M-12", ',
         '"footprint": "usb-c-16p:TYPE-C", "sheet": "MAIN"}]}',
     )
-    ev.append({"kind": "stage_done", "stage": "bom", "ok": True, "cost": 0.0431, "attempts": 1})
+    ev.append(
+        {
+            "kind": "work_unit_attempt",
+            "stage": "bom",
+            "unit_id": "bom-s001",
+            "unit_sheet": "MAIN",
+            "unit_attempt": 1,
+            "source": "llm",
+            "provider": "demo",
+            "model": _MODEL,
+            "outcome": "candidate",
+            "wall_s": 4.2,
+            "input_tokens": 1800,
+            "output_tokens": 640,
+            "cost_usd": 0.0431,
+        }
+    )
+    ev.append(
+        {
+            "kind": "work_unit_done",
+            "stage": "bom",
+            "unit_id": "bom-s001",
+            "unit_sheet": "MAIN",
+            "source": "llm",
+        }
+    )
+    ev.append(
+        {
+            "kind": "stage_done",
+            "stage": "bom",
+            "ok": True,
+            "cost": 0.0431,
+            "attempts": 1,
+            "work_units": 2,
+            "reused_work_units": 0,
+        }
+    )
 
     ev.append({"kind": "stage_start", "stage": "wiring", "model": _MODEL})
     ev += think(

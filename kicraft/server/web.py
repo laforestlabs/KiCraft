@@ -1831,24 +1831,51 @@ def _fresh_run_state() -> dict:
         "failed": False,
         "user_id": None, "project_id": None, "brief": "",
         "status": None, "awaiting_input": False, "questions": [],
-        "prices_rev": 0,
+        "prices_rev": 0, "run_id": None, "_provenance_seq": 0,
         # Support: the project's human-quotable id, and the auto-filed error
         # report's row id once a failure has been logged (see _file_failure_report).
         "board_code": None, "support_report_id": None,
     }
 
 
-def _load_events(dir_path) -> list[dict]:
-    """Read back the persisted event stream (events.jsonl) for a reopened project.
-    Inverse of the write in _persist_project. The build timeline + LLM-reasoning
-    panel renders from state['events']; events.jsonl is written at finalize but was
-    never read back, so a reopened project showed a blank timeline. Best-effort and
-    per-line tolerant so one corrupt line never blanks the whole history."""
-    if not dir_path:
-        return []
-    f = Path(dir_path) / "events.jsonl"
+_PROVENANCE_EVENT_KINDS = frozenset(
+    {"recipe_selected", "work_unit_plan", "work_unit_attempt", "work_unit_done"}
+)
+
+
+def _record_progress_event(state: dict, event: dict, *, run_id: str | None = None) -> dict:
+    """Append progress in memory and durably journal redacted execution provenance."""
+    recorded = dict(event)
+    if recorded.get("kind") in _PROVENANCE_EVENT_KINDS:
+        active_run_id = run_id or state.get("run_id")
+        state["_provenance_seq"] = int(state.get("_provenance_seq") or 0) + 1
+        recorded.setdefault("version", 1)
+        recorded.setdefault("run_id", active_run_id)
+        recorded.setdefault("ts", dt.datetime.now(dt.timezone.utc).isoformat())
+        recorded.setdefault(
+            "event_id",
+            f"{active_run_id or 'local'}:{state['_provenance_seq']}",
+        )
+        try:
+            project_dir = _project_dir(state)
+            if project_dir is not None:
+                with (project_dir / "provenance.jsonl").open("a", encoding="utf-8") as stream:
+                    stream.write(
+                        json.dumps(recorded, ensure_ascii=False, default=str) + "\n"
+                    )
+                    stream.flush()
+                    os.fsync(stream.fileno())
+        except OSError:
+            # The live in-memory event remains available; final persistence still
+            # writes the complete event transcript.
+            pass
+    state.setdefault("events", []).append(recorded)
+    return recorded
+
+
+def _read_event_jsonl(path: Path) -> list[dict]:
     try:
-        lines = f.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
     out: list[dict] = []
@@ -1857,12 +1884,33 @@ def _load_events(dir_path) -> list[dict]:
         if not line:
             continue
         try:
-            ev = json.loads(line)
+            event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(ev, dict):
-            out.append(ev)
+        if isinstance(event, dict):
+            out.append(event)
     return out
+
+
+def _load_events(dir_path) -> list[dict]:
+    """Restore the transcript plus crash-durable provenance for investigation."""
+    if not dir_path:
+        return []
+    root = Path(dir_path)
+    events = _read_event_jsonl(root / "events.jsonl")
+    seen = {
+        str(event["event_id"])
+        for event in events
+        if event.get("event_id") is not None
+    }
+    for event in _read_event_jsonl(root / "provenance.jsonl"):
+        event_id = event.get("event_id")
+        if event_id is not None and str(event_id) in seen:
+            continue
+        events.append(event)
+        if event_id is not None:
+            seen.add(str(event_id))
+    return events
 
 
 def _pick_default_project(user_id: int):
@@ -2040,8 +2088,7 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
         _LIVE_RUNS[pid] = state
 
     def progress(ev):
-        state["events"].append(ev)
-
+        _record_progress_event(state, ev)
     try:
         rc = _drive_build_queue(ws, state, progress, kind=kind)
         # Surface whatever board the build left behind -- on a failed verify
@@ -2115,6 +2162,7 @@ def _run_design(state: dict, stages, answers=None) -> None:
     # Stamp every model call of this run with a stable id so the spend ledger can
     # attribute cost per run/stage (see kicraft.cli.web_cost_report).
     run_id = f"p{state.get('project_id')}-{int(time.time())}"
+    state["run_id"] = run_id
 
     # Core-components registry rows for the architecture/bom prompts, fetched
     # fresh each run so admin edits apply to reruns. Registry trouble must never
@@ -2127,7 +2175,7 @@ def _run_design(state: dict, stages, answers=None) -> None:
             core_defaults = None
 
     def progress(ev):
-        state["events"].append(ev)
+        _record_progress_event(state, ev, run_id=run_id)
 
     try:
         res = run_session(ws, state.get("brief", ""), stages, answers=answers,

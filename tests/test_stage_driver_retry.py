@@ -1226,9 +1226,15 @@ def test_explicit_bom_topology_skips_provider_call(tmp_path, monkeypatch):
     assert result["attempts"] == 0
     assert client.calls == []
     assert len(commits[0]["parts"]) == 1
-    assert any(
-        event.get("source") == "deterministic_architecture_lowering" for event in progress
-    )
+    provenance = [
+        event
+        for event in progress
+        if event.get("source") == "deterministic_architecture_lowering"
+    ]
+    assert [event["kind"] for event in provenance] == [
+        "work_unit_plan",
+        "work_unit_done",
+    ]
 
 
 def test_invalid_bom_architecture_fails_before_provider_call(tmp_path, monkeypatch):
@@ -1935,11 +1941,13 @@ def test_review_question_does_not_persist_open_questions(tmp_path):
 
 def test_attempt_trace_associates_candidates_with_one_bounded_repair(tmp_path, monkeypatch):
     records = []
+    progress = []
     result, _client = _a3_run(
         tmp_path,
         monkeypatch,
         ["A", "A", "A"],
         extra_ok_reply=False,
+        progress=progress.append,
         attempt_observer=records.append,
     )
 
@@ -1955,6 +1963,17 @@ def test_attempt_trace_associates_candidates_with_one_bounded_repair(tmp_path, m
     assert records[1]["aggregate_signature"] is not None
     for row in records:
         assert "raw" not in row and "messages" not in row and "reasoning" not in row
+    plans = [event for event in progress if event.get("kind") == "work_unit_plan"]
+    attempts = [event for event in progress if event.get("kind") == "work_unit_attempt"]
+    accepted = [event for event in progress if event.get("kind") == "work_unit_done"]
+    assert [(event["unit_id"], event["source"]) for event in plans] == [
+        ("wiring-u000", "llm")
+    ]
+    assert [event["outcome"] for event in attempts] == ["candidate", "candidate"]
+    assert [event["aggregate_round"] for event in attempts] == [None, 1]
+    assert [event["source"] for event in accepted] == ["llm", "llm"]
+    for event in attempts:
+        assert not ({"raw", "messages", "reasoning", "candidate"} & event.keys())
 
 
 def test_neutral_series_feedback_allows_commit_progression(tmp_path, monkeypatch):

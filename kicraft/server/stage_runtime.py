@@ -178,6 +178,56 @@ def _record_attempt_facts(
     )
 
 
+def _work_unit_attempt_event(
+    client,
+    *,
+    stage: str,
+    unit,
+    provider_attempt: int,
+    unit_attempt: int,
+    call_mode: str,
+    outcome: str,
+    facts=None,
+    error_facts=None,
+    aggregate_round: int | None = None,
+    commit_result: dict | None = None,
+    candidate_retained: bool | None = None,
+    fallback_reason: str | None = None,
+) -> dict:
+    """Build the redacted user-visible counterpart of one ledger attempt row."""
+    usage = (facts.usage or {}) if facts is not None else {}
+    rejection = _redacted_rejection_facts(
+        commit_result,
+        candidate_retained=candidate_retained,
+    )
+    errors = error_facts or {}
+    return {
+        "kind": "work_unit_attempt",
+        "version": 1,
+        "stage": stage,
+        "unit_id": unit.unit_id,
+        "unit_sheet": unit.sheet,
+        "source": "llm",
+        "provider_attempt": provider_attempt,
+        "unit_attempt": unit_attempt,
+        "call_mode": call_mode,
+        "outcome": outcome,
+        "model": _client_model(client),
+        "provider": facts.provider if facts is not None else None,
+        "finish_reason": facts.finish if facts is not None else None,
+        "wall_s": facts.wall_s if facts is not None else None,
+        "input_tokens": usage.get("prompt_tokens"),
+        "output_tokens": usage.get("completion_tokens"),
+        "cost_usd": facts.cost_usd if facts is not None else 0.0,
+        "http_status": errors.get("http_status"),
+        "error_code": errors.get("error_code"),
+        "request_id": errors.get("request_id"),
+        "aggregate_round": aggregate_round,
+        "fallback_reason": fallback_reason,
+        **rejection,
+    }
+
+
 # Per-stage self-correction budget. Wiring must satisfy whole-board net coverage
 # (§9.11) in a single slot; on a complex board the model needs more correction
 # passes than the simpler, smaller-slot stages, so they floor higher (BOM must
@@ -993,6 +1043,9 @@ def finalize_stage(
                 "semantic_clean": outcome.get("semantic_clean"),
                 "fab_safe": outcome.get("fab_safe"),
                 "failure_kind": outcome.get("failure_kind"),
+                "work_units": outcome.get("work_units"),
+                "reused_work_units": outcome.get("reused_work_units"),
+                "aggregate_repair_rounds": outcome.get("aggregate_repair_rounds"),
                 "retryable": outcome.get("failure_kind") == "provider_rate_limited",
                 "retry_action": (
                     "retry_stage"
@@ -1073,6 +1126,7 @@ def _work_unit_instructions(
             ),
             {},
         )
+
         def topology_key(value: object) -> str:
             return re.sub(r"[^a-z0-9]", "", str(value).lower())
 
@@ -1243,8 +1297,56 @@ def _drive_work_unit_stage(
             candidates.clear()
             break
     reused_work_units = len(candidates)
+    architecture = prompt_state.get("architecture") or {}
+    selections = [
+        selection
+        for selection in architecture.get("recipe_selections") or []
+        if isinstance(selection, dict)
+    ]
+    recipe_sheets = {
+        str(sheet)
+        for selection in selections
+        for sheet in (selection.get("sheets") or {}).values()
+    }
+    if progress:
+        for selection in selections:
+            progress(
+                {
+                    "kind": "recipe_selected",
+                    "version": 1,
+                    "stage": stage,
+                    "source": "recipe",
+                    "recipe": selection.get("recipe"),
+                    "instance": selection.get("instance"),
+                    "sheets": selection.get("sheets") or {},
+                    "parameters": selection.get("parameters") or {},
+                }
+            )
     for unit in units:
         if unit.unit_id in candidates:
+            if progress:
+                progress(
+                    {
+                        "kind": "work_unit_plan",
+                        "version": 1,
+                        "stage": stage,
+                        "unit_id": unit.unit_id,
+                        "unit_sheet": unit.sheet,
+                        "source": "reused_validated_draft",
+                        "refs": list(unit.refs),
+                        "expected_pin_count": len(unit.expected_pins),
+                    }
+                )
+                progress(
+                    {
+                        "kind": "work_unit_done",
+                        "version": 1,
+                        "stage": stage,
+                        "unit_id": unit.unit_id,
+                        "unit_sheet": unit.sheet,
+                        "source": "reused_validated_draft",
+                    }
+                )
             continue
         deterministic = (
             deterministic_bom_candidate(unit, prompt_state)
@@ -1252,7 +1354,35 @@ def _drive_work_unit_stage(
             else deterministic_wiring_candidate(unit, prompt_state, extras)
         )
         if deterministic is None:
+            if progress:
+                progress(
+                    {
+                        "kind": "work_unit_plan",
+                        "version": 1,
+                        "stage": stage,
+                        "unit_id": unit.unit_id,
+                        "unit_sheet": unit.sheet,
+                        "source": (
+                            "recipe_plus_llm" if unit.sheet in recipe_sheets else "llm"
+                        ),
+                        "refs": list(unit.refs),
+                        "expected_pin_count": len(unit.expected_pins),
+                    }
+                )
             continue
+        if progress:
+            progress(
+                {
+                    "kind": "work_unit_plan",
+                    "version": 1,
+                    "stage": stage,
+                    "unit_id": unit.unit_id,
+                    "unit_sheet": unit.sheet,
+                    "source": "deterministic_architecture_lowering",
+                    "refs": list(unit.refs),
+                    "expected_pin_count": len(unit.expected_pins),
+                }
+            )
         candidates[unit.unit_id] = validate_unit_candidate(
             unit,
             deterministic,
@@ -1263,6 +1393,7 @@ def _drive_work_unit_stage(
             progress(
                 {
                     "kind": "work_unit_done",
+                    "version": 1,
                     "stage": stage,
                     "unit_id": unit.unit_id,
                     "unit_sheet": unit.sheet,
@@ -1312,6 +1443,24 @@ def _drive_work_unit_stage(
             candidate_retained=candidate_retained,
             fallback_reason=fallback_reason,
         )
+        if progress:
+            progress(
+                _work_unit_attempt_event(
+                    active_client,
+                    stage=stage,
+                    unit=unit,
+                    provider_attempt=attempts,
+                    unit_attempt=unit_attempt,
+                    call_mode=call_mode,
+                    outcome=outcome,
+                    facts=facts,
+                    error_facts=error_facts,
+                    aggregate_round=aggregate_round,
+                    commit_result=commit_result,
+                    candidate_retained=candidate_retained,
+                    fallback_reason=fallback_reason,
+                )
+            )
         if attempt_observer is not None:
             settings = getattr(active_client, "s", None)
             attempt_observer(
@@ -1652,6 +1801,20 @@ def _drive_work_unit_stage(
             )
             serialization_next = False
             if kind == "candidate":
+                if progress:
+                    progress(
+                        {
+                            "kind": "work_unit_done",
+                            "version": 1,
+                            "stage": stage,
+                            "unit_id": unit.unit_id,
+                            "unit_sheet": unit.sheet,
+                            "source": "llm",
+                            "unit_attempt": unit_attempt,
+                            "provider_attempt": attempts,
+                            "aggregate_round": aggregate_round,
+                        }
+                    )
                 return kind, payload
             if kind == "questions":
                 questions = _normalize_questions(payload.get("questions") or [], stage)

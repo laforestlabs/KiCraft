@@ -191,6 +191,72 @@ async def test_stage_tabs_bom_preview_survives_invalid_partial():
         await u.should_see("U1")
         await u.should_see("J1")
 
+
+
+@pytest.mark.anyio
+async def test_stage_tabs_render_execution_provenance():
+    holder = {}
+
+    def root():
+        holder["tabs"] = StageTabs()
+
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        tabs = holder["tabs"]
+        with u:
+            tabs.push({"kind": "stage_start", "stage": "bom", "model": "test"})
+            tabs.push(
+                {
+                    "kind": "recipe_selected",
+                    "stage": "bom",
+                    "recipe": "rp2040-minimal@1",
+                    "instance": "controller",
+                    "sheets": {"mcu": "MCU"},
+                    "parameters": {"usb": True},
+                }
+            )
+            tabs.push(
+                {
+                    "kind": "work_unit_plan",
+                    "stage": "bom",
+                    "unit_id": "bom-s000",
+                    "unit_sheet": "BUFFER",
+                    "source": "deterministic_architecture_lowering",
+                }
+            )
+            tabs.push(
+                {
+                    "kind": "work_unit_attempt",
+                    "stage": "bom",
+                    "unit_id": "bom-s001",
+                    "unit_sheet": "POWER",
+                    "unit_attempt": 2,
+                    "source": "llm",
+                    "provider": "openrouter",
+                    "model": "test/model",
+                    "outcome": "invalid_work_unit",
+                    "input_tokens": 120,
+                    "output_tokens": 40,
+                }
+            )
+            tabs.push(
+                {
+                    "kind": "work_unit_done",
+                    "stage": "bom",
+                    "unit_id": "bom-s000",
+                    "unit_sheet": "BUFFER",
+                    "source": "deterministic_architecture_lowering",
+                }
+            )
+
+        await u.should_see("Circuit recipe")
+        await u.should_see("rp2040-minimal@1")
+        await u.should_see("Deterministic")
+        await u.should_see("LLM")
+        await u.should_see("invalid_work_unit")
+        await u.should_see("Candidate validated and retained")
+
+
 # --------------------------------------------------- inspector tables (kc-table)
 
 def test_table_html_is_one_aligned_table():
@@ -226,6 +292,30 @@ def test_cell_html_renders_https_link_new_tab():
     assert out.startswith('<a href="https://www.lcsc.com/product-detail/C2687116.html"')
     assert 'target="_blank"' in out and 'rel="noopener noreferrer"' in out
     assert ">C2687116</a>" in out
+
+
+def test_persisted_provenance_routes_by_durable_stage():
+    class Panel:
+        def __init__(self):
+            self.events = []
+
+        def push(self, event):
+            self.events.append(event)
+
+    intent = Panel()
+    bom = Panel()
+    stub = SimpleNamespace(_current="intent", panels={"intent": intent, "bom": bom})
+    event = {
+        "kind": "work_unit_plan",
+        "stage": "bom",
+        "unit_id": "bom-s000",
+        "source": "llm",
+    }
+
+    StageTabs.push(stub, event)
+
+    assert intent.events == []
+    assert bom.events == [event]
 
 
 def test_table_html_highlights_warn_rows():
