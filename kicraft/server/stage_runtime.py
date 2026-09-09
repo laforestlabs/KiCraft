@@ -1109,9 +1109,7 @@ def _work_unit_provenance(unit: StageWorkUnit) -> dict:
         "requirement_ids": list(unit.requirement_ids),
         "owned_roles": list(unit.owned_roles),
         "excluded_refs": list(unit.excluded_refs),
-        "excluded_pins": [
-            {"ref": ref, "pin": pin} for ref, pin in unit.excluded_pins
-        ],
+        "excluded_pins": [{"ref": ref, "pin": pin} for ref, pin in unit.excluded_pins],
         "planned_resolution_source": unit.planned_resolution_source,
         "recipe_ids": list(unit.recipe_ids),
         "lowerer_ids": list(unit.lowerer_ids),
@@ -1132,9 +1130,7 @@ def _work_unit_instructions(
         "requirement_ids": list(unit.requirement_ids),
         "owned_roles": list(unit.owned_roles),
         "excluded_refs": list(unit.excluded_refs),
-        "excluded_pins": [
-            {"ref": ref, "pin": pin} for ref, pin in unit.excluded_pins
-        ],
+        "excluded_pins": [{"ref": ref, "pin": pin} for ref, pin in unit.excluded_pins],
         "planned_resolution_source": unit.planned_resolution_source,
         "recipe_ids": list(unit.recipe_ids),
         "lowerer_ids": list(unit.lowerer_ids),
@@ -1159,11 +1155,7 @@ def _work_unit_instructions(
         }
         topologies = (prompt_state.get("architecture") or {}).get("topologies") or {}
         target_topology = next(
-            (
-                value
-                for key, value in topologies.items()
-                if topology_key(key) in target_tokens
-            ),
+            (value for key, value in topologies.items() if topology_key(key) in target_tokens),
             None,
         )
         boundary["target_topology"] = target_topology
@@ -1330,9 +1322,7 @@ def _drive_work_unit_stage(
         if isinstance(selection, dict)
     ]
     recipe_sheets = {
-        str(sheet)
-        for selection in selections
-        for sheet in (selection.get("sheets") or {}).values()
+        str(sheet) for selection in selections for sheet in (selection.get("sheets") or {}).values()
     }
     if progress:
         for selection in selections:
@@ -1354,8 +1344,7 @@ def _drive_work_unit_stage(
                         record
                         for record in architecture.get("recipe_resolution") or []
                         if isinstance(record, dict)
-                        and record.get("requirement_id")
-                        in (selection.get("requirement_ids") or [])
+                        and record.get("requirement_id") in (selection.get("requirement_ids") or [])
                     ],
                 }
             )
@@ -1401,9 +1390,7 @@ def _drive_work_unit_stage(
                         "stage": stage,
                         "unit_id": unit.unit_id,
                         "unit_sheet": unit.sheet,
-                        "source": (
-                            "recipe_plus_llm" if unit.sheet in recipe_sheets else "llm"
-                        ),
+                        "source": ("recipe_plus_llm" if unit.sheet in recipe_sheets else "llm"),
                         "refs": list(unit.refs),
                         "expected_pin_count": len(unit.expected_pins),
                         **_work_unit_provenance(unit),
@@ -1946,7 +1933,7 @@ def _drive_work_unit_stage(
     def aggregate():
         nonlocal expanded_component_count
         if stage == "bom":
-            merged, ref_to_unit = merge_bom_units(units, candidates, prompt_state)
+            merged, ref_to_unit, ref_to_lowering = merge_bom_units(units, candidates, prompt_state)
             normalized, expanded_component_count = _normalize_stage_response(
                 stage, merged, prompt_state
             )
@@ -1957,6 +1944,9 @@ def _drive_work_unit_stage(
                 if unit_id:
                     part["resolution_source"] = unit_sources.get(unit_id, "llm")
                     part["resolution_id"] = unit_id
+                    lowering = ref_to_lowering.get(str(part.get("ref")))
+                    if lowering:
+                        part.update(lowering)
             return normalized, ref_to_unit, {}, {}
         merged, pin_to_unit, ref_to_unit_ids = merge_wiring_units(units, candidates)
         normalized, _expanded = _normalize_stage_response(stage, merged, prompt_state)
@@ -2338,6 +2328,10 @@ def drive_stage(
         from kicraft.design.recipes import recipe_summaries
 
         extras["circuit_recipes"] = recipe_summaries()
+    if stage == "architecture":
+        from kicraft.design.lowering import lowerer_summaries
+
+        extras["circuit_lowerers"] = lowerer_summaries()
 
     # Bookkeeping the model has no use for stays out of its prompt.
     prompt_state = dict(prep_json["state"])
@@ -2425,8 +2419,7 @@ def drive_stage(
             stage,
             prompt_state,
             allow_questions=not (
-                stage == "architecture"
-                and instruction == NONINTERACTIVE_DEFAULTS_INSTRUCTION
+                stage == "architecture" and instruction == NONINTERACTIVE_DEFAULTS_INSTRUCTION
             ),
         )
     except ValueError as exc:

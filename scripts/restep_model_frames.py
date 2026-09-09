@@ -35,6 +35,7 @@ Sub-0.5 mm z-only offsets (chip seating planes) were fixed along the way.
 
 Run with the project venv:  python scripts/restep_model_frames.py --verify
 """
+
 from __future__ import annotations
 
 import argparse
@@ -84,9 +85,13 @@ APPLIED_TRANSFORMS: dict[str, tuple[int, tuple[float, float, float]]] = {
     "pj-320a": (0, (-2.10, 0.00, 2.30)),
     "pj-320a-4p": (0, (-2.18, 0.00, 2.50)),
     "ds18b20": (0, (0.00, 1.03, 0.00)),
+    "esp32-c3-mini-1-n4": (0, (0.00, 2.72, 0.00)),
     "esp32-s3-mini-1": (0, (0.00, 2.54, 0.02)),
     "esp32-s3-wroom-1": (0, (0.00, 3.65, 0.01)),
-    "esp32-s3-wroom-1-n16r8": (0, (0.00, 3.65, 0.01)),  # same WIRELM frame as esp32-s3-wroom-1; fit med 0.001 mm
+    "esp32-s3-wroom-1-n16r8": (
+        0,
+        (0.00, 3.65, 0.01),
+    ),  # same WIRELM frame as esp32-s3-wroom-1; fit med 0.001 mm
     "esp32-wroom-32e-n4": (0, (-3.78, 0.00, 0.00)),
     "header-male-2-54-1x40": (0, (49.53, 0.00, 0.00)),
     "hs96l03w2c03": (0, (0.00, -12.66, -2.38)),
@@ -108,6 +113,7 @@ APPLIED_TRANSFORMS: dict[str, tuple[int, tuple[float, float, float]]] = {
     "veml7700": (0, (0.00, 0.44, 1.49)),
     "vl53l0x": (0, (0.00, 0.00, 1.02)),
 }
+
 
 def bundle_model_pair(part_dir: Path) -> tuple[Path, Path] | None:
     td = part_dir / "3d"
@@ -135,8 +141,7 @@ def cmd_verify(bundles: list[Path]) -> int:
         reason = frame_mismatch(*pair)
         if reason:
             bad += 1
-        print(f"{d.name:32s} registry q25 {err:7.3f} mm"
-              + (f"  <-- {reason}" if reason else ""))
+        print(f"{d.name:32s} registry q25 {err:7.3f} mm" + (f"  <-- {reason}" if reason else ""))
     print(f"\nworst q25 {worst:.3f} mm; {bad} mismatched bundle(s)")
     return 1 if bad else 0
 
@@ -159,7 +164,11 @@ def cmd_fit(bundles: list[Path]) -> int:
             scored.append((med, deg, t))
         scored.sort()
         med, deg, t = scored[0]
-        flag = "" if med < 0.4 and scored[1][0] > 2 * med else "  <-- AMBIGUOUS, adjudicate by pin features"
+        flag = (
+            ""
+            if med < 0.4 and scored[1][0] > 2 * med
+            else "  <-- AMBIGUOUS, adjudicate by pin features"
+        )
         print(
             f"{d.name:32s} rot={deg:3d} t=({t[0]:7.2f},{t[1]:7.2f},{t[2]:6.2f}) "
             f"med={med:6.3f} next={scored[1][0]:6.3f}{flag}"
@@ -186,7 +195,9 @@ def cmd_apply(bundles: list[Path]) -> int:
         )
         if reason:
             print(f"  WARNING {name}: still mismatched after transform: {reason}", file=sys.stderr)
-    print("\nnow re-bless hashes: python -m kicraft.design.cli_app validate-part <dir> --update-hash")
+    print(
+        "\nnow re-bless hashes: python -m kicraft.design.cli_app validate-part <dir> --update-hash"
+    )
     return 0
 
 

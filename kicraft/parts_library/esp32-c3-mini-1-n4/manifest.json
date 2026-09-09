@@ -1,0 +1,27 @@
+{
+  "content_hash": "sha256:4dd46f5d1a7c0f78d77163fd90d28bc2420a452541a6e331e263b3bcda79d46d",
+  "datasheet_url": "https://www.espressif.com/sites/default/files/documentation/esp32-c3-mini-1_datasheet_en.pdf",
+  "description": "ESP32-C3-MINI-1-N4 Wi-Fi and BLE module",
+  "footprint_name": "WIFIM-SMD_ESP32-C3-MINI-1",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "ESP32-C3-MINI-1-N4",
+  "name": "esp32-c3-mini-1-n4",
+  "provenance": {
+    "added_at": "2026-09-09T11:55:16Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2838502"
+  },
+  "symbol_name": "ESP32-C3-MINI-1-N4",
+  "tags": [
+    "mcu",
+    "wifi"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

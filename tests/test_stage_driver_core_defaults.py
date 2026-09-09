@@ -277,9 +277,10 @@ def test_drive_stage_injects_db_rows_overriding_nothing_else(tmp_path):
     ]
     client = _drive(tmp_path, "architecture", edited)
     prompt = _user_prompt(client)
+    block = _format_core_defaults_block(edited)
     assert "core_defaults_block" in prompt
-    assert "FT232RL-EDITED" in prompt  # the DB-edited row is what renders
-    assert "ME6211C33M5G-N" not in prompt  # not the bundled seed
+    assert "FT232RL-EDITED" in prompt
+    assert block is not None and "ME6211C33M5G-N" not in block
 
 
 def test_drive_stage_bom_gets_the_block_too(tmp_path):

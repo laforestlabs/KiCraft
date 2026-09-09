@@ -1180,7 +1180,7 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
     assert res["results"][-1]["failure_kind"] == "invalid_json"
 
 
-def test_explicit_bom_topology_skips_provider_call(tmp_path, monkeypatch):
+def test_typed_bom_lowerer_skips_provider_call(tmp_path, monkeypatch):
     state = {
         "architecture": {
             "topologies": {"INPUT": "8-pin header"},
@@ -1195,6 +1195,19 @@ def test_explicit_bom_topology_skips_provider_call(tmp_path, monkeypatch):
             "power_nets": ["GND"],
             "inter_sheet_nets": [],
             "recipe_selections": [],
+            "requirements": [
+                {
+                    "id": "input_header",
+                    "sheet": "INPUT",
+                    "role": "connector",
+                    "family": "pin-header",
+                    "parameters": {"rows": 1},
+                    "ports": {
+                        **{f"d{index}": f"D{index}" for index in range(8)},
+                        "gnd": "GND",
+                    },
+                }
+            ],
         }
     }
     prep = {"state": state, "extras": {}}
@@ -1228,9 +1241,7 @@ def test_explicit_bom_topology_skips_provider_call(tmp_path, monkeypatch):
     assert client.calls == []
     assert len(commits[0]["parts"]) == 1
     provenance = [
-        event
-        for event in progress
-        if event.get("source") == "deterministic_architecture_lowering"
+        event for event in progress if event.get("source") == "deterministic_architecture_lowering"
     ]
     assert [event["kind"] for event in provenance] == [
         "work_unit_plan",
@@ -1238,15 +1249,8 @@ def test_explicit_bom_topology_skips_provider_call(tmp_path, monkeypatch):
     ]
 
 
-def test_recipe_complete_mcu_bom_and_wiring_skip_provider_calls(
-    tmp_path, monkeypatch
-):
-    fixture = (
-        Path(__file__).parent
-        / "fixtures"
-        / "recipe_coverage"
-        / "mcu_only_architecture.json"
-    )
+def test_recipe_complete_mcu_bom_and_wiring_skip_provider_calls(tmp_path, monkeypatch):
+    fixture = Path(__file__).parent / "fixtures" / "recipe_coverage" / "mcu_only_architecture.json"
     state = {
         "intent": {"named_parts": ["ESP32-S3-MINI-1-N8"]},
         "architecture": json.loads(fixture.read_text(encoding="utf-8")),
@@ -1258,8 +1262,7 @@ def test_recipe_complete_mcu_bom_and_wiring_skip_provider_calls(
         parts = (state.get("bom") or {}).get("parts") or []
         extras = {
             "symbol_pinouts": {
-                part["ref"]: {"symbol": part["symbol"], "pins": []}
-                for part in parts
+                part["ref"]: {"symbol": part["symbol"], "pins": []} for part in parts
             }
         }
         return type(
@@ -1306,8 +1309,7 @@ def test_recipe_complete_mcu_bom_and_wiring_skip_provider_calls(
     assert bom_result["attempts"] == wiring_result["attempts"] == 0
     assert client.calls == []
     assert all(
-        part["recipe_id"] == "esp32-s3-mini-1-minimal@1"
-        for part in committed["bom"]["parts"]
+        part["recipe_id"] == "esp32-s3-mini-1-minimal@1" for part in committed["bom"]["parts"]
     )
     assert committed["bom"]["recipe_ownership"][0]["pins"]
     assert committed["wiring"]["connections"]
@@ -1321,15 +1323,8 @@ def test_recipe_complete_mcu_bom_and_wiring_skip_provider_calls(
     )
 
 
-def test_mixed_recipe_sheet_calls_provider_once_for_only_novel_role(
-    tmp_path, monkeypatch
-):
-    fixture = (
-        Path(__file__).parent
-        / "fixtures"
-        / "recipe_coverage"
-        / "mixed_architecture.json"
-    )
+def test_mixed_recipe_sheet_calls_provider_once_for_only_novel_role(tmp_path, monkeypatch):
+    fixture = Path(__file__).parent / "fixtures" / "recipe_coverage" / "mixed_architecture.json"
     state = {
         "intent": {"named_parts": ["ESP32-S3-MINI-1-N8"]},
         "architecture": json.loads(fixture.read_text(encoding="utf-8")),
@@ -1390,9 +1385,7 @@ def test_mixed_recipe_sheet_calls_provider_once_for_only_novel_role(
     assert '"recipe_ids":["esp32-s3-mini-1-minimal@1"]' in system_prompt
     assert any(part.get("recipe_id") for part in committed[0]["parts"])
     assert [
-        part["resolution_source"]
-        for part in committed[0]["parts"]
-        if not part.get("recipe_id")
+        part["resolution_source"] for part in committed[0]["parts"] if not part.get("recipe_id")
     ] == ["llm"]
 
 
@@ -2125,9 +2118,7 @@ def test_attempt_trace_associates_candidates_with_one_bounded_repair(tmp_path, m
     plans = [event for event in progress if event.get("kind") == "work_unit_plan"]
     attempts = [event for event in progress if event.get("kind") == "work_unit_attempt"]
     accepted = [event for event in progress if event.get("kind") == "work_unit_done"]
-    assert [(event["unit_id"], event["source"]) for event in plans] == [
-        ("wiring-u000", "llm")
-    ]
+    assert [(event["unit_id"], event["source"]) for event in plans] == [("wiring-u000", "llm")]
     assert [event["outcome"] for event in attempts] == ["candidate", "candidate"]
     assert [event["aggregate_round"] for event in attempts] == [None, 1]
     assert [event["source"] for event in accepted] == ["llm", "llm"]
@@ -2272,9 +2263,7 @@ def test_work_units_make_one_initial_call_each_before_one_full_commit(tmp_path, 
     assert result["commit_ok"] is True
     assert result["work_units"] == 2
     assert len(client.calls) == 2
-    assert [
-        call["collection_bounds"][0].total for call in client.calls
-    ] == [1, 1]
+    assert [call["collection_bounds"][0].total for call in client.calls] == [1, 1]
     assert len(commits) == 1
 
 

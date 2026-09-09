@@ -85,6 +85,19 @@ through to BOM/wiring. Prefer a matching recipe over inventing an MCU support
 circuit. USB and GPIO are bidirectional at sheet boundaries. Programming labels
 alone never prove a path.
 
+**Deterministic circuit lowerers.** `extras.circuit_lowerers` lists exact,
+versioned transformations for generic connectors, passive networks, and repeated
+simple channels. Prefer one when it matches the requested circuit. Emit a
+`requirements` entry whose `family` is one listed family, whose `parameters`
+contain the listed bounded design inputs, and whose `ports` map every listed
+logical port to the final application net. For ranged ports such as
+`bit0..bitN` or `signal0..signalN`, emit every indexed key implied by the count.
+For connectors with one named port per pin/terminal, dictionary insertion order
+is physical pin order. Families match exactly: never paraphrase, concatenate,
+or infer one from topology prose. KiCraft derives both BOM and wiring from the
+same lowerer artifact; an incomplete or out-of-range requirement deliberately
+falls through to an ordinary BOM work unit.
+
 **External-load power budget.** When the accepted functional spec says the board
 supplies power to a display, LED string, motor, heater, or other external load,
 the architecture must include both the maximum output-current budget and an

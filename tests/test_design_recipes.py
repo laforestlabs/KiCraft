@@ -196,9 +196,7 @@ def test_rp2040_v2_scopes_internal_nets_and_binds_power_ports():
     first_nets = {connection.net_name for connection in first.connections}
     assert "+3V3" in first_nets
     assert "QSPI_CS" not in first_nets
-    assert set(first.ownership.internal_nets).isdisjoint(
-        second.ownership.internal_nets
-    )
+    assert set(first.ownership.internal_nets).isdisjoint(second.ownership.internal_nets)
     definition = get_recipe("rp2040-minimal@2")
     assert definition.maturity == "production"
     assert len(definition.source_documents) == 2
@@ -227,19 +225,13 @@ def test_allocator_owned_wiring_pin_rejects_model_overwrite():
         parameters={"native_usb": False},
         port_bindings={"vdd": "+3V3", "gnd": "GND"},
         requirement_ids=["mcu_core"],
-        pin_allocations=[
-            RecipePinAllocation(net="APP_OUT", pin="5", capability="output")
-        ],
+        pin_allocations=[RecipePinAllocation(net="APP_OUT", pin="5", capability="output")],
     )
     expansion = expand_recipe(selection)
     bom = {
         "parts": [part.model_dump(mode="json") for part in expansion.parts],
-        "connections": [
-            connection.model_dump(mode="json") for connection in expansion.connections
-        ],
-        "no_connect_pins": [
-            pin.model_dump(mode="json") for pin in expansion.no_connect_pins
-        ],
+        "connections": [connection.model_dump(mode="json") for connection in expansion.connections],
+        "no_connect_pins": [pin.model_dump(mode="json") for pin in expansion.no_connect_pins],
         "recipe_ownership": [expansion.ownership.model_dump(mode="json")],
     }
     with pytest.raises(StageSchemaError, match="recipe-owned"):
@@ -549,9 +541,7 @@ def test_esp32_optional_usb_and_internal_nets_are_instance_scoped():
         base.model_copy(update={"instance": "aux", "requirement_ids": ["aux_core"]})
     )
     assert len(with_usb.parts) == len(without_usb.parts) + 2
-    assert set(without_usb.ownership.internal_nets).isdisjoint(
-        second.ownership.internal_nets
-    )
+    assert set(without_usb.ownership.internal_nets).isdisjoint(second.ownership.internal_nets)
     assert {pin.pin for pin in without_usb.no_connect_pins} >= {"23", "24"}
     assert {connection.net_name for connection in with_usb.connections} >= {
         "USB_DM",
@@ -607,9 +597,7 @@ def test_pin_allocator_excludes_reserved_input_only_and_strapping_pins():
         RecipeAllocatablePin(
             role="mcu", pin="1", gpio=0, capabilities=("gpio", "output"), strapping=True
         ),
-        RecipeAllocatablePin(
-            role="mcu", pin="2", gpio=1, capabilities=("gpio", "output")
-        ),
+        RecipeAllocatablePin(role="mcu", pin="2", gpio=1, capabilities=("gpio", "output")),
         RecipeAllocatablePin(
             role="mcu",
             pin="3",
@@ -661,9 +649,7 @@ def test_pin_allocator_excludes_reserved_input_only_and_strapping_pins():
         ("uart", {"tx": "TX", "rx": "RX"}, {"uart-tx", "uart-rx"}),
     ],
 )
-def test_pin_allocator_allocates_controller_buses_atomically(
-    interface, ports, capabilities
-):
+def test_pin_allocator_allocates_controller_buses_atomically(interface, ports, capabilities):
     from kicraft.design.models import CircuitRequirement
     from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
 
@@ -681,3 +667,141 @@ def test_pin_allocator_allocates_controller_buses_atomically(
     )
     assert {allocation.capability for allocation in allocations} == capabilities
     assert len({allocation.pin for allocation in allocations}) == len(allocations)
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "esp32-s3-wroom-1-minimal@1",
+        "esp32-wroom-32e-minimal@1",
+        "esp32-c3-mini-1-minimal@1",
+        "stm32f103c8t6-minimal@1",
+        "attiny402-updi-minimal@1",
+        "attiny412-updi-minimal@1",
+        "attiny1614-updi-minimal@1",
+        "ch32v003j4m6-minimal@1",
+    ],
+)
+def test_wave_a_mcu_recipes_expand_with_complete_ownership(recipe):
+    definition = get_recipe(recipe)
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe=recipe,
+            instance="main",
+            sheets={"mcu": "MCU"},
+            port_bindings={"vdd": "+3V3", "gnd": "GND"},
+        )
+    )
+    assert definition.maturity == "production"
+    assert definition.exact_part
+    assert definition.source_documents
+    assert definition.electrical_assertions
+    assert all(part.resolution_source == "recipe" for part in expansion.parts)
+    owned_pins = {(pin.ref, pin.pin) for pin in expansion.ownership.pins}
+    assert len(owned_pins) == len(expansion.ownership.pins)
+    assert any(part.ref.startswith("J") for part in expansion.parts)
+    from pathlib import Path
+
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    for part in expansion.parts:
+        expected = {
+            str(pin["number"]) for pin in lookup_pins(part.symbol, project_root=Path("."))["pins"]
+        }
+        actual = {pin.pin for pin in expansion.ownership.pins if pin.ref == part.ref}
+        assert actual == expected, (
+            definition.recipe,
+            part.ref,
+            sorted(expected - actual),
+            sorted(actual - expected),
+        )
+
+
+def test_wave_b_power_recipes_own_every_symbol_pin():
+    from pathlib import Path
+
+    from kicraft.design.recipes.wave_b_power import WAVE_B_POWER_RECIPES
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    for definition in WAVE_B_POWER_RECIPES:
+        assert definition.maturity == "production"
+        assert definition.source_documents
+        for group in definition.parts:
+            expected = {
+                str(pin["number"])
+                for pin in lookup_pins(group.symbol, project_root=Path("."))["pins"]
+            }
+            for index in range(group.quantity):
+                owned = {
+                    pin.pin
+                    for pin in (*definition.pins, *definition.no_connects)
+                    if pin.role == group.role and pin.index == index
+                }
+                assert owned == expected, (
+                    definition.recipe,
+                    group.role,
+                    index,
+                    sorted(expected - owned),
+                    sorted(owned - expected),
+                )
+
+
+def test_wave_c_interface_recipes_own_every_symbol_pin():
+    from pathlib import Path
+
+    from kicraft.design.recipes.wave_c_interfaces import WAVE_C_INTERFACE_RECIPES
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    for definition in WAVE_C_INTERFACE_RECIPES:
+        assert definition.maturity == "production"
+        assert definition.source_documents
+        for group in definition.parts:
+            expected = {
+                str(pin["number"])
+                for pin in lookup_pins(group.symbol, project_root=Path("."))["pins"]
+            }
+            for index in range(group.quantity):
+                owned = {
+                    pin.pin
+                    for pin in (*definition.pins, *definition.no_connects)
+                    if pin.role == group.role and pin.index == index
+                }
+                assert owned == expected, (
+                    definition.recipe,
+                    group.role,
+                    index,
+                    sorted(expected - owned),
+                    sorted(owned - expected),
+                )
+
+
+def test_expanded_recipe_wave_assets_resolve():
+    from pathlib import Path
+
+    from kicraft.design.recipes.wave_a_mcus import WAVE_A_MCU_RECIPES
+    from kicraft.design.recipes.wave_b_power import WAVE_B_POWER_RECIPES
+    from kicraft.design.recipes.wave_c_interfaces import WAVE_C_INTERFACE_RECIPES
+    from kicraft.design.synthesis.footprint_library import lookup_footprint
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    for definition in (
+        *WAVE_A_MCU_RECIPES,
+        *WAVE_B_POWER_RECIPES,
+        *WAVE_C_INTERFACE_RECIPES,
+    ):
+        for group in definition.parts:
+            lookup_pins(group.symbol, project_root=Path("."))
+            lookup_footprint(group.footprint, project_root=Path("."))
+
+
+def test_promoted_recipes_are_advertised_and_protected_in_production():
+    from kicraft.design.recipes.registry import (
+        protected_identity_matches,
+        recipe_summaries,
+    )
+
+    production_ids = {row["recipe"] for row in recipe_summaries()}
+    assert "esp32-s3-mini-1-minimal@1" in production_ids
+    assert "tp4056-1s-charger@1" in production_ids
+    assert protected_identity_matches("TP4056") == ("tp4056",)
+    assert recipe_summaries(frozenset({"canary"})) == []

@@ -1,59 +1,153 @@
 {
+  "topologies": {
+    "MCU": "ESP32-S3-MINI-1-N8 controller; +3V3 supplied externally; UART programming and BOOT/reset recovery"
+  },
+  "rail_voltages": {
+    "+3V3": 3.3
+  },
+  "comms_protocols": [
+    "UART"
+  ],
+  "mcu_present": true,
+  "sheets": [
+    {
+      "name": "MCU",
+      "stem": "MCU",
+      "function": "ESP32-S3-MINI-1-N8 controller"
+    }
+  ],
+  "power_nets": [
+    "+3V3"
+  ],
+  "inter_sheet_nets": [],
   "assumptions": [
     "External +3V3 source provides at least 500mA",
     "auto_esp32_s3_module: native_usb=False from registered circuit recipe"
   ],
-  "comms_protocols": ["UART"],
-  "inter_sheet_nets": [],
-  "mcu_present": true,
-  "power_nets": ["+3V3"],
+  "recipe_selections": [
+    {
+      "recipe": "esp32-s3-mini-1-minimal@1",
+      "instance": "auto_esp32_s3_module",
+      "sheets": {
+        "mcu": "MCU"
+      },
+      "parameters": {
+        "native_usb": false
+      },
+      "port_bindings": {
+        "gnd": "GND",
+        "vdd": "+3V3"
+      },
+      "requirement_ids": [
+        "auto_esp32_s3_module"
+      ],
+      "pin_allocations": []
+    }
+  ],
+  "requirements": [
+    {
+      "id": "auto_esp32_s3_module",
+      "sheet": "MCU",
+      "role": "mcu_core",
+      "family": "esp32-s3-module",
+      "exact_part": "ESP32-S3-MINI-1-N8",
+      "parameters": {},
+      "ports": {
+        "gnd": "GND",
+        "vdd": "+3V3"
+      },
+      "interfaces": []
+    }
+  ],
+  "recipe_resolution": [
+    {
+      "requirement_id": "auto_esp32_s3_module",
+      "recipe": "esp32-s3-mini-1-minimal@1",
+      "exact_part": "ESP32-S3-MINI-1-N8",
+      "assumptions": [
+        "auto_esp32_s3_module: native_usb=False from registered circuit recipe"
+      ]
+    }
+  ],
+  "unresolved_requirement_ids": [],
   "protected_identities": [
+    "a4988settrt",
+    "a4988stepperdriver",
+    "ads1115i2cadc",
+    "ads1115idgsr",
+    "ams111733",
+    "ams11173v3",
+    "ap632033v3",
+    "ap63203wu7",
+    "ap632055v",
+    "ap63205wu7",
+    "attiny1614",
+    "attiny1614ssnr",
+    "attiny402",
+    "attiny402ssn",
+    "attiny412",
+    "attiny412ssn",
+    "cannode3v3",
+    "ch224k",
+    "ch32v003",
+    "ch32v003j4m6",
+    "ch32v003j4m6ch32v003j4m6",
+    "ch340c",
+    "drv8833pwpr",
+    "dualdcmotordriver",
+    "esp32c3mini1module",
+    "esp32c3mini1n4",
+    "esp32c3mini1n4esp32c3mini1n4",
     "esp32s3",
     "esp32s3mini1",
     "esp32s3mini1esp32s3mini1n8",
     "esp32s3mini1n8",
     "esp32s3module",
+    "esp32s3wroom1esp32s3wroom1",
+    "esp32s3wroom1module",
+    "esp32s3wroom1n8r8",
+    "esp32wroom32emodule",
+    "esp32wroom32en4",
+    "esp32wroom32en4esp32wroom32e",
+    "hub75levelshiftinterface",
+    "hub75sn74hct245",
+    "max3485",
+    "mcp17003v3",
+    "mcp1700t3302ett",
+    "mcp6001follower",
+    "mcp6001tiot",
+    "mcumicrochipattinyattiny1614ss",
+    "mcumicrochipattinyattiny402ss",
+    "mcumicrochipattinyattiny412ss",
     "mcuraspberrypirp2040",
+    "me62113v3",
+    "me6211c33m5gn",
+    "pca9685pw118",
+    "pca9685servobank",
     "raspberrypirp2040",
-    "rp2040"
-  ],
-  "rail_voltages": {"+3V3": 3.3},
-  "recipe_resolution": [
-    {
-      "assumptions": ["auto_esp32_s3_module: native_usb=False from registered circuit recipe"],
-      "exact_part": "ESP32-S3-MINI-1-N8",
-      "recipe": "esp32-s3-mini-1-minimal@1",
-      "requirement_id": "auto_esp32_s3_module"
-    }
-  ],
-  "recipe_selections": [
-    {
-      "instance": "auto_esp32_s3_module",
-      "parameters": {"native_usb": false},
-      "pin_allocations": [],
-      "port_bindings": {"gnd": "GND", "vdd": "+3V3"},
-      "recipe": "esp32-s3-mini-1-minimal@1",
-      "requirement_ids": ["auto_esp32_s3_module"],
-      "sheets": {"mcu": "MCU"}
-    }
-  ],
-  "requirements": [
-    {
-      "exact_part": "ESP32-S3-MINI-1-N8",
-      "family": "esp32-s3-module",
-      "id": "auto_esp32_s3_module",
-      "interfaces": [],
-      "parameters": {},
-      "ports": {"gnd": "GND", "vdd": "+3V3"},
-      "role": "mcu_core",
-      "sheet": "MCU"
-    }
-  ],
-  "sheets": [
-    {"function": "ESP32-S3-MINI-1-N8 controller", "name": "MCU", "stem": "MCU"}
-  ],
-  "topologies": {
-    "MCU": "ESP32-S3-MINI-1-N8 controller; +3V3 supplied externally; UART programming and BOOT/reset recovery"
-  },
-  "unresolved_requirement_ids": []
+    "rp2040",
+    "rs485node3v3",
+    "singlecellliioncharger",
+    "sn65hvd230",
+    "stm32f103c8",
+    "stm32f103c8t6",
+    "stm32f103c8t6stm32f103c8t6",
+    "tca9555gpioexpander",
+    "tca9555pwrumw",
+    "tinyavr",
+    "tlv625693v3",
+    "tlv62569dbvr",
+    "tp4056",
+    "tps54331adjustable",
+    "tps54331ddar",
+    "typec31m12",
+    "usbc5vsink",
+    "usbcpowersink",
+    "usbcusb2device",
+    "usblc62sc6",
+    "usbpdfixedtrigger",
+    "usbuartbridge",
+    "ws2812bbt",
+    "ws2812output"
+  ]
 }

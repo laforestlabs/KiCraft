@@ -41,9 +41,7 @@ def register_recipe(
     if not re.search(r"@[1-9][0-9]*$", definition.recipe):
         raise ValueError(f"recipe {definition.recipe!r} must end in an immutable @N version")
     selectors = {
-        _identity(value)
-        for value in (definition.exact_part, *definition.identity_aliases)
-        if value
+        _identity(value) for value in (definition.exact_part, *definition.identity_aliases) if value
     }
     for selector in selectors:
         prior = _SELECTORS.get(selector)
@@ -72,7 +70,9 @@ def registered_recipes() -> tuple[RegisteredRecipe, ...]:
     return tuple(_REGISTRY[key] for key in sorted(_REGISTRY))
 
 
-def recipe_summaries() -> list[dict]:
+def recipe_summaries(
+    allowed_maturities: frozenset[str] = frozenset({"production"}),
+) -> list[dict]:
     return [
         {
             "recipe": definition.recipe,
@@ -83,17 +83,17 @@ def recipe_summaries() -> list[dict]:
             "parameters": definition.parameter_defaults,
             "ports": [port.model_dump() for port in definition.ports],
         }
-        for definition in (
-            registered.definition for registered in registered_recipes()
-        )
+        for definition in (registered.definition for registered in registered_recipes())
+        if definition.maturity in allowed_maturities
     ]
 
 
 def protected_identities() -> frozenset[str]:
-    """Return normalized family, exact-part, and alias identities."""
+    """Return identities owned by production-enabled deterministic recipes."""
     return frozenset(
         _identity(value)
         for registered in registered_recipes()
+        if registered.definition.maturity == "production"
         for value in (
             registered.definition.family,
             registered.definition.exact_part,
@@ -115,20 +115,15 @@ def protected_identity_matches(*values: object) -> tuple[str, ...]:
     return tuple(sorted(matches))
 
 
-def _validated_parameters(
-    definition: RecipeDefinition, selection: RecipeSelection
-) -> dict:
+def _validated_parameters(definition: RecipeDefinition, selection: RecipeSelection) -> dict:
     unknown = set(selection.parameters) - set(definition.parameter_defaults)
     if unknown:
-        raise ValueError(
-            f"recipe {definition.recipe} has unknown parameters: {sorted(unknown)}"
-        )
+        raise ValueError(f"recipe {definition.recipe} has unknown parameters: {sorted(unknown)}")
     parameters = {**definition.parameter_defaults, **selection.parameters}
     for name, allowed in definition.allowed_parameters.items():
         if parameters.get(name) not in allowed:
             raise ValueError(
-                f"recipe {definition.recipe} parameter {name!r} must be one of "
-                f"{list(allowed)!r}"
+                f"recipe {definition.recipe} parameter {name!r} must be one of {list(allowed)!r}"
             )
     missing_roles = set(definition.required_sheet_roles) - set(selection.sheets)
     extra_roles = set(selection.sheets) - set(definition.required_sheet_roles)
@@ -155,6 +150,7 @@ def _validated_parameters(
 def _scope_internal_net(recipe: str, instance: str, net: str) -> str:
     recipe_name = recipe.rsplit("@", 1)[0].replace("-", "_")
     return f"__KICRAFT_RECIPE__{recipe_name}__{instance}__{net}"
+
 
 def expand_static_definition(
     definition: RecipeDefinition,
@@ -198,31 +194,24 @@ def expand_static_definition(
         if logical in selection.port_bindings:
             return selection.port_bindings[logical]
         if logical in definition.internal_nets:
-            return _scope_internal_net(
-                definition.recipe, selection.instance, logical
-            )
+            return _scope_internal_net(definition.recipe, selection.instance, logical)
         return logical
 
     by_sheet_net: dict[tuple[str, str], list[PinEndpoint]] = defaultdict(list)
     part_by_ref = {part.ref: part for part in parts}
     owned: list[PinOwnership] = []
-    requirement_id = (
-        selection.requirement_ids[0] if selection.requirement_ids else None
-    )
+    requirement_id = selection.requirement_ids[0] if selection.requirement_ids else None
     for spec in definition.pins:
         refs = refs_by_role.get(spec.role)
         if not refs:
             raise ValueError(f"recipe pin references unknown role {spec.role!r}")
         if spec.index >= len(refs):
             raise ValueError(
-                f"recipe pin role {spec.role!r} index {spec.index} "
-                f"exceeds {len(refs)} parts"
+                f"recipe pin role {spec.role!r} index {spec.index} exceeds {len(refs)} parts"
             )
         ref = refs[spec.index]
         net = bound_net(spec.net)
-        by_sheet_net[(part_by_ref[ref].sheet, net)].append(
-            PinEndpoint(ref=ref, pin=spec.pin)
-        )
+        by_sheet_net[(part_by_ref[ref].sheet, net)].append(PinEndpoint(ref=ref, pin=spec.pin))
         owned.append(
             PinOwnership(
                 ref=ref,
@@ -233,21 +222,18 @@ def expand_static_definition(
                 requirement_id=requirement_id,
             )
         )
+    allocated_keys: set[tuple[str, int, str]] = set()
     for allocation in selection.pin_allocations:
         allocatable = next(
-            (
-                pin
-                for pin in definition.allocatable_pins
-                if pin.pin == allocation.pin
-            ),
+            (pin for pin in definition.allocatable_pins if pin.pin == allocation.pin),
             None,
         )
         if allocatable is None:
             raise ValueError(
-                f"recipe {definition.recipe} allocation uses unavailable pin "
-                f"{allocation.pin!r}"
+                f"recipe {definition.recipe} allocation uses unavailable pin {allocation.pin!r}"
             )
         ref = refs_by_role[allocatable.role][allocatable.index]
+        allocated_keys.add((allocatable.role, allocatable.index, allocatable.pin))
         by_sheet_net[(part_by_ref[ref].sheet, allocation.net)].append(
             PinEndpoint(ref=ref, pin=allocation.pin)
         )
@@ -269,9 +255,7 @@ def expand_static_definition(
     for spec in definition.no_connects:
         refs = refs_by_role.get(spec.role)
         if not refs or spec.index >= len(refs):
-            raise ValueError(
-                f"recipe no-connect role {spec.role!r} index {spec.index} is invalid"
-            )
+            raise ValueError(f"recipe no-connect role {spec.role!r} index {spec.index} is invalid")
         endpoint = PinEndpoint(ref=refs[spec.index], pin=spec.pin)
         no_connect_pins.append(endpoint)
         owned.append(
@@ -280,6 +264,24 @@ def expand_static_definition(
                 pin=endpoint.pin,
                 owner="recipe",
                 owner_id=definition.recipe,
+                requirement_id=requirement_id,
+            )
+        )
+    no_connect_keys = {(spec.role, spec.index, spec.pin) for spec in definition.no_connects}
+    recipe_pin_keys = {(spec.role, spec.index, spec.pin) for spec in definition.pins}
+    for allocatable in definition.allocatable_pins:
+        key = (allocatable.role, allocatable.index, allocatable.pin)
+        if key in allocated_keys or key in no_connect_keys or key in recipe_pin_keys:
+            continue
+        ref = refs_by_role[allocatable.role][allocatable.index]
+        endpoint = PinEndpoint(ref=ref, pin=allocatable.pin)
+        no_connect_pins.append(endpoint)
+        owned.append(
+            PinOwnership(
+                ref=ref,
+                pin=allocatable.pin,
+                owner="allocator",
+                owner_id=f"{definition.recipe}:pin-allocator@1",
                 requirement_id=requirement_id,
             )
         )
@@ -307,12 +309,9 @@ def expand_static_definition(
         port_bindings=selection.port_bindings,
         pin_allocations=selection.pin_allocations,
         placement_constraints=[
-            constraint.model_dump(mode="json")
-            for constraint in definition.placement_constraints
+            constraint.model_dump(mode="json") for constraint in definition.placement_constraints
         ],
-        assertions=[
-            assertion.code for assertion in definition.electrical_assertions
-        ],
+        assertions=[assertion.code for assertion in definition.electrical_assertions],
     )
     return RecipeExpansion(
         selection=selection,
@@ -337,8 +336,7 @@ def _renumber_expansion(
         match = re.match(r"([A-Z]+)[0-9]+$", part.ref)
         if match is None:
             raise ValueError(
-                f"recipe {expansion.selection.recipe} emitted invalid local ref "
-                f"{part.ref!r}"
+                f"recipe {expansion.selection.recipe} emitted invalid local ref {part.ref!r}"
             )
         prefix = match.group(1)
         number = counters.get(prefix, 1)
@@ -380,9 +378,7 @@ def expand_recipe(
         else expand_static_definition(registered.definition, resolved)
     )
     if expansion.selection != selection:
-        raise ValueError(
-            f"recipe builder {selection.recipe} returned a different selection"
-        )
+        raise ValueError(f"recipe builder {selection.recipe} returned a different selection")
     return _renumber_expansion(expansion, next_reference)
 
 
@@ -413,9 +409,7 @@ def locked_pin_assignments(bom: dict) -> dict[tuple[str, str], str]:
     parts = [part for part in bom.get("parts") or [] if isinstance(part, dict)]
     by_key_role: dict[tuple[str, str, str], list[str]] = defaultdict(list)
     for part in parts:
-        if part.get("recipe_id") and part.get("recipe_instance") and part.get(
-            "recipe_role"
-        ):
+        if part.get("recipe_id") and part.get("recipe_instance") and part.get("recipe_role"):
             by_key_role[
                 (
                     str(part["recipe_id"]),
@@ -444,9 +438,7 @@ def locked_no_connect_pins(bom: dict) -> set[tuple[str, str]]:
     parts = [part for part in bom.get("parts") or [] if isinstance(part, dict)]
     by_key_role: dict[tuple[str, str, str], list[str]] = defaultdict(list)
     for part in parts:
-        if part.get("recipe_id") and part.get("recipe_instance") and part.get(
-            "recipe_role"
-        ):
+        if part.get("recipe_id") and part.get("recipe_instance") and part.get("recipe_role"):
             by_key_role[
                 (
                     str(part["recipe_id"]),

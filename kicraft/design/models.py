@@ -486,9 +486,7 @@ class Architecture(BaseModel):
             if requirement.sheet not in sheet_names
         }
         if unknown:
-            raise ValueError(
-                f"Architecture.requirements map unknown sheets: {sorted(unknown)}"
-            )
+            raise ValueError(f"Architecture.requirements map unknown sheets: {sorted(unknown)}")
         requirement_ids = set(ids)
         selected = {
             requirement_id
@@ -498,14 +496,12 @@ class Architecture(BaseModel):
         unknown_selected = selected - requirement_ids
         if unknown_selected:
             raise ValueError(
-                "recipe selections reference unknown requirements: "
-                f"{sorted(unknown_selected)}"
+                f"recipe selections reference unknown requirements: {sorted(unknown_selected)}"
             )
         unknown_unresolved = set(self.unresolved_requirement_ids) - requirement_ids
         if unknown_unresolved:
             raise ValueError(
-                "unresolved requirement ids are unknown: "
-                f"{sorted(unknown_unresolved)}"
+                f"unresolved requirement ids are unknown: {sorted(unknown_unresolved)}"
             )
         return self
 
@@ -558,6 +554,9 @@ class BomPart(BaseModel):
     # Canonical ownership source. Model-facing BOM groups cannot author these.
     resolution_source: Literal["recipe", "lowerer", "llm", "reuse"] | None = None
     resolution_id: str | None = None
+    lowering_requirement_id: str | None = None
+    lowering_role: str | None = None
+    lowering_index: int | None = Field(default=None, ge=0)
     # False means a routed/validated board-fabricated feature omitted from
     # assembly BOM and position exports.
     assembly: bool = True
@@ -871,15 +870,11 @@ class BOM(BaseModel):
                 )
             overlap_refs = owned_refs & set(manifest.refs)
             if overlap_refs:
-                raise ValueError(
-                    f"recipe ownership overlaps refs: {sorted(overlap_refs)}"
-                )
+                raise ValueError(f"recipe ownership overlaps refs: {sorted(overlap_refs)}")
             owned_refs.update(manifest.refs)
             overlap_nets = internal_nets & set(manifest.internal_nets)
             if overlap_nets:
-                raise ValueError(
-                    f"recipe ownership internal nets collide: {sorted(overlap_nets)}"
-                )
+                raise ValueError(f"recipe ownership internal nets collide: {sorted(overlap_nets)}")
             internal_nets.update(manifest.internal_nets)
             for ownership in manifest.pins:
                 key = (ownership.ref, ownership.pin)
