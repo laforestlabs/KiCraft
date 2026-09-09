@@ -170,10 +170,18 @@ class _FakeClient:
         }
 
 
-def test_run_session_parks_on_question_then_resumes(tmp_path):
+def test_run_session_defaults_direct_question_without_parking(tmp_path):
     brief = "a USB-powered LED"
-    q_reply = json.dumps(
-        {"questions": [{"text": "Battery?", "options": ["LiPo"], "blocking": True}]}
+    question = json.dumps(
+        {
+            "questions": [
+                {
+                    "text": "Which battery chemistry?",
+                    "options": ["LiPo", "Alkaline"],
+                    "blocking": True,
+                }
+            ]
+        }
     )
     intent_slot = json.dumps(
         {
@@ -181,29 +189,19 @@ def test_run_session_parks_on_question_then_resumes(tmp_path):
             "constraints": [],
             "named_parts": [],
             "inferred_expertise": "intermediate",
-            "assumptions": [],
+            "assumptions": ["Alkaline battery selected (defaulted)"],
             "project_stem": "USB_LED",
         }
     )
+    client = _FakeClient([question, intent_slot])
 
-    # 1) the model asks a blocking question -> the session parks
-    res = run_session(tmp_path, brief, ["intent"], client=_FakeClient([q_reply]))
-    assert res["status"] == "awaiting_input"
-    assert res["questions"][0]["text"] == "Battery?"
-    assert read_state(tmp_path)["open_questions"][0]["text"] == "Battery?"  # persisted
+    result = run_session(tmp_path, brief, ["intent"], client=client)
 
-    # 2) the user answers -> the stage commits (answers suppress re-asking)
-    res2 = run_session(
-        tmp_path,
-        brief,
-        ["intent"],
-        answers=[{"text": "Battery?", "answer": "LiPo 1S"}],
-        client=_FakeClient([intent_slot]),
-    )
-    assert res2["status"] == "ok"
-    assert read_state(tmp_path)["intent"]["goal"] == "a USB-powered LED"
-    # The driver stamps the durable outcome the GUI restores stage tabs from.
-    assert read_state(tmp_path)["stage_status"]["intent"]["ok"] is True
+    assert result["status"] == "ok"
+    state = read_state(tmp_path)
+    assert state["intent"]["goal"] == brief
+    assert state["open_questions"] == []
+    assert state["stage_status"]["intent"]["ok"] is True
 
 
 # ---- derive_stage_statuses: electrical_review tab -----------------------------

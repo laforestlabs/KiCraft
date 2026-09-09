@@ -13,6 +13,15 @@ from kicraft.server.stage_work_units import (
     stage_draft_fingerprint,
     validate_unit_candidate,
 )
+from kicraft.server.stage_contracts import BomComponentGroup
+
+
+def test_bom_group_contract_rejects_unqualified_footprint():
+    payload = _group("pd_controller", "A", prefix="U")
+    payload["footprint"] = "QFN-32-1EP_5x5mm_P0.5mm_EP3.1x3.1mm"
+
+    with pytest.raises(ValueError, match="footprint"):
+        BomComponentGroup.model_validate(payload)
 
 
 def _state(parts=None):
@@ -347,3 +356,214 @@ def test_bom_unit_rejects_protected_identity_before_merge():
     with pytest.raises(WorkUnitValidationError) as caught:
         validate_unit_candidate(unit, payload, _state(), {})
     assert caught.value.defects["model_authored_protected_identity"] == ["esp32_s3_support"]
+
+
+def test_bom_unit_allows_owned_protected_identity():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "usb_c_receptacle",
+            "sheet": "A",
+            "role": "connector",
+            "family": "usb_c_receptacle",
+        }
+    ]
+    unit = StageWorkUnit(
+        "bom-r000",
+        "bom",
+        "A",
+        requirement_ids=("usb_c_receptacle",),
+        owned_roles=("connector",),
+    )
+    payload = {
+        "groups": [
+            {
+                "id": "usb_c_receptacle",
+                "reference_prefix": "J",
+                "quantity": 1,
+                "value": "USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+                "symbol": "Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+                "footprint": "Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+                "sheet": "A",
+            }
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, state, {})
+
+    assert validated["groups"][0]["id"] == "usb_c_receptacle"
+
+
+def test_bom_unit_allows_owned_protected_identity_words():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "pd_trigger_controller",
+            "sheet": "A",
+            "role": "bus_interface",
+            "family": "pd_trigger_controller",
+        }
+    ]
+    unit = StageWorkUnit(
+        "bom-r000",
+        "bom",
+        "A",
+        requirement_ids=("pd_trigger_controller",),
+        owned_roles=("bus_interface",),
+    )
+    payload = {
+        "groups": [
+            {
+                "id": "pd_controller",
+                "reference_prefix": "U",
+                "quantity": 1,
+                "value": "CH224K",
+                "symbol": "ch224k:CH224K",
+                "footprint": "ch224k:SOT-23-6_WRONG",
+                "sheet": "A",
+            }
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, state, {})
+
+    assert validated["groups"][0]["footprint"] == ("ch224k:ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP")
+
+
+def test_bom_unit_rejects_parts_that_do_not_implement_owned_requirement():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "pd_trigger_controller",
+            "sheet": "A",
+            "role": "bus_interface",
+            "family": "pd_trigger_controller",
+        }
+    ]
+    unit = StageWorkUnit(
+        "bom-r000",
+        "bom",
+        "A",
+        requirement_ids=("pd_trigger_controller",),
+        owned_roles=("bus_interface",),
+    )
+    payload = {
+        "groups": [
+            {
+                "id": "support_resistor",
+                "reference_prefix": "R",
+                "quantity": 1,
+                "value": "10k",
+                "symbol": "Device:R",
+                "footprint": "Resistor_SMD:R_0603_1608Metric",
+                "sheet": "A",
+            }
+        ]
+    }
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, payload, state, {})
+
+    assert caught.value.defects["missing-requirement-implementation"] == ["pd_trigger_controller"]
+
+
+def test_bom_unit_accepts_connector_terminal_synonym():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "output_connector",
+            "sheet": "A",
+            "role": "connector",
+            "family": "output_connector",
+        }
+    ]
+    unit = StageWorkUnit(
+        "bom-r000",
+        "bom",
+        "A",
+        requirement_ids=("output_connector",),
+        owned_roles=("connector",),
+    )
+
+    validated = validate_unit_candidate(
+        unit,
+        {"groups": [_group("output_terminal", "A", prefix="J")]},
+        state,
+        {},
+    )
+
+    assert validated["groups"][0]["id"] == "output_terminal"
+
+
+def test_bom_unit_rejects_selector_support_without_selector():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "voltage_selector_switch",
+            "sheet": "A",
+            "role": "user_io",
+            "family": "voltage_selector_switch",
+        }
+    ]
+    unit = StageWorkUnit(
+        "bom-r000",
+        "bom",
+        "A",
+        requirement_ids=("voltage_selector_switch",),
+        owned_roles=("user_io",),
+    )
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(
+            unit,
+            {"groups": [_group("jumper", "A", prefix="J")]},
+            state,
+            {},
+        )
+
+    assert caught.value.defects["missing-requirement-implementation"] == ["voltage_selector_switch"]
+
+
+def test_bom_unit_discards_only_unowned_protected_sibling():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "pd_trigger_controller",
+            "sheet": "A",
+            "role": "bus_interface",
+            "family": "pd_trigger_controller",
+        }
+    ]
+    unit = StageWorkUnit(
+        "bom-r000",
+        "bom",
+        "A",
+        requirement_ids=("pd_trigger_controller",),
+        owned_roles=("bus_interface",),
+    )
+    payload = {
+        "groups": [
+            {
+                "id": "pd_controller",
+                "reference_prefix": "U",
+                "quantity": 1,
+                "value": "TPS25730",
+                "symbol": "Test:TPS25730",
+                "footprint": "Test:TPS25730",
+                "sheet": "A",
+            },
+            {
+                "id": "usb_c_receptacle",
+                "reference_prefix": "J",
+                "quantity": 1,
+                "value": "USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+                "symbol": "Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+                "footprint": "Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+                "sheet": "A",
+            },
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, state, {})
+
+    assert [group["id"] for group in validated["groups"]] == ["pd_controller"]

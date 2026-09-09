@@ -138,8 +138,11 @@ converter that connects them. Do not emit both as unexplained outputs of one
 sheet or distribute different loads between them without that relationship.
 
 
-Open-question discipline matches earlier stages. If a question has a safe
-default, it is not blocking: apply that default in the first draft and record
-the choice in `assumptions` ending `(defaulted)`. Return a blocking question
-only when no safe default exists and the answer materially changes the board;
-never ask merely to confirm a default you can already state.
+Open-question discipline matches earlier stages. First produce a complete
+architecture using safe engineering defaults. If a question has a safe default,
+it is not blocking: apply that default in the first draft and record the choice
+in `assumptions` ending `(defaulted)`. Return a blocking question only when no
+safe default exists and the answer materially changes the manufactured board.
+Ask one decision per question and include 2–4 concise suggested answers in
+`options`; never ask merely to confirm a default or a fact already stated in the
+brief or design state.

@@ -232,7 +232,7 @@ def _work_unit_attempt_event(
 # (§9.11) in a single slot; on a complex board the model needs more correction
 # passes than the simpler, smaller-slot stages, so they floor higher (BOM must
 # also resolve every symbol/footprint to a real library entry within its budget).
-_STAGE_MIN_RETRIES = {"wiring": 7, "bom": 4}
+_STAGE_MIN_RETRIES = {"architecture": 3, "wiring": 7, "bom": 4}
 
 # In-stream reasoning-loop breakout budget: when the client aborts a completion
 # (finish_reason="reasoning_loop"), retry once with reasoning disabled + higher
@@ -292,6 +292,39 @@ def _retry_feedback(
         "'real options: ...', use one exact option verbatim; otherwise use the BOM "
         "lookup tools. Use compact JSON and output only the slot object."
     )
+    if stage == "architecture":
+        rejection_text = json.dumps([*(out.get("errors") or []), *(out.get("offenders") or [])])
+        if "fs-connection mapping" in rejection_text:
+            msg += (
+                " ARCHITECTURE FIX: add every missing cross-sheet signal to "
+                "`inter_sheet_nets`. Each entry needs a concise net name and at least "
+                "two endpoints using the exact canonical `sheets[].name` values. Do not "
+                "return an empty `inter_sheet_nets` list while any listed connection "
+                "crosses sheets."
+            )
+        if "block-sheet mapping" in rejection_text:
+            msg += (
+                " ARCHITECTURE FIX: emit nonempty `sheets`, grouping the functional "
+                "blocks by physical IC domain. Do not return an empty architecture."
+            )
+    if stage == "bom":
+        rejection_text = json.dumps([*(out.get("errors") or []), *(out.get("offenders") or [])])
+        if "spec-named part accountability" in rejection_text:
+            msg += (
+                " BOM FIX: for every named-part offender, either use that exact part or add "
+                "one `substitutions` entry whose `wanted` is the exact offender token and "
+                "whose `got` names the shipped replacement. Do not leave any offender "
+                "implicit in assumptions."
+            )
+        if (
+            "do not resolve to a real .kicad_mod" in rejection_text
+            or "do not resolve to a pin inventory" in rejection_text
+        ):
+            msg += (
+                " BOM FIX: replace every unresolved symbol/footprint pair with an exact pair "
+                "from the available-parts table or BOM lookup tools. Never invent a library "
+                "prefix or package name."
+            )
     # Unknown-ref in wiring means the model tried to wire a part the BOM lacks --
     # it cannot add parts, so retrying with an invented ref just re-fails. Point
     # it at the real refs and the reconcile escape hatch so it stops thrashing and
@@ -424,28 +457,60 @@ def _reasoning_failure_kind(facts) -> str | None:
     return None
 
 
+_AUTO_DEFAULT_QUESTION_STAGES = frozenset({"intent", "functional_spec", "architecture", "bom"})
+_SAFE_DEFAULT_QUESTION_MARKERS = (
+    "default:",
+    "(default",
+    "i'll default",
+    "i will default",
+    "if you don't have a strong preference",
+    "if you do not have a strong preference",
+)
+
+
 def _normalize_questions(raw_list, stage: str) -> list[dict]:
-    """Coerce a model-emitted questions payload into Question-shaped dicts (so the
-    state.json open_questions list stays schema-valid). Caps count and lengths."""
+    """Return bounded, actionable questions safe to expose to a user.
+
+    A user-facing blocker needs at least two distinct suggested answers and
+    cannot simultaneously advertise a safe default. Malformed or self-defaulting
+    questions are demoted so the stage retries with its own default instead of
+    parking the project. Internal BOM reconciliation remains blocking because it
+    is pipeline control, not a user decision.
+    """
     out = []
     for q in raw_list:
-        if isinstance(q, dict) and str(q.get("text", "")).strip():
-            # reconcile_target marks a deficit the pipeline repairs itself (re-drive
-            # the named stage) rather than a question for the user. Whitelisted so
-            # the model can't route a park to an arbitrary/looping target.
-            target = q.get("reconcile_target")
-            out.append(
-                {
-                    "text": str(q["text"]).strip()[:500],
-                    "stage": stage,
-                    "blocking": bool(q.get("blocking", True)),
-                    "material": bool(q.get("material", True)),
-                    "options": [str(o)[:200] for o in (q.get("options") or [])][:6],
-                    "answer": None,
-                    "reconcile_target": (target if target in ("bom",) else None),
-                }
-            )
-    return out[:5]
+        if not isinstance(q, dict):
+            continue
+        text = str(q.get("text", "")).strip()
+        if not text:
+            continue
+        target = q.get("reconcile_target")
+        reconcile_target = target if target in ("bom",) else None
+        options: list[str] = []
+        for raw_option in q.get("options") or []:
+            option = str(raw_option).strip()[:200]
+            if option and option not in options:
+                options.append(option)
+            if len(options) == 4:
+                break
+        blocking = bool(q.get("blocking", False))
+        if reconcile_target is None and (
+            len(options) < 2
+            or any(marker in text.lower() for marker in _SAFE_DEFAULT_QUESTION_MARKERS)
+        ):
+            blocking = False
+        out.append(
+            {
+                "text": text[:500],
+                "stage": stage,
+                "blocking": blocking,
+                "material": bool(q.get("material", True)),
+                "options": options,
+                "answer": None,
+                "reconcile_target": reconcile_target,
+            }
+        )
+    return out[:3]
 
 
 def _client_model(client) -> str | None:
@@ -620,6 +685,34 @@ _COLLECTION_LIMIT_RETRY_MSG = (
     "canonical limits. Do not continue or salvage the stopped draft."
 )
 
+
+def _stage_recovery_message(
+    kind: str | None,
+    raw: str,
+    bounds_sentence: str,
+    *,
+    schema_error: str | None = None,
+    collection_limit: dict | None = None,
+) -> str:
+    if kind == "collection_limit":
+        template = _COLLECTION_LIMIT_RETRY_MSG
+    elif kind == "invalid_schema":
+        template = _SCHEMA_RETRY_MSG
+    else:
+        template = _SERIALIZATION_RETRY_MSG
+    limit = collection_limit or {}
+    return template.format(
+        prior_chars=len(raw),
+        bounds_sentence=(bounds_sentence + " ") if bounds_sentence else "",
+        field=limit.get("field", "unknown"),
+        observed_count=limit.get("observed_count", "unknown"),
+        configured_total=limit.get("configured_total", "unknown"),
+        limit_scope=limit.get("limit_scope", "total"),
+        emitted_content_chars=limit.get("emitted_content_chars", len(raw)),
+        schema_error=(schema_error or "unspecified schema violation")[:1200],
+    )
+
+
 _SEMANTIC_REPAIR_MSG = (
     "The candidate is schema-valid but deterministic semantic checks found the "
     "following high-confidence defects: {diagnostics}. Preserve all valid content, "
@@ -647,14 +740,15 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
     if any(d.code == "functional_spec_external_load_power_assumed" for d in diagnostics):
         message += (
             " Do not guess whether the board powers the external display or LED "
-            "load. Return a questions object with one blocking question asking "
-            "whether those loads use board-supplied or separate power."
+            "load. Return one blocking question with exactly these options: "
+            '["Board supplies the external loads", '
+            '"External loads use a separate power supply"].'
         )
     if any(d.code == "architecture_external_load_current_unspecified" for d in diagnostics):
         message += (
-            " Do not guess the external-load current. Return a questions object "
-            "with one blocking question asking for the maximum total 5V output "
-            "current for the HUB75 panel and LED string."
+            " Do not guess the external-load current. Return one blocking question "
+            "asking for the maximum total 5V output current, with concrete choices "
+            'such as ["1 A", "2 A", "3 A", "5 A"].'
         )
     if any(
         d.code
@@ -673,8 +767,9 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
             "for a 5V/5A load, negotiate a higher voltage at no more than 5A and "
             "use a dedicated buck converter rated above 5A to generate the "
             "regulated 5V rail. If the user's 5V wording could refer either to "
-            "the PD contract or the load rail, return one blocking question "
-            "asking which meaning is required."
+            "the PD contract or the load rail, return one blocking question with "
+            'exactly these options: ["5 V is the external load rail", '
+            '"5 V is only the USB-PD input contract"].'
         )
 
     if any(d.code == "architecture_duplicate_voltage_rails_unrelated" for d in diagnostics):
@@ -1070,7 +1165,7 @@ def finalize_stage(
 
 
 WORK_UNIT_MIN_REPAIR_ROUNDS = 1
-WORK_UNIT_MAX_REPAIR_ROUNDS = 1
+WORK_UNIT_MAX_REPAIR_ROUNDS = 3
 
 
 def _work_unit_summary(units: tuple[StageWorkUnit, ...], candidates: dict[str, dict]) -> list[dict]:
@@ -1514,8 +1609,37 @@ def _drive_work_unit_stage(
                         if aggregate_signature is not None
                         else None
                     ),
+                    "error_facts": dict(error_facts or {}) or None,
                 }
             )
+
+    def response_policy_for_unit(unit: StageWorkUnit) -> StageResponsePolicy:
+        if stage == "wiring":
+            return replace(
+                policy,
+                collection_bounds=(
+                    CollectionBound(
+                        field="pins",
+                        total=max(1, len(unit.expected_pins)),
+                    ),
+                ),
+            )
+        if stage == "bom":
+            unit_count = max(1, len(units))
+            unit_bounds = []
+            for bound in policy.collection_bounds:
+                total = max(1, bound.total // unit_count)
+                unit_bounds.append(
+                    replace(
+                        bound,
+                        total=total,
+                        per_group=(
+                            min(total, bound.per_group) if bound.per_group is not None else None
+                        ),
+                    )
+                )
+            return replace(policy, collection_bounds=tuple(unit_bounds))
+        return policy
 
     def invoke(
         unit: StageWorkUnit,
@@ -1533,19 +1657,7 @@ def _drive_work_unit_stage(
             and isinstance(feedback.get("aggregate_commit_rejection"), dict)
             else None
         )
-        unit_policy = (
-            replace(
-                policy,
-                collection_bounds=(
-                    CollectionBound(
-                        field="pins",
-                        total=max(1, len(unit.expected_pins)),
-                    ),
-                ),
-            )
-            if stage == "wiring"
-            else policy
-        )
+        unit_policy = response_policy_for_unit(unit)
         contract = contracts_by_unit[unit.unit_id]
         instructions = _work_unit_instructions(
             unit,
@@ -1576,6 +1688,11 @@ def _drive_work_unit_stage(
             {"role": "user", "content": user},
         ]
         active_client = stage_client
+        if stage == "bom":
+            escalation_profile = getattr(getattr(stage_client, "s", None), "escalation_profile", "")
+            switch_profile = getattr(stage_client, "with_design_profile", None)
+            if escalation_profile and callable(switch_profile):
+                active_client = switch_profile(escalation_profile)
         prepared = PreparedStage(
             stage=stage,
             prompt_state=prompt_state,
@@ -1781,6 +1898,7 @@ def _drive_work_unit_stage(
                     call_mode=call_mode,
                     outcome="invalid_work_unit",
                     facts=facts,
+                    error_facts={"message": str(exc)},
                     aggregate_round=aggregate_round,
                     aggregate_signature=aggregate_signature,
                     candidate_retained=False,
@@ -1819,7 +1937,8 @@ def _drive_work_unit_stage(
         local_feedback = feedback
         serialization_next = False
         serialization_spent = False
-        for unit_attempt in range(1, repair_rounds + 3):
+        unit_attempt_stop = repair_rounds + (5 if stage == "bom" else 3)
+        for unit_attempt in range(1, unit_attempt_stop):
             used_serialization = serialization_next
             kind, payload, facts, error = invoke(
                 unit,
@@ -1849,14 +1968,33 @@ def _drive_work_unit_stage(
             if kind == "questions":
                 questions = _normalize_questions(payload.get("questions") or [], stage)
                 reconcile = any(question.get("reconcile_target") for question in questions)
-                if any(question["blocking"] for question in questions) and (
-                    (not answers and not instruction) or reconcile
+                auto_default = (
+                    stage in _AUTO_DEFAULT_QUESTION_STAGES
+                    and not review_before_commit
+                    and not reconcile
+                )
+                if (
+                    any(question["blocking"] for question in questions)
+                    and not auto_default
+                    and ((not answers and not instruction) or reconcile)
                 ):
                     return kind, {"questions": questions}
-                local_feedback = (
-                    "Do not ask more questions. Apply sensible defaults, record each "
-                    "assumption ending '(defaulted)', and return this unit."
-                )
+                if stage == "bom":
+                    local_feedback = (
+                        "Do not ask more questions. The committed architecture is binding: "
+                        "do not change its MCU presence, control architecture, topology, "
+                        "requirements, or sheet partition. This work unit owns only "
+                        f"requirement_ids={list(unit.requirement_ids)!r} and "
+                        f"roles={list(unit.owned_roles)!r}; do not emit components owned by "
+                        "another requirement. Select one concrete suitable part, apply sensible "
+                        "defaults, record each assumption ending '(defaulted)', and return only "
+                        "this complete unit."
+                    )
+                else:
+                    local_feedback = (
+                        "Do not ask more questions. Apply sensible defaults, record each "
+                        "assumption ending '(defaulted)', and return this unit."
+                    )
                 continue
             if kind == "terminal":
                 return kind, {"failure_kind": error or "provider_failure"}
@@ -1867,7 +2005,15 @@ def _drive_work_unit_stage(
                 "reasoning_loop",
             }
             if used_serialization and error in serialization_errors:
-                return "terminal", {"failure_kind": error}
+                bounds_sentence = _collection_bounds_sentence(
+                    response_policy_for_unit(unit).collection_bounds
+                )
+                local_feedback = (
+                    "The dedicated serialization recovery also failed with "
+                    f"{error}. Start from the binding state and emit a fresh, compact, "
+                    f"complete unit. {bounds_sentence} Output only the unit JSON."
+                )
+                continue
             if not serialization_spent and not used_serialization and error in serialization_errors:
                 serialization_spent = True
                 serialization_next = True
@@ -1878,16 +2024,49 @@ def _drive_work_unit_stage(
                 )
                 continue
             signature = str(error)
-            if signature == prior_signature:
-                return "terminal", {
-                    "failure_kind": "repeated_unit_defect",
-                    "error": signature,
+            repeated = signature == prior_signature
+            if stage == "bom":
+                repair_instruction = (
+                    "The committed architecture is binding. Correct every listed defect "
+                    "without changing MCU presence, control architecture, topology, "
+                    "requirements, or sheet partition. This unit owns only "
+                    f"requirement_ids={list(unit.requirement_ids)!r} and "
+                    f"roles={list(unit.owned_roles)!r}. Emit at least one real component "
+                    "group that genuinely implements that requirement unless verified recipe "
+                    "parts already satisfy it. Do not emit sibling requirements or invent a "
+                    "part capability."
+                )
+                if "model_authored_protected_identity" in signature:
+                    repair_instruction += (
+                        " Delete every group id listed under "
+                        "`model_authored_protected_identity`; those components are owned by "
+                        "verified recipes or sibling requirements. Do not replace them and do "
+                        "not redraft otherwise-valid groups."
+                    )
+                if "empty-sheet" in signature:
+                    repair_instruction += (
+                        " The empty groups list is the defect: emit the smallest complete set "
+                        "of groups needed for this owned requirement."
+                    )
+            else:
+                repair_instruction = (
+                    "Correct every listed defect in this complete unit replacement."
+                )
+            if repeated:
+                local_feedback = {
+                    "defect": signature,
+                    "instruction": (
+                        "Your previous correction repeated the same defect. Start this unit "
+                        "again from the binding state and return a fresh complete unit. "
+                        + repair_instruction
+                    ),
                 }
-            local_feedback = {
-                "defect": signature,
-                "rejected_unit": payload,
-                "instruction": "Correct every listed defect in this complete unit replacement.",
-            }
+            else:
+                local_feedback = {
+                    "defect": signature,
+                    "rejected_unit": payload,
+                    "instruction": repair_instruction,
+                }
             prior_signature = signature
         return "terminal", {
             "failure_kind": "unit_repair_exhausted",
@@ -2083,6 +2262,7 @@ def _drive_work_unit_stage(
         }
 
     prior_signature = None
+    prior_candidate_fingerprint = None
     for aggregate_round in range(repair_rounds + 1):
         ok, commit_result = commit_stage(stage, dict(candidate), state_path, brief, None, workspace)
         if ok:
@@ -2150,7 +2330,12 @@ def _drive_work_unit_stage(
                 }
             )
         signature = _commit_rejection_signature(commit_result)
-        repeated = signature == prior_signature
+        candidate_fingerprint = hashlib.sha256(
+            json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        repeated = (
+            signature == prior_signature and candidate_fingerprint == prior_candidate_fingerprint
+        )
         if repeated:
             last = {
                 "failure_kind": "commit_rejected",
@@ -2164,6 +2349,11 @@ def _drive_work_unit_stage(
                 "commit": commit_result,
             }
             break
+        if aggregate_round == 0:
+            escalation_profile = getattr(getattr(stage_client, "s", None), "escalation_profile", "")
+            switch_profile = getattr(stage_client, "with_design_profile", None)
+            if escalation_profile and callable(switch_profile):
+                stage_client = switch_profile(escalation_profile)
         targeted = route_work_unit_ids(
             commit_result,
             units,
@@ -2203,6 +2393,7 @@ def _drive_work_unit_stage(
                 last = {"failure_kind": "invalid_schema", "error": str(exc)}
                 break
             prior_signature = signature
+            prior_candidate_fingerprint = candidate_fingerprint
             continue
         candidates = prior_candidates
         break
@@ -2867,34 +3058,36 @@ def drive_stage(
                         "model": _client_model(active_client),
                     }
                 )
-            if serialization_calls >= serialization_budget or attempts >= provider_call_budget:
-                break  # serialization budget or provider-call budget exhausted
-            # Serialization recovery: exactly ONE plain, tool-free,
-            # reasoning-disabled completion at the fixed serialization cap,
-            # rebuilt from the pristine base messages + the serialization
-            # instruction (never the BOM tool transcript, never a doubled cap).
+            if attempts >= provider_call_budget:
+                break
+            if serialization_calls >= serialization_budget:
+                messages = _lean_retry(
+                    raw if schema_error else None,
+                    _stage_recovery_message(
+                        kind,
+                        raw or "",
+                        _collection_bounds_sentence(policy.collection_bounds),
+                        schema_error=schema_error_detail,
+                        collection_limit=collection_limit,
+                    ),
+                )
+                reasoning = {"enabled": False}
+                temperature = max(escape_temperature, 0.0)
+                continue
+            # Use at most one dedicated plain, tool-free serialization call.
+            # Any remaining bounded attempts may still correct its failure.
             serialization_calls += 1
             attempts += 1  # the serialization completion is a provider call too
             current_attempt_number = attempts
             sctx = {**ctx, "serialization": True, "call_mode": "serialization"}
             smessages = list(call_messages)
             bounds_sentence = _collection_bounds_sentence(policy.collection_bounds)
-            if kind == "collection_limit":
-                retry_template = _COLLECTION_LIMIT_RETRY_MSG
-            elif kind == "invalid_schema":
-                retry_template = _SCHEMA_RETRY_MSG
-            else:
-                retry_template = _SERIALIZATION_RETRY_MSG
-            limit_info = collection_limit or {}
-            retry_message = retry_template.format(
-                prior_chars=len(raw or ""),
-                bounds_sentence=(bounds_sentence + " ") if bounds_sentence else "",
-                field=limit_info.get("field", "unknown"),
-                observed_count=limit_info.get("observed_count", "unknown"),
-                configured_total=limit_info.get("configured_total", "unknown"),
-                limit_scope=limit_info.get("limit_scope", "total"),
-                emitted_content_chars=limit_info.get("emitted_content_chars", len(raw or "")),
-                schema_error=(schema_error_detail or "unspecified schema violation")[:1200],
+            retry_message = _stage_recovery_message(
+                kind,
+                raw or "",
+                bounds_sentence,
+                schema_error=schema_error_detail,
+                collection_limit=collection_limit,
             )
             smessages.append({"role": "user", "content": retry_message})
             resolution_ledger = getattr(executor, "resolution_ledger", {}) if executor else {}
@@ -3026,7 +3219,21 @@ def drive_stage(
                     "collection_limit": scollection_limit,
                     "schema_error": schema_error_detail,
                 }
-                break
+                if attempts >= provider_call_budget:
+                    break
+                messages = _lean_retry(
+                    sraw if schema_error else None,
+                    _stage_recovery_message(
+                        skind,
+                        sraw or "",
+                        _collection_bounds_sentence(policy.collection_bounds),
+                        schema_error=schema_error_detail,
+                        collection_limit=scollection_limit,
+                    ),
+                )
+                reasoning = {"enabled": False}
+                temperature = max(escape_temperature, 0.0)
+                continue
             # Parseable serialization output: the commit path owns it from here.
             # A commit rejection may still use remaining commit-correction
             # attempts at the normal stage/tool policy.
@@ -3060,8 +3267,15 @@ def drive_stage(
             # -- otherwise the "do not ask more questions" retry below burns the
             # stage's whole budget on a park it can never satisfy (WS6).
             is_reconcile_park = any(q.get("reconcile_target") for q in qs)
-            if any(q["blocking"] for q in qs) and (
-                (not answers and not instruction) or is_reconcile_park
+            auto_default = (
+                stage in _AUTO_DEFAULT_QUESTION_STAGES
+                and not review_before_commit
+                and not is_reconcile_park
+            )
+            if (
+                any(q["blocking"] for q in qs)
+                and not auto_default
+                and ((not answers and not instruction) or is_reconcile_park)
             ):
                 if not review_before_commit:
                     attach_questions(state_path, stage, qs)
@@ -3206,7 +3420,9 @@ def drive_stage(
                     continue
 
                 if repair_outcome.kind == "questions":
-                    qs = repair_outcome.payload["candidate"]["questions"]
+                    qs = _normalize_questions(
+                        repair_outcome.payload["candidate"]["questions"], stage
+                    )
                     if any(question["blocking"] for question in qs):
                         if not review_before_commit:
                             attach_questions(state_path, stage, qs)

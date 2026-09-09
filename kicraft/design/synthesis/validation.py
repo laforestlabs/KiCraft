@@ -3004,12 +3004,18 @@ _MPN_STOPWORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+_NONCOMMITTAL_EXAMPLE_RE = re.compile(
+    r"\((?:e\.?\s*g\.?|for example|such as)\b[^)]*\)",
+    re.IGNORECASE,
+)
+
 
 def named_part_tokens(texts) -> dict[str, str]:
     """Return conservative normalized MPN/family tokens from arbitrary text."""
     out: dict[str, str] = {}
     for text in texts:
-        for match in _MPN_TOKEN_RE.finditer(str(text)):
+        text = _NONCOMMITTAL_EXAMPLE_RE.sub("", str(text))
+        for match in _MPN_TOKEN_RE.finditer(text):
             token = match.group(0).rstrip(".-")
             if len(token) < 6 or _MPN_STOPWORD_RE.match(token):
                 continue

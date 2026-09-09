@@ -61,6 +61,14 @@ def _stage_extra(stage: str) -> str:
         )
     if stage == "bom":
         return (
+            "\n- ARCHITECTURE DECISIONS ARE CLOSED: the committed architecture is binding. "
+            "Never ask the user to choose an MCU, programming interface, control architecture, "
+            "topology, sheet, or component family that architecture already decided. In a work "
+            "unit, emit only the named requirement and owned role; components for sibling "
+            "requirements are rejected. For beginner/intermediate users, select a concrete "
+            "suitable part and record the default. A user question is allowed only for a "
+            "genuine unresolved sourcing failure or an explicit user-named-part substitution "
+            "that cannot be resolved automatically; it must offer 2-4 concrete viable options.\n"
             "\n- TOOLS available this stage: list_parts (curated bundles + exact symbol/"
             "footprint strings); search_symbols / search_footprints (find a stock KiCad symbol / "
             "footprint id by keyword); lookup_symbol (verify a 'Library:Name' symbol exists + "
@@ -383,14 +391,15 @@ def build_system(
         "- Use only allowed enum values; honor every naming pattern and uniqueness/reference "
         "constraint.\n"
         '- Every "assumptions" entry must end with "(defaulted)".\n'
-        "- CLARIFYING QUESTIONS: if the brief is too ambiguous to make a sound choice that "
-        "materially changes the board, you MAY ask the user instead of guessing. To ask, "
-        "output ONLY this shape (no slot this turn):\n"
-        '  {"questions": [{"text": "...", "options": ["a suggested answer", "..."], '
-        '"blocking": true}]}\n'
-        "Ask at most 3 genuinely blocking questions, and only when a wrong guess would waste "
-        'a real board; otherwise choose a sensible default, record it in "assumptions", and '
-        "output the slot."
+        "- CLARIFYING QUESTIONS: first produce a complete slot using safe engineering "
+        "defaults. Ask only when no safe default exists and a wrong answer would materially "
+        "change the manufactured board. Never ask to confirm a default or a fact already "
+        "present in the brief/state. Ask one decision per question, at most 3 questions. "
+        "Every blocking question MUST provide 2-4 concise suggested answers in `options`; "
+        "a blocker without options is invalid. To ask, output ONLY this shape:\n"
+        '  {"questions": [{"text": "...", "options": ["recommended answer", '
+        '"alternative"], "blocking": true, "material": true}]}\n'
+        "Otherwise record the chosen default in `assumptions` and output the slot."
         f"{_stage_extra(stage)}"
     )
 

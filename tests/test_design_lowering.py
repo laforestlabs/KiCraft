@@ -68,6 +68,21 @@ def test_pin_header_lowerer_emits_bom_and_exact_pin_ownership():
     ]
 
 
+def test_voltage_selector_lowerer_uses_curated_compatible_pair():
+    artifact = lower_requirement(
+        _requirement(
+            "voltage_selector_switch",
+            parameters={"positions": 3},
+            ports={"SEL0": "SEL0", "SEL1": "SEL1"},
+        )
+    )
+
+    assert artifact is not None
+    assert artifact.lowerer_id == "voltage-selector-switch@1"
+    assert artifact.groups[0].symbol == "sp3t-switch-msk13c02:MSK13C02-SZ"
+    assert artifact.groups[0].footprint == ("sp3t-switch-msk13c02:SW-SMD_MSK13C02-SZ")
+
+
 @pytest.mark.parametrize(
     ("family", "parameters", "ports"),
     [

@@ -17,6 +17,7 @@ from .stage_contracts import (
     ConnectedPinAssignment,
     NoConnectPinAssignment,
     _expand_bom_groups,
+    _requirement_owns_protected_group,
 )
 
 WORK_UNIT_WIRING_PIN_LIMIT = 256
@@ -364,10 +365,49 @@ def deterministic_bom_candidate(
     }
 
 
+def _normalize_curated_group_identities(
+    groups: list[BomComponentGroup],
+) -> list[BomComponentGroup]:
+    """Use a selected curated bundle's authoritative symbol/footprint pair."""
+    from kicraft.parts_library import find_part
+
+    bundles: dict[str, object | None] = {}
+    normalized: list[BomComponentGroup] = []
+    for group in groups:
+        library = group.symbol.partition(":")[0]
+        if library not in bundles:
+            bundles[library] = find_part(library, project_root=None)
+        loaded = bundles[library]
+        manifest = getattr(loaded, "manifest", None)
+        if manifest is None:
+            normalized.append(group)
+            continue
+        selected_identities = {
+            re.sub(r"[^a-z0-9]+", "", str(value).lower())
+            for value in (group.mpn, group.value)
+            if value
+        }
+        manifest_identity = re.sub(r"[^a-z0-9]+", "", manifest.mpn.lower())
+        if manifest_identity not in selected_identities:
+            normalized.append(group)
+            continue
+        normalized.append(
+            group.model_copy(
+                update={
+                    "symbol": f"{manifest.name}:{manifest.symbol_name}",
+                    "footprint": f"{manifest.name}:{manifest.footprint_name}",
+                }
+            )
+        )
+    return normalized
+
+
 def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -> dict:
-    groups = [BomComponentGroup.model_validate(group) for group in (payload.get("groups") or [])]
+    groups = _normalize_curated_group_identities(
+        [BomComponentGroup.model_validate(group) for group in (payload.get("groups") or [])]
+    )
     assumptions = [str(value) for value in payload.get("assumptions") or []]
-    lowering_metadata: dict = {}
+    lowering_metadata = {key: value for key, value in payload.items() if str(key).startswith("_")}
     if not groups:
         deterministic = deterministic_bom_candidate(unit, prompt_state)
         if deterministic is not None:
@@ -390,11 +430,40 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
     recipe_identities = {(part.symbol.lower(), part.value.lower()) for part in recipe_parts}
     from kicraft.design.recipes import protected_identity_matches
 
+    requirement = _unit_requirement(unit, prompt_state)
+    requirement_id = (
+        requirement.get("id") if isinstance(requirement, dict) else getattr(requirement, "id", None)
+    )
+    requirement_family = (
+        requirement.get("family")
+        if isinstance(requirement, dict)
+        else getattr(requirement, "family", None)
+    )
+    generic_families = {"", "applicationspecific", "custom", "generic"}
+    requires_named_implementation = (
+        requirement is not None
+        and not lowering_metadata
+        and re.sub(r"[^a-z0-9]+", "", str(requirement_family or "").lower()) not in generic_families
+    )
     protected_groups = [
         group.id
         for group in groups
         if protected_identity_matches(group.id, group.symbol, group.value, group.mpn)
+        and not _requirement_owns_protected_group(
+            group, (requirement,) if requirement is not None else ()
+        )
     ]
+    # A requirement-scoped unit sometimes redundantly emits a protected sibling
+    # (for example a USB receptacle beside its PD controller). Another planned
+    # unit owns that component. Preserve the owned implementation and discard
+    # only the extra group instead of rejecting an otherwise usable unit.
+    if protected_groups and len(groups) > len(protected_groups):
+        discarded = set(protected_groups)
+        groups = [group for group in groups if group.id not in discarded]
+        arrays = [array for array in arrays if array.group_id not in discarded]
+        protected_groups = []
+        group_ids = [group.id for group in groups]
+        array_group_ids = [array.group_id for array in arrays]
     recipe_sheets = {part.sheet for part in recipe_parts}
     defects = {
         "wrong-sheet": [
@@ -411,6 +480,14 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
             if (group.symbol.lower(), group.value.lower()) in recipe_identities
         ],
         "model_authored_protected_identity": protected_groups,
+        "missing-requirement-implementation": (
+            [str(requirement_id)]
+            if requires_named_implementation
+            and not any(
+                _requirement_owns_protected_group(group, (requirement,)) for group in groups
+            )
+            else []
+        ),
         "empty-sheet": (
             [unit.sheet]
             if not groups and (unit.requirement_ids or unit.sheet not in recipe_sheets)

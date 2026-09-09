@@ -11,7 +11,11 @@ from kicraft.design.recipes import expand_recipe, expand_selections
 from kicraft.design.recipes.pin_allocator import PinAllocationError, allocate_pins
 from kicraft.design.recipes.registry import get_recipe, locked_pin_assignments
 from kicraft.design.synthesis.validation import check_mcu_programming_access, check_net_coverage
-from kicraft.server.stage_contracts import StageSchemaError, _normalize_stage_response
+from kicraft.server.stage_contracts import (
+    StageSchemaError,
+    _normalize_architecture_sheet_aliases,
+    _normalize_stage_response,
+)
 
 
 def _selection(**parameters):
@@ -309,6 +313,108 @@ def test_architecture_normalizes_sheet_stems_used_as_endpoint_names():
         "DIGITAL INPUT HEADER",
         "R2R LADDER",
     ]
+
+
+def test_architecture_normalizes_sheet_identifier_case_and_spacing():
+    payload = {
+        "topologies": {},
+        "rail_voltages": {},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [
+            {
+                "name": "power_input_sheet",
+                "stem": "power input sheet",
+                "function": "power input",
+            },
+            {
+                "name": "Sensor Sheet",
+                "stem": "sensor_sheet",
+                "function": "sensor",
+            },
+        ],
+        "power_nets": [],
+        "inter_sheet_nets": [
+            {
+                "name": "POWER_OK",
+                "endpoints": [
+                    {"sheet": "POWER_INPUT_SHEET", "direction": "output"},
+                    {"sheet": "sensor sheet", "direction": "input"},
+                ],
+            }
+        ],
+    }
+
+    canonical, expanded = _normalize_stage_response("architecture", payload, {})
+
+    assert expanded == 0
+    assert [(sheet["name"], sheet["stem"]) for sheet in canonical["sheets"]] == [
+        ("POWER INPUT SHEET", "POWER_INPUT_SHEET"),
+        ("SENSOR SHEET", "SENSOR_SHEET"),
+    ]
+    assert [endpoint["sheet"] for endpoint in canonical["inter_sheet_nets"][0]["endpoints"]] == [
+        "POWER INPUT SHEET",
+        "SENSOR SHEET",
+    ]
+
+
+def test_architecture_normalizes_requirement_sheet_aliases():
+    payload = {
+        "topologies": {"crossover": "passive two-way crossover"},
+        "rail_voltages": {},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [
+            {"name": "crossover", "stem": "crossover", "function": "passive crossover"}
+        ],
+        "power_nets": [],
+        "inter_sheet_nets": [],
+        "requirements": [
+            {
+                "id": "inductor_lowpass",
+                "sheet": "crossover",
+                "role": "analog_block",
+                "family": "passive-crossover",
+            }
+        ],
+    }
+
+    canonical, _expanded = _normalize_stage_response("architecture", payload, {})
+
+    assert canonical["sheets"][0]["name"] == "CROSSOVER"
+    assert canonical["requirements"][0]["sheet"] == "CROSSOVER"
+
+
+def test_architecture_normalizes_recipe_selection_sheet_aliases():
+    normalized = _normalize_architecture_sheet_aliases(
+        {
+            "sheets": [
+                {"name": "controller", "stem": "controller", "function": "controller"}
+            ],
+            "recipe_selections": [
+                {
+                    "recipe": "example@1",
+                    "instance": "main",
+                    "sheets": {"mcu": "Controller"},
+                }
+            ],
+        }
+    )
+
+    assert normalized["recipe_selections"][0]["sheets"] == {"mcu": "CONTROLLER"}
+
+
+def test_architecture_derives_missing_or_empty_sheet_stems():
+    for raw_stem in (None, ""):
+        sheet = {"name": "sensor interface", "function": "sensor"}
+        if raw_stem is not None:
+            sheet["stem"] = raw_stem
+        normalized = _normalize_architecture_sheet_aliases({"sheets": [sheet]})
+        assert normalized["sheets"][0] == {
+            "name": "SENSOR INTERFACE",
+            "stem": "SENSOR_INTERFACE",
+            "function": "sensor",
+        }
 
 
 def _range_architecture_payload(explicit_nets, ranges):

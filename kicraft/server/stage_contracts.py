@@ -122,13 +122,56 @@ class BomComponentGroup(BaseModel):
     reference_prefix: str = Field(pattern=r"^[A-Z]+$")
     quantity: int = Field(ge=1, le=BOM_SHEET_PART_LIMIT)
     value: str
-    symbol: str
-    footprint: str
+    symbol: str = Field(pattern=r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.+-]+$")
+    footprint: str = Field(pattern=r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.,+-]+$")
     sheet: str
     mpn: str | None = None
     datasheet: str | None = None
     sourcing_note: str | None = None
     side: Literal["front", "back"] | None = None
+
+
+def _requirement_owns_protected_group(group: BomComponentGroup, requirements) -> bool:
+    """Whether a requirement-scoped group id names its implementation."""
+
+    def value(requirement, field: str):
+        if isinstance(requirement, dict):
+            return requirement.get(field)
+        return getattr(requirement, field, None)
+
+    def token(raw: object) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(raw).lower())
+
+    def words(raw: object) -> set[str]:
+        aliases = {
+            "header": "connector",
+            "receptacle": "connector",
+            "socket": "connector",
+            "terminal": "connector",
+            "jumper": "switch",
+        }
+        return {
+            aliases.get(word, word)
+            for word in re.split(r"[^a-z0-9]+", str(raw).lower())
+            if len(word) >= 2
+        }
+
+    group_token = token(group.id)
+    group_words = words(group.id)
+    for requirement in requirements or ():
+        for raw in (
+            value(requirement, "id"),
+            value(requirement, "family"),
+            value(requirement, "exact_part"),
+        ):
+            if not raw:
+                continue
+            requirement_token = token(raw)
+            if requirement_token and requirement_token in group_token:
+                return True
+            if len(group_words & words(raw)) >= 2:
+                return True
+    return False
 
 
 class BomArrayGroup(BaseModel):
@@ -198,12 +241,9 @@ def _expand_bom_groups(
     expansions = expand_selections(architecture.get("recipe_selections") or [])
     recipe_parts = [part for expansion in expansions for part in expansion.parts]
     if not response.groups and not recipe_parts:
-        raise ValueError(
-            "BOM must contain at least one component group or circuit-recipe part"
-        )
-    recipe_identities = {
-        (part.symbol.lower(), part.value.lower()) for part in recipe_parts
-    }
+        raise ValueError("BOM must contain at least one component group or circuit-recipe part")
+    recipe_identities = {(part.symbol.lower(), part.value.lower()) for part in recipe_parts}
+    requirements = architecture.get("requirements") or []
     for group in response.groups:
         protected = protected_identity_matches(
             group.id,
@@ -211,15 +251,13 @@ def _expand_bom_groups(
             group.value,
             group.mpn,
         )
-        if protected:
+        if protected and not _requirement_owns_protected_group(group, requirements):
             raise ValueError(
                 "model_authored_protected_identity: "
                 f"BOM group {group.id!r} contains {list(protected)!r}"
             )
         if (group.symbol.lower(), group.value.lower()) in recipe_identities:
-            raise ValueError(
-                f"BOM group {group.id!r} duplicates a locked circuit-recipe role"
-            )
+            raise ValueError(f"BOM group {group.id!r} duplicates a locked circuit-recipe role")
 
     per_sheet: dict[str, int] = {}
     next_number = next_reference_numbers(recipe_parts)
@@ -444,17 +482,22 @@ def _inter_sheet_net_endpoint_signature(endpoints: list[dict]) -> tuple[tuple[st
 
 
 def _normalize_architecture_sheet_aliases(payload: dict) -> dict:
-    """Canonicalize the model's common sheet-name/stem interchange.
+    """Canonicalize harmless sheet identifier representation differences.
 
-    ``Sheet.name`` is the human label (spaces); ``Sheet.stem`` is the filesystem
-    identifier (underscores). Structured-output schemas cannot express the
-    Architecture model's cross-field endpoint check, so models sometimes put a
-    valid stem in ``SheetPin.sheet`` or use the stem spelling for ``Sheet.name``.
-    Both identify the same declared sheet and need no paid repair call.
+    ``Sheet.name`` is the uppercase human label (spaces); ``Sheet.stem`` is the
+    uppercase filesystem identifier (underscores). Structured-output schemas
+    cannot express the Architecture model's cross-field endpoint check, and
+    providers commonly vary case or interchange those two spellings. Normalize
+    those representation-only differences locally instead of spending another
+    provider call; punctuation and missing fields remain schema errors.
     """
     raw_sheets = payload.get("sheets")
     if not isinstance(raw_sheets, list):
         return payload
+
+    def alias_key(value: str) -> str:
+        return re.sub(r"\s+", " ", value.replace("_", " ")).strip().upper()
+
     aliases: dict[str, str] = {}
     sheets: list[object] = []
     for raw_sheet in raw_sheets:
@@ -463,17 +506,33 @@ def _normalize_architecture_sheet_aliases(payload: dict) -> dict:
             continue
         sheet = dict(raw_sheet)
         raw_name = sheet.get("name")
+        canonical_name = None
         if isinstance(raw_name, str):
-            canonical_name = re.sub(r"\s+", " ", raw_name.replace("_", " ")).strip()
+            canonical_name = alias_key(raw_name)
             sheet["name"] = canonical_name
-            aliases[raw_name] = canonical_name
-            raw_stem = sheet.get("stem")
-            if isinstance(raw_stem, str):
-                aliases[raw_stem] = canonical_name
+            aliases[alias_key(raw_name)] = canonical_name
+
+        raw_stem = sheet.get("stem")
+        if isinstance(raw_stem, str) and raw_stem.strip():
+            canonical_stem = re.sub(r"\s+", "_", raw_stem.strip()).upper()
+        elif canonical_name:
+            canonical_stem = canonical_name.replace(" ", "_")
+        else:
+            canonical_stem = None
+        if canonical_stem is not None:
+            sheet["stem"] = canonical_stem
+            if canonical_name is not None:
+                if isinstance(raw_stem, str) and raw_stem:
+                    aliases[alias_key(raw_stem)] = canonical_name
+                aliases[alias_key(canonical_stem)] = canonical_name
         sheets.append(sheet)
 
     normalized = dict(payload)
     normalized["sheets"] = sheets
+
+    def normalize_reference(value: str) -> str:
+        return aliases.get(alias_key(value), value)
+
     for field in ("inter_sheet_nets", "inter_sheet_net_ranges"):
         raw_nets = payload.get(field)
         if not isinstance(raw_nets, list):
@@ -493,12 +552,46 @@ def _normalize_architecture_sheet_aliases(payload: dict) -> dict:
                         continue
                     endpoint = dict(raw_endpoint)
                     raw_ref = endpoint.get("sheet")
-                    if isinstance(raw_ref, str) and raw_ref in aliases:
-                        endpoint["sheet"] = aliases[raw_ref]
+                    if isinstance(raw_ref, str):
+                        endpoint["sheet"] = normalize_reference(raw_ref)
                     endpoints.append(endpoint)
                 net["endpoints"] = endpoints
             nets.append(net)
         normalized[field] = nets
+
+    raw_requirements = payload.get("requirements")
+    if isinstance(raw_requirements, list):
+        requirements: list[object] = []
+        for raw_requirement in raw_requirements:
+            if not isinstance(raw_requirement, dict):
+                requirements.append(raw_requirement)
+                continue
+            requirement = dict(raw_requirement)
+            raw_ref = requirement.get("sheet")
+            if isinstance(raw_ref, str):
+                requirement["sheet"] = normalize_reference(raw_ref)
+            requirements.append(requirement)
+        normalized["requirements"] = requirements
+
+    raw_selections = payload.get("recipe_selections")
+    if isinstance(raw_selections, list):
+        selections: list[object] = []
+        for raw_selection in raw_selections:
+            if not isinstance(raw_selection, dict):
+                selections.append(raw_selection)
+                continue
+            selection = dict(raw_selection)
+            raw_mapping = selection.get("sheets")
+            if isinstance(raw_mapping, dict):
+                selection["sheets"] = {
+                    role: normalize_reference(sheet_ref)
+                    if isinstance(sheet_ref, str)
+                    else sheet_ref
+                    for role, sheet_ref in raw_mapping.items()
+                }
+            selections.append(selection)
+        normalized["recipe_selections"] = selections
+
     return normalized
 
 

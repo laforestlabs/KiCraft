@@ -12,9 +12,11 @@ verbose enough that substring matching on the ``Library:Name`` id is effective.
 Resolution and loadability validation share :func:`load_footprint`, the single
 ``pcbnew.FootprintLoad`` seam used by BOM commit, lookup tools, and synthesis.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 from .parts_lookup import (
     DEFAULT_KICAD_FOOTPRINT_DIR,
@@ -25,6 +27,7 @@ from .parts_lookup import (
 
 class FootprintNotFoundError(LookupError):
     """Raised when a footprint cannot be loaded from the resolver chain."""
+
 
 # Query terms that describe the *kind* of thing being searched, not the part, and so
 # never appear in a footprint id. The model habitually appends "footprint" to queries
@@ -71,7 +74,8 @@ def load_footprint(
         print(
             f"footprint {library}:{name}: normalized {len(pth_changes)} PTH "
             f"pad(s) to fab floors ({'; '.join(pth_changes[:4])}"
-            f"{'; ...' if len(pth_changes) > 4 else ''})"
+            f"{'; ...' if len(pth_changes) > 4 else ''})",
+            file=sys.stderr,
         )
     return fp, lib_dir
 
@@ -91,8 +95,7 @@ def search_footprints(
     P2.54mm_Vertical``). Each ``<Library>.pretty/<Name>.kicad_mod`` under ``stock_dir``
     contributes the id ``"<Library>:<Name>"``.
     """
-    terms = [t for t in (w.lower() for w in (query or "").split())
-             if t and t not in _STOPWORDS]
+    terms = [t for t in (w.lower() for w in (query or "").split()) if t and t not in _STOPWORDS]
     if not terms or not stock_dir.is_dir():
         return []
     matches: list[str] = []

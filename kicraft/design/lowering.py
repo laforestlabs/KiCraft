@@ -608,6 +608,35 @@ def _switch_input(requirement: CircuitRequirement) -> LoweringArtifact | None:
     return _artifact("switch-input@1", requirement, tuple(groups), tuple(pins))
 
 
+def _voltage_selector_switch(
+    requirement: CircuitRequirement,
+) -> LoweringArtifact | None:
+    try:
+        positions = int(requirement.parameters.get("positions", 0))
+    except (TypeError, ValueError):
+        return None
+    if positions != 3 or {name.lower() for name in requirement.ports} != {
+        "sel0",
+        "sel1",
+    }:
+        return None
+    group = LoweringGroup(
+        role="voltage_selector_switch",
+        reference_prefix="SW",
+        value="MSK13C02-SZ",
+        symbol="sp3t-switch-msk13c02:MSK13C02-SZ",
+        footprint="sp3t-switch-msk13c02:SW-SMD_MSK13C02-SZ",
+        mpn="MSK13C02-SZ",
+    )
+    return _artifact(
+        "voltage-selector-switch@1",
+        requirement,
+        (group,),
+        (),
+        assumptions=("Three-position selector uses the curated MSK13C02-SZ part.",),
+    )
+
+
 def _decoupling(requirement: CircuitRequirement) -> LoweringArtifact | None:
     ports = _require_ports(requirement, ("vdd", "gnd"))
     try:
@@ -713,6 +742,13 @@ for _lowerer in (
         _switch_input,
         ("pull_policy", "resistance"),
         ("signal", "gnd", "vdd"),
+    ),
+    RegisteredLowerer(
+        "voltage-selector-switch@1",
+        frozenset({"voltage_selector_switch"}),
+        _voltage_selector_switch,
+        ("positions",),
+        ("SEL0", "SEL1"),
     ),
     RegisteredLowerer(
         "explicit-decoupling@1",

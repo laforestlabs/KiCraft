@@ -217,6 +217,21 @@ def test_retry_feedback_without_offenders_omits_that_line():
     assert "offenders" not in msg  # no offenders line when none present
 
 
+def test_architecture_retry_feedback_explains_missing_inter_sheet_nets():
+    message = _retry_feedback(
+        {
+            "errors": ["fs-connection mapping: 2 connection(s) not mapped"],
+            "offenders": [
+                "connection 'MCU'→'LED' (digital) crosses sheets but has no inter_sheet_net"
+            ],
+        },
+        stage="architecture",
+    )
+    assert "add every missing cross-sheet signal" in message
+    assert "at least two endpoints" in message
+    assert "exact canonical `sheets[].name`" in message
+
+
 def test_retry_feedback_explains_series_path_for_dangling_terminal():
     msg = _retry_feedback(
         {
@@ -289,9 +304,9 @@ def test_wiring_gets_a_larger_token_budget():
     assert _stage_max_tokens("wiring", 16000) == 16000  # a higher caller default wins
 
 
-def test_bom_gets_more_retries_for_symbol_resolution():
+def test_complex_stages_get_larger_retry_budgets():
     assert _stage_max_retries("bom", 2) == 4
-    assert _stage_max_retries("architecture", 2) == 2
+    assert _stage_max_retries("architecture", 2) == 3
 
 
 def test_bom_has_a_symbol_search_tool():
@@ -322,6 +337,29 @@ def test_normalize_questions_shapes_and_drops_junk():
     q = qs[0]
     assert q["stage"] == "intent" and q["blocking"] is True
     assert q["options"] == ["LiPo", "18650"] and q["answer"] is None
+    demoted = _normalize_questions(
+        [
+            {"text": "Supply voltage?", "blocking": True},
+            {
+                "text": "Choose an op amp. (Default: rail-to-rail.)",
+                "options": ["Rail-to-rail", "Dual supply"],
+                "blocking": True,
+            },
+        ],
+        "architecture",
+    )
+    assert [question["blocking"] for question in demoted] == [False, False]
+    capped = _normalize_questions(
+        [
+            {
+                "text": "Choose a sourced part?",
+                "options": ["A", "B", "C", "D", "E", "F"],
+                "blocking": True,
+            }
+        ],
+        "bom",
+    )
+    assert capped[0]["options"] == ["A", "B", "C", "D"]
 
 
 def test_normalize_questions_carries_and_whitelists_reconcile_target():
@@ -341,6 +379,7 @@ def test_normalize_questions_carries_and_whitelists_reconcile_target():
         "wiring",
     )
     assert [q["reconcile_target"] for q in qs] == ["bom", None, None]
+    assert [q["blocking"] for q in qs] == [True, False, False]
     # the normalized dicts still validate as Question (schema-safe for state.json)
     from kicraft.design.models import Question
 
@@ -356,10 +395,11 @@ def test_wiring_prompt_tells_model_to_self_repair_a_bom_shortfall():
     assert '"bom"' in sysmsg
 
 
-def test_bom_prompt_demands_decoupling_completeness():
-    # The requirement rides the bom.md spec block (single source; the
-    # _stage_extra restatement was deduped 2026-07-19 review §7.2).
+def test_bom_prompt_closes_architecture_decisions_and_demands_decoupling():
     sysmsg = build_system("bom")
+    assert "ARCHITECTURE DECISIONS ARE CLOSED" in sysmsg
+    assert "Never ask the user to choose an MCU" in sysmsg
+    assert "emit only the named requirement and owned role" in sysmsg
     assert "Decoupling completeness" in sysmsg
     assert "per dedicated supply/decoupling pin" in sysmsg
 
@@ -480,6 +520,39 @@ def test_build_system_offers_clarifying_questions():
     sysmsg = build_system("intent")
     assert '"questions"' in sysmsg  # the model is told it may ask
     assert "blocking" in sysmsg
+    assert "2-4 concise suggested answers" in sysmsg
+    assert "Never ask to confirm a default" in sysmsg
+
+
+@pytest.mark.parametrize(
+    ("stage", "code", "expected_option"),
+    [
+        (
+            "functional_spec",
+            "functional_spec_external_load_power_assumed",
+            "Board supplies the external loads",
+        ),
+        (
+            "architecture",
+            "architecture_external_load_current_unspecified",
+            "1 A",
+        ),
+    ],
+)
+def test_semantic_blocking_questions_include_concrete_options(stage, code, expected_option):
+    message = stage_driver_mod._semantic_repair_message(
+        stage,
+        [
+            StageDiagnostic(
+                code=code,
+                severity="repair_required",
+                message="x",
+                evidence=[],
+                detector_version=1,
+            )
+        ],
+    )
+    assert expected_option in message
 
 
 def test_bom_part_hints_extracts_pasted_lcsc_ids():
@@ -1063,7 +1136,7 @@ def test_truncated_json_triggers_one_plain_tool_free_serialization_call(tmp_path
     assert decoded["unknown_sheet_references"] == []
 
 
-def test_second_truncated_serialization_result_terminates_as_truncated_json(tmp_path):
+def test_repeated_truncated_replies_use_the_full_bounded_budget(tmp_path):
     client = _ScriptedClient(
         [
             {
@@ -1078,35 +1151,40 @@ def test_second_truncated_serialization_result_terminates_as_truncated_json(tmp_
                 "finish_reason": "length",
                 "cost_usd": 0.0,
             },
+            {
+                "text": '{"goal": "z", still',
+                "reasoning": "",
+                "finish_reason": "length",
+                "cost_usd": 0.0,
+            },
         ]
     )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "failed"
     last = res["results"][-1]
-    assert len(client.calls) == 2  # normal + ONE serialization, no more
-    assert last["failure_kind"] == "truncated_json"  # classified by its own signature
-    assert last["attempts"] == 2  # actual calls, not max_retries+1
+    assert len(client.calls) == 3
+    assert sum(1 for call in client.calls if call["serialization"]) == 1
+    assert last["failure_kind"] == "truncated_json"
+    assert last["attempts"] == 3
 
 
-def test_malformed_normal_stop_terminates_as_invalid_json_after_one_serialization(tmp_path):
+def test_repeated_invalid_json_uses_the_full_bounded_budget(tmp_path):
     client = _ScriptedClient(
         [
             {"text": "not json at all", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": "still not json", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
             {"text": "still not json", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
         ]
     )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     assert res["status"] == "failed"
     last = res["results"][-1]
-    assert len(client.calls) == 2
+    assert len(client.calls) == 3
     assert last["failure_kind"] == "invalid_json"
-    assert last["attempts"] == 2
+    assert last["attempts"] == 3
 
 
-def test_serialization_schema_failure_terminates_without_commit_correction(tmp_path):
-    # A parseable object that violates the requested provider schema is not a
-    # commit candidate. The one schema-bound serialization recovery is terminal
-    # when it repeats the schema defect.
+def test_serialization_schema_failure_gets_final_normal_correction(tmp_path):
     client = _ScriptedClient(
         [
             {
@@ -1116,14 +1194,15 @@ def test_serialization_schema_failure_terminates_without_commit_correction(tmp_p
                 "cost_usd": 0.0,
             },
             {"text": "{}", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            _ok_intent_reply(),
         ]
     )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
-    assert res["status"] == "failed"
-    last = res["results"][-1]
-    assert len(client.calls) == 2
+    assert res["status"] == "ok"
+    assert len(client.calls) == 3
     assert sum(1 for call in client.calls if call["serialization"]) == 1
-    assert last["failure_kind"] == "invalid_schema"
+    assert client.calls[2]["serialization"] is False
+    assert "Field required" in client.calls[2]["messages"][-1]["content"]
 
 
 def test_schema_recovery_reports_local_validation_error(tmp_path):
@@ -1140,6 +1219,24 @@ def test_schema_recovery_reports_local_validation_error(tmp_path):
     assert "Field required" in retry_message
 
 
+def test_answers_survive_schema_recovery(tmp_path):
+    client = _ScriptedClient(
+        [
+            {"text": "{}", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            _ok_intent_reply(),
+        ]
+    )
+    result = run_session(
+        tmp_path,
+        "a powered LED",
+        ["intent"],
+        client=client,
+        answers=[{"text": "Supply voltage?", "answer": "12 V"}],
+    )
+    assert result["status"] == "ok"
+    assert "Q: Supply voltage?\nA: 12 V" in client.calls[1]["messages"][1]["content"]
+
+
 def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
     # Serialization recovery must route through plain client.chat() for the BOM
     # stage too — never chat_with_tools, so no tool rounds and no transcript
@@ -1153,6 +1250,11 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
                 "cost_usd": 0.0,
             },
             {"text": "also bad", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": "still bad", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": "bad again", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": "final bad", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": "bad once more", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": "last bad", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
         ]
     )
     prep = {
@@ -1168,16 +1270,17 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
     )
     res = run_session(tmp_path, "a USB-powered LED", ["bom"], client=client)
     assert res["status"] == "failed"
-    assert len(client.calls) == 2
+    assert len(client.calls) == 7
     assert client.calls[0]["serialization"] is False  # chat_with_tools (tool loop)
     assert client.calls[1]["serialization"] is True  # plain chat for serialization
+    assert all(call["serialization"] is False for call in client.calls[2:])
     assert client.calls[1]["response_format"] is client.calls[0]["response_format"]
     assert client.calls[1]["max_tokens"] == 32768  # bom serialization cap
     assert client.calls[1]["reasoning"] == {"enabled": False}
     retry_message = client.calls[1]["messages"][-1]["content"]
     assert "about 16 characters" in retry_message
     assert client.calls[1]["response_format"]["json_schema"]["name"] == "kicraft_bom_response_v3"
-    assert res["results"][-1]["failure_kind"] == "invalid_json"
+    assert res["results"][-1]["failure_kind"] == "unit_repair_exhausted"
 
 
 def test_typed_bom_lowerer_skips_provider_call(tmp_path, monkeypatch):
@@ -1236,7 +1339,7 @@ def test_typed_bom_lowerer_skips_provider_call(tmp_path, monkeypatch):
         progress=progress.append,
     )
 
-    assert result["commit_ok"] is True
+    assert result["commit_ok"] is True, result
     assert result["attempts"] == 0
     assert client.calls == []
     assert len(commits[0]["parts"]) == 1
@@ -1449,6 +1552,7 @@ def test_failure_kind_reaches_stage_status(tmp_path):
         [
             {"text": "not json", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
             {"text": "not json either", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
+            {"text": "still not json", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
         ]
     )
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
@@ -1457,7 +1561,7 @@ def test_failure_kind_reaches_stage_status(tmp_path):
     sj = json.loads(sp.read_text(encoding="utf-8"))
     entry = sj["stage_status"]["intent"]
     assert entry["failure_kind"] == "invalid_json"
-    assert entry["attempts"] == last["attempts"] == 2
+    assert entry["attempts"] == last["attempts"] == 3
 
 
 # ---- provider/transport failures never enter JSON recovery -----------------
@@ -1489,7 +1593,7 @@ def test_collection_limit_uses_one_escape_serialization_call(tmp_path):
     assert "82000 content characters" in retry
 
 
-def test_second_collection_limit_is_terminal(tmp_path):
+def test_repeated_collection_limit_uses_the_full_bounded_budget(tmp_path):
     overflow = {
         "text": '{"goal":',
         "finish_reason": "collection_limit",
@@ -1501,11 +1605,11 @@ def test_second_collection_limit_is_terminal(tmp_path):
         },
         "cost_usd": 0.01,
     }
-    client = _ScriptedClient([overflow, overflow])
+    client = _ScriptedClient([overflow, overflow, overflow])
     res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
     last = res["results"][-1]
     assert last["failure_kind"] == "collection_limit"
-    assert last["attempts"] == 2
+    assert last["attempts"] == 3
 
 
 def test_commit_rejection_signature_normalizes_gate_ids_and_offenders():
@@ -1692,6 +1796,7 @@ def _a3_run(
     escalation_profile="pro",
     progress=None,
     attempt_observer=None,
+    vary_replies=False,
 ):
     """Drive wiring; commit rejects with _a3_sig(letter) per entry, then OK."""
     state_path = _a3_wiring_state(tmp_path, monkeypatch)
@@ -1721,6 +1826,12 @@ def _a3_run(
         "cost_usd": 0.0,
     }
     replies = [dict(reply) for _ in rejects] + ([dict(reply)] if extra_ok_reply else [])
+    if vary_replies:
+        for index, item in enumerate(replies):
+            payload = json.loads(item["text"])
+            payload["pins"][0]["net"] = f"A{index}"
+            payload["pins"][1]["net"] = f"A{index}"
+            item["text"] = json.dumps(payload)
     client = _ScriptedClient(replies)
     client.s = Settings(
         api_key="test",
@@ -1759,21 +1870,39 @@ def test_work_unit_repeated_signature_stops_after_one_aggregate_repair(
     assert len(client.calls) == 2
 
 
-def test_work_unit_changed_signature_still_stops_after_one_aggregate_repair(
+def test_work_unit_same_gate_continues_when_candidate_changes(
     tmp_path,
     monkeypatch,
 ):
     result, client = _a3_run(
         tmp_path,
         monkeypatch,
-        ["A", "B"],
+        ["A", "A"],
         max_retries=99,
-        extra_ok_reply=False,
+        extra_ok_reply=True,
+        vary_replies=True,
     )
-    assert result["commit_ok"] is False
-    assert result["aggregate_repair_rounds"] == 1
-    assert result["attempts"] == 2
-    assert len(client.calls) == 2
+    assert result["commit_ok"] is True
+    assert result["aggregate_repair_rounds"] == 2
+    assert result["attempts"] == 3
+    assert len(client.calls) == 3
+
+
+def test_work_unit_changed_signatures_get_third_aggregate_repair(
+    tmp_path,
+    monkeypatch,
+):
+    result, client = _a3_run(
+        tmp_path,
+        monkeypatch,
+        ["A", "B", "C"],
+        max_retries=99,
+        extra_ok_reply=True,
+    )
+    assert result["commit_ok"] is True
+    assert result["aggregate_repair_rounds"] == 3
+    assert result["attempts"] == 4
+    assert len(client.calls) == 4
 
 
 def test_work_unit_commit_process_failure_has_no_followup_call(tmp_path, monkeypatch):
@@ -2032,6 +2161,33 @@ def test_review_candidate_captures_forensics_without_committing(tmp_path):
     assert not state_path.exists()
 
 
+def test_early_design_question_defaults_without_parking(tmp_path):
+    question = {
+        "text": json.dumps(
+            {
+                "questions": [
+                    {
+                        "text": "Which op amp?",
+                        "options": ["Rail-to-rail", "Dual supply"],
+                        "blocking": True,
+                    }
+                ]
+            }
+        ),
+        "reasoning": "",
+        "finish_reason": "stop",
+        "cost_usd": 0.0,
+    }
+    client = _ScriptedClient([question, _ok_intent_reply()])
+
+    result = run_session(tmp_path, "an op-amp board", ["intent"], client=client)
+
+    assert result["status"] == "ok"
+    assert len(client.calls) == 2
+    assert "Do not ask more questions" in client.calls[1]["messages"][-1]["content"]
+    assert not json.loads((tmp_path / ".kicraft" / "state.json").read_text())["open_questions"]
+
+
 def test_complete_instruction_suppresses_repeated_blocking_question(tmp_path):
     question = {
         "text": json.dumps(
@@ -2072,6 +2228,7 @@ def test_review_question_does_not_persist_open_questions(tmp_path):
                     "stage": "intent",
                     "blocking": True,
                     "material": True,
+                    "options": ["3.3 V", "5 V"],
                 }
             ]
         }
@@ -2110,7 +2267,7 @@ def test_attempt_trace_associates_candidates_with_one_bounded_repair(tmp_path, m
     assert [row["version"] for row in records] == [2, 2]
     assert [row["unit_id"] for row in records] == ["wiring-u000"] * 2
     assert [row["aggregate_round"] for row in records] == [None, 1]
-    assert [row["design_profile"] for row in records] == ["flash", "flash"]
+    assert [row["design_profile"] for row in records] == ["flash", "pro"]
     assert records[0]["aggregate_signature"] is None
     assert records[1]["aggregate_signature"] is not None
     for row in records:
@@ -2267,6 +2424,155 @@ def test_work_units_make_one_initial_call_each_before_one_full_commit(tmp_path, 
     assert len(commits) == 1
 
 
+def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monkeypatch):
+    state = {
+        "architecture": {
+            "sheets": [{"name": "PD TRIGGER"}],
+            "power_nets": ["VBUS", "GND"],
+            "inter_sheet_nets": [],
+            "recipe_selections": [],
+            "requirements": [
+                {
+                    "id": "pd_trigger_controller",
+                    "sheet": "PD TRIGGER",
+                    "role": "bus_interface",
+                    "family": "pd_trigger_controller",
+                    "parameters": {"supported_pdos": "9V,12V,20V"},
+                    "ports": {"VBUS": "VBUS"},
+                },
+                {
+                    "id": "usb_c_receptacle",
+                    "sheet": "PD TRIGGER",
+                    "role": "connector",
+                    "family": "usb_c_receptacle",
+                    "ports": {"VBUS": "VBUS", "GND": "GND"},
+                },
+            ],
+        }
+    }
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state))
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc",
+            (),
+            {"returncode": 0, "stdout": json.dumps({"state": state, "extras": {}}), "stderr": ""},
+        )(),
+    )
+    question = {
+        "text": json.dumps(
+            {
+                "questions": [
+                    {
+                        "text": "Which MCU/control architecture should the BOM reflect?",
+                        "options": ["Dedicated PD trigger", "ESP32-S3", "ESP32 + CH340C"],
+                        "blocking": True,
+                        "material": True,
+                    }
+                ]
+            }
+        ),
+        "finish_reason": "stop",
+        "cost_usd": 0.0,
+    }
+    candidate = {
+        "text": json.dumps(
+            {
+                "groups": [
+                    _group_payload(
+                        id="pd_controller",
+                        reference_prefix="U",
+                        quantity=1,
+                        value="HUSB238",
+                        symbol="Test:HUSB238",
+                        footprint="Test:HUSB238",
+                        sheet="PD TRIGGER",
+                    )
+                ],
+                "arrays": [],
+                "assumptions": ["Selected a dedicated PD controller (defaulted)"],
+                "substitutions": [],
+            }
+        ),
+        "finish_reason": "stop",
+        "cost_usd": 0.0,
+    }
+    protected_candidate = {
+        "text": json.dumps(
+            {
+                **json.loads(candidate["text"]),
+                "groups": [
+                    *json.loads(candidate["text"])["groups"],
+                    _group_payload(
+                        id="usb_c_receptacle",
+                        reference_prefix="J",
+                        quantity=1,
+                        value="USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+                        symbol="Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+                        footprint=("Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12"),
+                        sheet="PD TRIGGER",
+                    ),
+                ],
+            }
+        ),
+        "finish_reason": "stop",
+        "cost_usd": 0.0,
+    }
+    usb_candidate = {
+        "text": json.dumps(
+            {
+                "groups": [json.loads(protected_candidate["text"])["groups"][1]],
+                "arrays": [],
+                "assumptions": [],
+                "substitutions": [],
+            }
+        ),
+        "finish_reason": "stop",
+        "cost_usd": 0.0,
+    }
+    collection_limit = {
+        "text": "{}",
+        "finish_reason": "collection_limit",
+        "cost_usd": 0.0,
+    }
+    client = _unit_client(
+        [question, collection_limit, collection_limit, protected_candidate, usb_candidate]
+    )
+    client.s = replace(client.s, escalation_profile="pro")
+    committed = []
+
+    def commit(_stage, slot, *args, **kwargs):
+        committed.append(slot)
+        return True, {"ok": True}
+
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", commit)
+
+    result = stage_driver_mod.drive_stage(client, "bom", "USB-C PD trigger", state_path, tmp_path)
+
+    assert result["commit_ok"] is True, result.get("error") or result
+    assert result.get("needs_input") is not True
+    assert len(client.calls) == 5
+    feedback = client.calls[1]["messages"][-1]["content"]
+    assert "committed architecture is binding" in feedback
+    assert "requirement_ids=['pd_trigger_controller']" in feedback
+    assert "do not emit components owned by another requirement" in feedback
+    assert {part["value"] for part in committed[0]["parts"]} == {
+        "HUSB238",
+        "USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+    }
+    assert [call["collection_bounds"][0].total for call in client.calls] == [32] * 5
+    assert [call["serialization"] for call in client.calls] == [
+        False,
+        False,
+        True,
+        False,
+        False,
+    ]
+    assert [call["model"] for call in client.calls] == [str(DESIGN_PROFILES["pro"]["model"])] * 5
+
+
 @pytest.mark.parametrize(
     ("rejection", "repair_refs"),
     [
@@ -2365,7 +2671,7 @@ def test_work_unit_debug_review_and_observer_v2_are_redacted(tmp_path, monkeypat
     )
 
 
-def test_work_unit_repeated_commit_signature_stops_after_one_repair(
+def test_work_unit_repeated_commit_signature_stops_when_candidate_also_repeats(
     tmp_path,
     monkeypatch,
 ):
@@ -2375,7 +2681,7 @@ def test_work_unit_repeated_commit_signature_stops_after_one_repair(
             _unit_reply("U1"),
             _unit_reply("R1"),
             _unit_reply("U1", "PRESERVED"),
-            _unit_reply("U1", "UNUSED"),
+            _unit_reply("U1", "PRESERVED"),
         ]
     )
     commits = {"count": 0}
@@ -2390,9 +2696,9 @@ def test_work_unit_repeated_commit_signature_stops_after_one_repair(
     )
 
     assert result["failure_kind"] == "commit_rejected"
-    assert result["aggregate_repair_rounds"] == 1
-    assert len(client.calls) == 3
-    assert commits["count"] == 2
+    assert result["aggregate_repair_rounds"] == 2
+    assert len(client.calls) == 4
+    assert commits["count"] == 3
 
 
 def test_work_unit_bom_reconcile_question_keeps_pipeline_park_shape(tmp_path, monkeypatch):

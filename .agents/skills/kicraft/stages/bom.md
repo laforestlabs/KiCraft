@@ -2,6 +2,16 @@ Stage 4: BOM. Draft the complete `bom` slot and commit it through the workflow i
 
 Given the `architecture` (available in the `state` field of stage-prep's output), pick real parts and assign each to a sheet.
 
+**Architecture is binding.** BOM may select concrete parts but must not reopen
+the committed MCU presence, programming interface, control architecture,
+topology, sheet partition, requirement family, or requirement parameters. In a
+work unit, emit only its named requirement and owned role; never include a
+sibling requirement's connector, switch, controller, or support parts. For
+beginner/intermediate designs, make a sensible concrete part selection and
+record it as `(defaulted)`. Ask the user only when a real sourcing failure or an
+unresolvable explicitly named part leaves no safe implementation; every such
+question must offer 2–4 concrete viable options.
+
 **Programming interface.** Reflect the architecture's programming decision:
 
 - **Native-USB MCU** (ESP32-S3/C3/S2/C6): native USB means no USB-UART bridge, but a USB connector alone is not sufficient for first download and recovery. Include BOOT and EN/RESET buttons or equivalent labeled strap test pads, required pulls, and complete decoupling as explicit groups on the MCU sheet.
