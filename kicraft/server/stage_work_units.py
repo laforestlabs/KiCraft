@@ -152,21 +152,115 @@ def plan_stage_work_units(
                     recipe_ids_by_sheet.setdefault(str(sheet), set()).add(
                         str(selection.get("recipe"))
                     )
-            return tuple(
-                StageWorkUnit(
-                    unit_id=f"bom-r{index:03d}",
-                    stage="bom",
-                    sheet=str(requirement["sheet"]),
-                    requirement_ids=(str(requirement["id"]),),
-                    owned_roles=(str(requirement["role"]),),
-                    planned_resolution_source="llm",
-                    recipe_ids=tuple(
-                        sorted(recipe_ids_by_sheet.get(str(requirement["sheet"]), set()))
-                    ),
+            recipe_part_roles_by_sheet: dict[str, set[str]] = {}
+            from kicraft.design.recipes import get_recipe
+
+            for selection in architecture.get("recipe_selections") or []:
+                if not isinstance(selection, dict):
+                    continue
+                definition = get_recipe(str(selection.get("recipe")))
+                sheet_bindings = selection.get("sheets") or {}
+                for group in definition.parts:
+                    bound_sheet = sheet_bindings.get(group.sheet_role)
+                    if bound_sheet:
+                        recipe_part_roles_by_sheet.setdefault(str(bound_sheet), set()).add(
+                            _identity_token(group.role)
+                        )
+
+            from kicraft.design.lowering import lower_requirement
+            from kicraft.design.models import CircuitRequirement
+
+            # A requirement gets its own bounded unit only when a deterministic
+            # lowerer can resolve it. A plain requirement (made-up family, no
+            # lowerer) forced the model to invent parts from the requirement
+            # alone, which it could not: those units came back empty and
+            # exhausted the stage. Plain requirements roll up into ONE
+            # sheet-scoped unit per sheet, where the model sees the sheet's
+            # function text and can emit a coherent part set.
+            combined_connector_sheets = {
+                str(sheet.get("name"))
+                for sheet in architecture.get("sheets") or []
+                if isinstance(sheet, dict)
+                and (
+                    "fpc" in str(sheet.get("function") or "").lower()
+                    or "ffc" in str(sheet.get("function") or "").lower()
                 )
-                for index, requirement in enumerate(requirements)
-                if str(requirement.get("id")) not in selected
-            )
+                and "header" in str(sheet.get("function") or "").lower()
+            }
+            determinable_ids: set[str] = set()
+            for requirement in requirements:
+                if str(requirement.get("id")) in selected:
+                    continue
+                if str(requirement.get("sheet")) in combined_connector_sheets:
+                    continue
+                try:
+                    if (
+                        lower_requirement(CircuitRequirement.model_validate(requirement))
+                        is not None
+                    ):
+                        determinable_ids.add(str(requirement["id"]))
+                except (TypeError, ValueError):
+                    continue
+
+            units: list[StageWorkUnit] = []
+            for requirement in requirements:
+                if str(requirement.get("id")) not in determinable_ids:
+                    continue
+                sheet = str(requirement["sheet"])
+                units.append(
+                    StageWorkUnit(
+                        unit_id=f"bom-r{len(units):03d}",
+                        stage="bom",
+                        sheet=sheet,
+                        requirement_ids=(str(requirement["id"]),),
+                        owned_roles=(str(requirement["role"]),),
+                        planned_resolution_source="llm",
+                        recipe_ids=tuple(sorted(recipe_ids_by_sheet.get(sheet, set()))),
+                    )
+                )
+
+            plain_by_sheet: dict[str, list[dict]] = {}
+            for requirement in requirements:
+                requirement_id = str(requirement.get("id"))
+                requirement_tokens = {
+                    _identity_token(requirement.get("role")),
+                    _identity_token(requirement.get("family")),
+                }
+                if requirement_tokens & recipe_part_roles_by_sheet.get(
+                    str(requirement.get("sheet")), set()
+                ):
+                    continue
+                if requirement_id in selected or requirement_id in determinable_ids:
+                    continue
+                plain_by_sheet.setdefault(str(requirement["sheet"]), []).append(requirement)
+
+            for sheet in sheets:
+                sheet_requirements = plain_by_sheet.get(sheet, [])
+                if sheet_requirements:
+                    units.append(
+                        StageWorkUnit(
+                            unit_id=f"bom-s{len(units):03d}",
+                            stage="bom",
+                            sheet=sheet,
+                            requirement_ids=tuple(str(req["id"]) for req in sheet_requirements),
+                            owned_roles=tuple(
+                                dict.fromkeys(str(req["role"]) for req in sheet_requirements)
+                            ),
+                            planned_resolution_source="llm",
+                            recipe_ids=tuple(sorted(recipe_ids_by_sheet.get(sheet, set()))),
+                        )
+                    )
+                elif sheet not in recipe_ids_by_sheet and not any(
+                    unit.sheet == sheet for unit in units
+                ):
+                    units.append(
+                        StageWorkUnit(
+                            unit_id=f"bom-s{len(units):03d}",
+                            stage="bom",
+                            sheet=sheet,
+                        )
+                    )
+            return tuple(units)
         return tuple(
             StageWorkUnit(
                 unit_id=f"bom-s{index:03d}",
@@ -328,43 +422,425 @@ def _unit_requirement(unit: StageWorkUnit, prompt_state: dict):
     return None
 
 
+_HIROSE_FH12_05_PIN_COUNTS = {
+    6,
+    8,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    22,
+    24,
+    25,
+    26,
+    28,
+    30,
+    32,
+    33,
+    34,
+    35,
+    36,
+    40,
+    45,
+    50,
+    53,
+}
+
+
+def _standard_connector_sheet_candidate(
+    unit: StageWorkUnit,
+    prompt_state: dict,
+) -> dict | None:
+    """Lower mechanically standard connector-only sheets without an LLM."""
+    sheets = (prompt_state.get("architecture") or {}).get("sheets") or []
+    target = next(
+        (
+            sheet
+            for sheet in sheets
+            if isinstance(sheet, dict) and str(sheet.get("name")) == unit.sheet
+        ),
+        None,
+    )
+    function = str((target or {}).get("function") or "")
+    identity = function.lower()
+    has_usb_c = bool(re.search(r"\busb(?:\s*|-)?c\b|\btype(?:\s*|-)?c\b", identity))
+    if has_usb_c:
+        from kicraft.design.recipes import get_recipe
+
+        recipe_name = (
+            "usb-c-usb2-device@1"
+            if any(token in identity for token in ("data", "usb2", "usb 2", "esd"))
+            else "usb-c-5v-sink@1"
+        )
+        definition = get_recipe(recipe_name)
+        return {
+            "groups": [
+                {
+                    "id": group.role,
+                    "reference_prefix": group.reference_prefix,
+                    "quantity": group.quantity,
+                    "value": group.value,
+                    "symbol": group.symbol,
+                    "footprint": group.footprint,
+                    "sheet": unit.sheet,
+                    **({"mpn": group.mpn} if group.mpn else {}),
+                }
+                for group in definition.parts
+            ],
+            "arrays": [],
+            "assumptions": [
+                f"Used deterministic {definition.recipe} parts for the standard USB-C interface"
+            ],
+            "substitutions": [],
+        }
+
+    has_usb_a = bool(re.search(r"\busb(?:\s*|-)?a\b", identity))
+    if "bnc" in identity and not any(token in identity for token in ("filter", "low-pass")):
+        return {
+            "groups": [
+                {
+                    "id": "bnc",
+                    "reference_prefix": "J",
+                    "quantity": 1,
+                    "value": "BNC",
+                    "symbol": "bnc-pcb-jack:KH-BNC50-3511",
+                    "footprint": "bnc-pcb-jack:ANT-TH_KH-BNC50-3511",
+                    "sheet": unit.sheet,
+                    "mpn": "KH-BNC50-3511",
+                }
+            ],
+            "arrays": [],
+            "assumptions": ["Selected the curated 50 ohm PCB BNC jack (defaulted)"],
+            "substitutions": [],
+        }
+
+    if has_usb_a:
+        groups = [
+            {
+                "id": "usb_a_receptacle",
+                "reference_prefix": "J",
+                "quantity": 1,
+                "value": "USB-A receptacle",
+                "symbol": "Connector_Generic:Conn_01x04",
+                "footprint": "Connector_USB:USB_A_Molex_67643_Horizontal",
+                "sheet": unit.sheet,
+            }
+        ]
+        if "current" in identity and ("limit" in identity or "switch" in identity):
+            groups.extend(
+                [
+                    {
+                        "id": "current_limit_switch",
+                        "reference_prefix": "U",
+                        "quantity": 1,
+                        "value": "TPS2041B",
+                        "symbol": "Power_Management:TPS2041B",
+                        "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+                        "sheet": unit.sheet,
+                    },
+                    {
+                        "id": "port_decoupling",
+                        "reference_prefix": "C",
+                        "quantity": 2,
+                        "value": "1uF",
+                        "symbol": "Device:C",
+                        "footprint": "Capacitor_SMD:C_0603_1608Metric",
+                        "sheet": unit.sheet,
+                    },
+                ]
+            )
+        if "led" in identity or "status" in identity:
+            groups.extend(
+                [
+                    {
+                        "id": "status_led",
+                        "reference_prefix": "D",
+                        "quantity": 1,
+                        "value": "Green",
+                        "symbol": "Device:LED",
+                        "footprint": "LED_SMD:LED_0603_1608Metric",
+                        "sheet": unit.sheet,
+                    },
+                    {
+                        "id": "status_led_resistor",
+                        "reference_prefix": "R",
+                        "quantity": 1,
+                        "value": "1k",
+                        "symbol": "Device:R",
+                        "footprint": "Resistor_SMD:R_0603_1608Metric",
+                        "sheet": unit.sheet,
+                    },
+                ]
+            )
+        return {
+            "groups": groups,
+            "arrays": [],
+            "assumptions": ["Used a stock USB-A receptacle and bounded port-power circuit"],
+            "substitutions": [],
+        }
+
+    architecture_requirements = [
+        row
+        for row in (prompt_state.get("architecture") or {}).get("requirements") or []
+        if isinstance(row, dict) and str(row.get("id")) in set(unit.requirement_ids)
+    ]
+    if "current" in identity and ("limit" in identity or "switch" in identity):
+        return {
+            "groups": [
+                {
+                    "id": "current_limit_switch",
+                    "reference_prefix": "U",
+                    "quantity": 1,
+                    "value": "TPS2041B",
+                    "symbol": "Power_Management:TPS2041B",
+                    "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+                    "sheet": unit.sheet,
+                },
+                {
+                    "id": "switch_decoupling",
+                    "reference_prefix": "C",
+                    "quantity": 2,
+                    "value": "1uF",
+                    "symbol": "Device:C",
+                    "footprint": "Capacitor_SMD:C_0603_1608Metric",
+                    "sheet": unit.sheet,
+                },
+            ],
+            "arrays": [],
+            "assumptions": ["Used a stock current-limited USB power switch (defaulted)"],
+            "substitutions": [],
+        }
+    if "led" in identity:
+        quantity = 3 if "leds" in identity else 1
+        return {
+            "groups": [
+                {
+                    "id": "status_led",
+                    "reference_prefix": "D",
+                    "quantity": quantity,
+                    "value": "Green",
+                    "symbol": "Device:LED",
+                    "footprint": "LED_SMD:LED_0603_1608Metric",
+                    "sheet": unit.sheet,
+                },
+                {
+                    "id": "status_led_resistor",
+                    "reference_prefix": "R",
+                    "quantity": quantity,
+                    "value": "1k",
+                    "symbol": "Device:R",
+                    "footprint": "Resistor_SMD:R_0603_1608Metric",
+                    "sheet": unit.sheet,
+                },
+            ],
+            "arrays": [],
+            "assumptions": ["Used one current-limiting resistor per status LED (defaulted)"],
+            "substitutions": [],
+        }
+    if (
+        ("two-pin" in identity or "2-pin" in identity)
+        and "power" in identity
+        and "input" in identity
+    ):
+        return {
+            "groups": [
+                {
+                    "id": "power_input",
+                    "reference_prefix": "J",
+                    "quantity": 1,
+                    "value": "Power input",
+                    "symbol": "Connector_Generic:Conn_01x02",
+                    "footprint": (
+                        "TerminalBlock_Phoenix:PhoenixContact_MKDS-1,5-2_1x02_P5.00mm_Horizontal"
+                    ),
+                    "sheet": unit.sheet,
+                }
+            ],
+            "arrays": [],
+            "assumptions": ["Used a stock two-pin power terminal (defaulted)"],
+            "substitutions": [],
+        }
+    requirement_families = {_identity_token(row.get("family")) for row in architecture_requirements}
+    if "qspiflash" in requirement_families or "qspi" in identity and "flash" in identity:
+        return {
+            "groups": [
+                {
+                    "id": "qspi_flash",
+                    "reference_prefix": "U",
+                    "quantity": 1,
+                    "value": "W25Q16JVSS",
+                    "symbol": "Memory_Flash:W25Q16JVSS",
+                    "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+                    "sheet": unit.sheet,
+                }
+            ],
+            "arrays": [],
+            "assumptions": ["Selected a stock 16-Mbit QSPI NOR flash (defaulted)"],
+            "substitutions": [],
+        }
+    if "ldo" in requirement_families or "ldo" in identity:
+        return {
+            "groups": [
+                {
+                    "id": "ldo_3v3",
+                    "reference_prefix": "U",
+                    "quantity": 1,
+                    "value": "AP1117-33",
+                    "symbol": "Regulator_Linear:AP1117-33",
+                    "footprint": "Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+                    "sheet": unit.sheet,
+                },
+                {
+                    "id": "ldo_caps",
+                    "reference_prefix": "C",
+                    "quantity": 2,
+                    "value": "10uF",
+                    "symbol": "Device:C",
+                    "footprint": "Capacitor_SMD:C_0805_2012Metric",
+                    "sheet": unit.sheet,
+                },
+            ],
+            "arrays": [],
+            "assumptions": ["Selected a stock fixed 3.3 V LDO implementation (defaulted)"],
+            "substitutions": [],
+        }
+    gpio_requirement = next(
+        (
+            row
+            for row in architecture_requirements
+            if _identity_token(row.get("family")) == "gpioheader"
+        ),
+        None,
+    )
+    if gpio_requirement is not None:
+        count = int((gpio_requirement.get("parameters") or {}).get("pins") or 0)
+        if 2 <= count <= 50 and count % 2 == 0:
+            rows = count // 2
+            return {
+                "groups": [
+                    {
+                        "id": "gpio_header",
+                        "reference_prefix": "J",
+                        "quantity": 1,
+                        "value": f"GPIO 2x{rows}",
+                        "symbol": f"Connector_Generic:Conn_02x{rows:02d}_Odd_Even",
+                        "footprint": (
+                            f"Connector_PinHeader_2.54mm:PinHeader_2x{rows:02d}_P2.54mm_Vertical"
+                        ),
+                        "sheet": unit.sheet,
+                    }
+                ],
+                "arrays": [],
+                "assumptions": ["Used a stock two-row GPIO breakout connector (defaulted)"],
+                "substitutions": [],
+            }
+
+    count_match = re.search(r"(?<![0-9])(\d{1,2})\s*(?:-|_|\s)?(?:pin|signals?)", identity)
+    if count_match is None:
+        count = sum(
+            1
+            for net in (prompt_state.get("architecture") or {}).get("inter_sheet_nets") or []
+            if isinstance(net, dict)
+            and any(
+                isinstance(endpoint, dict) and endpoint.get("sheet") == unit.sheet
+                for endpoint in net.get("endpoints") or []
+            )
+        )
+    else:
+        count = int(count_match.group(1))
+    if not 1 <= count <= 53:
+        return None
+    has_fpc = "fpc" in identity or "ffc" in identity
+    has_header = "header" in identity or "0.1-inch" in identity or "2.54mm" in identity
+    groups: list[dict] = []
+    if (
+        has_fpc
+        and count in _HIROSE_FH12_05_PIN_COUNTS
+        and ("0.5" in identity or "0.50" in identity)
+    ):
+        groups.append(
+            {
+                "id": "fpc",
+                "reference_prefix": "J",
+                "quantity": 1,
+                "value": f"FPC_{count:02d}_0.5mm",
+                "symbol": f"Connector_Generic:Conn_01x{count:02d}",
+                "footprint": (
+                    "Connector_FFC-FPC:"
+                    f"Hirose_FH12-{count}S-0.5SH_1x{count:02d}-1MP_P0.50mm_Horizontal"
+                ),
+                "sheet": unit.sheet,
+            }
+        )
+    if has_header and count <= 50:
+        groups.append(
+            {
+                "id": "header",
+                "reference_prefix": "J",
+                "quantity": 1,
+                "value": f"Header_1x{count:02d}_2.54mm",
+                "symbol": f"Connector_Generic:Conn_01x{count:02d}",
+                "footprint": (
+                    f"Connector_PinHeader_2.54mm:PinHeader_1x{count:02d}_P2.54mm_Vertical"
+                ),
+                "sheet": unit.sheet,
+            }
+        )
+    if not groups:
+        return None
+    return {
+        "groups": groups,
+        "arrays": [],
+        "assumptions": ["Used stock KiCad footprints for standard connectors (defaulted)"],
+        "substitutions": [],
+    }
+
+
 def deterministic_bom_candidate(
     unit: StageWorkUnit,
     prompt_state: dict,
 ) -> dict | None:
-    """Return one typed lowerer's combined BOM/wiring artifact."""
+    """Return deterministic BOM groups from a typed lowerer or standard sheet."""
     from kicraft.design.lowering import lower_requirement
 
     requirement = _unit_requirement(unit, prompt_state)
-    if requirement is None:
-        return None
-    artifact = lower_requirement(requirement)
-    if artifact is None:
-        return None
-    return {
-        "groups": [
-            {
-                "id": group.role,
-                "reference_prefix": group.reference_prefix,
-                "quantity": group.quantity,
-                "value": group.value,
-                "symbol": group.symbol,
-                "footprint": group.footprint,
-                "sheet": requirement.sheet,
-                **({"mpn": group.mpn} if group.mpn else {}),
+    if requirement is not None:
+        artifact = lower_requirement(requirement)
+        if artifact is not None:
+            return {
+                "groups": [
+                    {
+                        "id": group.role,
+                        "reference_prefix": group.reference_prefix,
+                        "quantity": group.quantity,
+                        "value": group.value,
+                        "symbol": group.symbol,
+                        "footprint": group.footprint,
+                        "sheet": requirement.sheet,
+                        **({"mpn": group.mpn} if group.mpn else {}),
+                    }
+                    for group in artifact.groups
+                ],
+                "arrays": [],
+                "assumptions": list(artifact.assumptions),
+                "substitutions": [],
+                "_lowerer_id": artifact.lowerer_id,
+                "_lowering_requirement_id": artifact.requirement_id,
+                "_lowering_roles": {
+                    group.role: {"lowering_role": group.role} for group in artifact.groups
+                },
+                "_calculations": [
+                    calculation.model_dump(mode="json") for calculation in artifact.calculations
+                ],
             }
-            for group in artifact.groups
-        ],
-        "arrays": [],
-        "assumptions": list(artifact.assumptions),
-        "substitutions": [],
-        "_lowerer_id": artifact.lowerer_id,
-        "_lowering_requirement_id": artifact.requirement_id,
-        "_lowering_roles": {group.role: {"lowering_role": group.role} for group in artifact.groups},
-        "_calculations": [
-            calculation.model_dump(mode="json") for calculation in artifact.calculations
-        ],
-    }
+    return _standard_connector_sheet_candidate(unit, prompt_state)
 
 
 def _identity_token(value: object) -> str:
@@ -421,6 +897,49 @@ def _normalize_curated_group_identities(
             loaded = by_name.get("bnc-pcb-jack")
         if loaded is None and "screw" in identity_text and "terminal" in identity_text:
             loaded = by_name.get("screw-terminal-5mm-2p")
+        if loaded is None and group.reference_prefix in {"J", "P"}:
+            # Models often invent a library namespace for mechanically standard
+            # connectors instead of using KiCad's stock generic symbol plus a
+            # concrete stock footprint. Canonicalize only obvious invented
+            # identities; preserve already-valid Connector_* selections.
+            stock_connector_library = library.startswith("Connector")
+            if not stock_connector_library and ("fpc" in identity_text or "ffc" in identity_text):
+                pin_match = re.search(r"(?<![0-9])(\d{1,2})(?:pin|p)(?![0-9])", identity_text)
+                if (
+                    pin_match
+                    and int(pin_match.group(1)) == 24
+                    and ("0.5" in identity_text or "05mm" in _identity_token(identity_text))
+                ):
+                    group = group.model_copy(
+                        update={
+                            "symbol": "Connector_Generic:Conn_01x24",
+                            "footprint": (
+                                "Connector_FFC-FPC:"
+                                "Hirose_FH12-24S-0.5SH_1x24-1MP_P0.50mm_Horizontal"
+                            ),
+                        }
+                    )
+                    normalized.append(group)
+                    continue
+            if not stock_connector_library and "header" in identity_text:
+                pin_match = re.search(r"1x(\d{1,2})(?![0-9])", identity_text)
+                if (
+                    pin_match
+                    and 1 <= int(pin_match.group(1)) <= 50
+                    and ("2.54" in identity_text or "254mm" in _identity_token(identity_text))
+                ):
+                    pin_count = int(pin_match.group(1))
+                    group = group.model_copy(
+                        update={
+                            "symbol": f"Connector_Generic:Conn_01x{pin_count:02d}",
+                            "footprint": (
+                                "Connector_PinHeader_2.54mm:"
+                                f"PinHeader_1x{pin_count:02d}_P2.54mm_Vertical"
+                            ),
+                        }
+                    )
+                    normalized.append(group)
+                    continue
         manifest = getattr(loaded, "manifest", None)
         if manifest is None:
             normalized.append(group)
@@ -442,14 +961,22 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
         [BomComponentGroup.model_validate(group) for group in (payload.get("groups") or [])]
     )
     assumptions = [str(value) for value in payload.get("assumptions") or []]
-    lowering_metadata = {key: value for key, value in payload.items() if str(key).startswith("_")}
+    used_deterministic_candidate = payload.get("_trusted_deterministic_candidate") is True
+    lowering_metadata = {
+        key: value
+        for key, value in payload.items()
+        if str(key).startswith("_") and key != "_trusted_deterministic_candidate"
+    }
     if not groups:
         deterministic = deterministic_bom_candidate(unit, prompt_state)
         if deterministic is not None:
             groups = [BomComponentGroup.model_validate(group) for group in deterministic["groups"]]
+            used_deterministic_candidate = True
             assumptions.extend(str(value) for value in deterministic.get("assumptions") or [])
             lowering_metadata = {
-                key: value for key, value in deterministic.items() if key.startswith("_")
+                key: value
+                for key, value in deterministic.items()
+                if key.startswith("_") and key != "_trusted_deterministic_candidate"
             }
     arrays = [BomArrayGroup.model_validate(array) for array in (payload.get("arrays") or [])]
     group_ids = [group.id for group in groups]
@@ -462,10 +989,19 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
         for expansion in expand_selections(architecture.get("recipe_selections") or [])
         for part in expansion.parts
     ]
-    recipe_identities = {(part.symbol.lower(), part.value.lower()) for part in recipe_parts}
+    recipe_identities = {
+        (part.sheet, part.symbol.lower(), part.value.lower()) for part in recipe_parts
+    }
     from kicraft.design.recipes import protected_identity_matches
 
-    requirement = _unit_requirement(unit, prompt_state)
+    architecture_requirements = [
+        row for row in architecture.get("requirements") or [] if isinstance(row, dict)
+    ]
+    unit_requirement_ids = set(unit.requirement_ids)
+    unit_requirements = tuple(
+        row for row in architecture_requirements if str(row.get("id")) in unit_requirement_ids
+    )
+    requirement = unit_requirements[0] if len(unit_requirements) == 1 else None
     requirement_id = (
         requirement.get("id") if isinstance(requirement, dict) else getattr(requirement, "id", None)
     )
@@ -479,25 +1015,40 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
         if isinstance(requirement, dict)
         else getattr(requirement, "role", None)
     )
-    architecture_requirements = [
-        row for row in architecture.get("requirements") or [] if isinstance(row, dict)
-    ]
     connector_prefixes = {"J", "P"}
-    if requirement_role == "connector":
-        owned_group_ids = {
-            group.id for group in groups if group.reference_prefix in connector_prefixes
-        }
-        if owned_group_ids:
-            groups = [group for group in groups if group.id in owned_group_ids]
-            arrays = [array for array in arrays if array.group_id in owned_group_ids]
-    elif any(row.get("role") == "connector" for row in architecture_requirements):
-        non_connector_groups = [
-            group for group in groups if group.reference_prefix not in connector_prefixes
-        ]
-        if non_connector_groups:
-            groups = non_connector_groups
-            retained_group_ids = {group.id for group in groups}
-            arrays = [array for array in arrays if array.group_id in retained_group_ids]
+    # Ownership pruning only makes sense for a bounded single-requirement unit.
+    # A sheet-scoped unit legitimately owns a mix of connector and circuit
+    # roles, so pruning its J/P groups would silently drop owned connectors.
+    target_sheet = next(
+        (
+            sheet
+            for sheet in architecture.get("sheets") or []
+            if isinstance(sheet, dict) and sheet.get("name") == unit.sheet
+        ),
+        {},
+    )
+    target_identity = str(target_sheet.get("function") or "").lower()
+    target_owns_connector = bool(
+        re.search(r"\b(?:connector|receptacle|header|terminal|usb|bnc|fpc|ffc)\b", target_identity)
+    )
+    if len(unit.requirement_ids) == 1:
+        if requirement_role == "connector":
+            owned_group_ids = {
+                group.id for group in groups if group.reference_prefix in connector_prefixes
+            }
+            if owned_group_ids:
+                groups = [group for group in groups if group.id in owned_group_ids]
+        elif (
+            any(row.get("role") == "connector" for row in architecture_requirements)
+            and not target_owns_connector
+        ):
+            non_connector_groups = [
+                group for group in groups if group.reference_prefix not in connector_prefixes
+            ]
+            if non_connector_groups:
+                groups = non_connector_groups
+                retained_group_ids = {group.id for group in groups}
+                arrays = [array for array in arrays if array.group_id in retained_group_ids]
     group_ids = [group.id for group in groups]
     array_group_ids = [array.group_id for array in arrays]
     requirement_identities = " ".join(
@@ -520,9 +1071,8 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
         group.id
         for group in groups
         if protected_identity_matches(group.id, group.symbol, group.value, group.mpn)
-        and not _requirement_owns_protected_group(
-            group, (requirement,) if requirement is not None else ()
-        )
+        and not used_deterministic_candidate
+        and not _requirement_owns_protected_group(group, unit_requirements)
     ]
     # A requirement-scoped unit sometimes redundantly emits a protected sibling
     # (for example a USB receptacle beside its PD controller). Another planned
@@ -548,7 +1098,7 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
         "recipe-duplicate": [
             group.id
             for group in groups
-            if (group.symbol.lower(), group.value.lower()) in recipe_identities
+            if (group.sheet, group.symbol.lower(), group.value.lower()) in recipe_identities
         ],
         "model_authored_protected_identity": protected_groups,
         "missing-requirement-implementation": (
@@ -596,6 +1146,74 @@ def _sheet_signal_nets(unit: StageWorkUnit, architecture: dict) -> list[dict]:
     ]
 
 
+def _standard_connector_wiring_candidate(
+    unit: StageWorkUnit,
+    prompt_state: dict,
+    extras: dict,
+) -> dict | None:
+    if len(unit.refs) != 1 or not unit.expected_pins:
+        return None
+    ref = unit.refs[0]
+    part = next(
+        (
+            row
+            for row in (prompt_state.get("bom") or {}).get("parts") or []
+            if isinstance(row, dict) and str(row.get("ref")) == ref
+        ),
+        None,
+    )
+    if part is None:
+        return None
+    symbol = str(part.get("symbol") or "").lower()
+    architecture = prompt_state.get("architecture") or {}
+    nets = [
+        str(net.get("name"))
+        for net in architecture.get("inter_sheet_nets") or []
+        if isinstance(net, dict)
+        and any(
+            isinstance(endpoint, dict) and endpoint.get("sheet") == unit.sheet
+            for endpoint in net.get("endpoints") or []
+        )
+    ]
+    pins = sorted(
+        (pin for owned_ref, pin in unit.expected_pins if owned_ref == ref),
+        key=_natural_key,
+    )
+    if not nets and "connector_generic:conn_01x" in symbol:
+        sheet_function = next(
+            (
+                str(sheet.get("function") or "").lower()
+                for sheet in architecture.get("sheets") or []
+                if isinstance(sheet, dict) and sheet.get("name") == unit.sheet
+            ),
+            "",
+        )
+        if ("fpc" in sheet_function or "ffc" in sheet_function) and "header" in sheet_function:
+            nets = [f"SIG{index}" for index in range(1, len(pins) + 1)]
+    candidate_pins: list[dict] = []
+    if "connector_generic:conn_01x" in symbol and len(nets) == len(pins):
+        candidate_pins = [
+            {"ref": ref, "pin": pin, "net": net} for pin, net in zip(pins, nets, strict=True)
+        ]
+    elif "bnc" in symbol:
+        signal = next((net for net in nets if net.upper() != "GND"), None)
+        if signal is not None and "GND" in nets and "1" in pins:
+            candidate_pins = [
+                {"ref": ref, "pin": pin, "net": signal if pin == "1" else "GND"} for pin in pins
+            ]
+    if not candidate_pins:
+        return None
+    try:
+        return _validate_wiring_unit(
+            unit,
+            {"pins": candidate_pins},
+            prompt_state,
+            extras,
+        )
+    except (WorkUnitValidationError, TypeError, ValueError):
+        return None
+
+
 def deterministic_wiring_candidate(
     unit: StageWorkUnit,
     prompt_state: dict,
@@ -620,7 +1238,7 @@ def deterministic_wiring_candidate(
         if part.get("lowering_requirement_id")
     }
     if len(lowerer_ids) != 1 or len(requirement_ids) != 1:
-        return None
+        return _standard_connector_wiring_candidate(unit, prompt_state, extras)
     requirement_id = next(iter(requirement_ids))
     requirement_row = next(
         (
@@ -631,10 +1249,10 @@ def deterministic_wiring_candidate(
         None,
     )
     if requirement_row is None:
-        return None
+        return _standard_connector_wiring_candidate(unit, prompt_state, extras)
     artifact = lower_requirement(CircuitRequirement.model_validate(requirement_row))
     if artifact is None or artifact.lowerer_id != next(iter(lowerer_ids)):
-        return None
+        return _standard_connector_wiring_candidate(unit, prompt_state, extras)
     refs = {
         (str(part.get("lowering_role")), int(part.get("lowering_index") or 0)): str(part["ref"])
         for part in parts
@@ -655,7 +1273,7 @@ def deterministic_wiring_candidate(
         }
         return _validate_wiring_unit(unit, candidate, prompt_state, extras)
     except (KeyError, WorkUnitValidationError, TypeError, ValueError):
-        return None
+        return _standard_connector_wiring_candidate(unit, prompt_state, extras)
 
 
 def _validate_wiring_unit(

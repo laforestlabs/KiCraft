@@ -11,6 +11,8 @@ import pytest
 from kicraft.server.stage_contracts import (
     StageQuestionResponse,
     _normalize_bom_stage_response,
+    _normalize_usb_c_requirements,
+    _normalize_stage_response,
     _normalize_wiring_stage_response,
     _response_schema,
     build_stage_response_contract,
@@ -96,6 +98,94 @@ def test_bom_contract_closes_group_sheet_and_reuses_schema_object():
     assert "SHEET NAMES ARE CLOSED" in prompt
 
 
+def test_generic_usb_c_requirements_select_verified_recipe_families():
+    base = {
+        "power_nets": ["VBUS", "GND"],
+        "inter_sheet_nets": [
+            {"name": "usb_dp", "endpoints": []},
+            {"name": "usb_dm", "endpoints": []},
+        ],
+    }
+    data = {
+        **base,
+        "requirements": [{"id": "usb", "sheet": "USB", "role": "connector", "family": "usb-c"}],
+    }
+    device = _normalize_usb_c_requirements(data)["requirements"][0]
+    sink = _normalize_usb_c_requirements(
+        {
+            "power_nets": ["VBUS", "GND"],
+            "requirements": [
+                {
+                    "id": "input",
+                    "sheet": "POWER",
+                    "role": "power_input",
+                    "family": "usb-c-receptacle",
+                }
+            ],
+        }
+    )["requirements"][0]
+
+    assert device["family"] == "usb-c-usb2-device"
+    assert device["ports"] == {
+        "gnd": "GND",
+        "vbus": "VBUS",
+        "usb_dp": "usb_dp",
+        "usb_dm": "usb_dm",
+    }
+    assert sink["family"] == "usb-c-power-sink"
+    assert sink["ports"] == {"gnd": "GND", "vbus": "VBUS"}
+    synthesized = _normalize_usb_c_requirements(
+        {
+            "power_nets": ["VBUS", "GND"],
+            "inter_sheet_nets": [],
+            "sheets": [
+                {
+                    "name": "USB C INPUT",
+                    "function": "USB-C receptacle with CC pull-downs",
+                }
+            ],
+            "requirements": [],
+        }
+    )["requirements"][0]
+    assert synthesized["family"] == "usb-c-power-sink"
+    assert synthesized["sheet"] == "USB C INPUT"
+
+
+def test_mcp6001_architecture_default_resolves_to_verified_follower_recipe():
+    payload = {
+        "topologies": {"BUFFER": "voltage follower"},
+        "rail_voltages": {"VCC": 5.0},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [
+            {
+                "name": "OP AMP BUFFER",
+                "stem": "OP_AMP_BUFFER",
+                "function": "Op-amp voltage buffer",
+            }
+        ],
+        "power_nets": ["VCC", "GND"],
+        "inter_sheet_nets": [],
+        "assumptions": ["Use MCP6001 as the rail-to-rail voltage follower (defaulted)"],
+        "requirements": [
+            {
+                "id": "buffer",
+                "sheet": "OP AMP BUFFER",
+                "role": "analog_block",
+                "family": "opamp-buffer",
+                "parameters": {},
+                "ports": {"input": "VCC", "output": "VCC"},
+                "interfaces": [],
+            }
+        ],
+    }
+
+    canonical, _ = _normalize_stage_response("architecture", payload, {"intent": {}})
+
+    assert canonical["requirements"][0]["exact_part"] == "MCP6001T-I/OT"
+    assert canonical["recipe_selections"][0]["recipe"] == "mcp6001-follower@1"
+
+
 def test_question_branch_and_non_bom_contracts_are_unchanged():
     question = StageQuestionResponse.model_json_schema()
     contract = build_stage_response_contract("architecture", {})
@@ -145,13 +235,17 @@ def test_work_unit_contracts_are_v3_scoped_and_prompt_examples_are_unit_shaped()
 
     assert bom.response_format["json_schema"]["name"] == "kicraft_bom_response_v3"
     assert bom.schema["$defs"]["BomComponentGroup"]["properties"]["sheet"]["enum"] == ["MCU"]
+    bom_variant = next(
+        variant for variant in bom.schema["anyOf"] if "groups" in variant.get("properties", {})
+    )
+    assert bom_variant["properties"]["groups"]["minItems"] == 1
+    assert "groups" in bom_variant["required"]
     assert wiring.response_format["json_schema"]["name"] == "kicraft_wiring_response_v3"
     for definition in ("ConnectedPinAssignment", "NoConnectPinAssignment"):
         assert wiring.schema["$defs"][definition]["properties"]["ref"]["enum"] == [
             "U1",
             "R1",
         ]
-
     prompt = _build_system(
         wiring,
         work_unit_instructions=(
@@ -161,3 +255,27 @@ def test_work_unit_contracts_are_v3_scoped_and_prompt_examples_are_unit_shaped()
     assert "=== WORK UNIT ===" in prompt
     assert "Prior accepted-unit summaries are immutable" in prompt
     assert "VALID work unit" in prompt
+
+
+def test_recipe_only_bom_work_unit_may_return_no_additional_groups():
+    state = {
+        "architecture": {
+            "sheets": [{"name": "MCU"}],
+            "requirements": [{"id": "mcu", "sheet": "MCU"}],
+            "recipe_selections": [
+                {
+                    "recipe": "rp2040-minimal@2",
+                    "instance": "mcu",
+                    "sheets": {"mcu": "MCU", "io": "MCU"},
+                    "requirement_ids": ["mcu"],
+                }
+            ],
+        }
+    }
+
+    contract = build_stage_response_contract("bom", state, bom_sheet="MCU")
+    bom_variant = next(
+        variant for variant in contract.schema["anyOf"] if "groups" in variant.get("properties", {})
+    )
+
+    assert "minItems" not in bom_variant["properties"]["groups"]

@@ -257,7 +257,10 @@ _BOM_MAX_ROUNDS = 2
 # slot; BOM for a large array (200 LEDs + 200 decoupling caps = 401 parts)
 # emits every part in one JSON object. Both overflow the default cap and
 # truncate into invalid JSON ("no JSON in reply"), so they floor higher.
-_STAGE_MIN_TOKENS = {"wiring": 8192, "bom": 16384}
+# Architecture is comparably large (sheets, inter-sheet nets, and requirement
+# rows for a multi-IC board) and truncated at the 4096 default on RP2040-class
+# boards, so it floors at the same cap as BOM.
+_STAGE_MIN_TOKENS = {"architecture": 16384, "wiring": 8192, "bom": 16384}
 
 
 def _stage_max_tokens(stage: str, default: int) -> int:
@@ -1222,14 +1225,20 @@ def _work_unit_instructions(
         "unit_index": unit_index,
         "unit_total": unit_total,
         "target_sheet": unit.sheet,
-        "requirement_ids": list(unit.requirement_ids),
-        "owned_roles": list(unit.owned_roles),
         "excluded_refs": list(unit.excluded_refs),
         "excluded_pins": [{"ref": ref, "pin": pin} for ref, pin in unit.excluded_pins],
         "planned_resolution_source": unit.planned_resolution_source,
         "recipe_ids": list(unit.recipe_ids),
         "lowerer_ids": list(unit.lowerer_ids),
     }
+    if unit.requirement_ids:
+        boundary["scope"] = "owned_requirements"
+        boundary["requirement_ids"] = list(unit.requirement_ids)
+        boundary["owned_roles"] = list(unit.owned_roles)
+    else:
+        # Empty requirement_ids means the architecture did not decompose this
+        # sheet, not that the model owns nothing.
+        boundary["scope"] = "complete_sheet"
     if unit.stage == "bom":
         architecture_sheets = (prompt_state.get("architecture") or {}).get("sheets") or []
         target = next(
@@ -1506,6 +1515,7 @@ def _drive_work_unit_stage(
                     **_work_unit_provenance(unit),
                 }
             )
+        deterministic["_trusted_deterministic_candidate"] = True
         candidates[unit.unit_id] = validate_unit_candidate(
             unit,
             deterministic,
@@ -1638,7 +1648,16 @@ def _drive_work_unit_stage(
                         ),
                     )
                 )
-            return replace(policy, collection_bounds=tuple(unit_bounds))
+            # Work-unit BOM responses are bounded fragments, not the full slot.
+            # Cap output at 2K: the pro route's 24K-input call ceiling then fits
+            # twice inside the default $0.10 project budget, so one invalid
+            # fragment can still be repaired instead of exhausting the run.
+            return replace(
+                policy,
+                normal_max_tokens=min(policy.normal_max_tokens, 2048),
+                serialization_max_tokens=min(policy.serialization_max_tokens, 2048),
+                collection_bounds=tuple(unit_bounds),
+            )
         return policy
 
     def invoke(
@@ -1688,15 +1707,11 @@ def _drive_work_unit_stage(
             {"role": "user", "content": user},
         ]
         active_client = stage_client
-        if unit_attempt > 1 and stage != "bom":
-            # Retry escalation uses the pro route for wiring/stalled units. BOM is
-            # deliberately excluded: its large output cap times the pro completion
-            # price produces a per-call ceiling that exceeds the default project
-            # budget, so escalating BOM refuses every call at preflight.
-            escalation_profile = getattr(getattr(stage_client, "s", None), "escalation_profile", "")
+        if stage == "bom" or unit_attempt > 1:
+            profile_name = getattr(getattr(stage_client, "s", None), "escalation_profile", "")
             switch_profile = getattr(stage_client, "with_design_profile", None)
-            if escalation_profile and callable(switch_profile):
-                active_client = switch_profile(escalation_profile)
+            if profile_name and callable(switch_profile):
+                active_client = switch_profile(profile_name)
         prepared = PreparedStage(
             stage=stage,
             prompt_state=prompt_state,
@@ -1767,7 +1782,7 @@ def _drive_work_unit_stage(
                             ),
                             0.0,
                         ),
-                        reasoning_guard=policy.reasoning_guard,
+                        reasoning_guard=unit_policy.reasoning_guard,
                         progress=progress,
                         meta_ctx=ctx,
                     )
@@ -1777,7 +1792,7 @@ def _drive_work_unit_stage(
                         prepared,
                         messages=list(messages),
                         response_format=response_format,
-                        max_tokens=int(policy.normal_max_tokens),
+                        max_tokens=int(unit_policy.normal_max_tokens),
                         temperature=(
                             max(
                                 float(
@@ -1792,8 +1807,8 @@ def _drive_work_unit_stage(
                             if pristine
                             else _design_temperature(active_client)
                         ),
-                        reasoning={"enabled": False} if pristine else policy.normal_reasoning,
-                        reasoning_guard=policy.reasoning_guard,
+                        reasoning={"enabled": False} if pristine else unit_policy.normal_reasoning,
+                        reasoning_guard=unit_policy.reasoning_guard,
                         progress=progress,
                         meta_ctx=ctx,
                     )
@@ -2038,15 +2053,26 @@ def _drive_work_unit_stage(
             signature = str(error)
             repeated = signature == prior_signature
             if stage == "bom":
+                if unit.requirement_ids:
+                    owned_scope = (
+                        f"This unit owns requirement_ids={list(unit.requirement_ids)!r} and "
+                        f"roles={list(unit.owned_roles)!r}. Emit the complete real component "
+                        "groups needed to implement every owned requirement unless verified "
+                        "recipe parts already satisfy one. Do not emit requirements outside "
+                        "this list or invent a part capability."
+                    )
+                else:
+                    owned_scope = (
+                        f"This unit owns the complete target sheet {unit.sheet!r}. Emit the "
+                        "complete real component groups needed to implement its committed "
+                        "target_function and target_topology. Do not return an empty groups "
+                        "list unless a verified recipe already populates this sheet, and do "
+                        "not emit another sheet's components."
+                    )
                 repair_instruction = (
                     "The committed architecture is binding. Correct every listed defect "
                     "without changing MCU presence, control architecture, topology, "
-                    "requirements, or sheet partition. This unit owns only "
-                    f"requirement_ids={list(unit.requirement_ids)!r} and "
-                    f"roles={list(unit.owned_roles)!r}. Emit at least one real component "
-                    "group that genuinely implements that requirement unless verified recipe "
-                    "parts already satisfy it. Do not emit sibling requirements or invent a "
-                    "part capability."
+                    f"requirements, or sheet partition. {owned_scope}"
                 )
                 if "model_authored_protected_identity" in signature:
                     repair_instruction += (
@@ -2056,9 +2082,10 @@ def _drive_work_unit_stage(
                         "not redraft otherwise-valid groups."
                     )
                 if "empty-sheet" in signature:
+                    owned_target = "owned requirements" if unit.requirement_ids else "target sheet"
                     repair_instruction += (
                         " The empty groups list is the defect: emit the smallest complete set "
-                        "of groups needed for this owned requirement."
+                        f"of groups needed for this {owned_target}."
                     )
             else:
                 repair_instruction = (
@@ -2361,10 +2388,7 @@ def _drive_work_unit_stage(
                 "commit": commit_result,
             }
             break
-        if aggregate_round == 0 and stage != "bom":
-            # Same budget rationale as the per-unit retry escalation: a pro BOM
-            # repair call cannot fit the default project budget, so BOM stays on
-            # the base route through aggregate repair as well.
+        if aggregate_round == 0:
             escalation_profile = getattr(getattr(stage_client, "s", None), "escalation_profile", "")
             switch_profile = getattr(stage_client, "with_design_profile", None)
             if escalation_profile and callable(switch_profile):

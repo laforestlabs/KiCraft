@@ -29,19 +29,26 @@ or placeholder footprints.
 ## WORK UNIT
 
 Without an `=== WORK UNIT ===` block, this contract owns the complete BOM slot.
-With that block, output exactly the named architecture sheet and owned role:
-every emitted group must use that sheet, and arrays may reference only groups
-emitted in the same response. A work unit's `owned_roles` / `requirement_ids`
-name the unresolved roles it owns; `excluded_refs` and `excluded_pins` are
+With that block, obey its explicit `scope`:
+
+- `scope: "owned_requirements"` means output exactly the target sheet components
+  that implement every listed `requirement_ids` / `owned_roles`.
+- `scope: "complete_sheet"` means the architecture did not decompose that sheet
+  into requirements. It does **not** mean the unit owns nothing. Output the
+  complete physical component set required by `target_function` and
+  `target_topology` for the named sheet.
+
+Every emitted group must use `target_sheet`, and arrays may reference only groups
+emitted in the same response. `excluded_refs` and `excluded_pins` are
 deterministically owned by recipes and the pin allocator and must never be
 recreated. The response remains the canonical `groups`/`arrays`/
 `assumptions`/`substitutions` shape, not a patch. Prior accepted-unit summaries
 are immutable context: never repeat, rename, substitute, or otherwise revise
 their groups. An empty `groups` list is valid only when locked circuit-recipe
 parts already populate the target sheet; every other architecture sheet must
-emit at least one physical component in its own work unit. A model group whose
-symbol/value/MPN contains a protected identity (an ESP32 module, RP2040, or
-other registered common block) is rejected before commit.
+emit at least one physical component in its own work unit.
+A model group whose symbol/value/MPN contains a protected identity (an ESP32
+module, RP2040, or other registered common block) is rejected before commit.
 
 Slot shape:
 

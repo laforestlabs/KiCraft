@@ -6,6 +6,7 @@ from kicraft.server.stage_work_units import (
     StageDraftStore,
     StageWorkUnit,
     WorkUnitValidationError,
+    deterministic_wiring_candidate,
     merge_bom_units,
     merge_wiring_units,
     plan_stage_work_units,
@@ -111,6 +112,261 @@ def test_bom_unit_normalizes_known_legacy_potentiometer_symbol():
     assert validated["groups"][0]["mpn"] == "3296W-1-103LF"
 
 
+def test_bom_unit_normalizes_invented_standard_connector_libraries():
+    unit = StageWorkUnit("bom-s000", "bom", "A")
+    payload = {
+        "groups": [
+            {
+                **_group("fpc_connector", "A", prefix="J"),
+                "value": "FFC_CONNECTOR_24P_0.5MM",
+                "symbol": "FPC_24PIN_0.5MM_SMT:FFC_CONNECTOR_24P_0.5MM",
+                "footprint": "FPC_24PIN_0.5MM_SMT:FFC_CONNECTOR_24P_0.5MM",
+            },
+            {
+                **_group("header_1x24", "A", prefix="J"),
+                "value": "HEADER_1X24_2.54MM",
+                "symbol": "HEADER_1X24_2.54MM:HEADER_1X24_2.54MM",
+                "footprint": "HEADER_1X24_2.54MM:HEADER_1X24_2.54MM",
+            },
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, _state(), {})
+
+    assert [(group["symbol"], group["footprint"]) for group in validated["groups"]] == [
+        (
+            "Connector_Generic:Conn_01x24",
+            "Connector_FFC-FPC:Hirose_FH12-24S-0.5SH_1x24-1MP_P0.50mm_Horizontal",
+        ),
+        (
+            "Connector_Generic:Conn_01x24",
+            "Connector_PinHeader_2.54mm:PinHeader_1x24_P2.54mm_Vertical",
+        ),
+    ]
+
+
+def test_empty_standard_connector_sheets_lower_deterministically():
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {
+            "name": "FPC CONNECTOR",
+            "function": "24-pin 0.5mm-pitch FPC/FFC connector for external cable",
+        },
+        {
+            "name": "HEADER",
+            "function": "0.1-inch header row exposing all 24 signals",
+        },
+    ]
+
+    fpc = validate_unit_candidate(
+        StageWorkUnit("bom-s000", "bom", "FPC CONNECTOR"),
+        {"groups": []},
+        state,
+        {},
+    )
+    header = validate_unit_candidate(
+        StageWorkUnit("bom-s001", "bom", "HEADER"),
+        {"groups": []},
+        state,
+        {},
+    )
+
+    assert fpc["groups"][0]["footprint"] == (
+        "Connector_FFC-FPC:Hirose_FH12-24S-0.5SH_1x24-1MP_P0.50mm_Horizontal"
+    )
+    assert header["groups"][0]["footprint"] == (
+        "Connector_PinHeader_2.54mm:PinHeader_1x24_P2.54mm_Vertical"
+    )
+
+
+@pytest.mark.parametrize(
+    ("function", "expected_ids"),
+    [
+        (
+            "USB-C receptacle with CC pull-downs, providing 5V VBUS and GND",
+            {"connector", "cc_pulldown"},
+        ),
+        (
+            "USB-C connector with ESD protection and VBUS detection",
+            {"connector", "cc_pulldown", "esd", "usb_series"},
+        ),
+    ],
+)
+def test_empty_usb_c_sheets_lower_to_standard_recipe_parts(function, expected_ids):
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": "USB INPUT", "function": function}]
+
+    candidate = validate_unit_candidate(
+        StageWorkUnit("bom-s000", "bom", "USB INPUT"),
+        {"groups": []},
+        state,
+        {},
+    )
+
+    assert {group["id"] for group in candidate["groups"]} == expected_ids
+    assert all(group["sheet"] == "USB INPUT" for group in candidate["groups"])
+
+
+def test_common_standard_sheets_lower_without_provider_guessing():
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {
+            "name": "PORT 1",
+            "function": "USB-A receptacle with current limiting and status LED",
+        },
+        {"name": "QSPI FLASH", "function": "QSPI flash storage"},
+        {"name": "POWER", "function": "3.3 V LDO regulator"},
+        {"name": "GPIO", "function": "Castellated GPIO breakout header"},
+    ]
+    state["architecture"]["requirements"] = [
+        {
+            "id": "port",
+            "sheet": "PORT 1",
+            "role": "driver",
+            "family": "current-limit-switch",
+        },
+        {
+            "id": "flash",
+            "sheet": "QSPI FLASH",
+            "role": "bus_interface",
+            "family": "qspi-flash",
+        },
+        {"id": "ldo", "sheet": "POWER", "role": "regulator", "family": "ldo"},
+        {
+            "id": "gpio",
+            "sheet": "GPIO",
+            "role": "connector",
+            "family": "gpio-header",
+            "parameters": {"pins": 28},
+        },
+    ]
+
+    expected = {
+        "PORT 1": {"usb_a_receptacle", "current_limit_switch", "status_led"},
+        "QSPI FLASH": {"qspi_flash"},
+        "POWER": {"ldo_3v3", "ldo_caps"},
+        "GPIO": {"gpio_header"},
+    }
+    for index, (sheet, ids) in enumerate(expected.items()):
+        requirement_id = state["architecture"]["requirements"][index]["id"]
+        candidate = validate_unit_candidate(
+            StageWorkUnit(
+                f"bom-s{index:03d}",
+                "bom",
+                sheet,
+                requirement_ids=(requirement_id,),
+            ),
+            {"groups": []},
+            state,
+            {},
+        )
+        assert ids <= {group["id"] for group in candidate["groups"]}
+
+
+@pytest.mark.parametrize(
+    ("function", "expected_id"),
+    [
+        ("Per-port current limiting power switch with overcurrent flag", "current_limit_switch"),
+        ("Status LEDs for power present and overcurrent indication", "status_led"),
+        ("Two-pin external +3V3 and GND power input", "power_input"),
+    ],
+)
+def test_common_standalone_sheets_lower_deterministically(function, expected_id):
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": "A", "function": function}]
+
+    candidate = validate_unit_candidate(
+        StageWorkUnit("bom-s000", "bom", "A"),
+        {"groups": []},
+        state,
+        {},
+    )
+
+    assert expected_id in {group["id"] for group in candidate["groups"]}
+
+
+def test_standard_connectors_wire_from_ordered_sheet_interfaces():
+    state = _state([{"ref": "J1", "sheet": "A", "symbol": "Connector_Generic:Conn_01x03"}])
+    state["architecture"]["inter_sheet_nets"] = [
+        {
+            "name": name,
+            "endpoints": [
+                {"sheet": "A", "direction": "passive"},
+                {"sheet": "B", "direction": "passive"},
+            ],
+        }
+        for name in ("SIG1", "SIG2", "SIG3")
+    ]
+    state["bom"]["parts"][0]["resolution_source"] = "lowerer"
+    unit = StageWorkUnit(
+        "wiring-u000",
+        "wiring",
+        "A",
+        ("J1",),
+        (("J1", "1"), ("J1", "2"), ("J1", "3")),
+    )
+
+    candidate = deterministic_wiring_candidate(
+        unit,
+        state,
+        {"symbol_pinouts": {"J1": _pinout(3)}},
+    )
+
+    assert [row["net"] for row in candidate["pins"]] == ["SIG1", "SIG2", "SIG3"]
+
+
+def test_bnc_wiring_grounds_every_shell_pin():
+    state = _state([{"ref": "J1", "sheet": "A", "symbol": "bnc-pcb-jack:KH-BNC50-3511"}])
+    state["architecture"]["power_nets"] = ["GND"]
+    state["architecture"]["inter_sheet_nets"] = [
+        {
+            "name": name,
+            "endpoints": [
+                {"sheet": "A", "direction": "passive"},
+                {"sheet": "B", "direction": "passive"},
+            ],
+        }
+        for name in ("SIG", "GND")
+    ]
+    state["bom"]["parts"][0]["resolution_source"] = "lowerer"
+    unit = StageWorkUnit(
+        "wiring-u000",
+        "wiring",
+        "A",
+        ("J1",),
+        tuple(("J1", str(pin)) for pin in range(1, 5)),
+    )
+
+    candidate = deterministic_wiring_candidate(
+        unit,
+        state,
+        {"symbol_pinouts": {"J1": _pinout(4)}},
+    )
+
+    assert [row["net"] for row in candidate["pins"]] == ["SIG", "GND", "GND", "GND"]
+
+
+def test_combined_fpc_header_sheet_wires_matching_internal_signals():
+    state = _state([{"ref": "J1", "sheet": "A", "symbol": "Connector_Generic:Conn_01x03"}])
+    state["architecture"]["sheets"] = [{"name": "A", "function": "FPC breakout to matching header"}]
+    state["bom"]["parts"][0]["resolution_source"] = "lowerer"
+    unit = StageWorkUnit(
+        "wiring-u000",
+        "wiring",
+        "A",
+        ("J1",),
+        (("J1", "1"), ("J1", "2"), ("J1", "3")),
+    )
+
+    candidate = deterministic_wiring_candidate(
+        unit,
+        state,
+        {"symbol_pinouts": {"J1": _pinout(3)}},
+    )
+
+    assert [row["net"] for row in candidate["pins"]] == ["SIG1", "SIG2", "SIG3"]
+
+
 def test_bom_connector_unit_discards_sibling_circuit_groups():
     state = _state()
     state["architecture"]["requirements"] = [
@@ -166,7 +422,12 @@ def test_bom_planning_skips_net_like_power_requirements():
 
     units = plan_stage_work_units("bom", state, {})
 
-    assert [unit.requirement_ids for unit in units] == [("filter",)]
+    # The plain filter requirement rolls up into a sheet-scoped unit; sheet B
+    # (no requirements) still gets its own unit so it can never come back empty.
+    assert [(unit.requirement_ids, unit.sheet) for unit in units] == [
+        (("filter",), "A"),
+        ((), "B"),
+    ]
 
 
 def test_units_are_immutable_and_bom_follows_architecture_order():
@@ -309,6 +570,7 @@ def test_wiring_merge_orders_pins_and_routes_exact_offenders():
         "wiring-u000": {"pins": [{"ref": "U1", "pin": "1", "net": "A"}]},
         "wiring-u001": {"pins": [{"ref": "U10", "pin": "1", "net": "B"}]},
     }
+
     merged, pins, refs = merge_wiring_units(units, candidates)
     assert [row["ref"] for row in merged["pins"]] == ["U1", "U10"]
     assert route_work_unit_ids(
@@ -318,6 +580,36 @@ def test_wiring_merge_orders_pins_and_routes_exact_offenders():
         "wiring-u000",
         "wiring-u001",
     )
+
+
+def test_combined_fpc_header_requirements_stay_in_one_sheet_unit():
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {"name": "A", "function": "24-pin FPC breakout to 0.1-inch header"}
+    ]
+    state["architecture"]["requirements"] = [
+        {
+            "id": "fpc",
+            "sheet": "A",
+            "role": "connector",
+            "family": "fpc-connector",
+            "parameters": {"pitch_mm": 0.5, "pin_count": 24},
+            "ports": {"signal": "24x signal"},
+        },
+        {
+            "id": "header",
+            "sheet": "A",
+            "role": "connector",
+            "family": "header",
+            "parameters": {"pitch_mm": 2.54, "pin_count": 24},
+            "ports": {"signal": "24x signal"},
+        },
+    ]
+
+    units = plan_stage_work_units("bom", state, {})
+
+    assert len(units) == 1
+    assert units[0].requirement_ids == ("fpc", "header")
 
 
 def test_exact_pin_offender_routes_only_its_slice_of_an_oversized_ref():
@@ -416,7 +708,29 @@ def test_recipe_complete_requirement_omits_bom_work_unit():
             "requirement_ids": ["mcu_core"],
         }
     ]
-    assert plan_stage_work_units("bom", state, {}) == ()
+    units = plan_stage_work_units("bom", state, {})
+    assert all("mcu_core" not in unit.requirement_ids for unit in units)
+    assert [unit.sheet for unit in units] == ["B"]
+
+
+def test_recipe_part_role_omits_redundant_unresolved_requirement():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {"id": "mcu", "sheet": "A", "role": "mcu_core", "family": "rp2040"},
+        {"id": "xtal", "sheet": "A", "role": "analog_block", "family": "crystal"},
+    ]
+    state["architecture"]["recipe_selections"] = [
+        {
+            "recipe": "rp2040-minimal@2",
+            "instance": "mcu",
+            "sheets": {"mcu": "A", "io": "A"},
+            "requirement_ids": ["mcu"],
+        }
+    ]
+
+    units = plan_stage_work_units("bom", state, {})
+
+    assert all("xtal" not in unit.requirement_ids for unit in units)
 
 
 def test_mixed_recipe_sheet_plans_only_unresolved_role():
@@ -444,10 +758,13 @@ def test_mixed_recipe_sheet_plans_only_unresolved_role():
         }
     ]
     units = plan_stage_work_units("bom", state, {})
-    assert len(units) == 1
+    # Sheet A: the recipe-owned mcu_core is omitted, its plain sibling rolls up
+    # into a sheet unit. Sheet B: uncovered, gets its own sheet unit.
+    assert len(units) == 2
     assert units[0].requirement_ids == ("novel_analog",)
     assert units[0].owned_roles == ("analog_block",)
     assert units[0].recipe_ids == ("esp32-s3-mini-1-minimal@1",)
+    assert units[1].sheet == "B"
 
 
 def test_bom_unit_rejects_protected_identity_before_merge():

@@ -106,5 +106,9 @@ Caddy fetches a Let's Encrypt cert automatically once DNS resolves to the box an
 ```bash
 cd ~/KiCraft && git pull
 .venv/bin/pip install -e ".[server,design]"
-sudo systemctl restart kicraft-web
+./deploy/deploy-production.sh
 ```
+
+`deploy-production.sh` refuses to restart unless all 34 fresh, real-provider
+design briefs commit all five stages. After the gate passes it restarts the web
+and build-worker processes and verifies both health checks.

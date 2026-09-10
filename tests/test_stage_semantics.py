@@ -456,9 +456,7 @@ def test_architecture_defaults_unsourced_rail_to_external_power_input():
     completed = complete_unsourced_external_rails(candidate, diagnostics)
 
     assert candidate["sheets"] == [{"name": "DAC", "stem": "DAC", "function": "R-2R DAC"}]
-    assert completed["topologies"]["POWER INPUT"] == (
-        "2-pin header for external +3V3 and GND"
-    )
+    assert completed["topologies"]["POWER INPUT"] == ("2-pin header for external +3V3 and GND")
     assert completed["sheets"][-1]["name"] == "POWER INPUT"
     assert completed["assumptions"] == [
         "+3V3 is supplied externally through the power input (defaulted)"

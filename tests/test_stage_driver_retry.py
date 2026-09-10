@@ -1275,7 +1275,7 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
     assert client.calls[1]["serialization"] is True  # plain chat for serialization
     assert all(call["serialization"] is False for call in client.calls[2:])
     assert client.calls[1]["response_format"] is client.calls[0]["response_format"]
-    assert client.calls[1]["max_tokens"] == 32768  # bom serialization cap
+    assert client.calls[1]["max_tokens"] == 2048  # affordable BOM-unit serialization cap
     assert client.calls[1]["reasoning"] == {"enabled": False}
     retry_message = client.calls[1]["messages"][-1]["content"]
     assert "about 16 characters" in retry_message
@@ -2572,26 +2572,7 @@ def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monk
         "finish_reason": "stop",
         "cost_usd": 0.0,
     }
-    usb_candidate = {
-        "text": json.dumps(
-            {
-                "groups": [json.loads(protected_candidate["text"])["groups"][1]],
-                "arrays": [],
-                "assumptions": [],
-                "substitutions": [],
-            }
-        ),
-        "finish_reason": "stop",
-        "cost_usd": 0.0,
-    }
-    collection_limit = {
-        "text": "{}",
-        "finish_reason": "collection_limit",
-        "cost_usd": 0.0,
-    }
-    client = _unit_client(
-        [question, collection_limit, collection_limit, protected_candidate, usb_candidate]
-    )
+    client = _unit_client([question, protected_candidate])
     client.s = replace(client.s, escalation_profile="pro")
     committed = []
 
@@ -2601,28 +2582,30 @@ def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monk
 
     monkeypatch.setattr(stage_driver_mod, "commit_stage", commit)
 
-    result = stage_driver_mod.drive_stage(client, "bom", "USB-C PD trigger", state_path, tmp_path)
+    result = stage_driver_mod.drive_stage(
+        client,
+        "bom",
+        "USB-C PD trigger",
+        state_path,
+        tmp_path,
+        max_tokens=16384,
+    )
 
     assert result["commit_ok"] is True, result.get("error") or result
     assert result.get("needs_input") is not True
-    assert len(client.calls) == 5
+    assert len(client.calls) == 2
     feedback = client.calls[1]["messages"][-1]["content"]
     assert "committed architecture is binding" in feedback
-    assert "requirement_ids=['pd_trigger_controller']" in feedback
+    assert "requirement_ids=['pd_trigger_controller', 'usb_c_receptacle']" in feedback
     assert "do not emit components owned by another requirement" in feedback
     assert {part["value"] for part in committed[0]["parts"]} == {
         "HUSB238",
         "USB_C_Receptacle_HRO_TYPE-C-31-M-12",
     }
-    assert [call["collection_bounds"][0].total for call in client.calls] == [32] * 5
-    assert [call["serialization"] for call in client.calls] == [
-        False,
-        False,
-        True,
-        False,
-        False,
-    ]
-    assert [call["model"] for call in client.calls] == [str(DESIGN_PROFILES["flash"]["model"])] * 5
+    assert [call["collection_bounds"][0].total for call in client.calls] == [64] * 2
+    assert [call["serialization"] for call in client.calls] == [False, False]
+    assert [call["max_tokens"] for call in client.calls] == [2048] * 2
+    assert [call["model"] for call in client.calls] == [str(DESIGN_PROFILES["pro"]["model"])] * 2
 
 
 @pytest.mark.parametrize(

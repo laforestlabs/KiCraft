@@ -242,7 +242,9 @@ def _expand_bom_groups(
     recipe_parts = [part for expansion in expansions for part in expansion.parts]
     if not response.groups and not recipe_parts:
         raise ValueError("BOM must contain at least one component group or circuit-recipe part")
-    recipe_identities = {(part.symbol.lower(), part.value.lower()) for part in recipe_parts}
+    recipe_identities = {
+        (part.sheet, part.symbol.lower(), part.value.lower()) for part in recipe_parts
+    }
     requirements = architecture.get("requirements") or []
     for group in response.groups:
         protected = protected_identity_matches(
@@ -256,7 +258,7 @@ def _expand_bom_groups(
                 "model_authored_protected_identity: "
                 f"BOM group {group.id!r} contains {list(protected)!r}"
             )
-        if (group.symbol.lower(), group.value.lower()) in recipe_identities:
+        if (group.sheet, group.symbol.lower(), group.value.lower()) in recipe_identities:
             raise ValueError(f"BOM group {group.id!r} duplicates a locked circuit-recipe role")
 
     per_sheet: dict[str, int] = {}
@@ -443,6 +445,49 @@ def build_stage_response_contract(
         if not isinstance(sheet, dict):
             raise ValueError("BOM response schema is missing BomComponentGroup.sheet")
         sheet["enum"] = names
+        architecture = prompt_state.get("architecture") or {}
+        selections = [
+            selection
+            for selection in architecture.get("recipe_selections") or []
+            if isinstance(selection, dict)
+        ]
+        recipe_sheets = {
+            str(selected_sheet)
+            for selection in selections
+            for selected_sheet in (selection.get("sheets") or {}).values()
+        }
+        resolved_requirement_ids = {
+            str(requirement_id)
+            for selection in selections
+            for requirement_id in selection.get("requirement_ids") or []
+        }
+        sheet_has_unresolved_requirement = any(
+            isinstance(requirement, dict)
+            and requirement.get("sheet") == bom_sheet
+            and str(requirement.get("id")) not in resolved_requirement_ids
+            for requirement in architecture.get("requirements") or []
+        )
+        require_groups = bom_sheet is not None and (
+            bom_sheet not in recipe_sheets or sheet_has_unresolved_requirement
+        )
+        if require_groups:
+            variants = schema.get("anyOf") or [schema]
+            for variant in variants:
+                variant_properties = (
+                    variant.get("properties") if isinstance(variant, dict) else None
+                )
+                groups = (
+                    variant_properties.get("groups")
+                    if isinstance(variant_properties, dict)
+                    else None
+                )
+                if not isinstance(groups, dict):
+                    continue
+                groups["minItems"] = 1
+                required = list(variant.get("required") or [])
+                if "groups" not in required:
+                    required.append("groups")
+                variant["required"] = required
     elif stage == "wiring" and wiring_refs is not None:
         definitions = schema.get("$defs")
         if not isinstance(definitions, dict):
@@ -631,6 +676,186 @@ def _normalize_architecture_sheet_aliases(payload: dict) -> dict:
     return normalized
 
 
+def _normalize_usb_c_requirements(payload: dict) -> dict:
+    """Route generic USB-C architecture requirements through verified recipes."""
+    normalized = dict(payload)
+    nets = {
+        str(name)
+        for name in [
+            *(payload.get("power_nets") or []),
+            *(
+                row.get("name")
+                for row in payload.get("inter_sheet_nets") or []
+                if isinstance(row, dict)
+            ),
+        ]
+        if name
+    }
+
+    def named_net(*aliases: str) -> str | None:
+        wanted = {re.sub(r"[^a-z0-9]+", "", alias.lower()) for alias in aliases}
+        return next(
+            (net for net in nets if re.sub(r"[^a-z0-9]+", "", net.lower()) in wanted),
+            None,
+        )
+
+    usb_dp = named_net("USB_DP", "USB_D+")
+    usb_dm = named_net("USB_DM", "USB_D-")
+    vbus = named_net("VBUS", "+5V", "5V")
+    requirements = []
+    for row in payload.get("requirements") or []:
+        if not isinstance(row, dict):
+            requirements.append(row)
+            continue
+        requirement = dict(row)
+        family = re.sub(r"[^a-z0-9]+", "", str(requirement.get("family") or "").lower())
+        if "usbc" not in family and "typec" not in family:
+            requirements.append(requirement)
+            continue
+        ports = dict(requirement.get("ports") or {})
+        ports["gnd"] = "GND"
+        if vbus:
+            ports["vbus"] = vbus
+        if usb_dp and usb_dm:
+            requirement["family"] = "usb-c-usb2-device"
+            ports["usb_dp"] = usb_dp
+            ports["usb_dm"] = usb_dm
+        else:
+            requirement["family"] = "usb-c-power-sink"
+        requirement["ports"] = ports
+        requirements.append(requirement)
+    requirement_sheets = {
+        str(row.get("sheet"))
+        for row in requirements
+        if isinstance(row, dict)
+        and "usbc" in re.sub(r"[^a-z0-9]+", "", str(row.get("family") or "").lower())
+    }
+    for sheet in payload.get("sheets") or []:
+        if not isinstance(sheet, dict):
+            continue
+        sheet_name = str(sheet.get("name") or "")
+        identity = f"{sheet_name} {sheet.get('function') or ''}".lower()
+        if sheet_name in requirement_sheets or not re.search(
+            r"\busb(?:\s*|-)?c\b|\btype(?:\s*|-)?c\b", identity
+        ):
+            continue
+        ports = {"gnd": "GND"}
+        if vbus:
+            ports["vbus"] = vbus
+        has_data = usb_dp is not None and usb_dm is not None
+        if has_data:
+            ports.update({"usb_dp": usb_dp, "usb_dm": usb_dm})
+        stem = re.sub(r"[^a-z0-9]+", "_", sheet_name.lower()).strip("_") or "input"
+        requirements.append(
+            {
+                "id": f"auto_usb_c_{stem}",
+                "sheet": sheet_name,
+                "role": "connector" if has_data else "power_input",
+                "family": "usb-c-usb2-device" if has_data else "usb-c-power-sink",
+                "parameters": {},
+                "ports": ports,
+                "interfaces": [],
+            }
+        )
+    normalized["requirements"] = requirements
+    return normalized
+
+
+def _fold_recipe_covered_sheets(architecture: models.Architecture) -> models.Architecture:
+    """Fold model-created sub-sheets already owned by a selected circuit recipe."""
+    from kicraft.design.recipes import get_recipe
+
+    data = architecture.model_dump(exclude_none=True)
+    requirements = [row for row in data.get("requirements") or [] if isinstance(row, dict)]
+    selections = [row for row in data.get("recipe_selections") or [] if isinstance(row, dict)]
+    claimed: dict[str, tuple[str, dict]] = {}
+
+    def token(value: object) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+    for selection in selections:
+        definition = get_recipe(str(selection.get("recipe")))
+        bindings = selection.get("sheets") or {}
+        for requirement in requirements:
+            requirement_id = str(requirement.get("id"))
+            if requirement_id in set(selection.get("requirement_ids") or []):
+                continue
+            family = token(requirement.get("family"))
+            for group in definition.parts:
+                role = token(group.role)
+                covered = (
+                    role == family
+                    or (role and role in family)
+                    or (
+                        definition.family == "rp2040"
+                        and family == "gpioheader"
+                        and role.startswith("cast")
+                    )
+                )
+                target_sheet = bindings.get(group.sheet_role)
+                if covered and target_sheet and requirement.get("sheet") != target_sheet:
+                    claimed[requirement_id] = (str(target_sheet), selection)
+                    break
+
+    requirements_by_sheet: dict[str, list[dict]] = {}
+    for requirement in requirements:
+        requirements_by_sheet.setdefault(str(requirement.get("sheet")), []).append(requirement)
+    bound_sheets = {
+        str(sheet) for selection in selections for sheet in (selection.get("sheets") or {}).values()
+    }
+    folds: dict[str, str] = {}
+    for sheet, sheet_requirements in requirements_by_sheet.items():
+        targets = {
+            claimed[str(requirement.get("id"))][0]
+            for requirement in sheet_requirements
+            if str(requirement.get("id")) in claimed
+        }
+        if (
+            sheet not in bound_sheets
+            and len(targets) == 1
+            and all(str(requirement.get("id")) in claimed for requirement in sheet_requirements)
+        ):
+            folds[sheet] = next(iter(targets))
+    if not folds:
+        return architecture
+
+    for requirement in requirements:
+        source_sheet = str(requirement.get("sheet"))
+        if source_sheet not in folds:
+            continue
+        requirement["sheet"] = folds[source_sheet]
+        requirement_id = str(requirement.get("id"))
+        selection = claimed[requirement_id][1]
+        selection["requirement_ids"] = list(
+            dict.fromkeys([*(selection.get("requirement_ids") or []), requirement_id])
+        )
+    data["sheets"] = [
+        sheet for sheet in data.get("sheets") or [] if str(sheet.get("name")) not in folds
+    ]
+    rewritten_nets = []
+    for net in data.get("inter_sheet_nets") or []:
+        endpoints = []
+        observed = set()
+        for endpoint in net.get("endpoints") or []:
+            rewritten = dict(endpoint)
+            rewritten["sheet"] = folds.get(str(rewritten.get("sheet")), rewritten.get("sheet"))
+            signature = (rewritten.get("sheet"), rewritten.get("direction"))
+            if signature not in observed:
+                observed.add(signature)
+                endpoints.append(rewritten)
+        if len({endpoint["sheet"] for endpoint in endpoints}) >= 2:
+            rewritten_nets.append({**net, "endpoints": endpoints})
+    data["inter_sheet_nets"] = rewritten_nets
+    data["requirements"] = requirements
+    data["recipe_selections"] = selections
+    data["unresolved_requirement_ids"] = [
+        requirement_id
+        for requirement_id in data.get("unresolved_requirement_ids") or []
+        if requirement_id not in claimed
+    ]
+    return models.Architecture.model_validate(data)
+
+
 def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> tuple[dict, int]:
     try:
         if isinstance(payload.get("questions"), list):
@@ -640,6 +865,7 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
         if stage == "architecture":
             payload = _normalize_architecture_sheet_aliases(payload)
             payload = _complete_connector_requirements(payload)
+            payload = _normalize_usb_c_requirements(payload)
             named_parts = (prompt_state.get("intent") or {}).get("named_parts") or []
             for requirement in payload.get("requirements") or []:
                 if not isinstance(requirement, dict) or requirement.get("exact_part"):
@@ -654,6 +880,29 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
                     if named_identity and named_identity in requirement_identity:
                         requirement["exact_part"] = str(named_part)
                         break
+            architecture_assumptions = " ".join(
+                str(value) for value in payload.get("assumptions") or []
+            ).lower()
+            for requirement in payload.get("requirements") or []:
+                if not isinstance(requirement, dict):
+                    continue
+                family = re.sub(r"[^a-z0-9]+", "", str(requirement.get("family") or "").lower())
+                if family == "opampbuffer" and "mcp6001" in architecture_assumptions:
+                    requirement["family"] = "mcp6001-follower"
+                    requirement["exact_part"] = "MCP6001T-I/OT"
+                    ports = dict(requirement.get("ports") or {})
+                    ports.setdefault("gnd", "GND")
+                    rail = next(
+                        (
+                            net
+                            for net in payload.get("power_nets") or []
+                            if str(net).upper() != "GND"
+                        ),
+                        None,
+                    )
+                    if rail:
+                        ports.setdefault("vdd", str(rail))
+                    requirement["ports"] = ports
             response = ArchitectureStageResponse.model_validate(payload)
             canonical = response.model_dump(exclude={"inter_sheet_net_ranges"}, exclude_none=True)
             explicit_nets = canonical.get("inter_sheet_nets") or []
@@ -694,6 +943,7 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
                 validated,
                 prompt_state.get("intent") or {},
             )
+            resolved = _fold_recipe_covered_sheets(resolved)
             return resolved.model_dump(exclude_none=True), len(expanded)
         if stage == "bom":
             return _normalize_bom_stage_response(payload, prompt_state)

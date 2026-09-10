@@ -143,10 +143,12 @@ def test_fs_connections_mapped_shared_bus_covers_pairwise_connections():
         FunctionalBlock(name="SENSOR", category="sense", purpose="sensor"),
         FunctionalBlock(name="DISPLAY", category="interface", purpose="display"),
         connections=[
-            BlockConnection(from_block="MCU", to_block="SENSOR",
-                            signal_type="digital", description="I2C"),
-            BlockConnection(from_block="MCU", to_block="DISPLAY",
-                            signal_type="digital", description="I2C"),
+            BlockConnection(
+                from_block="MCU", to_block="SENSOR", signal_type="digital", description="I2C"
+            ),
+            BlockConnection(
+                from_block="MCU", to_block="DISPLAY", signal_type="digital", description="I2C"
+            ),
         ],
     )
     arch = _arch(
