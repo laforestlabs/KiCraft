@@ -468,6 +468,52 @@ def test_evaluate_one_happy_path_drives_builds_and_scores(tmp_path, monkeypatch)
     assert rec["run_id"] == seen_kw["run_id"]
 
 
+def test_evaluate_one_design_only_skips_build_and_scoring(tmp_path, monkeypatch):
+    def fake_run_session(ws, brief, stages, **kw):
+        state = {
+            **_FULL_STATE,
+            "stage_status": {
+                stage: {"ok": True}
+                for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
+            },
+        }
+        Path(ws, ".kicraft", "state.json").write_text(json.dumps(state))
+        return {
+            "status": "ok",
+            "results": [{"cost_usd": 0.03}],
+            "questions": None,
+            "last_stage": "wiring",
+        }
+
+    monkeypatch.setattr(se, "run_session", fake_run_session)
+    monkeypatch.setattr(
+        se,
+        "run_build",
+        lambda *args, **kwargs: pytest.fail("design-only must not build"),
+    )
+    monkeypatch.setattr(
+        se,
+        "evaluate_project",
+        lambda *args, **kwargs: pytest.fail("design-only must not score"),
+    )
+
+    rec = se.evaluate_one(
+        object(),
+        1,
+        {"slug": "design-only", "archetype": "test", "brief": "A design-only brief"},
+        tmp_path,
+        judge_model=None,
+        skip_judge=True,
+        design_only=True,
+    )
+
+    assert rec["design_status"] == "ok"
+    assert rec["design_committed"] is True
+    assert rec["build_rc"] is None
+    assert rec["design_cost_usd"] == 0.03
+    assert "grade" not in rec
+
+
 def test_evaluate_one_skips_build_when_design_incomplete(tmp_path, monkeypatch):
     monkeypatch.setattr(
         se,

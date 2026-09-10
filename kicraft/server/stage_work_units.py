@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import hashlib
+from functools import lru_cache
 import json
 import re
 
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from kicraft.fsutil import atomic_write_text
 from kicraft.design.recipes import locked_no_connect_pins, locked_pin_assignments
+from kicraft.design.synthesis.symbol_pinout import canonical_symbol_id
 from .stage_contracts import (
     BomArrayGroup,
     BomComponentGroup,
@@ -133,7 +135,7 @@ def plan_stage_work_units(
         requirements = [
             requirement
             for requirement in architecture.get("requirements") or []
-            if isinstance(requirement, dict)
+            if isinstance(requirement, dict) and str(requirement.get("role")) != "power_input"
         ]
         if requirements:
             selected = {
@@ -365,40 +367,73 @@ def deterministic_bom_candidate(
     }
 
 
+def _identity_token(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).lower())
+
+
+@lru_cache(maxsize=1)
+def _curated_part_indexes() -> tuple[dict[str, object], dict[str, object]]:
+    from kicraft.parts_library import load_all_with_overrides
+
+    active, _shadowed, _broken = load_all_with_overrides(project_root=None)
+    by_name = {part.manifest.name: part for part in active}
+    by_mpn: dict[str, object] = {}
+    for part in active:
+        by_mpn.setdefault(_identity_token(part.manifest.mpn), part)
+    return by_name, by_mpn
+
+
 def _normalize_curated_group_identities(
     groups: list[BomComponentGroup],
 ) -> list[BomComponentGroup]:
-    """Use a selected curated bundle's authoritative symbol/footprint pair."""
-    from kicraft.parts_library import find_part
-
-    bundles: dict[str, object | None] = {}
+    """Use curated bundles as authoritative, reusable component defaults."""
+    by_name, by_mpn = _curated_part_indexes()
     normalized: list[BomComponentGroup] = []
     for group in groups:
+        original_symbol = group.symbol
+        group = group.model_copy(update={"symbol": canonical_symbol_id(original_symbol)})
+        selected_identities = {
+            _identity_token(value) for value in (group.mpn, group.value) if value
+        }
         library = group.symbol.partition(":")[0]
-        if library not in bundles:
-            bundles[library] = find_part(library, project_root=None)
-        loaded = bundles[library]
+        loaded = by_name.get(library)
+        if loaded is None:
+            loaded = next(
+                (by_mpn[identity] for identity in selected_identities if identity in by_mpn),
+                None,
+            )
+        if loaded is None:
+            loaded = next(
+                (
+                    part
+                    for identity in selected_identities
+                    for mpn, part in by_mpn.items()
+                    if mpn and mpn in identity
+                ),
+                None,
+            )
+        if loaded is None and original_symbol.lower().startswith("potentiometer:"):
+            loaded = by_name.get("trim-pot-3296w-10k")
+        identity_text = " ".join(
+            str(value or "") for value in (group.id, group.value, group.symbol, group.footprint)
+        ).lower()
+        if loaded is None and "bnc" in identity_text:
+            loaded = by_name.get("bnc-pcb-jack")
+        if loaded is None and "screw" in identity_text and "terminal" in identity_text:
+            loaded = by_name.get("screw-terminal-5mm-2p")
         manifest = getattr(loaded, "manifest", None)
         if manifest is None:
             normalized.append(group)
             continue
-        selected_identities = {
-            re.sub(r"[^a-z0-9]+", "", str(value).lower())
-            for value in (group.mpn, group.value)
-            if value
+        update = {
+            "symbol": f"{manifest.name}:{manifest.symbol_name}",
+            "footprint": f"{manifest.name}:{manifest.footprint_name}",
+            "mpn": manifest.mpn,
         }
-        manifest_identity = re.sub(r"[^a-z0-9]+", "", manifest.mpn.lower())
-        if manifest_identity not in selected_identities:
-            normalized.append(group)
-            continue
-        normalized.append(
-            group.model_copy(
-                update={
-                    "symbol": f"{manifest.name}:{manifest.symbol_name}",
-                    "footprint": f"{manifest.name}:{manifest.footprint_name}",
-                }
-            )
-        )
+        lcsc = (manifest.sourcing or {}).get("lcsc")
+        if lcsc:
+            update["sourcing_note"] = f"LCSC {lcsc}"
+        normalized.append(group.model_copy(update=update))
     return normalized
 
 
@@ -439,11 +474,47 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
         if isinstance(requirement, dict)
         else getattr(requirement, "family", None)
     )
-    generic_families = {"", "applicationspecific", "custom", "generic"}
+    requirement_role = (
+        requirement.get("role")
+        if isinstance(requirement, dict)
+        else getattr(requirement, "role", None)
+    )
+    architecture_requirements = [
+        row for row in architecture.get("requirements") or [] if isinstance(row, dict)
+    ]
+    connector_prefixes = {"J", "P"}
+    if requirement_role == "connector":
+        owned_group_ids = {
+            group.id for group in groups if group.reference_prefix in connector_prefixes
+        }
+        if owned_group_ids:
+            groups = [group for group in groups if group.id in owned_group_ids]
+            arrays = [array for array in arrays if array.group_id in owned_group_ids]
+    elif any(row.get("role") == "connector" for row in architecture_requirements):
+        non_connector_groups = [
+            group for group in groups if group.reference_prefix not in connector_prefixes
+        ]
+        if non_connector_groups:
+            groups = non_connector_groups
+            retained_group_ids = {group.id for group in groups}
+            arrays = [array for array in arrays if array.group_id in retained_group_ids]
+    group_ids = [group.id for group in groups]
+    array_group_ids = [array.group_id for array in arrays]
+    requirement_identities = " ".join(
+        str(value or "") for value in (requirement_id, requirement_family)
+    )
+    requirement_exact_part = (
+        requirement.get("exact_part")
+        if isinstance(requirement, dict)
+        else getattr(requirement, "exact_part", None)
+    )
     requires_named_implementation = (
         requirement is not None
         and not lowering_metadata
-        and re.sub(r"[^a-z0-9]+", "", str(requirement_family or "").lower()) not in generic_families
+        and (
+            bool(requirement_exact_part)
+            or "controller" in re.split(r"[^a-z0-9]+", requirement_identities.lower())
+        )
     )
     protected_groups = [
         group.id

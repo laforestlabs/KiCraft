@@ -8,6 +8,7 @@ participates.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -358,11 +359,21 @@ def _r2r(requirement: CircuitRequirement) -> LoweringArtifact | None:
         bits = int(requirement.parameters.get("bits", 0))
     except (TypeError, ValueError):
         return None
-    r_value = str(requirement.parameters.get("r_value", ""))
-    two_r_value = str(requirement.parameters.get("two_r_value", ""))
-    names = (*(f"bit{i}" for i in range(bits)), "output", "gnd")
-    ports = _require_ports(requirement, names)
-    if ports is None or not 2 <= bits <= 32 or not r_value or not two_r_value:
+    r_raw = requirement.parameters.get(
+        "r_value",
+        requirement.parameters.get("r_series", requirement.parameters.get("r", "")),
+    )
+    two_r_raw = requirement.parameters.get(
+        "two_r_value",
+        requirement.parameters.get("r_shunt", ""),
+    )
+    if not two_r_raw and isinstance(r_raw, (int, float)):
+        two_r_raw = float(r_raw) * 2
+    r_value = _resistance(float(r_raw)) if isinstance(r_raw, (int, float)) else str(r_raw)
+    two_r_value = (
+        _resistance(float(two_r_raw)) if isinstance(two_r_raw, (int, float)) else str(two_r_raw)
+    )
+    if not 2 <= bits <= 32 or not r_value or not two_r_value:
         return None
     series = LoweringGroup(
         role="series",
@@ -380,6 +391,31 @@ def _r2r(requirement: CircuitRequirement) -> LoweringArtifact | None:
         symbol="Device:R",
         footprint="Resistor_SMD:R_0603_1608Metric",
     )
+    names = (*(f"bit{i}" for i in range(bits)), "output", "gnd")
+    ports = _require_ports(requirement, names)
+    if ports is None:
+        compact_ports = {name.lower(): value for name, value in requirement.ports.items()}
+        if set(compact_ports) != {"digital_inputs", "analog_output"}:
+            return None
+        bus = str(compact_ports["digital_inputs"]).strip()
+        match = re.fullmatch(
+            r"([A-Za-z_][A-Za-z0-9_]*?)(\d+)\s*-\s*(?:\1)?(\d+)",
+            bus,
+        )
+        if match is not None:
+            prefix, first_text, last_text = match.groups()
+            first, last = int(first_text), int(last_text)
+            step = 1 if last >= first else -1
+            input_nets = [f"{prefix}{index}" for index in range(first, last + step, step)]
+        else:
+            input_nets = [item for item in re.split(r"[\s,;]+", bus) if item]
+        if len(input_nets) != bits:
+            return None
+        ports = {
+            **{f"bit{index}": net for index, net in enumerate(input_nets)},
+            "output": str(compact_ports["analog_output"]),
+            "gnd": "GND",
+        }
     nodes = [ports["output"], *(f"__lowerer__{requirement.id}__r2r_n{i}" for i in range(1, bits))]
     pins: list[LoweringPin] = []
     for index in range(bits - 1):
@@ -661,14 +697,23 @@ def _decoupling(requirement: CircuitRequirement) -> LoweringArtifact | None:
 for _lowerer in (
     RegisteredLowerer(
         "pin-header@1",
-        frozenset({"pin-header", "generic-header"}),
+        frozenset(
+            {
+                "pin-header",
+                "pin_header",
+                "generic-header",
+                "header",
+                "spi-header",
+                "spi_header",
+            }
+        ),
         _pin_header,
         ("rows",),
         ("<one named port per pin>",),
     ),
     RegisteredLowerer(
         "screw-terminal@1",
-        frozenset({"screw-terminal"}),
+        frozenset({"screw-terminal", "screw_terminal"}),
         _screw_terminal,
         (),
         ("<one named port per terminal>",),
@@ -696,10 +741,19 @@ for _lowerer in (
     ),
     RegisteredLowerer(
         "r2r-ladder@1",
-        frozenset({"r2r-ladder"}),
+        frozenset(
+            {
+                "r2r-ladder",
+                "r2r_ladder",
+                "resistor-ladder",
+                "resistor_ladder",
+                "resistor-network",
+                "resistor_network",
+            }
+        ),
         _r2r,
-        ("bits", "r_value", "two_r_value"),
-        ("bit0..bitN", "output", "gnd"),
+        ("bits", "r_value", "two_r_value", "r_series", "r_shunt", "r"),
+        ("bit0..bitN/output/gnd or digital_inputs/analog_output",),
     ),
     RegisteredLowerer(
         "led-current-resistor@1",
@@ -717,7 +771,7 @@ for _lowerer in (
     ),
     RegisteredLowerer(
         "rc-lowpass@1",
-        frozenset({"rc-lowpass"}),
+        frozenset({"rc-lowpass", "rc_filter"}),
         _rc_filter,
         ("cutoff_hz", "resistance_ohm", "max_error_percent"),
         ("input", "output", "gnd"),

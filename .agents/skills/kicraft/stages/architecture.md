@@ -30,6 +30,8 @@ Slot shape (`Architecture`):
   - Plain signals: `output` at the source, `input` at the sink.
   - Use `passive` only when direction genuinely doesn't apply (rare).
 - `assumptions`: defaults applied, each ending `(defaulted)`.
+- `requirements`: **required and non-empty unless circuit recipes cover every sheet**. Emit at least one bounded `CircuitRequirement` for every `sheets` entry not covered by a recipe. Each requirement has a stable lowercase `id`, exact `sheet` name, `role`, concrete lowercase `family`, optional `exact_part`, bounded `parameters`, final-net `ports`, and `interfaces`. A topology description is not an implementation requirement. Every part explicitly named in `intent.named_parts` must appear in a requirement `id`, `family`, or `exact_part`, or in a selected recipe.
+- `recipe_selections`: verified recipe instances. Together, `requirements` and recipe selections must cover every declared sheet; a sheet with neither is rejected before BOM.
 
 Constraints (enforced by Pydantic):
 
@@ -95,8 +97,8 @@ logical port to the final application net. For ranged ports such as
 For connectors with one named port per pin/terminal, dictionary insertion order
 is physical pin order. Families match exactly: never paraphrase, concatenate,
 or infer one from topology prose. KiCraft derives both BOM and wiring from the
-same lowerer artifact; an incomplete or out-of-range requirement deliberately
-falls through to an ordinary BOM work unit.
+same lowerer artifact; an incomplete or out-of-range supported requirement is
+rejected at architecture commit with the exact missing parameter/port contract.
 
 **External-load power budget.** When the accepted functional spec says the board
 supplies power to a display, LED string, motor, heater, or other external load,

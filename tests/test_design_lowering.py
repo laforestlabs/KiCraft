@@ -43,7 +43,7 @@ def _pinout(count: int) -> dict:
 
 
 def test_lowerer_registry_matches_exact_family_without_ordered_fallback():
-    assert lower_requirement(_requirement("pin_header", ports={"one": "N"})) is None
+    assert lower_requirement(_requirement("pin_header_extra", ports={"one": "N"})) is None
     assert lower_requirement(_requirement("unknown", ports={"one": "N"})) is None
     ids = [lowerer.lowerer_id for lowerer in registered_lowerers()]
     assert ids == sorted(ids)
@@ -81,6 +81,52 @@ def test_voltage_selector_lowerer_uses_curated_compatible_pair():
     assert artifact.lowerer_id == "voltage-selector-switch@1"
     assert artifact.groups[0].symbol == "sp3t-switch-msk13c02:MSK13C02-SZ"
     assert artifact.groups[0].footprint == ("sp3t-switch-msk13c02:SW-SMD_MSK13C02-SZ")
+
+
+@pytest.mark.parametrize(
+    "family",
+    [
+        "resistor-network",
+        "resistor_network",
+        "resistor-ladder",
+        "resistor_ladder",
+        "r2r_ladder",
+    ],
+)
+def test_r2r_lowerer_accepts_compact_architecture_requirement(family):
+    artifact = lower_requirement(
+        _requirement(
+            family,
+            parameters={"bits": 8, "r_series": 10000, "r_shunt": 20000},
+            ports={"digital_inputs": "D0-D7", "analog_output": "LADDER_OUT"},
+        )
+    )
+
+    assert artifact is not None
+    assert artifact.lowerer_id == "r2r-ladder@1"
+    assert [(group.quantity, group.value) for group in artifact.groups] == [
+        (7, "10k"),
+        (9, "20k"),
+    ]
+    assert len(artifact.pins) == 32
+    nets = {pin.net for pin in artifact.pins}
+    assert {"D0", "D7", "LADDER_OUT", "GND"} <= nets
+
+
+def test_r2r_lowerer_derives_two_r_from_single_r_parameter():
+    artifact = lower_requirement(
+        _requirement(
+            "resistor_network",
+            parameters={"bits": 8, "r": 10000},
+            ports={"digital_inputs": "D0-D7", "analog_output": "LADDER_OUT"},
+        )
+    )
+
+    assert artifact is not None
+    assert [(group.quantity, group.value) for group in artifact.groups] == [
+        (7, "10k"),
+        (9, "20k"),
+    ]
 
 
 @pytest.mark.parametrize(

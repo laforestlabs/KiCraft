@@ -306,7 +306,7 @@ def test_wiring_gets_a_larger_token_budget():
 
 def test_complex_stages_get_larger_retry_budgets():
     assert _stage_max_retries("bom", 2) == 4
-    assert _stage_max_retries("architecture", 2) == 3
+    assert _stage_max_retries("architecture", 2) == 6
 
 
 def test_bom_has_a_symbol_search_tool():
@@ -2422,6 +2422,58 @@ def test_work_units_make_one_initial_call_each_before_one_full_commit(tmp_path, 
     assert len(client.calls) == 2
     assert [call["collection_bounds"][0].total for call in client.calls] == [1, 1]
     assert len(commits) == 1
+
+
+def test_invalid_wiring_unit_escalates_after_first_attempt(tmp_path, monkeypatch):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    client = _unit_client([_unit_reply("R1", "WRONG"), _unit_reply("U1"), _unit_reply("R1")])
+    client.s = replace(client.s, escalation_profile="pro")
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "commit_stage",
+        lambda *args, **kwargs: (True, {"ok": True}),
+    )
+
+    result = stage_driver_mod.drive_stage(client, "wiring", "test", state_path, tmp_path)
+
+    assert result["commit_ok"] is True
+    assert [call["model"] for call in client.calls] == [
+        str(DESIGN_PROFILES["flash"]["model"]),
+        str(DESIGN_PROFILES["pro"]["model"]),
+        str(DESIGN_PROFILES["flash"]["model"]),
+    ]
+
+
+def test_rate_limited_escalated_unit_returns_to_primary_profile(tmp_path, monkeypatch):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    client = _unit_client(
+        [
+            _unit_reply("R1", "WRONG"),
+            requests.exceptions.HTTPError("429 Too Many Requests"),
+            _unit_reply("U1"),
+            _unit_reply("R1"),
+        ]
+    )
+    client.s = replace(
+        client.s,
+        escalation_profile="pro",
+        provider_fallback_profile="pro",
+    )
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "commit_stage",
+        lambda *args, **kwargs: (True, {"ok": True}),
+    )
+
+    result = stage_driver_mod.drive_stage(client, "wiring", "test", state_path, tmp_path)
+
+    assert result["commit_ok"] is True
+    assert [call["model"] for call in client.calls] == [
+        str(DESIGN_PROFILES["flash"]["model"]),
+        str(DESIGN_PROFILES["pro"]["model"]),
+        str(DESIGN_PROFILES["flash"]["model"]),
+        str(DESIGN_PROFILES["flash"]["model"]),
+    ]
 
 
 def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monkeypatch):

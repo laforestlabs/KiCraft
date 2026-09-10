@@ -481,6 +481,42 @@ def _inter_sheet_net_endpoint_signature(endpoints: list[dict]) -> tuple[tuple[st
     )
 
 
+def _complete_connector_requirements(payload: dict) -> dict:
+    """Auto-bind empty connector ports from the sheet's inter-sheet interface.
+
+    A header/screw-terminal requirement whose ``ports`` are empty cannot be
+    lowered deterministically, and the model's BOM unit then emits nothing
+    (empty-sheet exhaustion). The pin order of such a connector is exactly the
+    nets that cross its sheet, in declaration order, plus GND for a signal
+    header. Bind those here so the connector lowerer owns both BOM and wiring.
+    """
+    requirements = payload.get("requirements")
+    if not isinstance(requirements, list):
+        return payload
+    nets_by_sheet: dict[str, list[str]] = {}
+    for net in payload.get("inter_sheet_nets") or []:
+        if not isinstance(net, dict):
+            continue
+        name = net.get("name")
+        for endpoint in net.get("endpoints") or []:
+            if isinstance(endpoint, dict) and endpoint.get("sheet"):
+                nets_by_sheet.setdefault(str(endpoint["sheet"]), []).append(str(name))
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        if requirement.get("role") != "connector" or requirement.get("ports"):
+            continue
+        sheet = requirement.get("sheet")
+        signals = nets_by_sheet.get(sheet) or []
+        family = str(requirement.get("family") or "").lower()
+        is_terminal = "screw" in family or "terminal" in family
+        nets = list(signals) if is_terminal else [*signals, "GND"]
+        if not nets:
+            continue
+        requirement["ports"] = {f"PIN{index + 1}": net for index, net in enumerate(nets)}
+    return payload
+
+
 def _normalize_architecture_sheet_aliases(payload: dict) -> dict:
     """Canonicalize harmless sheet identifier representation differences.
 
@@ -603,6 +639,21 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
             return IntentStageResponse.model_validate(payload).model_dump(exclude_none=True), 0
         if stage == "architecture":
             payload = _normalize_architecture_sheet_aliases(payload)
+            payload = _complete_connector_requirements(payload)
+            named_parts = (prompt_state.get("intent") or {}).get("named_parts") or []
+            for requirement in payload.get("requirements") or []:
+                if not isinstance(requirement, dict) or requirement.get("exact_part"):
+                    continue
+                requirement_identity = re.sub(
+                    r"[^a-z0-9]+",
+                    "",
+                    f"{requirement.get('id', '')} {requirement.get('family', '')}".lower(),
+                )
+                for named_part in named_parts:
+                    named_identity = re.sub(r"[^a-z0-9]+", "", str(named_part).lower())
+                    if named_identity and named_identity in requirement_identity:
+                        requirement["exact_part"] = str(named_part)
+                        break
             response = ArchitectureStageResponse.model_validate(payload)
             canonical = response.model_dump(exclude={"inter_sheet_net_ranges"}, exclude_none=True)
             explicit_nets = canonical.get("inter_sheet_nets") or []

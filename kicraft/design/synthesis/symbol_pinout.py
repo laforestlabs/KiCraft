@@ -7,6 +7,7 @@ read unit 1 only.
 The output schema matches what the wiring LLM stage needs: every pin's
 number, name, electrical type, position, orientation, length.
 """
+
 from __future__ import annotations
 
 import re
@@ -36,6 +37,20 @@ _AT_RE = re.compile(r"\(at\s+(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\)")
 _LENGTH_RE = re.compile(r"\(length\s+(-?\d+\.?\d*)\)")
 _NAME_RE = re.compile(r'\(name\s+"([^"]*)"')
 _NUMBER_RE = re.compile(r'\(number\s+"([^"]+)"')
+
+
+_LEGACY_SYMBOL_IDS = {
+    "device:cp": "Device:C_Polarized",
+    "device:cp1": "Device:C_Polarized",
+    "device:cp_small": "Device:C_Polarized_Small",
+    "device:cp1_small": "Device:C_Polarized_Small",
+    "potentiometer:potentiometer": "Device:R_Potentiometer",
+}
+
+
+def canonical_symbol_id(lib_id: str) -> str:
+    """Return the current KiCad id for an exact known legacy symbol id."""
+    return _LEGACY_SYMBOL_IDS.get((lib_id or "").lower(), lib_id)
 
 
 def lookup_pins(
@@ -68,7 +83,10 @@ def lookup_pins(
 
 @lru_cache(maxsize=256)
 def _lookup_cached(
-    library: str, name: str, project_root_str: str, stock_dir_str: str,
+    library: str,
+    name: str,
+    project_root_str: str,
+    stock_dir_str: str,
     all_units: bool = False,
 ) -> dict:
     project_root = Path(project_root_str) if project_root_str else None

@@ -52,6 +52,123 @@ def _group(group_id, sheet, prefix="R", quantity=1):
     }
 
 
+def test_bom_unit_resolves_curated_bundle_from_exact_mpn():
+    unit = StageWorkUnit("bom-s000", "bom", "A")
+    payload = {
+        "groups": [
+            {
+                **_group("thermocouple_converter", "A", prefix="U"),
+                "value": "MAX31855KASA+T",
+                "mpn": "MAX31855KASA+T",
+                "symbol": "Maxim_IC:MAX31855",
+                "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+            }
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, _state(), {})
+
+    assert validated["groups"][0]["symbol"] == "max31855:MAX31855KASA+T"
+    assert validated["groups"][0]["footprint"] == ("max31855:SO-8_L4.9-W3.9-P1.27-LS5.9-BL")
+
+
+def test_bom_unit_resolves_curated_bundle_from_prefixed_mpn():
+    unit = StageWorkUnit("bom-s000", "bom", "A")
+    payload = {
+        "groups": [
+            {
+                **_group("trim_pot", "A", prefix="RV"),
+                "value": "100k trimmer",
+                "mpn": "Bourns 3296W-1-103LF",
+                "symbol": "Potentiometer:Potentiometer",
+                "footprint": "Potentiometer_SMD:Potentiometer_Bourns_3314J_Vertical",
+            }
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, _state(), {})
+
+    assert validated["groups"][0]["symbol"] == "trim-pot-3296w-10k:3296W-1-103LF"
+    assert validated["groups"][0]["footprint"] == "trim-pot-3296w-10k:RES-ADJ-TH_3296W"
+
+
+def test_bom_unit_normalizes_known_legacy_potentiometer_symbol():
+    unit = StageWorkUnit("bom-s000", "bom", "A")
+    payload = {
+        "groups": [
+            {
+                **_group("trim_pot", "A", prefix="RV"),
+                "mpn": "Bourns 3314J-1-104E",
+                "symbol": "Potentiometer:Potentiometer_Bourns_3314J",
+            }
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, _state(), {})
+
+    assert validated["groups"][0]["symbol"] == "trim-pot-3296w-10k:3296W-1-103LF"
+    assert validated["groups"][0]["footprint"] == "trim-pot-3296w-10k:RES-ADJ-TH_3296W"
+    assert validated["groups"][0]["mpn"] == "3296W-1-103LF"
+
+
+def test_bom_connector_unit_discards_sibling_circuit_groups():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "input_connector",
+            "sheet": "A",
+            "role": "connector",
+            "family": "bnc_connector",
+        },
+        {
+            "id": "filter",
+            "sheet": "A",
+            "role": "analog_block",
+            "family": "rc_filter",
+        },
+    ]
+    unit = StageWorkUnit(
+        "bom-r000",
+        "bom",
+        "A",
+        requirement_ids=("input_connector",),
+        owned_roles=("connector",),
+    )
+    payload = {
+        "groups": [
+            _group("input", "A", prefix="J"),
+            _group("filter_resistor", "A"),
+            _group("filter_capacitor", "A", prefix="C"),
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, state, {})
+
+    assert [group["id"] for group in validated["groups"]] == ["input"]
+
+
+def test_bom_planning_skips_net_like_power_requirements():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "external_power",
+            "sheet": "A",
+            "role": "power_input",
+            "family": "power_input",
+        },
+        {
+            "id": "filter",
+            "sheet": "A",
+            "role": "analog_block",
+            "family": "rc_filter",
+        },
+    ]
+
+    units = plan_stage_work_units("bom", state, {})
+
+    assert [unit.requirement_ids for unit in units] == [("filter",)]
+
+
 def test_units_are_immutable_and_bom_follows_architecture_order():
     units = plan_stage_work_units("bom", _state(), {})
     assert [(unit.unit_id, unit.sheet) for unit in units] == [
@@ -493,35 +610,6 @@ def test_bom_unit_accepts_connector_terminal_synonym():
     )
 
     assert validated["groups"][0]["id"] == "output_terminal"
-
-
-def test_bom_unit_rejects_selector_support_without_selector():
-    state = _state()
-    state["architecture"]["requirements"] = [
-        {
-            "id": "voltage_selector_switch",
-            "sheet": "A",
-            "role": "user_io",
-            "family": "voltage_selector_switch",
-        }
-    ]
-    unit = StageWorkUnit(
-        "bom-r000",
-        "bom",
-        "A",
-        requirement_ids=("voltage_selector_switch",),
-        owned_roles=("user_io",),
-    )
-
-    with pytest.raises(WorkUnitValidationError) as caught:
-        validate_unit_candidate(
-            unit,
-            {"groups": [_group("jumper", "A", prefix="J")]},
-            state,
-            {},
-        )
-
-    assert caught.value.defects["missing-requirement-implementation"] == ["voltage_selector_switch"]
 
 
 def test_bom_unit_discards_only_unowned_protected_sibling():

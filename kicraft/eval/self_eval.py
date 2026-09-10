@@ -601,6 +601,7 @@ def evaluate_one(
     build_timeout_s: int = 2400,
     build_gate=None,
     full_events: bool = True,
+    design_only: bool = False,
 ) -> dict:
     """Drive + build + score one benchmark brief into ``out_dir/<stem>/``. ``entry``
     is a ``{"slug", "archetype", "brief"}`` dict from ``BENCHMARK_PROMPTS``. Never
@@ -664,29 +665,35 @@ def evaluate_one(
             for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
         )
 
-        if d["status"] == "ok":
-            with build_gate or contextlib.nullcontext():
-                build_rc = run_build(rundir, progress, timeout_s=build_timeout_s)
+        if design_only:
+            rec["build_rc"] = None
+            rec["build_label"] = None
+            rec["duration_s"] = round(time.time() - t0, 1)
+            return rec
         else:
-            build_rc = None
-        rec["build_rc"] = build_rc
-        rec["build_label"] = _build_label(build_rc, rundir)
+            if d["status"] == "ok":
+                with build_gate or contextlib.nullcontext():
+                    build_rc = run_build(rundir, progress, timeout_s=build_timeout_s)
+            else:
+                build_rc = None
+            rec["build_rc"] = build_rc
+            rec["build_label"] = _build_label(build_rc, rundir)
 
-        # We know the real design+build wall-clock window (the same span the web app
-        # measures), so pass it explicitly: the latency dimension's state-history ->
-        # synth-checked_at fallback can return None, which leaves latency ungraded and
-        # withholds the whole letter grade. An exact window always scores it.
-        report = evaluate_project(
-            rundir,
-            None if skip_judge else client,
-            judge_model=judge_model,
-            judge_client=judge_client,
-            judge_max_tokens=judge_max_tokens,
-            skip_judge=skip_judge,
-            started_at=started_at,
-            finished_at=_now_iso(),
-            run_id=run_id,
-        )
+            # We know the real design+build wall-clock window (the same span the web app
+            # measures), so pass it explicitly: the latency dimension's state-history ->
+            # synth-checked_at fallback can return None, which leaves latency ungraded and
+            # withholds the whole letter grade. An exact window always scores it.
+            report = evaluate_project(
+                rundir,
+                None if skip_judge else client,
+                judge_model=judge_model,
+                judge_client=judge_client,
+                judge_max_tokens=judge_max_tokens,
+                skip_judge=skip_judge,
+                started_at=started_at,
+                finished_at=_now_iso(),
+                run_id=run_id,
+            )
         sc, judge = report["score"], report["judge"]
         rec.update(
             grade=sc.get("grade"),
@@ -1085,12 +1092,12 @@ def _resume_corpus_slugs(out_dir: Path, prior: dict[str, dict]) -> set[str]:
     return {str(row["slug"]) for row in prior.values() if row.get("slug")}
 
 
-def _reusable(rec: dict | None) -> bool:
-    """Under ``--resume``, a prior record is kept iff it finished scoring: no harness
-    error and its eval report still on disk. Design failures and bad build rcs are
-    legitimate *results* (regression signal), not candidates for a re-run."""
+def _reusable(rec: dict | None, *, design_only: bool = False) -> bool:
+    """Return whether a checkpoint is complete for the requested campaign mode."""
     if not rec or rec.get("error") or rec.get("design_failure_kind") == "provider_rate_limited":
         return False
+    if design_only:
+        return rec.get("design_committed") is True
     report = rec.get("report_path")
     return bool(report) and Path(report).exists()
 
@@ -1133,6 +1140,11 @@ def main(argv=None) -> int:
         "(default 1). N>=3 makes the ~12-pt run-to-run noise floor "
         "legible: a regression is a drop in the per-brief MEDIAN, not "
         "a single noisy run. Cost scales ~N (combine with --parallel).",
+    )
+    ap.add_argument(
+        "--design-only",
+        action="store_true",
+        help="drive and checkpoint the five LLM stages without building or grading",
     )
     ap.add_argument(
         "--max-park-rounds",
@@ -1258,7 +1270,10 @@ def main(argv=None) -> int:
     reused = {
         _run_key(e["slug"], rep): prior[_run_key(e["slug"], rep)]
         for _, e, rep in all_runs
-        if _reusable(prior.get(_run_key(e["slug"], rep)))
+        if _reusable(
+            prior.get(_run_key(e["slug"], rep)),
+            design_only=args.design_only,
+        )
     }
     todo = [(i, e, rep) for i, e, rep in all_runs if _run_key(e["slug"], rep) not in reused]
     parallel = max(1, min(args.parallel, len(todo) or 1))
@@ -1277,6 +1292,7 @@ def main(argv=None) -> int:
         "parallel": parallel,
         "build_slots": build_slots,
         "full_events": not args.lean_events,
+        "design_only": args.design_only,
     }
     if resume_dir:
         meta["resumed_reused_n"] = len(reused)
@@ -1337,6 +1353,7 @@ def main(argv=None) -> int:
                 max_park_rounds=args.max_park_rounds,
                 build_timeout_s=args.build_timeout,
                 full_events=not args.lean_events,
+                design_only=args.design_only,
             )
             if rec.get("error"):
                 print(f"   ERROR: {rec['error']}", flush=True)
@@ -1378,6 +1395,7 @@ def main(argv=None) -> int:
                 build_timeout_s=args.build_timeout,
                 build_gate=gate,
                 full_events=not args.lean_events,
+                design_only=args.design_only,
             )
             with print_lock:
                 if rec.get("error"):

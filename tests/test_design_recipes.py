@@ -364,9 +364,7 @@ def test_architecture_normalizes_requirement_sheet_aliases():
         "rail_voltages": {},
         "comms_protocols": [],
         "mcu_present": False,
-        "sheets": [
-            {"name": "crossover", "stem": "crossover", "function": "passive crossover"}
-        ],
+        "sheets": [{"name": "crossover", "stem": "crossover", "function": "passive crossover"}],
         "power_nets": [],
         "inter_sheet_nets": [],
         "requirements": [
@@ -385,12 +383,94 @@ def test_architecture_normalizes_requirement_sheet_aliases():
     assert canonical["requirements"][0]["sheet"] == "CROSSOVER"
 
 
+def test_architecture_auto_binds_connector_ports_from_sheet_interface():
+    payload = {
+        "topologies": {},
+        "rail_voltages": {},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [
+            {"name": "SPI HEADER", "stem": "SPI_HEADER", "function": "spi header"},
+            {"name": "AMPLIFIER", "stem": "AMPLIFIER", "function": "amp"},
+            {"name": "TC INPUT", "stem": "TC_INPUT", "function": "screw terminal"},
+        ],
+        "power_nets": ["GND"],
+        "inter_sheet_nets": [
+            {
+                "name": "SPI_MISO",
+                "endpoints": [
+                    {"sheet": "AMPLIFIER", "direction": "output"},
+                    {"sheet": "SPI HEADER", "direction": "input"},
+                ],
+            },
+            {
+                "name": "SPI_SCK",
+                "endpoints": [
+                    {"sheet": "AMPLIFIER", "direction": "input"},
+                    {"sheet": "SPI HEADER", "direction": "output"},
+                ],
+            },
+            {
+                "name": "SPI_CS",
+                "endpoints": [
+                    {"sheet": "AMPLIFIER", "direction": "input"},
+                    {"sheet": "SPI HEADER", "direction": "output"},
+                ],
+            },
+            {
+                "name": "TC_P",
+                "endpoints": [
+                    {"sheet": "TC INPUT", "direction": "output"},
+                    {"sheet": "AMPLIFIER", "direction": "input"},
+                ],
+            },
+            {
+                "name": "TC_N",
+                "endpoints": [
+                    {"sheet": "TC INPUT", "direction": "output"},
+                    {"sheet": "AMPLIFIER", "direction": "input"},
+                ],
+            },
+        ],
+        "requirements": [
+            {
+                "id": "req_spi_header",
+                "sheet": "SPI HEADER",
+                "role": "connector",
+                "family": "spi_header",
+            },
+            {
+                "id": "req_screw",
+                "sheet": "TC INPUT",
+                "role": "connector",
+                "family": "screw_terminal",
+            },
+            {
+                "id": "req_amp",
+                "sheet": "AMPLIFIER",
+                "role": "sensor",
+                "family": "thermocouple_converter",
+                "exact_part": "MAX31855",
+            },
+        ],
+    }
+
+    canonical, _expanded = _normalize_stage_response("architecture", payload, {})
+
+    by_id = {req["id"]: req for req in canonical["requirements"]}
+    assert list(by_id["req_spi_header"]["ports"].values()) == [
+        "SPI_MISO",
+        "SPI_SCK",
+        "SPI_CS",
+        "GND",
+    ]
+    assert list(by_id["req_screw"]["ports"].values()) == ["TC_P", "TC_N"]
+
+
 def test_architecture_normalizes_recipe_selection_sheet_aliases():
     normalized = _normalize_architecture_sheet_aliases(
         {
-            "sheets": [
-                {"name": "controller", "stem": "controller", "function": "controller"}
-            ],
+            "sheets": [{"name": "controller", "stem": "controller", "function": "controller"}],
             "recipe_selections": [
                 {
                     "recipe": "example@1",

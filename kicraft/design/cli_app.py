@@ -79,7 +79,7 @@ from .synthesis.footprint_library import (
     search_footprints,
 )
 from .synthesis.form_factor import extract_form_factor
-from .synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
+from .synthesis.symbol_pinout import SymbolNotFoundError, canonical_symbol_id, lookup_pins
 from .synthesis.parts_lookup import (
     LibraryNotFoundError,
     resolve_footprint_library_path,
@@ -187,10 +187,14 @@ def _footprint_candidates(fp: str, limit: int = 6) -> list[str]:
 # noise (self-eval 2026-07-07 run_19 burned two BOM attempts on Device:CP1 ->
 # Device:CP -> exhaustion). Keys are lowercase.
 _LEGACY_SYMBOL_RENAMES: dict[str, list[str]] = {
-    "device:cp": ["Device:C_Polarized"],
-    "device:cp1": ["Device:C_Polarized"],
-    "device:cp_small": ["Device:C_Polarized_Small"],
-    "device:cp1_small": ["Device:C_Polarized_Small"],
+    symbol.lower(): [canonical_symbol_id(symbol)]
+    for symbol in (
+        "Device:CP",
+        "Device:CP1",
+        "Device:CP_Small",
+        "Device:CP1_Small",
+        "Potentiometer:Potentiometer",
+    )
 }
 
 
@@ -3662,49 +3666,156 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     # "LCSC not in catalog" / "unresolved symbol" issues early, where the
     # model can still fix the architecture before the BOM stage.
     if stage == "architecture" and state.architecture is not None:
-        # R2: Pre-resolve named part families — catches "LCSC not in catalog"
-        # / "unresolved symbol" issues early, where the model can still fix the
-        # architecture before the BOM stage.
-        bad = _unresolved_architecture_parts(state.architecture, state_path.resolve().parent.parent)
-        if bad:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "errors": [
-                            "architecture references parts that do not resolve; "
-                            "fix the references or use search_footprints "
-                            "to find alternatives"
-                        ],
-                        "offenders": bad[:20],
-                        "offenders_total": len(bad),
-                    },
-                    indent=2,
+        from kicraft.design.lowering import lower_requirement
+
+        architecture_failures: list[tuple[str, list[str]]] = []
+        if not state.architecture.requirements and not state.architecture.recipe_selections:
+            architecture_failures.append(
+                (
+                    "architecture has no implementation requirements or circuit recipes; "
+                    "declare the bounded circuits that BOM and wiring must implement",
+                    [],
                 )
             )
-            return 3
-        # R4: Validate the architecture inter-sheet contract — every FS block
-        # must map to a topology+sheet, and every cross-sheet FS connection
-        # must appear in inter_sheet_nets. Catches the DTR/RTS→ESP32 and
-        # RESET/D0→PROTO dangling-label cases at architecture commit.
+
+        implementation_sheets = {
+            requirement.sheet
+            for requirement in state.architecture.requirements
+            if requirement.role != "power_input"
+        }
+        implementation_sheets.update(
+            sheet
+            for selection in state.architecture.recipe_selections
+            for sheet in selection.sheets.values()
+        )
+        missing_implementation_sheets = [
+            sheet.name
+            for sheet in state.architecture.sheets
+            if sheet.name not in implementation_sheets
+        ]
+        if missing_implementation_sheets:
+            architecture_failures.append(
+                (
+                    "architecture declares sheets with no implementation "
+                    "requirement or circuit recipe",
+                    missing_implementation_sheets,
+                )
+            )
+
+        # The R-2R ladder is the one deterministic lowerer whose LLM fallback is
+        # known to corrupt pin mapping (self-eval run_02); every other lowerer
+        # family falls through to the ordinary BOM unit when incomplete, per the
+        # architecture spec. Only the ladder must complete its contract here.
+        load_bearing_ladder = {
+            "r2r-ladder",
+            "r2r_ladder",
+            "resistor-ladder",
+            "resistor_ladder",
+            "resistor-network",
+            "resistor_network",
+        }
+        invalid_lowerer_requirements = []
+        for requirement in state.architecture.requirements:
+            if requirement.family not in load_bearing_ladder:
+                continue
+            try:
+                artifact = lower_requirement(requirement)
+            except (TypeError, ValueError):
+                artifact = None
+            if artifact is not None:
+                continue
+            invalid_lowerer_requirements.append(
+                f"{requirement.id} ({requirement.family}): set e.g. "
+                'parameters={"bits": 8, "r": 10000} and '
+                'ports={"digital_inputs": "D0-D7", "analog_output": "DAC_OUT"}'
+            )
+        if invalid_lowerer_requirements:
+            architecture_failures.append(
+                (
+                    "R-2R ladder requirements must carry the complete lowerer "
+                    "contract (bits, resistance, and port bindings)",
+                    invalid_lowerer_requirements,
+                )
+            )
+
+        if state.intent is not None and state.intent.named_parts:
+            implementation_identities = [
+                value
+                for requirement in state.architecture.requirements
+                for value in (
+                    requirement.id,
+                    requirement.family,
+                    requirement.exact_part,
+                )
+                if value
+            ]
+            implementation_identities.extend(
+                selection.recipe for selection in state.architecture.recipe_selections
+            )
+
+            def identity_token(value: str) -> str:
+                return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+            implementation_tokens = [identity_token(value) for value in implementation_identities]
+            missing_named_parts = [
+                named_part
+                for named_part in state.intent.named_parts
+                if not any(
+                    implementation
+                    and (
+                        identity_token(named_part) in implementation
+                        or implementation in identity_token(named_part)
+                    )
+                    for implementation in implementation_tokens
+                )
+            ]
+            if missing_named_parts:
+                architecture_failures.append(
+                    (
+                        "architecture does not bind every intent-named part to an "
+                        "implementation requirement or circuit recipe",
+                        missing_named_parts,
+                    )
+                )
+
+        bad = _unresolved_architecture_parts(state.architecture, state_path.resolve().parent.parent)
+        if bad:
+            architecture_failures.append(
+                (
+                    "architecture references parts that do not resolve; fix the "
+                    "references or use search_footprints to find alternatives",
+                    bad,
+                )
+            )
+
         if state.functional_spec is not None:
             for check in (
                 check_every_block_has_sheet(state.functional_spec, state.architecture),
                 check_fs_connections_mapped(state.functional_spec, state.architecture),
             ):
                 if not check.ok:
-                    print(
-                        json.dumps(
-                            {
-                                "ok": False,
-                                "errors": [f"{check.name}: {check.message}"],
-                                "offenders": check.offenders[:20],
-                                "offenders_total": len(check.offenders),
-                            },
-                            indent=2,
-                        )
+                    architecture_failures.append(
+                        (f"{check.name}: {check.message}", list(check.offenders))
                     )
-                    return 3
+
+        if architecture_failures:
+            offenders = [
+                offender
+                for _error, failure_offenders in architecture_failures
+                for offender in failure_offenders
+            ]
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [error for error, _offenders in architecture_failures],
+                        "offenders": offenders[:40],
+                        "offenders_total": len(offenders),
+                    },
+                    indent=2,
+                )
+            )
+            return 3
 
     # §9.25 capacitor polarity -- parts-only, so it fires at BOM commit (before
     # the wiring stage adds connections). A non-polarized Device:C on a polarized

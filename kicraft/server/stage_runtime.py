@@ -232,7 +232,7 @@ def _work_unit_attempt_event(
 # (§9.11) in a single slot; on a complex board the model needs more correction
 # passes than the simpler, smaller-slot stages, so they floor higher (BOM must
 # also resolve every symbol/footprint to a real library entry within its budget).
-_STAGE_MIN_RETRIES = {"architecture": 3, "wiring": 7, "bom": 4}
+_STAGE_MIN_RETRIES = {"architecture": 6, "wiring": 7, "bom": 4}
 
 # In-stream reasoning-loop breakout budget: when the client aborts a completion
 # (finish_reason="reasoning_loop"), retry once with reasoning disabled + higher
@@ -1688,7 +1688,7 @@ def _drive_work_unit_stage(
             {"role": "user", "content": user},
         ]
         active_client = stage_client
-        if stage == "bom":
+        if stage == "bom" or unit_attempt > 1:
             escalation_profile = getattr(getattr(stage_client, "s", None), "escalation_profile", "")
             switch_profile = getattr(stage_client, "with_design_profile", None)
             if escalation_profile and callable(switch_profile):
@@ -1828,10 +1828,18 @@ def _drive_work_unit_stage(
                     "",
                 )
                 switch = getattr(active_client, "with_design_profile", None)
-                if transient and not fallback_spent and fallback_profile and callable(switch):
-                    active_client = switch(fallback_profile)
-                    fallback_spent = True
-                    continue
+                if transient and not fallback_spent:
+                    active_profile = getattr(
+                        getattr(active_client, "s", None), "design_profile", None
+                    )
+                    if fallback_profile and fallback_profile != active_profile and callable(switch):
+                        active_client = switch(fallback_profile)
+                        fallback_spent = True
+                        continue
+                    if active_client is not stage_client:
+                        active_client = stage_client
+                        fallback_spent = True
+                        continue
                 return "terminal", failure, None, kind
             total_cost += facts.cost_usd
             provider_ok = True
