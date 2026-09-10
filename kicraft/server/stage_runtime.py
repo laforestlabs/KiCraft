@@ -232,7 +232,7 @@ def _work_unit_attempt_event(
 # (§9.11) in a single slot; on a complex board the model needs more correction
 # passes than the simpler, smaller-slot stages, so they floor higher (BOM must
 # also resolve every symbol/footprint to a real library entry within its budget).
-_STAGE_MIN_RETRIES = {"architecture": 6, "wiring": 7, "bom": 4}
+_STAGE_MIN_RETRIES = {"architecture": 3, "wiring": 7, "bom": 4}
 
 # In-stream reasoning-loop breakout budget: when the client aborts a completion
 # (finish_reason="reasoning_loop"), retry once with reasoning disabled + higher
@@ -1688,7 +1688,11 @@ def _drive_work_unit_stage(
             {"role": "user", "content": user},
         ]
         active_client = stage_client
-        if stage == "bom" or unit_attempt > 1:
+        if unit_attempt > 1 and stage != "bom":
+            # Retry escalation uses the pro route for wiring/stalled units. BOM is
+            # deliberately excluded: its large output cap times the pro completion
+            # price produces a per-call ceiling that exceeds the default project
+            # budget, so escalating BOM refuses every call at preflight.
             escalation_profile = getattr(getattr(stage_client, "s", None), "escalation_profile", "")
             switch_profile = getattr(stage_client, "with_design_profile", None)
             if escalation_profile and callable(switch_profile):
@@ -2357,7 +2361,10 @@ def _drive_work_unit_stage(
                 "commit": commit_result,
             }
             break
-        if aggregate_round == 0:
+        if aggregate_round == 0 and stage != "bom":
+            # Same budget rationale as the per-unit retry escalation: a pro BOM
+            # repair call cannot fit the default project budget, so BOM stays on
+            # the base route through aggregate repair as well.
             escalation_profile = getattr(getattr(stage_client, "s", None), "escalation_profile", "")
             switch_profile = getattr(stage_client, "with_design_profile", None)
             if escalation_profile and callable(switch_profile):

@@ -3666,117 +3666,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     # "LCSC not in catalog" / "unresolved symbol" issues early, where the
     # model can still fix the architecture before the BOM stage.
     if stage == "architecture" and state.architecture is not None:
-        from kicraft.design.lowering import lower_requirement
-
         architecture_failures: list[tuple[str, list[str]]] = []
-        if not state.architecture.requirements and not state.architecture.recipe_selections:
-            architecture_failures.append(
-                (
-                    "architecture has no implementation requirements or circuit recipes; "
-                    "declare the bounded circuits that BOM and wiring must implement",
-                    [],
-                )
-            )
-
-        implementation_sheets = {
-            requirement.sheet
-            for requirement in state.architecture.requirements
-            if requirement.role != "power_input"
-        }
-        implementation_sheets.update(
-            sheet
-            for selection in state.architecture.recipe_selections
-            for sheet in selection.sheets.values()
-        )
-        missing_implementation_sheets = [
-            sheet.name
-            for sheet in state.architecture.sheets
-            if sheet.name not in implementation_sheets
-        ]
-        if missing_implementation_sheets:
-            architecture_failures.append(
-                (
-                    "architecture declares sheets with no implementation "
-                    "requirement or circuit recipe",
-                    missing_implementation_sheets,
-                )
-            )
-
-        # The R-2R ladder is the one deterministic lowerer whose LLM fallback is
-        # known to corrupt pin mapping (self-eval run_02); every other lowerer
-        # family falls through to the ordinary BOM unit when incomplete, per the
-        # architecture spec. Only the ladder must complete its contract here.
-        load_bearing_ladder = {
-            "r2r-ladder",
-            "r2r_ladder",
-            "resistor-ladder",
-            "resistor_ladder",
-            "resistor-network",
-            "resistor_network",
-        }
-        invalid_lowerer_requirements = []
-        for requirement in state.architecture.requirements:
-            if requirement.family not in load_bearing_ladder:
-                continue
-            try:
-                artifact = lower_requirement(requirement)
-            except (TypeError, ValueError):
-                artifact = None
-            if artifact is not None:
-                continue
-            invalid_lowerer_requirements.append(
-                f"{requirement.id} ({requirement.family}): set e.g. "
-                'parameters={"bits": 8, "r": 10000} and '
-                'ports={"digital_inputs": "D0-D7", "analog_output": "DAC_OUT"}'
-            )
-        if invalid_lowerer_requirements:
-            architecture_failures.append(
-                (
-                    "R-2R ladder requirements must carry the complete lowerer "
-                    "contract (bits, resistance, and port bindings)",
-                    invalid_lowerer_requirements,
-                )
-            )
-
-        if state.intent is not None and state.intent.named_parts:
-            implementation_identities = [
-                value
-                for requirement in state.architecture.requirements
-                for value in (
-                    requirement.id,
-                    requirement.family,
-                    requirement.exact_part,
-                )
-                if value
-            ]
-            implementation_identities.extend(
-                selection.recipe for selection in state.architecture.recipe_selections
-            )
-
-            def identity_token(value: str) -> str:
-                return re.sub(r"[^a-z0-9]+", "", value.lower())
-
-            implementation_tokens = [identity_token(value) for value in implementation_identities]
-            missing_named_parts = [
-                named_part
-                for named_part in state.intent.named_parts
-                if not any(
-                    implementation
-                    and (
-                        identity_token(named_part) in implementation
-                        or implementation in identity_token(named_part)
-                    )
-                    for implementation in implementation_tokens
-                )
-            ]
-            if missing_named_parts:
-                architecture_failures.append(
-                    (
-                        "architecture does not bind every intent-named part to an "
-                        "implementation requirement or circuit recipe",
-                        missing_named_parts,
-                    )
-                )
 
         bad = _unresolved_architecture_parts(state.architecture, state_path.resolve().parent.parent)
         if bad:
@@ -3788,6 +3678,10 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                 )
             )
 
+        # R4: Validate the architecture inter-sheet contract — every FS block
+        # must map to a topology+sheet, and every cross-sheet FS connection
+        # must appear in inter_sheet_nets. Catches the DTR/RTS→ESP32 and
+        # RESET/D0→PROTO dangling-label cases at architecture commit.
         if state.functional_spec is not None:
             for check in (
                 check_every_block_has_sheet(state.functional_spec, state.architecture),

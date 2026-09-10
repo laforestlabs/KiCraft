@@ -306,7 +306,7 @@ def test_wiring_gets_a_larger_token_budget():
 
 def test_complex_stages_get_larger_retry_budgets():
     assert _stage_max_retries("bom", 2) == 4
-    assert _stage_max_retries("architecture", 2) == 6
+    assert _stage_max_retries("architecture", 2) == 3
 
 
 def test_bom_has_a_symbol_search_tool():
@@ -2622,7 +2622,7 @@ def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monk
         False,
         False,
     ]
-    assert [call["model"] for call in client.calls] == [str(DESIGN_PROFILES["pro"]["model"])] * 5
+    assert [call["model"] for call in client.calls] == [str(DESIGN_PROFILES["flash"]["model"])] * 5
 
 
 @pytest.mark.parametrize(
