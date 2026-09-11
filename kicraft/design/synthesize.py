@@ -19,6 +19,7 @@ function raises ``SynthesisInputError`` BEFORE touching the filesystem.
 If §9 validation fails the function raises ``SynthesisValidationError``
 AFTER writing files (so the user can inspect what was produced).
 """
+
 from __future__ import annotations
 
 import logging
@@ -40,6 +41,7 @@ from .synthesis.validation import (
     SynthesisValidationError,
     bom_parts_on_unknown_sheets,
     collect_validations,
+    check_typed_led_current_paths,
     run_solve_subcircuits_smoke,
 )
 
@@ -65,15 +67,9 @@ def _require_state(state: ConversationState) -> None:
     if missing:
         raise SynthesisInputError(f"synthesis requires slots: {', '.join(missing)}")
 
-    bad = [
-        ref for ref, _ in bom_parts_on_unknown_sheets(
-            state.architecture, state.bom
-        )
-    ]
+    bad = [ref for ref, _ in bom_parts_on_unknown_sheets(state.architecture, state.bom)]
     if bad:
-        raise SynthesisInputError(
-            f"BOM parts reference sheets not in architecture: {bad}"
-        )
+        raise SynthesisInputError(f"BOM parts reference sheets not in architecture: {bad}")
 
 
 def _install_library_sheets(
@@ -108,7 +104,8 @@ def _install_library_sheets(
 
     library_sheet_names = {s.name for s in library_sheets}
     project_refs: list[str] = [
-        p.ref for p in state.bom.parts  # type: ignore[union-attr]
+        p.ref
+        for p in state.bom.parts  # type: ignore[union-attr]
         if p.sheet not in library_sheet_names
     ]
 
@@ -127,9 +124,7 @@ def _install_library_sheets(
             )
         sheet_uuid = sheet_uuid_by_name.get(sheet.name)
         if sheet_uuid is None:
-            raise SynthesisInputError(
-                f"no pre-allocated UUID for library sheet {sheet.name!r}"
-            )
+            raise SynthesisInputError(f"no pre-allocated UUID for library sheet {sheet.name!r}")
         result = install_leaf(
             leaf,
             project_dir=project_dir,
@@ -175,8 +170,14 @@ def run(
     # hierarchy degenerate (the place/route engine then finds 0 leaf subcircuits and
     # fails). Scoped to this dir's own generated files by extension -- the
     # `.experiments/` and `.kicraft/` trees (subdirectories) are untouched.
-    for pat in ("*.kicad_sch", "*.kicad_pcb", "*.kicad_pro", "*.kicad_prl",
-                "*_autoplacer.json", "*_erc.rpt"):
+    for pat in (
+        "*.kicad_sch",
+        "*.kicad_pcb",
+        "*.kicad_pro",
+        "*.kicad_prl",
+        "*_autoplacer.json",
+        "*_erc.rpt",
+    ):
         for stale in project_dir.glob(pat):
             if stale.is_file():
                 stale.unlink()
@@ -206,6 +207,7 @@ def run(
         split_dense_sheets_enabled,
         split_dense_soc_sheets,
     )
+
     # A decap-only ArraySpec (per-LED bypass caps mistakenly declared as their
     # own grid) would grid the caps on top of the LED array -> data ties blocked
     # -> doomed route. Drop it first so the caps become array companions.
@@ -237,9 +239,7 @@ def run(
 
     sheet_instances = build_sheet_instances(state.architecture, state.bom)
 
-    fragments, library_leaves = _install_library_sheets(
-        state, project_dir, sheet_instances
-    )
+    fragments, library_leaves = _install_library_sheets(state, project_dir, sheet_instances)
 
     library_sheet_names = {name for name in library_leaves}
     root, leaves = emit_schematic(
@@ -292,9 +292,7 @@ def run(
         # crash the whole build with a bare traceback (live board 627).
         # Surface it as a structured validation failure instead, so the
         # caller records it and the wiring/BOM stage can be re-driven.
-        failure = CheckResult(
-            name="9.27 pcb-stub pad binding", ok=False, message=str(exc)
-        )
+        failure = CheckResult(name="9.27 pcb-stub pad binding", ok=False, message=str(exc))
         raise SynthesisValidationError(
             [failure],
             artifacts=artifacts.model_copy(update={"status": "failed"}),
@@ -303,11 +301,10 @@ def run(
     stage_3d_models(project_dir, state.bom)
 
     results = collect_validations(project_dir, state.project_stem, bom=state.bom)
+    results.append(check_typed_led_current_paths(state.architecture, state.bom))
     if smoke:
         results.append(
-            run_solve_subcircuits_smoke(
-                project_dir, state.project_stem, timeout_s=smoke_timeout_s
-            )
+            run_solve_subcircuits_smoke(project_dir, state.project_stem, timeout_s=smoke_timeout_s)
         )
     failures = [r for r in results if not r.ok]
     if failures:

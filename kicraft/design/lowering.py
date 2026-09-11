@@ -14,7 +14,7 @@ from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kicraft.design.models import CircuitRequirement
+from kicraft.design.models import CircuitRequirement, JsonScalar
 
 
 class LoweringGroup(BaseModel):
@@ -27,6 +27,8 @@ class LoweringGroup(BaseModel):
     symbol: str
     footprint: str
     mpn: str | None = None
+    datasheet: str | None = None
+    sourcing_note: str | None = None
 
 
 class LoweringPin(BaseModel):
@@ -36,6 +38,15 @@ class LoweringPin(BaseModel):
     index: int = Field(default=0, ge=0)
     pin: str
     net: str
+
+
+class LoweringNoConnect(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str
+    index: int = Field(default=0, ge=0)
+    pin: str
+    reason: str
 
 
 class LoweringCalculation(BaseModel):
@@ -55,8 +66,25 @@ class LoweringArtifact(BaseModel):
     requirement_id: str
     groups: tuple[LoweringGroup, ...]
     pins: tuple[LoweringPin, ...]
+    no_connects: tuple[LoweringNoConnect, ...] = ()
     assumptions: tuple[str, ...] = ()
     calculations: tuple[LoweringCalculation, ...] = ()
+    # Compiler-proven semantic identities, never copied from requirement labels.
+    named_part_identities: tuple[str, ...] = ()
+
+
+class LoweringParameterDiagnostic(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    requirement_id: str
+    sheet: str
+    family: str
+    lowerer_id: str
+    parameter: str
+    value: JsonScalar
+    choices: tuple[JsonScalar, ...]
+    missing: bool
+    constraint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +94,9 @@ class RegisteredLowerer:
     build: Callable[[CircuitRequirement], LoweringArtifact | None]
     parameter_keys: tuple[str, ...] = ()
     port_keys: tuple[str, ...] = ()
+    required_port_keys: tuple[str, ...] = ()
+    parameter_choices: tuple[tuple[str, tuple[JsonScalar, ...]], ...] = ()
+    required_parameter_keys: tuple[str, ...] = ()
 
 
 _REGISTRY: dict[str, RegisteredLowerer] = {}
@@ -94,11 +125,90 @@ def lowerer_summaries() -> list[dict]:
         {
             "lowerer": lowerer.lowerer_id,
             "families": sorted(lowerer.families),
-            "parameters": list(lowerer.parameter_keys),
-            "ports": list(lowerer.port_keys),
+            "parameter_keys": list(lowerer.parameter_keys),
+            "port_keys": list(lowerer.port_keys),
+            **(
+                {"required_port_keys": list(lowerer.required_port_keys)}
+                if lowerer.required_port_keys
+                else {}
+            ),
+            **(
+                {
+                    "parameter_choices": {
+                        key: list(values) for key, values in lowerer.parameter_choices
+                    }
+                }
+                if lowerer.parameter_choices
+                else {}
+            ),
+            **(
+                {"required_parameter_keys": list(lowerer.required_parameter_keys)}
+                if lowerer.required_parameter_keys
+                else {}
+            ),
         }
         for lowerer in registered_lowerers()
     ]
+
+
+def lowerer_parameter_diagnostics(
+    requirement: CircuitRequirement,
+) -> list[LoweringParameterDiagnostic]:
+    """Report only declared finite/required contracts, not model-owned parameters."""
+    lowerer_id = _FAMILIES.get(requirement.family)
+    if lowerer_id is None:
+        return []
+    lowerer = _REGISTRY[lowerer_id]
+    if not lowerer.parameter_choices and not lowerer.required_parameter_keys:
+        return []
+    choices_by_key = dict(lowerer.parameter_choices)
+    diagnostics = []
+    for key in dict.fromkeys((*lowerer.required_parameter_keys, *choices_by_key)):
+        missing = key not in requirement.parameters
+        if missing and key not in lowerer.required_parameter_keys:
+            continue
+        value = requirement.parameters.get(key)
+        choices = choices_by_key.get(key, ())
+        # JSON booleans must not compare equal to numeric choices such as rows=1.
+        if not missing and (
+            not choices
+            or any(
+                value == choice and isinstance(value, bool) == isinstance(choice, bool)
+                for choice in choices
+            )
+        ):
+            continue
+        diagnostics.append(
+            LoweringParameterDiagnostic(
+                requirement_id=requirement.id,
+                sheet=requirement.sheet,
+                family=requirement.family,
+                lowerer_id=lowerer_id,
+                parameter=key,
+                value=value,
+                choices=choices,
+                missing=missing,
+            )
+        )
+    if lowerer_id == "led-current-resistor@1" and not diagnostics:
+        try:
+            _led_resistor_parameters(requirement)
+        except ValueError as exc:
+            key, constraint = exc.args
+            diagnostics.append(
+                LoweringParameterDiagnostic(
+                    requirement_id=requirement.id,
+                    sheet=requirement.sheet,
+                    family=requirement.family,
+                    lowerer_id=lowerer_id,
+                    parameter=key,
+                    value=requirement.parameters.get(key),
+                    choices=(),
+                    missing=key not in requirement.parameters,
+                    constraint=constraint,
+                )
+            )
+    return diagnostics
 
 
 def lower_requirement(requirement: CircuitRequirement | dict) -> LoweringArtifact | None:
@@ -106,7 +216,22 @@ def lower_requirement(requirement: CircuitRequirement | dict) -> LoweringArtifac
     lowerer_id = _FAMILIES.get(requirement.family)
     if lowerer_id is None:
         return None
-    return _REGISTRY[lowerer_id].build(requirement)
+    lowerer = _REGISTRY[lowerer_id]
+    if requirement.parameters.keys() - lowerer.parameter_keys or lowerer_parameter_diagnostics(
+        requirement
+    ):
+        return None
+    artifact = lowerer.build(requirement)
+    if artifact is not None and requirement.exact_part:
+        # Only a physically identified group can prove an exact-part request.
+        # Generic values/footprints must not claim an unverified manufacturer part.
+        identity = requirement.exact_part.casefold()
+        if not any(
+            group.mpn and identity in {group.mpn.casefold(), group.value.casefold()}
+            for group in artifact.groups
+        ):
+            return None
+    return artifact
 
 
 def _artifact(
@@ -115,12 +240,14 @@ def _artifact(
     groups: tuple[LoweringGroup, ...],
     pins: tuple[LoweringPin, ...],
     *,
+    no_connects: tuple[LoweringNoConnect, ...] = (),
     assumptions: tuple[str, ...] = (),
     calculations: tuple[LoweringCalculation, ...] = (),
+    named_part_identities: tuple[str, ...] = (),
 ) -> LoweringArtifact:
     roles = {group.role: group.quantity for group in groups}
     seen: set[tuple[str, int, str]] = set()
-    for pin in pins:
+    for pin in (*pins, *no_connects):
         if pin.role not in roles or pin.index >= roles[pin.role]:
             raise ValueError(
                 f"{lowerer_id}: pin references unknown role/index {pin.role}[{pin.index}]"
@@ -134,8 +261,10 @@ def _artifact(
         requirement_id=requirement.id,
         groups=groups,
         pins=pins,
+        no_connects=no_connects,
         assumptions=assumptions,
         calculations=calculations,
+        named_part_identities=named_part_identities,
     )
 
 
@@ -233,11 +362,9 @@ def _connector(
     except (TypeError, ValueError):
         return None
     count = len(requirement.ports)
-    if rows not in (1, 2) or count % rows:
+    if count % rows:
         return None
     per_row = count // rows
-    if terminal and rows != 1:
-        return None
     if terminal:
         if not 2 <= count <= 12:
             return None
@@ -246,22 +373,156 @@ def _connector(
         lowerer_id = "screw-terminal@1"
         value = f"ScrewTerminal_1x{count:02d}"
     else:
+        gender = str(requirement.parameters.get("gender", "male")).lower()
+        if gender not in ("male", "female"):
+            return None
         symbol = f"Connector_Generic:Conn_{rows:02d}x{per_row:02d}"
-        footprint = f"Connector_PinHeader_2.54mm:PinHeader_{rows}x{per_row:02d}_P2.54mm_Vertical"
+        if rows == 2 and per_row > 1:
+            symbol += "_Odd_Even"
+        if gender == "female":
+            footprint = f"Connector_PinSocket_2.54mm:PinSocket_{rows}x{per_row:02d}_P2.54mm_Vertical"
+            value = f"PinSocket_{rows}x{per_row:02d}"
+        else:
+            footprint = f"Connector_PinHeader_2.54mm:PinHeader_{rows}x{per_row:02d}_P2.54mm_Vertical"
+            value = f"PinHeader_{rows}x{per_row:02d}"
         lowerer_id = "pin-header@1"
-        value = f"PinHeader_{rows}x{per_row:02d}"
     group = LoweringGroup(
         role="connector", reference_prefix="J", value=value, symbol=symbol, footprint=footprint
     )
     pins = tuple(
         LoweringPin(role="connector", pin=str(index), net=net)
         for index, net in enumerate(requirement.ports.values(), 1)
+        if net != "NC"
     )
-    return _artifact(lowerer_id, requirement, (group,), pins)
+    no_connects = tuple(
+        LoweringNoConnect(
+            role="connector",
+            pin=str(index),
+            reason="reserved contact is intentionally unconnected",
+        )
+        for index, net in enumerate(requirement.ports.values(), 1)
+        if net == "NC"
+    )
+    return _artifact(lowerer_id, requirement, (group,), pins, no_connects=no_connects)
+
+
+def _usb_c_breakout(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """Expose declared contacts of a verified receptacle, without terminations."""
+    ports = requirement.ports
+    superspeed = {
+        "tx1p": "A2",
+        "tx1n": "A3",
+        "tx2p": "B2",
+        "tx2n": "B3",
+        "rx1p": "B11",
+        "rx1n": "B10",
+        "rx2p": "A11",
+        "rx2n": "A10",
+    }
+    supported = {"vbus", "gnd", "shield", "usb_dp", "usb_dm", "cc1", "cc2", "sbu1", "sbu2"}
+    supported.update(superspeed)
+    if (
+        not {"vbus", "gnd"} <= ports.keys()
+        or ports.keys() - supported
+        or any(not net.strip() for net in ports.values())
+        or ports["vbus"] == ports["gnd"]
+        or requirement.parameters
+    ):
+        # Missing bindings are not rails; unknown hardware constraints stay unresolved.
+        return None
+    superspeed_mpn = "12401610E4#2A"
+    use_superspeed = bool(ports.keys() & superspeed.keys()) or (
+        requirement.exact_part is not None
+        and requirement.exact_part.casefold() == superspeed_mpn.casefold()
+    )
+    if use_superspeed:
+        # Amphenol drawing C12401610 rev C contact table; the installed land
+        # pattern uses A1..A12/B1..B12 and four shell pads sharing S1.
+        group = LoweringGroup(
+            role="connector",
+            reference_prefix="J",
+            value=superspeed_mpn,
+            mpn=superspeed_mpn,
+            symbol="Connector:USB_C_Receptacle",
+            footprint="Connector_USB:USB_C_Receptacle_Amphenol_12401610E4-2A",
+            datasheet="https://cdn.amphenol-cs.com/media/wysiwyg/files/drawing/c12401610_c.pdf",
+        )
+        pin_ports = [
+            *((number, "gnd") for number in ("A1", "A12", "B1", "B12")),
+            *((number, "vbus") for number in ("A4", "A9", "B4", "B9")),
+            ("A5", "cc1"),
+            ("B5", "cc2"),
+            ("S1", "shield"),
+            *((number, port) for port, number in superspeed.items()),
+        ]
+    else:
+        from kicraft.design.recipes import get_recipe
+
+        definition = get_recipe("usb-c-5v-sink@1")
+        connector = next(group for group in definition.parts if group.role == "connector")
+        group = LoweringGroup(
+            role="connector",
+            reference_prefix=connector.reference_prefix,
+            value=connector.value,
+            symbol=connector.symbol,
+            footprint=connector.footprint,
+            mpn=connector.mpn,
+        )
+        pin_ports = [(pin.pin, pin.net) for pin in definition.pins if pin.role == "connector"]
+    if requirement.exact_part and requirement.exact_part.casefold() != (group.mpn or "").casefold():
+        return None
+    pin_ports.extend(
+        (number, port)
+        for port, numbers in (
+            ("usb_dp", ("A6", "B6")),
+            ("usb_dm", ("A7", "B7")),
+            ("sbu1", ("A8",)),
+            ("sbu2", ("B8",)),
+        )
+        for number in numbers
+    )
+    pins = tuple(
+        LoweringPin(role="connector", pin=number, net=ports[port])
+        for number, port in pin_ports
+        if port in ports
+    )
+    no_connects = tuple(
+        LoweringNoConnect(
+            role="connector",
+            pin=number,
+            reason=f"{port} is not exposed by this receptacle contract",
+        )
+        for number, port in pin_ports
+        if port not in ports
+    )
+    return _artifact(
+        "usb-c-breakout@1",
+        requirement,
+        (group,),
+        pins,
+        no_connects=no_connects,
+        assumptions=(
+            "Unbound USB-C shell pads are intentionally unconnected; no CC pull-downs are fitted.",
+        ),
+    )
+
+
+def _numbered_connector_ports(requirement: CircuitRequirement) -> dict[str, str] | None:
+    # JSON objects have no physical ordering. Only explicit, contiguous pinN
+    # bindings establish the contact numbers of a generic header.
+    ports = requirement.ports
+    if set(ports) != {f"pin{index}" for index in range(1, len(ports) + 1)}:
+        return None
+    if any(not net.strip() for net in ports.values()):
+        return None
+    return {f"pin{index}": ports[f"pin{index}"] for index in range(1, len(ports) + 1)}
 
 
 def _pin_header(requirement: CircuitRequirement) -> LoweringArtifact | None:
-    return _connector(requirement)
+    ports = _numbered_connector_ports(requirement)
+    if ports is None:
+        return None
+    return _connector(requirement.model_copy(update={"ports": ports}))
 
 
 def _screw_terminal(requirement: CircuitRequirement) -> LoweringArtifact | None:
@@ -316,7 +577,8 @@ def _connector_bank(requirement: CircuitRequirement) -> LoweringArtifact | None:
 
 
 def _fpc_breakout(requirement: CircuitRequirement) -> LoweringArtifact | None:
-    if not requirement.ports or not 10 <= len(requirement.ports) <= 19:
+    ports = _numbered_connector_ports(requirement)
+    if ports is None or not 10 <= len(ports) <= 19:
         return None
     count = len(requirement.ports)
     try:
@@ -345,7 +607,7 @@ def _fpc_breakout(requirement: CircuitRequirement) -> LoweringArtifact | None:
     )
     pins = tuple(
         pin
-        for index, net in enumerate(requirement.ports.values(), 1)
+        for index, net in enumerate(ports.values(), 1)
         for pin in (
             LoweringPin(role="fpc", pin=str(index), net=net),
             LoweringPin(role="header", pin=str(index), net=net),
@@ -356,6 +618,11 @@ def _fpc_breakout(requirement: CircuitRequirement) -> LoweringArtifact | None:
 
 def _r2r(requirement: CircuitRequirement) -> LoweringArtifact | None:
     try:
+        if (
+            len(requirement.parameters.keys() & {"r_value", "r_series", "r"}) > 1
+            or len(requirement.parameters.keys() & {"two_r_value", "r_shunt"}) > 1
+        ):
+            return None
         bits = int(requirement.parameters.get("bits", 0))
     except (TypeError, ValueError):
         return None
@@ -443,15 +710,38 @@ def _r2r(requirement: CircuitRequirement) -> LoweringArtifact | None:
     return _artifact("r2r-ladder@1", requirement, (series, branch), tuple(pins))
 
 
+_LED_PARAMETER_KEYS = ("rail_voltage", "led_vf", "target_current_ma")
+
+
+def _led_resistor_parameters(requirement: CircuitRequirement) -> tuple[float, float, float]:
+    values = []
+    for key in _LED_PARAMETER_KEYS:
+        raw = requirement.parameters.get(key)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(key, "must be a finite number") from None
+        if isinstance(raw, bool) or not math.isfinite(value):
+            raise ValueError(key, "must be a finite number")
+        values.append(value)
+    rail, vf, current_ma = values
+    if not rail > vf > 0:
+        raise ValueError(
+            "rail_voltage",
+            f"must exceed positive led_vf={vf:g} V; a passive current limiter needs voltage headroom",
+        )
+    if not 1 <= current_ma <= 30:
+        raise ValueError("target_current_ma", "must be between 1 and 30 mA")
+    return rail, vf, current_ma
+
+
 def _led_resistor(requirement: CircuitRequirement) -> LoweringArtifact | None:
     ports = _require_ports(requirement, ("drive", "gnd"))
     try:
-        rail = float(requirement.parameters["rail_voltage"])
-        vf = float(requirement.parameters["led_vf"])
-        current_ma = float(requirement.parameters["target_current_ma"])
-    except (KeyError, TypeError, ValueError):
+        rail, vf, current_ma = _led_resistor_parameters(requirement)
+    except ValueError:
         return None
-    if ports is None or not (rail > vf > 0 and 1 <= current_ma <= 30):
+    if ports is None:
         return None
     ideal = (rail - vf) / (current_ma / 1000.0)
     value = _standard_value(ideal, _E24, ceiling=True)
@@ -461,8 +751,8 @@ def _led_resistor(requirement: CircuitRequirement) -> LoweringArtifact | None:
     pins = (
         LoweringPin(role="resistor", pin="1", net=ports["drive"]),
         LoweringPin(role="resistor", pin="2", net=node),
-        LoweringPin(role="led", pin="1", net=node),
-        LoweringPin(role="led", pin="2", net=ports["gnd"]),
+        LoweringPin(role="led", pin="2", net=node),
+        LoweringPin(role="led", pin="1", net=ports["gnd"]),
     )
     calculation = LoweringCalculation(
         output="series_resistance",
@@ -618,7 +908,14 @@ def _pullup(requirement: CircuitRequirement) -> LoweringArtifact | None:
 def _switch_input(requirement: CircuitRequirement) -> LoweringArtifact | None:
     ports = _require_ports(requirement, ("signal", "gnd", "vdd"))
     policy = str(requirement.parameters.get("pull_policy", ""))
-    if ports is None or policy not in ("internal", "external"):
+    active_level = str(requirement.parameters.get("active_level", "low"))
+    if (
+        ports is None
+        or len(set(ports.values())) != 3
+        or any(not net.strip() for net in ports.values())
+        or (policy == "internal" and "resistance" in requirement.parameters)
+        or requirement.exact_part
+    ):
         return None
     groups = [
         LoweringGroup(
@@ -631,14 +928,19 @@ def _switch_input(requirement: CircuitRequirement) -> LoweringArtifact | None:
     ]
     pins = [
         LoweringPin(role="switch", pin="1", net=ports["signal"]),
-        LoweringPin(role="switch", pin="2", net=ports["gnd"]),
+        LoweringPin(role="switch", pin="2", net=ports["gnd" if active_level == "low" else "vdd"]),
     ]
     if policy == "external":
-        groups.append(_passive("pullup", "R", str(requirement.parameters.get("resistance", "10k"))))
+        pull_role = "pullup" if active_level == "low" else "pulldown"
+        groups.append(
+            _passive(pull_role, "R", str(requirement.parameters.get("resistance", "10k")))
+        )
         pins.extend(
             (
-                LoweringPin(role="pullup", pin="1", net=ports["vdd"]),
-                LoweringPin(role="pullup", pin="2", net=ports["signal"]),
+                LoweringPin(
+                    role=pull_role, pin="1", net=ports["vdd" if active_level == "low" else "gnd"]
+                ),
+                LoweringPin(role=pull_role, pin="2", net=ports["signal"]),
             )
         )
     return _artifact("switch-input@1", requirement, tuple(groups), tuple(pins))
@@ -673,6 +975,42 @@ def _voltage_selector_switch(
     )
 
 
+def _coin_cell_holder(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    ports = _require_ports(requirement, ("positive", "negative"))
+    if (
+        ports is None
+        or any(not net.strip() for net in ports.values())
+        or ports["positive"] == ports["negative"]
+        or set(requirement.parameters) != {"cell_format"}
+        or requirement.parameters["cell_format"] != "CR2032"
+        or (requirement.exact_part is not None and requirement.exact_part != "BS-07-A1BJ001")
+    ):
+        return None
+    holder = LoweringGroup(
+        role="holder",
+        reference_prefix="BT",
+        value="CR2032 holder",
+        symbol="Device:Battery_Cell",
+        footprint="Battery:BatteryHolder_MYOUNG_BS-07-A1BJ001_CR2032",
+        mpn="BS-07-A1BJ001",
+        datasheet="https://www.lcsc.com/datasheet/C2979167.pdf",
+        sourcing_note="LCSC C2979167; MYOUNG BS-07-A1BJ001 holder; cell supplied separately",
+    )
+    # The installed MYOUNG land pattern marks pad 1 positive (the retaining
+    # contact), pad 2 negative. Device:Battery_Cell uses the same 1+/2- convention.
+    return _artifact(
+        "coin-cell-holder@1",
+        requirement,
+        (holder,),
+        (
+            LoweringPin(role="holder", pin="1", net=ports["positive"]),
+            LoweringPin(role="holder", pin="2", net=ports["negative"]),
+        ),
+        assumptions=("CR2032 holder only; the removable cell is supplied separately.",),
+        named_part_identities=("CR2032",),
+    )
+
+
 def _decoupling(requirement: CircuitRequirement) -> LoweringArtifact | None:
     ports = _require_ports(requirement, ("vdd", "gnd"))
     try:
@@ -696,6 +1034,32 @@ def _decoupling(requirement: CircuitRequirement) -> LoweringArtifact | None:
 
 for _lowerer in (
     RegisteredLowerer(
+        "usb-c-breakout@1",
+        frozenset({"usb-c-breakout"}),
+        _usb_c_breakout,
+        (),
+        (
+            "vbus",
+            "gnd",
+            "shield",
+            "usb_dp",
+            "usb_dm",
+            "cc1",
+            "cc2",
+            "sbu1",
+            "sbu2",
+            "tx1p",
+            "tx1n",
+            "tx2p",
+            "tx2n",
+            "rx1p",
+            "rx1n",
+            "rx2p",
+            "rx2n",
+        ),
+        required_port_keys=("vbus", "gnd"),
+    ),
+    RegisteredLowerer(
         "pin-header@1",
         frozenset(
             {
@@ -708,22 +1072,24 @@ for _lowerer in (
             }
         ),
         _pin_header,
-        ("rows",),
-        ("<one named port per pin>",),
+        ("rows", "gender"),
+        ("<pin1..pinN: contiguous explicit physical pin numbers>",),
+        parameter_choices=(("rows", (1, 2)), ("gender", ("male", "female"))),
     ),
     RegisteredLowerer(
         "screw-terminal@1",
         frozenset({"screw-terminal", "screw_terminal"}),
         _screw_terminal,
-        (),
+        ("rows",),
         ("<one named port per terminal>",),
+        parameter_choices=(("rows", (1,)),),
     ),
     RegisteredLowerer(
         "fpc-header-breakout@1",
         frozenset({"fpc-header-breakout"}),
         _fpc_breakout,
         ("pitch_mm",),
-        ("<one named port per pin>",),
+        ("<pin1..pinN: contiguous explicit physical pin numbers>",),
     ),
     RegisteredLowerer(
         "test-points@1",
@@ -761,6 +1127,7 @@ for _lowerer in (
         _led_resistor,
         ("rail_voltage", "led_vf", "target_current_ma", "color"),
         ("drive", "gnd"),
+        required_parameter_keys=_LED_PARAMETER_KEYS,
     ),
     RegisteredLowerer(
         "voltage-divider@1",
@@ -794,8 +1161,13 @@ for _lowerer in (
         "switch-input@1",
         frozenset({"switch-input"}),
         _switch_input,
-        ("pull_policy", "resistance"),
+        ("pull_policy", "resistance", "active_level"),
         ("signal", "gnd", "vdd"),
+        parameter_choices=(
+            ("pull_policy", ("internal", "external")),
+            ("active_level", ("low", "high")),
+        ),
+        required_parameter_keys=("pull_policy",),
     ),
     RegisteredLowerer(
         "voltage-selector-switch@1",
@@ -803,6 +1175,13 @@ for _lowerer in (
         _voltage_selector_switch,
         ("positions",),
         ("SEL0", "SEL1"),
+    ),
+    RegisteredLowerer(
+        "coin-cell-holder@1",
+        frozenset({"coin-cell-holder"}),
+        _coin_cell_holder,
+        ("cell_format",),
+        ("positive", "negative"),
     ),
     RegisteredLowerer(
         "explicit-decoupling@1",

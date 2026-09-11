@@ -1,32 +1,24 @@
-"""Deterministic "replace & rewire" reconcile at the wiring stage-commit.
+"""Atomically replace a standard host interface without discarding its circuit.
 
-When a brief named a validated standard form factor (e.g. Arduino shield), this
-replaces the LLM's generic stacking connectors with the standard's headers as
-REAL BOM parts, binds their power/ground pins to the design rails by net name,
-and marks the signal pins no-connect (they mate with the host board below, so
-they carry no on-board net). The result is a schematic/BOM/netlist whose edge
-interface is exactly the standard's -- the electrical half of replace & rewire.
-
-Env-gated by ``KICRAFT_FORM_FACTOR_ENFORCE`` (see :func:`enforce_enabled`) so it
-can never touch a normal build; it only runs when explicitly turned on for a
-shield dogfood run. ERC-correctness of the emitted schematic needs validation on
-a real build (a lone standard header, power-pin drive treatment) -- unit tests
-cover the BOM transformation, not ERC.
-
-Mechanical placement of these real headers at their fixed board positions is the
-compose half (``compose_scaffold`` + the ``_compose_artifacts`` fork); wiring
-that to consume these real parts (rather than inject synthetic ones) is the
-remaining integration step, tracked in the plan.
+Only the stacking interface is replaced; other headers (including prototyping
+pads) retain their physical and functional ownership. Requested signals are
+rebound by the standard's authoritative pin map, never converted to no-connect.
 """
 
 from __future__ import annotations
 
 import os
+import re
+from itertools import permutations
 
-from kicraft.design.models import is_power_or_ground_name
+from kicraft.design.models import (
+    BOM, Architecture, BomPart, InterSheetNet, NetConnection, PinEndpoint,
+    SheetPin, is_power_or_ground_name,
+)
 
 from . import get_template
-from .synthesis import standard_form_factor_bom_delta
+from .scaffold import standard_header_parts
+from .synthesis import _rail_key
 
 _STANDARD_MARKER = "standard form factor:"
 
@@ -72,156 +64,357 @@ def _already_standard(part) -> bool:
     return _STANDARD_MARKER in (getattr(part, "sourcing_note", "") or "")
 
 
+def _interface_parts(state, bom, arch):
+    """Footprint pitch is not ownership: a prototype header is not a host header."""
+    requirements = {r.id: r for r in arch.requirements} if arch else {}
+    sheets = {s.name: s for s in arch.sheets} if arch else {}
+    spec = getattr(state, "functional_spec", None)
+    blocks = {b.name: b for b in spec.blocks} if spec else {}
+    candidates = []
+    for part in bom.parts:
+        if not _is_stacking_header(part) or _already_standard(part):
+            continue
+        requirement = requirements.get(part.lowering_requirement_id)
+        if requirements:
+            # A typed circuit must establish the header's functional ownership.
+            # Never fall back to replacing every connector on its sheet.
+            if requirement is None or requirement.role != "connector":
+                continue
+            if requirement.functional_blocks:
+                descriptions = [
+                    f"{name} {getattr(blocks.get(name), 'purpose', '')}"
+                    for name in requirement.functional_blocks
+                ]
+            else:
+                sheet = sheets.get(part.sheet)
+                descriptions = [f"{part.sheet} {getattr(sheet, 'function', '')}"]
+            if not any(
+                re.search(r"\bstacking\b|\bpass[- ]through\b", text.replace("_", " "), re.I)
+                for text in descriptions
+            ):
+                continue
+            if requirement.exact_part:
+                raise ValueError(f"cannot replace exact-part standard header {part.ref}")
+            if (
+                part.resolution_source != "lowerer"
+                or part.resolution_id != "pin-header@1"
+                or part.lowering_role != "connector"
+                or part.lowering_index != 0
+            ):
+                raise ValueError(f"standard header {part.ref} lacks generic connector ownership")
+        if part.recipe_id or part.source_leaf:
+            raise ValueError(f"cannot replace physically owned standard header {part.ref}")
+        candidates.append(part)
+    return candidates
+
+
 def reconcile_standard_form_factor(state) -> list[str]:
-    """Rewire ``state.bom`` to the standard's headers. Returns human notes.
-
-    No-op (returns ``[]``) unless a validated standard was captured and the BOM
-    exists. Idempotent: previously-added standard headers are not re-dropped.
-    """
+    """Migrate geometry, ports and ownership together, or leave state untouched."""
     intent = getattr(state, "intent", None)
-    ff = getattr(intent, "form_factor", None) if intent is not None else None
-    template = get_template(getattr(ff, "standard", None) if ff is not None else None)
-    if template is None or not template.validated:
+    ff = getattr(intent, "form_factor", None)
+    template = get_template(getattr(ff, "standard", None))
+    original_bom = getattr(state, "bom", None)
+    if template is None or not template.validated or not getattr(original_bom, "parts", None):
         return []
-    bom = getattr(state, "bom", None)
-    if bom is None or not getattr(bom, "parts", None):
+    marked = [p for p in original_bom.parts if _already_standard(p)]
+    if marked:
+        roles = {p.sourcing_note for p in marked}
+        expected = {
+            f"{_STANDARD_MARKER} {template.key} {c.role}"
+            for c in template.fixed_connectors
+        }
+        if len(marked) != len(expected) or roles != expected:
+            raise ValueError("incomplete standard form-factor header ownership")
         return []
 
-    # Idempotent: a BOM that already carries the standard headers is done. A
-    # re-commit must not stack a second set.
-    if any(_already_standard(p) for p in bom.parts):
-        return []
-
-    notes: list[str] = []
-
-    # 1. LLM stacking connectors to replace (never the standard's own headers).
-    drop_refs = {
-        p.ref for p in bom.parts if _is_stacking_header(p) and not _already_standard(p)
+    # Work on copies: an unsupported signal, owner or schema must not leave a
+    # half-migrated BOM paired with the original architecture.
+    bom = original_bom.model_copy(deep=True)
+    original_arch = getattr(state, "architecture", None)
+    arch = original_arch.model_copy(deep=True) if original_arch else None
+    old_parts = _interface_parts(state, bom, arch)
+    requirements = {r.id: r for r in arch.requirements} if arch else {}
+    typed = bool(requirements)
+    if typed and not old_parts:
+        raise ValueError("standard form factor has no explicitly owned stacking interface")
+    host_sheet = old_parts[0].sheet if old_parts else bom.parts[0].sheet
+    old_refs = {p.ref for p in old_parts}
+    retained = [p for p in bom.parts if p.ref not in old_refs]
+    existing_j = [int(p.ref[1:]) for p in retained if re.fullmatch(r"J\d+", p.ref)]
+    geometry = standard_header_parts(
+        template, ref_start=max(existing_j, default=0) + 1, sheet=host_sheet
+    )
+    canonical_keys = {
+        _rail_key(pin["net"])
+        for header in geometry for pin in header["pins"] if pin["net"] is not None
     }
-    # 2. Host sheet: reuse a dropped connector's sheet, else the first part's.
-    host_sheet = None
-    if drop_refs:
-        host_sheet = next(p.sheet for p in bom.parts if p.ref in drop_refs)
-    elif bom.parts:
-        host_sheet = bom.parts[0].sheet
-    if host_sheet is None:
-        return []
+    owners = [requirements[p.lowering_requirement_id] for p in old_parts] if typed else []
+    if typed:
+        if len(owners) != len(geometry) or len({r.id for r in owners}) != len(owners):
+            raise ValueError("standard header migration requires one existing owner per fixed connector")
+        if len({tuple(sorted(r.functional_blocks)) for r in owners}) != 1:
+            raise ValueError("cannot redistribute standard ports across distinct functional owners")
+        # Preserve IDs/refs and choose the closest physical role by electrical
+        # coverage, not arbitrary BOM ordering or the erroneous old pin count.
+        old_parts = list(max(
+            permutations(old_parts),
+            key=lambda ordering: sum(
+                len(
+                    {_rail_key(n) for n in requirements[p.lowering_requirement_id].ports.values()}
+                    & {_rail_key(pin["net"]) for pin in header["pins"] if pin["net"]}
+                )
+                for p, header in zip(ordering, geometry)
+            ),
+        ))
 
-    # 3. Remove dropped parts + prune every reference to them (connections,
-    #    no-connects, and the ref-bearing BOM index fields the model validates).
-    if drop_refs:
-        bom.parts = [p for p in bom.parts if p.ref not in drop_refs]
-        pruned = 0
-        kept_conns = []
-        for c in bom.connections:
-            eps = [ep for ep in c.endpoints if ep.ref not in drop_refs]
-            pruned += len(c.endpoints) - len(eps)
-            if len(eps) >= 1:
-                c.endpoints = eps
-                kept_conns.append(c)
-            # a connection left with no endpoints is dropped entirely
-        bom.connections = kept_conns
-        bom.no_connect_pins = [
-            ep for ep in bom.no_connect_pins if ep.ref not in drop_refs
-        ]
-        # Ref-index fields (BOM validators reject a stale ref in any of these).
-        bom.component_zones = {
-            r: z for r, z in bom.component_zones.items() if r not in drop_refs
-        }
-        bom.thermal_refs = [r for r in bom.thermal_refs if r not in drop_refs]
-        bom.signal_flow_order = [
-            r for r in bom.signal_flow_order if r not in drop_refs
-        ]
-        bom.ic_groups = {
-            ic: [m for m in members if m not in drop_refs]
-            for ic, members in bom.ic_groups.items()
-            if ic not in drop_refs
-        }
-        kept_arrays = []
-        for spec in bom.arrays:
-            spec.refs = [r for r in spec.refs if r not in drop_refs]
-            if spec.refs:
-                kept_arrays.append(spec)
-        bom.arrays = kept_arrays
-        notes.append(
-            f"replaced {len(drop_refs)} LLM stacking connector(s) "
-            f"{sorted(drop_refs)} (pruned {pruned} endpoint(s))"
+    # Only reviewed spelling aliases from the standard contract are equivalent,
+    # never supplies that happen to have the same voltage. Two independently
+    # named onboard supplies are a contradiction, not permission to short them.
+    net_by_key = {}
+    for connection in bom.connections:
+        if any(ep.ref not in old_refs for ep in connection.endpoints):
+            if is_power_or_ground_name(connection.net_name):
+                key = _rail_key(connection.net_name)
+                previous = net_by_key.setdefault(key, connection.net_name)
+                if previous != connection.net_name:
+                    raise ValueError(f"distinct onboard rail bindings: {previous!r}, {connection.net_name!r}")
+    owner_ids = {r.id for r in owners}
+    for requirement in requirements.values():
+        if requirement.id not in owner_ids:
+            for net in requirement.ports.values():
+                previous = net_by_key.get(_rail_key(net))
+                if previous is not None and previous != net:
+                    raise ValueError(f"distinct functional rail bindings: {previous!r}, {net!r}")
+    for requirement in owners:
+        for net in requirement.ports.values():
+            key = _rail_key(net)
+            if key == "NC":
+                continue
+            if key not in canonical_keys:
+                raise ValueError(f"standard header cannot preserve requested signal {net!r}")
+            net_by_key.setdefault(key, net)
+    endpoint_keys = {}
+    for part in old_parts:
+        requirement = requirements.get(part.lowering_requirement_id)
+        if requirement:
+            for port, net in requirement.ports.items():
+                match = re.fullmatch(r"pin(\d+)", port)
+                if not match:
+                    raise ValueError(f"standard header {part.ref} needs explicit pinN ports")
+                endpoint_keys[part.ref, match.group(1)] = _rail_key(net)
+    for connection in bom.connections:
+        for ep in connection.endpoints:
+            if ep.ref not in old_refs:
+                continue
+            key = endpoint_keys.get((ep.ref, ep.pin), _rail_key(connection.net_name))
+            if key == "NC" and connection.net_name == "NC":
+                continue  # reserved contact, not a requested electrical signal
+            if key not in canonical_keys:
+                raise ValueError(f"standard header cannot preserve requested signal {connection.net_name!r}")
+            previous = net_by_key.get(key)
+            if previous is not None and _rail_key(previous) != _rail_key(connection.net_name):
+                raise ValueError(f"conflicting standard pin binding: {previous!r}, {connection.net_name!r}")
+            net_by_key.setdefault(key, connection.net_name)
+            endpoint_keys[ep.ref, ep.pin] = key
+
+    # An independently owned recipe/fabrication interface is not replaceable.
+    for manifest in bom.recipe_ownership:
+        if old_refs.intersection(manifest.refs):
+            raise ValueError("standard header belongs to a recipe ownership manifest")
+    for interface in bom.edge_interfaces:
+        if old_refs.intersection(interface.refs):
+            raise ValueError("standard header belongs to a fabrication edge interface")
+
+    parts = []
+    bound = {}
+    noconnects = []
+    for index, header in enumerate(geometry):
+        old = old_parts[index] if typed else None
+        part = BomPart(
+            ref=old.ref if old else header["ref"],
+            value=header["value"], symbol=header["symbol"],
+            footprint=header["footprint"], sheet=old.sheet if old else host_sheet,
+            sourcing_note=f"{_STANDARD_MARKER} {template.key} {header['role']}",
         )
+        ports = {}
+        for pin in header["pins"]:
+            net = net_by_key.get(_rail_key(pin["net"])) if pin["net"] else None
+            ep = PinEndpoint(ref=part.ref, pin=pin["pin"])
+            ports[f"pin{pin['pin']}"] = net or "NC"
+            if net is None:
+                noconnects.append(ep)
+            else:
+                bound.setdefault((part.sheet, net), []).append(ep)
+        if old:
+            requirement = requirements[old.lowering_requirement_id]
+            requirement.ports = ports
+            requirement.parameters = {"rows": 1, "gender": "female"}
+            # Same generic connector implementation and same functional owner;
+            # only its mistaken pin geometry has changed.
+            part.resolution_source = old.resolution_source
+            part.resolution_id = old.resolution_id
+            part.lowering_requirement_id = old.lowering_requirement_id
+            part.lowering_role = old.lowering_role
+            part.lowering_index = old.lowering_index
+            part.side = old.side
+            part.assembly = old.assembly
+        parts.append(part)
 
-    # 4. Add the standard headers as real parts, binding each pin onto a rail
-    #    the design ALREADY carries (else no-connect). The design's rails are its
-    #    power/ground nets remaining after the drop above (global by name, so the
-    #    header binds cross-sheet safely by re-using the design's own net name --
-    #    which is what stops KiCad merging a duplicate +3V3/3V3 rail and colliding
-    #    the regulator's driver with the emitter's PWR_FLAG).
-    design_rails = frozenset(
-        c.net_name
-        for c in bom.connections
-        if c.endpoints and is_power_or_ground_name(c.net_name)
-    )
-    existing = {p.ref for p in bom.parts}
-    parts, rail_conns, noconnects = standard_form_factor_bom_delta(
-        template, existing, sheet=host_sheet, design_rails=design_rails
-    )
-    bom.parts.extend(parts)
-    bom.connections.extend(rail_conns)
-    bom.no_connect_pins.extend(noconnects)
-    bound_nets = sorted({c.net_name for c in rail_conns})
-    notes.append(
-        f"added {len(parts)} {template.key} header(s) on sheet {host_sheet!r}: "
-        f"{[p.ref for p in parts]}; bound pins to {bound_nets or 'no'} rail(s); "
-        f"{len(noconnects)} pin(s) no-connect"
-    )
-
-    # Loud, not latent: every original stacking header must have been dropped in
-    # step 3. If one survived (a footprint naming ``_is_stacking_header`` failed to
-    # recognize), the scaffold's headers now coexist with the LLM's -- the exact
-    # setup that collides a leaf ref against its parent-local scaffold twin at
-    # compose. Fail HERE, naming the offending part+footprint, instead of surfacing
-    # a cryptic "Parent-local component ref 'J4' collides with a child" later (WS5).
-    survivors = [
-        (p.ref, getattr(p, "footprint", ""))
-        for p in bom.parts
-        if _is_stacking_header(p) and not _already_standard(p)
+    # Keep every non-interface endpoint, including prototype-pad connections.
+    kept_connections = []
+    for connection in bom.connections:
+        connection.endpoints = [ep for ep in connection.endpoints if ep.ref not in old_refs]
+        if connection.endpoints:
+            key = _rail_key(connection.net_name)
+            if key in canonical_keys and key in net_by_key:
+                connection.net_name = net_by_key[key]
+            kept_connections.append(connection)
+    bom.parts = retained + parts
+    bom.connections = kept_connections + [
+        NetConnection(sheet=sheet, net_name=net, endpoints=endpoints)
+        for (sheet, net), endpoints in bound.items()
     ]
-    if survivors:
-        raise ValueError(
-            "form-factor reconcile left un-replaced stacking header(s) alongside "
-            f"the standard's scaffold: {survivors}. _is_stacking_header did not "
-            "recognize the footprint -- broaden its detection so this ref is dropped "
-            "(it would otherwise collide with a scaffold-added ref at compose)."
-        )
+    bom.no_connect_pins = [ep for ep in bom.no_connect_pins if ep.ref not in old_refs] + noconnects
 
-    # 5. Consolidating the headers onto one host sheet can leave the sheets that
-    #    held only LLM connectors with no parts at all. An empty sheet is a
-    #    degenerate leaf -- the placement engine aborts on a leaf subcircuit "with
-    #    no matching components". Drop those emptied sheets from the architecture
-    #    (and any inter-sheet net that referenced them) so the hierarchy the
-    #    schematic + compose see matches the rewired BOM.
-    notes += _prune_emptied_sheets(state, bom)
-    return notes
+    if typed:
+        # Ref indexes still point to the same physical owners. Pin-specific hints
+        # must follow the electrical signal rather than retain an obsolete pad.
+        new_pins = {}
+        for connection in bom.connections:
+            for ep in connection.endpoints:
+                if ep.ref in old_refs:
+                    new_pins.setdefault((ep.ref, _rail_key(connection.net_name)), []).append(ep.pin)
+        for hint in bom.placement_hints:
+            if hint.anchor_ref in old_refs and hint.anchor_pin is not None:
+                key = endpoint_keys.get((hint.anchor_ref, hint.anchor_pin))
+                choices = new_pins.get((hint.anchor_ref, key), [])
+                if len(choices) != 1:
+                    raise ValueError("cannot unambiguously migrate standard-header placement anchor")
+                hint.anchor_pin = choices[0]
+    else:
+        # Legacy untyped designs have no durable requirement IDs to retain.
+        bom.component_zones = {r: z for r, z in bom.component_zones.items() if r not in old_refs}
+        bom.thermal_refs = [r for r in bom.thermal_refs if r not in old_refs]
+        bom.signal_flow_order = [r for r in bom.signal_flow_order if r not in old_refs]
+        bom.ic_groups = {
+            r: [m for m in members if m not in old_refs]
+            for r, members in bom.ic_groups.items() if r not in old_refs
+        }
+        for spec in bom.arrays:
+            spec.refs = [r for r in spec.refs if r not in old_refs]
+        bom.arrays = [spec for spec in bom.arrays if spec.refs]
+        if any(h.ref in old_refs or h.anchor_ref in old_refs for h in bom.placement_hints):
+            raise ValueError("cannot discard standard-header placement ownership")
+        if arch:
+            _migrate_emptied_sheets(arch, bom, {p.sheet for p in old_parts}, host_sheet)
+
+    if arch:
+        # Header-only spelling aliases also occur in architecture rail and
+        # inter-sheet contracts. Migrate those names in the same transaction.
+        def canonical_name(net):
+            return net_by_key.get(_rail_key(net), net)
+
+        arch.power_nets = list(dict.fromkeys(canonical_name(net) for net in arch.power_nets))
+        rails = {}
+        for net, voltage in arch.rail_voltages.items():
+            name = canonical_name(net)
+            if name in rails and rails[name] != voltage:
+                raise ValueError(f"conflicting standard rail voltage for {name!r}")
+            rails[name] = voltage
+        arch.rail_voltages = rails
+        nets = {}
+        for net in arch.inter_sheet_nets:
+            net.name = canonical_name(net.name)
+            if net.name not in nets:
+                nets[net.name] = net
+                continue
+            endpoints = {ep.sheet: ep for ep in nets[net.name].endpoints}
+            for ep in net.endpoints:
+                previous = endpoints.get(ep.sheet)
+                if previous is not None and previous.direction != ep.direction:
+                    raise ValueError("conflicting aliased inter-sheet net directions")
+                endpoints[ep.sheet] = ep
+            nets[net.name].endpoints = list(endpoints.values())
+        arch.inter_sheet_nets = list(nets.values())
+        # Redistribution can move a rail onto a header sheet that did not
+        # previously expose it (R13's +3V3). Derive those sheet endpoints from
+        # real parts/ports, retaining existing direction contracts where present.
+        if typed:
+            net_sheets = {}
+            for requirement in arch.requirements:
+                for net in requirement.ports.values():
+                    if net != "NC":
+                        net_sheets.setdefault(net, set()).add(requirement.sheet)
+            part_sheets = {p.ref: p.sheet for p in bom.parts}
+            for connection in bom.connections:
+                net_sheets.setdefault(connection.net_name, set()).update(
+                    part_sheets[ep.ref] for ep in connection.endpoints
+                )
+            nets = {net.name: net for net in arch.inter_sheet_nets}
+            for net in set(net_by_key.values()):
+                sheets = net_sheets.get(net, set())
+                if len(sheets) < 2:
+                    nets.pop(net, None)
+                    continue
+                previous = {ep.sheet: ep for ep in nets[net].endpoints} if net in nets else {}
+                nets[net] = InterSheetNet(name=net, endpoints=[
+                    previous[sheet] if sheet in previous else SheetPin(sheet=sheet, direction="bidirectional")
+                    for sheet in sorted(sheets)
+                ])
+            arch.inter_sheet_nets = list(nets.values())
+
+    bom = BOM.model_validate(bom.model_dump())
+    if arch:
+        arch = Architecture.model_validate(arch.model_dump())
+    if hasattr(state, "model_dump"):
+        payload = state.model_dump()
+        payload["bom"] = bom.model_dump()
+        payload["architecture"] = arch.model_dump() if arch else None
+        type(state).model_validate(payload)
+    # Publish only after the complete candidate is valid; preserve callers'
+    # references to these models.
+    for field in type(bom).model_fields:
+        setattr(original_bom, field, getattr(bom, field))
+    if arch:
+        for field in type(arch).model_fields:
+            setattr(original_arch, field, getattr(arch, field))
+    return [
+        f"replaced stacking interface {sorted(old_refs)} with {template.key} "
+        f"{[(p.ref, p.lowering_requirement_id, p.sheet) for p in parts]}; "
+        f"preserved requested nets {sorted({net for _, net in bound})}; "
+        f"retained non-interface parts {[p.ref for p in retained]}"
+    ]
 
 
-def _prune_emptied_sheets(state, bom) -> list[str]:
-    """Remove architecture sheets left with no BOM parts by the rewire, and any
-    inter-sheet net endpoint that pointed at them. Returns human notes."""
-    arch = getattr(state, "architecture", None)
-    if arch is None or not getattr(arch, "sheets", None):
-        return []
+def _migrate_emptied_sheets(arch, bom, replaced_sheets, host_sheet):
+    """Move only emptied interface-sheet identities, not unrelated functions."""
     used = {p.sheet for p in bom.parts}
-    keep = [s for s in arch.sheets if s.name in used]
-    dropped = {s.name for s in arch.sheets if s.name not in used}
+    dropped = replaced_sheets - used
     if not dropped:
-        return []
-    arch.sheets = keep
-    if getattr(arch, "inter_sheet_nets", None):
-        surviving = []
-        for isn in arch.inter_sheet_nets:
-            isn.endpoints = [ep for ep in isn.endpoints if ep.sheet not in dropped]
-            if len(isn.endpoints) >= 2:  # still spans >=2 sheets -> keep
-                surviving.append(isn)
-        arch.inter_sheet_nets = surviving
-    return [f"pruned emptied sheet(s) {sorted(dropped)}"]
+        return
+    arch.sheets = [s for s in arch.sheets if s.name not in dropped]
+    for requirement in arch.requirements:
+        if requirement.sheet in dropped:
+            requirement.sheet = host_sheet
+    for selection in arch.recipe_selections:
+        selection.sheets = {
+            role: host_sheet if sheet in dropped else sheet
+            for role, sheet in selection.sheets.items()
+        }
+    surviving = []
+    for net in arch.inter_sheet_nets:
+        endpoints = {}
+        for endpoint in net.endpoints:
+            if endpoint.sheet in dropped:
+                endpoint.sheet = host_sheet
+            previous = endpoints.get(endpoint.sheet)
+            if previous is not None and previous.direction != endpoint.direction:
+                raise ValueError("cannot merge conflicting standard-interface sheet directions")
+            endpoints[endpoint.sheet] = endpoint
+        net.endpoints = list(endpoints.values())
+        if len(net.endpoints) > 1:
+            surviving.append(net)
+    arch.inter_sheet_nets = surviving
 
 
 __all__ = ["enforce_enabled", "reconcile_standard_form_factor"]

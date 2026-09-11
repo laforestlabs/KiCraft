@@ -838,80 +838,45 @@ def split_cross_sheet_connections(bom) -> list[str]:
 
 
 def reconcile_inter_sheet_nets(architecture, bom) -> list[str]:
-    """Align ``architecture.inter_sheet_nets`` with the crossings the wiring
-    stage actually realized, so the wiring stage is never handed a cross-sheet
-    contract it has no power to edit.
+    """Add wiring-proven crossings without weakening architecture contracts.
 
-    The wiring stage emits only ``connections``/``no_connect_pins`` — it cannot
-    add or remove an ``inter_sheet_nets`` entry (those freeze at the architecture
-    stage). Two failure modes follow directly, and each made real boards
-    unbuildable (KC-WFFXZ3's ESP32 auto-reset; the proto-shield PROTO AREA):
+    Wiring may reveal a real crossing omitted by architecture, so a signal
+    realized on two or more sheets is promoted deterministically. Declared
+    crossings and endpoints are never removed: wiring owns connectivity, not
+    architecture, and §9.14 must reject any declared endpoint it failed to
+    realize.
 
-      * A net the wiring stage legitimately wires across two sheets but that
-        architecture never declared is flagged dangling by §9.15 on each side
-        (it exempts only *declared* inter-sheet nets), and the emitter draws two
-        disconnected local labels so the net would not even connect. The model
-        cannot escape this — it cannot declare the net. **ADD** every signal net
-        realized on >=2 sheets to ``inter_sheet_nets`` (e.g. EN/IO0 to the MCU).
-
-      * A signal net architecture declared as crossing but that wiring only ever
-        wires on one sheet — its real consumers live there (DTR/RTS at the
-        auto-reset transistors) — leaves the other sheet's pin with no label, so
-        §9.14 can never pass because nothing on that sheet consumes the net.
-        **DROP** it; it is not actually inter-sheet.
-
-    Net effect: a signal net is inter-sheet iff it is wired (under one name) on
-    >=2 sheets. Power/ground inter-sheet nets are preserved verbatim — they join
-    globally through power symbols, not per-pin connections, so realization does
-    not apply (§9.11 owns their per-pin coverage).
-
-    Because it only ever rewrites a contract the wiring stage failed to satisfy,
-    it is a no-op on any design that already passes §9.14/§9.15: such a design
-    has every cross-sheet net declared with all endpoints realized, and no
-    undeclared net wired across sheets. Inconsistent-name dangles (the
-    SOIL_MOISTURE_BLE USB_DP_POWER/USB_DP_ESP32 split) stay caught — each name
-    is single-sheet, so nothing is promoted and §9.15 still fires.
-
-    Mutates ``architecture.inter_sheet_nets`` in place; returns the changes made,
+    Mutates ``architecture.inter_sheet_nets`` in place and returns additions
     for logging.
     """
-    known = {s.name for s in architecture.sheets}
+    known = {sheet.name for sheet in architecture.sheets}
     realized: dict[str, set[str]] = defaultdict(set)
-    for c in bom.connections:
-        if c.endpoints and c.sheet in known:
-            realized[c.net_name].add(c.sheet)
+    for connection in bom.connections:
+        if connection.endpoints and connection.sheet in known:
+            realized[connection.net_name].add(connection.sheet)
 
-    declared = {n.name: n for n in architecture.inter_sheet_nets}
-    power = [n for n in architecture.inter_sheet_nets if is_power_or_ground_name(n.name)]
-    kept: set[str] = {n.name for n in power}
-
-    signal: list[InterSheetNet] = []
+    declared = {net.name: net for net in architecture.inter_sheet_nets}
     changes: list[str] = []
     for name in sorted(realized):
-        if is_power_or_ground_name(name):
-            continue
         sheets = realized[name]
-        if len(sheets) < 2:
+        if is_power_or_ground_name(name) or len(sheets) < 2:
             continue
-        signal.append(
-            InterSheetNet(name=name, endpoints=_reconciled_endpoints(sheets, declared.get(name)))
-        )
-        kept.add(name)
-        if name not in declared:
+        existing = declared.get(name)
+        if existing is None:
+            promoted = InterSheetNet(name=name, endpoints=_reconciled_endpoints(sheets, None))
+            architecture.inter_sheet_nets.append(promoted)
+            declared[name] = promoted
             changes.append(f"+{name} {sorted(sheets)} (realized, undeclared)")
-        elif {e.sheet for e in declared[name].endpoints} != sheets:
-            was = sorted(e.sheet for e in declared[name].endpoints)
-            changes.append(f"~{name} {was} -> {sorted(sheets)}")
-
-    for n in architecture.inter_sheet_nets:
-        if not is_power_or_ground_name(n.name) and n.name not in kept:
-            changes.append(
-                f"-{n.name} (declared {sorted(e.sheet for e in n.endpoints)}, "
-                f"realized {sorted(realized.get(n.name, set()))})"
-            )
-
-    if changes:
-        architecture.inter_sheet_nets = power + signal
+            continue
+        existing_sheets = {endpoint.sheet for endpoint in existing.endpoints}
+        added_sheets = sheets - existing_sheets
+        if not added_sheets:
+            continue
+        reconciled = {
+            endpoint.sheet: endpoint for endpoint in _reconciled_endpoints(sheets, existing)
+        }
+        existing.endpoints.extend(reconciled[sheet] for sheet in sorted(added_sheets))
+        changes.append(f"+{name} endpoints {sorted(added_sheets)} (realized, undeclared)")
     return changes
 
 
@@ -1543,6 +1508,115 @@ def _resistance_ohms(value: str) -> float | None:
         mult = m2.group(2)
     ohms = base * _R_SCALE[mult]
     return ohms if ohms > 0 else None
+
+
+def check_typed_led_current_paths(architecture, bom) -> CheckResult:
+    """§9.36 — simple typed passive LED channels need forward bias and a limiter.
+
+    Trace only resistors and explicit net scope. Unrelated LEDs, negative-rail
+    indicators and active current-driver circuits are not inferred from labels.
+    """
+    requirements = [
+        row
+        for row in architecture.requirements
+        if row.family in {"led-current-resistor", "status-led"}
+    ]
+    if not requirements:
+        return CheckResult("9.36 typed LED current paths", True)
+    global_nets = {
+        "GND",
+        *architecture.power_nets,
+        *(n.name for n in architecture.inter_sheet_nets),
+    }
+
+    def scoped(sheet, net):
+        return ("" if net in global_nets else sheet, net)
+
+    nets = _nets_by_ref(bom)
+    graph = defaultdict(list)
+    for part in bom.parts:
+        if part.symbol not in {"Device:R", "Device:R_Small"}:
+            continue
+        pins = nets.get(part.ref, {})
+        if "1" not in pins or "2" not in pins:
+            continue
+        left, right = (scoped(part.sheet, pins[pin]) for pin in ("1", "2"))
+        positive = _resistance_ohms(part.value) is not None
+        graph[left].append((right, positive))
+        graph[right].append((left, positive))
+
+    def reachable(start, without_limiter=False):
+        seen, pending = {start}, [start]
+        while pending:
+            for other, positive in graph.get(pending.pop(), ()):
+                if other not in seen and not (without_limiter and positive):
+                    seen.add(other)
+                    pending.append(other)
+        return seen
+
+    info, _ = _pin_info_by_ref(bom)
+    bad = []
+    for requirement in requirements:
+        ground = requirement.ports.get("gnd")
+        if not ground:
+            continue
+        ground_key = scoped(requirement.sheet, ground)
+        supply_names = set(architecture.power_nets) | {requirement.ports.get("vdd", "")}
+        supplies = {
+            scoped(requirement.sheet, net)
+            for net in supply_names
+            if net and _net_is_positive_rail(net)
+        }
+        drives = {
+            scoped(requirement.sheet, net)
+            for key, net in requirement.ports.items()
+            if not _net_is_negative_rail(net)
+            and (key == "drive" or (net != ground and net not in supply_names))
+        }
+        for part in bom.parts:
+            if part.sheet != requirement.sheet or not part.symbol.startswith("Device:LED"):
+                continue
+            terminals = {
+                pin["name"]: number
+                for number, pin in info.get(part.ref, {}).items()
+                if pin["name"] in {"A", "K"}
+            }
+            pins = nets.get(part.ref, {})
+            if len(terminals) != 2 or any(number not in pins for number in terminals.values()):
+                continue  # Pin existence/coverage own unresolved terminal evidence.
+            anode, cathode = (scoped(part.sheet, pins[terminals[name]]) for name in ("A", "K"))
+            a_reach, k_reach = reachable(anode), reachable(cathode)
+            source = bool(a_reach & drives) and ground_key in k_reach
+            sink = bool(k_reach & drives) and bool(a_reach & supplies)
+            reversed_path = (bool(k_reach & drives) and ground_key in a_reach) or (
+                bool(a_reach & drives) and bool(k_reach & supplies)
+            )
+            identity = f"{part.ref}.{terminals['A']} (A), {part.ref}.{terminals['K']} (K)"
+            if reversed_path and not (source or sink):
+                bad.append(
+                    f"{identity} on sheet {part.sheet!r}: reversed LED in "
+                    f"{requirement.id!r}; positive current must enter A and leave K"
+                )
+            elif source or sink:
+                a_unlimited = reachable(anode, without_limiter=True)
+                k_unlimited = reachable(cathode, without_limiter=True)
+                bypass = (bool(a_unlimited & drives) and ground_key in k_unlimited) or (
+                    bool(k_unlimited & drives) and bool(a_unlimited & supplies)
+                )
+                if bypass:
+                    bad.append(
+                        f"{identity} on sheet {part.sheet!r}: {requirement.id!r} has "
+                        "a drive path without a proven positive series resistance; "
+                        "0-ohm links and unknown values do not establish current limiting"
+                    )
+    return CheckResult(
+        "9.36 typed LED current paths",
+        not bad,
+        "typed passive LED paths agree with polarity and current limiting"
+        if not bad
+        else f"{len(bad)} invalid typed LED path(s)",
+        bad,
+    )
 
 
 def _net_voltage(net_name: str) -> float | None:
@@ -2978,29 +3052,23 @@ def check_named_part_substitutions(intent, bom) -> CheckResult:
     return CheckResult(name=name, ok=True, message="all named parts match BOM")
 
 
-# ---------- §9.33 spec-named part accountability (hard) ----------
+# ---------- §9.33 typed exact-part accountability (hard) ----------
 #
-# The 2026-07-27 self-eval batch capped 6 runs on silent_substitution: an
-# architecture-named RECOM RP12-2412DA (~500 mA/rail) silently became a
-# WRA2412S-3WR2 (~125 mA/rail); a symbol-field STM32F103C8T6 shipped as a
-# CBT6. §9.23 above only covers intent.named_parts (advisory); the
-# spec/architecture free text is where the model itself commits to example
-# parts, and a BOM that quietly walks away from them is the gate's exact
-# condition. HARD at BOM commit: the model still has retries, and the fix is
-# always writable -- use the named part, or record the swap in
-# ``bom.substitutions`` (that ledger is the surfacing the gate demands; the
-# substitution itself is often a fine engineering call).
-#
-# The token regex is deliberately conservative (>= 2 letters, >= 2 digits,
-# total >= 6, protocol/package/pin-name stoplist): a missed family name like
-# "LM317" costs nothing (no enforcement), while a false positive would cost a
-# commit retry.
+# Exact identity is authoritative only when it crosses the architecture
+# boundary in ``Requirement.exact_part``. Free-form functional-spec and
+# architecture prose may explain a choice, but cannot silently create a new
+# BOM identity contract.
 
-_MPN_TOKEN_RE = re.compile(r"\b[A-Za-z]{2,4}[0-9]{2,}[A-Za-z0-9.\-]*")
+_MPN_TOKEN_RE = re.compile(
+    r"\b(?:ESP32[ _-][CS]\d|(?:ATtiny|ATmega)[ _-]?[0-9]{2,}|[A-Z]{2,4}[0-9]{2,})[A-Z0-9.\-]*",
+    re.IGNORECASE,
+)
+_SHORT_MCU_FAMILY_RE = re.compile(r"^(?:ESP32|STM32|NRF51|NRF52|NRF53|NRF54)$", re.I)
 _MPN_STOPWORD_RE = re.compile(
     r"^(?:USB|COM|GPIO|ADC|DAC|TIM|UART|USART|SPI|I2C|I2S|CAN|PWM|AIN|AOUT|"
     r"EXTI|REV|VER|LQFP|TQFP|QFN|DFN|SOIC|SOP|SSOP|TSSOP|MSOP|SOT|DIP|PDIP|"
-    r"SOD|BGA|TO|IEC|ISO|AWG)[0-9]",
+    r"SOD|BGA|TO|IEC|ISO|AWG|PINS?|LEDS?|PCS|BITS?|MHZ|KHZ|HZ|MM|MIL|MA|MV|"
+    r"VCC|VDD|VBAT|VBUS|VSYS|VOUT|VIN)[0-9]",
     re.IGNORECASE,
 )
 
@@ -3017,25 +3085,25 @@ def named_part_tokens(texts) -> dict[str, str]:
         text = _NONCOMMITTAL_EXAMPLE_RE.sub("", str(text))
         for match in _MPN_TOKEN_RE.finditer(text):
             token = match.group(0).rstrip(".-")
-            if len(token) < 6 or _MPN_STOPWORD_RE.match(token):
+            if (
+                len(token) < 6 and not _SHORT_MCU_FAMILY_RE.fullmatch(token)
+            ) or _MPN_STOPWORD_RE.match(token):
                 continue
             out.setdefault(token.lower(), token)
     return out
 
 
 def spec_named_tokens(functional_spec, architecture) -> dict[str, str]:
-    """MPN-like tokens the spec/architecture free text commits to, keyed by
-    lowercase form (original casing kept for messages)."""
-    texts: list[str] = []
-    if architecture is not None:
-        texts += list(getattr(architecture, "assumptions", None) or [])
-        topo = getattr(architecture, "topologies", None) or {}
-        texts += [f"{k}: {v}" for k, v in topo.items()]
-        texts += [s.function or "" for s in (architecture.sheets or [])]
-    if functional_spec is not None:
-        texts += list(getattr(functional_spec, "assumptions", None) or [])
-        texts += [b.purpose or "" for b in (functional_spec.blocks or [])]
-    return named_part_tokens(texts)
+    """Return typed architecture exact-part tokens keyed by lowercase form."""
+    del functional_spec
+    if architecture is None:
+        return {}
+    exact_parts = [
+        requirement.exact_part
+        for requirement in (getattr(architecture, "requirements", None) or [])
+        if getattr(requirement, "exact_part", None)
+    ]
+    return named_part_tokens(exact_parts)
 
 
 # Compatibility for callers that imported the former private helper.
@@ -3345,82 +3413,88 @@ def check_capacitor_polarity_consistency(bom) -> CheckResult:
     )
 
 
-def check_every_block_has_sheet(functional_spec: FunctionalSpec, architecture) -> CheckResult:
-    """Architecture-stage gate: the architecture must have enough sheets to
-    cover every functional_spec block (with count expansion).
-
-    Blocks may be merged onto a sheet named for the IC domain (e.g. "POWER
-    PATH" covers CHARGER + BOOST), so we don't require a 1:1 block→sheet
-    mapping. We only flag when the architecture has zero sheets or far too
-    few for the block count. Individual dropped blocks are caught at BOM
-    commit by ``check_sheets_have_parts``.
-    """
-    total_block_instances = sum(max(1, b.count) for b in functional_spec.blocks)
-    n_sheets = len(architecture.sheets)
+def _functional_block_sheets(
+    functional_spec: FunctionalSpec, architecture
+) -> tuple[dict[str, set[str]], list[str]]:
+    """Resolve only explicit requirement ownership, retaining all owner sheets."""
+    block_sheets: dict[str, set[str]] = {block.name: set() for block in functional_spec.blocks}
+    sheet_names = {sheet.name for sheet in architecture.sheets}
     bad: list[str] = []
-    if n_sheets == 0 and total_block_instances > 0:
-        bad.append(
-            f"functional_spec has {total_block_instances} block instance(s) "
-            f"but the architecture has zero sheets"
-        )
+    if not architecture.requirements:
+        bad.append("architecture has no implementation requirements")
+    for requirement in architecture.requirements:
+        if not requirement.functional_blocks:
+            bad.append(f"requirement {requirement.id!r} has no functional_blocks membership")
+        if requirement.sheet not in sheet_names:
+            bad.append(
+                f"requirement {requirement.id!r} references unknown sheet {requirement.sheet!r}"
+            )
+        for name in requirement.functional_blocks:
+            if name not in block_sheets:
+                bad.append(f"requirement {requirement.id!r} references unknown block {name!r}")
+            elif requirement.sheet in sheet_names:
+                block_sheets[name].add(requirement.sheet)
+    for name, sheets in block_sheets.items():
+        if not sheets:
+            bad.append(f"functional block {name!r} has no implementation requirement on a sheet")
+    return block_sheets, bad
+
+
+def check_every_block_has_sheet(functional_spec: FunctionalSpec, architecture) -> CheckResult:
+    """Require explicit, complete block membership without prescribing sheet layout.
+
+    Several requirements may implement one block; a composite requirement may
+    implement several blocks, and all of them may share a sheet.
+    """
+    block_sheets, bad = _functional_block_sheets(functional_spec, architecture)
     return CheckResult(
         name="block-sheet mapping",
         ok=not bad,
         message=(
-            f"{n_sheets} sheet(s) for {total_block_instances} block instance(s)"
+            f"all {len(block_sheets)} functional block(s) have explicit implementation requirements"
             if not bad
-            else bad[0]
+            else "; ".join(bad)
         ),
         offenders=bad,
     )
 
 
 def check_fs_connections_mapped(functional_spec: FunctionalSpec, architecture) -> CheckResult:
-    """Architecture-stage gate: every non-power/ground functional_spec connection
-    is either intra-sheet (both blocks on the same sheet) or declared in
-    ``architecture.inter_sheet_nets``.
+    """Require explicit endpoint ownership and a sheet crossing for each signal.
 
-    Catches the historical DTR/RTS→ESP32 and RESET/D0→PROTO cases where a
-    cross-sheet signal was declared in the functional_spec but never surfaced
-    as an inter-sheet net, leaving a hierarchical label dangling at synthesis.
+    Power/ground may use global nets, but still require mapped block endpoints.
+    Every declared net endpoint, including power/ground, must bind its exact net
+    name through a requirement on that sheet, regardless of implementation owner.
+    A shared bus may cover several pairs, and multiple owners allow a connection
+    through any of the block's implementing sheets.
     """
-    # Build block → set of sheet names mapping (heuristic: block name appears
-    # in sheet name, case-insensitive). Blocks not matching any sheet are
-    # "unmapped" — their connections can't be verified and are left to the
-    # wiring-stage safety net.
-    sheet_names_upper = [s.name.upper() for s in architecture.sheets]
-
-    def _sheets_for_block(block_name: str) -> set[str]:
-        bu = block_name.upper()
-        return {sn for sn in sheet_names_upper if bu in sn}
-
-    # Build a map: inter_sheet_net name → set of endpoint sheet names (uppercased)
-    isn_by_sheets: dict[frozenset[str], list[str]] = {}
+    block_sheets, bad = _functional_block_sheets(functional_spec, architecture)
+    bound_nets: dict[str, set[str]] = defaultdict(set)
+    for requirement in architecture.requirements:
+        bound_nets[requirement.sheet].update(requirement.ports.values())
     for net in architecture.inter_sheet_nets:
-        endpoint_sheets = frozenset(ep.sheet.upper() for ep in net.endpoints)
-        isn_by_sheets.setdefault(endpoint_sheets, []).append(net.name)
-
-    bad: list[str] = []
+        for endpoint in net.endpoints:
+            if net.name not in bound_nets.get(endpoint.sheet, set()):
+                bad.append(
+                    f"inter-sheet net {net.name!r} endpoint on sheet {endpoint.sheet!r} "
+                    "has no requirement.ports value bound to that exact net name"
+                )
+    endpoint_sets = [
+        {endpoint.sheet for endpoint in net.endpoints} for net in architecture.inter_sheet_nets
+    ]
     for conn in functional_spec.connections:
-        # Power/ground nets are global (power symbols in leaves, not sheet pins)
-        if conn.signal_type in ("power", "ground"):
-            continue
-        from_sheets = _sheets_for_block(conn.from_block)
-        to_sheets = _sheets_for_block(conn.to_block)
-        # If both blocks map to the same sheet, the connection is intra-sheet
-        if from_sheets and to_sheets and (from_sheets & to_sheets):
-            continue
-        # If either block is unmapped, we can't verify — skip (advisory only)
+        from_sheets = block_sheets.get(conn.from_block, set())
+        to_sheets = block_sheets.get(conn.to_block, set())
         if not from_sheets or not to_sheets:
+            bad.append(
+                f"connection {conn.from_block!r}→{conn.to_block!r} "
+                f"({conn.signal_type}) has an unknown or unmapped block endpoint"
+            )
             continue
-        # Cross-sheet: check if any inter_sheet_net connects these sheets.
-        # Subset, not equality: a shared bus declared once across 3+ sheets
-        # (e.g. I2C_SDA over MCU/SENSOR/DISPLAY) covers every pairwise
-        # functional-spec connection between its endpoints; requiring an exact
-        # 2-sheet match would bounce that correct architecture forever.
-        cross_pairs = {frozenset({f, t}) for f in from_sheets for t in to_sheets if f != t}
+        if conn.signal_type in ("power", "ground") or from_sheets & to_sheets:
+            continue
         covered = any(
-            pair <= endpoint_sheets for pair in cross_pairs for endpoint_sheets in isn_by_sheets
+            from_sheets & endpoints and to_sheets & endpoints for endpoints in endpoint_sets
         )
         if not covered:
             bad.append(
@@ -3431,9 +3505,9 @@ def check_fs_connections_mapped(functional_spec: FunctionalSpec, architecture) -
         name="fs-connection mapping",
         ok=not bad,
         message=(
-            "every cross-sheet connection is declared in inter_sheet_nets"
+            "every functional connection has mapped endpoints and declared sheet crossings"
             if not bad
-            else f"{len(bad)} connection(s) not mapped to inter_sheet_nets"
+            else f"{len(bad)} functional connection mapping defect(s)"
         ),
         offenders=bad,
     )

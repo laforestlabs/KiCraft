@@ -26,7 +26,11 @@ from .rp2040_minimal import RP2040_MINIMAL
 from .rp2040_minimal_v2 import RP2040_MINIMAL_V2
 from .wave_a_mcus import WAVE_A_MCU_RECIPES, expand_wave_a_mcu
 from .wave_b_power import WAVE_B_POWER_RECIPES
-from .wave_c_interfaces import WAVE_C_INTERFACE_RECIPES
+from .wave_c_interfaces import (
+    CH340C_USB_UART,
+    WAVE_C_INTERFACE_RECIPES,
+    expand_ch340c_usb_uart,
+)
 
 register_recipe(RP2040_MINIMAL)
 register_recipe(RP2040_MINIMAL_V2)
@@ -36,7 +40,10 @@ for definition in WAVE_A_MCU_RECIPES:
 for definition in WAVE_B_POWER_RECIPES:
     register_recipe(definition)
 for definition in WAVE_C_INTERFACE_RECIPES:
-    register_recipe(definition)
+    register_recipe(
+        definition,
+        expand_ch340c_usb_uart if definition.recipe == CH340C_USB_UART.recipe else None,
+    )
 
 __all__ = [
     "RecipeResolutionError",

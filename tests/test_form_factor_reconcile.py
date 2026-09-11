@@ -7,10 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from kicraft.design.lowering import lower_requirement
 from kicraft.design.models import (
     BOM,
     Architecture,
     BomPart,
+    CircuitRequirement,
     FormFactor,
     InterSheetNet,
     NetConnection,
@@ -18,6 +20,8 @@ from kicraft.design.models import (
     Sheet,
     SheetPin,
 )
+from kicraft.form_factors import get_template
+from kicraft.form_factors.scaffold import standard_header_parts
 from kicraft.form_factors.reconcile import (
     _is_stacking_header,
     enforce_enabled,
@@ -44,8 +48,8 @@ def _shield_bom():
                       endpoints=[PinEndpoint(ref="U1", pin="5"), PinEndpoint(ref="J1", pin="1")]),
         NetConnection(net_name="GND", sheet="REGULATOR",
                       endpoints=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="J1", pin="4")]),
-        # A signal net that ONLY involves a dropped header -> should vanish.
-        NetConnection(net_name="D2_SENSE", sheet="INTERFACE",
+        # A requested signal remains available at the authoritative host pin.
+        NetConnection(net_name="D2", sheet="INTERFACE",
                       endpoints=[PinEndpoint(ref="J2", pin="3")]),
     ]
     return BOM(parts=parts, connections=conns)
@@ -119,12 +123,16 @@ class TestReconcile:
         assert headers
         assert all("standard form factor" in (p.sourcing_note or "") for p in headers)
 
-    def test_power_rebinds_and_dangling_signal_net_dropped(self):
+    def test_requested_signal_rebound_to_standard_pin(self):
         bom = _shield_bom()
         reconcile_standard_form_factor(_state(bom))
-        nets = {c.net_name for c in bom.connections}
-        assert "+5V" in nets and "GND" in nets   # rails still present (rebound)
-        assert "D2_SENSE" not in nets            # only referenced dropped J2 -> gone
+        low = next(p for p in bom.parts if (p.sourcing_note or "").endswith("digital_low"))
+        endpoints = {
+            (ep.ref, ep.pin) for c in bom.connections if c.net_name == "D2"
+            for ep in c.endpoints
+        }
+        assert endpoints == {(low.ref, "6")}
+        assert (low.ref, "6") not in {(ep.ref, ep.pin) for ep in bom.no_connect_pins}
         # Every connection endpoint references a part that still exists (no dangling).
         part_refs = {p.ref for p in bom.parts}
         assert all(ep.ref in part_refs for c in bom.connections for ep in c.endpoints)
@@ -132,10 +140,8 @@ class TestReconcile:
     def test_unbound_pins_marked_no_connect(self):
         bom = _shield_bom()
         reconcile_standard_form_factor(_state(bom))
-        # The design carries only +5V and GND, so those header pins bind
-        # (1 +5V + 3 GND = 4) and every other pin -- 3V3/VIN/IOREF/RESET/AREF,
-        # all D/A/SCL/SDA, and the reserved power pin -- is no-connect (32-4=28).
-        assert len(bom.no_connect_pins) == 28
+        # Only +5V/GND and the requested D2 signal are bound.
+        assert len(bom.no_connect_pins) == 27
         # A rail the design does NOT carry must not appear as a dangling net.
         nets = {c.net_name for c in bom.connections}
         assert "VIN" not in nets and "+3V3" not in nets and "AREF" not in nets
@@ -215,16 +221,157 @@ class TestEmptiedSheetPruning:
     def test_inter_sheet_net_referencing_dropped_sheet_repaired(self):
         bom, arch = self._multi_sheet()
         reconcile_standard_form_factor(_state(bom, architecture=arch))
-        # The GND inter-sheet net spanned SPARE HEADER<->REGULATOR; the spare sheet
-        # is gone so it drops to one endpoint (no longer inter-sheet) and is
-        # removed rather than left referencing a deleted sheet.
-        for isn in arch.inter_sheet_nets:
-            assert all(ep.sheet != "SPARE HEADER" for ep in isn.endpoints)
+        # The physical interface still provides GND: migrate its sheet endpoint
+        # rather than deleting the inter-sheet electrical contract.
+        ground = next(net for net in arch.inter_sheet_nets if net.name == "GND")
+        assert {ep.sheet for ep in ground.endpoints} == {"HOST HEADER", "REGULATOR"}
 
     def test_no_architecture_is_tolerated(self):
         bom = _shield_bom()
         # SimpleNamespace state with architecture=None must not raise.
         reconcile_standard_form_factor(_state(bom, architecture=None))
+
+
+def _typed_proto_shield():
+    """Oversized generic headers plus independent 20-pad prototype hardware."""
+    template = get_template("arduino_uno_shield")
+    geometry = standard_header_parts(template)
+    parts = []
+    requirements = []
+    connections = []
+    for index, header in enumerate(geometry, 1):
+        # R13 assigned duplicate contacts on oversized generic connectors.
+        nets = [pin["net"] or "NC" for pin in header["pins"]] * 2
+        nets = ["3V3" if net == "+3V3" else "5V" if net == "+5V" else net for net in nets]
+        requirement = CircuitRequirement(
+            id=f"req_headers_{index}", sheet="STACKING HEADERS",
+            role="connector", family="pin-header", parameters={"rows": 1},
+            ports={f"pin{pin}": net for pin, net in enumerate(nets, 1)},
+            functional_blocks=["STACKING_HEADERS"],
+        )
+        requirements.append(requirement)
+        parts.append(BomPart(
+            ref=f"J{index}", value=f"PinHeader_1x{len(nets):02d}",
+            symbol=f"Connector_Generic:Conn_01x{len(nets):02d}",
+            footprint=f"Connector_PinHeader_2.54mm:PinHeader_1x{len(nets):02d}_P2.54mm_Vertical",
+            sheet=requirement.sheet, resolution_source="lowerer", resolution_id="pin-header@1",
+            lowering_requirement_id=requirement.id, lowering_role="connector", lowering_index=0,
+        ))
+        for pin, net in enumerate(nets, 1):
+            if net != "NC":
+                connections.append(NetConnection(
+                    net_name=net, sheet=requirement.sheet,
+                    endpoints=[PinEndpoint(ref=f"J{index}", pin=str(pin))],
+                ))
+    prototype = CircuitRequirement(
+        id="req_proto_area", sheet="PROTOTYPING AREA", role="connector",
+        family="pin-header", parameters={"rows": 1},
+        ports={f"pin{pin}": ("5V", "GND", "+3V3", "GND")[(pin - 1) % 4] for pin in range(1, 21)},
+        functional_blocks=["PROTOTYPING_AREA"],
+    )
+    requirements.append(prototype)
+    parts.append(BomPart(
+        ref="J5", value="PinHeader_1x20", symbol="Connector_Generic:Conn_01x20",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x20_P2.54mm_Vertical",
+        sheet=prototype.sheet, resolution_source="lowerer", resolution_id="pin-header@1",
+        lowering_requirement_id=prototype.id, lowering_role="connector", lowering_index=0,
+    ))
+    for pin, net in prototype.ports.items():
+        connections.append(NetConnection(
+            net_name=net, sheet=prototype.sheet,
+            endpoints=[PinEndpoint(ref="J5", pin=pin.removeprefix("pin"))],
+        ))
+    arch = Architecture(
+        sheets=[Sheet(name=name, stem=name.replace(" ", "_"), function=name)
+                for name in ("STACKING HEADERS", "PROTOTYPING AREA")],
+        requirements=requirements, unresolved_requirement_ids=[r.id for r in requirements],
+        power_nets=["5V", "GND", "3V3", "+3V3"], rail_voltages={"3V3": 3.3, "+3V3": 3.3},
+        inter_sheet_nets=[InterSheetNet(name="+3V3", endpoints=[
+            SheetPin(sheet=name, direction="bidirectional")
+            for name in ("STACKING HEADERS", "PROTOTYPING AREA")
+        ])],
+    )
+    return _state(BOM(parts=parts, connections=connections), architecture=arch)
+
+
+class TestTypedInterfaceMigration:
+    def test_preserves_prototype_hardware_signals_and_functional_owners(self):
+        state = _typed_proto_shield()
+        prototype = state.bom.parts[-1].model_dump()
+        requirement = state.architecture.requirements[-1].model_dump()
+        prototype_endpoints = {
+            (c.net_name, ep.pin) for c in state.bom.connections for ep in c.endpoints if ep.ref == "J5"
+        }
+        owners = {p.ref: p.lowering_requirement_id for p in state.bom.parts}
+        reconcile_standard_form_factor(state)
+        assert next(p for p in state.bom.parts if p.ref == "J5").model_dump() == prototype
+        assert next(r for r in state.architecture.requirements if r.id == "req_proto_area").model_dump() == requirement
+        assert {p.ref: p.lowering_requirement_id for p in state.bom.parts} == owners
+        assert {
+            (c.net_name, ep.pin) for c in state.bom.connections for ep in c.endpoints if ep.ref == "J5"
+        } == prototype_endpoints
+        assert {s.name for s in state.architecture.sheets} == {"STACKING HEADERS", "PROTOTYPING AREA"}
+        by_owner = {r.id: r for r in state.architecture.requirements}
+        geometry = {
+            header["role"]: header
+            for header in standard_header_parts(get_template("arduino_uno_shield"))
+        }
+        for part in state.bom.parts:
+            if part.ref == "J5":
+                continue
+            header = geometry[part.sourcing_note.rsplit(" ", 1)[1]]
+            assert part.symbol == header["symbol"] and part.footprint == header["footprint"]
+            artifact = lower_requirement(by_owner[part.lowering_requirement_id])
+            assert artifact.groups[0].symbol == part.symbol
+            assert artifact.groups[0].footprint == part.footprint
+        endpoints = {
+            (ep.ref, ep.pin): c.net_name for c in state.bom.connections for ep in c.endpoints
+        }
+        nc = {(ep.ref, ep.pin) for ep in state.bom.no_connect_pins}
+        for part in state.bom.parts:
+            for port, net in by_owner[part.lowering_requirement_id].ports.items():
+                endpoint = (part.ref, port.removeprefix("pin"))
+                if net == "NC":
+                    assert endpoint in nc and endpoint not in endpoints
+                else:
+                    assert endpoints[endpoint] == net and endpoint not in nc
+        assert set(endpoints.values()) >= {
+            "5V", "+3V3", "GND", "VIN", "IOREF", "RESET", "AREF", "SCL", "SDA",
+            *(f"D{index}" for index in range(14)), *(f"A{index}" for index in range(6)),
+        }
+        assert state.architecture.power_nets == ["5V", "GND", "+3V3"]
+        assert state.architecture.rail_voltages == {"+3V3": 3.3}
+        assert {
+            net.name: {ep.sheet for ep in net.endpoints}
+            for net in state.architecture.inter_sheet_nets
+        } == {
+            name: {"STACKING HEADERS", "PROTOTYPING AREA"}
+            for name in ("5V", "+3V3", "GND")
+        }
+        BOM.model_validate(state.bom.model_dump())
+        Architecture.model_validate(state.architecture.model_dump())
+
+    def test_unsupported_signal_rejects_without_partial_migration(self):
+        state = _typed_proto_shield()
+        state.architecture.requirements[0].ports["pin1"] = "CUSTOM_SUPPLY"
+        before = (state.bom.model_dump(), state.architecture.model_dump())
+        with pytest.raises(ValueError, match="cannot preserve requested signal"):
+            reconcile_standard_form_factor(state)
+        assert (state.bom.model_dump(), state.architecture.model_dump()) == before
+
+    def test_distinct_onboard_supplies_are_not_shorted_by_alias(self):
+        state = _typed_proto_shield()
+        state.bom.parts.append(BomPart(
+            ref="U1", value="AMS1117-3.3", symbol="Regulator_Linear:AMS1117-3.3",
+            footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2", sheet="PROTOTYPING AREA",
+        ))
+        state.bom.connections.append(NetConnection(
+            net_name="3V3", sheet="PROTOTYPING AREA", endpoints=[PinEndpoint(ref="U1", pin="2")]
+        ))
+        before = (state.bom.model_dump(), state.architecture.model_dump())
+        with pytest.raises(ValueError, match="distinct onboard rail bindings"):
+            reconcile_standard_form_factor(state)
+        assert (state.bom.model_dump(), state.architecture.model_dump()) == before
 
 
 class TestEnforceGate:

@@ -177,13 +177,15 @@ def evaluate_project(
     stay null and the run is not finalized (Class-C only). The judge uses
     ``judge_client`` when supplied (a client with routing relaxed for a stronger,
     steadier judge model that may be off the design provider tier), else
-    ``client``.
+    ``client``. ``run_id`` selects exact-run ledger metrics and tags judge calls;
+    without it, metrics intentionally aggregate all runs of this project.
     """
     rubric = rubric or load_rubric()
     pd = Path(project_dir)
 
     m = collect_web_metrics(
-        pd, ledger_path=ledger_path, started_at=started_at, finished_at=finished_at
+        pd, ledger_path=ledger_path, run_id=run_id,
+        started_at=started_at, finished_at=finished_at
     )
     dims = score_class_c_dims(m, rubric)
     gates = eval_script_gates(m, rubric)
@@ -214,7 +216,7 @@ def evaluate_project(
 
     report = {
         "scenario": None,
-        "run_id": pd.name,
+        "run_id": run_id if run_id is not None else pd.name,
         "run_dir": str(pd),
         "scored_at": _now(),
         "rubric_version": rubric["meta"]["version"],

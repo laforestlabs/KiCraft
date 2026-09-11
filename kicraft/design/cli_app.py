@@ -112,6 +112,7 @@ from .synthesis.validation import (
     check_single_net_per_pin,
     check_spec_named_mpn_substitutions,
     check_two_terminal_self_short,
+    check_typed_led_current_paths,
     reconcile_inter_sheet_nets,
     split_cross_sheet_connections,
 )
@@ -135,27 +136,66 @@ def _utc_compact_now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _resemble_candidates(ident: str, search_fn, limit: int = 6) -> list[str]:
-    """Real ids resembling an unresolved ``Library:Name``, kept in-category.
+def _identity_tokens(name: str) -> set[str]:
+    # These are connector contact terms, not hardware substitutions. Keep
+    # dimensions intact: splitting 2.77 into "2" and "77" loses pitch evidence.
+    contacts = {"female": "socket", "male": "pins", "pin": "pins"}
+    return {contacts.get(token, token) for token in re.split(r"[^a-z0-9.]+", name.lower()) if token}
 
-    Surfaced in commit-rejection feedback so a weak model picks a real id in one
-    guided round instead of repeatedly guessing -- the dominant BOM-stage retry
-    cost. Queries most-specific first (the full name, catching a truncation like
-    ``SW_SPST_PTS645`` -> ``...PTS645Sx43SMTR92`` or a pin-count like
-    ``Conn_02x08``), then broadens to the library family token (``Inductor_THT``
-    -> ``Inductor``) so a hallucinated variant (``L_Radial_D50.0mm``) returns
-    real *inductors*, not whatever shares a generic word.
+
+def _identity_structure(name: str) -> tuple[int, ...]:
+    grid = re.search(r"(?:^|_)(\d+)x(\d+)(?=$|_)", name, re.IGNORECASE)
+    if grid:
+        return tuple(int(n) for n in grid.groups())
+    count = re.match(r"[a-z]+[-_]?(\d+)(?=$|[_-])", name, re.IGNORECASE)
+    return (int(count.group(1)),) if count else ()
+
+
+def _resemble_candidates(ident: str, search_fn, limit: int = 6) -> list[str]:
+    """Retrieve real catalogue matches, rank their identity evidence, then cap.
+
+    Exact/truncated names lead, followed by represented pin layout/count,
+    component family, contact type and footprint dimensions. Broad retrieval
+    must not alphabetically discard the useful match before this ranking.
     """
+    if limit <= 0:
+        return []
     library, _, name = ident.partition(":")
     lib_fam = re.split(r"[^A-Za-z]+", library)[0] if library else ""
     name_toks = [t for t in re.split(r"[^A-Za-z0-9]+", name or ident) if len(t) > 1]
     alpha = [t for t in name_toks if not any(c.isdigit() for c in t)]
+    wanted_tokens = _identity_tokens(name or ident)
+    wanted_structure = _identity_structure(name or ident)
+    wanted_family = re.split(r"[_\d-]", name.lower())[0]
+    dimensions = {t for t in wanted_tokens if t.endswith("mm")}
+    contacts = wanted_tokens & {"socket", "pins"}
+
+    def rank(candidate: str) -> tuple:
+        candidate_library, _, candidate_name = candidate.partition(":")
+        tokens = _identity_tokens(candidate_name)
+        return (
+            -int(candidate_name.lower().startswith(name.lower()) and bool(name)),
+            -int(
+                bool(wanted_structure) and _identity_structure(candidate_name) == wanted_structure
+            ),
+            -int(bool(wanted_family) and candidate_name.lower().startswith(wanted_family)),
+            -len(contacts & tokens),
+            -len(dimensions & tokens),
+            -int(candidate_library.lower() == library.lower()),
+            -len(wanted_tokens & tokens),
+            len(candidate_name),
+            candidate,
+        )
+
     queries: list[str] = []
     if lib_fam and name_toks:
         # In-library first: a bare short name ("CP") substring-matches junk
         # across libraries (Amplifier_Audio:SSM2211CP) and steers the model
         # AWAY from the right family (self-eval 2026-07-07 run_19).
         queries.append(" ".join([lib_fam] + name_toks))
+    structural = re.search(r"[A-Za-z]+(?:[-_]\d+(?:x\d+)?)", name)
+    if structural:
+        queries.append(structural.group(0))
     if name_toks:
         queries.append(" ".join(name_toks))  # exact-ish: truncation / pin-count
     if lib_fam and alpha:
@@ -167,13 +207,57 @@ def _resemble_candidates(ident: str, search_fn, limit: int = 6) -> list[str]:
         queries.append(library)
     if lib_fam:
         queries.append(lib_fam)  # category only
-    if alpha:
+    if alpha and not library:
         queries.append(" ".join(alpha[:2]))
-    for q in queries:
-        hits = search_fn(q, limit=limit)
-        if hits:
-            return hits[:limit]
-    return []
+    candidates: set[str] = set()
+    for q in dict.fromkeys(queries):
+        hits = search_fn(q, limit=None)
+        # Package metadata is useful for discovery, but a package name in the
+        # symbol field cannot identify an IC. Cross-category suggestions need
+        # an actual name-prefix match, not merely a shared description word.
+        hits = [
+            hit
+            for hit in hits
+            if not lib_fam
+            or hit.partition(":")[0].lower().startswith(lib_fam.lower())
+            or (name_toks and hit.partition(":")[2].lower().startswith(name_toks[0].lower()))
+        ]
+        candidates.update(hits)
+    # A metadata-only hit in an early query is not a reason to stop retrieval:
+    # connector prose can describe an unrelated debug connector, while the
+    # correct row/count spelling is found by the broader catalogue query.
+    prefixes = {
+        hit for hit in candidates if name and hit.partition(":")[2].lower().startswith(name.lower())
+    }
+    if prefixes:
+        candidates = prefixes
+    if wanted_structure:
+        structured = {
+            hit
+            for hit in candidates
+            if _identity_structure(hit.partition(":")[2]) == wanted_structure
+        }
+        if structured:
+            candidates = structured
+    family_matches = {
+        hit
+        for hit in candidates
+        if wanted_family and hit.partition(":")[2].lower().startswith(wanted_family)
+    }
+    if family_matches:
+        candidates = family_matches
+    if contacts:
+        contact_matches = {
+            hit for hit in candidates if contacts & _identity_tokens(hit.partition(":")[2])
+        }
+        if contact_matches:
+            candidates = contact_matches
+    same_library = {hit for hit in candidates if hit.partition(":")[0].lower() == library.lower()}
+    if same_library:
+        candidates = same_library
+    # Do not pad a strong in-library match with weaker cross-library hardware
+    # merely to fill the output limit (e.g. surface-mount versus through-hole).
+    return sorted(candidates, key=rank)[:limit]
 
 
 def _footprint_candidates(fp: str, limit: int = 6) -> list[str]:
@@ -199,9 +283,13 @@ _LEGACY_SYMBOL_RENAMES: dict[str, list[str]] = {
 
 
 def _symbol_candidates(sym: str, limit: int = 6) -> list[str]:
+    if limit <= 0:
+        return []
     renamed = _LEGACY_SYMBOL_RENAMES.get((sym or "").lower())
     if renamed:
-        return renamed[:limit]
+        return [
+            candidate for candidate in renamed if candidate in search_symbols(candidate, limit=None)
+        ][:limit]
     return _resemble_candidates(sym, search_symbols, limit)
 
 
@@ -818,9 +906,7 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                     unverified.append(f"{part.ref} ({cid})")
             continue
         if not mpn:
-            # Tier 4: generic part sourced by value/package keyword. Bare
-            # board features (test points, mounting holes) have nothing to
-            # order and are skipped outright.
+            # Tier 4: generic part sourced by value/package keyword.
             if jlcparts.is_unsourceable_hardware(part.footprint or ""):
                 continue
             kw = jlcparts.bom_keyword(part.value or "", part.footprint or "")
@@ -947,9 +1033,13 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                 f"likely not a real orderable part; resolve it with "
                 f"lookup_lcsc_id / add_part_from_lcsc, pick a core default, "
                 f"or drop the MPN and record the substitution in "
-                f"bom.substitutions ({{wanted, got, reason}})"
+                f"bom.substitutions ({{wanted, got, reason}})" + _alternates_note(part, "", floor)
             )
         elif best is None:
+            dead_cid = next(
+                iter(re.findall(r"\bC\d+\b", " ".join(tried), flags=re.IGNORECASE)),
+                "",
+            )
             bad.append(
                 f"{part.ref}: no orderable variant of '{mpn}': "
                 + "; ".join(tried[:4])
@@ -957,7 +1047,7 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                 "JLCPCB assembly and the lcsc.com retail storefront) and "
                 "record the swap in bom.substitutions "
                 '({"wanted": "' + str(mpn) + '", "got": "<new pick>", '
-                '"reason": "not orderable"})'
+                '"reason": "not orderable"})' + _alternates_note(part, dead_cid, floor)
             )
         else:
             part.sourcing_note = (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
@@ -1187,6 +1277,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         ]
         if state.architecture is not None:
             checks.append(check_inter_sheet_nets_realized(state.architecture, state.bom))
+            checks.append(check_typed_led_current_paths(state.architecture, state.bom))
             # §9.15 inverse: a signal net wired to a single pin that was never
             # declared inter-sheet connects to nothing (the SOIL_MOISTURE_BLE
             # USB D+/D- dangle).
@@ -3363,6 +3454,8 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
         extras["locked_no_connect_pins"] = [
             {"ref": ref, "pin": pin} for ref, pin in sorted(locked_no_connect_pins(bom_payload))
         ]
+    if stage == "bom":
+        extras["_validation_project_root"] = str(state_path.resolve().parent.parent)
 
     output = {
         "stage": stage,
@@ -3487,9 +3580,9 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     #     per-sheet connection, so the connector-holding sheet actually draws a
     #     stub per pin (run_01 BNC J1, run_30 GPIO header J2) and reconcile can
     #     see the true crossing instead of a lone single-sheet tag;
-    #   * reconcile inter_sheet_nets to the crossings wiring actually realized,
-    #     so the stage is never blamed for an inter-sheet contract it cannot edit
-    #     (KC-WFFXZ3 DTR/RTS-into-ESP32; the proto-shield PROTO AREA orphans).
+    #   * promote genuinely realized crossings without deleting architecture's
+    #     declared endpoints; wiring must satisfy that frozen contract, and a
+    #     repeated unresolvable singleton escalates explicitly to architecture.
     wiring_normalizations: list[str] = []
     if stage == "wiring" and state.bom is not None and state.bom.connections:
         wiring_normalizations += [f"bridge {b}" for b in bridge_duplicate_pins(state.bom)]
@@ -3733,7 +3826,68 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             )
             return 3
 
-    if state.bom is not None and state.bom.connections:
+    # BOM may already contain deterministic recipe connections. Validate only
+    # those emitted endpoints here; intentionally unwired model-owned parts are
+    # not a complete-design wiring candidate yet.
+    if stage == "bom" and state.bom is not None and state.bom.connections:
+        recipe_pins = {
+            (row.ref, row.pin) for manifest in state.bom.recipe_ownership for row in manifest.pins
+        }
+        unowned_endpoints = [
+            f"{endpoint.ref}.{endpoint.pin}"
+            for connection in state.bom.connections
+            for endpoint in connection.endpoints
+            if (endpoint.ref, endpoint.pin) not in recipe_pins
+        ]
+        if unowned_endpoints:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": ["BOM deterministic connection provenance is incomplete"],
+                        "offenders": sorted(set(unowned_endpoints))[:20],
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+        recipe_refs = {ref for ref, _pin in recipe_pins}
+        partial_bom = state.bom.model_copy(
+            update={
+                "parts": [part for part in state.bom.parts if part.ref in recipe_refs],
+                "no_connect_pins": [
+                    endpoint
+                    for endpoint in state.bom.no_connect_pins
+                    if (endpoint.ref, endpoint.pin) in recipe_pins
+                ],
+            }
+        )
+        partial_checks = [
+            check_pin_existence(partial_bom),
+            check_power_pin_polarity(partial_bom),
+            check_two_terminal_self_short(partial_bom),
+            check_single_net_per_pin(partial_bom),
+        ]
+        partial_failures = [check for check in partial_checks if not check.ok]
+        if partial_failures:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "errors": [f"{check.name}: {check.message}" for check in partial_failures],
+                        "offenders": [
+                            offender
+                            for check in partial_failures
+                            for offender in check.offenders[:20]
+                        ],
+                        "offenders_total": sum(len(check.offenders) for check in partial_failures),
+                    },
+                    indent=2,
+                )
+            )
+            return 3
+
+    if stage == "wiring" and state.bom is not None and state.bom.connections:
         checks = [
             check_pin_existence(state.bom),
             check_net_coverage(state.bom),
@@ -3761,6 +3915,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             # pin with no hierarchical label (caught only by §9.12 ERC at
             # synthesis time otherwise).
             checks.append(check_inter_sheet_nets_realized(state.architecture, state.bom))
+            checks.append(check_typed_led_current_paths(state.architecture, state.bom))
             # The inverse failure: a signal net wired to a single pin that was
             # never declared inter-sheet dangles ("Label not connected to
             # anything") -- the SOIL_MOISTURE_BLE USB D+/D- build failure.

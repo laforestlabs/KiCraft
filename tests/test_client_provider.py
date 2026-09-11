@@ -9,21 +9,27 @@ Covers the changes that cut web-KiCraft LLM cost:
 - internal `_meta*` control keys never leak into the request body,
 - the real billed cost + cached-token count + resolved provider are recorded as
   structured meta, which the web-cost-report then attributes per run/stage,
-- the stage driver raises max_tokens (instead of blindly redrafting) when a reply
-  is truncated at the output cap.
+- normal and recovery calls honor explicit stage output ceilings without
+  relaxing the project's monetary budget.
 """
 
 from __future__ import annotations
 
 import json
 import types
+from pathlib import Path
 
 import pytest
 import requests
 
 from kicraft.server import client as client_mod
 from kicraft.server.client import CappedOpenRouterClient, _StreamingCollectionGuard
-from kicraft.server.config import CollectionBound, DESIGN_PROFILES, Settings
+from kicraft.server.config import (
+    CollectionBound,
+    DESIGN_PROFILES,
+    STAGE_COLLECTION_BOUNDS,
+    Settings,
+)
 from kicraft.cli.model_preflight import preflight_role
 from kicraft.server.session import run_session
 from kicraft.server.spend_guard import SpendGuard
@@ -63,21 +69,26 @@ class _FakeResp:
         self._lines = [f"data: {json.dumps(c)}" for c in chunks] + ["data: [DONE]"]
         self.status_code = status_code
         self.reason = reason
+        self.closed = False
+        self.lines_read = 0
 
     def raise_for_status(self):
         if self.status_code >= 400:
             raise requests.exceptions.HTTPError(f"{self.status_code} {self.reason}", response=self)
 
     def close(self):
-        pass
+        self.closed = True
 
     def iter_lines(self, decode_unicode=True):
-        return iter(self._lines)
+        for line in self._lines:
+            self.lines_read += 1
+            yield line
 
     def __enter__(self):
         return self
 
     def __exit__(self, *a):
+        self.close()
         return False
 
 
@@ -1076,9 +1087,9 @@ def test_collection_guard_enforces_per_group_bound_without_full_response_copy():
     assert accepted.endswith('{"ref":"R3","sheet":"ARRAY"}')
 
 
-def test_collection_guard_stops_on_duplicate_unique_key():
+def test_collection_guard_stops_on_duplicate_single_key():
     guard = _StreamingCollectionGuard(
-        (CollectionBound(field="groups", total=500, unique_key="id"),)
+        (CollectionBound(field="groups", total=500, unique_keys=("id",)),)
     )
     text = '{"groups":[{"id":"header"},{"id":"header"},{"id":"unreachable"}]}'
 
@@ -1089,10 +1100,443 @@ def test_collection_guard_stops_on_duplicate_unique_key():
         "observed_count": 2,
         "configured_total": 500,
         "limit_scope": "duplicate",
-        "unique_key": "id",
-        "duplicate_value": "header",
+        "unique_keys": ["id"],
+        "duplicate_values": ["header"],
     }
     assert accepted.endswith('{"id":"header"}')
+
+
+def test_collection_guard_without_identity_allows_repeated_members():
+    text = '{"connections":[{"from_block":"A"},{"from_block":"A"}]}'
+    guard = _StreamingCollectionGuard((CollectionBound(field="connections", total=2),))
+    assert guard.consume(text) == (text, None)
+
+
+@pytest.mark.parametrize("reply_index", [0, 1])
+@pytest.mark.parametrize("chunk_size", [1, 7, 4096])
+def test_collection_guard_stops_captured_functional_repetition(reply_index, chunk_size):
+    fixture = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/stage_reliability/functional_spec_round3_20260911.json"
+        ).read_text()
+    )["replies"][reply_index]
+    guard = _StreamingCollectionGuard(STAGE_COLLECTION_BOUNDS["functional_spec"])
+    text = fixture["text"]
+    pieces = []
+    overflow = None
+    for start in range(0, len(text), chunk_size):
+        accepted, overflow = guard.consume(text[start : start + chunk_size])
+        pieces.append(accepted)
+        if overflow is not None:
+            break
+
+    assert overflow == {
+        "field": "connections",
+        "observed_count": fixture["first_duplicate_count"],
+        "configured_total": 128,
+        "limit_scope": "duplicate",
+        "unique_keys": ["from_block", "to_block", "signal_type"],
+        "duplicate_values": fixture["duplicate_values"],
+    }
+    assert "".join(pieces).rstrip() == text[: fixture["duplicate_end_chars"]]
+    assert overflow["observed_count"] < 128
+
+
+@pytest.mark.parametrize("chunk_size", [1, 11, 4096])
+def test_compound_identity_preserves_fanout_direction_type_and_escaped_strings(chunk_size):
+    text = (
+        r'{"nested":{"connections":[{"from_block":"A","to_block":"B","signal_type":"digital"}]},'
+        r'"connec\u0074ions":['
+        r'{"from_block":"A","to_block":"B","signal_type":"digital","description":"escaped \" [, }"},'
+        r'{"from_block":"A","to_block":"C","signal_type":"digital"},'
+        r'{"from_block":"B","to_block":"A","signal_type":"digital"},'
+        r'{"from_block":"A","to_block":"B","signal_type":"power"},'
+        r'{"from_block":"A\\B","to_block":"C","signal_type":"bus"},'
+        r'{"from_block":"A","to_block":"B\\C","signal_type":"bus"},'
+        r'{"from_block":"A\"","to_block":"B","signal_type":"digital"}'
+    )
+    guard = _StreamingCollectionGuard(STAGE_COLLECTION_BOUNDS["functional_spec"])
+    for start in range(0, len(text), chunk_size):
+        chunk = text[start : start + chunk_size]
+        accepted, overflow = guard.consume(chunk)
+        assert accepted == chunk
+        assert overflow is None
+    # Key escapes, value escapes, reordered fields and a different description
+    # must still identify the original A -> B digital flow.
+    duplicate = (
+        r',{"description":"second physical signal","to_block":"\u0042",'
+        r'"signal_type":"dig\u0069tal","from_\u0062lock":"\u0041"}]}'
+    )
+    overflow = None
+    for start in range(0, len(duplicate), chunk_size):
+        _accepted, overflow = guard.consume(duplicate[start : start + chunk_size])
+        if overflow is not None:
+            break
+    assert overflow["observed_count"] == 8
+    assert overflow["limit_scope"] == "duplicate"
+    assert overflow["duplicate_values"] == ["A", "B", "digital"]
+
+
+def test_compound_identity_does_not_invent_missing_member_keys():
+    text = (
+        '{"connections":[{"from_block":"A"},{"from_block":"A"},'
+        '{"from_block":"A","to_block":"B"},'
+        '{"from_block":"A","to_block":"B","signal_type":"digital"}]}'
+    )
+    guard = _StreamingCollectionGuard(STAGE_COLLECTION_BOUNDS["functional_spec"])
+    assert guard.consume(text) == (text, None)
+    # Structural validation, not the lexer, owns these malformed members.
+    from kicraft.server.stage_contracts import StageSchemaError, _normalize_stage_response
+
+    payload = json.loads(text)
+    payload["blocks"] = [
+        {"name": name, "category": "process", "purpose": "Signal processing"} for name in ("A", "B")
+    ]
+    with pytest.raises(StageSchemaError):
+        _normalize_stage_response("functional_spec", payload, {})
+
+
+def test_stream_duplicate_abort_is_charged_and_never_completed_or_pruned(monkeypatch):
+    text = (
+        '{"connections":['
+        '{"from_block":"A","to_block":"B","signal_type":"digital","description":"first"},'
+        '{"from_block":"A","to_block":"B","signal_type":"digital","description":"second"}]}'
+    )
+    response = _FakeResp([{"choices": [{"delta": {"content": text}}]}])
+    monkeypatch.setattr(client_mod.requests, "post", lambda *a, **kw: response)
+    spend = _RecordingGuard()
+    client = CappedOpenRouterClient(Settings(api_key="k"), guard=spend)
+    msg, cost = client._stream(
+        {
+            "messages": [{"role": "user", "content": "Return functional flows"}],
+            "_collection_bounds": STAGE_COLLECTION_BOUNDS["functional_spec"],
+        }
+    )
+
+    assert msg["finish_reason"] == "collection_limit"
+    assert msg["collection_limit"]["limit_scope"] == "duplicate"
+    assert msg["collection_limit"]["unique_keys"] == ["from_block", "to_block", "signal_type"]
+    assert msg["collection_limit"]["duplicate_values"] == ["A", "B", "digital"]
+    assert '"description":"second"' in msg["content"]
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(msg["content"])
+    assert len(spend.records) == 1
+    charged = spend.records[0]
+    assert charged["cost"] == cost > 0
+    assert charged["in"] > 0 and charged["out"] > 0
+    assert charged["meta"]["collection_limit"] == msg["collection_limit"]
+    assert charged["meta"]["bounded_collection_completed"] is False
+
+
+def _property_response_format():
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "inter_sheet_net_ranges": {"type": "array", "items": {"$ref": "#/$defs/range"}},
+                    "dictionary": {"type": "object", "additionalProperties": True},
+                    "choice": {
+                        "anyOf": [
+                            {"properties": {"left": True}, "additionalProperties": False},
+                            {"properties": {"right": True}, "additionalProperties": False},
+                        ]
+                    },
+                },
+                "additionalProperties": False,
+                "$defs": {
+                    "range": {
+                        "properties": {"net_class": True, "sheet": True},
+                        "additionalProperties": False,
+                    }
+                },
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize("chunk_size", [1, 7, 4096])
+def test_property_guard_aborts_recorded_nested_unknown_key(chunk_size):
+    text = '{"inter_sheet_net_ranges":[{"start_sheet":"root","end_sheet":"leds",'
+    text += '"net_class_net_class":"x",' * 200
+    guard = _StreamingCollectionGuard((), _property_response_format())
+    accepted_parts = []
+    violation = None
+    for offset in range(0, len(text), chunk_size):
+        accepted, violation = guard.consume(text[offset : offset + chunk_size])
+        accepted_parts.append(accepted)
+        if violation:
+            break
+    assert violation == {
+        "limit_scope": "property",
+        "field": "$.inter_sheet_net_ranges[0]",
+        "property": "start_sheet",
+    }
+    assert "".join(accepted_parts) == '{"inter_sheet_net_ranges":[{"start_sheet'
+
+
+@pytest.mark.parametrize("chunk_size", [1, 5, 4096])
+def test_property_guard_preserves_refs_escapes_dictionaries_and_union_branches(chunk_size):
+    text = (
+        r'{"inter_sheet_net_ranges":[{"net_\u0063lass":"escaped \" } [","sheet":1}],'
+        r'"dictionary":{"arbitrary":{"also\"arbitrary":true}},'
+        r'"choice":{"right":{"unconstrained":null}}}'
+    )
+    guard = _StreamingCollectionGuard((), _property_response_format())
+    for offset in range(0, len(text), chunk_size):
+        chunk = text[offset : offset + chunk_size]
+        assert guard.consume(chunk) == (chunk, None)
+
+
+def test_property_guard_leaves_no_schema_calls_permissive():
+    text = '{"unknown":[{"anything":true}]}'
+    assert _StreamingCollectionGuard(()).consume(text) == (text, None)
+
+
+@pytest.mark.parametrize("with_tools", [False, True])
+def test_stream_property_abort_is_paid_and_never_completed(monkeypatch, with_tools):
+    text = '{"inter_sheet_net_ranges":[{"start_sheet":"root","net_class_net_class":1}]}'
+    response = _FakeResp([{"choices": [{"delta": {"content": text}}]}])
+    monkeypatch.setattr(client_mod.requests, "post", lambda *a, **kw: response)
+    spend = _RecordingGuard()
+    client = CappedOpenRouterClient(Settings(api_key="k"), guard=spend)
+    call = client.chat_with_tools if with_tools else client.chat
+    kwargs = {"tools": [], "executor": lambda name, args: ""} if with_tools else {}
+    result = call(
+        [{"role": "user", "content": "Return ranges"}],
+        response_format=_property_response_format(),
+        **kwargs,
+    )
+    assert result["finish_reason"] == "collection_limit"
+    assert result["collection_limit"]["property"] == "start_sheet"
+    assert "net_class_net_class" not in result["text"]
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result["text"])
+    assert spend.records[0]["cost"] > 0
+    assert spend.records[0]["in"] > 0 and spend.records[0]["out"] > 0
+    assert spend.records[0]["meta"]["bounded_collection_completed"] is False
+
+
+def _guarded_json_stream(monkeypatch, text, chunk_size, with_tools=False, **kwargs):
+    chunks = [text[offset : offset + chunk_size] for offset in range(0, len(text), chunk_size)]
+    response = _FakeResp(
+        [{"choices": [{"delta": {"content": chunk}}]} for chunk in chunks]
+        + [{"choices": [{"delta": {}, "finish_reason": "stop"}]}, _usage_chunk()]
+    )
+    monkeypatch.setattr(client_mod.requests, "post", lambda *a, **kw: response)
+    spend = _RecordingGuard()
+    client = CappedOpenRouterClient(Settings(api_key="k"), guard=spend)
+    call = client.chat_with_tools if with_tools else client.chat
+    if with_tools:
+        kwargs.update(tools=[], executor=lambda name, args: "")
+    deltas = []
+    result = call(
+        [{"role": "user", "content": "Return one JSON object"}],
+        response_format=kwargs.pop("response_format", {"type": "json_object"}),
+        progress=deltas.append,
+        **kwargs,
+    )
+    assert response.closed
+    assert len(spend.records) == 1
+    return result, spend.records[0], response, deltas
+
+
+@pytest.mark.parametrize("with_tools", [False, True])
+@pytest.mark.parametrize("chunk_size", [1, 17, 4096])
+def test_stream_rejects_captured_can_syntax_at_first_irreparable_character(
+    monkeypatch, with_tools, chunk_size
+):
+    fixture = json.loads(
+        (
+            Path(__file__).parent
+            / "fixtures/stage_reliability/architecture_can_syntax_round8_20260911.json"
+        ).read_text()
+    )
+    prefix = fixture["prefix"]
+    text = prefix + "UNREACHABLE" * 500
+    result, paid, response, deltas = _guarded_json_stream(
+        monkeypatch, text, chunk_size, with_tools
+    )
+    offset = fixture["character_offset"]
+    assert result["finish_reason"] == "collection_limit"
+    limit = result["collection_limit"]
+    assert limit["limit_scope"] == "syntax"
+    assert limit["character_offset"] == offset == 3034
+    assert limit["field"] == "$.inter_sheet_nets"
+    assert limit["syntax_error"].startswith("Expected ','")
+    assert result["text"] == prefix[:offset]
+    assert "".join(
+        delta["text"] for delta in deltas if delta["kind"] == "answer_delta"
+    ) == prefix[:offset]
+    assert response.lines_read == offset // chunk_size + 1
+    received_chars = min(len(text), response.lines_read * chunk_size)
+    assert paid["out"] == max(1, received_chars // 4)
+    assert paid["in"] > 0 and paid["cost"] == result["cost_usd"] > 0
+    assert paid["meta"]["collection_limit"] == limit
+    assert paid["meta"]["bounded_collection_completed"] is False
+
+
+@pytest.mark.parametrize(
+    ("prefix", "bad", "error"),
+    [
+        ('{"a":{}', "{", "Expected ','"),
+        ('{"a":1 ', '"', "Expected ','"),
+        ('{"a"', "1", "Expected ':'"),
+        ('{"a":', "}", "Expected a JSON value"),
+        ('{"a":1,', "}", "Expected a quoted object key"),
+        ('{"a":[1,', "]", "Expected a JSON value"),
+        ('{"a":[1 ', "2", "Expected ','"),
+        ('{"a":[', "}", "Expected a JSON value"),
+        ('{"a":tru', "x", "Invalid JSON literal"),
+        ('{"a":fals', "}", "Invalid JSON literal"),
+        ('{"a":nul', " ", "Invalid JSON literal"),
+        ('{"a":0', "1", "Invalid JSON number"),
+        ('{"a":-', "}", "Invalid JSON number"),
+        ('{"a":1.', "}", "Invalid JSON number"),
+        ('{"a":1e+', "]", "Invalid JSON number"),
+        ('{"a":1', "x", "Invalid JSON number"),
+        ('{"a":"\\', "x", "Invalid JSON string escape"),
+        ('{"a":"\\u12', "x", "Expected a hexadecimal digit"),
+        ('{"a":"', "\n", "Unescaped control character"),
+        ('{"a":1}', "{", "Unexpected content"),
+        ('{"a":true,"a', '"', "Duplicate object key"),
+        (r'{"a":1,"\u0061', '"', "Duplicate object key"),
+        (r'{"\u0061":1,"a', '"', "Duplicate object key"),
+        (r'{"😀":1,"\ud83d\ude00', '"', "Duplicate object key"),
+        ('{"dictionary":{"x":1,"x', '"', "Duplicate object key"),
+    ],
+)
+@pytest.mark.parametrize("chunk_size", [1, 7, 4096])
+def test_stream_syntax_abort_preserves_only_repairable_prefix(
+    monkeypatch, prefix, bad, error, chunk_size
+):
+    result, paid, response, _ = _guarded_json_stream(
+        monkeypatch, prefix + bad + "unreachable" * 500, chunk_size
+    )
+    assert result["finish_reason"] == "collection_limit"
+    assert result["text"] == prefix
+    assert result["collection_limit"]["limit_scope"] == "syntax"
+    assert result["collection_limit"]["syntax_error"].startswith(error)
+    assert result["collection_limit"]["character_offset"] == len(prefix)
+    assert response.lines_read == len(prefix) // chunk_size + 1
+    assert paid["cost"] > 0 and paid["in"] > 0 and paid["out"] > 0
+    assert paid["meta"]["bounded_collection_completed"] is False
+
+
+def test_syntax_abort_does_not_execute_previously_streamed_tool_calls(monkeypatch):
+    tool_call = {
+        "index": 0,
+        "id": "pending",
+        "type": "function",
+        "function": {"name": "lookup", "arguments": '{"query":"STM32"}'},
+    }
+    response = _FakeResp(
+        [
+            {"choices": [{"delta": {"tool_calls": [tool_call]}}]},
+            {"choices": [{"delta": {"content": '{"a":1}{}'}}]},
+            _usage_chunk(),
+        ]
+    )
+    monkeypatch.setattr(client_mod.requests, "post", lambda *a, **kw: response)
+    spend = _RecordingGuard()
+    client = CappedOpenRouterClient(Settings(api_key="k"), guard=spend)
+    result = client.chat_with_tools(
+        [{"role": "user", "content": "Return JSON"}],
+        tools=[],
+        executor=lambda *a: pytest.fail("A syntax-stopped draft must not execute tools"),
+        response_format={"type": "json_object"},
+    )
+    assert result["finish_reason"] == "collection_limit"
+    assert result["collection_limit"]["limit_scope"] == "syntax"
+    assert result["rounds"] == 1
+    assert response.closed and response.lines_read == 2
+    assert len(spend.records) == 1 and spend.records[0]["cost"] > 0
+
+
+@pytest.mark.parametrize("chunk_size", [1, 5, 4096])
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        "{}",
+        " \n{}\t",
+        "```json\n{}\n```",
+        "```{}\n```",
+        "Here is the result:\n{}",
+        "Here is the result:\n```json\n{}\n```\nEnd of result.",
+    ],
+)
+def test_stream_accepts_chunked_nested_json_and_fences(monkeypatch, chunk_size, wrapper):
+    value = (
+        r'{"dictionary":{"arbitrary":[{},[],true,false,null,0,-0,123,-42,'
+        r'0.25,-1.25e-10,1E+2,1e0,"quote\"slash\\solidus\/\b\f\n\r\t\u0041",'
+        r'{"\u0061":1},{"a":2}]},"choice":{"right":{"unconstrained":null}}}'
+    )
+    text = wrapper.format(value)
+    result, paid, response, _ = _guarded_json_stream(
+        monkeypatch, text, chunk_size, response_format=_property_response_format()
+    )
+    assert result["finish_reason"] == "stop"
+    assert result.get("collection_limit") is None
+    assert result["text"] == text
+    from kicraft.server.stage_contracts import _extract_json
+
+    assert _extract_json(result["text"]) == json.loads(value)
+    assert response.lines_read == (len(text) + chunk_size - 1) // chunk_size + 3
+    assert paid["cost"] == 0.001
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"a":tru',
+        '{"a":fals',
+        '{"a":nul',
+        '{"a":-',
+        '{"a":1.',
+        '{"a":1e',
+        '{"a":1e+',
+        '{"a":"\\',
+        '{"a":"\\u12',
+        '{"a":[{"b":',
+        '```j',
+        '```json\n{"a":1}\n``',
+    ],
+)
+def test_stream_does_not_abort_incomplete_but_repairable_json(monkeypatch, text):
+    result, paid, _, _ = _guarded_json_stream(monkeypatch, text, 1)
+    assert result["finish_reason"] == "stop"
+    assert result.get("collection_limit") is None
+    assert result["text"] == text
+    assert paid["cost"] == 0.001
+
+
+def test_stream_oversized_keys_remain_syntax_checked_and_conservative(monkeypatch):
+    key = "x" * 5000
+    text = json.dumps({key: {key: [True, None, 1.2e-3]}})
+    result, _, _, _ = _guarded_json_stream(
+        monkeypatch, text, 7, response_format=_property_response_format()
+    )
+    assert result["finish_reason"] == "stop"
+    assert result["text"] == text
+    # Dropping the oversized key buffer must not disable string escape grammar.
+    malformed = '{"' + key + "\\u12"
+    result, paid, _, _ = _guarded_json_stream(monkeypatch, malformed + "X", 7)
+    assert result["collection_limit"]["limit_scope"] == "syntax"
+    assert result["text"] == malformed
+    assert paid["cost"] > 0
+
+
+def test_syntax_abort_never_salvages_a_bounded_wiring_prefix(monkeypatch):
+    text = '{"pins":[{"ref":"J1","pin":"1","net":"GND"}]{}'
+    result, paid, _, _ = _guarded_json_stream(
+        monkeypatch, text, 1, collection_bounds=(CollectionBound(field="pins", total=1),)
+    )
+    assert result["finish_reason"] == "collection_limit"
+    assert result["collection_limit"]["limit_scope"] == "syntax"
+    assert result["text"] == '{"pins":[{"ref":"J1","pin":"1","net":"GND"}]'
+    assert paid["meta"]["bounded_collection_completed"] is False
 
 
 def test_collection_guard_accepts_empty_and_large_in_bound_arrays():
@@ -1147,15 +1591,7 @@ def test_stream_closes_exact_wiring_unit_prefix_at_collection_bound(monkeypatch)
                         }
                     ]
                 },
-                {
-                    "choices": [
-                        {
-                            "delta": {
-                                "content": '{"ref":"J1","pin":"1","net":"D0"}]}'
-                            }
-                        }
-                    ]
-                },
+                {"choices": [{"delta": {"content": '{"ref":"J1","pin":"1","net":"D0"}]}'}}]},
             ]
         )
 
@@ -1200,9 +1636,65 @@ def _clear_profile_env(monkeypatch):
         "KICRAFT_PROVIDER_ORDER",
         "KICRAFT_MAX_PRICE_PROMPT",
         "KICRAFT_MAX_PRICE_COMPLETION",
+        "KICRAFT_STAGE_OUTPUT_LIMITS",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+def test_stage_output_ceiling_admits_bounded_call_without_raising_project_budget(
+    tmp_path, monkeypatch, recovery
+):
+    from kicraft.server.spend_guard import BudgetExceeded
+    from kicraft.server.stage_runtime import _response_policy
+
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "pro")
+    monkeypatch.setenv("KICRAFT_STAGE_OUTPUT_LIMITS", '{"architecture":8192}')
+    settings = Settings.from_env(dotenv=False)
+    settings.ledger_path = tmp_path / "ledger.db"
+    settings.project_llm_budget_usd = 0.10
+    guard = SpendGuard(settings)
+    guard.record(settings.model, 100, 100, 0.007, meta={"run_id": "bounded", "stage": "intent"})
+    client = CappedOpenRouterClient(settings, guard=guard)
+    messages = [{"role": "user", "content": "x" * 60000}]
+    monkeypatch.setattr(
+        client_mod.requests,
+        "post",
+        lambda *a, **k: _FakeResp(
+            [
+                {"choices": [{"delta": {"content": "{}"}, "finish_reason": "stop"}]},
+                _usage_chunk(cost=0.001),
+            ]
+        ),
+    )
+    with pytest.raises(BudgetExceeded):
+        client.chat(messages, max_tokens=16384, meta_ctx={"run_id": "bounded"})
+    policy = _response_policy(client, "architecture", 16384)
+    output_cap = policy.serialization_max_tokens if recovery else policy.normal_max_tokens
+    client.chat(messages, max_tokens=output_cap, meta_ctx={"run_id": "bounded"})
+
+    assert guard.spent_for_run("bounded") == pytest.approx(0.008)
+    with pytest.raises(BudgetExceeded) as refused:
+        guard.preflight(call_ceiling_usd=0.093, run_id="bounded")
+    assert refused.value.limit_usd == 0.10
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        {"architecture": True},
+        {"unknown_stage": 8192},
+        {"architecture": 0},
+        {"architecture": 16385},
+    ],
+)
+def test_stage_output_ceiling_rejects_nonbinding_configuration(monkeypatch, limits):
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setenv("KICRAFT_STAGE_OUTPUT_LIMITS", json.dumps(limits))
+    with pytest.raises(SystemExit, match="KICRAFT_STAGE_OUTPUT_LIMITS"):
+        Settings.from_env(dotenv=False)
 
 
 def test_design_profiles_resolve_dated_models_and_finite_caps(monkeypatch):

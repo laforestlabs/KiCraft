@@ -15,9 +15,16 @@ from pathlib import Path
 
 import pytest
 
-from kicraft.design.cli_app import main
+from kicraft.design.cli_app import (
+    _footprint_candidates,
+    _symbol_candidates,
+    _unresolved_symbols,
+    main,
+)
+from kicraft.design.models import BOM, BomPart
 from kicraft.design.synthesis.parts_lookup import DEFAULT_KICAD_FOOTPRINT_DIR
 from kicraft.design.synthesis.symbol_library import DEFAULT_KICAD_SYMBOL_DIR
+from kicraft.design.synthesis.symbol_pinout import lookup_pins
 
 
 def _run(capsys: pytest.CaptureFixture, *argv: str) -> tuple[int, dict]:
@@ -31,6 +38,91 @@ def _run(capsys: pytest.CaptureFixture, *argv: str) -> tuple[int, dict]:
         return rc, json.loads(out) if out.strip() else {}
     except json.JSONDecodeError:
         return rc, {"_raw_stdout": out}
+
+
+@pytest.mark.skipif(
+    not DEFAULT_KICAD_SYMBOL_DIR.is_dir(), reason="KiCad symbol libraries not installed"
+)
+def test_db9_rejection_offers_loadable_dsub_contacts_not_telephone_connectors():
+    candidates = _symbol_candidates("Connector:DB9_Female")
+    assert candidates[0] == "Connector:DE9_Socket"
+    assert all(candidate.startswith("Connector:DE9_") for candidate in candidates)
+    for candidate in candidates:
+        assert len(lookup_pins(candidate)["pins"]) >= 9
+    bom = BOM(
+        parts=[
+            BomPart(
+                ref="J1",
+                value="CAN",
+                symbol="Connector:DB9_Female",
+                footprint="Connector_Dsub:DSUB-9_Socket_Vertical_P2.77x2.84mm",
+                sheet="CAN",
+            )
+        ]
+    )
+    offenders = _unresolved_symbols(bom)
+    assert len(offenders) == 1
+    assert candidates[0] in offenders[0]
+    assert "4P2C" not in offenders[0]
+
+
+@pytest.mark.skipif(
+    not DEFAULT_KICAD_SYMBOL_DIR.is_dir(), reason="KiCad symbol libraries not installed"
+)
+@pytest.mark.parametrize(
+    "identity, layout, pin_count",
+    [
+        ("Connector_Generic:Conn_02x08", "02x08", 16),
+        ("Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical", "01x04", 4),
+    ],
+)
+def test_symbol_candidates_preserve_header_layout(identity, layout, pin_count):
+    candidates = _symbol_candidates(identity)
+    assert layout in candidates[0]
+    assert len(lookup_pins(candidates[0])["pins"]) == pin_count
+    for candidate in candidates:
+        assert layout in candidate
+        assert lookup_pins(candidate)["pins"]
+
+
+@pytest.mark.skipif(
+    not DEFAULT_KICAD_SYMBOL_DIR.is_dir(), reason="KiCad symbol libraries not installed"
+)
+def test_package_in_symbol_field_does_not_offer_unrelated_ics():
+    assert _symbol_candidates("Package_SO:SOIC-28W_7.5x17.9mm_P1.27mm") == []
+
+
+@pytest.mark.skipif(
+    not DEFAULT_KICAD_FOOTPRINT_DIR.is_dir(), reason="KiCad footprint libraries not installed"
+)
+@pytest.mark.parametrize(
+    "identity, prefix, dimension",
+    [
+        (
+            "Connector_Dsub:DSUB-9_Female_Horizontal_P2.77x2.84mm",
+            "Connector_Dsub:DSUB-9_Socket_Horizontal_",
+            "P2.77x2.84mm",
+        ),
+        (
+            "Button_Switch_SMD:SW_SPST_PTS645",
+            "Button_Switch_SMD:SW_SPST_PTS645",
+            "",
+        ),
+        (
+            "Inductor_THT:L_Radial_D50.0mm_P5.00mm",
+            "Inductor_THT:L_Radial_",
+            "P5.00mm",
+        ),
+    ],
+)
+def test_footprint_candidates_rank_structure_before_alphabetic_limit(identity, prefix, dimension):
+    candidates = _footprint_candidates(identity, limit=3)
+    assert 1 <= len(candidates) <= 3
+    for candidate in candidates:
+        assert candidate.startswith(prefix)
+        assert dimension in candidate
+        library, _, name = candidate.partition(":")
+        assert (DEFAULT_KICAD_FOOTPRINT_DIR / f"{library}.pretty" / f"{name}.kicad_mod").is_file()
 
 
 def _write_slot(tmp_path: Path, name: str, data: dict) -> Path:
@@ -87,6 +179,24 @@ def _valid_architecture() -> dict:
                 "function": "AP2112K 3V3 LDO with caps.",
                 "from_library": None,
                 "library_instance": None,
+            },
+        ],
+        "requirements": [
+            {
+                "id": "mcu",
+                "sheet": "MCU",
+                "role": "mcu_core",
+                "family": "mcu-module",
+                "ports": {"vdd": "+3V3", "gnd": "GND"},
+                "functional_blocks": ["MCU"],
+            },
+            {
+                "id": "regulator",
+                "sheet": "LDO",
+                "role": "regulator",
+                "family": "ldo",
+                "ports": {"vin": "VBUS", "vout": "+3V3", "gnd": "GND"},
+                "functional_blocks": ["LDO"],
             },
         ],
         "power_nets": ["VBUS", "+3V3", "GND"],
@@ -935,6 +1045,64 @@ def test_stage_commit_bom_accepts_resolvable_footprints(tmp_path, capsys):
     )
     assert rc == 0, payload
     assert payload["ok"] is True
+
+
+@_footprints_installed
+def test_bom_partial_deterministic_wiring_defers_full_coverage(tmp_path, capsys):
+    state_path = _commit_chain_through_arch(tmp_path, capsys)
+    bom = _valid_bom()
+    partial_wiring = {
+        "connections": [
+            {
+                "net_name": "LOCAL",
+                "endpoints": [{"ref": "U1", "pin": "1"}],
+                "sheet": "MCU",
+            }
+        ],
+        "no_connect_pins": [],
+    }
+    bom.update(partial_wiring)
+    bom["recipe_ownership"] = [
+        {
+            "recipe": "test-partial@1",
+            "instance": "test_partial",
+            "refs": ["U1"],
+            "pins": [
+                {
+                    "ref": "U1",
+                    "pin": "1",
+                    "net": "LOCAL",
+                    "owner": "recipe",
+                    "owner_id": "test-partial@1",
+                }
+            ],
+        }
+    ]
+    bom_slot = _write_slot(tmp_path, "bom", bom)
+
+    rc, payload = _run(
+        capsys,
+        "stage-commit",
+        "bom",
+        "--slot-file",
+        str(bom_slot),
+        "--no-archive",
+        str(state_path),
+    )
+
+    assert rc == 0, payload
+    wiring_slot = _write_slot(tmp_path, "wiring", partial_wiring)
+    rc, payload = _run(
+        capsys,
+        "stage-commit",
+        "wiring",
+        "--slot-file",
+        str(wiring_slot),
+        "--no-archive",
+        str(state_path),
+    )
+    assert rc == 3
+    assert any("9.11 net coverage" in error for error in payload["errors"])
 
 
 @_footprints_installed

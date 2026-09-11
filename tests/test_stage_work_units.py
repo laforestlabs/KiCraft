@@ -1,3 +1,5 @@
+import json
+
 from dataclasses import FrozenInstanceError
 
 import pytest
@@ -6,6 +8,7 @@ from kicraft.server.stage_work_units import (
     StageDraftStore,
     StageWorkUnit,
     WorkUnitValidationError,
+    deterministic_bom_candidate,
     deterministic_wiring_candidate,
     merge_bom_units,
     merge_wiring_units,
@@ -207,60 +210,118 @@ def test_empty_usb_c_sheets_lower_to_standard_recipe_parts(function, expected_id
     assert all(group["sheet"] == "USB INPUT" for group in candidate["groups"])
 
 
-def test_common_standard_sheets_lower_without_provider_guessing():
+def test_usb_signal_header_is_not_replaced_with_a_receptacle():
     state = _state()
     state["architecture"]["sheets"] = [
         {
-            "name": "PORT 1",
-            "function": "USB-A receptacle with current limiting and status LED",
-        },
-        {"name": "QSPI FLASH", "function": "QSPI flash storage"},
-        {"name": "POWER", "function": "3.3 V LDO regulator"},
-        {"name": "GPIO", "function": "Castellated GPIO breakout header"},
+            "name": "HEADER BREAKOUT",
+            "function": "24-pin header exposing USB-C connector signals and VBUS",
+        }
+    ]
+
+    candidate = validate_unit_candidate(
+        StageWorkUnit("bom-s000", "bom", "HEADER BREAKOUT"),
+        {"groups": []},
+        state,
+        {},
+    )
+
+    assert [(group["symbol"], group["footprint"]) for group in candidate["groups"]] == [
+        (
+            "Connector_Generic:Conn_01x24",
+            "Connector_PinHeader_2.54mm:PinHeader_1x24_P2.54mm_Vertical",
+        )
+    ]
+
+
+def test_standard_power_terminal_resolves_installed_identity(tmp_path):
+    from kicraft.server.stage_work_units import _bom_unit_identity_defects
+
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {"name": "POWER INPUT", "function": "Two-pin power input terminal"}
+    ]
+    candidate = deterministic_bom_candidate(StageWorkUnit("bom-s000", "bom", "POWER INPUT"), state)
+    groups = [BomComponentGroup.model_validate(group) for group in candidate["groups"]]
+
+    assert _bom_unit_identity_defects(groups, tmp_path) == {
+        "unresolved-footprint": [],
+        "unresolved-symbol": [],
+        "symbol-footprint-pad-mismatch": [],
+    }
+
+
+def test_selectable_usb_pd_trigger_stays_model_owned():
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {
+            "name": "PD",
+            "function": "USB-C PD trigger with switch-selectable output voltage",
+        }
+    ]
+
+    candidate = deterministic_bom_candidate(
+        StageWorkUnit("bom-s000", "bom", "PD"),
+        state,
+    )
+
+    assert candidate is None
+
+
+def test_typed_pd_power_input_is_not_captured_by_connector_sheet_lowerer():
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {"name": "PD", "function": "USB-C receptacle and power interface"}
     ]
     state["architecture"]["requirements"] = [
         {
-            "id": "port",
-            "sheet": "PORT 1",
-            "role": "driver",
-            "family": "current-limit-switch",
-        },
-        {
-            "id": "flash",
-            "sheet": "QSPI FLASH",
-            "role": "bus_interface",
-            "family": "qspi-flash",
-        },
-        {"id": "ldo", "sheet": "POWER", "role": "regulator", "family": "ldo"},
-        {
-            "id": "gpio",
-            "sheet": "GPIO",
-            "role": "connector",
-            "family": "gpio-header",
-            "parameters": {"pins": 28},
-        },
+            "id": "power_controller",
+            "sheet": "PD",
+            "role": "power_input",
+            "family": "usb-pd-trigger",
+            "parameters": {"supported_voltages": "9V,12V,20V"},
+            "ports": {"cc1": "CC1", "cc2": "CC2", "vbus_out": "VBUS"},
+        }
     ]
 
-    expected = {
-        "PORT 1": {"usb_a_receptacle", "current_limit_switch", "status_led"},
-        "QSPI FLASH": {"qspi_flash"},
-        "POWER": {"ldo_3v3", "ldo_caps"},
-        "GPIO": {"gpio_header"},
-    }
-    for index, (sheet, ids) in enumerate(expected.items()):
-        requirement_id = state["architecture"]["requirements"][index]["id"]
-        candidate = validate_unit_candidate(
-            StageWorkUnit(
-                f"bom-s{index:03d}",
-                "bom",
-                sheet,
-                requirement_ids=(requirement_id,),
-            ),
-            {"groups": []},
-            state,
-            {},
-        )
-        assert ids <= {group["id"] for group in candidate["groups"]}
+    (unit,) = plan_stage_work_units("bom", state, {})
+
+    assert unit.requirement_ids == ("power_controller",)
+    assert deterministic_bom_candidate(unit, state) is None
+
+
+def test_mcu_sheet_cannot_be_replaced_by_ancillary_ldo():
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {
+            "name": "CORE",
+            "function": "Module with integrated MCU, USB transceiver, and 3.3V LDO regulator.",
+        }
+    ]
+
+    (unit,) = plan_stage_work_units("bom", state, {})
+
+    assert deterministic_bom_candidate(unit, state) is None
+
+
+def test_typed_mcu_cannot_be_replaced_by_ancillary_ldo_without_prose_hint():
+    from kicraft.design.models import CircuitRequirement
+
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {"name": "CORE", "function": "Processing module with integrated 3.3V LDO regulator"}
+    ]
+    state["architecture"]["requirements"] = [
+        CircuitRequirement(
+            id="processing", sheet="CORE", role="mcu_core", family="custom-processing-module"
+        ).model_dump(mode="json")
+    ]
+    (unit,) = plan_stage_work_units("bom", state, {})
+
+    assert deterministic_bom_candidate(unit, state) is None
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, {"groups": [_group("ldo_caps", "CORE")]}, state, {})
+    assert caught.value.defects["missing-requirement-implementation"] == ["processing"]
 
 
 @pytest.mark.parametrize(
@@ -403,7 +464,7 @@ def test_bom_connector_unit_discards_sibling_circuit_groups():
     assert [group["id"] for group in validated["groups"]] == ["input"]
 
 
-def test_bom_planning_skips_net_like_power_requirements():
+def test_bom_planning_keeps_explicit_power_requirements():
     state = _state()
     state["architecture"]["requirements"] = [
         {
@@ -422,10 +483,9 @@ def test_bom_planning_skips_net_like_power_requirements():
 
     units = plan_stage_work_units("bom", state, {})
 
-    # The plain filter requirement rolls up into a sheet-scoped unit; sheet B
-    # (no requirements) still gets its own unit so it can never come back empty.
+    # Every unselected requirement remains work, even without a typed lowerer.
     assert [(unit.requirement_ids, unit.sheet) for unit in units] == [
-        (("filter",), "A"),
+        (("external_power", "filter"), "A"),
         ((), "B"),
     ]
 
@@ -553,10 +613,11 @@ def test_bom_merge_rewrites_ids_arrays_and_stably_deduplicates():
             "substitutions": [],
         },
     }
-    merged, refs, lowering = merge_bom_units(units, candidates, state)
+    merged, refs, lowering, trusted_groups = merge_bom_units(units, candidates, state)
     assert [group["id"] for group in merged["groups"]] == ["s000_res", "s001_res"]
     assert merged["arrays"][0]["group_id"] == "s000_res"
     assert merged["assumptions"] == ["shared (defaulted)"]
+    assert trusted_groups == frozenset()
     assert refs == {"R1": "bom-s000", "R2": "bom-s001"}
     assert lowering == {}
 
@@ -713,7 +774,7 @@ def test_recipe_complete_requirement_omits_bom_work_unit():
     assert [unit.sheet for unit in units] == ["B"]
 
 
-def test_recipe_part_role_omits_redundant_unresolved_requirement():
+def test_recipe_part_role_does_not_own_an_unselected_requirement():
     state = _state()
     state["architecture"]["requirements"] = [
         {"id": "mcu", "sheet": "A", "role": "mcu_core", "family": "rp2040"},
@@ -730,7 +791,37 @@ def test_recipe_part_role_omits_redundant_unresolved_requirement():
 
     units = plan_stage_work_units("bom", state, {})
 
-    assert all("xtal" not in unit.requirement_ids for unit in units)
+    assert [unit.requirement_ids for unit in units if unit.sheet == "A"] == [("xtal",)]
+
+
+def test_recipe_internal_role_id_does_not_own_an_unselected_requirement():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "mcu",
+            "sheet": "A",
+            "role": "mcu_core",
+            "family": "stm32f103c8",
+        },
+        {
+            "id": "hse_crystal",
+            "sheet": "A",
+            "role": "analog_block",
+            "family": "crystal",
+        },
+    ]
+    state["architecture"]["recipe_selections"] = [
+        {
+            "recipe": "stm32f103c8t6-minimal@1",
+            "instance": "mcu",
+            "sheets": {"mcu": "A"},
+            "requirement_ids": ["mcu"],
+        }
+    ]
+
+    units = plan_stage_work_units("bom", state, {})
+
+    assert [unit.requirement_ids for unit in units if unit.sheet == "A"] == [("hse_crystal",)]
 
 
 def test_mixed_recipe_sheet_plans_only_unresolved_role():
@@ -790,6 +881,34 @@ def test_bom_unit_rejects_protected_identity_before_merge():
     with pytest.raises(WorkUnitValidationError) as caught:
         validate_unit_candidate(unit, payload, _state(), {})
     assert caught.value.defects["model_authored_protected_identity"] == ["esp32_s3_support"]
+
+
+def test_generic_power_input_cannot_claim_unselected_registered_regulator():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "power_input",
+            "sheet": "A",
+            "role": "power_input",
+            "family": "power-input",
+            "parameters": {"input_voltage": 5.0, "output_voltage": 3.3},
+            "ports": {"gnd": "GND", "output": "+3V3"},
+        }
+    ]
+    # The saved CAN candidate remains invalid even if an old persisted plan
+    # reaches validation: registered identities are protected globally, not
+    # merely when another selected recipe happens to own this component.
+    unit = StageWorkUnit("bom-s002", "bom", "A", requirement_ids=("power_input",))
+    regulator = {
+        **_group("ldo_3v3", "A", prefix="U"),
+        "value": "AMS1117-3.3",
+        "mpn": "AMS1117-3.3",
+        "symbol": "Regulator_Linear:AMS1117-3.3",
+        "footprint": "Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+    }
+    with pytest.raises(WorkUnitValidationError) as rejected:
+        validate_unit_candidate(unit, {"groups": [regulator]}, state, {})
+    assert rejected.value.defects["model_authored_protected_identity"] == ["ldo_3v3"]
 
 
 def test_bom_unit_allows_owned_protected_identity():
@@ -901,6 +1020,303 @@ def test_bom_unit_rejects_parts_that_do_not_implement_owned_requirement():
     assert caught.value.defects["missing-requirement-implementation"] == ["pd_trigger_controller"]
 
 
+@pytest.mark.parametrize("family", ["switch-input", "voltage_selector_switch"])
+@pytest.mark.parametrize("with_sibling", [False, True])
+def test_typed_switch_requirement_rejects_unrelated_passives(family, with_sibling):
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {"name": "A", "function": "Control circuit with status LED and supply decoupling"}
+    ]
+    requirements = [{"id": "control", "sheet": "A", "role": "user_io", "family": family}]
+    if with_sibling:
+        requirements.append(
+            {"id": "filter", "sheet": "A", "role": "analog_block", "family": "custom-filter"}
+        )
+    state["architecture"]["requirements"] = requirements
+    (unit,) = plan_stage_work_units("bom", state, {})
+    assert deterministic_bom_candidate(unit, state) is None
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(
+            unit,
+            {
+                "groups": [
+                    _group("control", "A", prefix="SW"),
+                    {
+                        **_group("filter", "A", prefix="C"),
+                        "symbol": "Device:C",
+                        "value": "100nF",
+                        "footprint": "Capacitor_SMD:C_0603_1608Metric",
+                    },
+                ],
+                "_lowering_requirement_id": "control",
+            },
+            state,
+            {},
+        )
+    assert caught.value.defects["missing-requirement-implementation"] == ["control"]
+
+
+def test_button_requirement_accepts_physical_button_with_ancillary_passives():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {"id": "control", "sheet": "A", "role": "user_io", "family": "switch-input"}
+    ]
+    unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("control",))
+    switch = {
+        **_group("control_switch", "A", prefix="SW"),
+        "value": "BUTTON",
+        "symbol": "Switch:SW_Push",
+        "footprint": "Button_Switch_SMD:SW_SPST_TL3342",
+    }
+    validated = validate_unit_candidate(
+        unit, {"groups": [switch, _group("pullup", "A")]}, state, {}
+    )
+    assert {group["id"] for group in validated["groups"]} == {"control_switch", "pullup"}
+
+
+def test_typed_coin_cell_holder_rejects_a_welded_cell_footprint():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "battery",
+            "sheet": "A",
+            "role": "power_input",
+            "family": "coin-cell-holder",
+            "parameters": {"cell_format": "CR2032"},
+            "ports": {"positive": "VBAT", "negative": "GND"},
+        }
+    ]
+    unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("battery",))
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(
+            unit,
+            {
+                "groups": [
+                    {
+                        **_group("battery_holder", "A", prefix="BT"),
+                        "value": "CR2032",
+                        "symbol": "Device:Battery_Cell",
+                        "footprint": "Battery:Battery_Panasonic_CR2032-HFN_Horizontal_CircularHoles",
+                    }
+                ]
+            },
+            state,
+            {},
+        )
+    assert caught.value.defects["missing-requirement-implementation"] == ["battery"]
+
+
+def _battery_power_state():
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {"name": "A", "function": "Battery and voltage conditioning"}
+    ]
+    state["architecture"]["requirements"] = [
+        {
+            "id": "battery",
+            "sheet": "A",
+            "role": "power_input",
+            "family": "coin-cell-holder",
+            "parameters": {"cell_format": "CR2032"},
+            "ports": {"positive": "VBAT", "negative": "GND"},
+        },
+        {
+            "id": "power_conversion",
+            "sheet": "A",
+            "role": "regulator",
+            "family": "direct-battery-rail",
+            "functional_blocks": ["POWER_CONVERSION"],
+            "ports": {"input": "VBAT", "output": "VCC", "ground": "GND"},
+        },
+    ]
+    return state
+
+
+@pytest.mark.parametrize(
+    ("mpn", "footprint"),
+    [
+        ("BS-07-A1BJ001", "Battery:BatteryHolder_MYOUNG_BS-07-A1BJ001_CR2032"),
+        ("Keystone3034", "Battery:BatteryHolder_Keystone_3034_1x20mm"),
+    ],
+)
+@pytest.mark.parametrize("with_support_passive", [False, True])
+def test_regulator_unit_rejects_sibling_coin_cell_holder_substitution(
+    mpn, footprint, with_support_passive
+):
+    state = _battery_power_state()
+    unit = StageWorkUnit("bom-s001", "bom", "A", requirement_ids=("power_conversion",))
+    holder = {
+        **_group("power_conversion", "A", prefix="BT"),
+        "value": "CR2032 holder",
+        "mpn": mpn,
+        "symbol": "Device:Battery_Cell",
+        "footprint": footprint,
+    }
+    groups = [holder]
+    if with_support_passive:
+        # Even an owned-looking label cannot turn an ancillary resistor into
+        # the implementation that makes sibling pruning safe.
+        groups.append(_group("power_conversion_support", "A"))
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, {"groups": groups}, state, {})
+
+    assert caught.value.defects["model_authored_protected_identity"] == ["power_conversion"]
+
+
+def test_coin_cell_holder_unit_accepts_own_feature_despite_sibling_holder():
+    state = _battery_power_state()
+    state["architecture"]["requirements"].append(
+        {
+            "id": "backup_battery",
+            "sheet": "A",
+            "role": "power_input",
+            "family": "coin-cell-holder",
+            "parameters": {"cell_format": "CR2032"},
+            "ports": {"positive": "BACKUP", "negative": "GND"},
+        }
+    )
+    unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("battery",))
+    holder = {
+        **_group("primary_cell", "A", prefix="BT"),
+        "value": "CR2032 holder",
+        "mpn": "Keystone3034",
+        "symbol": "Device:Battery_Cell",
+        "footprint": "Battery:BatteryHolder_Keystone_3034_1x20mm",
+    }
+
+    validated = validate_unit_candidate(unit, {"groups": [holder]}, state, {})
+
+    assert [group["id"] for group in validated["groups"]] == ["primary_cell"]
+
+
+def test_regulator_unit_prunes_sibling_holder_only_with_owned_implementation():
+    state = _battery_power_state()
+    state["architecture"]["requirements"][1].update(
+        {"family": "ldo", "exact_part": "MCP1700T-2502E/TT"}
+    )
+    unit = StageWorkUnit("bom-s001", "bom", "A", requirement_ids=("power_conversion",))
+    regulator = {
+        **_group("voltage_conditioner", "A", prefix="U"),
+        "value": "MCP1700T-2502E/TT",
+        "mpn": "MCP1700T-2502E/TT",
+        "symbol": "Regulator_Linear:MCP1700-2502E_SOT23",
+        "footprint": "Package_TO_SOT_SMD:SOT-23",
+    }
+    holder = {
+        **_group("extra_holder", "A", prefix="BT"),
+        "value": "CR2032 holder",
+        "mpn": "Keystone3034",
+        "symbol": "Device:Battery_Cell",
+        "footprint": "Battery:BatteryHolder_Keystone_3034_1x20mm",
+    }
+    decoupling = {
+        **_group("output_decoupling", "A", prefix="C"),
+        "value": "1uF",
+        "symbol": "Device:C",
+        "footprint": "Capacitor_SMD:C_0603_1608Metric",
+    }
+
+    validated = validate_unit_candidate(
+        unit, {"groups": [regulator, holder, decoupling]}, state, {}
+    )
+
+    assert {group["id"] for group in validated["groups"]} == {
+        "voltage_conditioner",
+        "output_decoupling",
+    }
+
+
+def test_regulator_unit_rejects_empty_direct_battery_rail():
+    state = _battery_power_state()
+    unit = StageWorkUnit("bom-s001", "bom", "A", requirement_ids=("power_conversion",))
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, {"groups": []}, state, {})
+
+    assert caught.value.defects["empty-sheet"] == ["A"]
+
+
+@pytest.mark.parametrize("with_sibling", [False, True])
+def test_typed_pd_requirement_rejects_ancillary_only_bom_at_origin(with_sibling):
+    from kicraft.design.models import CircuitRequirement
+
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {"name": "A", "function": "USB-C receptacle with PD trigger negotiating 9/12/20 V"}
+    ]
+    requirements = [
+        CircuitRequirement(
+            id="pd_trigger_negotiation",
+            sheet="A",
+            role="power_input",
+            family="usb-pd-trigger",
+            parameters={"voltages": "9,12,20"},
+            ports={"vbus": "VBUS", "cc1": "CC1", "cc2": "CC2"},
+        ).model_dump(mode="json")
+    ]
+    if with_sibling:
+        requirements.append(
+            CircuitRequirement(
+                id="bulk_filter", sheet="A", role="analog_block", family="custom-filter"
+            ).model_dump(mode="json")
+        )
+    state["architecture"]["requirements"] = requirements
+    (unit,) = plan_stage_work_units("bom", state, {})
+    payload = {
+        "groups": [
+            _group("pd_trigger_negotiation", "A"),
+            {
+                **_group("bulk_filter", "A", prefix="C"),
+                "value": "10uF",
+                "symbol": "Device:C",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+            },
+        ]
+    }
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, payload, state, {})
+
+    assert caught.value.defects["missing-requirement-implementation"] == ["pd_trigger_negotiation"]
+
+
+def test_typed_pd_requirement_preserves_actual_controller_identity():
+    from kicraft.design.models import CircuitRequirement
+
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": "A", "function": "PD negotiation"}]
+    state["architecture"]["requirements"] = [
+        CircuitRequirement(
+            id="pd_trigger_negotiation",
+            sheet="A",
+            role="power_input",
+            family="usb-pd-trigger",
+            parameters={"voltages": "9,12,20"},
+        ).model_dump(mode="json")
+    ]
+    (unit,) = plan_stage_work_units("bom", state, {})
+    payload = {
+        "groups": [
+            {
+                **_group("negotiator", "A", prefix="U"),
+                "value": "CH224K",
+                "mpn": "CH224K",
+                "symbol": "ch224k:CH224K",
+                "footprint": "ch224k:ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP",
+            },
+            _group("configuration_resistor", "A"),
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, state, {})
+
+    assert {group["id"] for group in validated["groups"]} == {
+        "negotiator",
+        "configuration_resistor",
+    }
+
+
 def test_bom_unit_accepts_connector_terminal_synonym():
     state = _state()
     state["architecture"]["requirements"] = [
@@ -937,6 +1353,7 @@ def test_bom_unit_discards_only_unowned_protected_sibling():
             "sheet": "A",
             "role": "bus_interface",
             "family": "pd_trigger_controller",
+            "exact_part": "TPS25730",
         }
     ]
     unit = StageWorkUnit(
@@ -972,3 +1389,742 @@ def test_bom_unit_discards_only_unowned_protected_sibling():
     validated = validate_unit_candidate(unit, payload, state, {})
 
     assert [group["id"] for group in validated["groups"]] == ["pd_controller"]
+
+
+def test_bom_unit_prunes_exact_recipe_duplicate_but_rejects_conflict():
+    state = _state()
+    state["architecture"]["recipe_selections"] = [
+        {
+            "recipe": "esp32-s3-mini-1-minimal@1",
+            "instance": "mcu_core",
+            "sheets": {"mcu": "A"},
+            "port_bindings": {"gnd": "GND", "vdd": "+3V3"},
+            "requirement_ids": ["mcu_core"],
+        }
+    ]
+    unit = StageWorkUnit(
+        "bom-r000",
+        "bom",
+        "A",
+        requirement_ids=("novel_analog",),
+    )
+    duplicate = {
+        "id": "duplicate_bulk_capacitor",
+        "reference_prefix": "C",
+        "quantity": 1,
+        "value": "10uF",
+        "symbol": "Device:C",
+        "footprint": "Capacitor_SMD:C_0603_1608Metric",
+        "sheet": "A",
+    }
+
+    owned = _group("novel_filter", "A")
+    validated = validate_unit_candidate(
+        unit,
+        {"groups": [duplicate, owned]},
+        state,
+        {},
+    )
+    assert [group["id"] for group in validated["groups"]] == ["novel_filter"]
+
+    conflict = {**duplicate, "footprint": "Capacitor_SMD:C_0805_2012Metric"}
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, {"groups": [conflict, owned]}, state, {})
+    assert caught.value.defects["recipe-duplicate"] == ["duplicate_bulk_capacitor"]
+
+
+def test_bom_unit_returns_bounded_structured_identity_defect(tmp_path, monkeypatch):
+    from kicraft.design import cli_app
+
+    monkeypatch.setattr(
+        cli_app,
+        "_unresolved_footprints",
+        lambda bom, project_root: [
+            "U1: footprint 'Test:Missing' is not loadable"
+            " -- real options: Package_SO:SOIC-8, Package_DIP:DIP-8"
+        ],
+    )
+    monkeypatch.setattr(cli_app, "_unresolved_symbols", lambda bom: [])
+    monkeypatch.setattr(
+        cli_app,
+        "_symbol_footprint_pin_mismatches",
+        lambda bom, project_root: [],
+    )
+    unit = StageWorkUnit("bom-s000", "bom", "A")
+    group = {
+        "id": "novel_ic",
+        "reference_prefix": "U",
+        "quantity": 1,
+        "value": "NOVEL",
+        "symbol": "Test:Novel",
+        "footprint": "Test:Missing",
+        "sheet": "A",
+    }
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(
+            unit,
+            {"groups": [group]},
+            _state(),
+            {"_validation_project_root": str(tmp_path)},
+        )
+
+    defect = json.loads(caught.value.defects["unresolved-footprint"][0])
+    assert defect == {
+        "candidates": ["Package_SO:SOIC-8", "Package_DIP:DIP-8"],
+        "detail": "U1: footprint 'Test:Missing' is not loadable",
+        "field": "footprint",
+        "group_id": "novel_ic",
+        "rejected_identifier": "Test:Missing",
+    }
+
+
+def test_bom_unit_routes_sourcing_failure_and_pins_to_owning_group(tmp_path, monkeypatch):
+    from kicraft.design import cli_app
+
+    monkeypatch.setattr(cli_app, "_unresolved_footprints", lambda bom, project_root: [])
+    monkeypatch.setattr(cli_app, "_unresolved_symbols", lambda bom: [])
+    monkeypatch.setattr(
+        cli_app,
+        "_symbol_footprint_pin_mismatches",
+        lambda bom, project_root: [],
+    )
+    unit = StageWorkUnit("bom-s000", "bom", "A")
+    group = _group("sourceable_ic", "A")
+
+    def reject_sourcing(bom, project_root):
+        return ["R1: MPN DRY is not orderable; in-stock alternates: C123, C456"], []
+
+    monkeypatch.setattr(cli_app, "_resolve_bom_mpn_sourcing", reject_sourcing)
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(
+            unit,
+            {"groups": [group]},
+            _state(),
+            {"_validation_project_root": str(tmp_path)},
+        )
+    defect = json.loads(caught.value.defects["unresolved-sourcing"][0])
+    assert defect["group_id"] == "sourceable_ic"
+    assert defect["field"] == "sourcing"
+    assert defect["candidates"] == ["C123", "C456"]
+
+    def pin_sourcing(bom, project_root):
+        bom.parts[0].sourcing_note = "LCSC C123"
+        return [], []
+
+    monkeypatch.setattr(cli_app, "_resolve_bom_mpn_sourcing", pin_sourcing)
+    validated = validate_unit_candidate(
+        unit,
+        {"groups": [group]},
+        _state(),
+        {"_validation_project_root": str(tmp_path)},
+    )
+    assert validated["groups"][0]["sourcing_note"] == "LCSC C123"
+
+
+def test_bom_unit_omits_absent_metadata_sentinels():
+    unit = StageWorkUnit("bom-s000", "bom", "A")
+    payload = {
+        "groups": [
+            {
+                **_group("resistor", "A"),
+                "value": "1k signal termination",
+                "mpn": "N/A",
+                "datasheet": "unknown",
+                "sourcing_note": "none",
+            }
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, _state(), {})
+
+    assert "mpn" not in validated["groups"][0]
+    assert "datasheet" not in validated["groups"][0]
+    assert "sourcing_note" not in validated["groups"][0]
+    assert validated["groups"][0]["symbol"] == "Device:R"
+    assert validated["groups"][0]["footprint"] == "Resistor_SMD:R_0603_1608Metric"
+
+
+def test_curated_terminal_resolves_its_explicit_manufacturer_identity(tmp_path):
+    unit = StageWorkUnit("bom-s000", "bom", "A")
+    payload = {
+        "groups": [
+            {
+                **_group("terminal", "A", prefix="J"),
+                "value": "2-pin screw terminal",
+                "mpn": "WJ126V-5.0-2P",
+                "symbol": "Connector_Generic:Conn_01x02",
+                "footprint": "TerminalBlock:TerminalBlock_bornier-2_P5.08mm",
+            }
+        ]
+    }
+
+    validated = validate_unit_candidate(
+        unit, payload, _state(), {"_validation_project_root": str(tmp_path)}
+    )
+
+    group = validated["groups"][0]
+    assert group["symbol"].startswith("screw-terminal-5mm-2p:")
+    assert group["footprint"].startswith("screw-terminal-5mm-2p:")
+    assert group["mpn"] == "WJ126V-5.0-2P"
+
+
+def test_terminal_normalization_preserves_real_contact_count(tmp_path):
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    unit = StageWorkUnit("bom-s000", "bom", "A")
+    payload = {
+        "groups": [
+            {
+                **_group("terminal", "A", prefix="J"),
+                "value": "ScrewTerminal_1x03",
+                "symbol": "Connector:Screw_Terminal_01x03",
+                "footprint": (
+                    "TerminalBlock_Phoenix:"
+                    "TerminalBlock_Phoenix_MKDS-1,5-3_1x03_P5.00mm_Horizontal"
+                ),
+            }
+        ]
+    }
+    validated = validate_unit_candidate(
+        unit, payload, _state(), {"_validation_project_root": str(tmp_path)}
+    )
+    assert {
+        pin["number"] for pin in lookup_pins(validated["groups"][0]["symbol"])["pins"]
+    } == {"1", "2", "3"}
+
+
+def test_curated_namespace_cannot_replace_an_explicitly_selected_device(monkeypatch):
+    from types import SimpleNamespace
+
+    from kicraft.server.stage_contracts import _requirement_owns_protected_group
+    from kicraft.server.stage_work_units import _normalize_curated_group_identities
+
+    conflicting = SimpleNamespace(
+        manifest=SimpleNamespace(
+            name="Sensor",
+            symbol_name="BME280",
+            footprint_name="Bosch_LGA-8_2.5x2.5mm_P0.65mm",
+            mpn="K2-1102DP-C4SW-04",
+            sourcing={},
+        )
+    )
+    monkeypatch.setattr(
+        "kicraft.server.stage_work_units._curated_part_indexes",
+        lambda: ({"Sensor": conflicting}, {}),
+    )
+    group = BomComponentGroup.model_validate(
+        {
+            **_group("sensor", "A", prefix="U"),
+            "value": "BME280",
+            "mpn": "BME280",
+            "symbol": "Sensor:BME280",
+            "footprint": "Package_LGA:Bosch_LGA-8_2.5x2.5mm_P0.65mm",
+        }
+    )
+    normalized = _normalize_curated_group_identities([group])[0]
+    assert _requirement_owns_protected_group(normalized, [{"exact_part": "BME280"}])
+
+
+def test_curated_generic_pad_preserves_absent_manufacturer_identity(tmp_path):
+    unit = StageWorkUnit("bom-s000", "bom", "A")
+    payload = {
+        "groups": [
+            {
+                **_group("pad", "A", prefix="J"),
+                "value": "CASTELLATED PAD",
+                "symbol": "castellated-pad-2p54:Conn_01x01",
+                "footprint": "castellated-pad-2p54:Castellated_Pad_2.54mm",
+            }
+        ]
+    }
+
+    validated = validate_unit_candidate(
+        unit, payload, _state(), {"_validation_project_root": str(tmp_path)}
+    )
+
+    assert validated["groups"][0]["symbol"] == payload["groups"][0]["symbol"]
+    assert "mpn" not in validated["groups"][0]
+
+
+def test_wiring_unit_deduplicates_only_identical_assignments():
+    state = _state([{"ref": "R1", "sheet": "A", "symbol": "Device:R"}])
+    unit = StageWorkUnit(
+        "wiring-u000",
+        "wiring",
+        "A",
+        refs=("R1",),
+        expected_pins=(("R1", "1"),),
+    )
+    extras = {"symbol_pinouts": {"R1": _pinout(1)}}
+
+    validated = validate_unit_candidate(
+        unit,
+        {
+            "pins": [
+                {"ref": "R1", "pin": "1", "net": "SIG"},
+                {"ref": "R1", "pin": "1", "net": "SIG"},
+            ]
+        },
+        state,
+        extras,
+    )
+
+    assert validated["pins"] == [{"ref": "R1", "pin": "1", "net": "SIG"}]
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(
+            unit,
+            {
+                "pins": [
+                    {"ref": "R1", "pin": "1", "net": "SIG"},
+                    {"ref": "R1", "pin": "1", "net": "OTHER"},
+                ]
+            },
+            state,
+            extras,
+        )
+    assert caught.value.defects["duplicate"] == ["R1.1"]
+    assert caught.value.defects["expected-pin-set"] == ["R1.1"]
+    assert caught.value.defects["rejected-assignment-set"] == [
+        '{"net":"OTHER","pin":"1","ref":"R1"}'
+    ]
+
+
+def test_wiring_planner_preserves_bom_unit_boundaries():
+    parts = [
+        {
+            "ref": ref,
+            "sheet": "A",
+            "symbol": "Device:R",
+            "resolution_id": resolution_id,
+        }
+        for ref, resolution_id in (
+            ("R1", "bom-s000"),
+            ("R2", "bom-s000"),
+            ("R3", "bom-s001"),
+        )
+    ]
+    state = _state(parts)
+    extras = {"symbol_pinouts": {part["ref"]: _pinout(2) for part in parts}}
+
+    units = plan_stage_work_units("wiring", state, extras)
+
+    assert [unit.refs for unit in units] == [("R1", "R2"), ("R3",)]
+
+
+def test_wiring_planner_rejects_overlapping_locked_ownership():
+    state = _state([{"ref": "R1", "sheet": "A", "symbol": "Device:R"}])
+    extras = {
+        "symbol_pinouts": {"R1": _pinout(2)},
+        "locked_pin_assignments": [{"ref": "R1", "pin": "1", "net": "GND"}],
+        "locked_no_connect_pins": [{"ref": "R1", "pin": "1"}],
+    }
+
+    with pytest.raises(ValueError, match="overlaps locked"):
+        plan_stage_work_units("wiring", state, extras)
+
+
+def test_deterministic_sheet_missing_signal_fails_during_wiring_planning():
+    state = _state(
+        [
+            {"ref": "U1", "sheet": "A", "symbol": "X:U", "resolution_source": "recipe"},
+            {"ref": "J1", "sheet": "B", "symbol": "X:J", "resolution_source": "llm"},
+        ]
+    )
+    state["architecture"]["inter_sheet_nets"] = [
+        {"name": "USB_D_P", "endpoints": [{"sheet": "A"}, {"sheet": "B"}]}
+    ]
+    state["bom"]["recipe_ownership"] = [
+        {
+            "recipe": "core",
+            "refs": ["U1"],
+            "pins": [
+                {"ref": "U1", "pin": "1", "net": "GND"},
+                {"ref": "U1", "pin": "2", "net": None},
+            ],
+        }
+    ]
+    extras = {"symbol_pinouts": {"U1": _pinout(2), "J1": _pinout(2)}}
+
+    with pytest.raises(ValueError, match="deterministic_endpoint_unrealizable.*A:USB_D_P"):
+        plan_stage_work_units("wiring", state, extras)
+
+
+def test_bom_only_lowerer_pins_remain_model_owned_for_wiring():
+    state = _state(
+        [
+            {
+                "ref": "J1",
+                "sheet": "A",
+                "symbol": "usb-type-c-16p:TYPE-C-31-M-12",
+                "resolution_source": "lowerer",
+            },
+            {"ref": "J2", "sheet": "B", "symbol": "X:J", "resolution_source": "llm"},
+        ]
+    )
+    state["architecture"]["inter_sheet_nets"] = [
+        {"name": "SEL_1", "endpoints": [{"sheet": "A"}, {"sheet": "B"}]}
+    ]
+    extras = {"symbol_pinouts": {"J1": _pinout(16), "J2": _pinout(3)}}
+
+    units = plan_stage_work_units("wiring", state, extras)
+
+    assert units[0].planned_resolution_source == "llm"
+    assert units[0].expected_pins == tuple(("J1", str(pin)) for pin in range(1, 17))
+    assert deterministic_wiring_candidate(units[0], state, extras) is None
+
+
+def test_c3_gpio_allocations_and_native_usb_reach_locked_wiring_once():
+    from kicraft.design.models import CircuitRequirement, RecipeSelection
+    from kicraft.design.recipes import expand_recipe, get_recipe
+    from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
+    from kicraft.server.stage_contracts import _normalize_stage_response
+
+    definition = get_recipe("esp32-c3-mini-1-minimal@1")
+    ports = {
+        "vdd": "+3V3",
+        "gnd": "GND",
+        "usb_dm": "USB_D_N",
+        "usb_dp": "USB_D_P",
+        "gpio0": "GPIO0",
+        "gpio1": "GPIO1",
+    }
+    requirement = CircuitRequirement(
+        id="core", sheet="A", role="mcu_core", family=definition.family, ports=ports
+    )
+    selection = RecipeSelection(
+        recipe=definition.recipe,
+        instance="core",
+        sheets={"mcu": "A"},
+        parameters={"native_usb": True},
+        port_bindings={key: value for key, value in ports.items() if not key.startswith("gpio")},
+        requirement_ids=["core"],
+        pin_allocations=allocate_requirement_pins(definition, requirement),
+    )
+    expansion = expand_recipe(selection)
+    state = _state([part.model_dump(mode="json") for part in expansion.parts])
+    state["architecture"]["sheets"] = [{"name": "A"}]
+    state["architecture"]["inter_sheet_nets"] = [
+        {"name": net, "endpoints": [{"sheet": "A"}]}
+        for net in ("GPIO0", "GPIO1", "USB_D_N", "USB_D_P")
+    ]
+    state["bom"]["recipe_ownership"] = [expansion.ownership.model_dump(mode="json")]
+    inventory = {}
+    for row in expansion.ownership.pins:
+        inventory.setdefault(row.ref, {"pins": []})["pins"].append({"number": row.pin})
+
+    units = plan_stage_work_units("wiring", state, {"symbol_pinouts": inventory})
+    assert units == ()
+    merged, _ = _normalize_stage_response("wiring", {"pins": []}, state)
+    carried = {
+        connection["net_name"]: [
+            (endpoint["ref"], endpoint["pin"]) for endpoint in connection["endpoints"]
+        ]
+        for connection in merged["connections"]
+    }
+    assert {net: carried[net] for net in ("GPIO0", "GPIO1", "USB_D_N", "USB_D_P")} == {
+        "GPIO0": [("U1", "12")],
+        "GPIO1": [("U1", "13")],
+        "USB_D_N": [("U1", "26")],
+        "USB_D_P": [("U1", "27")],
+    }
+
+
+@pytest.mark.parametrize("membership", [[], ["USB_C_RECEPTACLE"]])
+def test_recipe_covered_merged_sheet_rejects_missing_functional_ownership(membership):
+    state = _state()
+    state["functional_spec"] = {
+        "blocks": [
+            {"name": "USB_C_RECEPTACLE", "category": "interface", "purpose": "USB breakout"},
+            {"name": "BREAKOUT_HEADER", "category": "interface", "purpose": "Expose USB pins"},
+        ]
+    }
+    state["architecture"].update(
+        sheets=[
+            {
+                "name": "USB BREAKOUT",
+                "stem": "USB_BREAKOUT",
+                "function": "USB-C receptacle and signal breakout header",
+            }
+        ],
+        requirements=[
+            {
+                "id": "usb",
+                "sheet": "USB BREAKOUT",
+                "role": "power_input",
+                "family": "usb-c-power-sink",
+                "functional_blocks": membership,
+            }
+        ],
+        recipe_selections=[
+            {
+                "recipe": "usb-c-5v-sink@1",
+                "instance": "usb",
+                "sheets": {"power": "USB BREAKOUT"},
+                "port_bindings": {"vbus": "VBUS", "gnd": "GND"},
+                "requirement_ids": ["usb"],
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="BREAKOUT_HEADER"):
+        plan_stage_work_units("bom", state, {})
+
+
+@pytest.mark.parametrize("lower_header", [False, True])
+def test_recipe_model_and_lowerer_functions_survive_one_sheet_bom_merge(lower_header):
+    state = _state()
+    state["functional_spec"] = {
+        "blocks": [
+            {"name": name, "category": "interface", "purpose": name}
+            for name in ("USB", "HEADER", "CONTROL")
+        ]
+    }
+    state["architecture"].update(
+        sheets=[{"name": "A", "stem": "A", "function": "USB power and exposed control header"}],
+        requirements=[
+            {
+                "id": "usb",
+                "sheet": "A",
+                "role": "power_input",
+                "family": "usb-c-power-sink",
+                "functional_blocks": ["USB"],
+            },
+            {
+                "id": "header",
+                "sheet": "A",
+                "role": "connector",
+                "family": "pin-header",
+                "functional_blocks": ["HEADER"],
+                "ports": {"pin1": "SELECT", "pin2": "GND"} if lower_header else {},
+            },
+            {
+                "id": "control",
+                "sheet": "A",
+                "role": "power_input",
+                "family": "usb-pd-selectable-trigger",
+                "functional_blocks": ["CONTROL"],
+            },
+        ],
+        recipe_selections=[
+            {
+                "recipe": "usb-c-5v-sink@1",
+                "instance": "usb",
+                "sheets": {"power": "A"},
+                "port_bindings": {"vbus": "VBUS", "gnd": "GND"},
+                "requirement_ids": ["usb"],
+            }
+        ],
+        unresolved_requirement_ids=["header", "control"],
+    )
+
+    units = plan_stage_work_units("bom", state, {})
+    assert [unit.requirement_ids for unit in units] == (
+        [("header",), ("control",)] if lower_header else [("header", "control")]
+    )
+    candidates = {}
+    for unit in units:
+        groups = []
+        if "control" in unit.requirement_ids:
+            groups.append(
+                {
+                    **_group("negotiator", "A", prefix="U"),
+                    "value": "CH224K",
+                    "symbol": "ch224k:CH224K",
+                    "footprint": "ch224k:ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP",
+                }
+            )
+        if not lower_header:
+            groups.append(
+                {
+                    **_group("header", "A", prefix="J"),
+                    "symbol": "Connector_Generic:Conn_01x02",
+                    "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+                }
+            )
+        candidates[unit.unit_id] = validate_unit_candidate(unit, {"groups": groups}, state, {})
+
+    merged, ref_to_unit, _, _ = merge_bom_units(units, candidates, state)
+
+    assert {group["symbol"] for group in merged["groups"]} == {
+        "Connector_Generic:Conn_01x02",
+        "ch224k:CH224K",
+    }
+    assert set(ref_to_unit.values()) == {unit.unit_id for unit in units}
+
+
+def test_typed_header_cannot_be_replaced_by_passive_footprint():
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": "A", "function": "External interface"}]
+    state["architecture"]["requirements"] = [
+        {"id": "header", "sheet": "A", "role": "connector", "family": "pin-header"}
+    ]
+    (unit,) = plan_stage_work_units("bom", state, {})
+    group = {
+        **_group("header", "A", prefix="J"),
+        "symbol": "Connector_Generic:Conn_01x02",
+        "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+    }
+    group["footprint"] = _group("passive", "A")["footprint"]
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, {"groups": [group]}, state, {})
+
+    assert caught.value.defects["missing-requirement-implementation"] == ["header"]
+
+
+@pytest.mark.parametrize("multiple_requirements", [False, True])
+def test_model_owned_header_constraints_cannot_fall_back_to_sheet_prose(multiple_requirements):
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": "A", "function": "8-pin breakout header"}]
+    state["architecture"]["requirements"] = [
+        {
+            "id": "header",
+            "sheet": "A",
+            "role": "connector",
+            "family": "breakout-header",
+            "parameters": {"pin_count": 10},
+            "ports": {"vbus": "VBUS", "ground": "GND"},
+        }
+    ]
+    if multiple_requirements:
+        state["architecture"]["requirements"].append(
+            {"id": "socket", "sheet": "A", "role": "connector", "family": "custom-socket"}
+        )
+    (unit,) = plan_stage_work_units("bom", state, {})
+
+    assert deterministic_bom_candidate(unit, state) is None
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, {"groups": []}, state, {})
+    assert caught.value.defects["empty-sheet"] == ["A"]
+
+
+@pytest.mark.parametrize(
+    "family", ["usb-pd-trigger", "usb-pd-fixed-trigger", "usb-pd-selectable-trigger"]
+)
+def test_pd_controller_label_and_substitution_cannot_turn_a_header_into_an_ic(family):
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": "A", "function": "Selectable supply"}]
+    state["architecture"]["requirements"] = [
+        {"id": "control", "sheet": "A", "role": "power_input", "family": family}
+    ]
+    (unit,) = plan_stage_work_units("bom", state, {})
+    assert deterministic_bom_candidate(unit, state) is None
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(
+            unit,
+            {
+                "groups": [
+                    {
+                        **_group("control", "A", prefix="U"),
+                        "value": "PD controller replacement",
+                        "symbol": "Connector_Generic:Conn_01x02",
+                        "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+                    }
+                ],
+                "substitutions": [
+                    {
+                        "wanted": "PD controller",
+                        "got": "2-pin header",
+                        "reason": "Controller implementation placeholder",
+                    }
+                ],
+                "_lowering_requirement_id": "control",
+            },
+            state,
+            {},
+        )
+
+    assert caught.value.defects["missing-requirement-implementation"] == ["control"]
+
+
+def _usb_breakout_wiring_state():
+    from kicraft.design.lowering import lower_requirement
+
+    requirement = {
+        "id": "usb",
+        "sheet": "A",
+        "role": "connector",
+        "family": "usb-c-breakout",
+        "ports": {"vbus": "VBUS", "gnd": "GND"},
+    }
+    artifact = lower_requirement(requirement)
+    state = _state(
+        [
+            {
+                "ref": "J1",
+                "sheet": "A",
+                "symbol": artifact.groups[0].symbol,
+                "resolution_source": "lowerer",
+                "resolution_id": artifact.lowerer_id,
+                "lowering_requirement_id": "usb",
+                "lowering_role": "connector",
+            }
+        ]
+    )
+    state["architecture"]["requirements"] = [requirement]
+    pins = tuple(("J1", pin.pin) for pin in (*artifact.pins, *artifact.no_connects))
+    extras = {"symbol_pinouts": {"J1": {"pins": [{"number": pin} for _, pin in pins]}}}
+    return state, extras, pins
+
+
+@pytest.mark.parametrize("omitted_pin", ["A4B9", "A5"])
+def test_deterministic_wiring_rejects_dropped_connections_and_no_connects(omitted_pin):
+    state, extras, pins = _usb_breakout_wiring_state()
+    expected = tuple(pin for pin in pins if pin != ("J1", omitted_pin))
+    unit = StageWorkUnit("wiring-u000", "wiring", "A", refs=("J1",), expected_pins=expected)
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        deterministic_wiring_candidate(unit, state, extras)
+
+    assert caught.value.defects["unexpected"] == [f"J1.{omitted_pin}"]
+
+
+def test_deterministic_wiring_preserves_excluded_recipe_connections_and_no_connects():
+    state, extras, pins = _usb_breakout_wiring_state()
+    extras["locked_pin_assignments"] = [{"ref": "J1", "pin": "A4B9", "net": "VBUS"}]
+    extras["locked_no_connect_pins"] = [{"ref": "J1", "pin": "A5"}]
+    (unit,) = plan_stage_work_units("wiring", state, extras)
+
+    candidate = deterministic_wiring_candidate(unit, state, extras)
+    rows = {(row["ref"], row["pin"]): row for row in candidate["pins"]}
+
+    assert set(rows) == set(pins) - {("J1", "A4B9"), ("J1", "A5")}
+    assert rows[("J1", "B4A9")]["net"] == "VBUS"
+    assert rows[("J1", "B5")]["no_connect"] is True
+
+
+def test_model_owned_led_unit_cannot_use_zero_ohm_current_limiters():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "led",
+            "sheet": "A",
+            "role": "driver",
+            "family": "led-current-resistor",
+            "parameters": {"rail_voltage": 3.3, "led_vf": 2.0, "target_current_ma": 5},
+            "ports": {"drive": "LED_DRIVE", "gnd": "GND"},
+        }
+    ]
+    unit = StageWorkUnit("bom-s000", "bom", "A", requirement_ids=("led",))
+    payload = {
+        "groups": [
+            {
+                **_group("led", "A", prefix="D"),
+                "value": "LED",
+                "symbol": "Device:LED",
+                "footprint": "LED_SMD:LED_0805_2012Metric",
+            },
+            {**_group("limiter", "A"), "value": "0R"},
+        ]
+    }
+    with pytest.raises(WorkUnitValidationError) as rejected:
+        validate_unit_candidate(unit, payload, state, {})
+    assert rejected.value.defects["missing-led-current-limiter"] == ["led"]
+
+    payload["groups"][1]["value"] = "270R"
+    validated = validate_unit_candidate(unit, payload, state, {})
+    assert (
+        next(group for group in validated["groups"] if group["id"] == "limiter")["value"] == "270R"
+    )

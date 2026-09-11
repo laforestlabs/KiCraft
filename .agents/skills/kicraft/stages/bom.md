@@ -47,8 +47,10 @@ are immutable context: never repeat, rename, substitute, or otherwise revise
 their groups. An empty `groups` list is valid only when locked circuit-recipe
 parts already populate the target sheet; every other architecture sheet must
 emit at least one physical component in its own work unit.
-A model group whose symbol/value/MPN contains a protected identity (an ESP32
-module, RP2040, or other registered common block) is rejected before commit.
+Protected identities may be emitted only for an explicitly owned unresolved
+requirement matched by its exact part or supported family. Parts already owned
+by a locked recipe remain forbidden; do not omit an unresolved controller
+merely because another recipe uses the same IC.
 
 Slot shape:
 

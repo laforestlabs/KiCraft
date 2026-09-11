@@ -66,6 +66,42 @@ def test_preflight_reserves_call_against_project_run_budget(tmp_path):
     guarded.preflight(call_ceiling_usd=0.09, run_id="another-run")
 
 
+def test_configured_project_cap_admits_only_fully_covered_calls(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from kicraft.server.config import Settings
+
+    settings = Settings(
+        api_key="test",
+        ledger_path=tmp_path / "ledger.db",
+        kill_switch=False,
+        daily_usd_ceiling=10.0,
+        total_usd_ceiling=10.0,
+    )
+    guard = SpendGuard(settings)
+    _rec(guard, "run", 0.0648, stage="bom")
+    with pytest.raises(BudgetExceeded) as refused:
+        guard.preflight(call_ceiling_usd=0.0384, run_id="run")
+    assert refused.value.scope == "project"
+    assert refused.value.spent_usd == pytest.approx(0.0648)
+    assert refused.value.call_ceiling_usd == pytest.approx(0.0384)
+    assert refused.value.limit_usd == pytest.approx(0.10)
+
+    monkeypatch.setenv("KICRAFT_PROJECT_LLM_BUDGET_USD", "0.15")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    configured = replace(
+        settings, project_llm_budget_usd=Settings.from_env(dotenv=False).project_llm_budget_usd
+    )
+    larger_guard = SpendGuard(configured)
+    larger_guard.preflight(call_ceiling_usd=0.0384, run_id="run")
+    # Admission is not a charge. Only the billed call reduces later headroom.
+    assert larger_guard.spent_for_run("run") == pytest.approx(0.0648)
+    _rec(larger_guard, "run", 0.0384, stage="bom")
+    with pytest.raises(BudgetExceeded):
+        larger_guard.preflight(call_ceiling_usd=0.046801, run_id="run")
+    assert larger_guard.spent_by_stage_for_run("run") == {"bom": pytest.approx(0.1032)}
+
+
 def test_spent_by_day_counts_all_calls(guard):
     _rec(guard, "p1-1", 0.02)
     _rec(guard, "p1-1", 0.03)  # two project calls today
@@ -243,6 +279,10 @@ def test_work_unit_stage_and_attempt_metrics_are_redacted_and_persisted(guard):
         fallback_reason="provider_rate_limited",
         candidate_retained=True,
         reasoning_failure_kind="reasoning_token_exhaustion",
+        schema_error="parts.0.mpn: string_type",
+        failure_detail="invalid_schema",
+        response_chars=417,
+        response_format_mode="json_schema",
     )
     with sqlite3.connect(guard.path) as connection:
         run = connection.execute(
@@ -251,7 +291,8 @@ def test_work_unit_stage_and_attempt_metrics_are_redacted_and_persisted(guard):
         attempt = connection.execute(
             "SELECT unit_id,unit_attempt,aggregate_round,commit_gate_codes,"
             "offender_count,rejection_signature,provider_profile,fallback_reason,"
-            "candidate_retained,reasoning_failure_kind FROM stage_attempts"
+            "candidate_retained,reasoning_failure_kind,schema_error,failure_detail,"
+            "response_chars,response_format_mode FROM stage_attempts"
         ).fetchone()
         attempt_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(stage_attempts)")
@@ -268,6 +309,10 @@ def test_work_unit_stage_and_attempt_metrics_are_redacted_and_persisted(guard):
         "provider_rate_limited",
         1,
         "reasoning_token_exhaustion",
+        "parts.0.mpn: string_type",
+        "invalid_schema",
+        417,
+        "json_schema",
     )
     assert {
         "unit_id",
@@ -280,6 +325,10 @@ def test_work_unit_stage_and_attempt_metrics_are_redacted_and_persisted(guard):
         "fallback_reason",
         "candidate_retained",
         "reasoning_failure_kind",
+        "schema_error",
+        "failure_detail",
+        "response_chars",
+        "response_format_mode",
     } <= attempt_columns
     aggregate = guard.stage_attempt_aggregates()[0]
     assert aggregate["unit_id"] == "wiring-u001"

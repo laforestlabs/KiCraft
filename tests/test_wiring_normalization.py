@@ -3,12 +3,12 @@ KC-WFFXZ3 terminal wiring failure:
 
   * ``bridge_duplicate_pins`` — put internally-shorted duplicate pads (KiCad
     ``N'``) on their terminal's net, so §9.11 net coverage stops flagging a pad
-    the package already ties together (the EVQP7A01P 1/1', 2/2' tactile switch).
-  * ``reconcile_inter_sheet_nets`` — derive the signal inter-sheet contract from
-    the crossings wiring actually realized, so the wiring stage is never handed
-    a cross-sheet contract it cannot edit (DTR/RTS declared into the ESP32 sheet
-    with no consumer there; EN/IO0 wired across sheets but never declared).
+  * ``reconcile_inter_sheet_nets`` — promote crossings wiring actually
+    realized while preserving the frozen architecture contract. Missing
+    declared endpoints remain visible to §9.14 instead of being silently
+    deleted.
 """
+
 from __future__ import annotations
 
 from kicraft.design.models import (
@@ -37,14 +37,16 @@ SWITCH_FP = "evq-p7a01p:SW-SMD_EVQP7A01P"
 
 def _r(ref: str, sheet: str) -> BomPart:
     return BomPart(
-        ref=ref, value="x", symbol="Device:R",
-        footprint="Resistor_SMD:R_0402_1005Metric", sheet=sheet,
+        ref=ref,
+        value="x",
+        symbol="Device:R",
+        footprint="Resistor_SMD:R_0402_1005Metric",
+        sheet=sheet,
     )
 
 
 def _sw(ref: str, sheet: str) -> BomPart:
-    return BomPart(ref=ref, value="btn", symbol=SWITCH_SYM,
-                   footprint=SWITCH_FP, sheet=sheet)
+    return BomPart(ref=ref, value="btn", symbol=SWITCH_SYM, footprint=SWITCH_FP, sheet=sheet)
 
 
 # ---------- bridge_duplicate_pins (§9.11 prime-pin trap) ----------
@@ -64,12 +66,16 @@ def test_bridge_covers_unwired_duplicate_pads() -> None:
     bom = BOM(
         parts=[_sw("SW1", "MCU"), _r("R1", "MCU")],
         connections=[
-            NetConnection(net_name="RESET", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="SW1", pin="1"),
-                                     PinEndpoint(ref="R1", pin="1")]),
-            NetConnection(net_name="GND", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="SW1", pin="2"),
-                                     PinEndpoint(ref="R1", pin="2")]),
+            NetConnection(
+                net_name="RESET",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="SW1", pin="1"), PinEndpoint(ref="R1", pin="1")],
+            ),
+            NetConnection(
+                net_name="GND",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="SW1", pin="2"), PinEndpoint(ref="R1", pin="2")],
+            ),
         ],
     )
     assert not check_net_coverage(bom).ok  # 1' and 2' uncovered before
@@ -86,12 +92,16 @@ def test_bridge_is_noop_when_pads_already_covered() -> None:
     bom = BOM(
         parts=[_sw("SW1", "MCU")],
         connections=[
-            NetConnection(net_name="RESET", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="SW1", pin="1"),
-                                     PinEndpoint(ref="SW1", pin="1'")]),
-            NetConnection(net_name="GND", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="SW1", pin="2"),
-                                     PinEndpoint(ref="SW1", pin="2'")]),
+            NetConnection(
+                net_name="RESET",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="SW1", pin="1"), PinEndpoint(ref="SW1", pin="1'")],
+            ),
+            NetConnection(
+                net_name="GND",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="SW1", pin="2"), PinEndpoint(ref="SW1", pin="2'")],
+            ),
         ],
     )
     assert bridge_duplicate_pins(bom) == []
@@ -103,9 +113,11 @@ def test_bridge_leaves_fully_unwired_terminal_for_coverage() -> None:
     bom = BOM(
         parts=[_sw("SW1", "MCU")],
         connections=[
-            NetConnection(net_name="RESET", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="SW1", pin="1"),
-                                     PinEndpoint(ref="SW1", pin="1'")]),
+            NetConnection(
+                net_name="RESET",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="SW1", pin="1"), PinEndpoint(ref="SW1", pin="1'")],
+            ),
         ],
     )
     assert bridge_duplicate_pins(bom) == []  # terminal 2 untouched
@@ -119,11 +131,14 @@ def test_bridge_respects_explicit_no_connect_on_a_duplicate_pad() -> None:
     bom = BOM(
         parts=[_sw("SW1", "MCU")],
         connections=[
-            NetConnection(net_name="RESET", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="SW1", pin="1")]),
-            NetConnection(net_name="GND", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="SW1", pin="2"),
-                                     PinEndpoint(ref="SW1", pin="2'")]),
+            NetConnection(
+                net_name="RESET", sheet="MCU", endpoints=[PinEndpoint(ref="SW1", pin="1")]
+            ),
+            NetConnection(
+                net_name="GND",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="SW1", pin="2"), PinEndpoint(ref="SW1", pin="2'")],
+            ),
         ],
         no_connect_pins=[PinEndpoint(ref="SW1", pin="1'")],
     )
@@ -138,13 +153,13 @@ def test_bridge_skips_terminal_whose_pads_are_on_different_nets() -> None:
     bom = BOM(
         parts=[_sw("SW1", "MCU")],
         connections=[
-            NetConnection(net_name="A", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="SW1", pin="1")]),
-            NetConnection(net_name="B", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="SW1", pin="1'")]),
-            NetConnection(net_name="GND", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="SW1", pin="2"),
-                                     PinEndpoint(ref="SW1", pin="2'")]),
+            NetConnection(net_name="A", sheet="MCU", endpoints=[PinEndpoint(ref="SW1", pin="1")]),
+            NetConnection(net_name="B", sheet="MCU", endpoints=[PinEndpoint(ref="SW1", pin="1'")]),
+            NetConnection(
+                net_name="GND",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="SW1", pin="2"), PinEndpoint(ref="SW1", pin="2'")],
+            ),
         ],
     )
     assert bridge_duplicate_pins(bom) == []
@@ -152,13 +167,15 @@ def test_bridge_skips_terminal_whose_pads_are_on_different_nets() -> None:
     assert [e.pin for e in a.endpoints] == ["1"]  # not merged with B
 
 
-# ---------- reconcile_inter_sheet_nets (§9.14/§9.15 unwinnable contract) ----------
+# ---------- reconcile_inter_sheet_nets (§9.14/§9.15 boundary) ----------
 
 
 def _two_sheets(inter: list[InterSheetNet], conns: list[NetConnection]):
     arch = Architecture(
-        sheets=[Sheet(name="USB", stem="USB", function="bridge"),
-                Sheet(name="MCU", stem="MCU", function="mcu")],
+        sheets=[
+            Sheet(name="USB", stem="USB", function="bridge"),
+            Sheet(name="MCU", stem="MCU", function="mcu"),
+        ],
         power_nets=["GND"],
         inter_sheet_nets=inter,
     )
@@ -167,9 +184,13 @@ def _two_sheets(inter: list[InterSheetNet], conns: list[NetConnection]):
 
 
 def _gnd() -> InterSheetNet:
-    return InterSheetNet(name="GND", endpoints=[
-        SheetPin(sheet="USB", direction="bidirectional"),
-        SheetPin(sheet="MCU", direction="bidirectional")])
+    return InterSheetNet(
+        name="GND",
+        endpoints=[
+            SheetPin(sheet="USB", direction="bidirectional"),
+            SheetPin(sheet="MCU", direction="bidirectional"),
+        ],
+    )
 
 
 def test_reconcile_adds_realized_undeclared_crossing() -> None:
@@ -179,10 +200,8 @@ def test_reconcile_adds_realized_undeclared_crossing() -> None:
     arch, bom = _two_sheets(
         inter=[_gnd()],
         conns=[
-            NetConnection(net_name="EN", sheet="USB",
-                          endpoints=[PinEndpoint(ref="U1", pin="1")]),
-            NetConnection(net_name="EN", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="U2", pin="1")]),
+            NetConnection(net_name="EN", sheet="USB", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+            NetConnection(net_name="EN", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="1")]),
         ],
     )
     assert not check_no_dangling_signal_nets(arch, bom).ok  # EN dangles each side
@@ -194,40 +213,49 @@ def test_reconcile_adds_realized_undeclared_crossing() -> None:
     assert check_inter_sheet_nets_realized(arch, bom).ok
 
 
-def test_reconcile_drops_declared_but_locally_consumed_crossing() -> None:
-    """DTR/RTS case: architecture declared DTR crossing to MCU, but wiring only
-    ever wires it on USB (its consumers — the auto-reset transistors — live
-    there). §9.14 can never pass as declared; reconcile drops the phantom
-    crossing and §9.14 passes."""
+def test_reconcile_preserves_declared_but_unrealized_crossing() -> None:
+    """Wiring cannot erase an architecture endpoint it failed to realize."""
     arch, bom = _two_sheets(
-        inter=[_gnd(), InterSheetNet(name="DTR", endpoints=[
-            SheetPin(sheet="USB", direction="output"),
-            SheetPin(sheet="MCU", direction="input")])],
+        inter=[
+            _gnd(),
+            InterSheetNet(
+                name="DTR",
+                endpoints=[
+                    SheetPin(sheet="USB", direction="output"),
+                    SheetPin(sheet="MCU", direction="input"),
+                ],
+            ),
+        ],
         conns=[
-            NetConnection(net_name="DTR", sheet="USB",
-                          endpoints=[PinEndpoint(ref="U1", pin="1"),
-                                     PinEndpoint(ref="U1", pin="2")]),
+            NetConnection(
+                net_name="DTR",
+                sheet="USB",
+                endpoints=[PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="U1", pin="2")],
+            ),
         ],
     )
-    assert not check_inter_sheet_nets_realized(arch, bom).ok  # MCU side has no label
 
-    changes = reconcile_inter_sheet_nets(arch, bom)
-    assert any(c.startswith("-DTR") for c in changes)
-    assert "DTR" not in {n.name for n in arch.inter_sheet_nets}
-    assert check_inter_sheet_nets_realized(arch, bom).ok
-    assert check_no_dangling_signal_nets(arch, bom).ok  # DTR now a valid 2-pin local net
+    assert reconcile_inter_sheet_nets(arch, bom) == []
+    assert "DTR" in {net.name for net in arch.inter_sheet_nets}
+    assert not check_inter_sheet_nets_realized(arch, bom).ok
+    assert check_no_dangling_signal_nets(arch, bom).ok
 
 
 def test_reconcile_is_noop_on_correct_design() -> None:
     arch, bom = _two_sheets(
-        inter=[_gnd(), InterSheetNet(name="SIG", endpoints=[
-            SheetPin(sheet="USB", direction="output"),
-            SheetPin(sheet="MCU", direction="input")])],
+        inter=[
+            _gnd(),
+            InterSheetNet(
+                name="SIG",
+                endpoints=[
+                    SheetPin(sheet="USB", direction="output"),
+                    SheetPin(sheet="MCU", direction="input"),
+                ],
+            ),
+        ],
         conns=[
-            NetConnection(net_name="SIG", sheet="USB",
-                          endpoints=[PinEndpoint(ref="U1", pin="1")]),
-            NetConnection(net_name="SIG", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="U2", pin="1")]),
+            NetConnection(net_name="SIG", sheet="USB", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+            NetConnection(net_name="SIG", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="1")]),
         ],
     )
     before = [n.model_dump() for n in arch.inter_sheet_nets]
@@ -238,10 +266,12 @@ def test_reconcile_is_noop_on_correct_design() -> None:
 def test_reconcile_preserves_power_nets_verbatim() -> None:
     """GND joins globally via power symbols, not per-pin connections, so it is
     preserved even though no connection realizes it on two sheets."""
-    arch, bom = _two_sheets(inter=[_gnd()], conns=[
-        NetConnection(net_name="GND", sheet="USB",
-                      endpoints=[PinEndpoint(ref="U1", pin="2")]),
-    ])
+    arch, bom = _two_sheets(
+        inter=[_gnd()],
+        conns=[
+            NetConnection(net_name="GND", sheet="USB", endpoints=[PinEndpoint(ref="U1", pin="2")]),
+        ],
+    )
     changes = reconcile_inter_sheet_nets(arch, bom)
     assert all("GND" not in c for c in changes)
     assert "GND" in {n.name for n in arch.inter_sheet_nets}
@@ -251,57 +281,80 @@ def test_reconcile_does_not_merge_inconsistently_named_dangles() -> None:
     """The SOIL_MOISTURE_BLE bug: D+/D- split into differently-named single-sheet
     nets. Each name is on one sheet, so reconcile promotes nothing and §9.15
     still catches them."""
-    arch, bom = _two_sheets(inter=[_gnd()], conns=[
-        NetConnection(net_name="USB_DP_POWER", sheet="USB",
-                      endpoints=[PinEndpoint(ref="U1", pin="1")]),
-        NetConnection(net_name="USB_DP_ESP32", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U2", pin="1")]),
-    ])
+    arch, bom = _two_sheets(
+        inter=[_gnd()],
+        conns=[
+            NetConnection(
+                net_name="USB_DP_POWER", sheet="USB", endpoints=[PinEndpoint(ref="U1", pin="1")]
+            ),
+            NetConnection(
+                net_name="USB_DP_ESP32", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="1")]
+            ),
+        ],
+    )
     changes = reconcile_inter_sheet_nets(arch, bom)
     assert not any(c.startswith("+") for c in changes)
     assert not check_no_dangling_signal_nets(arch, bom).ok
 
 
-def test_reconcile_kc_wffxzu_autoreset_end_to_end() -> None:
-    """The KC-WFFXZ3 deadlock in one design: DTR/RTS declared crossing but wired
-    only on USB, while EN/IO0 cross to the MCU but were never declared. Before
-    reconcile §9.14 and §9.15 both fail and the wiring stage cannot fix either
-    (it cannot edit inter_sheet_nets). After reconcile both pass."""
+def test_reconcile_adds_realized_crossings_without_erasing_declared_ones() -> None:
     arch, bom = _two_sheets(
-        inter=[_gnd(),
-               InterSheetNet(name="DTR", endpoints=[
-                   SheetPin(sheet="USB", direction="output"),
-                   SheetPin(sheet="MCU", direction="input")]),
-               InterSheetNet(name="RTS", endpoints=[
-                   SheetPin(sheet="USB", direction="output"),
-                   SheetPin(sheet="MCU", direction="input")])],
+        inter=[
+            _gnd(),
+            InterSheetNet(
+                name="DTR",
+                endpoints=[
+                    SheetPin(sheet="USB", direction="output"),
+                    SheetPin(sheet="MCU", direction="input"),
+                ],
+            ),
+            InterSheetNet(
+                name="RTS",
+                endpoints=[
+                    SheetPin(sheet="USB", direction="output"),
+                    SheetPin(sheet="MCU", direction="input"),
+                ],
+            ),
+        ],
         conns=[
-            # DTR/RTS consumed locally on USB by the auto-reset transistors.
-            NetConnection(net_name="DTR", sheet="USB",
-                          endpoints=[PinEndpoint(ref="U1", pin="1"),
-                                     PinEndpoint(ref="U2", pin="2")]),
-            NetConnection(net_name="RTS", sheet="USB",
-                          endpoints=[PinEndpoint(ref="U1", pin="2"),
-                                     PinEndpoint(ref="U2", pin="1")]),
-            # EN/IO0: transistor collector (USB) -> MCU reset/boot pin.
-            NetConnection(net_name="EN", sheet="USB",
-                          endpoints=[PinEndpoint(ref="U1", pin="1")]),
-            NetConnection(net_name="EN", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="U2", pin="1")]),
-            NetConnection(net_name="IO0", sheet="USB",
-                          endpoints=[PinEndpoint(ref="U1", pin="2")]),
-            NetConnection(net_name="IO0", sheet="MCU",
-                          endpoints=[PinEndpoint(ref="U2", pin="2")]),
+            NetConnection(
+                net_name="DTR",
+                sheet="USB",
+                endpoints=[PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="U2", pin="2")],
+            ),
+            NetConnection(
+                net_name="RTS",
+                sheet="USB",
+                endpoints=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U2", pin="1")],
+            ),
+            NetConnection(
+                net_name="EN",
+                sheet="USB",
+                endpoints=[PinEndpoint(ref="U1", pin="1")],
+            ),
+            NetConnection(
+                net_name="EN",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U2", pin="1")],
+            ),
+            NetConnection(
+                net_name="IO0",
+                sheet="USB",
+                endpoints=[PinEndpoint(ref="U1", pin="2")],
+            ),
+            NetConnection(
+                net_name="IO0",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U2", pin="2")],
+            ),
         ],
     )
-    assert not check_inter_sheet_nets_realized(arch, bom).ok
-    assert not check_no_dangling_signal_nets(arch, bom).ok
 
     reconcile_inter_sheet_nets(arch, bom)
 
-    names = {n.name for n in arch.inter_sheet_nets}
-    assert {"EN", "IO0", "GND"} <= names and "DTR" not in names and "RTS" not in names
-    assert check_inter_sheet_nets_realized(arch, bom).ok
+    names = {net.name for net in arch.inter_sheet_nets}
+    assert {"EN", "IO0", "GND", "DTR", "RTS"} <= names
+    assert not check_inter_sheet_nets_realized(arch, bom).ok
     assert check_no_dangling_signal_nets(arch, bom).ok
 
 
@@ -313,12 +366,17 @@ def test_split_realizes_connection_on_each_endpoint_sheet() -> None:
     whose parts live on TWO sheets (a connector parked on a HEADER sheet, wired
     from the functional sheet's list). Split into one per-sheet connection so the
     connector sheet draws a stub for its pin; reconcile then sees the crossing."""
-    arch, bom = _two_sheets(inter=[_gnd()], conns=[
-        # INPUT lists J1 (on USB) and U2 (on MCU) but is tagged MCU only.
-        NetConnection(net_name="INPUT", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="1"),
-                                 PinEndpoint(ref="U2", pin="1")]),
-    ])
+    arch, bom = _two_sheets(
+        inter=[_gnd()],
+        conns=[
+            # INPUT lists J1 (on USB) and U2 (on MCU) but is tagged MCU only.
+            NetConnection(
+                net_name="INPUT",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="U2", pin="1")],
+            ),
+        ],
+    )
     changes = split_cross_sheet_connections(bom)
     assert changes and "INPUT" in changes[0]
     by_sheet = {(c.net_name, c.sheet): c for c in bom.connections}
@@ -335,11 +393,16 @@ def test_split_retags_single_sheet_mismatch() -> None:
     """All endpoints live on ONE sheet, but the connection is tagged a different
     one (a mis-tagged connector net). Retag it to where its pins actually are so
     route_sheet stops dropping every endpoint as unplaced-on-this-sheet."""
-    arch, bom = _two_sheets(inter=[_gnd()], conns=[
-        NetConnection(net_name="ANT", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="1"),
-                                 PinEndpoint(ref="U1", pin="2")]),
-    ])
+    arch, bom = _two_sheets(
+        inter=[_gnd()],
+        conns=[
+            NetConnection(
+                net_name="ANT",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U1", pin="1"), PinEndpoint(ref="U1", pin="2")],
+            ),
+        ],
+    )
     changes = split_cross_sheet_connections(bom)
     assert changes == ["ANT retagged MCU->USB"]
     assert [c.sheet for c in bom.connections] == ["USB"]
@@ -348,12 +411,13 @@ def test_split_retags_single_sheet_mismatch() -> None:
 def test_split_is_noop_on_correctly_tagged_design() -> None:
     """Every endpoint already on the connection's own sheet -> untouched (same
     connection objects, no changes reported)."""
-    arch, bom = _two_sheets(inter=[_gnd()], conns=[
-        NetConnection(net_name="SIG", sheet="USB",
-                      endpoints=[PinEndpoint(ref="U1", pin="1")]),
-        NetConnection(net_name="SIG", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U2", pin="1")]),
-    ])
+    arch, bom = _two_sheets(
+        inter=[_gnd()],
+        conns=[
+            NetConnection(net_name="SIG", sheet="USB", endpoints=[PinEndpoint(ref="U1", pin="1")]),
+            NetConnection(net_name="SIG", sheet="MCU", endpoints=[PinEndpoint(ref="U2", pin="1")]),
+        ],
+    )
     before = list(bom.connections)
     assert split_cross_sheet_connections(bom) == []
     assert bom.connections is before or bom.connections == before
@@ -362,11 +426,16 @@ def test_split_is_noop_on_correctly_tagged_design() -> None:
 def test_split_groups_power_net_per_sheet_for_symbol_stamping() -> None:
     """A ground listing pins on both sheets is split so EACH sheet stamps its own
     GND symbols; reconcile still leaves the power net alone (it joins globally)."""
-    arch, bom = _two_sheets(inter=[_gnd()], conns=[
-        NetConnection(net_name="GND", sheet="MCU",
-                      endpoints=[PinEndpoint(ref="U1", pin="2"),
-                                 PinEndpoint(ref="U2", pin="2")]),
-    ])
+    arch, bom = _two_sheets(
+        inter=[_gnd()],
+        conns=[
+            NetConnection(
+                net_name="GND",
+                sheet="MCU",
+                endpoints=[PinEndpoint(ref="U1", pin="2"), PinEndpoint(ref="U2", pin="2")],
+            ),
+        ],
+    )
     split_cross_sheet_connections(bom)
     sheets = sorted(c.sheet for c in bom.connections if c.net_name == "GND")
     assert sheets == ["MCU", "USB"]

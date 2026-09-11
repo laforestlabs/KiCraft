@@ -54,7 +54,7 @@ def _recipe(
     internal: tuple[str, ...],
     parts: tuple[Group, ...],
     pins: tuple[Pin, ...],
-    source: str,
+    source: str | Source,
     assertions: tuple[Assertion, ...],
     no_connects: tuple[NoConnect, ...] = (),
     parameters: dict | None = None,
@@ -90,7 +90,9 @@ def _recipe(
         placement_constraints=tuple(constraints),
         electrical_assertions=assertions,
         source_documents=(
-            Source(
+            source
+            if isinstance(source, Source)
+            else Source(
                 url=source,
                 title=f"{exact} data sheet",
                 revision="current",
@@ -112,8 +114,9 @@ SN65HVD230_CAN_NODE = _recipe(
         Port(name="rx", direction="output"),
         Port(name="canh", direction="bidirectional"),
         Port(name="canl", direction="bidirectional"),
+        Port(name="stby", direction="input", required=False),
     ),
-    internal=("slope", "can_term"),
+    internal=("can_term",),
     parts=(
         _part(
             "transceiver",
@@ -141,16 +144,22 @@ SN65HVD230_CAN_NODE = _recipe(
         Pin(role="transceiver", pin="2", net="gnd"),
         Pin(role="transceiver", pin="7", net="canh"),
         Pin(role="transceiver", pin="6", net="canl"),
-        Pin(role="transceiver", pin="8", net="slope"),
-        Pin(role="transceiver", pin="5", net="gnd"),
+        Pin(role="transceiver", pin="8", net="stby"),
         Pin(role="decoupling", pin="1", net="vdd"),
         Pin(role="decoupling", pin="2", net="gnd"),
-        Pin(role="slope_resistor", pin="1", net="slope"),
+        Pin(role="slope_resistor", pin="1", net="stby"),
         Pin(role="slope_resistor", pin="2", net="gnd"),
         Pin(role="termination", pin="1", net="canh"),
         Pin(role="termination", pin="2", net="can_term"),
         Pin(role="termination_jumper", pin="1", net="can_term"),
         Pin(role="termination_jumper", pin="2", net="canl"),
+    ),
+    no_connects=(
+        NoConnect(
+            role="transceiver",
+            pin="5",
+            # Unused VCC/2 reference output, not a ground pin.
+        ),
     ),
     source="https://www.ti.com/lit/ds/symlink/sn65hvd230.pdf",
     assertions=(
@@ -631,7 +640,9 @@ CH340C_USB_UART = _recipe(
         Port(name="dtr_n", direction="output", required=False),
         Port(name="rts_n", direction="output", required=False),
     ),
-    internal=("v3",),
+    parameters={"supply_voltage": 3.3},
+    allowed={"supply_voltage": (3.3, 5.0)},
+    internal=(),
     parts=(
         _part(
             "bridge",
@@ -648,7 +659,7 @@ CH340C_USB_UART = _recipe(
         Pin(role="bridge", pin="1", net="gnd"),
         Pin(role="bridge", pin="2", net="tx"),
         Pin(role="bridge", pin="3", net="rx"),
-        Pin(role="bridge", pin="4", net="v3"),
+        Pin(role="bridge", pin="4", net="vdd"),
         Pin(role="bridge", pin="5", net="usb_dp"),
         Pin(role="bridge", pin="6", net="usb_dm"),
         Pin(role="bridge", pin="13", net="dtr_n"),
@@ -656,20 +667,61 @@ CH340C_USB_UART = _recipe(
         Pin(role="bridge", pin="16", net="vdd"),
         Pin(role="decoupling", pin="1", net="vdd"),
         Pin(role="decoupling", pin="2", net="gnd"),
-        Pin(role="v3_cap", pin="1", net="v3"),
+        Pin(role="v3_cap", pin="1", net="vdd"),
         Pin(role="v3_cap", pin="2", net="gnd"),
     ),
     no_connects=tuple(
         NoConnect(role="bridge", pin=pin) for pin in ("7", "8", "9", "10", "11", "12", "15")
     ),
-    source="https://www.wch-ic.com/downloads/CH340DS1_PDF.html",
+    source=Source(
+        url="https://www.wch-ic.com/downloads/CH340DS1_PDF.html",
+        title="CH340 data sheet",
+        revision="3D",
+        reviewed_date="2026-09-11",
+        sections=(
+            "5.1 Clock, Reset, Power, Connection",
+            "6.2 5V Electrical Parameters",
+            "6.3 3.3V Electrical Parameters",
+            "7.6 Connect to MCU Serial Port, Unified Power Supply",
+            "7.7 Connect to MCU, Supply Power to Each, and Prevent Flooding in Both Directions",
+        ),
+    ),
     assertions=(
         Assertion(
             code="usb_uart_power_mode",
-            message="V3 bypassing and VCC/VIO binding follow the selected 3.3 V operating mode",
+            message=(
+                "CH340DS1 v3D §5.1: at 3.3 V, V3 and VCC share vdd; at 5 V, "
+                "V3 is a private node with only a 100 nF bypass to ground. "
+                "UART/control levels depend on VCC (§6.2); separate MCU supplies "
+                "require reviewed isolation/translation (§§7.6–7.7)."
+            ),
         ),
     ),
 )
+
+
+def expand_ch340c_usb_uart(resolved):
+    """Select the manufacturer's V3 topology without changing external rails."""
+    from .registry import expand_static_definition
+
+    definition = CH340C_USB_UART
+    supply_voltage = resolved.parameters["supply_voltage"]
+    if supply_voltage == 5.0:
+        definition = definition.model_copy(
+            update={
+                "internal_nets": ("v3",),
+                "pins": tuple(
+                    pin.model_copy(update={"net": "v3"})
+                    if (pin.role, pin.pin) in {("bridge", "4"), ("v3_cap", "1")}
+                    else pin
+                    for pin in definition.pins
+                ),
+            }
+        )
+    elif supply_voltage != 3.3:
+        raise ValueError(f"recipe {definition.recipe} supply_voltage must be 3.3 or 5.0")
+    return expand_static_definition(definition, resolved)
+
 
 WAVE_C_INTERFACE_RECIPES = (
     SN65HVD230_CAN_NODE,

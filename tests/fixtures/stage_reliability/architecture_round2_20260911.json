@@ -1,0 +1,640 @@
+{
+  "can": {
+    "intent": {
+      "goal": "A CAN bus node with an STM32 MCU, an SN65HVD230 transceiver, a DB9 connector, and a switchable bus terminator.",
+      "constraints": [
+        "A CAN bus node: an STM32 MCU, an SN65HVD230 transceiver, a DB9 connector, and a switchable bus terminator."
+      ],
+      "named_parts": [
+        "SN65HVD230"
+      ],
+      "inferred_expertise": "intermediate",
+      "assumptions": [],
+      "form_factor": null
+    },
+    "architecture": {
+      "topologies": {
+        "CAN": "Differential CAN 2.0B transceiver",
+        "LDO": "Linear LDO 5V to 3.3V",
+        "MCU": "STM32F103C8T6 with CAN peripheral",
+        "POWER": "USB 5V input"
+      },
+      "rail_voltages": {
+        "+3V3": 3.3,
+        "VBUS": 5.0
+      },
+      "comms_protocols": [
+        "CAN 2.0B"
+      ],
+      "mcu_present": true,
+      "sheets": [
+        {
+          "name": "MCU",
+          "stem": "MCU",
+          "function": "STM32F103C8T6 MCU with 8MHz crystal and CAN peripheral",
+          "from_library": null,
+          "library_instance": null,
+          "replication_group": null,
+          "replication_instance": null
+        },
+        {
+          "name": "CAN TRANSCEIVER",
+          "stem": "CAN_TRANSCEIVER",
+          "function": "SN65HVD230 CAN transceiver with 3.3V supply",
+          "from_library": null,
+          "library_instance": null,
+          "replication_group": null,
+          "replication_instance": null
+        },
+        {
+          "name": "POWER INPUT",
+          "stem": "POWER_INPUT",
+          "function": "USB 5V input with ME6211C33 LDO to 3.3V",
+          "from_library": null,
+          "library_instance": null,
+          "replication_group": null,
+          "replication_instance": null
+        },
+        {
+          "name": "DB9 CONNECTOR",
+          "stem": "DB9_CONNECTOR",
+          "function": "DB9 connector with switchable 120 ohm bus terminator",
+          "from_library": null,
+          "library_instance": null,
+          "replication_group": null,
+          "replication_instance": null
+        }
+      ],
+      "power_nets": [
+        "VBUS",
+        "+3V3",
+        "GND"
+      ],
+      "inter_sheet_nets": [
+        {
+          "name": "CAN_TX",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "output"
+            },
+            {
+              "sheet": "CAN TRANSCEIVER",
+              "direction": "input"
+            }
+          ]
+        },
+        {
+          "name": "CAN_RX",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "input"
+            },
+            {
+              "sheet": "CAN TRANSCEIVER",
+              "direction": "output"
+            }
+          ]
+        },
+        {
+          "name": "CANH",
+          "endpoints": [
+            {
+              "sheet": "CAN TRANSCEIVER",
+              "direction": "output"
+            },
+            {
+              "sheet": "DB9 CONNECTOR",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "CANL",
+          "endpoints": [
+            {
+              "sheet": "CAN TRANSCEIVER",
+              "direction": "output"
+            },
+            {
+              "sheet": "DB9 CONNECTOR",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "CAN_TERM",
+          "endpoints": [
+            {
+              "sheet": "CAN TRANSCEIVER",
+              "direction": "passive"
+            },
+            {
+              "sheet": "DB9 CONNECTOR",
+              "direction": "passive"
+            }
+          ]
+        }
+      ],
+      "assumptions": [
+        "MCU: STM32F103C8T6 per core defaults (defaulted)",
+        "CAN transceiver: SN65HVD230 per core defaults (defaulted)",
+        "DB9 connector: standard 9-pin D-sub male (defaulted)",
+        "Bus terminator: 120 ohm resistor switched by a slide switch (defaulted)",
+        "Power: 5V USB input, regulated to 3.3V for MCU and transceiver (defaulted)",
+        "LDO 3.3V <=500mA: ME6211C33 per core defaults (defaulted)",
+        "MCU clock: 8MHz crystal with internal PLL to 72MHz (defaulted)",
+        "CAN bus speed: 500 kbps (defaulted)",
+        "No external EEPROM or sensors required (defaulted)",
+        "Switchable terminator uses a SPST slide switch in series with 120 ohm resistor (defaulted)",
+        "mcu_core: selected the only registered exact family variant"
+      ],
+      "recipe_selections": [
+        {
+          "recipe": "sn65hvd230-can-node@1",
+          "instance": "can_transceiver",
+          "sheets": {
+            "interface": "CAN TRANSCEIVER"
+          },
+          "parameters": {},
+          "port_bindings": {
+            "canh": "CANH",
+            "canl": "CANL",
+            "gnd": "GND",
+            "rx": "CAN_RX",
+            "tx": "CAN_TX",
+            "vdd": "+3V3"
+          },
+          "requirement_ids": [
+            "can_transceiver"
+          ],
+          "pin_allocations": []
+        },
+        {
+          "recipe": "stm32f103c8t6-minimal@1",
+          "instance": "mcu_core",
+          "sheets": {
+            "mcu": "MCU"
+          },
+          "parameters": {},
+          "port_bindings": {
+            "gnd": "GND",
+            "vdd": "+3V3"
+          },
+          "requirement_ids": [
+            "mcu_core"
+          ],
+          "pin_allocations": []
+        }
+      ],
+      "requirements": [
+        {
+          "id": "mcu_core",
+          "sheet": "MCU",
+          "role": "mcu_core",
+          "family": "stm32f103",
+          "exact_part": "STM32F103C8T6",
+          "parameters": {
+            "clock_mhz": 72
+          },
+          "ports": {},
+          "interfaces": []
+        },
+        {
+          "id": "can_transceiver",
+          "sheet": "CAN TRANSCEIVER",
+          "role": "bus_interface",
+          "family": "sn65hvd230",
+          "exact_part": "SN65HVD230",
+          "parameters": {},
+          "ports": {},
+          "interfaces": []
+        },
+        {
+          "id": "ldo_3v3",
+          "sheet": "POWER INPUT",
+          "role": "regulator",
+          "family": "me6211c33",
+          "exact_part": null,
+          "parameters": {},
+          "ports": {},
+          "interfaces": []
+        },
+        {
+          "id": "db9_connector",
+          "sheet": "DB9 CONNECTOR",
+          "role": "connector",
+          "family": "db9",
+          "exact_part": null,
+          "parameters": {},
+          "ports": {},
+          "interfaces": []
+        },
+        {
+          "id": "termination_switch",
+          "sheet": "DB9 CONNECTOR",
+          "role": "user_io",
+          "family": "termination_switch",
+          "exact_part": null,
+          "parameters": {},
+          "ports": {},
+          "interfaces": []
+        }
+      ],
+      "recipe_resolution": [
+        {
+          "requirement_id": "can_transceiver",
+          "recipe": "sn65hvd230-can-node@1",
+          "exact_part": "SN65HVD230",
+          "assumptions": []
+        },
+        {
+          "requirement_id": "mcu_core",
+          "recipe": "stm32f103c8t6-minimal@1",
+          "exact_part": "STM32F103C8T6",
+          "assumptions": [
+            "mcu_core: selected the only registered exact family variant"
+          ]
+        }
+      ],
+      "unresolved_requirement_ids": [
+        "db9_connector",
+        "ldo_3v3",
+        "termination_switch"
+      ],
+      "protected_identities": [
+        "a4988settrt",
+        "a4988stepperdriver",
+        "ads1115i2cadc",
+        "ads1115idgsr",
+        "ams111733",
+        "ams11173v3",
+        "ap632033v3",
+        "ap63203wu7",
+        "ap632055v",
+        "ap63205wu7",
+        "attiny1614",
+        "attiny1614ssnr",
+        "attiny402",
+        "attiny402ssn",
+        "attiny412",
+        "attiny412ssn",
+        "cannode3v3",
+        "ch224k",
+        "ch32v003",
+        "ch32v003j4m6",
+        "ch32v003j4m6ch32v003j4m6",
+        "ch340c",
+        "drv8833pwpr",
+        "dualdcmotordriver",
+        "esp32c3mini1module",
+        "esp32c3mini1n4",
+        "esp32c3mini1n4esp32c3mini1n4",
+        "esp32s3",
+        "esp32s3mini1",
+        "esp32s3mini1esp32s3mini1n8",
+        "esp32s3mini1n8",
+        "esp32s3module",
+        "esp32s3wroom1esp32s3wroom1",
+        "esp32s3wroom1module",
+        "esp32s3wroom1n8r8",
+        "esp32wroom32emodule",
+        "esp32wroom32en4",
+        "esp32wroom32en4esp32wroom32e",
+        "hub75levelshiftinterface",
+        "hub75sn74hct245",
+        "max3485",
+        "mcp17003v3",
+        "mcp1700t3302ett",
+        "mcp6001follower",
+        "mcp6001tiot",
+        "mcumicrochipattinyattiny1614ss",
+        "mcumicrochipattinyattiny402ss",
+        "mcumicrochipattinyattiny412ss",
+        "mcuraspberrypirp2040",
+        "me62113v3",
+        "me6211c33m5gn",
+        "pca9685pw118",
+        "pca9685servobank",
+        "raspberrypirp2040",
+        "rp2040",
+        "rs485node3v3",
+        "singlecellliioncharger",
+        "sn65hvd230",
+        "stm32f103c8",
+        "stm32f103c8t6",
+        "stm32f103c8t6stm32f103c8t6",
+        "tca9555gpioexpander",
+        "tca9555pwrumw",
+        "tinyavr",
+        "tlv625693v3",
+        "tlv62569dbvr",
+        "tp4056",
+        "tps54331adjustable",
+        "tps54331ddar",
+        "typec31m12",
+        "usbc5vsink",
+        "usbcpowersink",
+        "usbcusb2device",
+        "usblc62sc6",
+        "usbpdfixedtrigger",
+        "usbuartbridge",
+        "ws2812bbt",
+        "ws2812output"
+      ]
+    }
+  },
+  "badge": {
+    "intent": {
+      "goal": "A chamfered-corner conference badge: an ATtiny1614 driving six 0805 LEDs and a CR2032 coin-cell holder, with two capacitive-touch pads.",
+      "constraints": [
+        "A chamfered-corner conference badge: an ATtiny1614 driving six 0805 LEDs and a CR2032 coin-cell holder, with two capacitive-touch pads."
+      ],
+      "named_parts": [
+        "CR2032"
+      ],
+      "inferred_expertise": "intermediate",
+      "assumptions": [],
+      "form_factor": {
+        "shape": "chamfered_rect",
+        "corner_radius_mm": null,
+        "chamfer_mm": null,
+        "size_mm": null,
+        "note": "chamfered",
+        "standard": null
+      }
+    },
+    "architecture": {
+      "topologies": {
+        "LED DRIVER": "Direct GPIO drive with series resistors",
+        "TOUCH SENSOR": "Capacitive touch via ATtiny1614 PTC",
+        "POWER": "Coin-cell direct supply"
+      },
+      "rail_voltages": {
+        "VBAT": 3.0
+      },
+      "comms_protocols": [],
+      "mcu_present": false,
+      "sheets": [
+        {
+          "name": "MCU",
+          "stem": "MCU",
+          "function": "ATtiny1614 microcontroller with UPDI programming and capacitive-touch sensing",
+          "from_library": null,
+          "library_instance": null,
+          "replication_group": null,
+          "replication_instance": null
+        },
+        {
+          "name": "LED MATRIX",
+          "stem": "LED_MATRIX",
+          "function": "Six 0805 LEDs driven by MCU GPIO",
+          "from_library": null,
+          "library_instance": null,
+          "replication_group": null,
+          "replication_instance": null
+        },
+        {
+          "name": "TOUCH PADS",
+          "stem": "TOUCH_PADS",
+          "function": "Two capacitive-touch pads connected to MCU touch channels",
+          "from_library": null,
+          "library_instance": null,
+          "replication_group": null,
+          "replication_instance": null
+        },
+        {
+          "name": "PROGRAMMING",
+          "stem": "PROGRAMMING",
+          "function": "UPDI programming header for flashing the ATtiny1614",
+          "from_library": null,
+          "library_instance": null,
+          "replication_group": null,
+          "replication_instance": null
+        }
+      ],
+      "power_nets": [
+        "VBAT",
+        "GND"
+      ],
+      "inter_sheet_nets": [
+        {
+          "name": "LED_0",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "output"
+            },
+            {
+              "sheet": "LED MATRIX",
+              "direction": "input"
+            }
+          ]
+        },
+        {
+          "name": "LED_1",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "output"
+            },
+            {
+              "sheet": "LED MATRIX",
+              "direction": "input"
+            }
+          ]
+        },
+        {
+          "name": "LED_2",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "output"
+            },
+            {
+              "sheet": "LED MATRIX",
+              "direction": "input"
+            }
+          ]
+        },
+        {
+          "name": "LED_3",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "output"
+            },
+            {
+              "sheet": "LED MATRIX",
+              "direction": "input"
+            }
+          ]
+        },
+        {
+          "name": "LED_4",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "output"
+            },
+            {
+              "sheet": "LED MATRIX",
+              "direction": "input"
+            }
+          ]
+        },
+        {
+          "name": "LED_5",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "output"
+            },
+            {
+              "sheet": "LED MATRIX",
+              "direction": "input"
+            }
+          ]
+        },
+        {
+          "name": "LED_6",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "output"
+            },
+            {
+              "sheet": "LED MATRIX",
+              "direction": "input"
+            }
+          ]
+        },
+        {
+          "name": "TOUCH_0",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "output"
+            },
+            {
+              "sheet": "TOUCH PADS",
+              "direction": "input"
+            }
+          ]
+        },
+        {
+          "name": "TOUCH_1",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "output"
+            },
+            {
+              "sheet": "TOUCH PADS",
+              "direction": "input"
+            }
+          ]
+        },
+        {
+          "name": "UPDI",
+          "endpoints": [
+            {
+              "sheet": "MCU",
+              "direction": "bidirectional"
+            },
+            {
+              "sheet": "PROGRAMMING",
+              "direction": "bidirectional"
+            }
+          ]
+        }
+      ],
+      "assumptions": [],
+      "recipe_selections": [],
+      "requirements": [],
+      "recipe_resolution": [],
+      "unresolved_requirement_ids": [],
+      "protected_identities": [
+        "a4988settrt",
+        "a4988stepperdriver",
+        "ads1115i2cadc",
+        "ads1115idgsr",
+        "ams111733",
+        "ams11173v3",
+        "ap632033v3",
+        "ap63203wu7",
+        "ap632055v",
+        "ap63205wu7",
+        "attiny1614",
+        "attiny1614ssnr",
+        "attiny402",
+        "attiny402ssn",
+        "attiny412",
+        "attiny412ssn",
+        "cannode3v3",
+        "ch224k",
+        "ch32v003",
+        "ch32v003j4m6",
+        "ch32v003j4m6ch32v003j4m6",
+        "ch340c",
+        "drv8833pwpr",
+        "dualdcmotordriver",
+        "esp32c3mini1module",
+        "esp32c3mini1n4",
+        "esp32c3mini1n4esp32c3mini1n4",
+        "esp32s3",
+        "esp32s3mini1",
+        "esp32s3mini1esp32s3mini1n8",
+        "esp32s3mini1n8",
+        "esp32s3module",
+        "esp32s3wroom1esp32s3wroom1",
+        "esp32s3wroom1module",
+        "esp32s3wroom1n8r8",
+        "esp32wroom32emodule",
+        "esp32wroom32en4",
+        "esp32wroom32en4esp32wroom32e",
+        "hub75levelshiftinterface",
+        "hub75sn74hct245",
+        "max3485",
+        "mcp17003v3",
+        "mcp1700t3302ett",
+        "mcp6001follower",
+        "mcp6001tiot",
+        "mcumicrochipattinyattiny1614ss",
+        "mcumicrochipattinyattiny402ss",
+        "mcumicrochipattinyattiny412ss",
+        "mcuraspberrypirp2040",
+        "me62113v3",
+        "me6211c33m5gn",
+        "pca9685pw118",
+        "pca9685servobank",
+        "raspberrypirp2040",
+        "rp2040",
+        "rs485node3v3",
+        "singlecellliioncharger",
+        "sn65hvd230",
+        "stm32f103c8",
+        "stm32f103c8t6",
+        "stm32f103c8t6stm32f103c8t6",
+        "tca9555gpioexpander",
+        "tca9555pwrumw",
+        "tinyavr",
+        "tlv625693v3",
+        "tlv62569dbvr",
+        "tp4056",
+        "tps54331adjustable",
+        "tps54331ddar",
+        "typec31m12",
+        "usbc5vsink",
+        "usbcpowersink",
+        "usbcusb2device",
+        "usblc62sc6",
+        "usbpdfixedtrigger",
+        "usbuartbridge",
+        "ws2812bbt",
+        "ws2812output"
+      ]
+    }
+  }
+}

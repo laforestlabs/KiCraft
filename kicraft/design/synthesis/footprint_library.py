@@ -15,6 +15,7 @@ Resolution and loadability validation share :func:`load_footprint`, the single
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 import sys
 
@@ -80,11 +81,20 @@ def load_footprint(
     return fp, lib_dir
 
 
+@lru_cache(maxsize=512)
+def _searchable_footprints(pretty: Path, mtime_ns: int) -> tuple[tuple[str, str], ...]:
+    """Cache filenames until directory membership changes; never parse pad geometry."""
+    return tuple(
+        (f"{pretty.stem}:{mod.stem}", f"{pretty.stem}:{mod.stem}".lower())
+        for mod in sorted(pretty.glob("*.kicad_mod"))
+    )
+
+
 def search_footprints(
     query: str,
     *,
     stock_dir: Path = DEFAULT_KICAD_FOOTPRINT_DIR,
-    limit: int = 40,
+    limit: int | None = 40,
 ) -> list[str]:
     """Return up to ``limit`` stock KiCad ``Library:Name`` footprint ids whose id
     contains every (non-stopword) whitespace-separated term in ``query``
@@ -94,6 +104,7 @@ def search_footprints(
     one (e.g. ``"pinheader 2x08"`` -> ``Connector_PinHeader_2.54mm:PinHeader_2x08_
     P2.54mm_Vertical``). Each ``<Library>.pretty/<Name>.kicad_mod`` under ``stock_dir``
     contributes the id ``"<Library>:<Name>"``.
+    ``limit=None`` retrieves all matches for relevance ranking by the caller.
     """
     terms = [t for t in (w.lower() for w in (query or "").split()) if t and t not in _STOPWORDS]
     if not terms or not stock_dir.is_dir():
@@ -101,15 +112,16 @@ def search_footprints(
     matches: list[str] = []
     seen: set[str] = set()
     for pretty in sorted(stock_dir.glob("*.pretty")):
-        libname = pretty.stem
-        for mod in sorted(pretty.glob("*.kicad_mod")):
-            fp_id = f"{libname}:{mod.stem}"
-            key = fp_id.lower()
+        try:
+            rows = _searchable_footprints(pretty, pretty.stat().st_mtime_ns)
+        except OSError:
+            continue
+        for fp_id, key in rows:
             if fp_id in seen or not all(t in key for t in terms):
                 continue
             seen.add(fp_id)
             matches.append(fp_id)
-            if len(matches) >= limit:
+            if limit is not None and len(matches) >= limit:
                 return matches
     return matches
 

@@ -102,9 +102,16 @@ RP2040_MINIMAL_V2: RecipeDefinition = RP2040_MINIMAL.model_copy(
             SourceDocument(
                 url="https://datasheets.raspberrypi.com/rp2040/hardware-design-with-rp2040.pdf",
                 title="Hardware design with RP2040",
-                revision="build-date 2023-03-01",
-                reviewed_date="2026-09-09",
-                sections=("2 Power supplies", "3 Flash", "4 Crystal", "5 USB"),
+                revision="release 2, build-date 2026-08-20",
+                reviewed_date="2026-09-11",
+                sections=("2.1 Power", "2.2 Flash storage", "2.3 Crystal oscillator", "2.4.1 USB"),
+            ),
+            SourceDocument(
+                url="https://abracon.com/datasheets/ABM8-272-T3.pdf",
+                title="ABM8-272-T3 crystal specifications and mechanical dimensions",
+                revision="Drawing 456603 revision B, 2024-09-16",
+                reviewed_date="2026-09-11",
+                sections=("Key Electrical Specifications", "Mechanical Dimensions"),
             ),
         ),
     }

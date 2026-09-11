@@ -1,0 +1,653 @@
+{
+  "source": "logs/self_eval/recovery_serializer_pass1_20260911T0400Z",
+  "can": {
+    "intent": {
+      "goal": "A CAN bus node with an STM32 MCU, an SN65HVD230 transceiver, a DB9 connector, and a switchable bus terminator.",
+      "constraints": [
+        "A CAN bus node: an STM32 MCU, an SN65HVD230 transceiver, a DB9 connector, and a switchable bus terminator."
+      ],
+      "named_parts": [
+        "SN65HVD230"
+      ],
+      "inferred_expertise": "intermediate",
+      "assumptions": [],
+      "form_factor": null
+    },
+    "candidates": [
+      {
+        "comms_protocols": [
+          "CAN 2.0B"
+        ],
+        "inter_sheet_net_ranges": [
+          {
+            "end": 1,
+            "endpoints": [
+              {
+                "direction": "output",
+                "sheet": "MCU"
+              },
+              {
+                "direction": "input",
+                "sheet": "CAN TRANSCEIVER"
+              }
+            ],
+            "name_pattern": "CAN_TX_{n}",
+            "start": 0
+          },
+          {
+            "end": 1,
+            "endpoints": [
+              {
+                "direction": "output",
+                "sheet": "CAN TRANSCEIVER"
+              },
+              {
+                "direction": "input",
+                "sheet": "MCU"
+              }
+            ],
+            "name_pattern": "CAN_RX_{n}",
+            "start": 0
+          }
+        ],
+        "inter_sheet_nets": [
+          {
+            "endpoints": [
+              {
+                "direction": "output",
+                "sheet": "MCU"
+              },
+              {
+                "direction": "input",
+                "sheet": "CAN TRANSCEIVER"
+              }
+            ],
+            "name": "CAN_TX"
+          },
+          {
+            "endpoints": [
+              {
+                "direction": "output",
+                "sheet": "CAN TRANSCEIVER"
+              },
+              {
+                "direction": "input",
+                "sheet": "MCU"
+              }
+            ],
+            "name": "CAN_RX"
+          },
+          {
+            "endpoints": [
+              {
+                "direction": "output",
+                "sheet": "MCU"
+              },
+              {
+                "direction": "input",
+                "sheet": "CAN TRANSCEIVER"
+              }
+            ],
+            "name": "CAN_STBY"
+          },
+          {
+            "endpoints": [
+              {
+                "direction": "output",
+                "sheet": "MCU"
+              },
+              {
+                "direction": "input",
+                "sheet": "CAN TERMINATION"
+              }
+            ],
+            "name": "TERM_EN"
+          }
+        ],
+        "mcu_present": true,
+        "power_nets": [
+          "GND",
+          "VBUS",
+          "+3V3"
+        ],
+        "rail_voltages": {
+          "+3V3": 3.3,
+          "VBUS": 5.0
+        },
+        "recipe_selections": [],
+        "requirements": [
+          {
+            "family": "stm32f103",
+            "id": "mcu_core",
+            "parameters": {
+              "clock": "72MHz",
+              "package": "LQFP48"
+            },
+            "role": "mcu_core",
+            "sheet": "MCU"
+          },
+          {
+            "family": "sn65hvd230",
+            "id": "can_transceiver",
+            "role": "bus_interface",
+            "sheet": "CAN TRANSCEIVER"
+          },
+          {
+            "family": "db9",
+            "id": "can_connector",
+            "role": "connector",
+            "sheet": "CAN CONNECTOR"
+          },
+          {
+            "family": "termination_switch",
+            "id": "termination_switch",
+            "role": "driver",
+            "sheet": "CAN TERMINATION"
+          },
+          {
+            "family": "usb_c",
+            "id": "usb_input",
+            "role": "power_input",
+            "sheet": "POWER INPUT"
+          },
+          {
+            "family": "me6211c33",
+            "id": "ldo_3v3",
+            "role": "regulator",
+            "sheet": "POWER INPUT"
+          }
+        ],
+        "sheets": [
+          {
+            "function": "STM32F103 MCU with 8 MHz crystal, decoupling, and SWD header",
+            "name": "MCU",
+            "stem": "MCU"
+          },
+          {
+            "function": "SN65HVD230 CAN transceiver with 120 ohm bus termination",
+            "name": "CAN TRANSCEIVER",
+            "stem": "CAN_TRANSCEIVER"
+          },
+          {
+            "function": "DB9 connector for CAN bus",
+            "name": "CAN CONNECTOR",
+            "stem": "CAN_CONNECTOR"
+          },
+          {
+            "function": "Switchable 120 ohm termination resistor controlled by MCU GPIO",
+            "name": "CAN TERMINATION",
+            "stem": "CAN_TERMINATION"
+          },
+          {
+            "function": "USB-C power input with 5V rail and 3.3V LDO regulator",
+            "name": "POWER INPUT",
+            "stem": "POWER_INPUT"
+          }
+        ],
+        "topologies": {
+          "CAN_PHY": "SN65HVD230 transceiver with integrated protection",
+          "MCU": "STM32F103 with internal CAN controller",
+          "POWER": "USB-C 5V input with 3.3V LDO",
+          "TERMINATION": "GPIO-controlled 120 ohm termination resistor"
+        },
+        "unresolved_requirement_ids": []
+      },
+      {
+        "inter_sheet_nets": [],
+        "power_nets": [
+          "VBUS",
+          "GND",
+          "CANH",
+          "CANL"
+        ],
+        "rail_voltages": {
+          "VBUS": 5.0,
+          "+3V3": 3.3
+        },
+        "sheets": [
+          {
+            "function": "STM32 MCU core with crystal, reset, and decoupling",
+            "name": "MCU",
+            "stem": "MCU"
+          },
+          {
+            "function": "SN65HVD230 CAN transceiver with 120 ohm switchable terminator",
+            "name": "CAN TRANSCEIVER",
+            "stem": "CAN_TRANSCEIVER"
+          },
+          {
+            "function": "DB9 connector for CAN bus",
+            "name": "DB9 CONNECTOR",
+            "stem": "DB9_CONNECTOR"
+          }
+        ],
+        "topologies": {
+          "MCU": "STM32 MCU core",
+          "CAN_TRANSCEIVER": "SN65HVD230 CAN transceiver with switchable 120 ohm termination",
+          "DB9_CONNECTOR": "DB9 CAN connector"
+        },
+        "unresolved_requirement_ids": []
+      }
+    ]
+  },
+  "c3": {
+    "intent": {
+      "goal": "Design a rounded-corner ESP32-C3 development board with a USB-C connector on one edge and a 2x10 0.1-inch GPIO header along the opposite edge.",
+      "constraints": [
+        "A rounded-corner ESP32-C3 development board with a USB-C connector on one edge and a 2x10 0.1-inch GPIO header along the opposite edge."
+      ],
+      "named_parts": [
+        "ESP32-C3"
+      ],
+      "inferred_expertise": "intermediate",
+      "assumptions": [],
+      "form_factor": {
+        "shape": "rounded_rect",
+        "corner_radius_mm": null,
+        "chamfer_mm": null,
+        "size_mm": null,
+        "note": "rounded-corner",
+        "standard": null
+      }
+    },
+    "architecture": {
+      "topologies": {
+        "LDO 3.3V": "Low-dropout linear regulator (ME6211C33)",
+        "USB POWER INPUT": "USB-C receptacle with 5V VBUS"
+      },
+      "rail_voltages": {
+        "+3V3": 3.3,
+        "VBUS": 5.0
+      },
+      "comms_protocols": [
+        "USB 2.0 FS"
+      ],
+      "mcu_present": true,
+      "sheets": [
+        {
+          "name": "USB INPUT",
+          "stem": "USB_INPUT",
+          "function": "USB-C receptacle with CC pull-downs and ESD protection, provides VBUS and USB data to the module.",
+          "from_library": null,
+          "library_instance": null,
+          "replication_group": null,
+          "replication_instance": null
+        },
+        {
+          "name": "ESP32 C3 MODULE",
+          "stem": "ESP32_C3_MODULE",
+          "function": "ESP32-C3 module with integrated MCU, USB transceiver, and 3.3V LDO regulator.",
+          "from_library": null,
+          "library_instance": null,
+          "replication_group": null,
+          "replication_instance": null
+        },
+        {
+          "name": "GPIO HEADER",
+          "stem": "GPIO_HEADER",
+          "function": "2x10 0.1-inch male header exposing GPIOs, 3.3V, 5V, and GND.",
+          "from_library": null,
+          "library_instance": null,
+          "replication_group": null,
+          "replication_instance": null
+        }
+      ],
+      "power_nets": [
+        "VBUS",
+        "+3V3",
+        "GND"
+      ],
+      "inter_sheet_nets": [
+        {
+          "name": "USB_D_P",
+          "endpoints": [
+            {
+              "sheet": "USB INPUT",
+              "direction": "passive"
+            },
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "bidirectional"
+            }
+          ]
+        },
+        {
+          "name": "USB_D_N",
+          "endpoints": [
+            {
+              "sheet": "USB INPUT",
+              "direction": "passive"
+            },
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "bidirectional"
+            }
+          ]
+        },
+        {
+          "name": "VBUS",
+          "endpoints": [
+            {
+              "sheet": "USB INPUT",
+              "direction": "passive"
+            },
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "input"
+            }
+          ]
+        },
+        {
+          "name": "GPIO0",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO1",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO2",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO3",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO4",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO5",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO6",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO7",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO8",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO9",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO10",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO18",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO19",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO20",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        },
+        {
+          "name": "GPIO21",
+          "endpoints": [
+            {
+              "sheet": "ESP32 C3 MODULE",
+              "direction": "output"
+            },
+            {
+              "sheet": "GPIO HEADER",
+              "direction": "passive"
+            }
+          ]
+        }
+      ],
+      "assumptions": [
+        "ESP32-C3 module is the MCU; USB-C connector provides 5V VBUS input (defaulted)",
+        "LDO 3.3V <=500mA: ME6211C33 per core defaults (defaulted)",
+        "USB-C connector is a standard 16-pin receptacle with CC1/CC2 pulled to GND via 5.1k resistors (defaulted)",
+        "GPIO header is a 2x10 0.1-inch male header (defaulted)",
+        "No battery or other power source; board is USB-powered only (defaulted)",
+        "USB D+/D- are bidirectional differential signals between USB-C connector and ESP32-C3 module (defaulted)",
+        "ESP32-C3 module is the only MCU; no external MCU (defaulted)",
+        "GPIO header exposes ESP32-C3 GPIOs, 3.3V, 5V, and GND (defaulted)",
+        "No additional sensors, drivers, or interface chips beyond the ESP32-C3 module (defaulted)",
+        "No programming header; programming via USB-C (defaulted)",
+        "No battery charger; USB power only (defaulted)",
+        "No external crystal; ESP32-C3 module includes crystal (defaulted)"
+      ],
+      "recipe_selections": [],
+      "requirements": [
+        {
+          "id": "auto_usb_c_usb_input",
+          "sheet": "USB INPUT",
+          "role": "connector",
+          "family": "connector",
+          "exact_part": null,
+          "parameters": {},
+          "ports": {
+            "gnd": "GND",
+            "vbus": "VBUS",
+            "usb_d_n": "USB_D_N"
+          },
+          "interfaces": []
+        }
+      ],
+      "recipe_resolution": [],
+      "unresolved_requirement_ids": [
+        "auto_usb_c_usb_input"
+      ],
+      "protected_identities": [
+        "a4988settrt",
+        "a4988stepperdriver",
+        "ads1115i2cadc",
+        "ads1115idgsr",
+        "ams111733",
+        "ams11173v3",
+        "ap632033v3",
+        "ap63203wu7",
+        "ap632055v",
+        "ap63205wu7",
+        "attiny1614",
+        "attiny1614ssnr",
+        "attiny402",
+        "attiny402ssn",
+        "attiny412",
+        "attiny412ssn",
+        "cannode3v3",
+        "ch224k",
+        "ch32v003",
+        "ch32v003j4m6",
+        "ch32v003j4m6ch32v003j4m6",
+        "ch340c",
+        "drv8833pwpr",
+        "dualdcmotordriver",
+        "esp32c3mini1module",
+        "esp32c3mini1n4",
+        "esp32c3mini1n4esp32c3mini1n4",
+        "esp32s3",
+        "esp32s3mini1",
+        "esp32s3mini1esp32s3mini1n8",
+        "esp32s3mini1n8",
+        "esp32s3module",
+        "esp32s3wroom1esp32s3wroom1",
+        "esp32s3wroom1module",
+        "esp32s3wroom1n8r8",
+        "esp32wroom32emodule",
+        "esp32wroom32en4",
+        "esp32wroom32en4esp32wroom32e",
+        "hub75levelshiftinterface",
+        "hub75sn74hct245",
+        "max3485",
+        "mcp17003v3",
+        "mcp1700t3302ett",
+        "mcp6001follower",
+        "mcp6001tiot",
+        "mcumicrochipattinyattiny1614ss",
+        "mcumicrochipattinyattiny402ss",
+        "mcumicrochipattinyattiny412ss",
+        "mcuraspberrypirp2040",
+        "me62113v3",
+        "me6211c33m5gn",
+        "pca9685pw118",
+        "pca9685servobank",
+        "raspberrypirp2040",
+        "rp2040",
+        "rs485node3v3",
+        "singlecellliioncharger",
+        "sn65hvd230",
+        "stm32f103c8",
+        "stm32f103c8t6",
+        "stm32f103c8t6stm32f103c8t6",
+        "tca9555gpioexpander",
+        "tca9555pwrumw",
+        "tinyavr",
+        "tlv625693v3",
+        "tlv62569dbvr",
+        "tp4056",
+        "tps54331adjustable",
+        "tps54331ddar",
+        "typec31m12",
+        "usbc5vsink",
+        "usbcpowersink",
+        "usbcusb2device",
+        "usblc62sc6",
+        "usbpdfixedtrigger",
+        "usbuartbridge",
+        "ws2812bbt",
+        "ws2812output"
+      ]
+    }
+  }
+}

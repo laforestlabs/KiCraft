@@ -20,6 +20,8 @@ from .stage_contracts import (
     NoConnectPinAssignment,
     _expand_bom_groups,
     _requirement_owns_protected_group,
+    _sheet_owns_usb_c_connector,
+    _validate_power_requirement_contracts,
 )
 
 WORK_UNIT_WIRING_PIN_LIMIT = 256
@@ -125,17 +127,127 @@ def _locked_pin_sets(
     return connected, no_connect
 
 
+def _assert_wiring_unit_ownership(
+    units: list[StageWorkUnit],
+    inventory: dict[str, tuple[str, ...]],
+    locked_connected: set[tuple[str, str]],
+    locked_no_connect: set[tuple[str, str]],
+) -> None:
+    overlap = locked_connected & locked_no_connect
+    if overlap:
+        rendered = ", ".join(f"{ref}.{pin}" for ref, pin in sorted(overlap))
+        raise ValueError(f"wiring pin ownership overlaps locked connection/no-connect: {rendered}")
+    all_pins = {(ref, pin) for ref, pins in inventory.items() for pin in pins}
+    locked = locked_connected | locked_no_connect
+    unknown_locked = locked - all_pins
+    # A missing inventory is a stage-prep concern. Do not reinterpret an empty
+    # mocked/legacy inventory as proof that trusted deterministic pins are bad.
+    if all_pins and unknown_locked:
+        rendered = ", ".join(f"{ref}.{pin}" for ref, pin in sorted(unknown_locked))
+        raise ValueError(f"locked wiring ownership references unknown pins: {rendered}")
+    owners: dict[tuple[str, str], str] = {}
+    for unit in units:
+        for pin in unit.expected_pins:
+            prior = owners.get(pin)
+            if prior is not None:
+                raise ValueError(
+                    f"wiring pin ownership overlaps for {pin[0]}.{pin[1]}: {prior}, {unit.unit_id}"
+                )
+            owners[pin] = unit.unit_id
+    missing = all_pins - locked - set(owners)
+    extra = set(owners) - all_pins
+    if missing or extra:
+        detail = []
+        if missing:
+            detail.append(
+                "unowned=" + ",".join(f"{ref}.{pin}" for ref, pin in sorted(missing)[:20])
+            )
+        if extra:
+            detail.append("unknown=" + ",".join(f"{ref}.{pin}" for ref, pin in sorted(extra)[:20]))
+        raise ValueError("wiring pin ownership is not exact: " + "; ".join(detail))
+
+
+def _assert_deterministic_endpoints(
+    units: list[StageWorkUnit], prompt_state: dict, extras: dict
+) -> None:
+    """Prove deterministic sheet contracts from assignments, never spare pins."""
+    bom = prompt_state.get("bom") or {}
+    ref_sheets = {
+        str(part["ref"]): str(part.get("sheet") or "")
+        for part in bom.get("parts") or []
+        if isinstance(part, dict) and part.get("ref")
+    }
+    carried = {
+        (ref_sheets.get(ref), net) for (ref, _pin), net in locked_pin_assignments(bom).items()
+    }
+    for row in extras.get("locked_pin_assignments") or extras.get("recipe_locked_pins") or []:
+        if isinstance(row, dict) and row.get("net"):
+            carried.add((ref_sheets.get(str(row.get("ref"))), str(row["net"])))
+    model_sheets: set[str] = set()
+    parts_by_ref = {
+        str(part["ref"]): part
+        for part in bom.get("parts") or []
+        if isinstance(part, dict) and part.get("ref")
+    }
+    for unit in units:
+        candidate = deterministic_wiring_candidate(unit, prompt_state, extras)
+        if candidate is not None:
+            carried.update(
+                (unit.sheet, str(row["net"]))
+                for row in candidate.get("pins") or []
+                if row.get("net")
+            )
+        elif any(
+            parts_by_ref[ref].get("resolution_source") != "recipe"
+            and not (
+                parts_by_ref[ref].get("resolution_source") == "lowerer"
+                and parts_by_ref[ref].get("lowering_requirement_id")
+                and parts_by_ref[ref].get("lowering_role")
+            )
+            for ref in unit.refs
+        ):
+            # A model-owned inventory is not proof of electrical realization.
+            # Its assignments remain subject to unit and aggregate commit gates.
+            model_sheets.add(unit.sheet)
+    missing = []
+    for net in (prompt_state.get("architecture") or {}).get("inter_sheet_nets") or []:
+        for endpoint in net.get("endpoints") or []:
+            sheet = str(endpoint.get("sheet") or "")
+            name = str(net.get("name") or "")
+            if sheet not in model_sheets and (sheet, name) not in carried:
+                missing.append(f"{sheet}:{name}")
+    if missing:
+        raise ValueError(
+            "deterministic_endpoint_unrealizable: no carrying assignment for "
+            + ", ".join(sorted(set(missing)))
+        )
+
+
 def plan_stage_work_units(
     stage: str, prompt_state: dict, extras: dict
 ) -> tuple[StageWorkUnit, ...]:
     """Plan deterministic sheet-local BOM or bounded exact-pin wiring units."""
     architecture = prompt_state.get("architecture") or {}
     sheets = _architecture_sheets(prompt_state)
+    if prompt_state.get("functional_spec") is not None:
+        from kicraft.design.models import Architecture, FunctionalSpec
+        from kicraft.design.synthesis.validation import check_every_block_has_sheet
+
+        coverage = check_every_block_has_sheet(
+            FunctionalSpec.model_validate(prompt_state["functional_spec"]),
+            Architecture.model_validate(architecture),
+        )
+        if not coverage.ok:
+            raise ValueError(
+                "work-unit planning requires complete functional block ownership: "
+                + "; ".join(coverage.offenders or [coverage.message])
+            )
     if stage == "bom":
+        _validate_power_requirement_contracts(architecture, prompt_state)
         requirements = [
             requirement
             for requirement in architecture.get("requirements") or []
-            if isinstance(requirement, dict) and str(requirement.get("role")) != "power_input"
+            if isinstance(requirement, dict)
         ]
         if requirements:
             selected = {
@@ -152,21 +264,6 @@ def plan_stage_work_units(
                     recipe_ids_by_sheet.setdefault(str(sheet), set()).add(
                         str(selection.get("recipe"))
                     )
-            recipe_part_roles_by_sheet: dict[str, set[str]] = {}
-            from kicraft.design.recipes import get_recipe
-
-            for selection in architecture.get("recipe_selections") or []:
-                if not isinstance(selection, dict):
-                    continue
-                definition = get_recipe(str(selection.get("recipe")))
-                sheet_bindings = selection.get("sheets") or {}
-                for group in definition.parts:
-                    bound_sheet = sheet_bindings.get(group.sheet_role)
-                    if bound_sheet:
-                        recipe_part_roles_by_sheet.setdefault(str(bound_sheet), set()).add(
-                            _identity_token(group.role)
-                        )
-
             from kicraft.design.lowering import lower_requirement
             from kicraft.design.models import CircuitRequirement
 
@@ -222,14 +319,6 @@ def plan_stage_work_units(
             plain_by_sheet: dict[str, list[dict]] = {}
             for requirement in requirements:
                 requirement_id = str(requirement.get("id"))
-                requirement_tokens = {
-                    _identity_token(requirement.get("role")),
-                    _identity_token(requirement.get("family")),
-                }
-                if requirement_tokens & recipe_part_roles_by_sheet.get(
-                    str(requirement.get("sheet")), set()
-                ):
-                    continue
                 if requirement_id in selected or requirement_id in determinable_ids:
                     continue
                 plain_by_sheet.setdefault(str(requirement["sheet"]), []).append(requirement)
@@ -298,7 +387,7 @@ def plan_stage_work_units(
     unit_index = 0
     for sheet in sheets:
         lowerer_buckets: dict[tuple[str, str], list[dict]] = {}
-        ordinary_parts: list[dict] = []
+        ordinary_buckets: dict[str, list[dict]] = {}
         for part in parts_by_sheet[sheet]:
             if (
                 part.get("resolution_source") == "lowerer"
@@ -311,13 +400,15 @@ def plan_stage_work_units(
                 )
                 lowerer_buckets.setdefault(key, []).append(part)
             else:
-                ordinary_parts.append(part)
+                # Preserve the BOM work unit as the smallest proven ownership
+                # boundary. Legacy parts without provenance share one sheet unit.
+                resolution_id = str(part.get("resolution_id") or "__sheet__")
+                ordinary_buckets.setdefault(resolution_id, []).append(part)
         batches = [
             (parts, lowerer_id, requirement_id)
             for (lowerer_id, requirement_id), parts in lowerer_buckets.items()
         ]
-        if ordinary_parts:
-            batches.append((ordinary_parts, None, None))
+        batches.extend((parts, None, None) for parts in ordinary_buckets.values())
 
         for batch_parts, lowerer_id, requirement_id in batches:
             pending_refs: list[str] = []
@@ -387,6 +478,13 @@ def plan_stage_work_units(
                 pending_refs.append(ref)
                 pending_pins.extend(ref_pins)
             flush()
+    _assert_wiring_unit_ownership(
+        units,
+        inventory,
+        locked_connected,
+        locked_no_connect,
+    )
+    _assert_deterministic_endpoints(units, prompt_state, extras)
     return tuple(units)
 
 
@@ -454,6 +552,87 @@ _HIROSE_FH12_05_PIN_COUNTS = {
 }
 
 
+def _requirement_needs_controller(requirement: dict) -> bool:
+    return (
+        str(requirement.get("role")) == "mcu_core"
+        or _identity_token(requirement.get("family"))
+        in {"usbpdtrigger", "usbpdfixedtrigger", "usbpdselectabletrigger"}
+        or "controller"
+        in re.split(
+            r"[^a-z0-9]+",
+            f"{requirement.get('id', '')} {requirement.get('family', '')}".lower(),
+        )
+    )
+
+
+def _required_physical_feature(requirement: dict) -> str | None:
+    """Use typed families, never a sheet name or component-group label."""
+    family = _identity_token(requirement.get("family"))
+    if family in {
+        "pinheader",
+        "genericheader",
+        "header",
+        "spiheader",
+        "gpioheader",
+        "fpcheaderbreakout",
+    }:
+        return "header"
+    if family in {"switchinput", "button", "pushbutton", "bootbutton", "resetbutton"}:
+        return "button"
+    if family in {"voltageselectorswitch", "selectorswitch", "selector"}:
+        return "selector"
+    if family == "coincellholder":
+        return "coin-cell-holder"
+    return None
+
+
+def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
+    if feature == "header":
+        return group.symbol.startswith(
+            ("Connector_Generic:Conn_", "Connector:Conn_", "Connector_Generic_MountingPin:Conn_")
+        ) and group.footprint.startswith(
+            ("Connector_PinHeader_", "Connector_PinSocket_", "Connector_IDC:")
+        )
+    if feature == "coin-cell-holder":
+        return group.symbol == "Device:Battery_Cell" and group.footprint.startswith(
+            "Battery:BatteryHolder_"
+        )
+    if feature == "selector" and (
+        group.symbol == "sp3t-switch-msk13c02:MSK13C02-SZ"
+        and group.footprint == "sp3t-switch-msk13c02:SW-SMD_MSK13C02-SZ"
+    ):
+        return True
+    if not group.footprint.startswith(("Button_Switch_SMD:", "Button_Switch_THT:")):
+        return False
+    if feature == "button":
+        return group.symbol.startswith("Switch:SW_Push")
+    return group.symbol.startswith(
+        ("Switch:SW_SPDT", "Switch:SW_DPDT", "Switch:SW_Rotary", "Switch:SW_DIP")
+    )
+
+
+def _group_implements_controller(group: BomComponentGroup, requirement: dict) -> bool:
+    if (
+        group.reference_prefix != "U"
+        or group.symbol.startswith(("Device:", "Connector", "Switch:", "Jumper:", "TestPoint:"))
+        or group.footprint.startswith(
+            (
+                "Connector",
+                "TerminalBlock",
+                "Resistor_",
+                "Capacitor_",
+                "Button_Switch_",
+                "TestPoint:",
+            )
+        )
+    ):
+        return False
+    if _identity_token(requirement.get("family")) == "pdtriggercontroller":
+        requirement = {**requirement, "family": "usb-pd-trigger"}
+    # A label or substitution rationale is not evidence of controller identity.
+    return _requirement_owns_protected_group(group.model_copy(update={"id": ""}), (requirement,))
+
+
 def _standard_connector_sheet_candidate(
     unit: StageWorkUnit,
     prompt_state: dict,
@@ -470,8 +649,41 @@ def _standard_connector_sheet_candidate(
     )
     function = str((target or {}).get("function") or "")
     identity = function.lower()
-    has_usb_c = bool(re.search(r"\busb(?:\s*|-)?c\b|\btype(?:\s*|-)?c\b", identity))
-    if has_usb_c:
+    requirements = [
+        row
+        for row in (prompt_state.get("architecture") or {}).get("requirements") or []
+        if isinstance(row, dict) and str(row.get("sheet")) == unit.sheet
+    ]
+    if any(
+        _requirement_needs_controller(row)
+        or _required_physical_feature(row) not in {None, "header"}
+        for row in requirements
+    ) or re.search(r"\bmcu\b|\bmicrocontroller\b", identity):
+        # An ancillary connector, regulator, or passive bank cannot implement
+        # a typed controller, button, selector, or battery-holder requirement.
+        return None
+    if re.search(r"\bdb[\s-]?9\b|\bd[\s-]?sub\b.*\b9\b", identity):
+        return {
+            "groups": [
+                {
+                    "id": "db9",
+                    "reference_prefix": "J",
+                    "quantity": 1,
+                    "value": "DB9",
+                    "symbol": "Connector_Generic:Conn_01x09",
+                    "footprint": "Connector_Dsub:DSUB-9_Pins_EdgeMount_P2.77mm",
+                    "sheet": unit.sheet,
+                }
+            ],
+            "arrays": [],
+            "assumptions": ["Used a stock KiCad 9-pin D-sub connector (defaulted)"],
+            "substitutions": [],
+        }
+    if ("pd" in identity or "power delivery" in identity) and "trigger" in identity:
+        # The verified CH224K recipe owns only a fixed 9 V PDO. A selectable
+        # trigger needs its switch truth table modeled explicitly by this unit.
+        return None
+    if _sheet_owns_usb_c_connector(target or {}):
         from kicraft.design.recipes import get_recipe
 
         recipe_name = (
@@ -658,7 +870,7 @@ def _standard_connector_sheet_candidate(
                     "value": "Power input",
                     "symbol": "Connector_Generic:Conn_01x02",
                     "footprint": (
-                        "TerminalBlock_Phoenix:PhoenixContact_MKDS-1,5-2_1x02_P5.00mm_Horizontal"
+                        "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-2_1x02_P5.00mm_Horizontal"
                     ),
                     "sheet": unit.sheet,
                 }
@@ -721,6 +933,10 @@ def _standard_connector_sheet_candidate(
     )
     if gpio_requirement is not None:
         count = int((gpio_requirement.get("parameters") or {}).get("pins") or 0)
+        if count == 0:
+            dimension = re.search(r"(?<![0-9])(\d{1,2})\s*[x×]\s*(\d{1,2})(?![0-9])", identity)
+            if dimension is not None:
+                count = int(dimension.group(1)) * int(dimension.group(2))
         if 2 <= count <= 50 and count % 2 == 0:
             rows = count // 2
             return {
@@ -825,6 +1041,8 @@ def deterministic_bom_candidate(
                         "footprint": group.footprint,
                         "sheet": requirement.sheet,
                         **({"mpn": group.mpn} if group.mpn else {}),
+                        **({"datasheet": group.datasheet} if group.datasheet else {}),
+                        **({"sourcing_note": group.sourcing_note} if group.sourcing_note else {}),
                     }
                     for group in artifact.groups
                 ],
@@ -840,6 +1058,11 @@ def deterministic_bom_candidate(
                     calculation.model_dump(mode="json") for calculation in artifact.calculations
                 ],
             }
+        return None
+    if unit.requirement_ids:
+        # A prose-based sheet fallback cannot prove a typed contract, whether
+        # its family is unknown or a registered lowerer declined its constraints.
+        return None
     return _standard_connector_sheet_candidate(unit, prompt_state)
 
 
@@ -855,7 +1078,9 @@ def _curated_part_indexes() -> tuple[dict[str, object], dict[str, object]]:
     by_name = {part.manifest.name: part for part in active}
     by_mpn: dict[str, object] = {}
     for part in active:
-        by_mpn.setdefault(_identity_token(part.manifest.mpn), part)
+        mpn = part.manifest.mpn
+        if mpn and mpn.strip().lower() not in _ABSENT_METADATA_SENTINELS:
+            by_mpn.setdefault(_identity_token(mpn), part)
     return by_name, by_mpn
 
 
@@ -873,6 +1098,12 @@ def _normalize_curated_group_identities(
         }
         library = group.symbol.partition(":")[0]
         loaded = by_name.get(library)
+        if loaded is not None and group.mpn:
+            curated_mpn = _identity_token(getattr(loaded.manifest, "mpn", "") or "")
+            if curated_mpn and _identity_token(group.mpn) != curated_mpn:
+                # A library-name collision is not permission to replace an
+                # explicitly selected device with a different part.
+                loaded = None
         if loaded is None:
             loaded = next(
                 (by_mpn[identity] for identity in selected_identities if identity in by_mpn),
@@ -895,8 +1126,6 @@ def _normalize_curated_group_identities(
         ).lower()
         if loaded is None and "bnc" in identity_text:
             loaded = by_name.get("bnc-pcb-jack")
-        if loaded is None and "screw" in identity_text and "terminal" in identity_text:
-            loaded = by_name.get("screw-terminal-5mm-2p")
         if loaded is None and group.reference_prefix in {"J", "P"}:
             # Models often invent a library namespace for mechanically standard
             # connectors instead of using KiCad's stock generic symbol plus a
@@ -952,13 +1181,156 @@ def _normalize_curated_group_identities(
         lcsc = (manifest.sourcing or {}).get("lcsc")
         if lcsc:
             update["sourcing_note"] = f"LCSC {lcsc}"
-        normalized.append(group.model_copy(update=update))
+        normalized.append(group.model_copy(update=_normalize_bom_optional_metadata(update)))
     return normalized
 
 
-def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -> dict:
+_ABSENT_METADATA_SENTINELS = {"", "n/a", "na", "none", "null", "unknown"}
+
+
+def _normalize_bom_optional_metadata(raw_group: object) -> object:
+    if not isinstance(raw_group, dict):
+        return raw_group
+    group = dict(raw_group)
+    for field in ("mpn", "datasheet", "sourcing_note"):
+        value = group.get(field)
+        if isinstance(value, str) and value.strip().lower() in _ABSENT_METADATA_SENTINELS:
+            group[field] = None
+    return group
+
+
+def _bom_unit_identity_defects(
+    groups: list[BomComponentGroup],
+    project_root: Path,
+) -> dict[str, list[str]]:
+    """Run the aggregate BOM identity seams against one owning unit."""
+    from kicraft.design.cli_app import (
+        _symbol_footprint_pin_mismatches,
+        _unresolved_footprints,
+        _unresolved_symbols,
+    )
+    from kicraft.design.models import BOM, BomPart
+
+    defects: dict[str, list[str]] = {
+        "unresolved-footprint": [],
+        "unresolved-symbol": [],
+        "symbol-footprint-pad-mismatch": [],
+    }
+
+    def append_defect(
+        key: str,
+        group: BomComponentGroup,
+        field: str,
+        rejected_identifier: str,
+        detail: str,
+    ) -> None:
+        if len(defects[key]) >= 8:
+            return
+        message, _, options = detail.partition(" -- real options: ")
+        defects[key].append(
+            json.dumps(
+                {
+                    "group_id": group.id,
+                    "field": field,
+                    "rejected_identifier": rejected_identifier,
+                    "candidates": [value.strip() for value in options.split(",") if value.strip()][
+                        :6
+                    ],
+                    "detail": message[:400],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+
+    for group in groups:
+        shared = group.model_dump(
+            exclude={"id", "reference_prefix", "quantity"},
+            exclude_none=True,
+        )
+        part = BomPart.model_validate({"ref": f"{group.reference_prefix}1", **shared})
+        bom = BOM(parts=[part])
+        for detail in _unresolved_footprints(bom, project_root):
+            append_defect(
+                "unresolved-footprint",
+                group,
+                "footprint",
+                group.footprint,
+                detail,
+            )
+        for detail in _unresolved_symbols(bom):
+            append_defect(
+                "unresolved-symbol",
+                group,
+                "symbol",
+                group.symbol,
+                detail,
+            )
+        for detail in _symbol_footprint_pin_mismatches(bom, project_root):
+            append_defect(
+                "symbol-footprint-pad-mismatch",
+                group,
+                "symbol_footprint_pair",
+                f"{group.symbol}|{group.footprint}",
+                detail,
+            )
+    return defects
+
+
+def _validate_bom_unit_sourcing(
+    groups: list[BomComponentGroup],
+    project_root: Path,
+) -> tuple[list[BomComponentGroup], list[str]]:
+    """Run §9.26 once per group and retain deterministic catalog pins."""
+    from kicraft.design.cli_app import _resolve_bom_mpn_sourcing
+    from kicraft.design.models import BOM, BomPart
+
+    validated: list[BomComponentGroup] = []
+    defects: list[str] = []
+    for group in groups:
+        shared = group.model_dump(
+            exclude={"id", "reference_prefix", "quantity"},
+            exclude_none=True,
+        )
+        part = BomPart.model_validate({"ref": f"{group.reference_prefix}1", **shared})
+        offenders, _warnings = _resolve_bom_mpn_sourcing(BOM(parts=[part]), project_root)
+        for detail in offenders[:8]:
+            alternate_detail = str(detail).partition("in-stock alternates")[2]
+            candidate_ids = list(
+                dict.fromkeys(re.findall(r"\bC\d+\b", alternate_detail, flags=re.IGNORECASE))
+            )
+            defects.append(
+                json.dumps(
+                    {
+                        "group_id": group.id,
+                        "field": "sourcing",
+                        "rejected_identifier": group.mpn or group.value,
+                        "candidates": candidate_ids,
+                        "detail": str(detail)[:600],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        validated.append(
+            group.model_copy(update={"sourcing_note": part.sourcing_note or group.sourcing_note})
+        )
+    return validated, defects
+
+
+def _validate_bom_unit(
+    unit: StageWorkUnit,
+    payload: dict,
+    prompt_state: dict,
+    extras: dict,
+) -> dict:
+    from kicraft.design.synthesis.validation import _resistance_ohms
+
     groups = _normalize_curated_group_identities(
-        [BomComponentGroup.model_validate(group) for group in (payload.get("groups") or [])]
+        [
+            BomComponentGroup.model_validate(_normalize_bom_optional_metadata(group))
+            for group in (payload.get("groups") or [])
+        ]
     )
     assumptions = [str(value) for value in payload.get("assumptions") or []]
     used_deterministic_candidate = payload.get("_trusted_deterministic_candidate") is True
@@ -992,6 +1364,29 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
     recipe_identities = {
         (part.sheet, part.symbol.lower(), part.value.lower()) for part in recipe_parts
     }
+    exact_recipe_duplicates: set[str] = set()
+    for group in groups:
+        matching = [
+            part
+            for part in recipe_parts
+            if part.sheet == group.sheet
+            and part.symbol.lower() == group.symbol.lower()
+            and part.value.lower() == group.value.lower()
+        ]
+        if (
+            len(matching) == group.quantity
+            and matching
+            and all(
+                part.footprint.lower() == group.footprint.lower()
+                and (not group.mpn or (part.mpn or "").lower() == group.mpn.lower())
+                and re.sub(r"[0-9].*$", "", part.ref) == group.reference_prefix
+                for part in matching
+            )
+        ):
+            exact_recipe_duplicates.add(group.id)
+    if exact_recipe_duplicates:
+        groups = [group for group in groups if group.id not in exact_recipe_duplicates]
+        arrays = [array for array in arrays if array.group_id not in exact_recipe_duplicates]
     from kicraft.design.recipes import protected_identity_matches
 
     architecture_requirements = [
@@ -1001,15 +1396,18 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
     unit_requirements = tuple(
         row for row in architecture_requirements if str(row.get("id")) in unit_requirement_ids
     )
+    owned_physical_features = {
+        feature
+        for row in unit_requirements
+        if (feature := _required_physical_feature(row)) is not None
+    }
+    sibling_physical_features = {
+        feature
+        for row in architecture_requirements
+        if str(row.get("id")) not in unit_requirement_ids
+        and (feature := _required_physical_feature(row)) is not None
+    } - owned_physical_features
     requirement = unit_requirements[0] if len(unit_requirements) == 1 else None
-    requirement_id = (
-        requirement.get("id") if isinstance(requirement, dict) else getattr(requirement, "id", None)
-    )
-    requirement_family = (
-        requirement.get("family")
-        if isinstance(requirement, dict)
-        else getattr(requirement, "family", None)
-    )
     requirement_role = (
         requirement.get("role")
         if isinstance(requirement, dict)
@@ -1051,41 +1449,63 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
                 arrays = [array for array in arrays if array.group_id in retained_group_ids]
     group_ids = [group.id for group in groups]
     array_group_ids = [array.group_id for array in arrays]
-    requirement_identities = " ".join(
-        str(value or "") for value in (requirement_id, requirement_family)
-    )
-    requirement_exact_part = (
-        requirement.get("exact_part")
-        if isinstance(requirement, dict)
-        else getattr(requirement, "exact_part", None)
-    )
-    requires_named_implementation = (
-        requirement is not None
-        and not lowering_metadata
-        and (
-            bool(requirement_exact_part)
-            or "controller" in re.split(r"[^a-z0-9]+", requirement_identities.lower())
-        )
-    )
     protected_groups = [
         group.id
         for group in groups
-        if protected_identity_matches(group.id, group.symbol, group.value, group.mpn)
-        and not used_deterministic_candidate
-        and not _requirement_owns_protected_group(group, unit_requirements)
+        if (
+            protected_identity_matches(group.id, group.symbol, group.value, group.mpn)
+            and not used_deterministic_candidate
+            and not _requirement_owns_protected_group(group, unit_requirements)
+        )
+        or any(_group_has_physical_feature(group, feature) for feature in sibling_physical_features)
+    ]
+    recipe_duplicate_groups = [
+        group.id
+        for group in groups
+        if (group.sheet, group.symbol.lower(), group.value.lower()) in recipe_identities
     ]
     # A requirement-scoped unit sometimes redundantly emits a protected sibling
     # (for example a USB receptacle beside its PD controller). Another planned
-    # unit owns that component. Preserve the owned implementation and discard
-    # only the extra group instead of rejecting an otherwise usable unit.
-    if protected_groups and len(groups) > len(protected_groups):
-        discarded = set(protected_groups)
-        groups = [group for group in groups if group.id not in discarded]
-        arrays = [array for array in arrays if array.group_id not in discarded]
-        protected_groups = []
+    # unit owns that component. A surviving label or passive alone does not
+    # prove the outstanding function; require physical/identity evidence for
+    # every owned requirement before pruning surplus sibling hardware.
+    discardable_protected = set(protected_groups) - set(recipe_duplicate_groups)
+    retained_groups = (
+        [group for group in groups if group.id not in discardable_protected]
+        if discardable_protected
+        else []
+    )
+    retained_implements_requirements = bool(retained_groups and unit_requirements) and all(
+        any(
+            (
+                (feature := _required_physical_feature(row)) is not None
+                and _group_has_physical_feature(group, feature)
+            )
+            or _requirement_owns_protected_group(group.model_copy(update={"id": ""}), (row,))
+            for group in retained_groups
+        )
+        for row in unit_requirements
+    )
+    if discardable_protected and retained_implements_requirements:
+        groups = retained_groups
+        arrays = [array for array in arrays if array.group_id not in discardable_protected]
+        protected_groups = [
+            group_id for group_id in protected_groups if group_id not in discardable_protected
+        ]
         group_ids = [group.id for group in groups]
         array_group_ids = [array.group_id for array in arrays]
     recipe_sheets = {part.sheet for part in recipe_parts}
+    if (
+        protected_groups
+        and not recipe_duplicate_groups
+        and len(groups) == len(protected_groups)
+        and unit.sheet in recipe_sheets
+    ):
+        groups = []
+        arrays = []
+        protected_groups = []
+        group_ids = []
+        array_group_ids = []
     defects = {
         "wrong-sheet": [
             f"{group.id}:{group.sheet}" for group in groups if group.sheet != unit.sheet
@@ -1095,26 +1515,49 @@ def _validate_bom_unit(unit: StageWorkUnit, payload: dict, prompt_state: dict) -
             group_id for group_id in array_group_ids if group_id not in set(group_ids)
         ]
         + [f"duplicate:{group_id}" for group_id in _duplicates(array_group_ids)],
-        "recipe-duplicate": [
-            group.id
-            for group in groups
-            if (group.sheet, group.symbol.lower(), group.value.lower()) in recipe_identities
-        ],
+        "recipe-duplicate": recipe_duplicate_groups,
         "model_authored_protected_identity": protected_groups,
-        "missing-requirement-implementation": (
-            [str(requirement_id)]
-            if requires_named_implementation
+        "missing-led-current-limiter": [
+            str(row["id"])
+            for row in unit_requirements
+            if row.get("family") in {"led-current-resistor", "status-led"}
             and not any(
-                _requirement_owns_protected_group(group, (requirement,)) for group in groups
+                group.symbol in {"Device:R", "Device:R_Small"}
+                and _resistance_ohms(group.value) is not None
+                for group in groups
             )
-            else []
-        ),
+        ],
+        "missing-requirement-implementation": [
+            str(row["id"])
+            for row in unit_requirements
+            if (
+                (feature := _required_physical_feature(row)) is not None
+                and not any(_group_has_physical_feature(group, feature) for group in groups)
+            )
+            or (
+                _requirement_needs_controller(row)
+                and not any(_group_implements_controller(group, row) for group in groups)
+            )
+            or (
+                row.get("exact_part")
+                and lowering_metadata.get("_lowering_requirement_id") != row["id"]
+                and not any(_requirement_owns_protected_group(group, (row,)) for group in groups)
+            )
+        ],
         "empty-sheet": (
             [unit.sheet]
             if not groups and (unit.requirement_ids or unit.sheet not in recipe_sheets)
             else []
         ),
     }
+    project_root = extras.get("_validation_project_root")
+    if project_root:
+        root = Path(str(project_root))
+        identity_defects = _bom_unit_identity_defects(groups, root)
+        defects.update(identity_defects)
+        if not any(identity_defects.values()):
+            groups, sourcing_defects = _validate_bom_unit_sourcing(groups, root)
+            defects["unresolved-sourcing"] = sourcing_defects
     if any(defects.values()):
         raise WorkUnitValidationError(unit.unit_id, defects)
     return {
@@ -1175,6 +1618,13 @@ def _standard_connector_wiring_candidate(
             for endpoint in net.get("endpoints") or []
         )
     ]
+    for requirement in architecture.get("requirements") or []:
+        if not isinstance(requirement, dict) or requirement.get("sheet") != unit.sheet:
+            continue
+        for net in (requirement.get("ports") or {}).values():
+            net_name = str(net)
+            if net_name and net_name not in nets:
+                nets.append(net_name)
     pins = sorted(
         (pin for owned_ref, pin in unit.expected_pins if owned_ref == ref),
         key=_natural_key,
@@ -1191,10 +1641,14 @@ def _standard_connector_wiring_candidate(
         if ("fpc" in sheet_function or "ffc" in sheet_function) and "header" in sheet_function:
             nets = [f"SIG{index}" for index in range(1, len(pins) + 1)]
     candidate_pins: list[dict] = []
-    if "connector_generic:conn_01x" in symbol and len(nets) == len(pins):
-        candidate_pins = [
-            {"ref": ref, "pin": pin, "net": net} for pin, net in zip(pins, nets, strict=True)
-        ]
+    is_generic_connector = (
+        "connector_generic:conn_01x" in symbol or "connector_generic:conn_02x" in symbol
+    )
+    if is_generic_connector and len(nets) <= len(pins):
+        candidate_pins = [{"ref": ref, "pin": pin, "net": net} for pin, net in zip(pins, nets)]
+        candidate_pins.extend(
+            {"ref": ref, "pin": pin, "no_connect": True} for pin in pins[len(candidate_pins) :]
+        )
     elif "bnc" in symbol:
         signal = next((net for net in nets if net.upper() != "GND"), None)
         if signal is not None and "GND" in nets and "1" in pins:
@@ -1249,44 +1703,93 @@ def deterministic_wiring_candidate(
         None,
     )
     if requirement_row is None:
-        return _standard_connector_wiring_candidate(unit, prompt_state, extras)
+        raise WorkUnitValidationError(
+            unit.unit_id, {"deterministic-ownership": [f"unknown requirement {requirement_id}"]}
+        )
     artifact = lower_requirement(CircuitRequirement.model_validate(requirement_row))
     if artifact is None or artifact.lowerer_id != next(iter(lowerer_ids)):
-        return _standard_connector_wiring_candidate(unit, prompt_state, extras)
+        raise WorkUnitValidationError(
+            unit.unit_id,
+            {"deterministic-ownership": [f"lowerer no longer implements {requirement_id}"]},
+        )
+    # A large artifact can span several units. Resolve every role against its
+    # committed BOM owner before selecting this unit's complete references.
+    artifact_parts = [
+        part
+        for part in bom.get("parts") or []
+        if isinstance(part, dict)
+        and part.get("resolution_source") == "lowerer"
+        and part.get("resolution_id") == artifact.lowerer_id
+        and part.get("lowering_requirement_id") == requirement_id
+    ]
     refs = {
         (str(part.get("lowering_role")), int(part.get("lowering_index") or 0)): str(part["ref"])
-        for part in parts
+        for part in artifact_parts
         if part.get("lowering_role")
     }
-    expected_pins = set(unit.expected_pins)
-    try:
-        candidate = {
-            "pins": [
-                {
-                    "ref": refs[(pin.role, pin.index)],
-                    "pin": pin.pin,
-                    "net": pin.net,
-                }
-                for pin in artifact.pins
-                if (refs[(pin.role, pin.index)], pin.pin) in expected_pins
-            ]
-        }
-        return _validate_wiring_unit(unit, candidate, prompt_state, extras)
-    except (KeyError, WorkUnitValidationError, TypeError, ValueError):
-        return _standard_connector_wiring_candidate(unit, prompt_state, extras)
+    expected_roles = {
+        (group.role, index) for group in artifact.groups for index in range(group.quantity)
+    }
+    if set(refs) != expected_roles or len(refs) != len(artifact_parts):
+        raise WorkUnitValidationError(
+            unit.unit_id,
+            {
+                "deterministic-ownership": [
+                    f"{requirement_id} requires one BOM owner per artifact role/index"
+                ]
+            },
+        )
+    locked_connected, locked_no_connect = _locked_pin_sets(prompt_state, extras)
+    excluded = set(unit.excluded_pins) & (locked_connected | locked_no_connect)
+    candidate = {
+        "pins": [
+            {
+                "ref": refs[(pin.role, pin.index)],
+                "pin": pin.pin,
+                "net": pin.net,
+            }
+            for pin in artifact.pins
+            if refs[(pin.role, pin.index)] in unit.refs
+            and (refs[(pin.role, pin.index)], pin.pin) not in excluded
+        ]
+        + [
+            {
+                "ref": refs[(pin.role, pin.index)],
+                "pin": pin.pin,
+                "no_connect": True,
+            }
+            for pin in artifact.no_connects
+            if refs[(pin.role, pin.index)] in unit.refs
+            and (refs[(pin.role, pin.index)], pin.pin) not in excluded
+        ]
+    }
+    # Missing inventory/ownership is a deterministic contradiction, not an
+    # invitation to trim the artifact or retry a generic connector fallback.
+    return _validate_wiring_unit(unit, candidate, prompt_state, extras)
 
 
 def _validate_wiring_unit(
     unit: StageWorkUnit, payload: dict, prompt_state: dict, extras: dict
 ) -> dict:
     assignments: list[ConnectedPinAssignment | NoConnectPinAssignment] = []
+    seen_rows: dict[tuple[str, str], dict] = {}
+    conflicting_duplicates: list[str] = []
     for row in payload.get("pins") or []:
         model = (
             NoConnectPinAssignment
             if isinstance(row, dict) and "no_connect" in row
             else ConnectedPinAssignment
         )
-        assignments.append(model.model_validate(row))
+        assignment = model.model_validate(row)
+        key = (assignment.ref, assignment.pin)
+        canonical = assignment.model_dump(exclude_none=True)
+        prior = seen_rows.get(key)
+        if prior == canonical:
+            continue
+        if prior is not None:
+            conflicting_duplicates.append(f"{key[0]}.{key[1]}")
+        seen_rows[key] = canonical
+        assignments.append(assignment)
     observed = [(assignment.ref, assignment.pin) for assignment in assignments]
     expected = set(unit.expected_pins)
     observed_set = set(observed)
@@ -1302,7 +1805,11 @@ def _validate_wiring_unit(
     recipe_owned = locked_connected | locked_no_connect
     duplicate_keys = _duplicates([f"{ref}\0{pin}" for ref, pin in observed])
     defects = {
-        "duplicate": [key.replace("\0", ".") for key in duplicate_keys],
+        "duplicate": list(
+            dict.fromkeys(
+                [key.replace("\0", ".") for key in duplicate_keys] + conflicting_duplicates
+            )
+        ),
         "missing": [
             f"{ref}.{pin}" for ref, pin in unit.expected_pins if (ref, pin) not in observed_set
         ],
@@ -1318,6 +1825,10 @@ def _validate_wiring_unit(
     for key, values in defects.items():
         defects[key] = list(dict.fromkeys(values))
     if any(defects.values()):
+        defects["expected-pin-set"] = [f"{ref}.{pin}" for ref, pin in unit.expected_pins]
+        defects["rejected-assignment-set"] = [
+            json.dumps(row, sort_keys=True, separators=(",", ":")) for row in seen_rows.values()
+        ]
         raise WorkUnitValidationError(unit.unit_id, defects)
     by_pin = {
         (assignment.ref, assignment.pin): assignment.model_dump(exclude_none=True)
@@ -1333,7 +1844,7 @@ def validate_unit_candidate(
     if not isinstance(payload, dict):
         raise TypeError("work-unit payload must be an object")
     if unit.stage == "bom":
-        return _validate_bom_unit(unit, payload, prompt_state)
+        return _validate_bom_unit(unit, payload, prompt_state, extras)
     return _validate_wiring_unit(unit, payload, prompt_state, extras)
 
 
@@ -1352,7 +1863,9 @@ def merge_bom_units(
     units: tuple[StageWorkUnit, ...],
     candidates: dict[str, dict],
     prompt_state: dict,
-) -> tuple[dict, dict[str, str], dict[str, dict]]:
+    *,
+    trusted_unit_ids: frozenset[str] = frozenset(),
+) -> tuple[dict, dict[str, str], dict[str, dict], frozenset[str]]:
     """Merge sheet replacements and return unit/lowerer ref provenance."""
     groups: list[dict] = []
     arrays: list[dict] = []
@@ -1396,8 +1909,22 @@ def merge_bom_units(
         "assumptions": _stable_dedupe(assumptions),
         "substitutions": _stable_dedupe(substitutions),
     }
+    trusted_lowering_group_ids = frozenset(
+        {
+            *lowering_by_group,
+            *(
+                group_id
+                for group_id, unit_id in group_to_unit.items()
+                if unit_id in trusted_unit_ids
+            ),
+        }
+    )
+    validation_state = {
+        **prompt_state,
+        "_trusted_lowering_group_ids": trusted_lowering_group_ids,
+    }
     _response, _parts, _arrays, refs_by_group, _expansions = _expand_bom_groups(
-        merged, prompt_state
+        merged, validation_state
     )
     ref_to_unit = {
         ref: group_to_unit[group_id] for group_id, refs in refs_by_group.items() for ref in refs
@@ -1411,7 +1938,7 @@ def merge_bom_units(
         if group_id in lowering_by_group
         for index, ref in enumerate(refs)
     }
-    return merged, ref_to_unit, ref_to_lowering
+    return merged, ref_to_unit, ref_to_lowering, trusted_lowering_group_ids
 
 
 def merge_wiring_units(

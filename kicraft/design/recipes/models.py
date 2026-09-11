@@ -67,6 +67,7 @@ class RecipePort(BaseModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     direction: RecipePortDirection
     required: bool = True
+    allow_ground: bool = False
 
 
 class RecipeAllocatablePin(BaseModel):

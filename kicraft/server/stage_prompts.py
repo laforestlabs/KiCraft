@@ -93,8 +93,9 @@ def _stage_extra(stage: str) -> str:
             "call search_symbols / search_footprints by keyword (e.g. 'conn 02x08', "
             "'pinheader 2x08', 'barreljack') to find it; a symbol or footprint that does not "
             "resolve is rejected at commit.\n"
-            "- Use a library bundle VERBATIM when one matches (e.g. usb-c-16p for a USB-C "
-            "receptacle): symbol '<name>:<sym>', footprint '<name>:<fp>'.\n"
+            "- Use a library bundle VERBATIM only when it supports every required signal: "
+            "symbol '<name>:<sym>', footprint '<name>:<fp>'. The usb-c-16p bundle is USB2-only; "
+            "SuperSpeed TX/RX pairs require a verified full-contact USB-C receptacle.\n"
             "- Trivial / generic parts from STOCK KiCad: discrete passives (R, C, L, LED, diode) "
             "AND generic mechanical/connectors (pin headers, barrel jacks, battery holders, basic "
             "switches). Use Device:R / Device:C / Device:L / Device:LED for passives. For their "
@@ -337,8 +338,11 @@ def _collection_bounds_sentence(bounds: tuple[CollectionBound, ...]) -> str:
         clause = f"The `{bound.field}` collection must contain at most {bound.total} items total"
         if bound.per_group is not None and bound.group_key is not None:
             clause += f" and at most {bound.per_group} items per `{bound.group_key}`"
-        if bound.unique_key is not None:
-            clause += f"; every `{bound.unique_key}` value must be unique"
+        if len(bound.unique_keys) == 1:
+            clause += f"; every `{bound.unique_keys[0]}` value must be unique"
+        elif bound.unique_keys:
+            keys = ", ".join(f"`{key}`" for key in bound.unique_keys)
+            clause += f"; every ({keys}) combination must be unique"
         clauses.append(clause + ".")
     return " ".join(clauses)
 
@@ -348,10 +352,17 @@ def _bounded_output_contract(stage: str, bounds: tuple[CollectionBound, ...] | N
     sentence = _collection_bounds_sentence(configured)
     if not sentence:
         return ""
+    guidance = (
+        "Emit each actual causal inter-block flow once. Do not enumerate all block pairs "
+        "or signal-type combinations. Descriptions do not create new connections; "
+        "reverse directions and different signal types belong only when real flows require them."
+        if stage == "functional_spec"
+        else "Emit only items required by the accepted intent and this stage's scope; "
+        "do not pad collections with speculative or repeated items."
+    )
     return (
         "\n\n=== BOUNDED OUTPUT POLICY ===\n"
-        f"{sentence} Emit only components required by the architecture and intent; "
-        "do not pad the collection with speculative or repeated parts."
+        f"{sentence} {guidance}"
         "\n=== END BOUNDED OUTPUT POLICY ==="
     )
 

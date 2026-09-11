@@ -22,6 +22,9 @@ _PROGRAM_HEADER = (
 )
 _REVIEW_DATE = "2026-09-09"
 _OPTIONAL_USB_PINS: dict[str, tuple[str, str]] = {}
+_AUTO_RESET_BOOT_HIGH_PINS: dict[str, tuple[str, ...]] = {}
+_AUTO_RESET_SCHEMATIC = "https://dl.espressif.com/dl/schematics/esp32_devkitc_v4-sch-20180607a.pdf"
+_AUTO_RESET_TRANSISTOR_DATASHEET = "https://www.onsemi.com/pdf/datasheet/mmbt3904lt1-d.pdf"
 
 
 def _gpio_capabilities(*, adc: bool = True) -> tuple[str, ...]:
@@ -66,6 +69,7 @@ def _module_recipe(
     strapping: frozenset[int],
     no_connect_pins: tuple[str, ...] = (),
     input_only_gpios: frozenset[int] = frozenset(),
+    boot_high_gpios: frozenset[int] = frozenset(),
 ) -> RecipeDefinition:
     fixed = {boot_gpio}
     if usb_pins:
@@ -175,9 +179,16 @@ def _module_recipe(
         Pin(role="program_header", pin="5", net="en"),
         Pin(role="program_header", pin="6", net="boot"),
     ]
-    ports = [Port(name="vdd", direction="power"), Port(name="gnd", direction="power")]
-    parameters: dict[str, bool] = {}
-    allowed: dict[str, tuple[bool, ...]] = {}
+    ports = [
+        Port(name="vdd", direction="power"),
+        Port(name="gnd", direction="power"),
+        Port(name="uart_tx", direction="output", required=False),
+        Port(name="uart_rx", direction="input", required=False),
+        Port(name="dtr_n", direction="input", required=False),
+        Port(name="rts_n", direction="input", required=False),
+    ]
+    parameters: dict[str, bool] = {"auto_reset": False}
+    allowed: dict[str, tuple[bool, ...]] = {"auto_reset": (False, True)}
     if usb_pins:
         ports.extend(
             (
@@ -189,6 +200,9 @@ def _module_recipe(
         allowed["native_usb"] = (False, True)
         internal_nets.extend(("usb_dm", "usb_dp"))
         _OPTIONAL_USB_PINS[recipe] = usb_pins
+    _AUTO_RESET_BOOT_HIGH_PINS[recipe] = tuple(
+        gpio_to_pin[gpio] for gpio in sorted(boot_high_gpios)
+    )
     return RecipeDefinition(
         recipe=recipe,
         family=family,
@@ -253,6 +267,40 @@ def _module_recipe(
                 revision="current",
                 reviewed_date=_REVIEW_DATE,
                 sections=("Power Supply", "Chip Power-up and Reset", "Strapping Pins"),
+            ),
+            SourceDocument(
+                url=_AUTO_RESET_SCHEMATIC,
+                title="Espressif ESP32-DevKitC V4 reference schematic",
+                revision="2018-06-07",
+                reviewed_date="2026-09-11",
+                sections=("Auto program: cross-coupled NPN circuit and DTR/RTS truth table",),
+            ),
+            SourceDocument(
+                url=_AUTO_RESET_TRANSISTOR_DATASHEET,
+                title="onsemi MMBT3904L NPN transistor datasheet",
+                revision="Rev 15",
+                reviewed_date="2026-09-11",
+                sections=("SOT-23: base 1, emitter 2, collector 3", "Electrical characteristics"),
+            ),
+            SourceDocument(
+                url="https://docs.espressif.com/projects/esptool/en/latest/esp32c3/advanced-topics/boot-mode-selection.html",
+                title="Espressif esptool automatic bootloader circuit",
+                revision="current",
+                reviewed_date="2026-09-11",
+                sections=("Automatic Bootloader: active-low controls and 1uF-10uF EN capacitor",),
+            ),
+            *(
+                (
+                    SourceDocument(
+                        url="https://dl.espressif.com/dl/schematics/SCH_ESP32-C3-DEVKITM-1_V1_20200915A.pdf",
+                        title="Espressif ESP32-C3-DevKitM-1 reference schematic",
+                        revision="2020-09-15",
+                        reviewed_date="2026-09-11",
+                        sections=("GPIO8 10k pullup; auto-program circuit and truth table",),
+                    ),
+                )
+                if boot_high_gpios
+                else ()
             ),
         ),
     )
@@ -392,6 +440,7 @@ ESP32_C3_MINI_1_MINIMAL = _module_recipe(
     uart_rx_pin="30",
     usb_pins=("26", "27"),
     strapping=frozenset({2, 8, 9}),
+    boot_high_gpios=frozenset({8}),
     no_connect_pins=(
         "4",
         "7",
@@ -412,7 +461,13 @@ ESP32_C3_MINI_1_MINIMAL = _module_recipe(
 
 
 def _tinyavr_recipe(
-    *, part: str, recipe: str, symbol: str, pins: dict[str, str], datasheet: str
+    *,
+    part: str,
+    recipe: str,
+    symbol: str,
+    pins: dict[str, str],
+    datasheet: str,
+    touch_pins: tuple[str, ...] = (),
 ) -> RecipeDefinition:
     updi_pin = pins["PA0"]
     gpio_rows = [
@@ -426,7 +481,11 @@ def _tinyavr_recipe(
         protected_aliases=("tinyAVR", part.split("-")[0]),
         identity_aliases=(part, symbol),
         required_sheet_roles=("mcu",),
-        ports=(Port(name="vdd", direction="power"), Port(name="gnd", direction="power")),
+        ports=(
+            Port(name="vdd", direction="power"),
+            Port(name="gnd", direction="power"),
+            Port(name="updi", direction="bidirectional", required=False),
+        ),
         internal_nets=("updi",),
         parts=(
             Group(
@@ -470,8 +529,12 @@ def _tinyavr_recipe(
         ),
         no_connects=(NoConnect(role="updi_header", pin="4"),),
         allocatable_pins=tuple(
-            AllocatablePin(role="mcu", pin=pin, capabilities=_gpio_capabilities())
-            for _, pin in gpio_rows
+            AllocatablePin(
+                role="mcu",
+                pin=pin,
+                capabilities=_gpio_capabilities() + (("touch",) if name in touch_pins else ()),
+            )
+            for name, pin in gpio_rows
         ),
         placement_constraints=(
             PlacementConstraint(
@@ -543,13 +606,35 @@ ATTINY1614_UPDI_MINIMAL = _tinyavr_recipe(
         "PB2": "7",
         "PB1": "8",
         "PB0": "9",
-        "PA3": "10",
-        "PA2": "11",
-        "PA1": "12",
-        "PA0": "13",
+        "PA0": "10",
+        "PA1": "11",
+        "PA2": "12",
+        "PA3": "13",
         "GND": "14",
     },
     datasheet="https://ww1.microchip.com/downloads/en/DeviceDoc/ATtiny1614-16-17-DataSheet-DS40002204A.pdf",
+    # SOIC14 PTC Y-lines for self-capacitance; application firmware must configure
+    # and link the QTouch Library (DS40002204A, sections 32.1 and 32.6).
+    touch_pins=("PA4", "PA5", "PA6", "PA7", "PB1", "PB0"),
+)
+ATTINY1614_UPDI_MINIMAL = ATTINY1614_UPDI_MINIMAL.model_copy(
+    update={
+        "source_documents": (
+            SourceDocument(
+                url=ATTINY1614_UPDI_MINIMAL.parts[0].datasheet,
+                title="ATtiny1614/1616/1617 data sheet",
+                revision="DS40002204A",
+                reviewed_date="2026-09-11",
+                sections=(
+                    "4.1 14-Pin SOIC",
+                    "5.1 Table 5-1 PORT Function Multiplexing",
+                    "32.1 PTC Overview",
+                    "32.6 PTC Functional Description",
+                    "33 UPDI",
+                ),
+            ),
+        ),
+    }
 )
 
 
@@ -567,8 +652,11 @@ def _simple_programmed_mcu(
     gpio_pins: tuple[str, ...],
     extra_parts: tuple[Group, ...] = (),
     extra_pins: tuple[Pin, ...] = (),
+    extra_ports: tuple[Port, ...] = (),
     internal_nets: tuple[str, ...] = (),
+    pin_capabilities: dict[str, tuple[str, ...]] | None = None,
 ) -> RecipeDefinition:
+    program_nets = tuple(dict.fromkeys(net for _pin, net in program_pins))
     return RecipeDefinition(
         recipe=recipe,
         family=family,
@@ -577,8 +665,13 @@ def _simple_programmed_mcu(
         protected_aliases=(family, part),
         identity_aliases=(part, symbol),
         required_sheet_roles=("mcu",),
-        ports=(Port(name="vdd", direction="power"), Port(name="gnd", direction="power")),
-        internal_nets=internal_nets,
+        ports=(
+            Port(name="vdd", direction="power"),
+            Port(name="gnd", direction="power"),
+            *(Port(name=net, direction="bidirectional", required=False) for net in program_nets),
+            *extra_ports,
+        ),
+        internal_nets=tuple(net for net in internal_nets if net not in program_nets),
         parts=(
             Group(
                 role="mcu",
@@ -632,9 +725,14 @@ def _simple_programmed_mcu(
             for index in range(len(program_pins) + 1, 5)
         ),
         allocatable_pins=tuple(
-            AllocatablePin(role="mcu", pin=pin, capabilities=_gpio_capabilities())
+            AllocatablePin(
+                role="mcu",
+                pin=pin,
+                capabilities=(*_gpio_capabilities(), *(pin_capabilities or {}).get(pin, ())),
+            )
             for pin in gpio_pins
             if pin not in {row[0] for row in program_pins}
+            and pin not in {row.pin for row in extra_pins if row.role == "mcu"}
         ),
         placement_constraints=(
             PlacementConstraint(
@@ -674,7 +772,14 @@ STM32F103C8T6_MINIMAL = _simple_programmed_mcu(
     gpio_pins=tuple(
         str(pin) for pin in range(2, 49) if pin not in {5, 6, 8, 9, 23, 24, 35, 36, 47, 48}
     ),
+    # ST STM32F103x8/xB Table 5: LQFP48 PB8=45 CANRX, PB9=46 CANTX
+    # (remapped functions). PA11/PA12 remain reserved by this recipe for USB.
+    pin_capabilities={"45": ("can-rx",), "46": ("can-tx",)},
     internal_nets=("swdio", "swclk", "nrst", "boot0", "hse_in", "hse_out"),
+    extra_ports=(
+        Port(name="usb_dm", direction="bidirectional", required=False),
+        Port(name="usb_dp", direction="bidirectional", required=False),
+    ),
     extra_parts=(
         Group(
             role="boot0_pulldown",
@@ -696,7 +801,7 @@ STM32F103C8T6_MINIMAL = _simple_programmed_mcu(
             role="hse_crystal",
             reference_prefix="Y",
             value="8MHz",
-            symbol="Device:Crystal",
+            symbol="Device:Crystal_GND24",
             footprint="Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm",
             sheet_role="mcu",
         ),
@@ -717,13 +822,40 @@ STM32F103C8T6_MINIMAL = _simple_programmed_mcu(
         Pin(role="reset_pullup", pin="2", net="nrst"),
         Pin(role="mcu", pin="5", net="hse_in"),
         Pin(role="mcu", pin="6", net="hse_out"),
+        Pin(role="mcu", pin="32", net="usb_dm"),
+        Pin(role="mcu", pin="33", net="usb_dp"),
         Pin(role="hse_crystal", pin="1", net="hse_in"),
-        Pin(role="hse_crystal", pin="2", net="hse_out"),
+        Pin(role="hse_crystal", pin="3", net="hse_out"),
+        Pin(role="hse_crystal", pin="2", net="gnd"),
+        Pin(role="hse_crystal", pin="4", net="gnd"),
         Pin(role="hse_caps", index=0, pin="1", net="hse_in"),
         Pin(role="hse_caps", index=0, pin="2", net="gnd"),
         Pin(role="hse_caps", index=1, pin="1", net="hse_out"),
         Pin(role="hse_caps", index=1, pin="2", net="gnd"),
     ),
+)
+STM32F103C8T6_MINIMAL = STM32F103C8T6_MINIMAL.model_copy(
+    update={
+        "parameter_defaults": {"can_remap": "pb8-pb9"},
+        "allowed_parameters": {"can_remap": ("pb8-pb9",)},
+        "source_documents": (
+            *STM32F103C8T6_MINIMAL.source_documents,
+            SourceDocument(
+                url="https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/1139/STM32F103x8%2CB.pdf",
+                title="ST STM32F103x8/xB datasheet (distributor mirror)",
+                revision="Doc ID 13587 Rev 10",
+                reviewed_date="2026-09-11",
+                sections=("Table 5: PB8 pin 45 CANRX and PB9 pin 46 CANTX remap",),
+            ),
+            SourceDocument(
+                url="https://abracon.com/Resonators/abm8.pdf",
+                title="ABM8 four-pad ceramic crystal mechanical outline",
+                revision="2020-07-29",
+                reviewed_date="2026-09-11",
+                sections=("Outline drawing: resonator terminals 1/3, grounded case 2/4",),
+            ),
+        ),
+    }
 )
 
 CH32V003J4M6_MINIMAL = _simple_programmed_mcu(
@@ -753,7 +885,7 @@ WAVE_A_MCU_RECIPES = (
 
 
 def expand_wave_a_mcu(resolved):
-    """Apply optional native-USB ownership before generic static expansion."""
+    """Materialize only explicitly enabled USB and programming support circuits."""
     from .registry import expand_static_definition
 
     definition = next(
@@ -761,30 +893,126 @@ def expand_wave_a_mcu(resolved):
         for definition in WAVE_A_MCU_RECIPES
         if definition.recipe == resolved.selection.recipe
     )
-    usb_pins = _OPTIONAL_USB_PINS.get(definition.recipe)
-    if usb_pins is None:
-        return expand_static_definition(definition, resolved)
     pins = list(definition.pins)
+    parts = list(definition.parts)
+    internal_nets = list(definition.internal_nets)
     no_connects = list(definition.no_connects)
-    if resolved.parameters["native_usb"]:
-        if not {"usb_dm", "usb_dp"} <= set(resolved.selection.port_bindings):
+    bindings = resolved.selection.port_bindings
+    if "auto_reset" in definition.parameter_defaults:
+        auto_reset = resolved.parameters["auto_reset"]
+        if auto_reset and not {"uart_tx", "uart_rx", "dtr_n", "rts_n"} <= bindings.keys():
             raise ValueError(
-                f"recipe {definition.recipe} native_usb=True requires usb_dm and usb_dp bindings"
+                f"recipe {definition.recipe} auto_reset=True requires uart_tx, uart_rx, dtr_n and rts_n bindings"
             )
-        pins.extend(
-            (
-                Pin(role="mcu", pin=usb_pins[0], net="usb_dm"),
-                Pin(role="mcu", pin=usb_pins[1], net="usb_dp"),
+        if not auto_reset and {"dtr_n", "rts_n"} & bindings.keys():
+            raise ValueError(
+                f"recipe {definition.recipe} dtr_n/rts_n bindings require auto_reset=True"
             )
-        )
-    else:
-        no_connects.extend(
-            (
-                NoConnect(role="mcu", pin=usb_pins[0]),
-                NoConnect(role="mcu", pin=usb_pins[1]),
+        if auto_reset:
+            if len({bindings[name] for name in ("uart_tx", "uart_rx", "dtr_n", "rts_n")}) != 4:
+                raise ValueError(f"recipe {definition.recipe} programming signals must be distinct")
+            # Reference truth table (physical levels): DTR RTS -> EN BOOT:
+            # 00 -> 11, 11 -> 11, 10 -> 01, 01 -> 10.
+            # Each emitter uses the opposite handshake, NOT ground. 10k
+            # base resistors and the existing EN 10k/1uF RC retain timing.
+            # MMBT3904LT1G: onsemi SOT-23 B=1, E=2, C=3; KiCad's
+            # Transistor_BJT:MMBT3904 inherits that exact Q_NPN_BEC map.
+            for target, base_control, emitter_control in (
+                ("en", "dtr_n", "rts_n"),
+                ("boot", "rts_n", "dtr_n"),
+            ):
+                transistor = f"auto_reset_{target}"
+                resistor = f"{transistor}_base_resistor"
+                base = f"{transistor}_base"
+                internal_nets.append(base)
+                parts.extend(
+                    (
+                        Group(
+                            role=transistor,
+                            reference_prefix="Q",
+                            value="MMBT3904",
+                            symbol="Transistor_BJT:MMBT3904",
+                            footprint="Package_TO_SOT_SMD:SOT-23",
+                            sheet_role="mcu",
+                            mpn="MMBT3904LT1G",
+                            datasheet=_AUTO_RESET_TRANSISTOR_DATASHEET,
+                        ),
+                        Group(
+                            role=resistor,
+                            reference_prefix="R",
+                            value="10k",
+                            symbol=_PASSIVE_RES[0],
+                            footprint=_PASSIVE_RES[1],
+                            sheet_role="mcu",
+                        ),
+                    )
+                )
+                pins.extend(
+                    (
+                        Pin(role=resistor, pin="1", net=base_control),
+                        Pin(role=resistor, pin="2", net=base),
+                        Pin(role=transistor, pin="1", net=base),
+                        Pin(role=transistor, pin="2", net=emitter_control),
+                        Pin(role=transistor, pin="3", net=target),
+                    )
+                )
+            # ESP32-C3 additionally samples GPIO8 high for serial download.
+            # Its pullup shares any allocated application conductor; it does
+            # not reserve/reassign that GPIO or add a second MCU pin owner.
+            for pin in _AUTO_RESET_BOOT_HIGH_PINS[definition.recipe]:
+                allocation = next(
+                    (row for row in resolved.selection.pin_allocations if row.pin == pin),
+                    None,
+                )
+                net = allocation.net if allocation else f"auto_reset_boot_high_{pin}"
+                role = f"auto_reset_boot_high_pullup_{pin}"
+                parts.append(
+                    Group(
+                        role=role,
+                        reference_prefix="R",
+                        value="10k",
+                        symbol=_PASSIVE_RES[0],
+                        footprint=_PASSIVE_RES[1],
+                        sheet_role="mcu",
+                    )
+                )
+                pins.extend(
+                    (
+                        Pin(role=role, pin="1", net="vdd"),
+                        Pin(role=role, pin="2", net=net),
+                    )
+                )
+                if allocation is None:
+                    internal_nets.append(net)
+                    pins.append(Pin(role="mcu", pin=pin, net=net))
+    usb_pins = _OPTIONAL_USB_PINS.get(definition.recipe)
+    if usb_pins is not None:
+        if resolved.parameters["native_usb"]:
+            if not {"usb_dm", "usb_dp"} <= bindings.keys():
+                raise ValueError(
+                    f"recipe {definition.recipe} native_usb=True requires usb_dm and usb_dp bindings"
+                )
+            pins.extend(
+                (
+                    Pin(role="mcu", pin=usb_pins[0], net="usb_dm"),
+                    Pin(role="mcu", pin=usb_pins[1], net="usb_dp"),
+                )
             )
-        )
+        else:
+            no_connects.extend(
+                (
+                    NoConnect(role="mcu", pin=usb_pins[0]),
+                    NoConnect(role="mcu", pin=usb_pins[1]),
+                )
+            )
     return expand_static_definition(
-        definition.model_copy(update={"pins": tuple(pins), "no_connects": tuple(no_connects)}),
+        definition.model_copy(
+            update={
+                "parts": tuple(parts),
+                "pins": tuple(pins),
+                "internal_nets": tuple(internal_nets),
+                "no_connects": tuple(no_connects),
+            }
+        ),
         resolved,
     )

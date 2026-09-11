@@ -12,9 +12,11 @@ This module owns that extraction. Library discovery is delegated to
 four-tier parts library before falling back to KiCad stock. Missing
 libraries or symbols raise, not warn.
 """
+
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from pathlib import Path
 
 from .parts_lookup import (
@@ -130,15 +132,11 @@ def _resolve_extends_chain(lib_text: str, symbol_name: str) -> str:
     # `(symbol "<base>"`, the `(symbol "<base>_` pattern can't match it — which
     # matters when the derived name itself begins with `<base>_` (e.g. the base
     # `C` and the derivative `C_Small`).
-    merged = base_resolved.replace(
-        f'(symbol "{base_name}_', f'(symbol "{symbol_name}_'
-    )
+    merged = base_resolved.replace(f'(symbol "{base_name}_', f'(symbol "{symbol_name}_')
     # Now rename the base symbol header to the derived name. Use the exact bytes
     # `(symbol "<base_name>"` so we don't substring-match inside other symbols
     # in the chain.
-    merged = merged.replace(
-        f'(symbol "{base_name}"', f'(symbol "{symbol_name}"', 1
-    )
+    merged = merged.replace(f'(symbol "{base_name}"', f'(symbol "{symbol_name}"', 1)
     derived_props = _extract_properties(derived)
     merged_props = _extract_properties(merged)
     for prop_name, prop_block in derived_props.items():
@@ -149,9 +147,7 @@ def _resolve_extends_chain(lib_text: str, symbol_name: str) -> str:
 
 def _qualify_with_prefix(symbol_text: str, symbol_name: str, library: str) -> str:
     """Rewrite (symbol "Name" ...) to (symbol "Library:Name" ...) once."""
-    return symbol_text.replace(
-        f'(symbol "{symbol_name}"', f'(symbol "{library}:{symbol_name}"', 1
-    )
+    return symbol_text.replace(f'(symbol "{symbol_name}"', f'(symbol "{library}:{symbol_name}"', 1)
 
 
 # Reference-designator prefixes for device classes whose `input` pins can't be
@@ -182,21 +178,51 @@ def _qualify_with_prefix(symbol_text: str, symbol_name: str, library: str) -> st
 # The device class is read from KiCraft's assigned instance refdes when available
 # (authoritative: easyeda fills the symbol's intrinsic Reference with arbitrary
 # strings like "Card"), falling back to the symbol's own Reference prefix.
-_PASSIVE_DEVICE_REF_PREFIXES = frozenset({
-    "SW", "BTN", "PB", "KEY",                  # switches / buttons
-    "R", "RN", "RV", "RT", "RP", "VR", "POT",  # resistors / networks / thermistors / pots
-    "C",                                       # capacitors
-    "L", "FB", "FL",                           # inductors / ferrite beads
-    "D", "LED", "CR", "DZ", "TVS",             # diodes / LEDs / TVS
-    "F", "FU",                                 # fuses
-    "K", "RLY", "RL", "RY",                    # relays (coil + contacts are passive)
-    "SOL", "MTR", "M",                         # solenoids / motors (passive loads)
-    "BT", "BAT", "BATT",                       # battery holders / cells (passive, per KiCad)
-    "TP",                                      # test points
-    "LS", "SP", "BZ", "MK", "MIC",             # transducers (speaker / buzzer / mic)
-    "ANT", "AE",                               # antennas
-    "MH",                                      # mounting holes
-})
+_PASSIVE_DEVICE_REF_PREFIXES = frozenset(
+    {
+        "SW",
+        "BTN",
+        "PB",
+        "KEY",  # switches / buttons
+        "R",
+        "RN",
+        "RV",
+        "RT",
+        "RP",
+        "VR",
+        "POT",  # resistors / networks / thermistors / pots
+        "C",  # capacitors
+        "L",
+        "FB",
+        "FL",  # inductors / ferrite beads
+        "D",
+        "LED",
+        "CR",
+        "DZ",
+        "TVS",  # diodes / LEDs / TVS
+        "F",
+        "FU",  # fuses
+        "K",
+        "RLY",
+        "RL",
+        "RY",  # relays (coil + contacts are passive)
+        "SOL",
+        "MTR",
+        "M",  # solenoids / motors (passive loads)
+        "BT",
+        "BAT",
+        "BATT",  # battery holders / cells (passive, per KiCad)
+        "TP",  # test points
+        "LS",
+        "SP",
+        "BZ",
+        "MK",
+        "MIC",  # transducers (speaker / buzzer / mic)
+        "ANT",
+        "AE",  # antennas
+        "MH",  # mounting holes
+    }
+)
 
 _REFERENCE_PROP_RE = re.compile(r'\(property\s+"Reference"\s+"([^"]*)"')
 _REF_ALPHA_PREFIX_RE = re.compile(r"[A-Za-z]+")
@@ -210,21 +236,20 @@ def _ref_alpha_prefix(ref: str | None) -> str | None:
     pm = _REF_ALPHA_PREFIX_RE.match(ref)
     return pm.group(0).upper() if pm else None
 
+
 # Switch/phase node of a switching regulator — the pin that drives the
 # inductor. Vendored/easyeda-imported regulator symbols routinely mistype it as
 # `power_in` (it is an *output*), so KiCad ERC flags ``power_pin_not_driven`` on
 # the legitimately-wired {SW, D, L} net. The pin must be typed `power_in` AND
 # named exactly one of these tokens, so this can never touch a real power input.
 _SWITCH_NODE_PIN_RE = re.compile(
-    r'(\(pin\s+)power_in'
+    r"(\(pin\s+)power_in"
     r'(\s+\w+(?:\s*\([^()]*\))*?\s*\(name\s+"(?:PH|SW|LX|PHASE|SWITCH)")',
     re.IGNORECASE,
 )
 
 
-def _normalize_passive_device_pins(
-    symbol_text: str, ref_prefix: str | None = None
-) -> str:
+def _normalize_passive_device_pins(symbol_text: str, ref_prefix: str | None = None) -> str:
     """Retype a symbol's stray `input` pins so they can't trip ERC pin_not_driven.
 
     easyeda2kicad-imported parts (and stock KiCad symbols) type contacts `input`
@@ -274,6 +299,8 @@ def _normalize_switch_node_pins(symbol_text: str) -> str:
     mistype a genuine power input (GND/EP/VIN stay ``power_in``).
     """
     return _SWITCH_NODE_PIN_RE.sub(r"\1power_out\2", symbol_text)
+
+
 def _normalize_regulator_output_pins(symbol_text: str) -> str:
     """Retype easyeda2kicad's `power_in` regulator outputs to `power_out`.
 
@@ -287,7 +314,7 @@ def _normalize_regulator_output_pins(symbol_text: str) -> str:
     name, so it can never mistype a genuine power input (VIN stays ``power_in``).
     """
     _REGULATOR_OUTPUT_PIN_RE = re.compile(
-        r'(\(pin\s+)power_in'
+        r"(\(pin\s+)power_in"
         r'(\s+\w+(?:\s*\([^()]*\))*?\s*\(name\s+"(?:VREG|VOUT|VCP|VREG_OUT|LDO_OUT)")',
         re.IGNORECASE,
     )
@@ -296,10 +323,7 @@ def _normalize_regulator_output_pins(symbol_text: str) -> str:
 
 def _normalize_ic_pins(symbol_text: str) -> str:
     """Apply all IC-level pin-type normalizations in order."""
-    return _normalize_regulator_output_pins(
-        _normalize_switch_node_pins(symbol_text)
-    )
-
+    return _normalize_regulator_output_pins(_normalize_switch_node_pins(symbol_text))
 
 
 # ---------- public API ----------
@@ -341,24 +365,47 @@ def extract_symbol_block(
     lib_text = lib_path.read_text()
     resolved = _resolve_extends_chain(lib_text, symbol_name)
     qualified = _qualify_with_prefix(resolved, symbol_name, library)
-    return _normalize_ic_pins(
-        _normalize_passive_device_pins(qualified, ref_prefix)
-    )
+    return _normalize_ic_pins(_normalize_passive_device_pins(qualified, ref_prefix))
+
+
+@lru_cache(maxsize=512)
+def _searchable_symbols(lib: Path, mtime_ns: int, size: int) -> tuple[tuple[str, str], ...]:
+    """Cache stock identities and their catalogue keywords until the file changes."""
+    text = lib.read_text(encoding="utf-8", errors="ignore")
+    rows: list[tuple[str, str]] = []
+    symbol_id = ""
+    terms: list[str] = []
+    for match in re.finditer(
+        r'\(symbol "([^"]+)"|\(property "(?:ki_keywords|Description)" "((?:[^"\\]|\\.)*)"',
+        text,
+    ):
+        name, metadata = match.groups()
+        if name is not None:
+            if symbol_id:
+                rows.append((symbol_id, " ".join(terms).lower()))
+            symbol_id = "" if re.search(r"_\d+_\d+$", name) else f"{lib.stem}:{name}"
+            terms = [symbol_id] if symbol_id else []
+        elif symbol_id:
+            terms.append(metadata)
+    if symbol_id:
+        rows.append((symbol_id, " ".join(terms).lower()))
+    return tuple(rows)
 
 
 def search_symbols(
     query: str,
     *,
     stock_dir: Path = DEFAULT_KICAD_SYMBOL_DIR,
-    limit: int = 40,
+    limit: int | None = 40,
 ) -> list[str]:
-    """Return up to ``limit`` stock KiCad ``Library:Name`` symbol ids whose id
-    contains every whitespace-separated term in ``query`` (case-insensitive).
+    """Return stock KiCad ids matching every query term in id/keywords/description.
 
     Lets a stage discover the correct symbol name by keyword instead of guessing
     it (e.g. ``"conn 02x08"`` -> ``Connector_Generic:Conn_02x08_Odd_Even``). KiCad
     unit / body-style sub-symbols (``<name>_<n>_<m>``) are skipped so only real
     top-level symbols are returned.
+    ``limit=None`` retrieves all matches for relevance ranking by the caller.
+    Catalogue text is cached per file version, not reparsed for each query.
     """
     term_alts = _symbol_query_terms(query)
     if not term_alts or not stock_dir.is_dir():
@@ -366,24 +413,17 @@ def search_symbols(
     matches: list[str] = []
     seen: set[str] = set()
     for lib in sorted(stock_dir.glob("*.kicad_sym")):
-        libname = lib.stem
         try:
-            text = lib.read_text(encoding="utf-8", errors="ignore")
+            stat = lib.stat()
+            rows = _searchable_symbols(lib, stat.st_mtime_ns, stat.st_size)
         except OSError:
             continue
-        for m in re.finditer(r'\(symbol "([^"]+)"', text):
-            name = m.group(1)
-            if re.search(r"_\d+_\d+$", name):  # unit / body-style sub-symbol
-                continue
-            sym_id = f"{libname}:{name}"
-            key = sym_id.lower()
-            if sym_id in seen or not all(
-                any(alt in key for alt in alts) for alts in term_alts
-            ):
+        for sym_id, key in rows:
+            if sym_id in seen or not all(any(alt in key for alt in alts) for alts in term_alts):
                 continue
             seen.add(sym_id)
             matches.append(sym_id)
-            if len(matches) >= limit:
+            if limit is not None and len(matches) >= limit:
                 return matches
     return matches
 
@@ -393,11 +433,25 @@ def search_symbols(
 # guessed a nonexistent Library:Name -- 2026-07-19 review §5.6). Dropped from
 # the query; when any is dropped, "conn" joins the terms so the search still
 # lands in the connector families.
-_SYMBOL_CONNECTOR_PROSE = frozenset({
-    "pin", "pins", "header", "male", "female", "socket", "plug",
-    "vertical", "horizontal", "right", "angle", "smd", "tht",
-    "through", "hole",
-})
+_SYMBOL_CONNECTOR_PROSE = frozenset(
+    {
+        "pin",
+        "pins",
+        "header",
+        "male",
+        "female",
+        "socket",
+        "plug",
+        "vertical",
+        "horizontal",
+        "right",
+        "angle",
+        "smd",
+        "tht",
+        "through",
+        "hole",
+    }
+)
 _COUNT_RE = re.compile(r"^(\d+)x(\d+)$")
 
 

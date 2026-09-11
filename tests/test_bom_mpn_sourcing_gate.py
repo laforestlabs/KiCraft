@@ -131,6 +131,7 @@ def test_hallucinated_mpn_is_an_offender(tmp_path, monkeypatch):
     assert p.sourcing_note is None  # never pin what we couldn't verify
 
 
+
 def test_low_stock_is_an_offender(tmp_path, monkeypatch):
     # The KC-T6ERHM L1: real Bourns part, 49 units in the snapshot.
     _install(monkeypatch, _FakeCatalog(by_mpn={
@@ -387,6 +388,36 @@ def test_mpn_walk_exhausted_is_an_offender_enumerating_tries(tmp_path, monkeypat
     assert "SS34F" in bad[0] and "retail stock 0" in bad[0]
     assert "SS34 (C8678) JLC stock 50" in bad[0]
     assert p.sourcing_note is None
+
+def test_mpn_walk_exhausted_suggests_orderable_keyword_alternative(tmp_path, monkeypatch):
+    keyword = "CR2032 COIN CELL HOLDER 103"
+    _install(
+        monkeypatch,
+        _FakeCatalog(
+            by_mpn={
+                "KEYSTONE 3034": [
+                    {"lcsc": "CDEAD", "model": "KEYSTONE 3034", "stock": 900_000}
+                ],
+                keyword: [
+                    {"lcsc": "CGOOD", "model": "BS-08-B2AA005", "stock": 3_000}
+                ],
+            }
+        ),
+        _FakeRetail(by_lcsc={"CDEAD": {"stock": 0, "min_buy": 1}}),
+    )
+    holder = _part(
+        ref="BT1",
+        mpn="Keystone 3034",
+        symbol="Device:Battery_Cell",
+        footprint="Battery:BatteryHolder_Keystone_103_1x20mm",
+    )
+    holder.value = "CR2032 coin cell holder"
+
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(holder), tmp_path)
+
+    assert len(bad) == 1
+    assert "in-stock alternates" in bad[0]
+    assert "CGOOD" in bad[0]
 
 
 def test_kw_walk_picks_next_candidate_when_basic_is_retail_dry(tmp_path, monkeypatch):

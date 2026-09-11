@@ -10,6 +10,8 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kicraft.design import models
+from kicraft.design.lowering import lowerer_parameter_diagnostics
+from kicraft.design.part_identity import is_part_family, matches_part_identity
 
 from .config import (
     BOM_ARRAY_LIMIT,
@@ -17,6 +19,8 @@ from .config import (
     BOM_NOTE_LIMIT,
     BOM_SHEET_PART_LIMIT,
     BOM_TOTAL_PART_LIMIT,
+    STAGE_COLLECTION_BOUNDS,
+    CollectionBound,
 )
 
 # Canonical stage -> slot model, mirroring cli_app._apply_slot's owned-field map.
@@ -132,7 +136,7 @@ class BomComponentGroup(BaseModel):
 
 
 def _requirement_owns_protected_group(group: BomComponentGroup, requirements) -> bool:
-    """Whether a requirement-scoped group id names its implementation."""
+    """Match an implementing component to its typed requirement, not just its label."""
 
     def value(requirement, field: str):
         if isinstance(requirement, dict):
@@ -158,7 +162,39 @@ def _requirement_owns_protected_group(group: BomComponentGroup, requirements) ->
 
     group_token = token(group.id)
     group_words = words(group.id)
+    from kicraft.design.recipes import registered_recipes
+
+    component_tokens = {
+        token(group.value),
+        token(group.mpn or ""),
+        token(group.symbol.partition(":")[2]),
+    } - {""}
+    component_families = [
+        words(registered.definition.family) - {"fixed", "minimal"}
+        for registered in registered_recipes()
+        if token(registered.definition.exact_part) in component_tokens
+    ]
+    physical_identity = group.mpn or group.value
     for requirement in requirements or ():
+        exact_part = value(requirement, "exact_part")
+        if exact_part:
+            if matches_part_identity(str(exact_part), physical_identity):
+                return True
+            # A matching group label or broad family cannot waive an explicit
+            # physical identity, especially when the BOM declares another MPN.
+            continue
+        family_identity = str(value(requirement, "family") or "")
+        if matches_part_identity(family_identity, physical_identity):
+            return True
+        if is_part_family(family_identity):
+            # A typed product family needs verified concrete hardware. Neither
+            # the family token itself nor a matching group label is a device.
+            continue
+        family_words = words(value(requirement, "family")) - {"fixed", "minimal", "selectable"}
+        if family_words and any(
+            family_words == family or family_words <= family for family in component_families
+        ):
+            return True
         for raw in (
             value(requirement, "id"),
             value(requirement, "family"),
@@ -238,6 +274,7 @@ def _expand_bom_groups(
     from kicraft.design.recipes.registry import next_reference_numbers
 
     architecture = (prompt_state or {}).get("architecture") or {}
+    trusted_lowering_groups = set((prompt_state or {}).get("_trusted_lowering_group_ids") or ())
     expansions = expand_selections(architecture.get("recipe_selections") or [])
     recipe_parts = [part for expansion in expansions for part in expansion.parts]
     if not response.groups and not recipe_parts:
@@ -253,7 +290,11 @@ def _expand_bom_groups(
             group.value,
             group.mpn,
         )
-        if protected and not _requirement_owns_protected_group(group, requirements):
+        if (
+            protected
+            and group.id not in trusted_lowering_groups
+            and not _requirement_owns_protected_group(group, requirements)
+        ):
             raise ValueError(
                 "model_authored_protected_identity: "
                 f"BOM group {group.id!r} contains {list(protected)!r}"
@@ -378,7 +419,18 @@ def _slot_response_schema(stage: str) -> dict:
     if stage == "wiring":
         return WiringStageResponse.model_json_schema()
     if stage == "architecture":
-        return ArchitectureStageResponse.model_json_schema()
+        schema = ArchitectureStageResponse.model_json_schema()
+        properties = schema["properties"]
+        for field in ("recipe_resolution", "unresolved_requirement_ids", "protected_identities"):
+            properties.pop(field, None)
+        schema["$defs"].pop("RecipeResolutionRecord", None)
+        properties["requirements"]["minItems"] = 1
+        schema["required"] = [*schema.get("required", []), "requirements"]
+        requirement = schema["$defs"]["CircuitRequirement"]
+        requirement["properties"]["functional_blocks"]["minItems"] = 1
+        # Canonical validation enforces uniqueness; Alibaba rejects array uniqueItems.
+        requirement["required"] = [*requirement.get("required", []), "functional_blocks"]
+        return schema
     return SLOT_MODEL[stage].model_json_schema()
 
 
@@ -422,6 +474,16 @@ def _architecture_sheet_names(prompt_state: dict) -> tuple[str, ...]:
     return tuple(names)
 
 
+def apply_collection_bounds(schema: dict, bounds: tuple[CollectionBound, ...]) -> None:
+    """Constrain provider arrays without relaxing existing model or unit limits."""
+    for variant in schema.get("anyOf") or [schema]:
+        properties = variant.get("properties") or {}
+        for bound in bounds:
+            collection = properties.get(bound.field)
+            if isinstance(collection, dict) and collection.get("type") == "array":
+                collection["maxItems"] = min(collection.get("maxItems", bound.total), bound.total)
+
+
 def build_stage_response_contract(
     stage: str,
     prompt_state: dict,
@@ -431,6 +493,16 @@ def build_stage_response_contract(
     wiring_refs: tuple[str, ...] | None = None,
 ) -> StageResponseContract:
     schema = _response_schema(stage) if allow_questions else _slot_response_schema(stage)
+    apply_collection_bounds(schema, STAGE_COLLECTION_BOUNDS.get(stage, ()))
+    if stage == "architecture":
+        functional_spec = prompt_state.get("functional_spec")
+        if isinstance(functional_spec, dict):
+            spec = models.FunctionalSpec.model_validate(functional_spec)
+            names = [block.name for block in spec.blocks]
+            if not names:
+                raise ValueError("architecture response contract requires functional block names")
+            ownership = schema["$defs"]["CircuitRequirement"]["properties"]["functional_blocks"]
+            ownership["items"]["enum"] = names
     if stage == "bom":
         architecture_names = _architecture_sheet_names(prompt_state)
         if bom_sheet is not None and bom_sheet not in architecture_names:
@@ -459,12 +531,20 @@ def build_stage_response_contract(
         resolved_requirement_ids = {
             str(requirement_id)
             for selection in selections
+            if bom_sheet is None or bom_sheet in (selection.get("sheets") or {}).values()
             for requirement_id in selection.get("requirement_ids") or []
+        }
+        unresolved_requirement_ids = {
+            str(requirement_id)
+            for requirement_id in architecture.get("unresolved_requirement_ids") or []
         }
         sheet_has_unresolved_requirement = any(
             isinstance(requirement, dict)
             and requirement.get("sheet") == bom_sheet
-            and str(requirement.get("id")) not in resolved_requirement_ids
+            and (
+                str(requirement.get("id")) not in resolved_requirement_ids
+                or str(requirement.get("id")) in unresolved_requirement_ids
+            )
             for requirement in architecture.get("requirements") or []
         )
         require_groups = bom_sheet is not None and (
@@ -512,7 +592,9 @@ def schema_json(contract: StageResponseContract) -> str:
 
 
 class StageSchemaError(ValueError):
-    pass
+    def __init__(self, message: str, *, diagnostic: dict | None = None):
+        self.diagnostic = diagnostic
+        super().__init__(message)
 
 
 def _inter_sheet_net_endpoint_signature(endpoints: list[dict]) -> tuple[tuple[str, str], ...]:
@@ -554,8 +636,16 @@ def _complete_connector_requirements(payload: dict) -> dict:
         sheet = requirement.get("sheet")
         signals = nets_by_sheet.get(sheet) or []
         family = str(requirement.get("family") or "").lower()
+        if family.replace("_", "-") not in {
+            "pin-header",
+            "generic-header",
+            "header",
+            "spi-header",
+            "screw-terminal",
+        }:
+            continue
         is_terminal = "screw" in family or "terminal" in family
-        nets = list(signals) if is_terminal else [*signals, "GND"]
+        nets = list(dict.fromkeys(signals if is_terminal else [*signals, "GND"]))
         if not nets:
             continue
         requirement["ports"] = {f"PIN{index + 1}": net for index, net in enumerate(nets)}
@@ -568,18 +658,29 @@ def _normalize_architecture_sheet_aliases(payload: dict) -> dict:
     ``Sheet.name`` is the uppercase human label (spaces); ``Sheet.stem`` is the
     uppercase filesystem identifier (underscores). Structured-output schemas
     cannot express the Architecture model's cross-field endpoint check, and
-    providers commonly vary case or interchange those two spellings. Normalize
-    those representation-only differences locally instead of spending another
-    provider call; punctuation and missing fields remain schema errors.
+    providers commonly vary case, punctuation, or interchange those two
+    spellings. Normalize those representation-only differences locally instead
+    of spending another provider call.
     """
     raw_sheets = payload.get("sheets")
     if not isinstance(raw_sheets, list):
         return payload
 
     def alias_key(value: str) -> str:
-        return re.sub(r"\s+", " ", value.replace("_", " ")).strip().upper()
+        return re.sub(r"[^A-Z0-9]+", " ", value.upper()).strip()
 
     aliases: dict[str, str] = {}
+    canonical_names: set[str] = set()
+
+    def register_alias(raw: str, canonical: str) -> None:
+        key = alias_key(raw)
+        prior = aliases.get(key)
+        if prior is not None and prior != canonical:
+            raise ValueError(
+                f"sheet alias {raw!r} ambiguously names both {prior!r} and {canonical!r}"
+            )
+        aliases[key] = canonical
+
     sheets: list[object] = []
     for raw_sheet in raw_sheets:
         if not isinstance(raw_sheet, dict):
@@ -590,12 +691,15 @@ def _normalize_architecture_sheet_aliases(payload: dict) -> dict:
         canonical_name = None
         if isinstance(raw_name, str):
             canonical_name = alias_key(raw_name)
+            if canonical_name in canonical_names:
+                raise ValueError(f"duplicate canonical sheet name {canonical_name!r}")
+            canonical_names.add(canonical_name)
             sheet["name"] = canonical_name
-            aliases[alias_key(raw_name)] = canonical_name
+            register_alias(raw_name, canonical_name)
 
         raw_stem = sheet.get("stem")
         if isinstance(raw_stem, str) and raw_stem.strip():
-            canonical_stem = re.sub(r"\s+", "_", raw_stem.strip()).upper()
+            canonical_stem = re.sub(r"[^A-Z0-9]+", "_", raw_stem.upper()).strip("_")
         elif canonical_name:
             canonical_stem = canonical_name.replace(" ", "_")
         else:
@@ -604,8 +708,8 @@ def _normalize_architecture_sheet_aliases(payload: dict) -> dict:
             sheet["stem"] = canonical_stem
             if canonical_name is not None:
                 if isinstance(raw_stem, str) and raw_stem:
-                    aliases[alias_key(raw_stem)] = canonical_name
-                aliases[alias_key(canonical_stem)] = canonical_name
+                    register_alias(raw_stem, canonical_name)
+                register_alias(canonical_stem, canonical_name)
         sheets.append(sheet)
 
     normalized = dict(payload)
@@ -676,82 +780,136 @@ def _normalize_architecture_sheet_aliases(payload: dict) -> dict:
     return normalized
 
 
+def _sheet_owns_usb_c_connector(sheet: dict) -> bool:
+    """Distinguish a receptacle from sheets merely carrying its signals."""
+    name = str(sheet.get("name") or "")
+    function = str(sheet.get("function") or "")
+    if re.search(r"\b(?:header|gpio|expansion)\b", name, re.I) or re.search(
+        r"\b(?:mcu|microcontroller)\b|\b(?:pd|power delivery)\b.*\btrigger\b",
+        function,
+        re.I,
+    ):
+        return False
+    usb = r"\b(?:usb[\s-]*c|type[\s-]*c)\b"
+    return bool(
+        re.search(usb, name, re.I)
+        or re.search(usb + r"\s+(?:receptacle|connector|port)\b", function, re.I)
+    )
+
+
 def _normalize_usb_c_requirements(payload: dict) -> dict:
-    """Route generic USB-C architecture requirements through verified recipes."""
+    """Complete generic connector contracts without changing their hardware role."""
+    from kicraft.design.recipes.registry import get_recipe
+
     normalized = dict(payload)
-    nets = {
-        str(name)
-        for name in [
-            *(payload.get("power_nets") or []),
-            *(
-                row.get("name")
-                for row in payload.get("inter_sheet_nets") or []
-                if isinstance(row, dict)
-            ),
-        ]
-        if name
+    power_nets = {str(net) for net in payload.get("power_nets") or []}
+    sheet_nets: dict[str, set[str]] = {}
+    for row in payload.get("inter_sheet_nets") or []:
+        if not isinstance(row, dict) or not row.get("name"):
+            continue
+        for endpoint in row.get("endpoints") or []:
+            if isinstance(endpoint, dict) and endpoint.get("sheet"):
+                sheet_nets.setdefault(str(endpoint["sheet"]), set()).add(str(row["name"]))
+
+    def named_net(nets: set[str], *aliases: str) -> str | None:
+        # Polarity is electrical meaning: D+ and D- must never share a key.
+        wanted = {re.sub(r"[^a-z0-9+-]+", "", alias.lower()) for alias in aliases}
+        matches = sorted(net for net in nets if re.sub(r"[^a-z0-9+-]+", "", net.lower()) in wanted)
+        if len(matches) > 1:
+            raise StageSchemaError(f"ambiguous connector net aliases: {matches}")
+        return matches[0] if matches else None
+
+    def ports_for(sheet: str, explicit: dict[str, str] | None = None) -> dict[str, str]:
+        nets = sheet_nets.get(sheet, set())
+        ports = dict(explicit or {})
+        aliases = {
+            "gnd": ("GND",),
+            "vbus": ("VBUS", "+5V", "5V"),
+            "usb_dp": ("USB_DP", "USB_D+", "USB_D_P", "D+"),
+            "usb_dm": ("USB_DM", "USB_D-", "USB_D_N", "D-"),
+            "cc1": ("CC1",),
+            "cc2": ("CC2",),
+            "sbu1": ("SBU1",),
+            "sbu2": ("SBU2",),
+        }
+        for port, names in aliases.items():
+            # A typed binding already identifies the net; aliases only complete
+            # missing ports, never second-guess that binding.
+            if port in ports:
+                continue
+            net = named_net(nets, *names)
+            # Power rails may be global rather than inter-sheet interfaces.
+            # Data and auxiliary signals must belong to this connector's sheet.
+            if net is None and port in {"gnd", "vbus"}:
+                net = named_net(power_nets, *names)
+            if net is not None:
+                ports[port] = net
+        return ports
+
+    generic_families = {
+        "usbc",
+        "typec",
+        "usbcconnector",
+        "typecconnector",
+        "usbcreceptacle",
+        "usbcpowersink",
+        "usbcusb2device",
     }
-
-    def named_net(*aliases: str) -> str | None:
-        wanted = {re.sub(r"[^a-z0-9]+", "", alias.lower()) for alias in aliases}
-        return next(
-            (net for net in nets if re.sub(r"[^a-z0-9]+", "", net.lower()) in wanted),
-            None,
-        )
-
-    usb_dp = named_net("USB_DP", "USB_D+")
-    usb_dm = named_net("USB_DM", "USB_D-")
-    vbus = named_net("VBUS", "+5V", "5V")
     requirements = []
     for row in payload.get("requirements") or []:
         if not isinstance(row, dict):
             requirements.append(row)
             continue
         requirement = dict(row)
-        family = re.sub(r"[^a-z0-9]+", "", str(requirement.get("family") or "").lower())
-        if "usbc" not in family and "typec" not in family:
-            requirements.append(requirement)
-            continue
-        ports = dict(requirement.get("ports") or {})
-        ports["gnd"] = "GND"
-        if vbus:
-            ports["vbus"] = vbus
-        if usb_dp and usb_dm:
-            requirement["family"] = "usb-c-usb2-device"
-            ports["usb_dp"] = usb_dp
-            ports["usb_dm"] = usb_dm
-        else:
-            requirement["family"] = "usb-c-power-sink"
-        requirement["ports"] = ports
+        family = re.sub(r"[^a-z0-9]+", "", str(row.get("family") or "").lower())
+        if family in generic_families:
+            ports = ports_for(str(row.get("sheet") or ""), row.get("ports"))
+            has_data = bool(ports.get("usb_dp") and ports.get("usb_dm"))
+            sink = get_recipe("usb-c-usb2-device@1" if has_data else "usb-c-5v-sink@1")
+            exposed_auxiliary = ports.keys() - {port.name for port in sink.ports}
+            exact = re.sub(r"[^a-z0-9]+", "", str(row.get("exact_part") or "").lower())
+            if exposed_auxiliary and exact in {
+                "usbc5vsink",
+                "usbcpowersink",
+                "usbcusb2device",
+            }:
+                raise StageSchemaError(
+                    "USB connector exposes CC/SBU signals but requests an active sink recipe; "
+                    "use a passive usb-c-breakout with the actual connector identity, "
+                    "not a sink block identity"
+                )
+            requirement["family"] = "usb-c-breakout" if exposed_auxiliary else sink.family
+            requirement["ports"] = ports
         requirements.append(requirement)
     requirement_sheets = {
-        str(row.get("sheet"))
-        for row in requirements
-        if isinstance(row, dict)
-        and "usbc" in re.sub(r"[^a-z0-9]+", "", str(row.get("family") or "").lower())
+        str(row.get("sheet")) for row in requirements if isinstance(row, dict) and row.get("sheet")
     }
     for sheet in payload.get("sheets") or []:
         if not isinstance(sheet, dict):
             continue
         sheet_name = str(sheet.get("name") or "")
-        identity = f"{sheet_name} {sheet.get('function') or ''}".lower()
-        if sheet_name in requirement_sheets or not re.search(
-            r"\busb(?:\s*|-)?c\b|\btype(?:\s*|-)?c\b", identity
-        ):
+        if sheet_name in requirement_sheets or not _sheet_owns_usb_c_connector(sheet):
             continue
-        ports = {"gnd": "GND"}
-        if vbus:
-            ports["vbus"] = vbus
-        has_data = usb_dp is not None and usb_dm is not None
-        if has_data:
-            ports.update({"usb_dp": usb_dp, "usb_dm": usb_dm})
+        ports = ports_for(sheet_name)
+        remaining = sheet_nets.get(sheet_name, set()) - power_nets - set(ports.values())
+        # Arbitrary signal names are preserved losslessly as connector port keys.
+        # They are not recipe pin names until an explicit typed binding exists.
+        for net in sorted(remaining):
+            key = net.lower().replace("+", "_plus").replace("-", "_minus")
+            key = re.sub(r"[^a-z0-9_]+", "_", key).strip("_")
+            if key in ports and ports[key] != net:
+                raise StageSchemaError(f"connector port alias collision: {ports[key]!r}, {net!r}")
+            ports[key] = net
+        has_data = bool(ports.get("usb_dp") and ports.get("usb_dm"))
+        sink = get_recipe("usb-c-usb2-device@1" if has_data else "usb-c-5v-sink@1")
+        exposed_auxiliary = ports.keys() - {port.name for port in sink.ports}
         stem = re.sub(r"[^a-z0-9]+", "_", sheet_name.lower()).strip("_") or "input"
         requirements.append(
             {
                 "id": f"auto_usb_c_{stem}",
                 "sheet": sheet_name,
-                "role": "connector" if has_data else "power_input",
-                "family": "usb-c-usb2-device" if has_data else "usb-c-power-sink",
+                "role": "connector" if has_data or exposed_auxiliary else "power_input",
+                "family": "usb-c-breakout" if exposed_auxiliary else sink.family,
                 "parameters": {},
                 "ports": ports,
                 "interfaces": [],
@@ -762,40 +920,22 @@ def _normalize_usb_c_requirements(payload: dict) -> dict:
 
 
 def _fold_recipe_covered_sheets(architecture: models.Architecture) -> models.Architecture:
-    """Fold model-created sub-sheets already owned by a selected circuit recipe."""
-    from kicraft.design.recipes import get_recipe
-
+    """Fold only explicitly recipe-owned requirements with one unambiguous target."""
     data = architecture.model_dump(exclude_none=True)
-    requirements = [row for row in data.get("requirements") or [] if isinstance(row, dict)]
-    selections = [row for row in data.get("recipe_selections") or [] if isinstance(row, dict)]
-    claimed: dict[str, tuple[str, dict]] = {}
-
-    def token(value: object) -> str:
-        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
-
+    requirements = data["requirements"]
+    selections = data["recipe_selections"]
+    unresolved = set(architecture.unresolved_requirement_ids)
+    targets_by_requirement: dict[str, set[str]] = {}
     for selection in selections:
-        definition = get_recipe(str(selection.get("recipe")))
-        bindings = selection.get("sheets") or {}
-        for requirement in requirements:
-            requirement_id = str(requirement.get("id"))
-            if requirement_id in set(selection.get("requirement_ids") or []):
-                continue
-            family = token(requirement.get("family"))
-            for group in definition.parts:
-                role = token(group.role)
-                covered = (
-                    role == family
-                    or (role and role in family)
-                    or (
-                        definition.family == "rp2040"
-                        and family == "gpioheader"
-                        and role.startswith("cast")
-                    )
-                )
-                target_sheet = bindings.get(group.sheet_role)
-                if covered and target_sheet and requirement.get("sheet") != target_sheet:
-                    claimed[requirement_id] = (str(target_sheet), selection)
-                    break
+        target_sheets = set(selection["sheets"].values())
+        for requirement_id in selection["requirement_ids"]:
+            if requirement_id not in unresolved:
+                targets_by_requirement.setdefault(requirement_id, set()).update(target_sheets)
+    claimed = {
+        requirement_id: next(iter(targets))
+        for requirement_id, targets in targets_by_requirement.items()
+        if len(targets) == 1
+    }
 
     requirements_by_sheet: dict[str, list[dict]] = {}
     for requirement in requirements:
@@ -806,7 +946,7 @@ def _fold_recipe_covered_sheets(architecture: models.Architecture) -> models.Arc
     folds: dict[str, str] = {}
     for sheet, sheet_requirements in requirements_by_sheet.items():
         targets = {
-            claimed[str(requirement.get("id"))][0]
+            claimed[str(requirement.get("id"))]
             for requirement in sheet_requirements
             if str(requirement.get("id")) in claimed
         }
@@ -817,18 +957,13 @@ def _fold_recipe_covered_sheets(architecture: models.Architecture) -> models.Arc
         ):
             folds[sheet] = next(iter(targets))
     if not folds:
-        return architecture
+        return models.Architecture.model_validate(data)
 
     for requirement in requirements:
         source_sheet = str(requirement.get("sheet"))
         if source_sheet not in folds:
             continue
         requirement["sheet"] = folds[source_sheet]
-        requirement_id = str(requirement.get("id"))
-        selection = claimed[requirement_id][1]
-        selection["requirement_ids"] = list(
-            dict.fromkeys([*(selection.get("requirement_ids") or []), requirement_id])
-        )
     data["sheets"] = [
         sheet for sheet in data.get("sheets") or [] if str(sheet.get("name")) not in folds
     ]
@@ -848,12 +983,136 @@ def _fold_recipe_covered_sheets(architecture: models.Architecture) -> models.Arc
     data["inter_sheet_nets"] = rewritten_nets
     data["requirements"] = requirements
     data["recipe_selections"] = selections
-    data["unresolved_requirement_ids"] = [
-        requirement_id
-        for requirement_id in data.get("unresolved_requirement_ids") or []
-        if requirement_id not in claimed
-    ]
     return models.Architecture.model_validate(data)
+
+
+def _validate_power_requirement_contracts(architecture: dict, prompt_state: dict) -> None:
+    from kicraft.design.stage_semantics import architecture_power_requirement_diagnostics
+
+    diagnostics = architecture_power_requirement_diagnostics(prompt_state, architecture)
+    if diagnostics:
+        message = " ".join(diagnostic.message for diagnostic in diagnostics)
+        raise StageSchemaError(
+            message,
+            diagnostic={
+                "code": "unrealizable_power_requirement",
+                "message": message,
+                "evidence": [
+                    diagnostic.model_dump(exclude_none=True) for diagnostic in diagnostics
+                ],
+            },
+        )
+
+
+def _validate_lowerer_parameter_contracts(architecture: models.Architecture) -> None:
+    diagnostics = [
+        diagnostic
+        for requirement in architecture.requirements
+        for diagnostic in lowerer_parameter_diagnostics(requirement)
+    ]
+    if not diagnostics:
+        return
+    evidence = []
+    for diagnostic in diagnostics:
+        value = "<missing>" if diagnostic.missing else repr(diagnostic.value)
+        evidence.append(
+            f"requirement {diagnostic.requirement_id!r} on sheet {diagnostic.sheet!r} "
+            f"({diagnostic.family}, {diagnostic.lowerer_id}): "
+            f"parameters.{diagnostic.parameter}={value}; "
+            + (
+                diagnostic.constraint
+                if diagnostic.constraint
+                else f"choices={list(diagnostic.choices)!r}"
+            )
+        )
+    message = (
+        "Invalid deterministic lowerer parameter contract. Supply explicit supported values "
+        "before BOM; do not infer missing hardware policy or substitute pull direction for "
+        "internal/external implementation. " + "; ".join(evidence)
+    )
+    raise StageSchemaError(
+        message,
+        diagnostic={
+            "code": "invalid_lowerer_parameters",
+            "message": message,
+            "evidence": [diagnostic.model_dump(mode="json") for diagnostic in diagnostics],
+        },
+    )
+
+
+def _validate_typed_inter_sheet_contracts(
+    architecture: models.Architecture, functional_spec: dict | None
+) -> None:
+    """Check shared typed signals only when explicit functional ownership links them.
+
+    Net names alone do not establish scope. Neither power-only graph links nor
+    ambiguous replicated owners prove that two sheet-local signals are one wire.
+    Recipe peer completion and sheet folding must run before this check.
+    """
+    if not functional_spec:
+        return
+    spec = models.FunctionalSpec.model_validate(functional_spec)
+    global_nets = {"GND", *architecture.power_nets}
+    bindings: dict[str, dict[str, list[models.CircuitRequirement]]] = {
+        block.name: {} for block in spec.blocks
+    }
+    for requirement in architecture.requirements:
+        signals = set(requirement.ports.values()) - global_nets
+        for block in requirement.functional_blocks:
+            if block not in bindings:
+                continue  # The block-sheet mapping gate owns invalid membership.
+            for net in signals:
+                bindings[block].setdefault(net, []).append(requirement)
+    boundaries = {
+        net.name: {endpoint.sheet for endpoint in net.endpoints}
+        for net in architecture.inter_sheet_nets
+    }
+    missing: dict[str, dict[str, models.CircuitRequirement]] = {}
+    for connection in spec.connections:
+        if connection.signal_type in {"power", "ground"}:
+            continue
+        source = bindings[connection.from_block]
+        target = bindings[connection.to_block]
+        for net in source.keys() & target.keys():
+            source_sheets = {owner.sheet for owner in source[net]}
+            target_sheets = {owner.sheet for owner in target[net]}
+            if len(source_sheets) != 1 or len(target_sheets) != 1:
+                continue
+            if source_sheets == target_sheets:
+                continue
+            if source_sheets | target_sheets <= boundaries.get(net, set()):
+                continue
+            owners = missing.setdefault(net, {})
+            owners.update((owner.id, owner) for owner in source[net])
+            owners.update((owner.id, owner) for owner in target[net])
+    if not missing:
+        return
+    evidence = []
+    for net, owners in sorted(missing.items()):
+        owner_labels = ", ".join(
+            f"{owner.id!r} on sheet {owner.sheet!r}"
+            for owner in sorted(owners.values(), key=lambda owner: owner.id)
+        )
+        declared_sheets = boundaries.get(net, set())
+        missing_sheets = sorted({owner.sheet for owner in owners.values()} - declared_sheets)
+        evidence.append(
+            f"net {net!r}: signal-linked typed owners {owner_labels}; "
+            f"declared inter-sheet endpoints {sorted(declared_sheets)}, "
+            f"missing owning endpoints {missing_sheets}"
+        )
+    message = (
+        "Typed signal bindings cross functional-owner sheets without a complete "
+        "inter_sheet_nets contract. Declare each named net with its owning sheet endpoints "
+        "before BOM/wiring; preserve the typed port bindings. " + "; ".join(evidence)
+    )
+    raise StageSchemaError(
+        message,
+        diagnostic={
+            "code": "missing_typed_inter_sheet_contract",
+            "message": message,
+            "evidence": evidence,
+        },
+    )
 
 
 def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> tuple[dict, int]:
@@ -876,34 +1135,21 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
                     f"{requirement.get('id', '')} {requirement.get('family', '')}".lower(),
                 )
                 for named_part in named_parts:
+                    if is_part_family(str(named_part)):
+                        continue
                     named_identity = re.sub(r"[^a-z0-9]+", "", str(named_part).lower())
                     if named_identity and named_identity in requirement_identity:
                         requirement["exact_part"] = str(named_part)
                         break
-            architecture_assumptions = " ".join(
-                str(value) for value in payload.get("assumptions") or []
-            ).lower()
-            for requirement in payload.get("requirements") or []:
-                if not isinstance(requirement, dict):
-                    continue
-                family = re.sub(r"[^a-z0-9]+", "", str(requirement.get("family") or "").lower())
-                if family == "opampbuffer" and "mcp6001" in architecture_assumptions:
-                    requirement["family"] = "mcp6001-follower"
-                    requirement["exact_part"] = "MCP6001T-I/OT"
-                    ports = dict(requirement.get("ports") or {})
-                    ports.setdefault("gnd", "GND")
-                    rail = next(
-                        (
-                            net
-                            for net in payload.get("power_nets") or []
-                            if str(net).upper() != "GND"
-                        ),
-                        None,
-                    )
-                    if rail:
-                        ports.setdefault("vdd", str(rail))
-                    requirement["ports"] = ports
+            # These are server-derived persisted fields, not provider claims.
+            for field in (
+                "recipe_resolution",
+                "unresolved_requirement_ids",
+                "protected_identities",
+            ):
+                payload.pop(field, None)
             response = ArchitectureStageResponse.model_validate(payload)
+            _validate_lowerer_parameter_contracts(response)
             canonical = response.model_dump(exclude={"inter_sheet_net_ranges"}, exclude_none=True)
             explicit_nets = canonical.get("inter_sheet_nets") or []
             explicit_by_name = {str(net["name"]): net for net in explicit_nets}
@@ -936,22 +1182,48 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
                         models.InterSheetNet(name=name, endpoints=net_range.endpoints).model_dump()
                     )
             canonical["inter_sheet_nets"] = explicit_nets + expanded
-            from kicraft.design.recipes import apply_architecture_recipe_resolution
+            _validate_power_requirement_contracts(canonical, prompt_state)
+            from kicraft.design.recipes import (
+                RecipeResolutionError,
+                apply_architecture_recipe_resolution,
+            )
 
             validated = models.Architecture.model_validate(canonical)
-            resolved = apply_architecture_recipe_resolution(
-                validated,
-                prompt_state.get("intent") or {},
-            )
+            try:
+                resolved = apply_architecture_recipe_resolution(
+                    validated,
+                    prompt_state.get("intent") or {},
+                )
+            except RecipeResolutionError as exc:
+                evidence = [row.model_dump(exclude_none=True) for row in exc.diagnostics]
+                diagnostic = (
+                    evidence[0]
+                    if len(evidence) == 1
+                    else {
+                        "code": "multiple_recipe_contracts",
+                        "message": str(exc),
+                        "evidence": evidence,
+                    }
+                )
+                raise StageSchemaError(str(exc), diagnostic=diagnostic) from exc
             resolved = _fold_recipe_covered_sheets(resolved)
+            _validate_typed_inter_sheet_contracts(resolved, prompt_state.get("functional_spec"))
             return resolved.model_dump(exclude_none=True), len(expanded)
         if stage == "bom":
             return _normalize_bom_stage_response(payload, prompt_state)
         if stage == "wiring":
             return _normalize_wiring_stage_response(payload, prompt_state), 0
         return SLOT_MODEL[stage].model_validate(payload).model_dump(exclude_none=True), 0
+    except StageSchemaError:
+        raise
     except (TypeError, ValueError) as exc:
-        raise StageSchemaError(str(exc)) from exc
+        diagnostic = getattr(exc, "diagnostic", None)
+        raise StageSchemaError(
+            str(exc),
+            diagnostic=(
+                diagnostic.model_dump(exclude_none=True) if diagnostic is not None else None
+            ),
+        ) from exc
 
 
 def _extract_json(text: str) -> dict:

@@ -243,6 +243,20 @@ class FunctionalSpec(BaseModel):
                 raise ValueError(f"connection to unknown block {c.to_block!r}")
         return self
 
+    @model_validator(mode="after")
+    def _connections_unique(self):
+        seen: set[tuple[str, str, SignalType]] = set()
+        for connection in self.connections:
+            key = (connection.from_block, connection.to_block, connection.signal_type)
+            if key in seen:
+                raise ValueError(
+                    "duplicate functional connection "
+                    f"{connection.from_block!r} -> {connection.to_block!r} "
+                    f"({connection.signal_type})"
+                )
+            seen.add(key)
+        return self
+
 
 # ---------- Stage 3: Architecture ----------
 
@@ -366,8 +380,29 @@ class CircuitRequirement(BaseModel):
     family: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]*$")
     exact_part: str | None = None
     parameters: dict[str, JsonScalar] = Field(default_factory=dict)
-    ports: dict[str, str] = Field(default_factory=dict)
+    ports: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Logical port key to actual net NAME binding, e.g. {'usb_dp': 'D_P', "
+            "'gnd': 'GND'}, not port directions or electrical types. Every declared "
+            "inter-sheet net endpoint must have its exact net name bound as a value "
+            "by a requirement on that sheet, including model-owned requirements."
+        ),
+    )
     interfaces: list[str] = Field(default_factory=list)
+    # Exact committed FunctionalSpec block names, never inferred from sheet prose.
+    # Empty remains valid for standalone primitive contracts; stage coverage
+    # requires explicit membership for a complete architecture.
+    functional_blocks: list[str] = Field(default_factory=list)
+
+    @field_validator("functional_blocks")
+    @classmethod
+    def _functional_blocks_unique(cls, names: list[str]) -> list[str]:
+        if any(not name.strip() for name in names):
+            raise ValueError("CircuitRequirement.functional_blocks names must be nonempty")
+        if len(names) != len(set(names)):
+            raise ValueError("CircuitRequirement.functional_blocks names must be unique")
+        return names
 
 
 class RecipePinAllocation(BaseModel):

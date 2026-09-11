@@ -7,6 +7,7 @@ touched (defense in depth behind the prepaid + virtual-card limits).
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -64,13 +65,13 @@ def _env_bool_default(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class CollectionBound:
-    """Cardinality policy for one collection in a design-stage response."""
+    """Cardinality and member identity; an empty ``unique_keys`` disables uniqueness."""
 
     field: str
     total: int
     per_group: int | None = None
     group_key: str | None = None
-    unique_key: str | None = None
+    unique_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.total <= 0:
@@ -127,9 +128,13 @@ STAGE_COLLECTION_BOUNDS: dict[str, tuple[CollectionBound, ...]] = {
         CollectionBound(
             field="blocks",
             total=FUNCTIONAL_BLOCK_LIMIT,
-            unique_key="name",
+            unique_keys=("name",),
         ),
-        CollectionBound(field="connections", total=FUNCTIONAL_CONNECTION_LIMIT),
+        CollectionBound(
+            field="connections",
+            total=FUNCTIONAL_CONNECTION_LIMIT,
+            unique_keys=("from_block", "to_block", "signal_type"),
+        ),
         CollectionBound(field="assumptions", total=DESIGN_NOTE_LIMIT),
     ),
     "architecture": (
@@ -137,13 +142,13 @@ STAGE_COLLECTION_BOUNDS: dict[str, tuple[CollectionBound, ...]] = {
         CollectionBound(
             field="sheets",
             total=ARCHITECTURE_SHEET_LIMIT,
-            unique_key="name",
+            unique_keys=("name",),
         ),
         CollectionBound(field="power_nets", total=32),
         CollectionBound(
             field="inter_sheet_nets",
             total=ARCHITECTURE_NET_LIMIT,
-            unique_key="name",
+            unique_keys=("name",),
         ),
         CollectionBound(field="assumptions", total=DESIGN_NOTE_LIMIT),
         CollectionBound(field="recipe_selections", total=32),
@@ -154,7 +159,7 @@ STAGE_COLLECTION_BOUNDS: dict[str, tuple[CollectionBound, ...]] = {
             total=BOM_GROUP_LIMIT,
             per_group=BOM_GROUP_LIMIT,
             group_key="sheet",
-            unique_key="id",
+            unique_keys=("id",),
         ),
         CollectionBound(field="arrays", total=BOM_ARRAY_LIMIT),
         CollectionBound(field="assumptions", total=BOM_NOTE_LIMIT),
@@ -177,6 +182,29 @@ STAGE_SERIALIZATION_MAX_TOKENS = {
     "bom": 32768,
     "wiring": 32768,
 }
+
+
+def _resolved_stage_output_limits() -> dict[str, int]:
+    name = "KICRAFT_STAGE_OUTPUT_LIMITS"
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        limits = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{name} must be a JSON object of stage names to token ceilings") from exc
+    if not isinstance(limits, dict) or any(
+        stage not in STAGE_SERIALIZATION_MAX_TOKENS
+        or type(limit) is not int
+        or not 1 <= limit <= STAGE_SERIALIZATION_MAX_TOKENS[stage]
+        for stage, limit in limits.items()
+    ):
+        raise SystemExit(
+            f"{name} requires known stages and positive integer ceilings no larger "
+            f"than {STAGE_SERIALIZATION_MAX_TOKENS}"
+        )
+    return limits
+
 
 DESIGN_PROFILES: dict[str, dict[str, object]] = {
     "flash": {
@@ -313,6 +341,9 @@ class Settings:
     serialization_max_tokens: dict = field(
         default_factory=lambda: dict(STAGE_SERIALIZATION_MAX_TOKENS)
     )
+    # Optional tighter ceilings for BOTH normal and recovery calls. These never
+    # expand the existing policy or relax any monetary/completeness gate.
+    stage_output_limits: dict[str, int] = field(default_factory=dict)
     # Parse-side degeneration guards. Tuples keep the per-drive policy immutable.
     collection_bounds: dict[str, tuple[CollectionBound, ...]] = field(
         default_factory=lambda: dict(STAGE_COLLECTION_BOUNDS)
@@ -512,6 +543,7 @@ class Settings:
                 )
             ),
             serialization_max_tokens=dict(STAGE_SERIALIZATION_MAX_TOKENS),
+            stage_output_limits=_resolved_stage_output_limits(),
             collection_bounds=dict(STAGE_COLLECTION_BOUNDS),
             stage_semantics=_stage_semantics_mode(
                 os.environ.get("KICRAFT_STAGE_SEMANTICS", cls.stage_semantics)
@@ -705,18 +737,23 @@ class Settings:
     def design_stage_policy(self, stage: str, normal_max_tokens: int) -> StageResponsePolicy:
         """Immutable response policy for one design-stage drive.
 
-        ``normal_max_tokens`` is the caller's already-floored normal output cap;
-        the serialization cap is the stage's fixed value from
-        ``serialization_max_tokens`` (never doubled). The normal reasoning
-        payload comes from :meth:`design_reasoning`, the compatibility source.
+        ``normal_max_tokens`` is the caller's already-floored normal output cap.
+        Explicit stage output limits tighten both normal and serialization calls;
+        retries cannot escape the configured ceiling.
         """
+        normal_cap = int(normal_max_tokens)
+        serialization_cap = int(
+            self.serialization_max_tokens.get(stage)
+            or STAGE_SERIALIZATION_MAX_TOKENS.get(stage, 8192)
+        )
+        limit = self.stage_output_limits.get(stage)
+        if limit is not None:
+            normal_cap = min(normal_cap, limit)
+            serialization_cap = min(serialization_cap, limit)
         return StageResponsePolicy(
-            normal_max_tokens=int(normal_max_tokens),
+            normal_max_tokens=normal_cap,
             normal_reasoning=self.design_reasoning(stage),
-            serialization_max_tokens=int(
-                self.serialization_max_tokens.get(stage)
-                or STAGE_SERIALIZATION_MAX_TOKENS.get(stage, 8192)
-            ),
+            serialization_max_tokens=serialization_cap,
             serialization_retries=max(0, int(self.serialization_retries)),
             collection_bounds=tuple(self.collection_bounds.get(stage, ())),
             reasoning_guard=self.design_reasoning_guard(),
@@ -743,6 +780,7 @@ class Settings:
             "provider_fallback_profile": self.provider_fallback_profile,
             "base_url": self.base_url,
             "max_tokens_per_call": self.max_tokens_per_call,
+            "stage_output_limits": dict(self.stage_output_limits),
             "daily_usd_ceiling": self.daily_usd_ceiling,
             "total_usd_ceiling": self.total_usd_ceiling,
             "project_llm_budget_usd": self.project_llm_budget_usd,

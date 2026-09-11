@@ -109,13 +109,22 @@ _REASONING_RECENT_CHARS = 4096
 
 
 class _StreamingCollectionGuard:
-    """Count direct members of bounded top-level JSON arrays incrementally."""
+    """Enforce JSON syntax, collection bounds and forbidden schema properties."""
 
-    def __init__(self, bounds: tuple[CollectionBound, ...]):
+    def __init__(self, bounds: tuple[CollectionBound, ...], response_format=None):
         self._counters = [_TopLevelArrayCounter(bound) for bound in bounds]
+        schema = ((response_format or {}).get("json_schema") or {}).get("schema")
+        structured = bool(bounds) or isinstance(schema, dict) or (response_format or {}).get("type") in {
+            "json_schema", "json_object"
+        }
+        self._properties = _StreamingPropertyGuard(schema) if structured else None
 
     def consume(self, text: str) -> tuple[str, dict | None]:
         for index, char in enumerate(text):
+            if self._properties is not None:
+                violation = self._properties.consume(char)
+                if violation is not None:
+                    return text[:index], violation
             for counter in self._counters:
                 overflow = counter.consume(char)
                 if overflow is not None:
@@ -124,6 +133,307 @@ class _StreamingCollectionGuard:
 
     def counts(self) -> dict[str, int]:
         return {counter.bound.field: counter.count for counter in self._counters}
+
+
+class _StreamingPropertyGuard:
+    """Incrementally validate JSON grammar, decoding only bounded key tokens.
+
+    Schema projection is deliberately conservative: unions retain every branch,
+    and unsupported constraints remain the final schema validator's job.
+    """
+
+    _KEY_LIMIT = 4096
+
+    def __init__(self, schema):
+        self.schema = schema
+        self.stack: list[dict] = []
+        self.in_string = False
+        self.escape = False
+        self.unicode_digits = 0
+        self.key_token: list[str] | None = None
+        self.string_is_key = False
+        self.number = None
+        self.literal = ""
+        self.literal_index = 0
+        self.root_state = "value"
+        self.wrapper = "start"
+        self.fence_prefix = ""
+        self.fenced = False
+        self.offset = -1
+        self.line = 1
+        self.column = 0
+
+    def _child(self, schema, key, seen=()):
+        if not isinstance(schema, dict):
+            return schema if isinstance(schema, bool) else True
+        constraints = []
+        ref = schema.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/") and ref not in seen:
+            target = self.schema
+            try:
+                for part in ref[2:].split("/"):
+                    target = target[part.replace("~1", "/").replace("~0", "~")]
+            except (KeyError, TypeError):
+                target = True
+            constraints.append(self._child(target, key, (*seen, ref)))
+        for combinator in ("anyOf", "oneOf"):
+            if isinstance(schema.get(combinator), list):
+                branches = [self._child(branch, key, seen) for branch in schema[combinator]]
+                constraints.append(self._combine(branches, "anyOf"))
+        for branch in schema.get("allOf", []):
+            constraints.append(self._child(branch, key, seen))
+        if isinstance(key, int):
+            prefix = schema.get("prefixItems", [])
+            items = schema.get("items", True)
+            if key < len(prefix):
+                constraints.append(prefix[key])
+            elif isinstance(items, list):
+                constraints.append(
+                    items[key] if key < len(items) else schema.get("additionalItems", True)
+                )
+            else:
+                constraints.append(items)
+        else:
+            properties = schema.get("properties", {})
+            matches = [properties[key]] if key in properties else []
+            for pattern, value in schema.get("patternProperties", {}).items():
+                try:
+                    if re.search(pattern, key):
+                        matches.append(value)
+                except re.error:
+                    # A regex dialect we cannot interpret must not close a branch.
+                    matches.append(True)
+            constraints.append(
+                self._combine(matches, "allOf")
+                if matches
+                else schema.get("additionalProperties", True)
+            )
+        return self._combine(constraints, "allOf")
+
+    @staticmethod
+    def _combine(branches, operator):
+        decisive, neutral = (False, True) if operator == "allOf" else (True, False)
+        if any(branch is decisive for branch in branches):
+            return decisive
+        remaining = [branch for branch in branches if branch is not neutral]
+        if not remaining:
+            return neutral
+        return remaining[0] if len(remaining) == 1 else {operator: remaining}
+
+    def _value(self):
+        if not self.stack:
+            return self.schema, "$"
+        parent = self.stack[-1]
+        key = parent["key"] if parent["kind"] == "{" else parent["index"]
+        if key is None:
+            return True, parent["path"] + "[?]"
+        suffix = (
+            f"[{key}]"
+            if isinstance(key, int)
+            else ("." + key if key.isidentifier() else "[" + json.dumps(key) + "]")
+        )
+        return self._child(parent["schema"], key), parent["path"] + suffix
+
+    def _syntax(self, error: str) -> dict:
+        return {
+            "limit_scope": "syntax",
+            "field": self.stack[-1]["path"] if self.stack else "$",
+            "syntax_error": error,
+            "character_offset": self.offset,
+            "line": self.line,
+            "column": self.column,
+        }
+
+    def _finish_value(self):
+        if self.stack:
+            self.stack[-1]["state"] = "comma_or_end"
+        else:
+            self.root_state = "end"
+
+    def _string(self, char: str) -> dict | None:
+        if self.key_token is not None:
+            if len(self.key_token) < self._KEY_LIMIT:
+                self.key_token.append(char)
+            else:
+                # Oversized keys remain syntactically checked but cannot safely
+                # participate in schema projection or duplicate detection.
+                self.key_token = None
+        if self.unicode_digits:
+            if char not in "0123456789abcdefABCDEF":
+                return self._syntax("Expected a hexadecimal digit in Unicode escape")
+            self.unicode_digits -= 1
+        elif self.escape:
+            self.escape = False
+            if char == "u":
+                self.unicode_digits = 4
+            elif char not in '"\\/bfnrt':
+                return self._syntax("Invalid JSON string escape")
+        elif char == "\\":
+            self.escape = True
+        elif char == '"':
+            self.in_string = False
+            if self.string_is_key:
+                parent = self.stack[-1]
+                key = json.loads("".join(self.key_token)) if self.key_token is not None else None
+                parent["key"] = key
+                parent["state"] = "colon"
+                if key is not None:
+                    if key in parent["keys"]:
+                        return self._syntax("Duplicate object key " + json.dumps(key))
+                    parent["keys"].add(key)
+                    if self._child(parent["schema"], key) is False:
+                        return {"limit_scope": "property", "field": parent["path"], "property": key}
+            else:
+                self._finish_value()
+            self.key_token = None
+        elif ord(char) < 0x20:
+            return self._syntax("Unescaped control character in JSON string")
+        return None
+
+    def _number(self, char: str) -> dict | None:
+        state = self.number
+        digit = "0" <= char <= "9"
+        if state == "sign" and digit:
+            self.number = "zero" if char == "0" else "integer"
+        elif state in {"integer", "fraction", "exponent"} and digit:
+            pass
+        elif state in {"zero", "integer"} and char == ".":
+            self.number = "dot"
+        elif state in {"zero", "integer", "fraction"} and char in "eE":
+            self.number = "e"
+        elif state == "e" and char in "+-":
+            self.number = "exponent_sign"
+        elif state in {"dot", "e", "exponent_sign"} and digit:
+            self.number = "fraction" if state == "dot" else "exponent"
+        elif state in {"zero", "integer", "fraction", "exponent"} and char in " \t\r\n,]}":
+            self.number = None
+            self._finish_value()
+        else:
+            return self._syntax("Invalid JSON number")
+        return None
+
+    def consume(self, char: str) -> dict | None:
+        self.offset += 1
+        self.column += 1
+        violation = self._consume(char)
+        if char == "\n":
+            self.line += 1
+            self.column = 0
+        return violation
+
+    def _consume(self, char: str) -> dict | None:
+        if self.in_string:
+            return self._string(char)
+        if self.literal:
+            if char != self.literal[self.literal_index]:
+                return self._syntax("Invalid JSON literal; expected " + self.literal)
+            self.literal_index += 1
+            if self.literal_index == len(self.literal):
+                self.literal = ""
+                self._finish_value()
+            return None
+        if self.number is not None:
+            violation = self._number(char)
+            if violation is not None or self.number is not None:
+                return violation
+            # The delimiter terminates the number AND belongs to its container.
+
+        if self.wrapper in {"start", "opening"}:
+            # The final extractor permits leading prose and optional bare/json
+            # fences. Before a root container starts, a later object can still
+            # salvage that preamble. Never return here once JSON has begun.
+            if char in "{[":
+                self.fenced |= self.fence_prefix in {"```", "```json"}
+                self.wrapper = "body"
+            else:
+                if self.wrapper == "opening":
+                    if self.fence_prefix in {"```", "```json"} and char.isspace():
+                        self.fenced = True
+                        self.wrapper = "start"
+                        self.fence_prefix = ""
+                    elif "```json".startswith(self.fence_prefix + char):
+                        self.fence_prefix += char
+                    else:
+                        self.wrapper = "start"
+                        self.fence_prefix = ""
+                elif char == "`":
+                    self.wrapper = "opening"
+                    self.fence_prefix = "`"
+                return None
+
+        if not self.stack and self.root_state == "end":
+            if self.wrapper == "closed":
+                # _extract_json ignores prose outside a complete fenced object.
+                return None
+            if self.wrapper == "closing":
+                if char != "`":
+                    return self._syntax("Expected a closing JSON markdown fence")
+                self.fence_prefix += char
+                if self.fence_prefix == "```":
+                    self.wrapper = "closed"
+                return None
+            if char.isspace():
+                return None
+            if self.fenced and char == "`":
+                self.wrapper = "closing"
+                self.fence_prefix = "`"
+                return None
+            return self._syntax("Unexpected content after the JSON value")
+        if char in " \t\r\n":
+            return None
+
+        parent = self.stack[-1] if self.stack else None
+        state = parent["state"] if parent else self.root_state
+        if parent:
+            end = "}" if parent["kind"] == "{" else "]"
+            if char == end and state in {"key_or_end", "value_or_end", "comma_or_end"}:
+                self.stack.pop()
+                self._finish_value()
+                return None
+            if state == "comma_or_end":
+                if char != ",":
+                    return self._syntax("Expected ',' or " + repr(end) + " after a value")
+                parent["state"] = "key" if parent["kind"] == "{" else "value"
+                parent["key"] = None
+                parent["index"] += 1
+                return None
+            if state == "colon":
+                if char != ":":
+                    return self._syntax("Expected ':' after an object key")
+                parent["state"] = "value"
+                return None
+            if state in {"key", "key_or_end"}:
+                if char != '"':
+                    return self._syntax("Expected a quoted object key")
+                self.in_string = True
+                self.string_is_key = True
+                self.key_token = ['"']
+                return None
+
+        if char == '"':
+            self.in_string = True
+            self.string_is_key = False
+        elif char in "{[":
+            schema, path = self._value()
+            self.stack.append(
+                {
+                    "kind": char,
+                    "schema": schema,
+                    "path": path,
+                    "state": "key_or_end" if char == "{" else "value_or_end",
+                    "key": None,
+                    "index": 0,
+                    "keys": set() if char == "{" else None,
+                }
+            )
+        elif char in "tfn":
+            self.literal = "true" if char == "t" else ("false" if char == "f" else "null")
+            self.literal_index = 1
+        elif char == "-" or "0" <= char <= "9":
+            self.number = "sign" if char == "-" else ("zero" if char == "0" else "integer")
+        else:
+            return self._syntax("Expected a JSON value")
+        return None
 
 
 def _complete_bounded_wiring_json(content: str, limit: dict | None) -> str | None:
@@ -144,7 +454,6 @@ def _complete_bounded_wiring_json(content: str, limit: dict | None) -> str | Non
     return completed
 
 
-
 class _TopLevelArrayCounter:
     """Streaming lexer for one direct child array of the root JSON object."""
 
@@ -162,7 +471,10 @@ class _TopLevelArrayCounter:
         self.count = 0
         self.member_buf: list[str] | None = None
         self.group_counts: dict[str, int] = {}
-        self.unique_values: set[str] = set()
+        self.unique_values: set[tuple[str, ...]] = set()
+        # Each ASCII field-name character can be encoded as a six-byte JSON
+        # Unicode escape. Longer tokens cannot name this bounded collection.
+        self.field_token_limit = 6 * len(bound.field) + 2
 
     def _finish_member(self) -> dict | None:
         if self.member_buf is None:
@@ -177,18 +489,18 @@ class _TopLevelArrayCounter:
             return None
         if not isinstance(member, dict):
             return None
-        if self.bound.unique_key is not None and self.bound.unique_key in member:
-            value = str(member[self.bound.unique_key])
-            if value in self.unique_values:
+        if self.bound.unique_keys and all(key in member for key in self.bound.unique_keys):
+            values = tuple(str(member[key]) for key in self.bound.unique_keys)
+            if values in self.unique_values:
                 return {
                     "field": self.bound.field,
                     "observed_count": self.count,
                     "configured_total": self.bound.total,
                     "limit_scope": "duplicate",
-                    "unique_key": self.bound.unique_key,
-                    "duplicate_value": value,
+                    "unique_keys": list(self.bound.unique_keys),
+                    "duplicate_values": list(values),
                 }
-            self.unique_values.add(value)
+            self.unique_values.add(values)
         if self.bound.per_group is None or self.bound.group_key is None:
             return None
         if self.bound.group_key not in member:
@@ -220,22 +532,28 @@ class _TopLevelArrayCounter:
             self.member_buf.append(char)
 
         if self.in_string:
+            if self.capture_string:
+                if len(self.string_buf) < self.field_token_limit:
+                    self.string_buf += char
+                else:
+                    self.capture_string = False
+                    self.string_buf = ""
             if self.escape:
                 self.escape = False
-                if self.capture_string:
-                    self.string_buf += char
                 return None
             if char == "\\":
                 self.escape = True
                 return None
             if char == '"':
                 self.in_string = False
-                self.completed_string = self.string_buf if self.capture_string else None
+                self.completed_string = None
+                if self.capture_string:
+                    try:
+                        self.completed_string = json.loads(self.string_buf)
+                    except json.JSONDecodeError:
+                        pass
                 self.capture_string = False
                 self.string_buf = ""
-                return None
-            if self.capture_string and len(self.string_buf) <= len(self.bound.field):
-                self.string_buf += char
             return None
 
         direct_target = self.target_depth is not None and len(self.stack) == self.target_depth
@@ -249,12 +567,13 @@ class _TopLevelArrayCounter:
                 }
             self.count = observed
             self.expect_member = False
-            self.member_buf = [char]
+            if self.bound.unique_keys or self.bound.group_key is not None:
+                self.member_buf = [char]
 
         if char == '"':
             self.in_string = True
             self.capture_string = self.stack == ["{"]
-            self.string_buf = ""
+            self.string_buf = '"' if self.capture_string else ""
             return None
         if char.isspace():
             return None
@@ -407,9 +726,7 @@ class CappedOpenRouterClient:
             float(getattr(self.s, "max_price_completion", 0.0) or 0.0),
         )
         if prompt_price or completion_price:
-            return (
-                input_tokens * prompt_price + output_tokens * completion_price
-            ) / 1_000_000
+            return (input_tokens * prompt_price + output_tokens * completion_price) / 1_000_000
         return estimate_cost(model, input_tokens, output_tokens)
 
     def _open_stream(
@@ -552,8 +869,11 @@ class CappedOpenRouterClient:
             collection_limit = None
             reasoning_chars = 0
             content_chars = 0
+            received_content_chars = 0
             reasoning_recent = ""
-            collection_guard = _StreamingCollectionGuard(collection_bounds)
+            collection_guard = _StreamingCollectionGuard(
+                collection_bounds, payload.get("response_format")
+            )
             stream_t0 = time.monotonic()
             try:
                 resp = self._open_stream(
@@ -607,6 +927,7 @@ class CappedOpenRouterClient:
                                 if on_delta:
                                     on_delta({"reasoning": delta["reasoning"]})
                             if delta.get("content"):
+                                received_content_chars += len(delta["content"])
                                 accepted, overflow = collection_guard.consume(delta["content"])
                                 if accepted:
                                     content.append(accepted)
@@ -742,7 +1063,9 @@ class CappedOpenRouterClient:
                 json.dumps(payload.get("messages") or [], ensure_ascii=False, separators=(",", ":"))
             )
             in_tok = in_tok or max(1, prompt_chars // 4)
-            out_tok = out_tok or max(1, (reasoning_chars + content_chars) // 4)
+            # The provider generated the entire last delta, even the suffix
+            # discarded by the guard. Charge that paid partial output as well.
+            out_tok = out_tok or max(1, (reasoning_chars + received_content_chars) // 4)
         cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
         cost = float(usage.get("cost") or 0.0)
         if cost <= 0.0:  # never record 0 for real spend, or the ceiling under-counts
@@ -918,7 +1241,7 @@ class CappedOpenRouterClient:
                 reasoning = {"enabled": False}
                 continue
 
-            if not tcs:
+            if not tcs or msg.get("collection_limit"):
                 return {
                     "text": msg.get("content") or "",
                     "cost_usd": total_cost,

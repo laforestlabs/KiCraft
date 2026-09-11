@@ -36,7 +36,138 @@ from kicraft.server.stage_runtime import (
     _stage_max_tokens,
 )
 from kicraft.server.stage_state_io import attach_questions as _attach_questions
+from kicraft.server.stage_work_units import StageWorkUnit
 from kicraft.server.session import run_session
+
+
+def test_wiring_prompt_state_exposes_only_owned_bom_refs_and_local_contracts():
+    state = {
+        "architecture": {
+            "sheets": [{"name": "A"}, {"name": "B"}, {"name": "C"}],
+            "requirements": [
+                {"id": "local", "sheet": "A"},
+                {"id": "remote", "sheet": "C"},
+            ],
+            "inter_sheet_nets": [
+                {
+                    "name": "A_TO_B",
+                    "endpoints": [{"sheet": "A"}, {"sheet": "B"}],
+                },
+                {
+                    "name": "C_ONLY",
+                    "endpoints": [{"sheet": "C"}],
+                },
+            ],
+            "recipe_selections": [
+                {"recipe": "local@1", "sheets": {"main": "A"}},
+                {"recipe": "remote@1", "sheets": {"main": "C"}},
+            ],
+            "recipe_resolution": [
+                {"requirement_id": "local", "recipe": "local@1"},
+                {"requirement_id": "remote", "recipe": "remote@1"},
+            ],
+            "unresolved_requirement_ids": ["local", "remote"],
+        },
+        "bom": {
+            "parts": [{"ref": "R1"}, {"ref": "U1"}],
+            "connections": [
+                {"endpoints": [{"ref": "R1"}, {"ref": "R1"}]},
+                {"endpoints": [{"ref": "R1"}, {"ref": "U1"}]},
+            ],
+            "no_connect_pins": [{"ref": "R1"}, {"ref": "U1"}],
+        },
+    }
+    unit = StageWorkUnit(
+        "wiring-u000",
+        "wiring",
+        "A",
+        refs=("R1",),
+        requirement_ids=("local",),
+    )
+
+    visible = stage_driver_mod._work_unit_prompt_state(unit, state)
+
+    assert [part["ref"] for part in visible["bom"]["parts"]] == ["R1"]
+    assert len(visible["bom"]["connections"]) == 1
+    assert visible["bom"]["no_connect_pins"] == [{"ref": "R1"}]
+    assert [sheet["name"] for sheet in visible["architecture"]["sheets"]] == ["A", "B"]
+    assert [net["name"] for net in visible["architecture"]["inter_sheet_nets"]] == ["A_TO_B"]
+    assert [row["id"] for row in visible["architecture"]["requirements"]] == ["local"]
+    assert [row["recipe"] for row in visible["architecture"]["recipe_selections"]] == ["local@1"]
+    assert [row["requirement_id"] for row in visible["architecture"]["recipe_resolution"]] == [
+        "local"
+    ]
+    assert visible["architecture"]["unresolved_requirement_ids"] == ["local"]
+
+
+def test_bom_prompt_keeps_owned_contract_and_read_only_exact_part_exclusions():
+    owned = {
+        "id": "button",
+        "sheet": "USER IO",
+        "role": "user_io",
+        "family": "button",
+        "parameters": {"active_low": True},
+        "ports": {"out": "BOOT0"},
+        "interfaces": [{"kind": "digital", "voltage": 3.3}],
+    }
+    sibling = {
+        "id": "mcu",
+        "sheet": "USER IO",
+        "role": "mcu",
+        "exact_part": "STM32F103C8T6",
+    }
+    recipe = {
+        "recipe": "stm32f103c8t6-minimal@1",
+        "instance": "mcu",
+        "sheets": {"mcu": "USER IO"},
+        "requirement_ids": ["mcu"],
+    }
+    state = {
+        "intent": {
+            "named_parts": ["STM32F103C8T6"],
+            "constraints": ["hand solderable"],
+            "inferred_expertise": "expert",
+        },
+        "functional_spec": {"blocks": [{"name": "USB"}, {"name": "MCU"}]},
+        "architecture": {
+            "sheets": [
+                {"name": "USER IO", "stem": "USER_IO", "function": "MCU and button"},
+                {"name": "USB", "function": "USB receptacle"},
+            ],
+            "topologies": {"USER_IO": "MCU with button", "USB": "USB device"},
+            "requirements": [owned, sibling],
+            "recipe_selections": [recipe],
+            "recipe_resolution": [{"requirement_id": "mcu", "recipe": recipe["recipe"]}],
+            "unresolved_requirement_ids": ["button"],
+            "protected_identities": ["stm32f103c8t6"],
+            "rail_voltages": {"+3V3": 3.3},
+            "power_nets": ["+3V3", "GND"],
+            "inter_sheet_nets": [
+                {"name": "BOOT0", "endpoints": [{"sheet": "USER IO"}, {"sheet": "USB"}]},
+                {"name": "VBUS", "endpoints": [{"sheet": "USB"}]},
+            ],
+        },
+    }
+    original = json.loads(json.dumps(state))
+    unit = StageWorkUnit(
+        "bom-s000", "bom", "USER IO", requirement_ids=("button",), owned_roles=("user_io",)
+    )
+
+    visible = stage_driver_mod._work_unit_prompt_state(unit, state)
+    boundary = json.loads(stage_driver_mod._work_unit_instructions(unit, 1, 2, state))
+
+    assert visible["intent"] == state["intent"]
+    assert visible["architecture"]["requirements"] == [owned]
+    assert [sheet["name"] for sheet in visible["architecture"]["sheets"]] == ["USER IO"]
+    assert visible["architecture"]["topologies"] == {"USER_IO": "MCU with button"}
+    assert visible["architecture"]["inter_sheet_nets"] == [
+        state["architecture"]["inter_sheet_nets"][0]
+    ]
+    assert visible["architecture"]["rail_voltages"] == {"+3V3": 3.3}
+    assert visible["architecture"]["protected_identities"] == ["stm32f103c8t6"]
+    assert visible["read_only_exclusions"] == {"requirements": [sibling], "recipes": [recipe]}
+    assert boundary["owned_requirements"] == [owned]
+    assert state == original
 
 
 def build_system(stage: str, collection_bounds=None) -> str:
@@ -402,14 +533,6 @@ def test_bom_prompt_closes_architecture_decisions_and_demands_decoupling():
     assert "emit only the named requirement and owned role" in sysmsg
     assert "Decoupling completeness" in sysmsg
     assert "per dedicated supply/decoupling pin" in sysmsg
-
-
-def test_architecture_spec_declares_power_rails_are_not_sheets():
-    # The architecture spec must resolve the power-block contradiction: a
-    # functional-spec block whose category is `power` is a net, never a sheet.
-    sysmsg = build_system("architecture")
-    assert "power/ground NETS" in sysmsg
-    assert "never emit a Sheet" in sysmsg
 
 
 def test_bom_reconcile_instruction_lists_the_missing_parts():
@@ -1116,9 +1239,6 @@ def test_truncated_json_triggers_one_plain_tool_free_serialization_call(tmp_path
     assert serial["reasoning"] == {"enabled": False}
     assert serial["max_tokens"] == 8192  # fixed serialization cap for intent
     assert serial["max_tokens"] == 2 * first["max_tokens"]  # ... which is 2x the 4096 normal
-    retry_message = serial["messages"][-1]["content"]
-    assert "about 23 characters" in retry_message
-    assert "`constraints` collection must contain at most 64 items total" in retry_message
     # the cap is the policy's fixed value, never doubled AGAIN: a truncated
     # serialization result would go terminal, not raise to 16384.
     recovery = next(event for event in events if event["kind"] == "serialization_recovery")
@@ -1202,39 +1322,6 @@ def test_serialization_schema_failure_gets_final_normal_correction(tmp_path):
     assert len(client.calls) == 3
     assert sum(1 for call in client.calls if call["serialization"]) == 1
     assert client.calls[2]["serialization"] is False
-    assert "Field required" in client.calls[2]["messages"][-1]["content"]
-
-
-def test_schema_recovery_reports_local_validation_error(tmp_path):
-    client = _ScriptedClient(
-        [
-            {"text": "{}", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
-            _ok_intent_reply(),
-        ]
-    )
-    res = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
-    assert res["status"] == "ok"
-    retry_message = client.calls[1]["messages"][-1]["content"]
-    assert "valid JSON but failed KiCraft's local slot validation" in retry_message
-    assert "Field required" in retry_message
-
-
-def test_answers_survive_schema_recovery(tmp_path):
-    client = _ScriptedClient(
-        [
-            {"text": "{}", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0},
-            _ok_intent_reply(),
-        ]
-    )
-    result = run_session(
-        tmp_path,
-        "a powered LED",
-        ["intent"],
-        client=client,
-        answers=[{"text": "Supply voltage?", "answer": "12 V"}],
-    )
-    assert result["status"] == "ok"
-    assert "Q: Supply voltage?\nA: 12 V" in client.calls[1]["messages"][1]["content"]
 
 
 def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
@@ -1270,23 +1357,78 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
     )
     res = run_session(tmp_path, "a USB-powered LED", ["bom"], client=client)
     assert res["status"] == "failed"
-    assert len(client.calls) == 7
+    assert len(client.calls) == 3
     assert client.calls[0]["serialization"] is False  # chat_with_tools (tool loop)
     assert client.calls[1]["serialization"] is True  # plain chat for serialization
-    assert all(call["serialization"] is False for call in client.calls[2:])
-    assert client.calls[1]["response_format"] is client.calls[0]["response_format"]
+    assert client.calls[2]["serialization"] is False  # one bounded clean-slate call
+    assert client.calls[2]["reasoning"] == {"enabled": False}
+    assert client.calls[2]["max_tokens"] == 2048
     assert client.calls[1]["max_tokens"] == 2048  # affordable BOM-unit serialization cap
     assert client.calls[1]["reasoning"] == {"enabled": False}
-    retry_message = client.calls[1]["messages"][-1]["content"]
-    assert "about 16 characters" in retry_message
-    assert client.calls[1]["response_format"]["json_schema"]["name"] == "kicraft_bom_response_v3"
-    assert res["results"][-1]["failure_kind"] == "unit_repair_exhausted"
+    assert res["results"][-1]["failure_kind"] == "invalid_json"
+
+
+def test_bom_ownership_conflict_stops_after_one_attributable_rejection(
+    tmp_path,
+    monkeypatch,
+):
+    response = {
+        "groups": [
+            {
+                "id": "unowned_esp32",
+                "reference_prefix": "U",
+                "quantity": 1,
+                "value": "ESP32-S3-MINI-1-N8",
+                "symbol": "esp32-s3-mini-1:ESP32-S3-MINI-1-N8",
+                "footprint": "esp32-s3-mini-1:BULETM-SMD_ESP32-S3-MINI-1-N8",
+                "mpn": "ESP32-S3-MINI-1-N8",
+                "sheet": "POWER",
+            }
+        ],
+        "arrays": [],
+        "assumptions": [],
+        "substitutions": [],
+    }
+    client = _ScriptedClient(
+        [
+            {
+                "text": json.dumps(response),
+                "reasoning": "",
+                "finish_reason": "stop",
+                "cost_usd": 0.0,
+            }
+        ]
+    )
+    prep = {
+        "state": {
+            "architecture": {
+                "sheets": [{"name": "POWER"}],
+                "recipe_selections": [],
+            }
+        },
+        "extras": {},
+    }
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc",
+            (),
+            {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""},
+        )(),
+    )
+
+    res = run_session(tmp_path, "a power board", ["bom"], client=client)
+
+    assert res["status"] == "failed"
+    assert res["results"][-1]["failure_kind"] == "unit_ownership_conflict"
+    assert len(client.calls) == 1
 
 
 def test_typed_bom_lowerer_skips_provider_call(tmp_path, monkeypatch):
     state = {
         "architecture": {
-            "topologies": {"INPUT": "8-pin header"},
+            "topologies": {"INPUT": "9-pin header"},
             "rail_voltages": {},
             "sheets": [
                 {
@@ -1306,8 +1448,8 @@ def test_typed_bom_lowerer_skips_provider_call(tmp_path, monkeypatch):
                     "family": "pin-header",
                     "parameters": {"rows": 1},
                     "ports": {
-                        **{f"d{index}": f"D{index}" for index in range(8)},
-                        "gnd": "GND",
+                        **{f"pin{index + 1}": f"D{index}" for index in range(8)},
+                        "pin9": "GND",
                     },
                 }
             ],
@@ -1342,14 +1484,28 @@ def test_typed_bom_lowerer_skips_provider_call(tmp_path, monkeypatch):
     assert result["commit_ok"] is True, result
     assert result["attempts"] == 0
     assert client.calls == []
-    assert len(commits[0]["parts"]) == 1
-    provenance = [
-        event for event in progress if event.get("source") == "deterministic_architecture_lowering"
-    ]
-    assert [event["kind"] for event in provenance] == [
-        "work_unit_plan",
-        "work_unit_done",
-    ]
+    state["bom"] = commits[0]
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    prep["extras"] = {
+        "symbol_pinouts": {
+            part["ref"]: lookup_pins(part["symbol"], all_units=True)
+            for part in state["bom"]["parts"]
+        }
+    }
+    wiring = stage_driver_mod.drive_stage(
+        client,
+        "wiring",
+        "eight digital inputs",
+        tmp_path / "state.json",
+        tmp_path,
+    )
+    assert wiring["commit_ok"] is True, wiring
+    assert client.calls == []
+    assert {connection["net_name"] for connection in commits[-1]["connections"]} == {
+        *(f"D{index}" for index in range(8)),
+        "GND",
+    }
 
 
 def test_recipe_complete_mcu_bom_and_wiring_skip_provider_calls(tmp_path, monkeypatch):
@@ -1593,6 +1749,23 @@ def test_collection_limit_uses_one_escape_serialization_call(tmp_path):
     assert "82000 content characters" in retry
 
 
+def test_architecture_collection_retry_requires_compact_numbered_ranges():
+    retry = stage_driver_mod._stage_recovery_message(
+        "collection_limit",
+        '{"inter_sheet_nets":[',
+        "Keep inter_sheet_nets at or below 128 items.",
+        collection_limit={
+            "field": "inter_sheet_nets",
+            "observed_count": 129,
+            "configured_total": 128,
+            "emitted_content_chars": 16000,
+        },
+    )
+
+    assert "inter_sheet_net_ranges" in retry
+    assert "never invent signal indices beyond the physical component's pins" in retry
+
+
 def test_repeated_collection_limit_uses_the_full_bounded_budget(tmp_path):
     overflow = {
         "text": '{"goal":',
@@ -1610,6 +1783,39 @@ def test_repeated_collection_limit_uses_the_full_bounded_budget(tmp_path):
     last = res["results"][-1]
     assert last["failure_kind"] == "collection_limit"
     assert last["attempts"] == 3
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+def test_syntax_stopped_stream_uses_truthful_feedback_and_existing_retry_ceiling(
+    tmp_path, recovers
+):
+    syntax_error = "Expected ',' or ']' after a value"
+    stopped = {
+        # Even a parseable saved prefix is not a candidate after a syntax abort.
+        "text": _OK_INTENT,
+        "finish_reason": "collection_limit",
+        "collection_limit": {
+            "limit_scope": "syntax",
+            "syntax_error": syntax_error,
+            "field": "$.inter_sheet_nets",
+            "character_offset": 3034,
+            "line": 51,
+            "column": 129,
+            "emitted_content_chars": 3034,
+        },
+        "cost_usd": 0.01,
+    }
+    client = _ScriptedClient([stopped, _ok_intent_reply()] if recovers else [stopped] * 3)
+    result = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert result["status"] == ("ok" if recovers else "failed")
+    assert len(client.calls) == (2 if recovers else 3)
+    feedback = client.calls[1]["messages"][-1]["content"]
+    assert syntax_error in feedback
+    assert "3034" in feedback and "$.inter_sheet_nets" in feedback
+    assert "configured" not in feedback and "item unknown" not in feedback
+    if not recovers:
+        assert result["results"][-1]["failure_kind"] == "collection_limit"
+        assert result["results"][-1]["attempts"] == 3
 
 
 def test_commit_rejection_signature_normalizes_gate_ids_and_offenders():
@@ -2248,6 +2454,101 @@ def test_review_question_does_not_persist_open_questions(tmp_path):
     assert not state_path.exists()
 
 
+@pytest.mark.parametrize(
+    "review,answers,instruction,reconcile,needs_input",
+    [
+        pytest.param(False, None, None, False, False, id="noninteractive-default"),
+        pytest.param(
+            True,
+            [{"text": "Which supply voltage?", "answer": "5 V"}],
+            None,
+            False,
+            False,
+            id="answered-review",
+        ),
+        pytest.param(
+            True, None, "Use 5 V; do not ask again.", False, False, id="instructed-review"
+        ),
+        pytest.param(True, None, None, False, True, id="interactive-clarification"),
+        pytest.param(
+            False,
+            [{"text": "Which supply voltage?", "answer": "5 V"}],
+            "Use the supplied answers.",
+            True,
+            True,
+            id="reconcile-after-answer",
+        ),
+        pytest.param(True, None, "Use defaults.", True, True, id="reconcile-review"),
+    ],
+)
+def test_semantic_repair_questions_follow_primary_disposition(
+    tmp_path, monkeypatch, review, answers, instruction, reconcile, needs_input
+):
+    # Isolate the question transition from individual semantic detectors: a valid
+    # candidate needs repair, and the repair provider asks rather than repairing.
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "diagnose_stage",
+        lambda *args, **kwargs: [
+            StageDiagnostic(
+                code="intent_named_part_omitted",
+                severity="repair_required",
+                message="An explicit part needs clarification.",
+                evidence=["LED"],
+                detector_version=1,
+            )
+        ],
+    )
+    question = {
+        "text": "Which supply voltage?",
+        "blocking": True,
+        "options": ["3.3 V", "5 V"],
+    }
+    if reconcile:
+        question["reconcile_target"] = "bom"
+    client = _ScriptedClient(
+        [
+            _ok_intent_reply(),
+            {
+                "text": json.dumps({"questions": [question]}),
+                "reasoning": "",
+                "finish_reason": "stop",
+                "cost_usd": 0.0,
+            },
+        ]
+    )
+    client.s = Settings(api_key="test", stage_semantics="repair")
+    state_path = tmp_path / ".kicraft" / "state.json"
+    events = []
+    result = stage_driver_mod.drive_stage(
+        client,
+        "intent",
+        "a USB-powered LED",
+        state_path,
+        tmp_path,
+        answers=answers,
+        instruction=instruction,
+        review_before_commit=review,
+        progress=events.append,
+    )
+
+    assert result.get("needs_input", False) is needs_input
+    assert bool([event for event in events if event["kind"] == "question"]) is needs_input
+    if needs_input:
+        assert result["questions"][0]["text"] == question["text"]
+        assert result["questions"][0]["reconcile_target"] == ("bom" if reconcile else None)
+        assert result["commit_ok"] is False
+    else:
+        # The recoverable question is not a replacement slot or an extra repair.
+        assert "questions" not in result["slot"]
+        assert result["commit_ok"] is (not review)
+    if review:
+        assert not state_path.exists()
+    elif not needs_input:
+        state = json.loads(state_path.read_text())
+        assert not state.get("open_questions")
+
+
 def test_attempt_trace_associates_candidates_with_one_bounded_repair(tmp_path, monkeypatch):
     records = []
     progress = []
@@ -2278,6 +2579,8 @@ def test_attempt_trace_associates_candidates_with_one_bounded_repair(tmp_path, m
     assert [(event["unit_id"], event["source"]) for event in plans] == [("wiring-u000", "llm")]
     assert [event["outcome"] for event in attempts] == ["candidate", "candidate"]
     assert [event["aggregate_round"] for event in attempts] == [None, 1]
+    assert all(event["response_chars"] > 0 for event in attempts)
+    assert [event["response_format_mode"] for event in attempts] == ["json_schema"] * 2
     assert [event["source"] for event in accepted] == ["llm", "llm"]
     for event in attempts:
         assert not ({"raw", "messages", "reasoning", "candidate"} & event.keys())
@@ -2424,6 +2727,112 @@ def test_work_units_make_one_initial_call_each_before_one_full_commit(tmp_path, 
     assert len(commits) == 1
 
 
+@pytest.mark.parametrize("recover", [True, False])
+def test_bom_unit_collection_overflow_gets_one_focused_recovery(tmp_path, monkeypatch, recover):
+    state = {
+        "architecture": {
+            "sheets": [{"name": "A"}, {"name": "B"}, {"name": "C"}],
+            "recipe_selections": [],
+        }
+    }
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state))
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc",
+            (),
+            {"returncode": 0, "stdout": json.dumps({"state": state, "extras": {}}), "stderr": ""},
+        )(),
+    )
+
+    def reply(sheet):
+        return {
+            "text": json.dumps({"groups": [_group_payload(sheet=sheet)]}),
+            "finish_reason": "stop",
+            "cost_usd": 0.0,
+        }
+
+    overflow = {
+        "text": '{"groups":[',
+        "finish_reason": "collection_limit",
+        "collection_limit": {
+            "field": "groups",
+            "configured_total": 21,
+            "observed_count": 22,
+            "emitted_content_chars": 3726,
+        },
+        "cost_usd": 0.0,
+    }
+    correction = (
+        reply("B")
+        if recover
+        else {
+            **overflow,
+            "collection_limit": {**overflow["collection_limit"], "emitted_content_chars": 4767},
+        }
+    )
+    replies = [reply("A"), overflow, correction]
+    if recover:
+        replies.append(reply("C"))
+    client = _unit_client(replies)
+    monkeypatch.setattr(
+        stage_driver_mod, "commit_stage", lambda *args, **kwargs: (True, {"ok": True})
+    )
+
+    result = stage_driver_mod.drive_stage(client, "bom", "passive board", state_path, tmp_path)
+
+    assert result["commit_ok"] is recover
+    assert [call["serialization"] for call in client.calls[:3]] == [False, False, True]
+    for call in client.calls:
+        schema = call["response_format"]["json_schema"]["schema"]
+        groups = next(
+            variant["properties"]["groups"]
+            for variant in schema["anyOf"]
+            if "groups" in variant.get("properties", {})
+        )
+        assert groups["maxItems"] == 21
+        assert call["max_tokens"] == 2048
+    if recover:
+        assert [(part["ref"], part["sheet"]) for part in result["slot"]["parts"]] == [
+            ("C1", "A"),
+            ("C2", "A"),
+            ("C3", "B"),
+            ("C4", "B"),
+            ("C5", "C"),
+            ("C6", "C"),
+        ]
+        assert len(client.calls) == 4
+    else:
+        assert result["failure_kind"] == "unit_repair_exhausted"
+        assert len(client.calls) == 3
+        saved = json.loads((tmp_path / "drafts" / "bom-units.json").read_text())
+        assert saved["candidates"]["bom-s000"]["groups"] == [_group_payload(sheet="A")]
+
+
+def test_work_unit_nonconsecutive_failure_retains_accepted_sibling(tmp_path, monkeypatch):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    client = _unit_client(
+        [_unit_reply("U1"), _unit_reply("X1"), _unit_reply("Y1"), _unit_reply("X1", "RENAMED")]
+    )
+    events = []
+
+    result = stage_driver_mod.drive_stage(
+        client, "wiring", "test", state_path, tmp_path, progress=events.append
+    )
+
+    assert result["failure_kind"] == "unit_repair_exhausted"
+    assert len(client.calls) == 4
+    saved = json.loads((tmp_path / "drafts" / "wiring-units.json").read_text())
+    assert saved["candidates"] == {"wiring-u000": {"pins": [{"ref": "U1", "pin": "1", "net": "N"}]}}
+    done = next(event for event in events if event["kind"] == "stage_done")
+    assert done["diagnostic"]["unit_id"] == "wiring-u001"
+    assert done["diagnostic"]["defects"]["unknown-ref"] == ["X1"]
+    assert done["diagnostic"]["defects"]["unexpected"] == ["X1.1"]
+    assert "X1.1" in done["schema_error"]
+
+
 def test_invalid_wiring_unit_escalates_after_first_attempt(tmp_path, monkeypatch):
     state_path = _work_unit_state(tmp_path, monkeypatch)
     client = _unit_client([_unit_reply("R1", "WRONG"), _unit_reply("U1"), _unit_reply("R1")])
@@ -2489,6 +2898,7 @@ def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monk
                     "sheet": "PD TRIGGER",
                     "role": "bus_interface",
                     "family": "pd_trigger_controller",
+                    "exact_part": "HUSB238",
                     "parameters": {"supported_pdos": "9V,12V,20V"},
                     "ports": {"VBUS": "VBUS"},
                 },
@@ -2593,19 +3003,10 @@ def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monk
 
     assert result["commit_ok"] is True, result.get("error") or result
     assert result.get("needs_input") is not True
-    assert len(client.calls) == 2
-    feedback = client.calls[1]["messages"][-1]["content"]
-    assert "committed architecture is binding" in feedback
-    assert "requirement_ids=['pd_trigger_controller', 'usb_c_receptacle']" in feedback
-    assert "do not emit components owned by another requirement" in feedback
     assert {part["value"] for part in committed[0]["parts"]} == {
         "HUSB238",
         "USB_C_Receptacle_HRO_TYPE-C-31-M-12",
     }
-    assert [call["collection_bounds"][0].total for call in client.calls] == [64] * 2
-    assert [call["serialization"] for call in client.calls] == [False, False]
-    assert [call["max_tokens"] for call in client.calls] == [2048] * 2
-    assert [call["model"] for call in client.calls] == [str(DESIGN_PROFILES["pro"]["model"])] * 2
 
 
 @pytest.mark.parametrize(
@@ -2734,6 +3135,109 @@ def test_work_unit_repeated_commit_signature_stops_when_candidate_also_repeats(
     assert result["aggregate_repair_rounds"] == 2
     assert len(client.calls) == 4
     assert commits["count"] == 3
+
+
+def test_work_unit_nonconsecutive_commit_failure_stops_before_another_redraft(
+    tmp_path, monkeypatch
+):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    client = _unit_client(
+        [_unit_reply("U1"), _unit_reply("R1"), _unit_reply("U1", "OTHER"), _unit_reply("U1")]
+    )
+    committed = []
+
+    def reject(_stage, slot, *args, **kwargs):
+        committed.append(slot)
+        return False, {"ok": False, "errors": ["same gate"], "offenders": ["U1.1"]}
+
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", reject)
+    result = stage_driver_mod.drive_stage(
+        client, "wiring", "test", state_path, tmp_path, max_retries=99
+    )
+
+    assert result["failure_kind"] == "commit_rejected"
+    assert len(client.calls) == 4
+    assert len(committed) == 3
+    assert committed[0] == committed[2]
+    assert committed[0] != committed[1]
+
+
+def test_repeated_singleton_signal_escalates_to_architecture_reconciliation(
+    tmp_path,
+    monkeypatch,
+):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    client = _unit_client(
+        [
+            _unit_reply("U1"),
+            _unit_reply("R1"),
+            _unit_reply("U1", "PRESERVED"),
+        ]
+    )
+    commits = {"count": 0}
+    rejection = {
+        "ok": False,
+        "errors": ["9.15 no dangling signal nets"],
+        "offenders": [
+            "net 'CTRL' on sheet 'A' wires only U1.1 and is neither a power net "
+            "nor a declared inter-sheet net"
+        ],
+    }
+
+    def reject(*args, **kwargs):
+        commits["count"] += 1
+        return False, rejection
+
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", reject)
+    result = stage_driver_mod.drive_stage(
+        client,
+        "wiring",
+        "test",
+        state_path,
+        tmp_path,
+        max_retries=99,
+    )
+
+    assert result["failure_kind"] == "architecture_reconciliation_required"
+    assert result["aggregate_repair_rounds"] == 1
+    assert len(client.calls) == 3
+    assert commits["count"] == 2
+
+
+@pytest.mark.parametrize("offender_ref", ["U1", "R1"])
+def test_singleton_reconciliation_respects_exact_immutable_pin_owner(
+    tmp_path, monkeypatch, offender_ref
+):
+    from kicraft.server import stage_runtime
+
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        stage_runtime,
+        "deterministic_wiring_candidate",
+        lambda unit, *_: (
+            {"pins": [{"ref": "U1", "pin": "1", "net": "CTRL"}]} if unit.refs == ("U1",) else None
+        ),
+    )
+    client = _unit_client([_unit_reply("R1"), _unit_reply("R1", "OTHER")])
+    rejection = {
+        "ok": False,
+        "errors": ["9.15 no dangling signal nets"],
+        "offenders": [
+            f"net 'CTRL' wires only {offender_ref}.1 and is neither a power net "
+            "nor a declared inter-sheet net"
+        ],
+    }
+    monkeypatch.setattr(
+        stage_driver_mod, "commit_stage", lambda *args, **kwargs: (False, rejection)
+    )
+
+    result = stage_driver_mod.drive_stage(
+        client, "wiring", "test", state_path, tmp_path, max_retries=99
+    )
+
+    assert result["failure_kind"] == "architecture_reconciliation_required"
+    assert result["aggregate_repair_rounds"] == (0 if offender_ref == "U1" else 1)
+    assert len(client.calls) == (1 if offender_ref == "U1" else 2)
 
 
 def test_work_unit_bom_reconcile_question_keeps_pipeline_park_shape(tmp_path, monkeypatch):

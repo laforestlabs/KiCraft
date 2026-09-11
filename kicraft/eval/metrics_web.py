@@ -7,7 +7,9 @@ The web app runs the whole pipeline server-side and persists, per project under
   * ``generated/<stem>/`` with the KiCad files, ``synthesis_check.json``, ERC reports,
   * ``events.jsonl`` (the design event stream).
 
-Token/cost lives in the SQLite spend ledger keyed by ``run_id`` (``p<pid>-<ts>``).
+Token/cost lives in the SQLite spend ledger keyed by ``run_id``. Exact-run
+collection excludes sibling/history runs; project-wide collection deliberately
+aggregates the ``p<pid>-`` prefix when no exact identity is requested.
 
 This collector reuses the shared artifact parsers (so pipeline-completion and
 ERC/synthesis cleanliness are scored identically to the offline harness) and
@@ -85,10 +87,14 @@ def analyze_events(events_path: Path) -> dict:
     }
 
 
-def _token_usage_from_ledger(ledger_path, run_id_prefix: str | None) -> dict | None:
-    """Sum the project's billed token usage from the spend ledger, grouped by the
-    project's run_id prefix (``p<pid>-``). Observability only; never scored, so a
-    missing ledger or import degrades to None like the harness token summary."""
+def _token_usage_from_ledger(
+    ledger_path, run_id_prefix: str | None, *, run_id: str | None = None
+) -> dict | None:
+    """Sum billed tokens for an exact run, or a project prefix when run_id is None.
+
+    Observability only; never scored, so a missing ledger or import degrades to
+    None like the harness token summary.
+    """
     if not ledger_path or not Path(ledger_path).exists():
         return None
     try:
@@ -106,7 +112,10 @@ def _token_usage_from_ledger(ledger_path, run_id_prefix: str | None) -> dict | N
     for r in rows:
         meta = r.get("meta") or {}
         rid = meta.get("run_id") or ""
-        if run_id_prefix and not rid.startswith(run_id_prefix):
+        if run_id is not None:
+            if rid != run_id:
+                continue
+        elif run_id_prefix and not rid.startswith(run_id_prefix):
             continue
         inp += int(r.get("input_tokens") or 0)
         out += int(r.get("output_tokens") or 0)
@@ -124,6 +133,7 @@ def _token_usage_from_ledger(ledger_path, run_id_prefix: str | None) -> dict | N
 
 
 def collect_web_metrics(project_dir, *, ledger_path=None, run_id_prefix=None,
+                        run_id: str | None = None,
                         started_at: str | None = None,
                         finished_at: str | None = None) -> dict:
     """Build the ``m`` metrics dict for a finished web project directory.
@@ -132,8 +142,9 @@ def collect_web_metrics(project_dir, *, ledger_path=None, run_id_prefix=None,
     script gates run unchanged. ``started_at``/``finished_at`` (the project row's
     ISO timestamps) give a precise latency; without them latency falls back to the
     state-history -> synth-checked_at heuristic (flagged approximate). Token usage
-    is pulled from the ledger when ``ledger_path`` is given (prefix defaults to
-    ``p<project_dir name>-``).
+    is pulled from the ledger when ``ledger_path`` is given. ``run_id`` selects
+    only that exact invocation, taking precedence over ``run_id_prefix``. Without
+    an exact identity, aggregate the project prefix (default ``p<project_dir name>-``).
     """
     pd = Path(project_dir)
     state = analyze_state(_find_one(pd, "state.json"))
@@ -150,9 +161,9 @@ def collect_web_metrics(project_dir, *, ledger_path=None, run_id_prefix=None,
     if latency is None:
         latency = compute_latency_min(transcript, state, synth)
 
-    if run_id_prefix is None:
+    if run_id is None and run_id_prefix is None:
         run_id_prefix = f"p{pd.name}-"
-    token_usage = _token_usage_from_ledger(ledger_path, run_id_prefix)
+    token_usage = _token_usage_from_ledger(ledger_path, run_id_prefix, run_id=run_id)
 
     return {
         "state": state, "synth": synth, "erc": erc, "generated": generated,

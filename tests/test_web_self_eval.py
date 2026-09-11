@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from kicraft.eval import load_rubric
 from kicraft.eval.judge import grade_class_j
 from kicraft.eval.metrics_web import collect_web_metrics
@@ -107,6 +105,47 @@ def test_collect_web_metrics_clean_run(tmp_path):
     assert dims["convergence_efficiency"]["level"] == 4
     assert dims["convergence_efficiency"]["partial"] is False
     assert eval_script_gates(m, rub) == []
+
+
+def test_token_metrics_distinguish_exact_run_from_project_aggregation(tmp_path):
+    from kicraft.server.config import Settings
+    from kicraft.server.spend_guard import SpendGuard
+
+    base = _make_project(tmp_path)
+    guard = SpendGuard(Settings(api_key="test", ledger_path=tmp_path / "ledger.db"))
+    guard.record("design", 10, 2, 0.01, {"run_id": "p123-current", "stage": "intent"})
+    guard.record("design", 20, 3, 0.02, {"run_id": "p123-current", "stage": "bom"})
+    guard.record("sibling", 100, 20, 0.10, {"run_id": "p123-current-other"})
+    guard.record("history", 200, 30, 0.20, {"run_id": "p123-previous"})
+    guard.record("unrelated", 1000, 200, 1.0, {"run_id": "p1234-current"})
+
+    report = evaluate_project(
+        base, None, ledger_path=guard.path, run_id="p123-current", skip_judge=True,
+    )
+    assert report["run_id"] == "p123-current"
+    assert report["metrics"]["token_usage"] == {
+        "input_tokens": 30, "output_tokens": 5, "total_tokens": 35,
+        "turns": 2, "estimated_cost_usd": 0.03,
+        "cost_known": True, "by_model": {"design": 2},
+    }
+    # Explicit exact identity wins even if the caller also supplies a broad prefix.
+    exact = collect_web_metrics(
+        base, ledger_path=guard.path, run_id="p123-current", run_id_prefix="p123",
+    )
+    assert exact["token_usage"] == report["metrics"]["token_usage"]
+    # A missing exact run must not fall back to the project's historical spend.
+    missing = collect_web_metrics(base, ledger_path=guard.path, run_id="p123-absent")
+    assert missing["token_usage"] is None
+
+    project = evaluate_project(base, None, ledger_path=guard.path, skip_judge=True)
+    assert project["metrics"]["token_usage"] == {
+        "input_tokens": 330, "output_tokens": 55, "total_tokens": 385,
+        "turns": 4, "estimated_cost_usd": 0.33,
+        "cost_known": True, "by_model": {"design": 2, "sibling": 1, "history": 1},
+    }
+    custom = collect_web_metrics(base, ledger_path=guard.path, run_id_prefix="p1234-")
+    assert custom["token_usage"]["total_tokens"] == 1200
+    assert custom["token_usage"]["estimated_cost_usd"] == 1.0
 
 
 def test_collect_web_metrics_convergence_penalty(tmp_path):

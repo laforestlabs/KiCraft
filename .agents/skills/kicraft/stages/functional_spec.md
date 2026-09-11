@@ -16,6 +16,22 @@ Constraints (enforced by Pydantic):
 
 - Block names must be unique.
 - Every `connection.from_block` and `to_block` must reference a block in this list.
+- Each (`from_block`, `to_block`, `signal_type`) combination must be unique;
+  changing the description does not create another connection.
+
+Connection discipline:
+
+- Emit only actual causal power or signal flows required for the stated functions,
+  once per directed block pair and signal type. Combine descriptions of the same flow.
+- Several independent signals of the same type between the same blocks share
+  ONE edge: list them together in `description`. For example, two digital
+  channels from `INPUT` to `PROCESS` need one `digital` connection describing
+  both channels, not two duplicate connections. This does not remove either
+  channel; architecture defines their individual nets.
+- Do not enumerate every block pair or every `signal_type` enum value. Those are
+  allowed labels, not a checklist of connections the board must have.
+- Fan-out to different consumers, a real reverse-direction flow, and distinct
+  signal types between the same blocks are valid when the functions require them.
 
 Block-boundary heuristics:
 

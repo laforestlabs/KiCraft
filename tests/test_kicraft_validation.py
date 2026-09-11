@@ -53,19 +53,19 @@ LLUPS_AVAILABLE = (LLUPS_ROOT / "LLUPS.kicad_sch").is_file()
 def _write_minimal_project(d: Path, stem: str = "TINY") -> None:
     """Two-sheet fixture that passes every §9 check."""
     (d / f"{stem}.kicad_sch").write_text(
-        f"(kicad_sch\n"
-        f"\t(version 20250114)\n"
-        f'\t(generator "eeschema")\n'
-        f'\t(uuid "11111111-1111-1111-1111-111111111111")\n'
-        f"\t(lib_symbols)\n"
-        f"\t(sheet\n"
-        f"\t\t(at 30 40) (size 30 15)\n"
-        f'\t\t(uuid "22222222-2222-2222-2222-222222222222")\n'
-        f'\t\t(property "Sheetname" "REG" (at 30 39 0))\n'
-        f'\t\t(property "Sheetfile" "REG.kicad_sch" (at 30 56 0))\n'
-        f'\t\t(pin "VBUS" bidirectional (at 60 45 0) (uuid "33333333-3333-3333-3333-333333333333"))\n'
-        f"\t)\n"
-        f")\n"
+        "(kicad_sch\n"
+        "\t(version 20250114)\n"
+        '\t(generator "eeschema")\n'
+        '\t(uuid "11111111-1111-1111-1111-111111111111")\n'
+        "\t(lib_symbols)\n"
+        "\t(sheet\n"
+        "\t\t(at 30 40) (size 30 15)\n"
+        '\t\t(uuid "22222222-2222-2222-2222-222222222222")\n'
+        '\t\t(property "Sheetname" "REG" (at 30 39 0))\n'
+        '\t\t(property "Sheetfile" "REG.kicad_sch" (at 30 56 0))\n'
+        '\t\t(pin "VBUS" bidirectional (at 60 45 0) (uuid "33333333-3333-3333-3333-333333333333"))\n'
+        "\t)\n"
+        ")\n"
     )
     (d / "REG.kicad_sch").write_text(
         "(kicad_sch\n"
@@ -2187,3 +2187,104 @@ def test_a1_usb_dm_rejects_uart_endpoint_without_prescribing_direction(monkeypat
     assert "Rejected wrong-function candidate" in offender
     assert "Move the intended load/destination endpoint" not in offender
     assert "do not assume which side is source or destination" in offender
+
+
+def _typed_led_channel(*, sink=False, drive="LED1"):
+    architecture = Architecture.model_validate(
+        {
+            "sheets": [{"name": "LED", "stem": "LED", "function": "indicator"}],
+            "power_nets": ["GND", "+3V3"],
+            "inter_sheet_nets": [],
+            "requirements": [
+                {
+                    "id": "indicator",
+                    "sheet": "LED",
+                    "role": "driver",
+                    "family": "led-current-resistor",
+                    "ports": {"drive": drive, "gnd": "GND", "vdd": "+3V3"},
+                }
+            ],
+        }
+    )
+    rows = (
+        [("+3V3", [("D1", "2")]), ("LED_NODE", [("D1", "1"), ("R1", "2")])]
+        if sink
+        else [("GND", [("D1", "1")]), ("LED_NODE", [("D1", "2"), ("R1", "2")])]
+    )
+    rows.append((drive, [("R1", "1")]))
+    bom = BOM(
+        parts=[
+            _bpart("D1", "Device:LED", "LED"),
+            _bpart("R1", "Device:R", "LED").model_copy(update={"value": "1k"}),
+        ],
+        connections=[
+            NetConnection(
+                net_name=net,
+                sheet="LED",
+                endpoints=[PinEndpoint(ref=ref, pin=pin) for ref, pin in endpoints],
+            )
+            for net, endpoints in rows
+        ],
+    )
+    return architecture, bom
+
+
+@pytest.mark.parametrize("sink", [False, True])
+def test_typed_led_current_path_requires_forward_symbol_polarity(sink):
+    from kicraft.design.synthesis.validation import check_typed_led_current_paths
+
+    architecture, bom = _typed_led_channel(sink=sink)
+    assert check_typed_led_current_paths(architecture, bom).ok
+    for connection in bom.connections:
+        for endpoint in connection.endpoints:
+            if endpoint.ref == "D1":
+                endpoint.pin = "1" if endpoint.pin == "2" else "2"
+
+    rejected = check_typed_led_current_paths(architecture, bom)
+    assert not rejected.ok
+    assert any("D1.2 (A), D1.1 (K)" in offender for offender in rejected.offenders)
+
+
+def test_typed_led_zero_ohm_bypass_cannot_claim_parallel_resistor_limit():
+    from kicraft.design.synthesis.validation import check_typed_led_current_paths
+
+    architecture, bom = _typed_led_channel()
+    bom.parts.append(_bpart("R2", "Device:R", "LED").model_copy(update={"value": "0R"}))
+    for connection in bom.connections:
+        if connection.net_name in {"LED1", "LED_NODE"}:
+            connection.endpoints.append(
+                PinEndpoint(ref="R2", pin="1" if connection.net_name == "LED1" else "2")
+            )
+    assert not check_typed_led_current_paths(architecture, bom).ok
+    bom.parts[-1].value = "1k"
+    assert check_typed_led_current_paths(architecture, bom).ok
+
+
+def test_typed_led_limiter_does_not_join_unrelated_local_net_names():
+    from kicraft.design.synthesis.validation import check_typed_led_current_paths
+
+    architecture, bom = _typed_led_channel()
+    bom.parts.append(_bpart("R2", "Device:R", "OTHER").model_copy(update={"value": "0R"}))
+    bom.connections.extend(
+        [
+            NetConnection(
+                net_name="LED1", sheet="OTHER", endpoints=[PinEndpoint(ref="R2", pin="1")]
+            ),
+            NetConnection(
+                net_name="LED_NODE", sheet="OTHER", endpoints=[PinEndpoint(ref="R2", pin="2")]
+            ),
+        ]
+    )
+    assert check_typed_led_current_paths(architecture, bom).ok
+
+
+def test_typed_led_guard_does_not_reverse_negative_rail_indicator():
+    from kicraft.design.synthesis.validation import check_typed_led_current_paths
+
+    architecture, bom = _typed_led_channel(drive="-5V")
+    architecture.power_nets.append("-5V")
+    for connection in bom.connections:
+        for endpoint in connection.endpoints:
+            if endpoint.ref == "D1":
+                endpoint.pin = "1" if endpoint.pin == "2" else "2"
+    assert check_typed_led_current_paths(architecture, bom).ok

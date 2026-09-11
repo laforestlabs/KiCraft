@@ -103,7 +103,7 @@ USB_C_5V_SINK = _power_recipe(
     ports=(
         Port(name="vbus", direction="power"),
         Port(name="gnd", direction="power"),
-        Port(name="shield", direction="passive", required=False),
+        Port(name="shield", direction="passive", required=False, allow_ground=True),
     ),
     internal_nets=("cc1", "cc2", "shield"),
     parts=(
@@ -152,7 +152,7 @@ USB_C_USB2_DEVICE = _power_recipe(
         Port(name="gnd", direction="power"),
         Port(name="usb_dp", direction="bidirectional"),
         Port(name="usb_dm", direction="bidirectional"),
-        Port(name="shield", direction="passive", required=False),
+        Port(name="shield", direction="passive", required=False, allow_ground=True),
     ),
     internal_nets=("cc1", "cc2", "dp_conn", "dm_conn", "dp_esd", "dm_esd", "shield"),
     parts=(
@@ -285,6 +285,144 @@ CH224K_PD_TRIGGER = _power_recipe(
         Assertion(
             code="pd_fixed_pdo_review",
             message="9 V level selection is CFG1=CFG2=CFG3=0; VDD and VBUS sense use datasheet series resistors",
+        ),
+    ),
+)
+
+
+# WCH 1F sections 5.2.1/6.1 specify resistor selection, not three logic outputs.
+# The SS13D07VG4 manufacturer drawing has a long common contact (pad 2)
+# selecting pads 1, 3, 4. Its installed manifest's "SPDT/3-pin" prose is wrong;
+# the installed symbol/footprint correctly include four contacts and two tabs.
+CH224K_PD_SELECTABLE = RecipeDefinition(
+    recipe="ch224k-pd-selectable@1",
+    family="usb-pd-selectable-trigger",
+    default_for_family=True,
+    maturity="production",
+    protected_aliases=("usb-pd-selectable-trigger",),
+    required_sheet_roles=("power",),
+    parameter_defaults={
+        "voltage_options": "9/12/20V",
+        "selection_mode": "resistor-sp3t",
+        "selector_part": "SS13D07VG4",
+    },
+    allowed_parameters={
+        "voltage_options": ("9/12/20V",),
+        "selection_mode": ("resistor-sp3t",),
+        "selector_part": ("SS13D07VG4",),
+    },
+    ports=(
+        Port(name="cc1", direction="bidirectional"),
+        Port(name="cc2", direction="bidirectional"),
+        Port(name="vbus", direction="power"),
+        Port(name="gnd", direction="power"),
+    ),
+    internal_nets=("vdd", "vbus_sense", "pd_only", "cfg1", "select_9v", "select_12v"),
+    parts=(
+        _part(
+            "controller",
+            "U",
+            "CH224K",
+            "ch224k:CH224K",
+            "ch224k:ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP",
+            mpn="CH224K",
+        ),
+        _part(
+            "selector",
+            "SW",
+            "SS13D07VG4",
+            "ss13d07vg4:SS13D07VG4",
+            "ss13d07vg4:SW-TH_SS13D07VG4",
+            mpn="SS13D07VG4",
+        ),
+        _passive("select_9v", "R", "6.8k 1%"),
+        _passive("select_12v", "R", "24k 1%"),
+        # At 22 V input and 3.24 V VDD this dissipates 0.352 W nominal.
+        _part(
+            "vdd_feed",
+            "R",
+            "1k 1% 0.5W",
+            "Device:R",
+            "Resistor_SMD:R_1210_3225Metric",
+        ),
+        _passive("vbus_sense", "R", "10k"),
+        _passive("decoupling", "C", "1uF 10V"),
+    ),
+    pins=(
+        Pin(role="controller", pin="1", net="vdd"),
+        Pin(role="controller", pin="4", net="pd_only"),
+        Pin(role="controller", pin="5", net="pd_only"),
+        Pin(role="controller", pin="6", net="cc2"),
+        Pin(role="controller", pin="7", net="cc1"),
+        Pin(role="controller", pin="8", net="vbus_sense"),
+        Pin(role="controller", pin="9", net="cfg1"),
+        Pin(role="controller", pin="11", net="gnd"),
+        Pin(role="selector", pin="1", net="select_9v"),
+        Pin(role="selector", pin="2", net="cfg1"),
+        Pin(role="selector", pin="3", net="select_12v"),
+        Pin(role="selector", pin="5", net="gnd"),
+        Pin(role="selector", pin="6", net="gnd"),
+        Pin(role="select_9v", pin="1", net="select_9v"),
+        Pin(role="select_9v", pin="2", net="gnd"),
+        Pin(role="select_12v", pin="1", net="select_12v"),
+        Pin(role="select_12v", pin="2", net="gnd"),
+        Pin(role="vdd_feed", pin="1", net="vbus"),
+        Pin(role="vdd_feed", pin="2", net="vdd"),
+        Pin(role="vbus_sense", pin="1", net="vbus"),
+        Pin(role="vbus_sense", pin="2", net="vbus_sense"),
+        Pin(role="decoupling", pin="1", net="vdd"),
+        Pin(role="decoupling", pin="2", net="gnd"),
+    ),
+    no_connects=(
+        *(NoConnect(role="controller", pin=pin) for pin in ("2", "3", "10")),
+        NoConnect(role="selector", pin="4"),
+    ),
+    placement_constraints=(
+        Placement(kind="decoupling_proximity", role="controller", parameters={"max_mm": 3.0}),
+    ),
+    electrical_assertions=(
+        Assertion(
+            code="pd_resistor_selector",
+            message="SS13D07VG4 common pin 2 selects pin 1: 6.8k to GND requests 9V; "
+            "pin 3: 24k requests 12V; pin 4: open requests 20V. CFG2/CFG3 remain NC.",
+        ),
+        Assertion(
+            code="pd_direct_cc",
+            message="Connect CC1/CC2 directly to a USB-C receptacle, with no parallel "
+            "external Rd or separate 5V sink. CH224K provides the sink termination. "
+            "DP/DM are shorted locally for PD-only operation, not connected to USB data.",
+        ),
+        Assertion(
+            code="pd_selector_assembly",
+            message="Populate both 1% selection resistors and a >=0.5W 1k VDD feed "
+            "resistor in 1210. Solder exposed ground pad and both switch frame tabs to GND. "
+            "Label positions by continuity (2-1=9V, 2-3=12V, 2-4=20V). "
+            "Select with power disconnected; contact gaps request 20V. The source must "
+            "offer the requested PDO; VBUS starts at 5V and is not a regulated output. "
+            "All external VBUS circuitry and the load must tolerate 20V plus transients. "
+            "This receptacle block does not implement E-Mark simulation or guarantee >3A.",
+        ),
+    ),
+    source_documents=(
+        Source(
+            url="https://components101.com/sites/default/files/component_datasheet/WCH_CH224K_ENG.pdf",
+            title="WCH CH224 manual (English translation)",
+            revision="1F",
+            reviewed_date="2026-09-11",
+            sections=(
+                "4.3 pin functions",
+                "5.2.1 resistor configuration",
+                "5.5 PD only",
+                "6.1 CH224K female-port reference schematic",
+                "7.5 VDD regulator",
+            ),
+        ),
+        Source(
+            url="https://datasheet.lcsc.com/datasheet/pdf/39fcef34462917ff9922c33e708581d0.pdf?productCode=C2681578",
+            title="SHOUHAN SS-13D07VG4 specification for approval",
+            revision="2017-02-15 / drawing 2016-04-02",
+            reviewed_date="2026-09-11",
+            sections=("page 4 contact schematic and PCB layout",),
         ),
     ),
 )
@@ -674,6 +812,7 @@ WAVE_B_POWER_RECIPES = (
     USB_C_5V_SINK,
     USB_C_USB2_DEVICE,
     CH224K_PD_TRIGGER,
+    CH224K_PD_SELECTABLE,
     TP4056_1S_CHARGER,
     ME6211_3V3,
     MCP1700_3V3,

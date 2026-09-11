@@ -15,6 +15,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import pytest
+
 
 from kicraft.eval import self_eval as se
 
@@ -231,6 +233,12 @@ def test_event_writer_keeps_only_design_and_build_kinds(tmp_path):
             "attempt": 2,
             "mode": "full",
         },
+        {
+            "kind": "work_unit_attempt",
+            "stage": "bom",
+            "unit_id": "bom-s001",
+            "outcome": "invalid_work_unit",
+        },
         {"kind": "stage_done", "stage": "bom", "ok": True},
         {"kind": "build_start"},
         {"kind": "build_log", "text": "ok"},
@@ -245,11 +253,83 @@ def test_event_writer_keeps_only_design_and_build_kinds(tmp_path):
         "retry",
         "serialization_recovery",
         "candidate_decoded",
+        "work_unit_attempt",
         "stage_done",
         "build_start",
         "build_log",
         "build_done",
     ]
+
+
+def test_stage_failure_attribution_uses_structured_gate_and_unit_fields(tmp_path):
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        json.dumps(
+            {
+                "kind": "retry",
+                "stage": "bom",
+                "failure_kind": "commit_rejected",
+                "commit_gate_codes": ["bom_footprint_unresolved"],
+                "work_unit_ids": ["bom-s001"],
+                "accepted_siblings_retained": 3,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    attribution = se._stage_failure_attribution(
+        {"stage_status": {"bom": {"ok": False, "failure_kind": "commit_rejected"}}},
+        events,
+    )
+    assert attribution == {
+        "failed_stage": "bom",
+        "failure_kind": "commit_rejected",
+        "failure_codes": ["bom_footprint_unresolved"],
+        "work_unit_ids": ["bom-s001"],
+        "accepted_siblings_retained": 3,
+    }
+
+
+def test_stage_failure_report_reads_completed_campaign_without_provider_calls(tmp_path):
+    from kicraft.eval.stage_failure_report import analyze_campaign
+
+    run_dir = tmp_path / "run_01_case"
+    (run_dir / ".kicraft").mkdir(parents=True)
+    (run_dir / ".kicraft" / "state.json").write_text(
+        json.dumps(
+            {
+                "stage_status": {
+                    "intent": {"ok": True},
+                    "functional_spec": {
+                        "ok": False,
+                        "failure_kind": "invalid_schema",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "events.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "summary.json").write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "slug": "case",
+                        "rundir": str(run_dir),
+                        "design_committed": False,
+                        "design_failure_kind": "invalid_schema",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = analyze_campaign(tmp_path)
+
+    assert report["stage_counts"] == {"functional_spec": 1}
+    assert report["failure_matrix"][0]["failure_kind"] == "invalid_schema"
 
 
 # --------------------------------------------------------------------------- #
@@ -566,6 +646,161 @@ def test_evaluate_one_isolates_exceptions(tmp_path, monkeypatch):
     )
     assert "spend ceiling exceeded" in rec["error"]
     assert "duration_s" in rec and rec["index"] == 3 and rec["slug"] == "abrief"
+
+
+def test_same_brief_campaigns_isolate_budget_and_reported_spend(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from kicraft.server.config import Settings
+    from kicraft.server.spend_guard import SpendGuard
+
+    guard = SpendGuard(Settings(
+        api_key="test",
+        ledger_path=tmp_path / "ledger.db",
+        kill_switch=False,
+        project_llm_budget_usd=0.10,
+        daily_usd_ceiling=10.0,
+        total_usd_ceiling=10.0,
+    ))
+
+    def paid_session(ws, brief, stages, *, run_id, **kwargs):
+        guard.preflight(call_ceiling_usd=0.06, run_id=run_id)
+        guard.record("fixture", 10, 2, 0.06, {"run_id": run_id, "stage": "intent"})
+        return {
+            "status": "failed",
+            "last_stage": "intent",
+            "results": [{"cost_usd": 0.06, "error": "controlled paid failure"}],
+        }
+
+    monkeypatch.setattr(se.time, "time", lambda: 1700000000)
+    monkeypatch.setattr(se, "run_session", paid_session)
+    entry = {"slug": "same-brief", "archetype": "fixture", "brief": "An isolated financial probe"}
+    records = [
+        se.evaluate_one(
+            SimpleNamespace(guard=guard), 9, entry, tmp_path / campaign,
+            judge_model=None, skip_judge=True,
+        )
+        for campaign in ("campaign-a", "campaign-b")
+    ]
+
+    assert records[0]["run_id"] != records[1]["run_id"]
+    for record in records:
+        assert "error" not in record
+        assert "budget_refusal" not in record
+        assert record["design_error"] == "controlled paid failure"
+        assert record["design_cost_usd"] == pytest.approx(0.06)
+        assert record["stage_cost_usd"] == {"intent": pytest.approx(0.06)}
+        assert guard.spent_for_run(record["run_id"]) == pytest.approx(0.06)
+        assert Path(record["rundir"]).name == "run_09_same-brief"
+        report = json.loads(Path(record["report_path"]).read_text())
+        assert report["run_id"] == record["run_id"]
+        assert report["metrics"]["token_usage"] == {
+            "input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
+            "turns": 1, "estimated_cost_usd": 0.06,
+            "cost_known": True, "by_model": {"fixture": 1},
+        }
+    assert guard.spent_total() == pytest.approx(0.12)
+
+
+def test_budget_exception_preserves_paid_failed_stage_and_campaign_cost(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from kicraft.server.config import Settings
+    from kicraft.server.spend_guard import SpendGuard
+
+    guard = SpendGuard(Settings(
+        api_key="test",
+        ledger_path=tmp_path / "ledger.db",
+        kill_switch=False,
+        daily_usd_ceiling=10.0,
+        total_usd_ceiling=10.0,
+    ))
+
+    def paid_failure(ws, brief, stages, *, run_id, progress, **kwargs):
+        guard.record("m", 1, 1, 0.0048, {"run_id": run_id, "stage": "intent"})
+        progress({"kind": "stage_start", "stage": "intent"})
+        progress({"kind": "stage_done", "stage": "intent", "ok": True, "cost": 0.0048})
+        progress({"kind": "stage_start", "stage": "bom"})
+        guard.record("m", 1, 1, 0.06, {"run_id": run_id, "stage": "bom"})
+        progress({
+            "kind": "work_unit_attempt", "stage": "bom", "unit_id": "bom-s002",
+            "outcome": "invalid_work_unit", "cost_usd": 0.06,
+        })
+        guard.preflight(call_ceiling_usd=0.0384, run_id=run_id)
+        pytest.fail("over-budget call was admitted")
+
+    monkeypatch.setattr(se, "run_session", paid_failure)
+    rec = se.evaluate_one(
+        SimpleNamespace(guard=guard), 1,
+        {"slug": "failed", "archetype": "x", "brief": "a board"}, tmp_path,
+        judge_model=None, skip_judge=True, design_only=True,
+    )
+    assert rec["design_committed"] is False
+    assert rec["failed_stage"] == "bom"
+    assert rec["failure_kind"] == "budget_refused"
+    assert rec["design_cost_usd"] == pytest.approx(0.0648)
+    assert rec["stage_cost_usd"] == {"intent": pytest.approx(0.0048), "bom": pytest.approx(0.06)}
+    assert rec["budget_refusal"]["call_ceiling_usd"] == pytest.approx(0.0384)
+    success = {
+        "index": 2, "slug": "passed", "design_committed": True,
+        "design_cost_usd": 0.01, "judge_cost_usd": 0.002,
+    }
+    report = se.compile_report([rec, success], tmp_path, {})
+    assert report["stage_outcomes"] == {"bom": 1, "passed": 1}
+    assert report["failed_run_cost_usd"] == pytest.approx(0.0648)
+    assert report["cost_per_committed_design_usd"] == pytest.approx(0.0768)
+    assert se._campaign_costs([rec])["cost_per_committed_design_usd"] is None
+
+
+def test_legacy_failure_report_recovers_cost_without_double_counting(tmp_path):
+    from kicraft.eval.stage_failure_report import analyze_campaign
+
+    failed = tmp_path / "failed"
+    failed.mkdir()
+    events = [
+        {"kind": "stage_start", "stage": "bom"},
+        {"kind": "work_unit_attempt", "stage": "bom", "cost_usd": 0.01},
+        {"kind": "stage_done", "stage": "bom", "ok": True, "cost": 0.01},
+        {"kind": "stage_start", "stage": "wiring"},
+        {"kind": "work_unit_attempt", "stage": "wiring", "cost_usd": 0.0548},
+    ]
+    (failed / "events.jsonl").write_text("\n".join(json.dumps(event) for event in events))
+    (tmp_path / "summary.json").write_text(json.dumps({
+        "runs": [
+            {"slug": "failed", "rundir": str(failed), "error": "BudgetExceeded: refused"},
+            {"slug": "passed", "design_committed": True, "design_cost_usd": 0.00872},
+        ],
+    }))
+    report = analyze_campaign(tmp_path)
+    assert report["stage_counts"] == {"wiring": 1, "passed": 1}
+    assert report["failure_matrix"][1]["failure_kind"] == "budget_refused"
+    assert report["total_cost_usd"] == pytest.approx(0.07352)
+    assert report["failed_run_cost_usd"] == pytest.approx(0.0648)
+    assert report["cost_per_committed_design_usd"] == pytest.approx(0.07352)
+
+
+def test_source_fingerprint_changes_for_dirty_and_untracked_source(tmp_path, monkeypatch):
+    import subprocess
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path)
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test")
+    source = tmp_path / "kicraft" / "eval" / "self_eval.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("original\n")
+    git("add", ".")
+    git("commit", "-qm", "initial")
+    monkeypatch.setattr(se, "__file__", str(source))
+    initial = se._source_fingerprint()
+    source.write_text("changed\n")
+    assert se._source_fingerprint() != initial
+    source.write_text("original\n")
+    assert se._source_fingerprint() == initial
+    (source.parent / "new_runtime.py").write_text("new source\n")
+    assert se._source_fingerprint() != initial
 
 
 # --------------------------------------------------------------------------- #

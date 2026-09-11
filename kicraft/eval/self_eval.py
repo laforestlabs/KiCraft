@@ -56,6 +56,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -70,6 +71,7 @@ from kicraft.server.session import (
     run_session,
 )
 from kicraft.server.stage_runtime import NONINTERACTIVE_DEFAULTS_INSTRUCTION
+from kicraft.server.spend_guard import BudgetExceeded, KillSwitchEngaged
 from kicraft.tuning.benchmark import BENCHMARK_PROMPTS as BRIEFS
 from kicraft.tuning.benchmark import SHAPED_OUTLINE_PROMPTS
 
@@ -153,6 +155,10 @@ _EVENT_KINDS = frozenset(
         "serialization_recovery",
         "candidate_decoded",
         "stage_diagnostic",
+        "work_unit_plan",
+        "work_unit_attempt",
+        "work_unit_done",
+        "budget_refused",
         "build_start",
         "build_log",
         "build_done",
@@ -226,6 +232,30 @@ def _code_revision() -> str:
         return "unknown"
 
 
+def _source_fingerprint() -> str:
+    """Include inherited dirty source, not just the committed revision."""
+    root = Path(__file__).resolve().parents[2]
+    try:
+        digest = hashlib.sha256()
+        for args in (["rev-parse", "HEAD"], ["diff", "--binary", "HEAD", "--"]):
+            payload = subprocess.check_output(["git", *args], cwd=root, timeout=30)
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        untracked = subprocess.check_output(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", "kicraft", "deploy"],
+            cwd=root,
+            timeout=10,
+        )
+        for name in sorted(filter(None, untracked.split(b"\0"))):
+            payload = (root / os.fsdecode(name)).read_bytes()
+            digest.update(name + b"\0")
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        return "sha256:" + digest.hexdigest()
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
 def _write_campaign_manifest(
     out_dir: Path,
     *,
@@ -240,6 +270,8 @@ def _write_campaign_manifest(
     ]
     immutable = {
         "code_revision": _code_revision(),
+        "source_fingerprint": _source_fingerprint(),
+        "llm_mode": os.environ.get("KICRAFT_LLM_MODE", "live").strip().lower(),
         "design_profile": getattr(settings, "design_profile", "custom"),
         "design_model": settings.model,
         "design_provider_order": list(settings.provider_order),
@@ -261,8 +293,10 @@ def _write_campaign_manifest(
         "caps": {
             "daily_usd": settings.daily_usd_ceiling,
             "total_usd": settings.total_usd_ceiling,
+            "project_usd": settings.project_llm_budget_usd,
             "max_tokens_per_call": settings.max_tokens_per_call,
             "serialization_retries": settings.serialization_retries,
+            "stage_output_limits": dict(getattr(settings, "stage_output_limits", {})),
         },
         "repeats": repeats,
         "corpus_hash": _stable_hash(corpus),
@@ -290,12 +324,13 @@ def _stamp() -> str:
 
 
 def _stem_for(idx: int, entry: dict) -> str:
-    """A stable, filesystem-safe run-dir name; ``p<stem>-`` is also the ledger
-    run_id prefix collect_web_metrics groups token usage by. The benchmark slug is
-    a unique kebab id, so the dir is human-readable and stable across runs; the
-    ``run_NN_`` prefix preserves ordering and keeps the admin's ``run_NN_*`` globs
-    working. (Hyphens in the slug are safe in the run_id: the prefix match appends a
-    trailing ``-`` and every slug is unique.)"""
+    """A stable, filesystem-safe run-dir name, separate from invocation identity.
+
+    The benchmark slug is a unique kebab id, so the dir is human-readable and
+    stable across campaigns; ``run_NN_`` preserves ordering and the admin's
+    ``run_NN_*`` globs. Each evaluation records its own collision-resistant
+    ledger run_id instead of attributing spend by this shared directory name.
+    """
     return f"run_{idx:02d}_{entry['slug']}"
 
 
@@ -586,6 +621,90 @@ def _make_judge_client(s, judge_model, skip_judge: bool):
     return make_client(s.for_judge())
 
 
+def _stage_failure_attribution(state_doc: dict, events_path: Path) -> dict:
+    """Return structured terminal attribution without reparsing human error text."""
+    events = list(_design_events(events_path))
+    statuses = state_doc.get("stage_status") if isinstance(state_doc, dict) else {}
+    statuses = statuses if isinstance(statuses, dict) else {}
+    failed_stage = next(
+        (
+            stage
+            for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
+            if isinstance(statuses.get(stage), dict) and statuses[stage].get("ok") is False
+        ),
+        None,
+    )
+    # An exception can escape before stage_done/state status is persisted. The
+    # unmatched stage_start identifies the interrupted stage, not the last retry
+    # from a previously completed stage.
+    active_stage = None
+    for event in events:
+        if event.get("kind") == "stage_start":
+            active_stage = event.get("stage")
+        elif event.get("kind") == "stage_done" and event.get("stage") == active_stage:
+            active_stage = None
+        if event.get("kind") == "budget_refused":
+            active_stage = event.get("stage") or active_stage
+    failed_stage = active_stage or failed_stage
+    status = statuses.get(failed_stage) if failed_stage is not None else None
+    failure_kind = status.get("failure_kind") if isinstance(status, dict) else None
+    terminal_event: dict = {}
+    for event in events:
+        if failed_stage is not None and event.get("stage") == failed_stage:
+            if event.get("kind") in {"retry", "work_unit_attempt", "budget_refused"}:
+                terminal_event = event
+    unit_ids = terminal_event.get("work_unit_ids")
+    if not isinstance(unit_ids, list):
+        unit_id = terminal_event.get("unit_id")
+        unit_ids = [unit_id] if unit_id else []
+    gate_codes = terminal_event.get("commit_gate_codes")
+    if not isinstance(gate_codes, list):
+        gate_codes = []
+    return {
+        "failed_stage": failed_stage,
+        "failure_kind": failure_kind or terminal_event.get("failure_kind"),
+        "failure_codes": [str(code) for code in gate_codes],
+        "work_unit_ids": [str(unit_id) for unit_id in unit_ids],
+        "accepted_siblings_retained": terminal_event.get("accepted_siblings_retained"),
+    }
+
+
+def _design_events(events_path: Path):
+    if not events_path.is_file():
+        return
+    with events_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(event, dict) and event.get("stage"):
+                yield event
+
+
+def _design_event_costs(events_path: Path) -> dict[str, float]:
+    """Recover interrupted paid units; stage_done replaces, never adds to, them."""
+    costs: dict[str, float] = {}
+    pending: dict[str, float] = {}
+    for event in _design_events(events_path):
+        stage = event.get("stage")
+        if stage not in ("intent", "functional_spec", "architecture", "bom", "wiring"):
+            continue
+        if event.get("kind") == "stage_start":
+            costs[stage] = costs.get(stage, 0.0) + pending.pop(stage, 0.0)
+        elif event.get("kind") == "work_unit_attempt":
+            pending[stage] = pending.get(stage, 0.0) + float(event.get("cost_usd") or 0.0)
+        elif event.get("kind") == "stage_done":
+            cost = event.get("cost")
+            costs[stage] = costs.get(stage, 0.0) + (
+                float(cost) if isinstance(cost, (int, float)) else pending.get(stage, 0.0)
+            )
+            pending.pop(stage, None)
+    for stage, cost in pending.items():
+        costs[stage] = costs.get(stage, 0.0) + cost
+    return costs
+
+
 def evaluate_one(
     client,
     idx: int,
@@ -620,7 +739,7 @@ def evaluate_one(
     (rundir / ".kicraft").mkdir(parents=True, exist_ok=True)
     (rundir / "brief.txt").write_text(prompt + "\n", encoding="utf-8")
     progress = _event_writer(rundir / "events.jsonl", full=full_events)
-    run_id = f"p{stem}-{int(t0)}"
+    run_id = f"p{stem}-{uuid.uuid4().hex}"
 
     # ``prompt`` is kept as the record field name (the web admin + report read it) and
     # mirrors entry["brief"]; ``slug``/``archetype`` are the new corpus identity.
@@ -635,16 +754,32 @@ def evaluate_one(
         "run_id": run_id,
     }
     try:
-        d = run_design(
-            client, prompt, rundir, progress, max_park_rounds=max_park_rounds, run_id=run_id
-        )
-        rec.update(
-            design_status=d["status"],
-            design_cost_usd=round(d["cost_usd"], 6),
-            questions=d["questions"],
-            design_error=d["error"],
-            design_failure_kind=d.get("failure_kind"),
-        )
+        try:
+            d = run_design(
+                client, prompt, rundir, progress, max_park_rounds=max_park_rounds, run_id=run_id
+            )
+            rec.update(
+                design_status=d["status"],
+                design_cost_usd=round(d["cost_usd"], 6),
+                questions=d["questions"],
+                design_error=d["error"],
+                design_failure_kind=d.get("failure_kind"),
+            )
+        finally:
+            # Capture before build/judge: they can share run_id and must not be
+            # counted again as design spend. This also runs on budget exceptions.
+            guard = getattr(client, "guard", None)
+            if guard is not None and hasattr(guard, "spent_by_stage_for_run"):
+                stage_costs = guard.spent_by_stage_for_run(run_id)
+                rec["design_cost_usd"] = round(sum(stage_costs.values()), 6)
+                rec["design_cost_source"] = "spend_ledger"
+            else:
+                stage_costs = _design_event_costs(rundir / "events.jsonl")
+                rec["design_cost_usd"] = max(
+                    rec.get("design_cost_usd", 0.0), round(sum(stage_costs.values()), 6)
+                )
+                rec["design_cost_source"] = "stage_results_and_events"
+            rec["stage_cost_usd"] = stage_costs
         state_doc = {}
         try:
             state_doc = json.loads((rundir / ".kicraft" / "state.json").read_text(encoding="utf-8"))
@@ -663,6 +798,12 @@ def evaluate_one(
         rec["fab_safe"] = rec["design_committed"] and all(
             stage_statuses[stage].get("fab_safe") is not False
             for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
+        )
+        rec.update(
+            _stage_failure_attribution(
+                state_doc,
+                rundir / "events.jsonl",
+            )
         )
 
         if design_only:
@@ -689,6 +830,7 @@ def evaluate_one(
                 judge_model=judge_model,
                 judge_client=judge_client,
                 judge_max_tokens=judge_max_tokens,
+                ledger_path=getattr(guard, "path", None),
                 skip_judge=skip_judge,
                 started_at=started_at,
                 finished_at=_now_iso(),
@@ -716,6 +858,20 @@ def evaluate_one(
             rec["outline_check"] = oc
     except Exception as e:  # noqa: BLE001 - record and keep the batch going
         rec["error"] = f"{type(e).__name__}: {e}"[:600]
+        if "design_status" not in rec:
+            rec["design_status"] = "failed"
+            rec["design_committed"] = False
+            rec.update(
+                _stage_failure_attribution(read_state(rundir) or {}, rundir / "events.jsonl")
+            )
+            if isinstance(e, BudgetExceeded):
+                rec["failure_kind"] = rec["design_failure_kind"] = "budget_refused"
+                rec["budget_refusal"] = {
+                    key: getattr(e, key)
+                    for key in ("scope", "spent_usd", "limit_usd", "call_ceiling_usd", "run_id")
+                }
+            elif isinstance(e, KillSwitchEngaged):
+                rec["failure_kind"] = rec["design_failure_kind"] = "kill_switch"
     rec["duration_s"] = round(time.time() - t0, 1)
     return rec
 
@@ -725,6 +881,28 @@ def evaluate_one(
 # --------------------------------------------------------------------------- #
 def _run_cost(r: dict) -> float:
     return round((r.get("design_cost_usd") or 0.0) + (r.get("judge_cost_usd") or 0.0), 6)
+
+
+def _campaign_costs(records: list[dict]) -> dict:
+    total = sum(_run_cost(record) for record in records)
+    committed = sum(record.get("design_committed") is True for record in records)
+    stage_costs: dict[str, float] = {}
+    for record in records:
+        for stage, cost in (record.get("stage_cost_usd") or {}).items():
+            stage_costs[stage] = stage_costs.get(stage, 0.0) + float(cost)
+    return {
+        "total_cost_usd": round(total, 6),
+        "failed_run_cost_usd": round(
+            sum(
+                _run_cost(record)
+                for record in records
+                if record.get("design_committed") is not True
+            ),
+            6,
+        ),
+        "cost_per_committed_design_usd": round(total / committed, 6) if committed else None,
+        "stage_cost_usd": {stage: round(cost, 6) for stage, cost in sorted(stage_costs.items())},
+    }
 
 
 def _archetype_stats(records: list[dict]) -> dict[str, dict]:
@@ -815,6 +993,21 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
     ]
     repeats = meta.get("repeats", 1)
 
+    stage_outcomes: dict[str, int] = {}
+    failure_families: dict[str, int] = {}
+    for record in records:
+        terminal = (
+            "passed"
+            if record.get("design_committed") is True
+            else (record.get("failed_stage") or "unknown")
+        )
+        stage_outcomes[str(terminal)] = stage_outcomes.get(str(terminal), 0) + 1
+        if record.get("design_committed") is not True:
+            family = str(record.get("failure_kind") or "unattributed")
+            failure_families[family] = failure_families.get(family, 0) + 1
+
+    cost_summary = _campaign_costs(records)
+
     summary = {
         **meta,
         "n": len(records),
@@ -825,6 +1018,8 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         "design_committed": sum(1 for r in records if r.get("design_committed") is True),
         "semantic_clean": sum(1 for r in records if r.get("semantic_clean") is True),
         "fab_safe": sum(1 for r in records if r.get("fab_safe") is True),
+        "stage_outcomes": dict(sorted(stage_outcomes.items())),
+        "failure_families": dict(sorted(failure_families.items())),
         "mean_final": round(statistics.fmean(finals), 1) if finals else None,
         "median_final": round(statistics.median(finals), 1) if finals else None,
         # per-brief-median aggregates (== flat mean/median when repeats == 1)
@@ -847,7 +1042,7 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         "archetype_stats": _archetype_stats(records),
         "outline_stats": _outline_stats(records),
         "per_brief": per_brief,
-        "total_cost_usd": round(sum(_run_cost(r) for r in records), 4),
+        **cost_summary,
         "runs": records,
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -913,6 +1108,10 @@ def _render_md(s: dict) -> str:
         f"  ·  design model: {s.get('design_model')}"
     )
     L.append(f"- total spend: **${s['total_cost_usd']}**  ·  report dir: `{s.get('out_dir')}`")
+    L.append(
+        f"- failed-design spend: **${s['failed_run_cost_usd']}**  ·  "
+        f"all campaign spend / committed design: **{s['cost_per_committed_design_usd']} USD**"
+    )
     L.append("")
 
     arche = s.get("archetype_stats") or {}
@@ -1247,6 +1446,7 @@ def main(argv=None) -> int:
     out_dir = (
         resume_dir if resume_dir else (Path(args.out) if args.out else _default_out_dir())
     ).resolve()
+    fresh_output_directory = not out_dir.exists() or not any(out_dir.iterdir())
     out_dir.mkdir(parents=True, exist_ok=True)
 
     repeats = max(1, args.repeats)
@@ -1265,6 +1465,9 @@ def main(argv=None) -> int:
         selected=selected,
         repeats=repeats,
     )
+    source_fingerprint_start = json.loads(manifest_path.read_text(encoding="utf-8"))["immutable"][
+        "source_fingerprint"
+    ]
     # Expand to one (idx, entry, rep) per run; reuse / re-run is decided per run.
     all_runs = [(i, e, rep) for i, e in selected for rep in reps]
     reused = {
@@ -1293,9 +1496,13 @@ def main(argv=None) -> int:
         "build_slots": build_slots,
         "full_events": not args.lean_events,
         "design_only": args.design_only,
+        "resumed": resume_dir is not None,
+        "resumed_reused_n": len(reused),
+        "fresh_output_directory": fresh_output_directory,
+        "source_fingerprint_start": source_fingerprint_start,
+        "requested_only": args.only,
+        "requested_limit": args.limit,
     }
-    if resume_dir:
-        meta["resumed_reused_n"] = len(reused)
     try:
         from .rubric import load_rubric
 
@@ -1419,6 +1626,11 @@ def main(argv=None) -> int:
                     _checkpoint()
 
     meta["finished_at"] = _now_iso()
+    meta["source_fingerprint_end"] = _source_fingerprint()
+    meta["source_unchanged"] = (
+        source_fingerprint_start != "unknown"
+        and source_fingerprint_start == meta["source_fingerprint_end"]
+    )
     meta["wall_s"] = round(time.monotonic() - t_mono, 1)
     records = [by_run[k] for _, e, rep in all_runs if (k := _run_key(e["slug"], rep)) in by_run]
     summary = compile_report(records, out_dir, meta)

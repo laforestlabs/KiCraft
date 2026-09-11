@@ -6,7 +6,7 @@ import copy
 import re
 from collections.abc import Iterable
 
-from kicraft.design.models import Architecture, BOM, StageDiagnostic
+from kicraft.design.models import Architecture, BOM, StageDiagnostic, is_power_or_ground_name
 from kicraft.design.synthesis.validation import named_part_tokens
 
 DETECTOR_VERSION = 1
@@ -31,7 +31,22 @@ _NONFUNCTIONAL_RE = re.compile(
     re.I,
 )
 _BIDIRECTIONAL_RE = re.compile(r"(?:^|[_\s-])(usb|gpio|i2c|qspi)(?:$|[_\s-])", re.I)
-_SUPPORT_RE = re.compile(r"\b(crystal|clock|decoupl|pull[- ]?up|castellat|passive)\b", re.I)
+_SUPPORT_RE = re.compile(
+    r"\b(?:crystal|decoupl\w*|pull[- ]?(?:up|down)|passive support)\b|"
+    r"\bclock (?:source|generator|oscillator)\b",
+    re.I,
+)
+_SUPPORT_FAMILY_RE = re.compile(
+    r"^(?:resistor|capacitor|crystal|decoupling|pull[-_]?(?:up|down)|passive)"
+    r"(?:$|[-_])",
+    re.I,
+)
+_PHYSICAL_COMPONENT_RE = re.compile(
+    r"\b(?:mcu|microcontroller|ic|qfn|lqfp|tqfp|soic|bga|regulator|"
+    r"transceiver|amplifier|sensor|flash|controller|"
+    r"pushbutton|button|switch|receptacle|connector|header|terminal|holder)\b",
+    re.I,
+)
 _POWER_RE = re.compile(r"\b(power|vbus|vcc|vdd|3v3|5v|1v1|ldo|regulat)\b", re.I)
 
 
@@ -63,7 +78,12 @@ def complete_intent_classification(brief: str, candidate: dict) -> dict:
     completed = dict(candidate)
     expected = named_part_tokens([brief])
     supplied = {_norm_token(part) for part in completed.get("named_parts") or []}
-    missing_parts = [token for token in expected.values() if _norm_token(token) not in supplied]
+    missing_parts = []
+    for token in expected.values():
+        identity = _norm_token(token)
+        if identity not in supplied:
+            missing_parts.append(token)
+            supplied.add(identity)
     if missing_parts:
         completed["named_parts"] = [*(completed.get("named_parts") or []), *missing_parts]
 
@@ -230,9 +250,7 @@ def complete_unsourced_external_rails(
             assumptions.append(note)
     completed["assumptions"] = assumptions
     sheets = list(completed.get("sheets") or [])
-    if not any(
-        isinstance(sheet, dict) and sheet.get("name") == "POWER INPUT" for sheet in sheets
-    ):
+    if not any(isinstance(sheet, dict) and sheet.get("name") == "POWER INPUT" for sheet in sheets):
         sheets.append(
             {
                 "name": "POWER INPUT",
@@ -409,25 +427,206 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
     return diagnostics
 
 
+def _support_only_sheet(sheet: dict, requirements: list[dict]) -> bool:
+    """Distinguish a support-only sheet from a domain containing its own support."""
+    function = str(sheet.get("function") or "")
+    if not _SUPPORT_RE.search(f"{sheet.get('name', '')} {function}"):
+        return False
+    # Typed ownership is stronger than prose mentioning crystals or pull-ups.
+    # Passive requirements alone do not establish an owning IC or interface.
+    if any(
+        not _SUPPORT_FAMILY_RE.search(str(requirement.get("family") or ""))
+        for requirement in requirements
+    ):
+        return False
+
+    # Where typed ownership does not establish a substantive domain, inspect
+    # the physical subject, not a downstream owner in "decoupling for the MCU"
+    # or "crystal connected to the MCU".
+    subject = re.split(
+        r"\b(?:with|including|for|of|connected to|supporting)\b",
+        function,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    owns_component = _PHYSICAL_COMPONENT_RE.search(subject) and (
+        not _SUPPORT_RE.search(subject) or re.search(r"\bic\b", subject, re.I)
+    )
+    return not owns_component
+
+
+def architecture_power_requirement_diagnostics(
+    upstream: dict, candidate: dict
+) -> list[StageDiagnostic]:
+    """Reject power functions with no independently owned physical implementation."""
+    requirements = [row for row in candidate.get("requirements") or [] if isinstance(row, dict)]
+    blocks = {
+        str(block.get("name")): str(block.get("purpose") or "")
+        for block in (upstream.get("functional_spec") or {}).get("blocks") or []
+        if isinstance(block, dict)
+    }
+    rails = candidate.get("rail_voltages") or {}
+    diagnostics = []
+    for requirement in requirements:
+        family = _norm_token(requirement.get("family") or "")
+        generic_power = family in {
+            "powerinput",
+            "powerconversion",
+            "powerdistribution",
+            "directbatteryrail",
+        }
+        distribution = family in {"powerdistribution", "directbatteryrail"}
+        if not generic_power and requirement.get("role") not in {"power_input", "regulator"}:
+            continue
+        ports = requirement.get("ports") or {}
+        port_aliases = {_norm_token(key): net for key, net in ports.items()}
+        input_net = port_aliases.get("input") or port_aliases.get("vin")
+        output_net = port_aliases.get("output") or port_aliases.get("vout")
+        ground_net = port_aliases.get("gnd") or port_aliases.get("ground")
+        parameters = requirement.get("parameters") or {}
+        input_voltage = parameters.get("input_voltage", rails.get(input_net))
+        output_voltage = parameters.get("output_voltage", rails.get(output_net))
+        voltage_change = (
+            type(input_voltage) in (int, float)
+            and type(output_voltage) in (int, float)
+            and abs(input_voltage - output_voltage) > 0.05
+        )
+        incomplete_conversion = voltage_change and (
+            generic_power
+            or not input_net
+            or not output_net
+            or not ground_net
+            or len({input_net, output_net, ground_net}) != 3
+        )
+        if not distribution and not incomplete_conversion:
+            continue
+        owner = (
+            f"requirement {requirement.get('id')!r} on sheet {requirement.get('sheet')!r} "
+            f"(role={requirement.get('role')!r}, family={requirement.get('family')!r})"
+        )
+        evidence = [
+            owner,
+            *(f"ports.{key}={net!r}" for key, net in sorted(ports.items())),
+            *(
+                f"functional block {name!r}: {blocks.get(name, '<purpose unavailable>')}"
+                for name in requirement.get("functional_blocks") or []
+            ),
+        ]
+        if voltage_change:
+            evidence.extend(
+                [
+                    f"input_voltage={input_voltage!r}",
+                    f"output_voltage={output_voltage!r}",
+                    f"input net={input_net!r}; output net={output_net!r}; ground net={ground_net!r}",
+                ]
+            )
+        if incomplete_conversion:
+            repair = (
+                "Voltage conversion must have a typed regulator requirement with a physical "
+                "converter family (and exact part where known), distinct input/output/GND ports "
+                "before BOM. Keep the declared voltages and all functional ownership; split "
+                "the external connector from its converter if they are separate hardware. "
+                "A generic power-input requirement does not own a registered regulator."
+            )
+            code = "architecture_unowned_power_conversion"
+        else:
+            for sibling in requirements:
+                if sibling is requirement or sibling.get("sheet") != requirement.get("sheet"):
+                    continue
+                shared = set(ports.values()) & set((sibling.get("ports") or {}).values())
+                if shared:
+                    evidence.append(
+                        f"same-sheet requirement {sibling.get('id')!r} "
+                        f"({sibling.get('family')!r}) shares nets {sorted(shared)!r}"
+                    )
+            repair = (
+                "A distribution-only requirement cannot own a separate nonempty BOM unit. "
+                "Specify the actual conditioning/filter/protection circuit and its physical "
+                "port bindings. If only shared wiring is intended, assign that function to "
+                "an existing physical owner only when it implements the full committed "
+                "functional purpose. Preserve every functional block and net; do not "
+                "duplicate a source/holder, erase conditioning, or emit an empty BOM."
+            )
+            code = "architecture_unowned_power_support"
+        diagnostics.append(
+            _diag(code, "repair_required", repair + " " + "; ".join(evidence), evidence)
+        )
+    return diagnostics
+
+
+def _typed_rail_sources(
+    candidate: dict, requirements_by_sheet: dict[str, list[dict]]
+) -> dict[str, set[str]]:
+    """Return component-owned input rails for each explicitly driven output rail."""
+    rails = candidate.get("rail_voltages") or {}
+    endpoints = {
+        (str(net.get("name") or ""), str(endpoint.get("sheet") or ""), endpoint.get("direction"))
+        for net in candidate.get("inter_sheet_nets") or []
+        if isinstance(net, dict)
+        for endpoint in net.get("endpoints") or []
+        if isinstance(endpoint, dict)
+    }
+    topologies = candidate.get("topologies") or {}
+    relation_terms = re.compile(
+        r"\b(?:fuse|switch|net tie|filter|ideal diode|converter|regulator|"
+        r"buck|boost|power path|current limit(?:er|ing|ed)?)\b",
+        re.I,
+    )
+    sources: dict[str, set[str]] = {}
+    for sheet, requirements in requirements_by_sheet.items():
+        for requirement in requirements:
+            if requirement.get("role") == "connector":
+                continue
+            ports = requirement.get("ports") or {}
+            port_aliases = {_norm_token(key): net for key, net in ports.items()}
+            input_net = port_aliases.get("input") or port_aliases.get("vin")
+            output_net = port_aliases.get("output") or port_aliases.get("vout")
+            if (
+                not isinstance(input_net, str)
+                or not isinstance(output_net, str)
+                or input_net == output_net
+                or input_net not in rails
+                or output_net not in rails
+                or (input_net, sheet, "input") not in endpoints
+                or (output_net, sheet, "output") not in endpoints
+            ):
+                continue
+            # Only this component's family and owned functional topology establish
+            # circuit meaning. Unrelated sheet prose and rail-name mentions do not.
+            meaning = " ".join(
+                [
+                    str(requirement.get("family") or ""),
+                    *(
+                        str(topologies.get(block) or "")
+                        for block in requirement.get("functional_blocks") or []
+                    ),
+                ]
+            )
+            if relation_terms.search(re.sub(r"[-_]", " ", meaning)):
+                sources.setdefault(output_net, set()).add(input_net)
+    return sources
+
+
 def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
-    diagnostics: list[StageDiagnostic] = []
-    fs = upstream.get("functional_spec") or {}
-    blocks = {str(b.get("name")): b for b in fs.get("blocks") or [] if isinstance(b, dict)}
+    diagnostics = architecture_power_requirement_diagnostics(upstream, candidate)
     sheets = candidate.get("sheets") or []
+    requirements_by_sheet: dict[str, list[dict]] = {}
+    for requirement in candidate.get("requirements") or []:
+        if isinstance(requirement, dict):
+            requirements_by_sheet.setdefault(str(requirement.get("sheet") or ""), []).append(
+                requirement
+            )
     for sheet in sheets:
         if not isinstance(sheet, dict):
             continue
         name = str(sheet.get("name") or "")
         function = str(sheet.get("function") or "")
-        block = blocks.get(name.replace(" ", "_"))
         physical_power_domain = re.search(
-            r"\b(?:ldo|buck|regulat(?:or|ion)?|convert(?:er|ing)?|supply|input|sink|controller|protection)\b",
+            r"\b(?:ldo|buck|regulat(?:or|ion)?|convert(?:er|ing)?|supply|input|sink|controller|protection|connector|header|terminal|battery|holder)\b",
             f"{name} {function}",
             re.I,
         )
-        looks_like_power_only = bool(block and block.get("category") == "power") or bool(
-            _POWER_RE.search(name)
-        )
+        looks_like_power_only = is_power_or_ground_name(name) or bool(_POWER_RE.search(name))
         if looks_like_power_only and not physical_power_domain:
             diagnostics.append(
                 _diag(
@@ -437,13 +636,7 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                     [name],
                 )
             )
-        support_text = f"{name} {function}"
-        if re.search(
-            r"\b(?:crystal|decoupl|pull[- ]?up|passive support)\b|"
-            r"\bclock (?:source|generator|oscillator)\b",
-            support_text,
-            re.I,
-        ):
+        if len(sheets) > 1 and _support_only_sheet(sheet, requirements_by_sheet.get(name, [])):
             diagnostics.append(
                 _diag(
                     "architecture_fragmented_physical_domain",
@@ -684,17 +877,7 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     inter_sheet_nets = [
         net for net in candidate.get("inter_sheet_nets") or [] if isinstance(net, dict)
     ]
-    topology_descriptions = [
-        str(description) for description in (candidate.get("topologies") or {}).values()
-    ]
-    topology_descriptions.extend(
-        str(sheet.get("function") or "") for sheet in sheets if isinstance(sheet, dict)
-    )
-    relation_terms = re.compile(
-        r"\b(?:fuse|switch|net[- ]?tie|filter|ideal diode|converter|regulator|"
-        r"buck|boost|power path)\b",
-        re.I,
-    )
+    rail_sources = _typed_rail_sources(candidate, requirements_by_sheet)
     voltage_groups: dict[float, list[str]] = {}
     for rail_name, voltage in rail_voltages.items():
         voltage_groups.setdefault(round(float(voltage), 3), []).append(str(rail_name))
@@ -716,13 +899,14 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                     if isinstance(endpoint, dict)
                 }
                 common_endpoints = left_endpoints & right_endpoints
-                left_token = _norm_token(left_name)
-                right_token = _norm_token(right_name)
-                relationship_defined = any(
-                    left_token in _norm_token(description)
-                    and right_token in _norm_token(description)
-                    and relation_terms.search(description)
-                    for description in topology_descriptions
+                left_sources = rail_sources.get(left_name, set())
+                right_sources = rail_sources.get(right_name, set())
+                # Separate post-component outputs may share an upstream supply;
+                # they remain distinct nets, including independent current limits.
+                relationship_defined = (
+                    left_name in right_sources
+                    or right_name in left_sources
+                    or bool(left_sources & right_sources)
                 )
                 if not relationship_defined:
                     diagnostics.append(
@@ -882,6 +1066,12 @@ def _bom(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     for part in candidate.get("parts") or []:
         if isinstance(part, dict):
             parts_by_sheet.setdefault(str(part.get("sheet") or ""), []).append(part)
+    requirements_by_sheet: dict[str, list[dict]] = {}
+    for requirement in architecture.get("requirements") or []:
+        if isinstance(requirement, dict):
+            requirements_by_sheet.setdefault(str(requirement.get("sheet") or ""), []).append(
+                requirement
+            )
     ic_role = re.compile(
         r"\b(?:controller|mcu|regulator|converter|buck|boost|amplifier|"
         r"level shifter|sensor|bridge|driver|hub)\b",
@@ -892,10 +1082,36 @@ def _bom(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
         if not isinstance(sheet, dict):
             continue
         sheet_name = str(sheet.get("name") or "")
-        role_text = f"{sheet_name} {sheet.get('function', '')}"
+        sheet_parts = parts_by_sheet.get(sheet_name, [])
+        requirements = requirements_by_sheet.get(sheet_name, [])
+        connector_owned = (
+            bool(requirements)
+            and all(
+                requirement.get("role") == "connector" and requirement.get("ports")
+                for requirement in requirements
+            )
+            and any(str(part.get("ref") or "").startswith(("J", "P")) for part in sheet_parts)
+        )
+        # A physical connector may be named for the external IC it connects to.
+        # Do not infer that IC from its sheet title, but keep explicit active
+        # functions and typed active requirements authoritative.
+        role_text = " ".join(
+            [
+                "" if connector_owned else sheet_name,
+                str(sheet.get("function") or ""),
+                *(
+                    re.sub(
+                        r"[-_]",
+                        " ",
+                        f"{requirement.get('role', '')} {requirement.get('family', '')}",
+                    )
+                    for requirement in requirements
+                    if requirement.get("role") != "connector"
+                ),
+            ]
+        )
         if not ic_role.search(role_text):
             continue
-        sheet_parts = parts_by_sheet.get(sheet_name, [])
         if not any(str(part.get("ref") or "").startswith("U") for part in sheet_parts):
             unsupported_roles.append(sheet_name)
     if unsupported_roles:

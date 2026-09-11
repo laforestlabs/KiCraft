@@ -34,6 +34,7 @@ from .stage_contracts import (
     StageSchemaError,
     _extract_json,
     _normalize_stage_response,
+    apply_collection_bounds,
     build_stage_response_contract,
 )
 from .stage_prompts import (
@@ -147,8 +148,10 @@ def _record_attempt_facts(
     commit_result=None,
     candidate_retained: bool | None = None,
     fallback_reason: str | None = None,
+    schema_error: str | None = None,
 ) -> None:
     usage = (facts.usage or {}) if facts is not None else {}
+    errors = error_facts or {}
     _record_stage_attempt(
         client,
         run_id=run_id,
@@ -166,6 +169,12 @@ def _record_attempt_facts(
         provider_profile=getattr(getattr(client, "s", None), "design_profile", None),
         fallback_reason=fallback_reason,
         reasoning_failure_kind=_reasoning_failure_kind(facts),
+        schema_error=schema_error,
+        failure_detail=_redacted_schema_error(errors.get("message")),
+        response_chars=len(facts.raw) if facts is not None else None,
+        response_format_mode=(
+            facts.response_format_mode if facts is not None else errors.get("response_format_mode")
+        ),
         diagnostic_codes=diagnostic_codes,
         unit_id=unit_id,
         unit_attempt=unit_attempt,
@@ -174,7 +183,9 @@ def _record_attempt_facts(
             commit_result,
             candidate_retained=candidate_retained,
         ),
-        **(error_facts or {}),
+        http_status=errors.get("http_status"),
+        error_code=errors.get("error_code"),
+        request_id=errors.get("request_id"),
     )
 
 
@@ -193,6 +204,7 @@ def _work_unit_attempt_event(
     commit_result: dict | None = None,
     candidate_retained: bool | None = None,
     fallback_reason: str | None = None,
+    schema_error: str | None = None,
 ) -> dict:
     """Build the redacted user-visible counterpart of one ledger attempt row."""
     usage = (facts.usage or {}) if facts is not None else {}
@@ -224,6 +236,12 @@ def _work_unit_attempt_event(
         "request_id": errors.get("request_id"),
         "aggregate_round": aggregate_round,
         "fallback_reason": fallback_reason,
+        "schema_error": schema_error,
+        "response_chars": len(facts.raw) if facts is not None else None,
+        "response_format_mode": (
+            facts.response_format_mode if facts is not None else errors.get("response_format_mode")
+        ),
+        "failure_detail": _redacted_schema_error(errors.get("message")),
         **rejection,
     }
 
@@ -301,14 +319,17 @@ def _retry_feedback(
             msg += (
                 " ARCHITECTURE FIX: add every missing cross-sheet signal to "
                 "`inter_sheet_nets`. Each entry needs a concise net name and at least "
-                "two endpoints using the exact canonical `sheets[].name` values. Do not "
-                "return an empty `inter_sheet_nets` list while any listed connection "
-                "crosses sheets."
+                "two endpoints using the exact canonical `sheets[].name` values. Bind "
+                "that exact net name as a `requirements[].ports` value on each owning "
+                "sheet; direction words are not net bindings. Do not remove required "
+                "signals or endpoints to bypass the binding check."
             )
         if "block-sheet mapping" in rejection_text:
             msg += (
-                " ARCHITECTURE FIX: emit nonempty `sheets`, grouping the functional "
-                "blocks by physical IC domain. Do not return an empty architecture."
+                " ARCHITECTURE FIX: preserve the physical sheet hierarchy and emit "
+                "nonempty implementation requirements whose `functional_blocks` use "
+                "the exact committed Functional Spec block names. Every block needs "
+                "an explicit requirement owner, including blocks sharing one sheet."
             )
     if stage == "bom":
         rejection_text = json.dumps([*(out.get("errors") or []), *(out.get("offenders") or [])])
@@ -414,6 +435,54 @@ def _commit_rejection_signature(out: dict) -> tuple[tuple[str, ...], tuple[str, 
     return tuple(gate_ids), offenders
 
 
+_COMMIT_GATE_PATTERNS = (
+    ("footprint(s) do not resolve", "bom_footprint_unresolved"),
+    ("symbol(s) do not resolve", "bom_symbol_unresolved"),
+    ("symbol pin numbers do not match", "9.27"),
+    ("bom part(s) not orderable", "9.26"),
+    ("multi-element arrays", "9.28"),
+    ("net coverage", "9.11"),
+    ("dangling signal", "9.15"),
+    ("inter-sheet", "architecture_inter_sheet_contract"),
+    ("slot validation failed", "stage_schema"),
+    ("library validation failed", "architecture_library"),
+)
+
+
+def _stable_commit_gate_codes(gate_ids: tuple[str, ...]) -> list[str]:
+    stable: list[str] = []
+    for gate in gate_ids:
+        text = str(gate)
+        match = re.fullmatch(r"9\.\d+", text)
+        if match:
+            code = match.group(0)
+        else:
+            lowered = text.lower()
+            code = next(
+                (candidate for fragment, candidate in _COMMIT_GATE_PATTERNS if fragment in lowered),
+                None,
+            )
+            if code is None:
+                digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+                code = f"unclassified_{digest}"
+        if code not in stable:
+            stable.append(code)
+    return stable
+
+
+def _redacted_schema_error(detail: object) -> str | None:
+    if not detail:
+        return None
+    lines = []
+    for raw_line in str(detail).splitlines():
+        line = re.sub(r"input_value=.*", "input_value=<redacted>", raw_line).strip()
+        if line:
+            lines.append(line)
+        if len(lines) >= 8:
+            break
+    return "\n".join(lines)[:1200] or None
+
+
 def _redacted_rejection_facts(
     commit_result: dict | None,
     *,
@@ -423,14 +492,7 @@ def _redacted_rejection_facts(
     if not isinstance(commit_result, dict):
         return {"candidate_retained": candidate_retained}
     gate_ids, offenders = _commit_rejection_signature(commit_result)
-    stable_gates: list[str] = []
-    for gate in gate_ids:
-        match = re.fullmatch(r"9\.\d+", str(gate))
-        if match:
-            stable_gates.append(match.group(0))
-            continue
-        digest = hashlib.sha256(str(gate).encode("utf-8")).hexdigest()[:12]
-        stable_gates.append(f"unclassified_{digest}")
+    stable_gates = _stable_commit_gate_codes(gate_ids)
     if commit_result.get("failure_kind") == "commit_process_failed":
         stable_gates = ["commit_process_failed"]
     signature_payload = json.dumps(
@@ -514,6 +576,23 @@ def _normalize_questions(raw_list, stage: str) -> list[dict]:
             }
         )
     return out[:3]
+
+
+def _questions_need_input(
+    questions: list[dict],
+    stage: str,
+    *,
+    review_before_commit: bool,
+    answers,
+    instruction,
+) -> bool:
+    # BOM reconciliation is a pipeline escalation, not a user decision. It must
+    # remain visible even after answers or a noninteractive defaults instruction.
+    reconcile = any(question.get("reconcile_target") for question in questions)
+    auto_default = stage in _AUTO_DEFAULT_QUESTION_STAGES and not review_before_commit
+    return any(question["blocking"] for question in questions) and (
+        reconcile or (not auto_default and not answers and not instruction)
+    )
 
 
 def _client_model(client) -> str | None:
@@ -683,9 +762,38 @@ _COLLECTION_LIMIT_RETRY_MSG = (
     "Your previous reply was stopped at observed item {observed_count} of the "
     "top-level `{field}` collection because its configured {limit_scope} limit is "
     "{configured_total}; {emitted_content_chars} content characters were emitted "
-    "and nothing was committed. {bounds_sentence}Do NOT call any tools. Start "
-    "again from the project state and emit ONE compact slot JSON within those "
-    "canonical limits. Do not continue or salvage the stopped draft."
+    "and nothing was committed. {bounds_sentence}{collection_hint}Do NOT call any "
+    "tools. Start again from the project state and emit ONE compact slot JSON "
+    "within those canonical limits. Do not continue or salvage the stopped draft."
+)
+
+_DUPLICATE_IDENTITY_RETRY_MSG = (
+    "Your previous reply was stopped because `{field}` repeats identity values "
+    "{duplicate_values} for unique keys {unique_keys}; "
+    "{emitted_content_chars} content characters were emitted and nothing was "
+    "committed. This is a duplicate-identity error, not a collection-size error. "
+    "{bounds_sentence}{collection_hint}Emit exactly one entry per logical identity. "
+    "Do NOT call tools. Start again from the binding project state and emit ONE "
+    "complete compact slot JSON. Do not continue or salvage the stopped draft."
+)
+
+_PROPERTY_LIMIT_RETRY_MSG = (
+    "Your previous reply was stopped at object `{field}` because property "
+    "`{property}` is forbidden by the response schema; {emitted_content_chars} "
+    "content characters were emitted and nothing was committed. "
+    "{bounds_sentence}Use only the declared fields at that object. Do NOT call "
+    "tools. Start again from the binding project state and emit ONE complete "
+    "compact slot JSON. Do not continue or salvage the stopped draft."
+)
+
+_SYNTAX_LIMIT_RETRY_MSG = (
+    "Your previous reply was stopped because its JSON syntax became invalid at "
+    "character offset {character_offset} (zero-based), line {line}, column {column}, "
+    "at `{field}`: {syntax_error}. {emitted_content_chars} content characters were "
+    "emitted and nothing was committed. {bounds_sentence}Do NOT call tools. "
+    "Start again from the binding project state and emit ONE complete compact "
+    "JSON object with unique object keys and correct delimiters and escapes. "
+    "Do not continue or salvage the stopped draft."
 )
 
 
@@ -695,25 +803,78 @@ def _stage_recovery_message(
     bounds_sentence: str,
     *,
     schema_error: str | None = None,
+    diagnostic: dict | None = None,
     collection_limit: dict | None = None,
 ) -> str:
+    limit = collection_limit or {}
     if kind == "collection_limit":
-        template = _COLLECTION_LIMIT_RETRY_MSG
+        if limit.get("limit_scope") == "syntax":
+            template = _SYNTAX_LIMIT_RETRY_MSG
+        elif limit.get("limit_scope") == "property":
+            template = _PROPERTY_LIMIT_RETRY_MSG
+        elif limit.get("limit_scope") == "duplicate":
+            template = _DUPLICATE_IDENTITY_RETRY_MSG
+        else:
+            template = _COLLECTION_LIMIT_RETRY_MSG
     elif kind == "invalid_schema":
         template = _SCHEMA_RETRY_MSG
     else:
         template = _SERIALIZATION_RETRY_MSG
-    limit = collection_limit or {}
-    return template.format(
+    collection_hint = (
+        "For sequential numbered signal families, emit one "
+        "`inter_sheet_net_ranges` entry instead of enumerating "
+        "`inter_sheet_nets`; never invent signal indices beyond the physical "
+        "component's pins. "
+        if limit.get("field") == "inter_sheet_nets"
+        else ""
+    )
+    if limit.get("field") == "inter_sheet_nets" and limit.get("limit_scope") == "duplicate":
+        collection_hint = (
+            "A net shared by several sheets is ONE net record containing all of "
+            "those sheet endpoints, not a separate record for each pair of sheets. "
+            "Combine its participants without dropping endpoints or renaming the net. "
+        )
+    elif (
+        limit.get("field") == "connections"
+        and limit.get("limit_scope") == "duplicate"
+        and limit.get("unique_keys") == ["from_block", "to_block", "signal_type"]
+    ):
+        collection_hint = (
+            "These values identify ONE functional graph edge, not one physical signal. "
+            "Combine all same-type signals between this directed block pair in that "
+            "edge's description. Keep other signal types, other consumers and real "
+            "reverse flows as separate edges. Individual pin/net connections belong "
+            "in architecture and wiring, not repeated functional graph edges. "
+        )
+    message = template.format(
         prior_chars=len(raw),
         bounds_sentence=(bounds_sentence + " ") if bounds_sentence else "",
         field=limit.get("field", "unknown"),
+        property=limit.get("property", "unknown"),
         observed_count=limit.get("observed_count", "unknown"),
         configured_total=limit.get("configured_total", "unknown"),
         limit_scope=limit.get("limit_scope", "total"),
         emitted_content_chars=limit.get("emitted_content_chars", len(raw)),
+        collection_hint=collection_hint,
+        duplicate_values=(
+            json.dumps(limit.get("duplicate_values") or [])
+            if template is _DUPLICATE_IDENTITY_RETRY_MSG
+            else ""
+        ),
+        unique_keys=(
+            json.dumps(limit.get("unique_keys") or [])
+            if template is _DUPLICATE_IDENTITY_RETRY_MSG
+            else ""
+        ),
         schema_error=(schema_error or "unspecified schema violation")[:1200],
+        syntax_error=str(limit.get("syntax_error", "invalid JSON syntax"))[:1200],
+        character_offset=limit.get("character_offset", "unknown"),
+        line=limit.get("line", "unknown"),
+        column=limit.get("column", "unknown"),
     )
+    if diagnostic:
+        message += "\nConcrete diagnostic:\n" + json.dumps(diagnostic, separators=(",", ":"))
+    return message
 
 
 _SEMANTIC_REPAIR_MSG = (
@@ -728,7 +889,7 @@ _MAX_SEMANTIC_REPAIR_ROUNDS = 1
 def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnostic]) -> str:
     message = _SEMANTIC_REPAIR_MSG.format(
         diagnostics=json.dumps(
-            [{"code": d.code, "evidence": d.evidence} for d in diagnostics],
+            [{"code": d.code, "message": d.message, "evidence": d.evidence} for d in diagnostics],
             separators=(",", ":"),
         )
     )
@@ -864,6 +1025,7 @@ class ProviderFacts:
     provider: str | None = None
     usage: dict | None = None
     wall_s: float | None = None
+    response_format_mode: str | None = None
 
 
 def call_stage_provider(
@@ -928,6 +1090,7 @@ def call_stage_provider(
         provider=result.get("provider"),
         usage=result.get("usage") or {},
         wall_s=round(time.monotonic() - call_t0, 3),
+        response_format_mode=("json_schema" if response_format is not None else "none"),
     )
 
 
@@ -970,6 +1133,7 @@ def run_serialization_recovery(
         provider=result.get("provider"),
         usage=result.get("usage") or {},
         wall_s=round(time.monotonic() - call_t0, 3),
+        response_format_mode=("json_schema" if response_format is not None else "none"),
     )
 
 
@@ -1025,7 +1189,11 @@ def decode_stage_response(
     except StageSchemaError as exc:
         return AttemptOutcome(
             "recoverable_failure",
-            {"failure_kind": "invalid_schema", "schema_error": str(exc)},
+            {
+                "failure_kind": "invalid_schema",
+                "schema_error": str(exc),
+                "diagnostic": getattr(exc, "diagnostic", None),
+            },
         )
     except (json.JSONDecodeError, ValueError):
         kind = (
@@ -1141,6 +1309,8 @@ def finalize_stage(
                 "semantic_clean": outcome.get("semantic_clean"),
                 "fab_safe": outcome.get("fab_safe"),
                 "failure_kind": outcome.get("failure_kind"),
+                "schema_error": outcome.get("schema_error"),
+                "diagnostic": outcome.get("diagnostic"),
                 "work_units": outcome.get("work_units"),
                 "reused_work_units": outcome.get("reused_work_units"),
                 "aggregate_repair_rounds": outcome.get("aggregate_repair_rounds"),
@@ -1235,6 +1405,11 @@ def _work_unit_instructions(
         boundary["scope"] = "owned_requirements"
         boundary["requirement_ids"] = list(unit.requirement_ids)
         boundary["owned_roles"] = list(unit.owned_roles)
+        boundary["owned_requirements"] = [
+            requirement
+            for requirement in (prompt_state.get("architecture") or {}).get("requirements") or []
+            if isinstance(requirement, dict) and str(requirement.get("id")) in unit.requirement_ids
+        ]
     else:
         # Empty requirement_ids means the architecture did not decompose this
         # sheet, not that the model owns nothing.
@@ -1271,10 +1446,12 @@ def _work_unit_instructions(
         ]
         boundary["owned_output"] = (
             "Only components physically installed in target_sheet to implement "
-            "target_function and target_topology. Emit at least one group unless "
-            "a locked circuit recipe already populates this sheet. Never recreate "
-            "the whole-board BOM, another sheet's parts, or any component listed "
-            "in PRIOR ACCEPTED WORK UNITS."
+            "the owned_requirements, or target_function and target_topology when "
+            "scope is complete_sheet. Stage-wide programming and decoupling rules "
+            "apply only to ICs owned by this unit, never to a sibling or recipe IC. "
+            "Emit at least one group unless a locked circuit recipe already populates "
+            "this sheet. Never recreate the whole-board BOM, another requirement's "
+            "parts, read_only_exclusions, or PRIOR ACCEPTED WORK UNITS."
         )
     else:
         boundary["owned_refs"] = list(unit.refs)
@@ -1284,7 +1461,7 @@ def _work_unit_instructions(
 
 def _work_unit_extras(unit: StageWorkUnit, extras: dict) -> dict:
     if unit.stage == "bom":
-        return dict(extras)
+        return {key: value for key, value in extras.items() if not str(key).startswith("_")}
     refs = set(unit.refs)
     pinouts = extras.get("symbol_pinouts") or {}
     filtered = {ref: info for ref, info in pinouts.items() if ref in refs}
@@ -1301,6 +1478,131 @@ def _work_unit_extras(unit: StageWorkUnit, extras: dict) -> dict:
     return result
 
 
+def _work_unit_prompt_state(unit: StageWorkUnit, prompt_state: dict) -> dict:
+    if unit.stage not in {"bom", "wiring"}:
+        return prompt_state
+    refs = set(unit.refs)
+    architecture = dict(prompt_state.get("architecture") or {})
+    relevant_nets = [
+        net
+        for net in architecture.get("inter_sheet_nets") or []
+        if isinstance(net, dict)
+        and any(
+            isinstance(endpoint, dict) and endpoint.get("sheet") == unit.sheet
+            for endpoint in net.get("endpoints") or []
+        )
+    ]
+    relevant_sheets = {
+        str(endpoint.get("sheet"))
+        for net in relevant_nets
+        for endpoint in net.get("endpoints") or []
+        if isinstance(endpoint, dict) and endpoint.get("sheet")
+    } | {unit.sheet}
+    if unit.stage == "bom":
+        # The sheet enum already constrains every emitted group to this sheet.
+        # Showing sibling functions here causes whole-board parts to be moved
+        # into that sheet rather than limiting the model to its actual owner.
+        relevant_sheets = {unit.sheet}
+    architecture["sheets"] = [
+        sheet
+        for sheet in architecture.get("sheets") or []
+        if isinstance(sheet, dict) and str(sheet.get("name")) in relevant_sheets
+    ]
+    architecture["inter_sheet_nets"] = relevant_nets
+    architecture["requirements"] = [
+        requirement
+        for requirement in architecture.get("requirements") or []
+        if isinstance(requirement, dict)
+        and requirement.get("sheet") == unit.sheet
+        and (
+            unit.stage != "bom"
+            or not unit.requirement_ids
+            or str(requirement.get("id")) in unit.requirement_ids
+        )
+    ]
+    architecture["recipe_selections"] = [
+        selection
+        for selection in architecture.get("recipe_selections") or []
+        if isinstance(selection, dict)
+        and unit.sheet in {str(sheet) for sheet in (selection.get("sheets") or {}).values()}
+    ]
+    architecture["recipe_resolution"] = [
+        record
+        for record in architecture.get("recipe_resolution") or []
+        if isinstance(record, dict)
+        and str(record.get("requirement_id")) in set(unit.requirement_ids)
+    ]
+    architecture["unresolved_requirement_ids"] = [
+        requirement_id
+        for requirement_id in architecture.get("unresolved_requirement_ids") or []
+        if str(requirement_id) in set(unit.requirement_ids)
+    ]
+    if unit.stage == "bom":
+        target_tokens = {
+            re.sub(r"[^a-z0-9]", "", str(value).lower())
+            for sheet in architecture["sheets"]
+            for value in (sheet.get("name"), sheet.get("stem"))
+            if value
+        }
+        architecture["topologies"] = {
+            key: value
+            for key, value in (architecture.get("topologies") or {}).items()
+            if re.sub(r"[^a-z0-9]", "", str(key).lower()) in target_tokens
+        }
+        upstream = prompt_state.get("architecture") or {}
+        owned_ids = {str(row.get("id")) for row in architecture["requirements"]}
+        exclusions = {
+            "requirements": [
+                {
+                    key: row[key]
+                    for key in ("id", "sheet", "role", "family", "exact_part")
+                    if key in row
+                }
+                for row in upstream.get("requirements") or []
+                if isinstance(row, dict) and str(row.get("id")) not in owned_ids
+            ],
+            "recipes": [
+                {
+                    key: row[key]
+                    for key in ("recipe", "instance", "sheets", "requirement_ids")
+                    if key in row
+                }
+                for row in upstream.get("recipe_selections") or []
+                if isinstance(row, dict)
+            ],
+        }
+        # Intent remains complete: explicit part choices, assembly/mechanical
+        # constraints and expertise still govern sourcing. Full upstream state
+        # is independently retained for validation, normalization and commit.
+        return {
+            "intent": prompt_state.get("intent"),
+            "architecture": architecture,
+            "read_only_exclusions": exclusions,
+        }
+    bom = dict(prompt_state.get("bom") or {})
+    bom["parts"] = [
+        part
+        for part in bom.get("parts") or []
+        if isinstance(part, dict) and str(part.get("ref")) in refs
+    ]
+    bom["connections"] = [
+        connection
+        for connection in bom.get("connections") or []
+        if isinstance(connection, dict)
+        and (connection.get("endpoints") or [])
+        and all(
+            isinstance(endpoint, dict) and str(endpoint.get("ref")) in refs
+            for endpoint in connection.get("endpoints") or []
+        )
+    ]
+    bom["no_connect_pins"] = [
+        endpoint
+        for endpoint in bom.get("no_connect_pins") or []
+        if isinstance(endpoint, dict) and str(endpoint.get("ref")) in refs
+    ]
+    return {"architecture": architecture, "bom": bom}
+
+
 def _work_unit_user_prompt(
     *,
     stage: str,
@@ -1313,14 +1615,24 @@ def _work_unit_user_prompt(
     instruction,
     feedback: dict | str | None,
 ) -> str:
+    visible_state = _work_unit_prompt_state(unit, prompt_state)
+    visible_accepted_summary = [] if stage == "wiring" else accepted_summary
     user = (
         f"PROJECT BRIEF:\n{brief}\n\n"
-        f"CURRENT DESIGN STATE (JSON):\n{json.dumps(prompt_state, separators=(',', ':'))}\n\n"
+        f"CURRENT DESIGN STATE (JSON):\n{json.dumps(visible_state, separators=(',', ':'))}\n\n"
         "WORK-UNIT REFERENCE DATA (complete, not truncated):\n"
         f"{json.dumps(_work_unit_extras(unit, extras), separators=(',', ':'))}\n\n"
         "PRIOR ACCEPTED WORK UNITS (read-only):\n"
-        f"{json.dumps(accepted_summary, separators=(',', ':'))}"
+        f"{json.dumps(visible_accepted_summary, separators=(',', ':'))}"
     )
+    if stage == "bom":
+        user += (
+            "\n\nThe project brief, global architecture facts and sourcing reference "
+            "data are constraints, not a request to emit the whole board. Implement "
+            "only the WORK UNIT's owned requirements (or its complete target sheet "
+            "when no requirement decomposition exists). All read_only_exclusions "
+            "and prior accepted groups are already owned elsewhere."
+        )
     if answers:
         qa = "\n".join(
             f"Q: {answer.get('text', '')}\nA: {answer.get('answer', '')}" for answer in answers
@@ -1371,7 +1683,6 @@ def _drive_work_unit_stage(
         WORK_UNIT_MAX_REPAIR_ROUNDS,
         max(WORK_UNIT_MIN_REPAIR_ROUNDS, int(max_retries)),
     )
-    call_budget = min(64, (repair_rounds + 3) * len(units) + 6)
     policy = _response_policy(client, stage, max_tokens)
     executor = build_bom_executor(workspace, run_design_cli, KICRAFT) if stage == "bom" else None
     candidates: dict[str, dict] = {}
@@ -1410,6 +1721,13 @@ def _drive_work_unit_stage(
     for unit in units:
         loaded = loaded_candidates.get(unit.unit_id)
         if loaded is None:
+            continue
+        deterministic = (
+            deterministic_bom_candidate(unit, prompt_state)
+            if stage == "bom"
+            else deterministic_wiring_candidate(unit, prompt_state, extras)
+        )
+        if deterministic is not None:
             continue
         try:
             candidates[unit.unit_id] = validate_unit_candidate(unit, loaded, prompt_state, extras)
@@ -1535,6 +1853,8 @@ def _drive_work_unit_stage(
                     **_work_unit_provenance(unit),
                 }
             )
+    model_unit_count = sum(unit.unit_id not in candidates for unit in units)
+    call_budget = min(64, (repair_rounds + 3) * model_unit_count + 6) if model_unit_count else 0
     total_cost = 0.0
     attempts = 0
     rounds_total = 0 if stage == "bom" else None
@@ -1558,6 +1878,7 @@ def _drive_work_unit_stage(
         error_facts: dict | None = None,
         aggregate_round: int | None = None,
         aggregate_signature: tuple | None = None,
+        schema_error: str | None = None,
         commit_result: dict | None = None,
         candidate_retained: bool | None = None,
         fallback_reason: str | None = None,
@@ -1574,6 +1895,7 @@ def _drive_work_unit_stage(
             unit_id=unit.unit_id,
             unit_attempt=unit_attempt,
             aggregate_round=aggregate_round,
+            schema_error=schema_error,
             commit_result=commit_result,
             candidate_retained=candidate_retained,
             fallback_reason=fallback_reason,
@@ -1591,6 +1913,7 @@ def _drive_work_unit_stage(
                     facts=facts,
                     error_facts=error_facts,
                     aggregate_round=aggregate_round,
+                    schema_error=schema_error,
                     commit_result=commit_result,
                     candidate_retained=candidate_retained,
                     fallback_reason=fallback_reason,
@@ -1660,6 +1983,15 @@ def _drive_work_unit_stage(
             )
         return policy
 
+    # The provider schema and streaming collector must advertise the same cap.
+    # In particular a sheet-local schema must not invite 64 groups when the
+    # collector stops that unit at 21. Contracts are private to this invocation.
+    for unit in units:
+        apply_collection_bounds(
+            contracts_by_unit[unit.unit_id].schema,
+            response_policy_for_unit(unit).collection_bounds,
+        )
+
     def invoke(
         unit: StageWorkUnit,
         *,
@@ -1668,7 +2000,7 @@ def _drive_work_unit_stage(
         pristine: bool,
         serialization: bool,
         aggregate_round: int | None,
-    ) -> tuple[str, dict | None, ProviderFacts | None, str | None]:
+    ) -> tuple[str, dict | None, ProviderFacts | None, str | Exception | None]:
         nonlocal attempts, total_cost, rounds_total, tool_calls_total, provider_ok, stage_client
         aggregate_signature = (
             _commit_rejection_signature(feedback["aggregate_commit_rejection"])
@@ -1792,7 +2124,11 @@ def _drive_work_unit_stage(
                         prepared,
                         messages=list(messages),
                         response_format=response_format,
-                        max_tokens=int(unit_policy.normal_max_tokens),
+                        max_tokens=int(
+                            unit_policy.serialization_max_tokens
+                            if pristine
+                            else unit_policy.normal_max_tokens
+                        ),
                         temperature=(
                             max(
                                 float(
@@ -1822,7 +2158,10 @@ def _drive_work_unit_stage(
                     call_mode=call_mode,
                     outcome=kind,
                     error_facts={
-                        key: value for key, value in failure.items() if key != "failure_kind"
+                        **{key: value for key, value in failure.items() if key != "failure_kind"},
+                        "response_format_mode": (
+                            "json_schema" if response_format is not None else "none"
+                        ),
                     },
                     aggregate_round=aggregate_round,
                     aggregate_signature=aggregate_signature,
@@ -1926,12 +2265,13 @@ def _drive_work_unit_stage(
                     outcome="invalid_work_unit",
                     facts=facts,
                     error_facts={"message": str(exc)},
+                    schema_error=_redacted_schema_error(exc),
                     aggregate_round=aggregate_round,
                     aggregate_signature=aggregate_signature,
                     candidate_retained=False,
                     fallback_reason=("provider_rate_limited" if fallback_spent else None),
                 )
-                return "recoverable", parsed, facts, str(exc)
+                return "recoverable", parsed, facts, exc
             record(
                 active_client,
                 unit=unit,
@@ -1953,6 +2293,52 @@ def _drive_work_unit_stage(
             return "candidate", validated, facts, None
         return "terminal", None, None, "provider_call_budget_exhausted"
 
+    def failure_signature(error: str | Exception | None, facts: ProviderFacts | None) -> str:
+        if isinstance(error, WorkUnitValidationError):
+            defects = {}
+            for name, rows in error.defects.items():
+                if name in {"expected-pin-set", "rejected-assignment-set"}:
+                    continue
+                identities = []
+                for row in rows:
+                    try:
+                        detail = json.loads(row)
+                    except (TypeError, ValueError):
+                        detail = None
+                    if isinstance(detail, dict) and detail.get("rejected_identifier"):
+                        # Group names, diagnostic prose and suggested alternatives
+                        # can change while the same invalid library ID recurs.
+                        identity = [detail.get("field"), detail["rejected_identifier"]]
+                    else:
+                        identity = re.sub(r"\s+", " ", str(row)).strip()
+                    identities.append(json.dumps(identity, sort_keys=True))
+                if identities:
+                    defects[name] = sorted(set(identities))
+            return json.dumps(defects, sort_keys=True)
+        if error == "collection_limit" and facts is not None:
+            limit = facts.collection_limit or {}
+            return json.dumps(
+                [
+                    "collection_limit",
+                    {
+                        key: limit[key]
+                        for key in (
+                            "field",
+                            "limit_scope",
+                            "configured_total",
+                            "group_value",
+                            "property",
+                            "syntax_error",
+                        )
+                        if key in limit
+                    },
+                ],
+                sort_keys=True,
+            )
+        return re.sub(r"\s+", " ", str(error)).strip()
+
+    seen_unit_failures: dict[str, set[str]] = {}
+
     def draft(
         unit: StageWorkUnit,
         *,
@@ -1960,22 +2346,26 @@ def _drive_work_unit_stage(
         force_pristine: bool = False,
         aggregate_round: int | None = None,
     ) -> tuple[str, dict | None]:
-        prior_signature: str | None = None
+        seen_signatures = seen_unit_failures.setdefault(unit.unit_id, set())
         local_feedback = feedback
+        failure_detail: dict = {}
         serialization_next = False
         serialization_spent = False
+        pristine_next = force_pristine
         unit_attempt_stop = repair_rounds + (5 if stage == "bom" else 3)
         for unit_attempt in range(1, unit_attempt_stop):
             used_serialization = serialization_next
+            used_pristine = pristine_next
             kind, payload, facts, error = invoke(
                 unit,
                 unit_attempt=unit_attempt,
                 feedback=local_feedback,
-                pristine=False,
+                pristine=used_pristine,
                 serialization=used_serialization,
                 aggregate_round=aggregate_round,
             )
             serialization_next = False
+            pristine_next = False
             if kind == "candidate":
                 if progress:
                     progress(
@@ -1994,16 +2384,12 @@ def _drive_work_unit_stage(
                 return kind, payload
             if kind == "questions":
                 questions = _normalize_questions(payload.get("questions") or [], stage)
-                reconcile = any(question.get("reconcile_target") for question in questions)
-                auto_default = (
-                    stage in _AUTO_DEFAULT_QUESTION_STAGES
-                    and not review_before_commit
-                    and not reconcile
-                )
-                if (
-                    any(question["blocking"] for question in questions)
-                    and not auto_default
-                    and ((not answers and not instruction) or reconcile)
+                if _questions_need_input(
+                    questions,
+                    stage,
+                    review_before_commit=review_before_commit,
+                    answers=answers,
+                    instruction=instruction,
                 ):
                     return kind, {"questions": questions}
                 if stage == "bom":
@@ -2025,33 +2411,70 @@ def _drive_work_unit_stage(
                 continue
             if kind == "terminal":
                 return kind, {"failure_kind": error or "provider_failure"}
+            signature = failure_signature(error, facts)
+            error_text = str(error)
+            failure_detail = {
+                "error": error_text,
+                "unit_id": unit.unit_id,
+                "schema_error": (
+                    _redacted_schema_error(error) if isinstance(error, Exception) else None
+                ),
+                "diagnostic": (
+                    {"unit_id": unit.unit_id, "defects": error.defects}
+                    if isinstance(error, WorkUnitValidationError)
+                    else getattr(error, "diagnostic", None)
+                ),
+            }
             serialization_errors = {
                 "collection_limit",
                 "truncated_json",
                 "invalid_json",
                 "reasoning_loop",
             }
+            if used_pristine and error in serialization_errors:
+                return "terminal", {
+                    "failure_kind": error,
+                    "error": "clean-slate serialization retry failed",
+                }
+            if signature in seen_signatures:
+                return "terminal", {
+                    "failure_kind": "unit_repair_exhausted",
+                    **failure_detail,
+                }
+            seen_signatures.add(signature)
             if used_serialization and error in serialization_errors:
                 bounds_sentence = _collection_bounds_sentence(
                     response_policy_for_unit(unit).collection_bounds
                 )
-                local_feedback = (
-                    "The dedicated serialization recovery also failed with "
-                    f"{error}. Start from the binding state and emit a fresh, compact, "
-                    f"complete unit. {bounds_sentence} Output only the unit JSON."
+                pristine_next = True
+                local_feedback = _stage_recovery_message(
+                    str(error),
+                    facts.raw if facts is not None else "",
+                    bounds_sentence,
+                    collection_limit=facts.collection_limit if facts is not None else None,
                 )
                 continue
             if not serialization_spent and not used_serialization and error in serialization_errors:
                 serialization_spent = True
                 serialization_next = True
-                bounds_sentence = _collection_bounds_sentence(policy.collection_bounds)
-                local_feedback = _SERIALIZATION_RETRY_MSG.format(
-                    prior_chars=len(facts.raw if facts is not None else ""),
-                    bounds_sentence=(bounds_sentence + " ") if bounds_sentence else "",
+                bounds_sentence = _collection_bounds_sentence(
+                    response_policy_for_unit(unit).collection_bounds
+                )
+                local_feedback = _stage_recovery_message(
+                    str(error),
+                    facts.raw if facts is not None else "",
+                    bounds_sentence,
+                    collection_limit=facts.collection_limit if facts is not None else None,
                 )
                 continue
-            signature = str(error)
-            repeated = signature == prior_signature
+            if stage == "bom" and any(
+                marker in error_text
+                for marker in ("recipe-duplicate", "model_authored_protected_identity")
+            ):
+                return "terminal", {
+                    "failure_kind": "unit_ownership_conflict",
+                    **failure_detail,
+                }
             if stage == "bom":
                 if unit.requirement_ids:
                     owned_scope = (
@@ -2074,14 +2497,7 @@ def _drive_work_unit_stage(
                     "without changing MCU presence, control architecture, topology, "
                     f"requirements, or sheet partition. {owned_scope}"
                 )
-                if "model_authored_protected_identity" in signature:
-                    repair_instruction += (
-                        " Delete every group id listed under "
-                        "`model_authored_protected_identity`; those components are owned by "
-                        "verified recipes or sibling requirements. Do not replace them and do "
-                        "not redraft otherwise-valid groups."
-                    )
-                if "empty-sheet" in signature:
+                if "empty-sheet" in error_text:
                     owned_target = "owned requirements" if unit.requirement_ids else "target sheet"
                     repair_instruction += (
                         " The empty groups list is the defect: emit the smallest complete set "
@@ -2091,25 +2507,15 @@ def _drive_work_unit_stage(
                 repair_instruction = (
                     "Correct every listed defect in this complete unit replacement."
                 )
-            if repeated:
-                local_feedback = {
-                    "defect": signature,
-                    "instruction": (
-                        "Your previous correction repeated the same defect. Start this unit "
-                        "again from the binding state and return a fresh complete unit. "
-                        + repair_instruction
-                    ),
-                }
-            else:
-                local_feedback = {
-                    "defect": signature,
-                    "rejected_unit": payload,
-                    "instruction": repair_instruction,
-                }
-            prior_signature = signature
+            local_feedback = {
+                "defect": error_text,
+                "rejected_unit": payload,
+                "instruction": repair_instruction,
+            }
         return "terminal", {
             "failure_kind": "unit_repair_exhausted",
             "error": str(local_feedback),
+            **failure_detail,
         }
 
     def stop_for_question(payload: dict) -> dict:
@@ -2151,9 +2557,25 @@ def _drive_work_unit_stage(
     def aggregate():
         nonlocal expanded_component_count
         if stage == "bom":
-            merged, ref_to_unit, ref_to_lowering = merge_bom_units(units, candidates, prompt_state)
+            (
+                merged,
+                ref_to_unit,
+                ref_to_lowering,
+                trusted_lowering_group_ids,
+            ) = merge_bom_units(
+                units,
+                candidates,
+                prompt_state,
+                trusted_unit_ids=frozenset(
+                    unit_id for unit_id, source in unit_sources.items() if source == "lowerer"
+                ),
+            )
+            normalization_state = {
+                **prompt_state,
+                "_trusted_lowering_group_ids": trusted_lowering_group_ids,
+            }
             normalized, expanded_component_count = _normalize_stage_response(
-                stage, merged, prompt_state
+                stage, merged, normalization_state
             )
             for part in normalized.get("parts") or []:
                 if part.get("recipe_id"):
@@ -2175,7 +2597,12 @@ def _drive_work_unit_stage(
             candidate, ref_to_unit, pin_to_unit, ref_to_unit_ids = aggregate()
             schema_ok = True
         except (StageSchemaError, TypeError, ValueError) as exc:
-            last = {"failure_kind": "invalid_schema", "error": str(exc)}
+            last = {
+                "failure_kind": "invalid_schema",
+                "error": str(exc),
+                "schema_error": _redacted_schema_error(exc),
+                "diagnostic": getattr(exc, "diagnostic", None),
+            }
     if last:
         return finalize_stage(
             client,
@@ -2226,6 +2653,7 @@ def _drive_work_unit_stage(
             pin_to_unit=pin_to_unit,
             ref_to_unit_ids=ref_to_unit_ids,
         )
+        targeted = tuple(unit_id for unit_id in targeted if unit_sources.get(unit_id) != "lowerer")
         prior_candidates = dict(candidates)
         for unit_id in targeted:
             unit = unit_by_id[unit_id]
@@ -2301,7 +2729,7 @@ def _drive_work_unit_stage(
         }
 
     prior_signature = None
-    prior_candidate_fingerprint = None
+    seen_commit_failures: set[tuple] = set()
     for aggregate_round in range(repair_rounds + 1):
         ok, commit_result = commit_stage(stage, dict(candidate), state_path, brief, None, workspace)
         if ok:
@@ -2358,13 +2786,56 @@ def _drive_work_unit_stage(
                 "commit": commit_result,
             }
             break
+        gate_codes = list(
+            _redacted_rejection_facts(
+                commit_result,
+                candidate_retained=True,
+            ).get("commit_gate_codes")
+            or []
+        )
+        targeted = route_work_unit_ids(
+            commit_result,
+            units,
+            ref_to_unit=ref_to_unit,
+            pin_to_unit=pin_to_unit,
+            ref_to_unit_ids=ref_to_unit_ids,
+        )
+        undeclared_singletons = [
+            offender
+            for offender in commit_result.get("offenders") or []
+            if "neither a power net nor a declared inter-sheet net" in str(offender)
+        ]
+        immutable_singleton_units = {
+            unit_id
+            for offender in undeclared_singletons
+            for identity in _offender_identity(offender).split("|")
+            if (unit_id := pin_to_unit.get(tuple(identity.split(".", 1))))
+            and unit_sources.get(unit_id) == "lowerer"
+        }
+        if stage == "wiring" and "9.15" in gate_codes and immutable_singleton_units:
+            last = {
+                "failure_kind": "architecture_reconciliation_required",
+                "reconcile_target": "architecture",
+                "commit": commit_result,
+                "work_unit_ids": sorted(immutable_singleton_units),
+                "error": (
+                    "deterministic wiring binds a singleton signal without a declared "
+                    "architecture endpoint; sibling model units cannot repair its contract"
+                ),
+            }
+            break
+        targeted = tuple(unit_id for unit_id in targeted if unit_sources.get(unit_id) != "lowerer")
         if progress:
             progress(
                 {
                     "kind": "retry",
                     "stage": stage,
+                    "failure_kind": "commit_rejected",
                     "errors": commit_result.get("errors"),
                     "offenders": commit_result.get("offenders"),
+                    "commit_gate_codes": gate_codes,
+                    "work_unit_ids": list(targeted),
+                    "accepted_siblings_retained": max(0, len(candidates) - len(targeted)),
                     "model": _client_model(stage_client),
                 }
             )
@@ -2372,15 +2843,34 @@ def _drive_work_unit_stage(
         candidate_fingerprint = hashlib.sha256(
             json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        repeated = (
-            signature == prior_signature and candidate_fingerprint == prior_candidate_fingerprint
-        )
+        if (
+            stage == "wiring"
+            and "9.15" in gate_codes
+            and prior_signature == signature
+            and any(
+                "neither a power net nor a declared inter-sheet net" in str(offender)
+                for offender in commit_result.get("offenders") or []
+            )
+        ):
+            last = {
+                "failure_kind": "architecture_reconciliation_required",
+                "reconcile_target": "architecture",
+                "commit": commit_result,
+                "error": (
+                    "repeated singleton signal has no unambiguous endpoint in the "
+                    "committed architecture/BOM"
+                ),
+            }
+            break
+        rejection_key = (signature, candidate_fingerprint)
+        repeated = rejection_key in seen_commit_failures
         if repeated:
             last = {
                 "failure_kind": "commit_rejected",
                 "commit": commit_result,
             }
             break
+        seen_commit_failures.add(rejection_key)
         pristine = False
         if aggregate_round >= repair_rounds:
             last = {
@@ -2400,6 +2890,7 @@ def _drive_work_unit_stage(
             pin_to_unit=pin_to_unit,
             ref_to_unit_ids=ref_to_unit_ids,
         )
+        targeted = tuple(unit_id for unit_id in targeted if unit_sources.get(unit_id) != "lowerer")
         aggregate_repair_rounds += 1
         prior_candidates = dict(candidates)
         for unit_id in targeted:
@@ -2429,10 +2920,14 @@ def _drive_work_unit_stage(
                 candidate, ref_to_unit, pin_to_unit, ref_to_unit_ids = aggregate()
             except (StageSchemaError, TypeError, ValueError) as exc:
                 candidates = prior_candidates
-                last = {"failure_kind": "invalid_schema", "error": str(exc)}
+                last = {
+                    "failure_kind": "invalid_schema",
+                    "error": str(exc),
+                    "schema_error": _redacted_schema_error(exc),
+                    "diagnostic": getattr(exc, "diagnostic", None),
+                }
                 break
             prior_signature = signature
-            prior_candidate_fingerprint = candidate_fingerprint
             continue
         candidates = prior_candidates
         break
@@ -2463,6 +2958,43 @@ def _drive_work_unit_stage(
             "aggregate_repair_rounds": aggregate_repair_rounds,
         },
     )
+
+
+def _architecture_recipe_summaries(intent: dict) -> list[dict]:
+    """Do not offer unrelated MCU alternatives to an explicitly named design."""
+    from kicraft.design.recipes import get_recipe, recipe_summaries
+
+    summaries = recipe_summaries()
+    named = {
+        re.sub(r"[^a-z0-9]", "", str(value).lower()) for value in intent.get("named_parts") or []
+    }
+    named = {value for value in named if len(value) >= 5}
+    if not named:
+        return summaries
+    selected = set()
+    for summary in summaries:
+        if "mcu" not in summary["required_sheet_roles"]:
+            continue
+        definition = get_recipe(summary["recipe"])
+        selectors = {
+            re.sub(r"[^a-z0-9]", "", str(value).lower())
+            for value in (definition.exact_part, definition.family, *definition.identity_aliases)
+            if value
+        }
+        if any(
+            selector.startswith(part) or part.startswith(selector)
+            for selector in selectors
+            if len(selector) >= 5
+            for part in named
+        ):
+            selected.add(summary["recipe"])
+    if not selected:
+        return summaries
+    return [
+        summary
+        for summary in summaries
+        if "mcu" not in summary["required_sheet_roles"] or summary["recipe"] in selected
+    ]
 
 
 def drive_stage(
@@ -2554,11 +3086,10 @@ def drive_stage(
         block = _format_core_defaults_block(core_defaults)
         if block:
             extras["core_defaults_block"] = block
-    if stage in {"architecture", "bom"}:
-        from kicraft.design.recipes import recipe_summaries
-
-        extras["circuit_recipes"] = recipe_summaries()
     if stage == "architecture":
+        extras["circuit_recipes"] = _architecture_recipe_summaries(
+            prep_json["state"].get("intent") or {}
+        )
         from kicraft.design.lowering import lowerer_summaries
 
         extras["circuit_lowerers"] = lowerer_summaries()
@@ -2587,6 +3118,11 @@ def drive_stage(
                     "recipe_id": p.get("recipe_id"),
                     "recipe_instance": p.get("recipe_instance"),
                     "recipe_role": p.get("recipe_role"),
+                    "resolution_source": p.get("resolution_source"),
+                    "resolution_id": p.get("resolution_id"),
+                    "lowering_requirement_id": p.get("lowering_requirement_id"),
+                    "lowering_role": p.get("lowering_role"),
+                    "lowering_index": p.get("lowering_index"),
                 }
                 for p in full_bom.get("parts", [])
             ],
@@ -2621,10 +3157,11 @@ def drive_stage(
 
     user = f"PROJECT BRIEF:\n{brief}\n\nCURRENT DESIGN STATE (JSON):\n{json.dumps(prompt_state)}"
     if extras:
-        # bom carries the full parts table + core defaults (the adoption rule
-        # depends on both being complete), wiring carries symbol_pinouts.
-        budget = {"wiring": 40000, "bom": 20000}.get(stage, 24000)
-        user += f"\n\nSTAGE EXTRAS (reference data from stage-prep):\n{json.dumps(extras)[:budget]}"
+        # Reference contracts must remain complete JSON: slicing can hide a
+        # selected device's GPIO restrictions or the lowerer port contracts.
+        user += "\n\nSTAGE EXTRAS (reference data from stage-prep):\n" + json.dumps(
+            extras, separators=(",", ":")
+        )
     if answers:
         qa = "\n".join(f"Q: {a.get('text', '')}\nA: {a.get('answer', '')}" for a in answers)
         user += f"\n\nThe user answered your earlier clarifying question(s):\n{qa}"
@@ -2851,7 +3388,9 @@ def drive_stage(
                     prepared,
                     messages=call_messages,
                     response_format=call_response_format,
-                    max_tokens=normal_cap,
+                    max_tokens=(
+                        int(policy.serialization_max_tokens) if was_clean_slate else normal_cap
+                    ),
                     temperature=temperature,
                     reasoning=reasoning,
                     reasoning_guard=reasoning_guard,
@@ -3077,6 +3616,7 @@ def drive_stage(
                 "tool_calls": tool_calls_ct,
                 "error": _FAILURE_KIND_ERROR.get(kind, kind),
                 "schema_error": schema_error_detail,
+                "diagnostic": outcome.payload.get("diagnostic"),
             }
             _record_attempt_facts(
                 active_client,
@@ -3086,6 +3626,7 @@ def drive_stage(
                 call_mode="clean_slate" if was_clean_slate else "normal",
                 outcome=kind,
                 facts=facts,
+                schema_error=_redacted_schema_error(schema_error_detail),
             )
             if progress:
                 progress(
@@ -3094,9 +3635,13 @@ def drive_stage(
                         "stage": stage,
                         "errors": [last["error"]],
                         "failure_kind": kind,
+                        "schema_error": _redacted_schema_error(schema_error_detail),
+                        "diagnostic": outcome.payload.get("diagnostic"),
                         "model": _client_model(active_client),
                     }
                 )
+            if was_clean_slate:
+                break
             if attempts >= provider_call_budget:
                 break
             if serialization_calls >= serialization_budget:
@@ -3107,6 +3652,7 @@ def drive_stage(
                         raw or "",
                         _collection_bounds_sentence(policy.collection_bounds),
                         schema_error=schema_error_detail,
+                        diagnostic=last.get("diagnostic"),
                         collection_limit=collection_limit,
                     ),
                 )
@@ -3126,8 +3672,11 @@ def drive_stage(
                 raw or "",
                 bounds_sentence,
                 schema_error=schema_error_detail,
+                diagnostic=last.get("diagnostic"),
                 collection_limit=collection_limit,
             )
+            if schema_error and raw:
+                smessages.append({"role": "assistant", "content": raw})
             smessages.append({"role": "user", "content": retry_message})
             resolution_ledger = getattr(executor, "resolution_ledger", {}) if executor else {}
             if resolution_ledger:
@@ -3221,6 +3770,7 @@ def drive_stage(
                         else skind or "invalid_schema"
                     ),
                     facts=sfacts,
+                    schema_error=_redacted_schema_error(schema_error_detail),
                 )
                 _observe_attempt(
                     attempt_observer,
@@ -3257,18 +3807,23 @@ def drive_stage(
                     "tool_calls": tool_calls_ct,
                     "collection_limit": scollection_limit,
                     "schema_error": schema_error_detail,
+                    "diagnostic": serialization_outcome.payload.get("diagnostic"),
                 }
-                if attempts >= provider_call_budget:
+                if attempts >= provider_call_budget or clean_slate_spent:
                     break
+                clean_slate_spent = True
+                clean_slate_next = True
                 messages = _lean_retry(
-                    sraw if schema_error else None,
+                    None,
                     _stage_recovery_message(
                         skind,
-                        sraw or "",
+                        "",
                         _collection_bounds_sentence(policy.collection_bounds),
                         schema_error=schema_error_detail,
+                        diagnostic=last.get("diagnostic"),
                         collection_limit=scollection_limit,
-                    ),
+                    )
+                    + " Start from the binding state; emit one fresh compact JSON object.",
                 )
                 reasoning = {"enabled": False}
                 temperature = max(escape_temperature, 0.0)
@@ -3300,21 +3855,12 @@ def drive_stage(
                     escalated=escalation_done,
                     provider_fallback=provider_fallback_active,
                 )
-            # A reconcile_target park is the pipeline's ESCALATION (a BOM shortfall
-            # wiring can't fix), not a user question. Surface it even after answers
-            # were applied, so the shared bom-reconcile re-drive can add the parts
-            # -- otherwise the "do not ask more questions" retry below burns the
-            # stage's whole budget on a park it can never satisfy (WS6).
-            is_reconcile_park = any(q.get("reconcile_target") for q in qs)
-            auto_default = (
-                stage in _AUTO_DEFAULT_QUESTION_STAGES
-                and not review_before_commit
-                and not is_reconcile_park
-            )
-            if (
-                any(q["blocking"] for q in qs)
-                and not auto_default
-                and ((not answers and not instruction) or is_reconcile_park)
+            if _questions_need_input(
+                qs,
+                stage,
+                review_before_commit=review_before_commit,
+                answers=answers,
+                instruction=instruction,
             ):
                 if not review_before_commit:
                     attach_questions(state_path, stage, qs)
@@ -3462,7 +4008,13 @@ def drive_stage(
                     qs = _normalize_questions(
                         repair_outcome.payload["candidate"]["questions"], stage
                     )
-                    if any(question["blocking"] for question in qs):
+                    if _questions_need_input(
+                        qs,
+                        stage,
+                        review_before_commit=review_before_commit,
+                        answers=answers,
+                        instruction=instruction,
+                    ):
                         if not review_before_commit:
                             attach_questions(state_path, stage, qs)
                         if progress:

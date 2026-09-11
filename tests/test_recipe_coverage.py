@@ -1,43 +1,6 @@
-import json
-from pathlib import Path
-
 import pytest
 
-from kicraft.design.models import Architecture
 from kicraft.eval.recipe_coverage import analyze_recipe_coverage
-from kicraft.server.stage_contracts import _normalize_stage_response
-
-
-_FIXTURES = Path(__file__).parent / "fixtures" / "recipe_coverage"
-
-
-def test_frozen_architecture_fixtures_are_canonical_and_idempotent():
-    for name in ("mcu_only_architecture.json", "mixed_architecture.json"):
-        frozen = json.loads((_FIXTURES / name).read_text(encoding="utf-8"))
-        Architecture.model_validate(frozen)
-        canonical, _ = _normalize_stage_response(
-            "architecture",
-            frozen,
-            {"intent": {"named_parts": ["ESP32-S3-MINI-1-N8"]}},
-        )
-        assert canonical == frozen
-
-
-def test_pre_resolution_baseline_normalizes_to_frozen_recipe_selection():
-    baseline = json.loads(
-        (_FIXTURES / "mcu_only_architecture_pre_resolution.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    expected = json.loads(
-        (_FIXTURES / "mcu_only_architecture.json").read_text(encoding="utf-8")
-    )
-    canonical, _ = _normalize_stage_response(
-        "architecture",
-        baseline,
-        {"intent": {"named_parts": ["ESP32-S3-MINI-1-N8"]}},
-    )
-    assert canonical == expected
 
 
 def test_coverage_attributes_parts_pins_calls_and_cost_exactly_once():

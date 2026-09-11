@@ -22,11 +22,12 @@ from kicraft.design.synthesis.validation import (
 )
 
 
-def _arch(assumptions=(), sheets=(), topologies=None):
+def _arch(assumptions=(), sheets=(), topologies=None, exact_parts=()):
     return SimpleNamespace(
         assumptions=list(assumptions),
         topologies=topologies or {},
         sheets=[SimpleNamespace(function=s) for s in sheets],
+        requirements=[SimpleNamespace(exact_part=part) for part in exact_parts],
     )
 
 
@@ -63,28 +64,20 @@ def _bom(parts, substitutions=(), assumptions=()):
 # --- token extraction ------------------------------------------------------
 
 
-def test_spec_tokens_find_real_mpns_and_skip_noise():
+def test_spec_tokens_use_typed_exact_parts_and_skip_prose_noise():
     arch = _arch(
-        assumptions=[
-            # run_18 (verbatim shape): the architecture names the converter.
-            "Isolated DC-DC: RECOM RP12-2412DA dual-output module (defaulted)",
-        ],
-        sheets=["STM32F103C8T6 MCU with decoupling on LQFP48, GPIO12 spare, I2C1 to sensors"],
+        assumptions=["Isolated DC-DC: RECOM RP12-2412DA dual-output module"],
+        sheets=["STM32F103C8T6 MCU with decoupling on LQFP48"],
+        exact_parts=["RP12-2412DA", "STM32F103C8T6"],
     )
     toks = _spec_named_tokens(None, arch)
-    assert "rp12-2412da" in toks
-    assert "stm32f103c8t6" in toks
-    # Pin/package/protocol noise never counts as a named part.
-    assert "lqfp48" not in toks
-    assert "gpio12" not in toks
-    assert "i2c1" not in toks
+    assert set(toks) == {"rp12-2412da", "stm32f103c8t6"}
 
 
-def test_spec_tokens_ignore_noncommittal_example_lists():
+def test_spec_tokens_ignore_untyped_prose():
     arch = _arch(
-        assumptions=[
-            "Controller selected from common parts (e.g., CH224K, FUSB302, or similar) (defaulted)"
-        ]
+        assumptions=["Controller: CH224K; regulator: ME6211C33"],
+        sheets=["STM32F103C8T6 MCU"],
     )
 
     assert _spec_named_tokens(None, arch) == {}
@@ -94,22 +87,21 @@ def test_spec_tokens_ignore_noncommittal_example_lists():
 
 
 def test_spec_named_mpn_missing_without_ledger_fails():
-    # run_18: RP12-2412DA named, WRA2412S-3WR2 shipped, nothing recorded.
-    arch = _arch(assumptions=["Use a RECOM RP12-2412DA isolated module (defaulted)"])
+    arch = _arch(exact_parts=["RP12-2412DA"])
     bom = _bom([_part("PS1", "WRA2412S-3WR2", mpn="WRA2412S-3WR2")])
-    r = check_spec_named_mpn_substitutions(None, arch, bom)
-    assert not r.ok
-    assert any("RP12-2412DA" in o for o in r.offenders)
+    result = check_spec_named_mpn_substitutions(None, arch, bom)
+    assert not result.ok
+    assert any("RP12-2412DA" in offender for offender in result.offenders)
 
 
 def test_spec_named_mpn_shipped_passes():
-    arch = _arch(assumptions=["Use a RECOM RP12-2412DA isolated module (defaulted)"])
+    arch = _arch(exact_parts=["RP12-2412DA"])
     bom = _bom([_part("PS1", "RP12-2412DA", mpn="RP12-2412DA")])
     assert check_spec_named_mpn_substitutions(None, arch, bom).ok
 
 
 def test_spec_named_mpn_ledgered_passes():
-    arch = _arch(assumptions=["Use a RECOM RP12-2412DA isolated module (defaulted)"])
+    arch = _arch(exact_parts=["RP12-2412DA"])
     bom = _bom(
         [_part("PS1", "WRA2412S-3WR2", mpn="WRA2412S-3WR2")],
         substitutions=[
@@ -123,22 +115,12 @@ def test_spec_named_mpn_ledgered_passes():
     assert check_spec_named_mpn_substitutions(None, arch, bom).ok
 
 
-def test_spec_named_mpn_in_assumptions_counts_as_surfaced():
-    # run_32's shape: the swap note lives in bom.assumptions -- that IS a
-    # record; the gate condition is silence.
-    arch = _arch(assumptions=["Connector: SM04B-SRSS-TB per spec (defaulted)"])
-    bom = _bom(
-        [_part("J1", "XY-SM04B-clone")],
-        assumptions=["J1 switched to XY clone of SM04B-SRSS-TB after commit rejection (defaulted)"],
-    )
-    assert check_spec_named_mpn_substitutions(None, arch, bom).ok
-
-
-def test_functional_spec_purpose_tokens_enforced():
-    fs = _fs(purposes=["Thermocouple amplifier around a MAX31855 (defaulted)"])
+def test_untyped_prose_does_not_create_exact_part_accountability():
+    arch = _arch(assumptions=["Connector: SM04B-SRSS-TB per spec"])
+    fs = _fs(purposes=["Thermocouple amplifier around a MAX31855"])
     bom = _bom([_part("U2", "MAX6675", mpn="MAX6675")])
-    r = check_spec_named_mpn_substitutions(fs, None, bom)
-    assert not r.ok and any("MAX31855" in o for o in r.offenders)
+
+    assert check_spec_named_mpn_substitutions(fs, arch, bom).ok
 
 
 # --- §9.34 -----------------------------------------------------------------

@@ -20,6 +20,23 @@ from .config import Settings
 class BudgetExceeded(RuntimeError):
     """Raised by `preflight()` when a spend ceiling has been reached."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        scope: str | None = None,
+        spent_usd: float | None = None,
+        limit_usd: float | None = None,
+        call_ceiling_usd: float | None = None,
+        run_id: str | None = None,
+    ):
+        super().__init__(message)
+        self.scope = scope
+        self.spent_usd = spent_usd
+        self.limit_usd = limit_usd
+        self.call_ceiling_usd = call_ceiling_usd
+        self.run_id = run_id
+
 
 class KillSwitchEngaged(RuntimeError):
     """Raised by `preflight()` when KICRAFT_KILL_SWITCH is set."""
@@ -130,7 +147,11 @@ class SpendGuard:
                 "provider_profile TEXT,"
                 "fallback_reason TEXT,"
                 "candidate_retained INTEGER,"
-                "reasoning_failure_kind TEXT)"
+                "reasoning_failure_kind TEXT,"
+                "schema_error TEXT,"
+                "failure_detail TEXT,"
+                "response_chars INTEGER,"
+                "response_format_mode TEXT)"
             )
             attempt_cols = {row[1] for row in conn.execute("PRAGMA table_info(stage_attempts)")}
             for column in (
@@ -144,6 +165,10 @@ class SpendGuard:
                 "fallback_reason TEXT",
                 "candidate_retained INTEGER",
                 "reasoning_failure_kind TEXT",
+                "schema_error TEXT",
+                "failure_detail TEXT",
+                "response_chars INTEGER",
+                "response_format_mode TEXT",
             ):
                 name = column.split()[0]
                 if name not in attempt_cols:
@@ -189,6 +214,17 @@ class SpendGuard:
             "WHERE json_valid(meta) AND json_extract(meta, '$.run_id') = ?",
             (str(run_id),),
         )
+
+    def spent_by_stage_for_run(self, run_id: str) -> dict[str, float]:
+        """Sum billed calls, including failed attempts, without stage-run duplicates."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT json_extract(meta, '$.stage'), SUM(cost_usd) FROM spend "
+                "WHERE json_valid(meta) AND json_extract(meta, '$.run_id') = ? "
+                "GROUP BY json_extract(meta, '$.stage')",
+                (run_id,),
+            ).fetchall()
+        return {str(stage or "unknown"): float(cost) for stage, cost in rows}
 
     def spent_by_day(self, days: int = 30) -> list[tuple[str, float]]:
         """(YYYY-MM-DD, cost) for the trailing `days`, summing EVERY ledger call
@@ -270,13 +306,23 @@ class SpendGuard:
         if total >= self.s.total_usd_ceiling or total + reserve > self.s.total_usd_ceiling:
             raise BudgetExceeded(
                 f"total remaining budget cannot cover call ceiling ${reserve:.4f} "
-                f"(spent ${total:.4f} of ${self.s.total_usd_ceiling:.2f}); refusing."
+                f"(spent ${total:.4f} of ${self.s.total_usd_ceiling:.2f}); refusing.",
+                scope="total",
+                spent_usd=total,
+                limit_usd=self.s.total_usd_ceiling,
+                call_ceiling_usd=reserve,
+                run_id=run_id,
             )
         day = self.spent_today()
         if day >= self.s.daily_usd_ceiling or day + reserve > self.s.daily_usd_ceiling:
             raise BudgetExceeded(
                 f"daily remaining budget cannot cover call ceiling ${reserve:.4f} "
-                f"(spent ${day:.4f} of ${self.s.daily_usd_ceiling:.2f}); refusing."
+                f"(spent ${day:.4f} of ${self.s.daily_usd_ceiling:.2f}); refusing.",
+                scope="daily",
+                spent_usd=day,
+                limit_usd=self.s.daily_usd_ceiling,
+                call_ceiling_usd=reserve,
+                run_id=run_id,
             )
         project_budget = float(getattr(self.s, "project_llm_budget_usd", 0.0) or 0.0)
         if run_id and project_budget > 0:
@@ -285,7 +331,12 @@ class SpendGuard:
                 raise BudgetExceeded(
                     f"project run {run_id} remaining budget cannot cover call ceiling "
                     f"${reserve:.4f} (spent ${run_spend:.4f} of "
-                    f"${project_budget:.2f}); refusing."
+                    f"${project_budget:.2f}); refusing.",
+                    scope="project",
+                    spent_usd=run_spend,
+                    limit_usd=project_budget,
+                    call_ceiling_usd=reserve,
+                    run_id=run_id,
                 )
 
     def record(self, model: str, input_tokens, output_tokens, cost_usd: float, meta="") -> None:
@@ -399,6 +450,10 @@ class SpendGuard:
         fallback_reason: str | None = None,
         candidate_retained: bool | None = None,
         reasoning_failure_kind: str | None = None,
+        schema_error: str | None = None,
+        failure_detail: str | None = None,
+        response_chars: int | None = None,
+        response_format_mode: str | None = None,
     ) -> None:
         """Append redacted per-call facts; never stores prompts or responses."""
         codes = sorted({str(code) for code in diagnostic_codes if code})
@@ -410,8 +465,9 @@ class SpendGuard:
                 "request_id,wall_s,input_tokens,output_tokens,cost_usd,diagnostic_codes,"
                 "unit_id,unit_attempt,aggregate_round,commit_gate_codes,offender_count,"
                 "rejection_signature,provider_profile,fallback_reason,candidate_retained,"
-                "reasoning_failure_kind)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "reasoning_failure_kind,schema_error,failure_detail,response_chars,"
+                "response_format_mode)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     _utcnow_iso(),
                     run_id,
@@ -440,5 +496,9 @@ class SpendGuard:
                     fallback_reason,
                     int(candidate_retained) if candidate_retained is not None else None,
                     reasoning_failure_kind,
+                    schema_error,
+                    failure_detail,
+                    int(response_chars) if response_chars is not None else None,
+                    response_format_mode,
                 ),
             )

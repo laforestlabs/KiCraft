@@ -162,6 +162,7 @@ def _policy_rows(settings: Settings) -> dict:
                     "total": bound.total,
                     "per_group": bound.per_group,
                     "group_key": bound.group_key,
+                    "unique_keys": list(bound.unique_keys),
                 }
                 for bound in policy.collection_bounds
             ],

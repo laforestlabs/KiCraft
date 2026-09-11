@@ -18,6 +18,7 @@ from kicraft.design.models import (
     ArraySpec,
     BOM,
     BomPart,
+    CircuitRequirement,
     ConversationState,
     FunctionalBlock,
     FunctionalSpec,
@@ -264,6 +265,14 @@ def test_inter_sheet_net_needs_two_endpoints() -> None:
         InterSheetNet(name="VBUS", endpoints=[SheetPin(sheet="A", direction="output")])
 
 
+@pytest.mark.parametrize("blocks", [["USB", "USB"], [""]])
+def test_circuit_requirement_rejects_invalid_block_membership(blocks) -> None:
+    with pytest.raises(ValidationError):
+        CircuitRequirement(
+            id="usb", sheet="MAIN", role="connector", family="usb-c", functional_blocks=blocks
+        )
+
+
 # ---------- BOM cross-refs ----------
 
 
@@ -366,6 +375,37 @@ def test_functional_spec_unknown_block_rejected() -> None:
                 }
             ],
         )
+
+
+def test_functional_connection_identity_preserves_fanout_direction_and_type() -> None:
+    blocks = [
+        {"name": name, "category": "process", "purpose": "Signal processing"}
+        for name in ("A", "B", "C")
+    ]
+    connections = [
+        {"from_block": source, "to_block": target, "signal_type": signal, "description": signal}
+        for source, target, signal in (
+            ("A", "B", "digital"),
+            ("A", "C", "digital"),
+            ("B", "A", "digital"),
+            ("A", "B", "power"),
+        )
+    ]
+    payload = {"blocks": blocks, "connections": connections}
+    spec = FunctionalSpec.model_validate(payload)
+    assert [connection.model_dump() for connection in spec.connections] == connections
+
+    from kicraft.server.stage_contracts import StageSchemaError, _normalize_stage_response
+
+    normalized, _expanded = _normalize_stage_response("functional_spec", payload, {})
+    assert normalized["connections"] == connections
+    connections.append({**connections[0], "description": "A second physical signal"})
+    with pytest.raises(ValidationError, match="duplicate functional connection"):
+        FunctionalSpec.model_validate(payload)
+    with pytest.raises(StageSchemaError, match="duplicate functional connection"):
+        _normalize_stage_response("functional_spec", payload, {})
+    assert len(payload["connections"]) == 5
+    assert payload["connections"][-1]["description"] == "A second physical signal"
 
 
 # ---------- PinEndpoint / NetConnection ----------

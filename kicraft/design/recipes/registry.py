@@ -22,6 +22,7 @@ from .models import (
     RegisteredRecipe,
     ResolvedRecipeSelection,
 )
+from .pin_allocator import FIXED_INTERFACES, allocatable_capability_counts
 
 _REGISTRY: dict[str, RegisteredRecipe] = {}
 _SELECTORS: dict[str, str] = {}
@@ -80,8 +81,30 @@ def recipe_summaries(
             "exact_part": definition.exact_part,
             "maturity": definition.maturity,
             "required_sheet_roles": list(definition.required_sheet_roles),
-            "parameters": definition.parameter_defaults,
-            "ports": [port.model_dump() for port in definition.ports],
+            "parameter_defaults": definition.parameter_defaults,
+            "external_ports": [port.model_dump() for port in definition.ports],
+            "owned_parts": [
+                {"role": part.role, "quantity": part.quantity, "value": part.value}
+                for part in definition.parts
+            ],
+            "allocatable_gpios": sorted(
+                {
+                    pin.gpio
+                    for pin in definition.allocatable_pins
+                    if pin.gpio is not None and not pin.reserved
+                }
+            ),
+            "allocatable_capabilities": (
+                capabilities := allocatable_capability_counts(definition.allocatable_pins)
+            ),
+            "interfaces": {
+                interface: [
+                    {"keys": list(keys), "capability": capability}
+                    for keys, capability in members
+                ]
+                for interface, members in FIXED_INTERFACES.items()
+                if all(capability in capabilities for _, capability in members)
+            },
         }
         for definition in (registered.definition for registered in registered_recipes())
         if definition.maturity in allowed_maturities
