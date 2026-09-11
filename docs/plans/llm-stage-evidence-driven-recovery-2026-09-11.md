@@ -353,3 +353,15 @@ Extend the existing passive USB lowerer only with verified SuperSpeed-capable ha
 7. **Record** campaign costs and deployment health evidence in this log.
 
 Blocker policy unchanged: provider outage, unavailable electrical specification, or spend ceiling is an explicit blocker, never permission to weaken gates, invent electrical meaning, or claim completion. Production configuration and services remain unchanged.
+
+## Final handoff (2026-09-11)
+
+- Remaining source repairs landed and pushed: commit `c3416da` separates FPC connector ownership from the generic header feature (`fpc-header-breakout` now requires an FPC contact, `Connector_FFC-FPC` footprint) and scopes `route_work_unit_ids` case/separator-insensitively so semantic repair targets the owning unit. Full suite **3953 passed, 15 skipped, 1 xfailed**.
+- A fresh R14 full-corpus campaign was launched at `logs/self_eval/evidence_loop_round14_pro_budget15_all34_20260911` and stopped at operator request (exit 143) before completion; it is diagnostic only and does not count toward acceptance.
+- **Operator decision**: restart production services now and test live; do not run the deploy canary or any further verification this session.
+
+## To continue (operator live test)
+
+1. If live testing surfaces a concrete failure, classify its earliest mechanism against the R13 signature table and fix at the owning layer (architecture / resolver / BOM / wiring / budget), then re-run the affected brief fresh (no build/judge/resume).
+2. Otherwise proceed through the six cohorts (two consecutive fresh passes each), then one fresh complete 34/34 pre-deploy campaign on frozen source.
+3. Only a fresh 34/34 (plus the canonical `deploy/verify-design-canary.sh` all-34 during `deploy-production.sh`) authorizes claiming completion. Do not weaken gates, retry unchanged failures, or raise the spend cap to reach it.
