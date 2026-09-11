@@ -334,3 +334,22 @@ Extend the existing passive USB lowerer only with verified SuperSpeed-capable ha
 | Missing recipe physical controls | stepper-a4988, round-led-ring | A4988 EN/microstep endpoints and WS2812 terminal `data_out` need real ownership semantics, never deletion of requested signals. |
 | UART endpoint-direction contradiction | rounded-c3-devboard | Inspect bindings separately from direction annotations; no5V-domain bypass or guessed rewiring. |
 | Real orderability gate | star-ornament, snowman-ornament | ATTINY402-SSN reports retail stock47. Investigate proven equivalent ordering variants/availability without weakening§9.26 or silently substituting a different MCU. |
+
+### Round 14 — checkpoint commit `dfc1582`, pushed
+
+- Full suite **3951 passed, 15 skipped, 1 xfailed** (383.4s); all touched focused tests pass (427 across six files). Pushed to `origin/simplify/bom-wiring-pipeline`.
+- Verified repairs landed and integrated: exact directional device/order-code + family membership authority (`kicraft/design/part_identity.py`); fixed-interface key aliases resolved without guessed nets; unique family-selected composites own real MPNs; programming-role UART reaches crossing diagnostics; typed passive connectors no longer inferred as ICs; equal-voltage rails require typed directional ownership; BOM semantic repair routes to owning units; real `_Odd_Even` two-row symbols; connector gender selects real `PinSocket` footprints; reserved `NC` contacts become no-connects; connector cardinality and explicit MPN survive curated normalization; standard-form-factor reconcile preserves prototyping hardware/ownership.
+
+## Continuation plan
+
+1. **Finish two remaining source repairs** (both evidenced, not yet implemented):
+   - `fpc-breakout`: separate the `fpc-header-breakout` composite so an FPC-sheet model unit is not required to contain a pin header, and validate real FH12 footprints/sourcing without weakening identity gates (`_required_physical_feature` / `_validate_bom_unit_sourcing`).
+   - `route_work_unit_ids` (`kicraft/server/stage_work_units.py`): case/separator-normalize evidence↔sheet matching so semantic repair regenerates only the owning unit, not every accepted sibling (speaker-crossover exhaustion).
+2. **Verify offline**: focused regressions for the two fixes, then the full stable suite once.
+3. **Fresh live loop**: run affected live briefs (`fpc-breakout`, `speaker-crossover`, and any remaining R13 signature), no build/judge/resume, bounded production provider calls. Fix the earliest reproducible mechanism; never retry unchanged or raise the cap.
+4. **Cohort repeatability**: two consecutive fresh passes per cohort (serialization, identity, recipe/budget, boundary, ownership, regression sentinels), same frozen source.
+5. **Complete pre-deploy campaign**: one fresh 34/34 five-stage commit on frozen source.
+6. **Canonical deploy**: `./deploy/deploy-production.sh` — its independent fresh canary also reports 34/34; then verify HTTP 200 and `[build-worker] ready`.
+7. **Record** campaign costs and deployment health evidence in this log.
+
+Blocker policy unchanged: provider outage, unavailable electrical specification, or spend ceiling is an explicit blocker, never permission to weaken gates, invent electrical meaning, or claim completion. Production configuration and services remain unchanged.
