@@ -574,9 +574,10 @@ def _required_physical_feature(requirement: dict) -> str | None:
         "header",
         "spiheader",
         "gpioheader",
-        "fpcheaderbreakout",
     }:
         return "header"
+    if family == "fpcheaderbreakout":
+        return "fpc"
     if family in {"switchinput", "button", "pushbutton", "bootbutton", "resetbutton"}:
         return "button"
     if family in {"voltageselectorswitch", "selectorswitch", "selector"}:
@@ -593,6 +594,10 @@ def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
         ) and group.footprint.startswith(
             ("Connector_PinHeader_", "Connector_PinSocket_", "Connector_IDC:")
         )
+    if feature == "fpc":
+        return group.symbol.startswith(
+            ("Connector_Generic:Conn_", "Connector:Conn_", "Connector_Generic_MountingPin:Conn_")
+        ) and group.footprint.startswith("Connector_FFC-FPC:")
     if feature == "coin-cell-holder":
         return group.symbol == "Device:Battery_Cell" and group.footprint.startswith(
             "Battery:BatteryHolder_"
@@ -2010,6 +2015,23 @@ def route_work_unit_ids(
             )
         )
 
+    def mentions_sheet(sheet: str) -> bool:
+        # Semantic evidence is lowercased upstream, while sheet names are
+        # schema-forced UPPERCASE; separators also drift between space and
+        # underscore. Normalize both so a typed sheet still routes its own
+        # diagnostic instead of falling back to every unit.
+        parts = [part for part in re.split(r"[\s_-]+", sheet.strip()) if part]
+        if not parts:
+            return False
+        needle = r"[\s_-]+".join(re.escape(part) for part in parts)
+        return bool(
+            re.search(
+                rf"(?<![A-Za-z0-9_-]){needle}(?![A-Za-z0-9_-])",
+                text,
+                re.IGNORECASE,
+            )
+        )
+
     selected: set[str] = set()
     for pin, unit_id in (pin_to_unit or {}).items():
         if mentions(f"{pin[0]}.{pin[1]}"):
@@ -2021,7 +2043,7 @@ def route_work_unit_ids(
         if mentions_ref(ref):
             selected.update(unit_ids)
     for unit in units:
-        if unit.sheet and unit.sheet in text:
+        if unit.sheet and mentions_sheet(unit.sheet):
             selected.add(unit.unit_id)
     if not selected:
         return tuple(unit.unit_id for unit in units)

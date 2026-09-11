@@ -643,6 +643,19 @@ def test_wiring_merge_orders_pins_and_routes_exact_offenders():
     )
 
 
+def test_route_work_unit_ids_matches_sheet_case_insensitively():
+    units = (
+        StageWorkUnit("bom-s000", "bom", "AMPLIFIER INPUT"),
+        StageWorkUnit("bom-s001", "bom", "HIGH PASS FILTER"),
+    )
+    # Semantic diagnostics lowercase evidence; the sheet name is schema-forced
+    # uppercase. The owning unit must still be targeted, not the fallback set.
+    evidence = [
+        {"message": "no active amplifier on its input sheet", "evidence": ["amplifier input"]}
+    ]
+    assert route_work_unit_ids(evidence, units) == ("bom-s000",)
+
+
 def test_combined_fpc_header_requirements_stay_in_one_sheet_unit():
     state = _state()
     state["architecture"]["sheets"] = [
@@ -1580,8 +1593,7 @@ def test_terminal_normalization_preserves_real_contact_count(tmp_path):
                 "value": "ScrewTerminal_1x03",
                 "symbol": "Connector:Screw_Terminal_01x03",
                 "footprint": (
-                    "TerminalBlock_Phoenix:"
-                    "TerminalBlock_Phoenix_MKDS-1,5-3_1x03_P5.00mm_Horizontal"
+                    "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-3_1x03_P5.00mm_Horizontal"
                 ),
             }
         ]
@@ -1589,9 +1601,11 @@ def test_terminal_normalization_preserves_real_contact_count(tmp_path):
     validated = validate_unit_candidate(
         unit, payload, _state(), {"_validation_project_root": str(tmp_path)}
     )
-    assert {
-        pin["number"] for pin in lookup_pins(validated["groups"][0]["symbol"])["pins"]
-    } == {"1", "2", "3"}
+    assert {pin["number"] for pin in lookup_pins(validated["groups"][0]["symbol"])["pins"]} == {
+        "1",
+        "2",
+        "3",
+    }
 
 
 def test_curated_namespace_cannot_replace_an_explicitly_selected_device(monkeypatch):
@@ -1971,6 +1985,41 @@ def test_typed_header_cannot_be_replaced_by_passive_footprint():
         validate_unit_candidate(unit, {"groups": [group]}, state, {})
 
     assert caught.value.defects["missing-requirement-implementation"] == ["header"]
+
+
+def test_typed_fpc_connector_requires_fpc_contact_not_a_pin_header():
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": "A", "function": "FPC breakout"}]
+    state["architecture"]["requirements"] = [
+        {
+            "id": "fpc_connector",
+            "sheet": "A",
+            "role": "connector",
+            "family": "fpc-header-breakout",
+            "parameters": {"pitch_mm": 0.5},
+            "ports": {f"pin{index}": f"NET{index}" for index in range(1, 25)},
+        }
+    ]
+    (unit,) = plan_stage_work_units("bom", state, {})
+
+    fpc_group = {
+        **_group("fpc_connector", "A", prefix="J"),
+        "value": "FH12-24S-0.5SH(55)",
+        "symbol": "Connector_Generic:Conn_01x24",
+        "footprint": "Connector_FFC-FPC:Hirose_FH12-24S-0.5SH_1x24-1MP_P0.50mm_Horizontal",
+    }
+    validated = validate_unit_candidate(unit, {"groups": [fpc_group]}, state, {})
+    assert any(group["footprint"].startswith("Connector_FFC-FPC:") for group in validated["groups"])
+
+    header_group = {
+        **_group("header", "A", prefix="J"),
+        "value": "PinHeader_1x24",
+        "symbol": "Connector_Generic:Conn_01x24",
+        "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x24_P2.54mm_Vertical",
+    }
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, {"groups": [header_group]}, state, {})
+    assert caught.value.defects["missing-requirement-implementation"] == ["fpc_connector"]
 
 
 @pytest.mark.parametrize("multiple_requirements", [False, True])
