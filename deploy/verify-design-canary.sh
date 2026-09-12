@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Deploy gate: drive the complete 34-brief design corpus through the REAL
-# provider, spend guard, and stage pipeline — the same code, .env profile, and
-# per-run budget the web app uses. Exits nonzero unless every selected brief
+# On-demand design gate: drive the complete 34-brief design corpus through the
+# REAL provider, spend guard, and stage pipeline — the same code, .env profile,
+# and per-run budget the web app uses. Exits nonzero unless every selected brief
 # commits all five LLM stages (intent, functional_spec, architecture, bom,
-# wiring). Passing a slug list is only for local diagnosis; production deploys
-# invoke this script without arguments and therefore require all 34.
+# wiring). NOT part of deploy-production.sh; run it manually before/after a
+# deploy when you want the real-provider check.
 #
 # Usage:
 #   deploy/verify-design-canary.sh                 # all 34 briefs
