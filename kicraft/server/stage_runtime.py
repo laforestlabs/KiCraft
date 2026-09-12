@@ -600,6 +600,20 @@ def _client_model(client) -> str | None:
     return getattr(getattr(client, "s", None), "model", None)
 
 
+def _requirement_identity(requirement: dict) -> str:
+    """Requirement id plus the identity a group must carry to satisfy it.
+
+    The bare id ("relay_driver") does not tell a repair turn what part to emit;
+    role / family / exact_part do.
+    """
+    parts = [str(requirement.get("id"))]
+    for field in ("role", "family", "exact_part"):
+        value = requirement.get(field)
+        if value:
+            parts.append(f"{field}={value}")
+    return " ".join(parts)
+
+
 def _trace_candidate(stage: str, candidate: dict | None) -> dict | None:
     """Return only the normalized design slot; never provider request/response data."""
     if candidate is None:
@@ -1165,12 +1179,13 @@ def decode_stage_response(
         if facts.finish == "collection_limit":
             raise ValueError("stream collection limit")
         parsed = _extract_json(facts.raw)
-        if isinstance(parsed.get("questions"), list):
+        asked = parsed.get("questions")
+        if isinstance(asked, list) and asked:
             return AttemptOutcome(
                 "questions",
                 {
                     "candidate": {
-                        "questions": _normalize_questions(parsed["questions"], prepared.stage)
+                        "questions": _normalize_questions(asked, prepared.stage)
                     },
                     "expanded_component_count": 0,
                 },
@@ -1693,6 +1708,12 @@ def _drive_work_unit_stage(
             prompt_state,
             bom_sheet=unit.sheet if stage == "bom" else None,
             wiring_refs=unit.refs if stage == "wiring" else None,
+            # BOM work units can never park on a question (`_questions_need_input`
+            # auto-defaults the whole stage) and the loop's own feedback says
+            # "do not ask", so the affordance only burns repair attempts on turns
+            # the loop discards. Wiring keeps it: a missing support part must be
+            # able to request one BOM reconcile round.
+            allow_questions=stage != "bom",
         )
         for unit in units
     }
@@ -2240,7 +2261,7 @@ def _drive_work_unit_stage(
                     fallback_reason=("provider_rate_limited" if fallback_spent else None),
                 )
                 return "recoverable", None, facts, parse_kind
-            if isinstance(parsed.get("questions"), list):
+            if isinstance(parsed.get("questions"), list) and parsed["questions"]:
                 record(
                     active_client,
                     unit=unit,
@@ -2254,6 +2275,10 @@ def _drive_work_unit_stage(
                     fallback_reason=("provider_rate_limited" if fallback_spent else None),
                 )
                 return "questions", parsed, facts, None
+            if "questions" in parsed:
+                # The strict envelope always carries `questions`; an empty list is
+                # not part of the unit payload.
+                parsed = {key: value for key, value in parsed.items() if key != "questions"}
             try:
                 validated = validate_unit_candidate(unit, parsed, prompt_state, extras)
             except (WorkUnitValidationError, TypeError, ValueError) as exc:
@@ -2337,7 +2362,7 @@ def _drive_work_unit_stage(
             )
         return re.sub(r"\s+", " ", str(error)).strip()
 
-    seen_unit_failures: dict[str, set[str]] = {}
+    seen_unit_failures: dict[str, dict[str, int]] = {}
 
     def draft(
         unit: StageWorkUnit,
@@ -2346,7 +2371,7 @@ def _drive_work_unit_stage(
         force_pristine: bool = False,
         aggregate_round: int | None = None,
     ) -> tuple[str, dict | None]:
-        seen_signatures = seen_unit_failures.setdefault(unit.unit_id, set())
+        seen_signatures = seen_unit_failures.setdefault(unit.unit_id, {})
         local_feedback = feedback
         failure_detail: dict = {}
         serialization_next = False
@@ -2436,12 +2461,24 @@ def _drive_work_unit_stage(
                     "failure_kind": error,
                     "error": "clean-slate serialization retry failed",
                 }
-            if signature in seen_signatures:
+            # One identical defect may repeat: the model often fixes it on the
+            # next nudge, and the loop is already bounded by the unit attempt stop
+            # and the call budget. A third identical signature is terminal, and a
+            # protected-identity conflict still stops after one repair attempt so
+            # the model can never override deterministic ownership.
+            ownership_conflict = stage == "bom" and any(
+                marker in error_text
+                for marker in ("recipe-duplicate", "model_authored_protected_identity")
+            )
+            seen_signatures[signature] = seen_signatures.get(signature, 0) + 1
+            repeats = seen_signatures[signature]
+            if repeats > 2 or (ownership_conflict and repeats > 1):
                 return "terminal", {
-                    "failure_kind": "unit_repair_exhausted",
+                    "failure_kind": (
+                        "unit_ownership_conflict" if ownership_conflict else "unit_repair_exhausted"
+                    ),
                     **failure_detail,
                 }
-            seen_signatures.add(signature)
             if used_serialization and error in serialization_errors:
                 bounds_sentence = _collection_bounds_sentence(
                     response_policy_for_unit(unit).collection_bounds
@@ -2467,14 +2504,6 @@ def _drive_work_unit_stage(
                     collection_limit=facts.collection_limit if facts is not None else None,
                 )
                 continue
-            if stage == "bom" and any(
-                marker in error_text
-                for marker in ("recipe-duplicate", "model_authored_protected_identity")
-            ):
-                return "terminal", {
-                    "failure_kind": "unit_ownership_conflict",
-                    **failure_detail,
-                }
             if stage == "bom":
                 if unit.requirement_ids:
                     owned_scope = (
@@ -2502,6 +2531,49 @@ def _drive_work_unit_stage(
                     repair_instruction += (
                         " The empty groups list is the defect: emit the smallest complete set "
                         f"of groups needed for this {owned_target}."
+                    )
+                if any(
+                    marker in error_text
+                    for marker in (
+                        "unresolved-footprint",
+                        "unresolved-symbol",
+                        "symbol-footprint-pad-mismatch",
+                    )
+                ):
+                    repair_instruction += (
+                        " For each unresolved-footprint / unresolved-symbol / "
+                        "symbol-footprint-pad-mismatch defect, replace the rejected identifier "
+                        "with one of that defect's `candidates` entries VERBATIM (call "
+                        "search_symbols / search_footprints when none of the candidates fit); "
+                        "never invent a library id, and keep the symbol and footprint drawn for "
+                        "the same real part."
+                    )
+                if "missing-requirement-implementation" in error_text:
+                    architecture = prompt_state.get("architecture") or {}
+                    owned_ids = set(unit.requirement_ids)
+                    identities = [
+                        _requirement_identity(row)
+                        for row in architecture.get("requirements") or []
+                        if isinstance(row, dict)
+                        and (not owned_ids or str(row.get("id")) in owned_ids)
+                    ]
+                    if identities:
+                        repair_instruction += (
+                            " The missing-requirement-implementation defect means no group "
+                            "carries that requirement's identity; emit the real part for: "
+                            + "; ".join(identities)
+                            + "."
+                        )
+                if any(
+                    marker in error_text
+                    for marker in ("model_authored_protected_identity", "recipe-duplicate")
+                ):
+                    repair_instruction += (
+                        " The groups named in model_authored_protected_identity / "
+                        "recipe-duplicate are already supplied by the deterministic pipeline "
+                        "or a sibling unit: DROP those groups entirely and emit only the "
+                        "groups that implement this unit's own requirement_ids. Do not "
+                        "re-emit or rename a dropped group."
                     )
             else:
                 repair_instruction = (

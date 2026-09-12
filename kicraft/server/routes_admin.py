@@ -26,6 +26,7 @@ from nicegui import ui
 from kicraft.cli.artifact_paths import LEAF_ROUTED, artifact_root
 
 from . import billing
+from . import routing_config
 from .accounts import (
     CORE_COMPONENT_CATEGORIES,
     DEFAULT_TIER,
@@ -33,7 +34,7 @@ from .accounts import (
     _RESET_TTL_SECONDS,
     is_admin,
 )
-from .config import Settings
+from .config import DESIGN_PROFILES, Settings
 from .host_metrics import HostMetricsStore
 from .kicanvas import KiCanvasSource, KiCanvasView, kicanvas_head
 from .render_serving import _register_project_dir, _resolve_project_token
@@ -379,6 +380,9 @@ def _admin_header(active: str) -> None:
                 "Tuning", icon="tune", on_click=lambda: ui.navigate.to("/admin/tuning")
             ).props("flat dense no-caps color=white").classes("text-xs")
             ui.button(
+                "Routing", icon="alt_route", on_click=lambda: ui.navigate.to("/admin/routing")
+            ).props("flat dense no-caps color=white").classes("text-xs")
+            ui.button(
                 "Tidiness A/B",
                 icon="grid_view",
                 on_click=lambda: ui.navigate.to("/admin/tidiness-ab"),
@@ -399,6 +403,235 @@ def _admin_header(active: str) -> None:
 
 def _admin_card_style() -> str:
     return "background:var(--kc-surface);border:1px solid var(--kc-border);min-width:380px"
+
+
+# --------------------------------------------------------------------------- #
+# Admin: design-model routing. Persists the active DESIGN_PROFILES entry plus
+# four behavior knobs in the routing config (~/.kicraft/routing.json; override
+# with KICRAFT_ROUTING_CONFIG). Both the web app and the build worker call
+# Settings.from_env() per run, so a save takes effect on the next design run --
+# no restart. The page deliberately exposes NO secrets and NO cost ceilings:
+# API keys and the daily/total USD caps stay .env-only.
+# --------------------------------------------------------------------------- #
+def _routing_profile_summary(name: str) -> str:
+    profile = DESIGN_PROFILES[name]
+    return (
+        f"backend {profile['backend']} · model {profile['model']} · "
+        f"{profile['base_url']}"
+    )
+
+
+@ui.page("/admin/routing")
+def admin_routing_page():
+    """Pick the active design model (a named profile) and its behavior knobs:
+    per-call token cap, project LLM budget, reasoning/thinking budget, and
+    design temperature. Mutating handlers re-check is_admin() (defense in
+    depth, same as /admin/users)."""
+    user, redirect = _require_admin()
+    if redirect is not None:
+        return redirect
+    ui.dark_mode().enable()
+    ui.query("body").style("background:var(--kc-bg)")
+    _admin_header("routing")
+
+    def guard() -> bool:
+        """Defense in depth: never trust the page-load gate for a mutation."""
+        if not is_admin(_current_user()):
+            ui.notify("Admin access required.", color="warning")
+            return False
+        return True
+
+    def env_settings() -> Settings | None:
+        try:
+            return Settings.from_env()
+        except (SystemExit, ValueError) as exc:
+            ui.notify(f"Environment does not resolve: {exc}", color="negative")
+            return None
+
+    current = routing_config.load()
+    resolved = env_settings()
+    profile_names = sorted(DESIGN_PROFILES)
+    active = current.active_profile or getattr(resolved, "design_profile", "")
+    if active not in DESIGN_PROFILES:
+        active = "luna" if "luna" in DESIGN_PROFILES else profile_names[0]
+    field_defaults = {
+        "max_tokens_per_call": (
+            current.max_tokens_per_call
+            if current.max_tokens_per_call is not None
+            else getattr(resolved, "max_tokens_per_call", 1024)
+        ),
+        "project_llm_budget_usd": (
+            current.project_llm_budget_usd
+            if current.project_llm_budget_usd is not None
+            else getattr(resolved, "project_llm_budget_usd", 0.10)
+        ),
+        "design_reasoning_tokens": (
+            current.design_reasoning_tokens
+            if current.design_reasoning_tokens is not None
+            else getattr(resolved, "design_reasoning_tokens", 0)
+        ),
+        "design_temperature": (
+            current.design_temperature
+            if current.design_temperature is not None
+            else getattr(resolved, "design_temperature", 0.0)
+        ),
+    }
+
+    with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
+        ui.label("Design-model routing").classes("text-2xl font-bold text-white")
+        ui.label(
+            "Selects the model that drafts the schematic (the active design "
+            "profile) and its behavior knobs. A save applies to the NEXT design "
+            "run: both the web app and the build worker re-read settings per "
+            "run, so no restart is needed. API keys and the daily/total spend "
+            "ceilings always stay in .env and are not editable here."
+        ).classes("text-xs").style("color:#94a3b8")
+
+        with ui.card().classes("w-full gap-2").style(_admin_card_style()):
+            ui.label("Active model").classes("text-base font-semibold text-white")
+            profile_select = (
+                ui.select(
+                    {name: f"{name} — {DESIGN_PROFILES[name]['model']}" for name in profile_names},
+                    value=active,
+                    label="design profile",
+                )
+                .classes("w-96")
+                .props("dark outlined dense")
+                .mark("routing-profile-select")
+            )
+            for name in profile_names:
+                ui.label(f"{name}: {_routing_profile_summary(name)}").classes("text-xs").style(
+                    f"color:{'#34d399' if name == active else '#64748b'}"
+                )
+
+        with ui.card().classes("w-full gap-2").style(_admin_card_style()):
+            ui.label("Behavior").classes("text-base font-semibold text-white")
+            with ui.row().classes("w-full items-center gap-4 flex-wrap"):
+                tokens_input = (
+                    ui.number(
+                        label="Max tokens per call",
+                        value=field_defaults["max_tokens_per_call"],
+                        min=1,
+                        max=routing_config.MAX_TOKENS_PER_CALL_CEILING,
+                        precision=0,
+                    )
+                    .classes("w-56")
+                    .props("dark outlined dense")
+                    .mark("routing-tokens")
+                )
+                budget_input = (
+                    ui.number(
+                        label="Project LLM budget (USD)",
+                        value=field_defaults["project_llm_budget_usd"],
+                        min=0.0,
+                        max=routing_config.MAX_PROJECT_BUDGET_USD,
+                        step=0.01,
+                    )
+                    .classes("w-56")
+                    .props("dark outlined dense")
+                    .mark("routing-budget")
+                )
+                reasoning_input = (
+                    ui.number(
+                        label="Reasoning/thinking budget (tokens; 0 disables)",
+                        value=field_defaults["design_reasoning_tokens"],
+                        min=0,
+                        max=routing_config.MAX_REASONING_TOKENS,
+                        precision=0,
+                    )
+                    .classes("w-64")
+                    .props("dark outlined dense")
+                    .mark("routing-reasoning")
+                )
+                temperature_input = (
+                    ui.number(
+                        label="Design temperature (0..1)",
+                        value=field_defaults["design_temperature"],
+                        min=0.0,
+                        max=1.0,
+                        step=0.05,
+                    )
+                    .classes("w-56")
+                    .props("dark outlined dense")
+                    .mark("routing-temperature")
+                )
+
+        resolved_box = ui.column().classes("w-full gap-1")
+
+        def render_resolved() -> None:
+            resolved_box.clear()
+            fresh = env_settings()
+            with resolved_box:
+                with ui.card().classes("w-full gap-1").style(_admin_card_style()):
+                    ui.label("Effective settings (resolved now)").classes(
+                        "text-base font-semibold text-white"
+                    )
+                    ui.label(f"routing file: {routing_config.default_path()}").classes(
+                        "text-xs"
+                    ).style("color:#64748b")
+                    if fresh is None:
+                        ui.label("Could not resolve settings from the environment.").classes(
+                            "text-sm"
+                        ).style("color:#f87171")
+                        return
+                    redacted = fresh.redacted()
+                    for key in (
+                        "design_profile",
+                        "backend",
+                        "model",
+                        "base_url",
+                        "provider_order",
+                        "max_tokens_per_call",
+                        "project_llm_budget_usd",
+                        "design_reasoning_tokens",
+                        "design_temperature",
+                    ):
+                        with ui.row().classes("w-full items-center gap-2 text-xs"):
+                            ui.label(key).style("width:220px;color:#64748b;font-family:monospace")
+                            ui.label(json.dumps(redacted.get(key))).style(
+                                "color:#e2e8f0;font-family:monospace"
+                            )
+
+        def do_save() -> None:
+            if not guard():
+                return
+            try:
+                config = routing_config.RoutingConfig(
+                    active_profile=str(profile_select.value or ""),
+                    max_tokens_per_call=(
+                        int(tokens_input.value) if tokens_input.value is not None else None
+                    ),
+                    project_llm_budget_usd=(
+                        float(budget_input.value) if budget_input.value is not None else None
+                    ),
+                    design_reasoning_tokens=(
+                        int(reasoning_input.value) if reasoning_input.value is not None else None
+                    ),
+                    design_temperature=(
+                        float(temperature_input.value)
+                        if temperature_input.value is not None
+                        else None
+                    ),
+                )
+                path = routing_config.save(config)
+            except (ValueError, OSError) as exc:
+                ui.notify(str(exc), color="negative")
+                return
+            ui.notify(
+                f"Saved to {path}. Takes effect on the next design run.",
+                color="positive",
+            )
+            render_resolved()
+
+        with ui.row().classes("w-full items-center gap-3"):
+            ui.button("Save", icon="save", on_click=do_save).props(
+                "unelevated no-caps"
+            ).mark("routing-save")
+            ui.label("Takes effect on the next design run (no restart).").classes(
+                "text-xs"
+            ).style("color:#94a3b8")
+
+        render_resolved()
 
 
 # --------------------------------------------------------------------------- #

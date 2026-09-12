@@ -1058,9 +1058,10 @@ def test_rate_limit_falls_back_once_with_shared_guard_and_pristine_messages(tmp_
     )
     client.s = Settings(
         api_key="test",
-        design_profile="flash",
-        model=str(DESIGN_PROFILES["flash"]["model"]),
-        provider_fallback_profile="pro",
+        design_profile="deepseek",
+        model=str(DESIGN_PROFILES["deepseek"]["model"]),
+        provider_order=list(DESIGN_PROFILES["deepseek"]["provider_order"]),
+        provider_fallback_profile="luna",
         escalation_profile="",
     )
     result = run_session(
@@ -1073,8 +1074,8 @@ def test_rate_limit_falls_back_once_with_shared_guard_and_pristine_messages(tmp_
     assert result["status"] == "ok"
     assert result["results"][0]["attempts"] == 2
     assert [call["model"] for call in client.calls] == [
-        DESIGN_PROFILES["flash"]["model"],
-        DESIGN_PROFILES["pro"]["model"],
+        DESIGN_PROFILES["deepseek"]["model"],
+        DESIGN_PROFILES["luna"]["model"],
     ]
     assert all(call["guard"] is client.guard for call in client.calls)
     assert client.calls[1]["messages"] == client.calls[0]["messages"]
@@ -1088,12 +1089,12 @@ def test_rate_limit_falls_back_once_with_shared_guard_and_pristine_messages(tmp_
     assert fallback == {
         "kind": "provider_fallback",
         "stage": "intent",
-        "from": DESIGN_PROFILES["flash"]["model"],
-        "to": DESIGN_PROFILES["pro"]["model"],
-        "from_profile": "flash",
-        "to_profile": "pro",
-        "from_providers": DESIGN_PROFILES["flash"]["provider_order"],
-        "to_providers": DESIGN_PROFILES["pro"]["provider_order"],
+        "from": DESIGN_PROFILES["deepseek"]["model"],
+        "to": DESIGN_PROFILES["luna"]["model"],
+        "from_profile": "deepseek",
+        "to_profile": "luna",
+        "from_providers": DESIGN_PROFILES["deepseek"]["provider_order"],
+        "to_providers": DESIGN_PROFILES["luna"]["provider_order"],
         "attempt": 2,
         "reason": "provider_rate_limited",
     }
@@ -1109,9 +1110,9 @@ def test_provider_fallback_is_one_shot_and_only_for_rate_limits(tmp_path):
     )
     rate_limited.s = Settings(
         api_key="test",
-        design_profile="flash",
-        model=str(DESIGN_PROFILES["flash"]["model"]),
-        provider_fallback_profile="pro",
+        design_profile="deepseek",
+        model=str(DESIGN_PROFILES["deepseek"]["model"]),
+        provider_fallback_profile="luna",
     )
     result = run_session(
         tmp_path / "rate-limited",
@@ -1131,9 +1132,9 @@ def test_provider_fallback_is_one_shot_and_only_for_rate_limits(tmp_path):
     )
     upstream.s = Settings(
         api_key="test",
-        design_profile="flash",
-        model=str(DESIGN_PROFILES["flash"]["model"]),
-        provider_fallback_profile="pro",
+        design_profile="deepseek",
+        model=str(DESIGN_PROFILES["deepseek"]["model"]),
+        provider_fallback_profile="luna",
     )
     result = run_session(
         tmp_path / "upstream",
@@ -1154,8 +1155,8 @@ def test_empty_provider_fallback_profile_preserves_terminal_rate_limit(tmp_path)
     )
     client.s = Settings(
         api_key="test",
-        design_profile="flash",
-        model=str(DESIGN_PROFILES["flash"]["model"]),
+        design_profile="deepseek",
+        model=str(DESIGN_PROFILES["deepseek"]["model"]),
         provider_fallback_profile="",
     )
     result = run_session(
@@ -1176,7 +1177,7 @@ def test_provider_fallback_budget_refusal_does_not_return_to_initial_route(tmp_p
 
     class RefusingFallbackClient(_ScriptedClient):
         def chat(self, *args, **kwargs):
-            if self.s.design_profile == "pro":
+            if self.s.design_profile == "luna":
                 self.calls.append(
                     {
                         "model": self.s.model,
@@ -1190,9 +1191,9 @@ def test_provider_fallback_budget_refusal_does_not_return_to_initial_route(tmp_p
     client = RefusingFallbackClient([requests.exceptions.HTTPError("429 Too Many Requests")])
     client.s = Settings(
         api_key="test",
-        design_profile="flash",
-        model=str(DESIGN_PROFILES["flash"]["model"]),
-        provider_fallback_profile="pro",
+        design_profile="deepseek",
+        model=str(DESIGN_PROFILES["deepseek"]["model"]),
+        provider_fallback_profile="luna",
     )
     with pytest.raises(BudgetExceeded):
         run_session(
@@ -1202,8 +1203,8 @@ def test_provider_fallback_budget_refusal_does_not_return_to_initial_route(tmp_p
             client=client,
         )
     assert [call["model"] for call in client.calls] == [
-        DESIGN_PROFILES["flash"]["model"],
-        DESIGN_PROFILES["pro"]["model"],
+        DESIGN_PROFILES["deepseek"]["model"],
+        DESIGN_PROFILES["luna"]["model"],
     ]
     assert all(call["guard"] is client.guard for call in client.calls)
 
@@ -1368,7 +1369,7 @@ def test_serialization_goes_through_chat_even_for_bom(tmp_path, monkeypatch):
     assert res["results"][-1]["failure_kind"] == "invalid_json"
 
 
-def test_bom_ownership_conflict_stops_after_one_attributable_rejection(
+def test_bom_ownership_conflict_stops_after_one_repair_attempt(
     tmp_path,
     monkeypatch,
 ):
@@ -1389,16 +1390,15 @@ def test_bom_ownership_conflict_stops_after_one_attributable_rejection(
         "assumptions": [],
         "substitutions": [],
     }
-    client = _ScriptedClient(
-        [
-            {
-                "text": json.dumps(response),
-                "reasoning": "",
-                "finish_reason": "stop",
-                "cost_usd": 0.0,
-            }
-        ]
-    )
+    reply = {
+        "text": json.dumps(response),
+        "reasoning": "",
+        "finish_reason": "stop",
+        "cost_usd": 0.0,
+    }
+    # One repair attempt is granted (with drop-the-duplicate guidance); an
+    # identical repeat is terminal so the model can never override determinism.
+    client = _ScriptedClient([reply, dict(reply)])
     prep = {
         "state": {
             "architecture": {
@@ -1422,7 +1422,7 @@ def test_bom_ownership_conflict_stops_after_one_attributable_rejection(
 
     assert res["status"] == "failed"
     assert res["results"][-1]["failure_kind"] == "unit_ownership_conflict"
-    assert len(client.calls) == 1
+    assert len(client.calls) == 2
 
 
 def test_typed_bom_lowerer_skips_provider_call(tmp_path, monkeypatch):
@@ -1998,8 +1998,8 @@ def _a3_run(
     max_retries=7,
     extra_ok_reply=True,
     *,
-    design_profile="flash",
-    escalation_profile="pro",
+    design_profile="deepseek",
+    escalation_profile="luna",
     progress=None,
     attempt_observer=None,
     vary_replies=False,
@@ -2568,7 +2568,7 @@ def test_attempt_trace_associates_candidates_with_one_bounded_repair(tmp_path, m
     assert [row["version"] for row in records] == [2, 2]
     assert [row["unit_id"] for row in records] == ["wiring-u000"] * 2
     assert [row["aggregate_round"] for row in records] == [None, 1]
-    assert [row["design_profile"] for row in records] == ["flash", "pro"]
+    assert [row["design_profile"] for row in records] == ["deepseek", "luna"]
     assert records[0]["aggregate_signature"] is None
     assert records[1]["aggregate_signature"] is not None
     for row in records:
@@ -2624,7 +2624,7 @@ def test_neutral_series_feedback_allows_commit_progression(tmp_path, monkeypatch
         for slot in (first, corrected)
     ]
     client = _ScriptedClient(replies)
-    client.s = Settings(api_key="test", design_profile="flash")
+    client.s = Settings(api_key="test", design_profile="deepseek")
     records = []
 
     result = stage_driver_mod.drive_stage(
@@ -2700,7 +2700,9 @@ def _unit_client(replies):
     client = _ScriptedClient(replies)
     client.s = Settings(
         api_key="test",
-        design_profile="flash",
+        design_profile="deepseek",
+        model=str(DESIGN_PROFILES["deepseek"]["model"]),
+        provider_order=list(DESIGN_PROFILES["deepseek"]["provider_order"]),
         stage_semantics="observe",
         provider_fallback_profile="",
     )
@@ -2724,7 +2726,72 @@ def test_work_units_make_one_initial_call_each_before_one_full_commit(tmp_path, 
     assert result["work_units"] == 2
     assert len(client.calls) == 2
     assert [call["collection_bounds"][0].total for call in client.calls] == [1, 1]
+    # Wiring keeps the question affordance: a missing support part must be able
+    # to request one BOM reconcile round.
+    for call in client.calls:
+        properties = call["response_format"]["json_schema"]["schema"]["properties"]
+        assert "questions" in properties and properties["questions"]["minItems"] == 0
     assert len(commits) == 1
+
+
+def test_deterministic_endpoint_assertion_ignores_sheets_without_pins():
+    from kicraft.server.stage_work_units import _assert_deterministic_endpoints
+
+    prompt_state = {
+        "bom": {
+            "parts": [
+                {"ref": "H1", "sheet": "MOUNTING STRUCTURE"},
+                {"ref": "U1", "sheet": "MAIN"},
+            ]
+        },
+        "architecture": {
+            "inter_sheet_nets": [
+                {
+                    "name": "GND",
+                    "endpoints": [{"sheet": "MOUNTING STRUCTURE", "direction": "passive"}],
+                },
+                {"name": "SIG", "endpoints": [{"sheet": "MAIN", "direction": "output"}]},
+            ]
+        },
+    }
+    # A pinless mechanical sheet cannot carry an assignment, so its endpoint is
+    # ignored; a sheet with wireable pins and no assignment still fails.
+    with pytest.raises(ValueError, match="MAIN:SIG") as excinfo:
+        _assert_deterministic_endpoints((), prompt_state, {}, {"H1": (), "U1": ("1",)})
+    assert "MOUNTING STRUCTURE" not in str(excinfo.value)
+
+
+def test_endpoint_assertion_ignores_power_nets():
+    from kicraft.server.stage_work_units import _assert_deterministic_endpoints
+
+    prompt_state = {
+        "bom": {"parts": [{"ref": "U1", "sheet": "MAIN"}]},
+        "architecture": {
+            "inter_sheet_nets": [
+                {"name": "VCC_5V", "endpoints": [{"sheet": "MAIN", "direction": "output"}]},
+                {"name": "SIG", "endpoints": [{"sheet": "MAIN", "direction": "output"}]},
+            ]
+        },
+    }
+    # Power crosses via global symbols, not a wiring assignment (§9.14 exempts it
+    # too); a signal net with no carrying assignment still fails.
+    with pytest.raises(ValueError, match="MAIN:SIG") as excinfo:
+        _assert_deterministic_endpoints((), prompt_state, {}, {"U1": ("1",)})
+    assert "VCC_5V" not in str(excinfo.value)
+
+
+def test_missing_requirement_defect_names_the_required_identity():
+    from kicraft.server.stage_runtime import _requirement_identity
+
+    assert _requirement_identity(
+        {
+            "id": "relay_driver",
+            "role": "driver",
+            "family": "uln2003-smt",
+            "exact_part": "ULN2003",
+        }
+    ) == "relay_driver role=driver family=uln2003-smt exact_part=ULN2003"
+    assert _requirement_identity({"id": "x"}) == "x"
 
 
 @pytest.mark.parametrize("recover", [True, False])
@@ -2776,6 +2843,10 @@ def test_bom_unit_collection_overflow_gets_one_focused_recovery(tmp_path, monkey
     replies = [reply("A"), overflow, correction]
     if recover:
         replies.append(reply("C"))
+    else:
+        # One identical defect may repeat before it is terminal; the pristine
+        # clean-slate retry still ends the unit.
+        replies.append(dict(correction))
     client = _unit_client(replies)
     monkeypatch.setattr(
         stage_driver_mod, "commit_stage", lambda *args, **kwargs: (True, {"ok": True})
@@ -2787,13 +2858,12 @@ def test_bom_unit_collection_overflow_gets_one_focused_recovery(tmp_path, monkey
     assert [call["serialization"] for call in client.calls[:3]] == [False, False, True]
     for call in client.calls:
         schema = call["response_format"]["json_schema"]["schema"]
-        groups = next(
-            variant["properties"]["groups"]
-            for variant in schema["anyOf"]
-            if "groups" in variant.get("properties", {})
-        )
+        groups = schema["properties"]["groups"]
         assert groups["maxItems"] == 21
         assert call["max_tokens"] == 2048
+        # BOM units are non-interactive: a question can never park the stage, so
+        # the affordance must not be offered (it only burns repair turns).
+        assert "questions" not in schema["properties"]
     if recover:
         assert [(part["ref"], part["sheet"]) for part in result["slot"]["parts"]] == [
             ("C1", "A"),
@@ -2805,8 +2875,8 @@ def test_bom_unit_collection_overflow_gets_one_focused_recovery(tmp_path, monkey
         ]
         assert len(client.calls) == 4
     else:
-        assert result["failure_kind"] == "unit_repair_exhausted"
-        assert len(client.calls) == 3
+        assert result["failure_kind"] == "collection_limit"
+        assert len(client.calls) == 4
         saved = json.loads((tmp_path / "drafts" / "bom-units.json").read_text())
         assert saved["candidates"]["bom-s000"]["groups"] == [_group_payload(sheet="A")]
 
@@ -2814,7 +2884,14 @@ def test_bom_unit_collection_overflow_gets_one_focused_recovery(tmp_path, monkey
 def test_work_unit_nonconsecutive_failure_retains_accepted_sibling(tmp_path, monkeypatch):
     state_path = _work_unit_state(tmp_path, monkeypatch)
     client = _unit_client(
-        [_unit_reply("U1"), _unit_reply("X1"), _unit_reply("Y1"), _unit_reply("X1", "RENAMED")]
+        [
+            _unit_reply("U1"),
+            _unit_reply("X1"),
+            _unit_reply("Y1"),
+            _unit_reply("X1", "RENAMED"),
+            # One identical defect may repeat before it is terminal.
+            _unit_reply("X1", "RENAMED"),
+        ]
     )
     events = []
 
@@ -2823,7 +2900,7 @@ def test_work_unit_nonconsecutive_failure_retains_accepted_sibling(tmp_path, mon
     )
 
     assert result["failure_kind"] == "unit_repair_exhausted"
-    assert len(client.calls) == 4
+    assert len(client.calls) == 5
     saved = json.loads((tmp_path / "drafts" / "wiring-units.json").read_text())
     assert saved["candidates"] == {"wiring-u000": {"pins": [{"ref": "U1", "pin": "1", "net": "N"}]}}
     done = next(event for event in events if event["kind"] == "stage_done")
@@ -2836,7 +2913,7 @@ def test_work_unit_nonconsecutive_failure_retains_accepted_sibling(tmp_path, mon
 def test_invalid_wiring_unit_escalates_after_first_attempt(tmp_path, monkeypatch):
     state_path = _work_unit_state(tmp_path, monkeypatch)
     client = _unit_client([_unit_reply("R1", "WRONG"), _unit_reply("U1"), _unit_reply("R1")])
-    client.s = replace(client.s, escalation_profile="pro")
+    client.s = replace(client.s, escalation_profile="luna")
     monkeypatch.setattr(
         stage_driver_mod,
         "commit_stage",
@@ -2847,10 +2924,28 @@ def test_invalid_wiring_unit_escalates_after_first_attempt(tmp_path, monkeypatch
 
     assert result["commit_ok"] is True
     assert [call["model"] for call in client.calls] == [
-        str(DESIGN_PROFILES["flash"]["model"]),
-        str(DESIGN_PROFILES["pro"]["model"]),
-        str(DESIGN_PROFILES["flash"]["model"]),
+        str(DESIGN_PROFILES["deepseek"]["model"]),
+        str(DESIGN_PROFILES["luna"]["model"]),
+        str(DESIGN_PROFILES["deepseek"]["model"]),
     ]
+
+
+def test_empty_escalation_profile_never_switches_models(tmp_path, monkeypatch):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    client = _unit_client([_unit_reply("R1", "WRONG"), _unit_reply("U1"), _unit_reply("R1")])
+    assert client.s.escalation_profile == ""
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "commit_stage",
+        lambda *args, **kwargs: (True, {"ok": True}),
+    )
+
+    result = stage_driver_mod.drive_stage(client, "wiring", "test", state_path, tmp_path)
+
+    assert result["commit_ok"] is True
+    assert {call["model"] for call in client.calls} == {
+        str(DESIGN_PROFILES["deepseek"]["model"])
+    }
 
 
 def test_rate_limited_escalated_unit_returns_to_primary_profile(tmp_path, monkeypatch):
@@ -2865,8 +2960,8 @@ def test_rate_limited_escalated_unit_returns_to_primary_profile(tmp_path, monkey
     )
     client.s = replace(
         client.s,
-        escalation_profile="pro",
-        provider_fallback_profile="pro",
+        escalation_profile="luna",
+        provider_fallback_profile="luna",
     )
     monkeypatch.setattr(
         stage_driver_mod,
@@ -2878,10 +2973,10 @@ def test_rate_limited_escalated_unit_returns_to_primary_profile(tmp_path, monkey
 
     assert result["commit_ok"] is True
     assert [call["model"] for call in client.calls] == [
-        str(DESIGN_PROFILES["flash"]["model"]),
-        str(DESIGN_PROFILES["pro"]["model"]),
-        str(DESIGN_PROFILES["flash"]["model"]),
-        str(DESIGN_PROFILES["flash"]["model"]),
+        str(DESIGN_PROFILES["deepseek"]["model"]),
+        str(DESIGN_PROFILES["luna"]["model"]),
+        str(DESIGN_PROFILES["deepseek"]["model"]),
+        str(DESIGN_PROFILES["deepseek"]["model"]),
     ]
 
 
@@ -2983,7 +3078,7 @@ def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monk
         "cost_usd": 0.0,
     }
     client = _unit_client([question, protected_candidate])
-    client.s = replace(client.s, escalation_profile="pro")
+    client.s = replace(client.s, escalation_profile="luna")
     committed = []
 
     def commit(_stage, slot, *args, **kwargs):

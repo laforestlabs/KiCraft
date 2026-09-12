@@ -27,7 +27,12 @@ _DEVICE_MEMBERS: dict[str, frozenset[str]] = {
     "max485": frozenset({"max485esa+", "max485esa+t"}),
     "max485esa+": frozenset({"max485esa+t"}),
     "nrf52840": frozenset({"nrf52840-qiaa-r7"}),
-    "uln2003": frozenset({"uln2003adr"}),
+    # TI's device is the ULN2003A; "ULN2003" is the brief's unqualified series
+    # designation (see the sourcing comment above). A group naming either the
+    # series or the A-variant is the same reviewed device, so both own the
+    # requirement; the curated bundle still supplies the orderable identity.
+    "uln2003": frozenset({"uln2003adr", "uln2003a"}),
+    "uln2003a": frozenset({"uln2003a", "uln2003adr"}),
     "mcp23017": frozenset({"mcp23017-e/so"}),
 }
 

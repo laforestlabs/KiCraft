@@ -3,8 +3,8 @@
     python -m kicraft.server.smoketest
 
 Reads OPENROUTER_API_KEY from .env (see .env.example). Queries the prepaid key
-limit, makes one bounded DeepSeek call through the capped client, and prints the
-reply, token usage, cost, and the running spend status.
+limit, makes one bounded call through the active designer route via the capped
+client, and prints the reply, token usage, cost, and the running spend status.
 """
 from __future__ import annotations
 
@@ -18,6 +18,9 @@ from .config import Settings
 
 
 def _key_info(s: Settings) -> None:
+    if s.backend != "openrouter":
+        print(f"(key info check skipped: backend={s.backend}, no OpenRouter /key endpoint)")
+        return
     try:
         r = requests.get(f"{s.base_url}/key",
                          headers={"Authorization": f"Bearer {s.api_key}"}, timeout=30)

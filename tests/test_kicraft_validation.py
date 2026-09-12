@@ -429,6 +429,30 @@ def test_inter_sheet_realized_ignores_power_nets() -> None:
     assert check_inter_sheet_nets_realized(arch, bom).ok
 
 
+def test_inter_sheet_realized_ignores_mechanical_only_sheet_endpoints() -> None:
+    arch, bom = _two_sheet_design()
+    arch.sheets.append(Sheet(name="MOUNTING", stem="MOUNTING", function="Mechanical mounting"))
+    bom.parts.append(
+        BomPart(
+            ref="H1",
+            value="MountingHole",
+            symbol="Mechanical:MountingHole",
+            footprint="MountingHole:MountingHole_3.2mm_M3",
+            sheet="MOUNTING",
+        )
+    )
+    arch.inter_sheet_nets[0].endpoints.append(SheetPin(sheet="MOUNTING", direction="passive"))
+    # A mounting sheet has no pin to carry a hierarchical label, so its endpoint
+    # is not a missing connection; the real DRIVER/CONTROLLER sides still count.
+    assert check_inter_sheet_nets_realized(arch, bom).ok
+
+    # The same rule must not excuse a real unwired sheet.
+    bom.connections = [
+        c for c in bom.connections if not (c.net_name == "SIG" and c.sheet == "DRIVER")
+    ]
+    assert not check_inter_sheet_nets_realized(arch, bom).ok
+
+
 def test_sheets_have_parts_passes_when_populated() -> None:
     arch, bom = _two_sheet_design()
     assert check_sheets_have_parts(arch, bom).ok

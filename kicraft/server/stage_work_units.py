@@ -11,6 +11,7 @@ from typing import Literal
 from pathlib import Path
 
 from kicraft.fsutil import atomic_write_text
+from kicraft.design.models import is_power_or_ground_name
 from kicraft.design.recipes import locked_no_connect_pins, locked_pin_assignments
 from kicraft.design.synthesis.symbol_pinout import canonical_symbol_id
 from .stage_contracts import (
@@ -168,7 +169,10 @@ def _assert_wiring_unit_ownership(
 
 
 def _assert_deterministic_endpoints(
-    units: list[StageWorkUnit], prompt_state: dict, extras: dict
+    units: list[StageWorkUnit],
+    prompt_state: dict,
+    extras: dict,
+    inventory: dict[str, tuple[str, ...]],
 ) -> None:
     """Prove deterministic sheet contracts from assignments, never spare pins."""
     bom = prompt_state.get("bom") or {}
@@ -176,6 +180,14 @@ def _assert_deterministic_endpoints(
         str(part["ref"]): str(part.get("sheet") or "")
         for part in bom.get("parts") or []
         if isinstance(part, dict) and part.get("ref")
+    }
+    # A sheet with no wireable pins (e.g. mounting holes) cannot carry an
+    # assignment at all: the wiring stage owns pins, not sheet labels. Enforcing
+    # coverage there made any grounded mechanical sheet unrealizable.
+    pinned_sheets = {
+        str(part.get("sheet") or "")
+        for part in bom.get("parts") or []
+        if isinstance(part, dict) and part.get("ref") and inventory.get(str(part.get("ref")))
     }
     carried = {
         (ref_sheets.get(ref), net) for (ref, _pin), net in locked_pin_assignments(bom).items()
@@ -211,10 +223,19 @@ def _assert_deterministic_endpoints(
             model_sheets.add(unit.sheet)
     missing = []
     for net in (prompt_state.get("architecture") or {}).get("inter_sheet_nets") or []:
+        if not isinstance(net, dict) or is_power_or_ground_name(str(net.get("name") or "")):
+            # Power/ground crosses via global power symbols (and is covered by
+            # §9.11 per-pin coverage), never by a model wiring assignment — the
+            # same exemption §9.14 makes.
+            continue
         for endpoint in net.get("endpoints") or []:
             sheet = str(endpoint.get("sheet") or "")
             name = str(net.get("name") or "")
-            if sheet not in model_sheets and (sheet, name) not in carried:
+            if (
+                sheet in pinned_sheets
+                and sheet not in model_sheets
+                and (sheet, name) not in carried
+            ):
                 missing.append(f"{sheet}:{name}")
     if missing:
         raise ValueError(
@@ -484,7 +505,7 @@ def plan_stage_work_units(
         locked_connected,
         locked_no_connect,
     )
-    _assert_deterministic_endpoints(units, prompt_state, extras)
+    _assert_deterministic_endpoints(units, prompt_state, extras, inventory)
     return tuple(units)
 
 
@@ -1201,6 +1222,18 @@ def _normalize_bom_optional_metadata(raw_group: object) -> object:
         value = group.get(field)
         if isinstance(value, str) and value.strip().lower() in _ABSENT_METADATA_SENTINELS:
             group[field] = None
+            continue
+        if field == "mpn" and isinstance(value, str):
+            # `mpn` is the manufacturer part number, or null. Models frequently
+            # put a value description here ("47uH power inductor"), which the
+            # §9.26 sourcing gate then rejects as a non-orderable MPN and turns
+            # into a hard unit failure. A real MPN never contains whitespace, so
+            # drop one and let the part resolve by symbol/footprint/value (the
+            # same outcome as the gate's own "drop the MPN" repair guidance).
+            if value.strip().lower() == str(group.get("value") or "").strip().lower() or re.search(
+                r"\s", value.strip()
+            ):
+                group[field] = None
     return group
 
 
@@ -1564,6 +1597,19 @@ def _validate_bom_unit(
             groups, sourcing_defects = _validate_bom_unit_sourcing(groups, root)
             defects["unresolved-sourcing"] = sourcing_defects
     if any(defects.values()):
+        # A typed lowerer already knows how to build this requirement. When the
+        # model's attempt is defective and a deterministic candidate exists,
+        # determinism wins: adopt the lowered groups instead of burning repair
+        # turns (or failing the stage) on a part the pipeline can build itself.
+        if not used_deterministic_candidate:
+            deterministic = deterministic_bom_candidate(unit, prompt_state)
+            if deterministic is not None:
+                return _validate_bom_unit(
+                    unit,
+                    {**deterministic, "_trusted_deterministic_candidate": True},
+                    prompt_state,
+                    extras,
+                )
         raise WorkUnitValidationError(unit.unit_id, defects)
     return {
         "groups": [group.model_dump(exclude_none=True) for group in groups],

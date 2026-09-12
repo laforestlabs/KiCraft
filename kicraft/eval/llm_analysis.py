@@ -53,6 +53,10 @@ _FORBIDDEN_EVENT_FIELDS = {
 }
 _WITNESSES = ("1/701", "1/748", "1/749", "1/754")
 _COMPARISON_SLUGS = ("rounded-c3-devboard", "snowman-ornament")
+# Profile rank used to spot an escalated provider profile in a campaign's
+# attempt trace. Older manifests carry flash/pro; runs after the two-profile
+# rework carry luna (the default) / deepseek. Higher rank = escalated route.
+_PROFILE_RANK = {"flash": 0, "luna": 0, "pro": 1, "deepseek": 1}
 
 
 def _now() -> str:
@@ -1133,14 +1137,14 @@ def _recovery_gates(
     )
 
     provider_rows = [row for row in attempt_rows if row.get("call_mode") != "deterministic_commit"]
-    configured_rank = {"flash": 0, "pro": 1}.get(configured_profile)
+    configured_rank = _PROFILE_RANK.get(configured_profile)
     elevated_profiles = sorted(
         {
             str(row.get("provider_profile"))
             for row in provider_rows
             if row.get("provider_profile")
             and configured_rank is not None
-            and {"flash": 0, "pro": 1}.get(str(row.get("provider_profile")), configured_rank)
+            and _PROFILE_RANK.get(str(row.get("provider_profile")), configured_rank)
             > configured_rank
         }
     )
@@ -1516,7 +1520,7 @@ def analyze_batch(
         6,
     )
     stop_gates = _stop_gates(runs, integrity)
-    configured_profile = str((immutable.get("designer") or {}).get("profile") or "flash")
+    configured_profile = str((immutable.get("designer") or {}).get("profile") or "luna")
     recovery_gates = (
         _recovery_gates(
             runs,

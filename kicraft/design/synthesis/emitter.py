@@ -1074,8 +1074,15 @@ def _build_sheet_instances(
     eps_by_sheet: dict[str, list[tuple[InterSheetNet, SheetPin]]] = {
         s.name: [] for s in architecture.sheets
     }
+    from .validation import pinless_mechanical_sheets
+
+    pinless = pinless_mechanical_sheets(architecture, bom)
     for net in architecture.inter_sheet_nets:
         for ep in net.endpoints:
+            if ep.sheet in pinless:
+                # No pin to carry a hierarchical label here; emitting a sheet pin
+                # would leave it dangling (and trips §9.14's ERC rationale).
+                continue
             eps_by_sheet[ep.sheet].append((net, ep))
 
     out: list[_SheetInstance] = []

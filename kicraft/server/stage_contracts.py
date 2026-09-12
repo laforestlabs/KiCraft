@@ -404,10 +404,65 @@ def _normalize_wiring_stage_response(payload: dict, prompt_state: dict) -> dict:
     }
 
 
+def _is_free_form_object(schema: object) -> bool:
+    """A map-typed object (``dict[str, X]``): keys are data, not a fixed shape."""
+    return (
+        isinstance(schema, dict)
+        and schema.get("type") == "object"
+        and "properties" not in schema
+        and isinstance(schema.get("additionalProperties"), dict)
+    )
+
+
+def _strict_provider_schema(node):
+    """Deep-copy a Pydantic JSON schema into OpenAI's strict structured-output form.
+
+    OpenAI (and any endpoint that enforces ``strict: true``) demands that every
+    fixed-shape object close itself with ``additionalProperties: false`` and list
+    *every* property in ``required``. Pydantic omits fields that carry defaults,
+    so the raw ``model_json_schema()`` is rejected verbatim (live 2026-09-12:
+    HTTP 400 ``invalid_json_schema`` on the first luna intent call). Free-form
+    map objects (``dict[str, int]``) must instead stay open and MUST NOT be
+    required -- OpenAI rejects them in ``required`` ("Extra required key").
+
+    Root-level ``anyOf``/``oneOf``/``allOf`` are forbidden by OpenAI; the
+    interactive contracts already express the slot/questions alternation as one
+    object (see ``_response_schema``), so this only has to complete ``required``.
+
+    Only the provider envelope is transformed; ``StageResponseContract.schema``
+    (prompt text, in-stream guard allowlist, tests) keeps the canonical schema.
+    """
+    if isinstance(node, list):
+        return [_strict_provider_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out: dict = {}
+    for key, value in node.items():
+        if key in ("properties", "$defs", "definitions") and isinstance(value, dict):
+            out[key] = {name: _strict_provider_schema(subschema) for name, subschema in value.items()}
+        elif key in ("items", "additionalProperties", "not", "contains"):
+            out[key] = _strict_provider_schema(value)
+        elif key in ("anyOf", "oneOf", "allOf", "prefixItems") and isinstance(value, list):
+            out[key] = [_strict_provider_schema(item) for item in value]
+        else:
+            out[key] = value
+    properties = out.get("properties")
+    if isinstance(properties, dict):
+        out["additionalProperties"] = False
+        required = set(out.get("required") or [])
+        for name, subschema in properties.items():
+            if _is_free_form_object(subschema):
+                required.discard(name)
+            else:
+                required.add(name)
+        out["required"] = sorted(required)
+    return out
+
+
 def _json_response_format(name: str, schema: dict) -> dict:
     return {
         "type": "json_schema",
-        "json_schema": {"name": name, "strict": True, "schema": schema},
+        "json_schema": {"name": name, "strict": True, "schema": _strict_provider_schema(schema)},
     }
 
 
@@ -435,13 +490,30 @@ def _slot_response_schema(stage: str) -> dict:
 
 
 def _response_schema(stage: str) -> dict:
+    """One object holding the slot plus an optional (possibly empty) ``questions``.
+
+    OpenAI strict structured outputs reject ``anyOf``/``oneOf``/``allOf`` at the
+    schema root and require every typed property in ``required``, so the
+    interactive "slot OR clarifying questions" union is expressed as a single
+    object: the slot fields plus ``questions``. ``questions`` is required (the
+    decoder must always emit it) but ``minItems`` is 0, so ``[]`` is the normal
+    answer and a non-empty array is how the model asks. Slot-answer behavior is
+    unchanged: the state contract still accepts the slot shape.
+    """
     slot = dict(_slot_response_schema(stage))
     question = dict(StageQuestionResponse.model_json_schema())
     definitions = {
         **(slot.pop("$defs", {}) or {}),
         **(question.pop("$defs", {}) or {}),
     }
-    schema = {"anyOf": [slot, question]}
+    properties = dict(slot.get("properties") or {})
+    questions = dict((question.get("properties") or {}).get("questions") or {})
+    questions["minItems"] = 0
+    properties["questions"] = questions
+    required = [*slot.get("required", [])]
+    if "questions" not in required:
+        required.append("questions")
+    schema = {**slot, "type": "object", "properties": properties, "required": required}
     if definitions:
         schema["$defs"] = definitions
     return schema
@@ -451,7 +523,18 @@ def _response_schema(stage: str) -> dict:
 class StageResponseContract:
     stage: str
     schema: dict
-    response_format: dict
+    contract_name: str
+    allow_questions: bool = True
+
+    @property
+    def response_format(self) -> dict:
+        """The provider envelope, derived from the *current* ``schema``.
+
+        A property (not a stored copy) so callers that tighten the schema after
+        construction -- work units apply invocation-local collection bounds --
+        send the same limits they enforce.
+        """
+        return _json_response_format(self.contract_name, self.schema)
 
 
 def _architecture_sheet_names(prompt_state: dict) -> tuple[str, ...]:
@@ -583,8 +666,12 @@ def build_stage_response_contract(
     contract_name = f"kicraft_{stage}_response_v{version}"
     if not allow_questions:
         contract_name += "_noninteractive"
-    response_format = _json_response_format(contract_name, schema)
-    return StageResponseContract(stage=stage, schema=schema, response_format=response_format)
+    return StageResponseContract(
+        stage=stage,
+        schema=schema,
+        contract_name=contract_name,
+        allow_questions=allow_questions,
+    )
 
 
 def schema_json(contract: StageResponseContract) -> str:
@@ -1117,8 +1204,18 @@ def _validate_typed_inter_sheet_contracts(
 
 def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> tuple[dict, int]:
     try:
-        if isinstance(payload.get("questions"), list):
-            return StageQuestionResponse.model_validate(payload).model_dump(exclude_none=True), 0
+        questions = payload.get("questions")
+        if isinstance(questions, list) and questions:
+            return (
+                StageQuestionResponse.model_validate({"questions": questions}).model_dump(
+                    exclude_none=True
+                ),
+                0,
+            )
+        if isinstance(questions, list):
+            # The strict provider envelope requires the key on every answer, so a
+            # slot response carries `questions: []`. It is not part of the slot.
+            payload = {key: value for key, value in payload.items() if key != "questions"}
         if stage == "intent":
             return IntentStageResponse.model_validate(payload).model_dump(exclude_none=True), 0
         if stage == "architecture":

@@ -880,6 +880,34 @@ def reconcile_inter_sheet_nets(architecture, bom) -> list[str]:
     return changes
 
 
+_PINLESS_MECHANICAL_SYMBOLS = frozenset(
+    {
+        "Mechanical:MountingHole",
+        "Mechanical:Fiducial",
+        "Mechanical:Heatsink",
+    }
+)
+
+
+def pinless_mechanical_sheets(architecture, bom) -> set[str]:
+    """Sheets populated only by KiCad no-pin mechanical symbols.
+
+    Such a sheet cannot carry a hierarchical label, so an inter-sheet net
+    endpoint there is unrealizable (a mounting hole is mechanical, not wired).
+    The list is explicit: a ``*_Pad`` mounting hole DOES have a pin and must not
+    be skipped.
+    """
+    by_sheet: dict[str, list] = defaultdict(list)
+    for part in bom.parts:
+        by_sheet[part.sheet].append(part)
+    return {
+        sheet.name
+        for sheet in architecture.sheets
+        if by_sheet.get(sheet.name)
+        and all(str(part.symbol) in _PINLESS_MECHANICAL_SYMBOLS for part in by_sheet[sheet.name])
+    }
+
+
 def check_inter_sheet_nets_realized(architecture, bom) -> CheckResult:
     """§9.14 -- every SIGNAL inter-sheet net endpoint is realized by a
     same-named NetConnection in that sheet.
@@ -900,11 +928,17 @@ def check_inter_sheet_nets_realized(architecture, bom) -> CheckResult:
     realized: dict[tuple[str, str], int] = defaultdict(int)
     for c in bom.connections:
         realized[(c.net_name, c.sheet)] += len(c.endpoints)
+    pinless = pinless_mechanical_sheets(architecture, bom)
     bad: list[str] = []
     for net in architecture.inter_sheet_nets:
         if is_power_or_ground_name(net.name):
             continue
         for ep in net.endpoints:
+            if ep.sheet in pinless:
+                # A mechanical-only sheet has no pin to wire and no hierarchical
+                # label to match; the endpoint is a modeling artifact, not a
+                # missing connection.
+                continue
             if realized.get((net.name, ep.sheet), 0) < 1:
                 bad.append(
                     f"net {net.name!r} crosses into sheet {ep.sheet!r} but no "

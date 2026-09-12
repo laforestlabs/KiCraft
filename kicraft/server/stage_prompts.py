@@ -278,12 +278,46 @@ def _format_core_defaults_block(rows) -> str | None:
 
 # Hand-written compact example instance per stage. A mid-tier model pattern-
 # matches one worked example far more reliably than it infers nested-optional
-# shape from a raw $defs/anyOf schema dump (2026-07-19 review §7.1); the BOM
-# and wiring stages carry them (the costly, retry-prone stages). Each example
-# is validated against the real Pydantic models in
-# tests/test_stage_driver_prompt_examples.py, so a schema change that breaks
+# shape from a raw $defs/anyOf schema dump (2026-07-19 review §7.1). Every stage
+# carries one -- DeepSeek's `json_object` mode (the `deepseek` profile) asks for
+# a concrete example to copy, and the nested architecture/BOM/wiring slots need
+# it most. Each example is a tiny 3.3V-regulator board so the stages teach a
+# consistent story, and every one is validated against the real Pydantic models
+# in tests/test_stage_driver_prompt_examples.py, so a schema change that breaks
 # an example fails the suite instead of teaching the model a bounce.
 _WORKED_EXAMPLES = {
+    "intent": (
+        '{"goal": "Regulate a 5V DC input to 3.3V at up to 100 mA for a '
+        'breadboard project", "constraints": ["Input: 5V DC barrel jack", '
+        '"Output: 3.3V at up to 100 mA", "Single rectangular board"], '
+        '"named_parts": [], "inferred_expertise": "beginner", '
+        '"assumptions": ["Linear regulator assumed for the low current '
+        '(defaulted)"], "project_stem": "REG_3V3"}'
+    ),
+    "functional_spec": (
+        '{"blocks": ['
+        '{"name": "POWER INPUT", "category": "power", "purpose": "Accept the 5V '
+        'DC input and protect against reverse polarity", "count": 1}, '
+        '{"name": "3V3 REGULATOR", "category": "power", "purpose": "Regulate the '
+        '5V rail down to a clean 3.3V logic rail", "count": 1}], '
+        '"connections": [{"from_block": "POWER INPUT", "to_block": '
+        '"3V3 REGULATOR", "signal_type": "power", "description": "5V rail to the '
+        'regulator input"}], '
+        '"assumptions": ["Linear regulator chosen over a buck for the low current '
+        '(defaulted)"]}'
+    ),
+    "architecture": (
+        '{"topologies": {"power": "linear regulator"}, "rail_voltages": {"+5V": '
+        '5.0, "+3V3": 3.3}, "comms_protocols": [], "mcu_present": false, '
+        '"sheets": [{"name": "POWER", "stem": "POWER", "function": "Regulate the '
+        '5V input to 3.3V and distribute both rails"}], "power_nets": ["+5V", '
+        '"+3V3", "GND"], "inter_sheet_nets": [], '
+        '"assumptions": ["Linear regulator chosen for the low current '
+        '(defaulted)"], "requirements": [{"id": "reg_3v3", "sheet": "POWER", '
+        '"role": "regulator", "family": "ldo-3v3", "ports": {"vin": "+5V", '
+        '"vout": "+3V3", "gnd": "GND"}, "functional_blocks": ["3V3 REGULATOR"]}], '
+        '"inter_sheet_net_ranges": []}'
+    ),
     "bom": (
         '{"groups": ['
         '{"id": "regulator", "reference_prefix": "U", "quantity": 1, '
@@ -367,6 +401,31 @@ def _bounded_output_contract(stage: str, bounds: tuple[CollectionBound, ...] | N
     )
 
 
+def _clarifying_questions_block(allow_questions: bool) -> str:
+    """The clarify instruction for the contract's shape.
+
+    When questions are allowed the schema carries a required ``questions`` array
+    (empty is the normal answer); when they are not, the slot must be produced
+    with defaults only. See ``stage_contracts._response_schema``.
+    """
+    if not allow_questions:
+        return (
+            "\n- CLARIFYING QUESTIONS ARE DISABLED for this call: apply sensible "
+            "defaults, record each choice in `assumptions` ending with "
+            '"(defaulted)", and return the slot.'
+        )
+    return (
+        "\n- CLARIFYING QUESTIONS: always produce the complete slot using safe "
+        "engineering defaults; a question never replaces the slot. Ask only when "
+        "no safe default exists and a wrong answer would materially change the "
+        "manufactured board. Never ask to confirm a default or a fact already "
+        "present in the brief/state. Ask one decision per question, at most 3 "
+        "questions. Every question MUST provide 2-4 concise suggested answers in "
+        "`options`. Set `questions` to `[]` unless you are asking; a non-empty "
+        "`questions` array must carry actionable questions."
+    )
+
+
 def build_system(
     contract: StageResponseContract,
     collection_bounds: tuple[CollectionBound, ...] | None = None,
@@ -402,15 +461,7 @@ def build_system(
         "- Use only allowed enum values; honor every naming pattern and uniqueness/reference "
         "constraint.\n"
         '- Every "assumptions" entry must end with "(defaulted)".\n'
-        "- CLARIFYING QUESTIONS: first produce a complete slot using safe engineering "
-        "defaults. Ask only when no safe default exists and a wrong answer would materially "
-        "change the manufactured board. Never ask to confirm a default or a fact already "
-        "present in the brief/state. Ask one decision per question, at most 3 questions. "
-        "Every blocking question MUST provide 2-4 concise suggested answers in `options`; "
-        "a blocker without options is invalid. To ask, output ONLY this shape:\n"
-        '  {"questions": [{"text": "...", "options": ["recommended answer", '
-        '"alternative"], "blocking": true, "material": true}]}\n'
-        "Otherwise record the chosen default in `assumptions` and output the slot."
+        f"{_clarifying_questions_block(contract.allow_questions)}"
         f"{_stage_extra(stage)}"
     )
 

@@ -13,10 +13,10 @@ from kicraft.tuning.benchmark import BENCHMARK_PROMPTS
 
 
 def _settings() -> Settings:
-    profile = DESIGN_PROFILES["flash"]
+    profile = DESIGN_PROFILES["deepseek"]
     return Settings(
         api_key="secret",
-        design_profile="flash",
+        design_profile="deepseek",
         model=str(profile["model"]),
         provider_order=list(profile["provider_order"]),
         max_price_prompt=float(profile["max_price_prompt"]),

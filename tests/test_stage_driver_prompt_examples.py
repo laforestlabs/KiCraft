@@ -10,9 +10,14 @@ import pytest
 
 from kicraft.server.client import _StreamingCollectionGuard
 from kicraft.design import models
+from kicraft.design.stage_state import DESIGN_STAGES
 from kicraft.server.config import STAGE_COLLECTION_BOUNDS, CollectionBound
 from kicraft.server.stage_contracts import (
+    ArchitectureStageResponse,
+    IntentStageResponse,
+    _is_free_form_object,
     _normalize_bom_stage_response,
+    _strict_provider_schema,
     _fold_recipe_covered_sheets,
     _normalize_usb_c_requirements,
     _normalize_stage_response,
@@ -57,10 +62,94 @@ def test_wiring_example_normalizes_to_canonical_wiring():
     assert endpoints_by_net["+3V3"] == {("U1", "1"), ("C2", "1")}
 
 
-def test_examples_ride_the_system_prompt():
-    assert _WORKED_EXAMPLES["bom"] in build_system("bom")
-    assert _WORKED_EXAMPLES["wiring"] in build_system("wiring")
-    assert "Worked example" not in build_system("intent")
+def test_intent_example_validates_against_the_model_contract():
+    slot = json.loads(_WORKED_EXAMPLES["intent"])
+    IntentStageResponse.model_validate(slot)
+
+
+def test_functional_spec_example_validates_against_the_model_contract():
+    models.FunctionalSpec.model_validate(json.loads(_WORKED_EXAMPLES["functional_spec"]))
+
+
+def test_architecture_example_validates_and_carries_a_requirement():
+    slot = json.loads(_WORKED_EXAMPLES["architecture"])
+    architecture = ArchitectureStageResponse.model_validate(slot)
+    assert architecture.requirements
+    assert architecture.requirements[0].functional_blocks
+
+
+def test_every_stage_has_a_worked_example_riding_the_system_prompt():
+    for stage in DESIGN_STAGES:
+        assert stage in _WORKED_EXAMPLES, stage
+        json.loads(_WORKED_EXAMPLES[stage])  # a concrete JSON instance, not a schema
+        assert "Worked example" in build_system(stage)
+        assert _WORKED_EXAMPLES[stage] in build_system(stage)
+
+
+@pytest.mark.parametrize("stage", list(DESIGN_STAGES))
+def test_deepseek_json_object_prompts_name_json(stage):
+    # DeepSeek's json_object response format requires the word "json" in the
+    # prompt (case-insensitive); the deepseek profile has no json_schema mode.
+    assert "json" in build_system(stage).lower()
+
+
+def test_strict_provider_schema_is_openai_compatible():
+    schema = build_stage_response_contract("architecture", {}).schema
+    strict = _strict_provider_schema(schema)
+
+    assert strict is not schema
+    assert strict["type"] == "object"
+    assert strict["additionalProperties"] is False
+    # Every fixed-shape root property is required; free-form maps are not.
+    fixed = {
+        name
+        for name, subschema in strict["properties"].items()
+        if not _is_free_form_object(subschema)
+    }
+    assert set(strict["required"]) == fixed
+    assert "rail_voltages" in strict["properties"]
+    assert "rail_voltages" not in strict["required"]
+    nested = strict["$defs"]["Sheet"]
+    assert nested["additionalProperties"] is False
+    assert set(nested["required"]) == set(nested["properties"])
+    # The canonical schema is untouched.
+    assert "additionalProperties" not in schema["$defs"]["Sheet"]
+
+
+def test_interactive_contract_merges_questions_and_empty_list_is_a_slot():
+    contract = build_stage_response_contract("intent", {}, allow_questions=True)
+    assert contract.allow_questions is True
+    assert "anyOf" not in contract.schema
+    questions = contract.schema["properties"]["questions"]
+    assert questions["minItems"] == 0 and questions["maxItems"] == 5
+    assert "questions" in contract.schema["required"]
+
+    slot = json.loads(_WORKED_EXAMPLES["intent"])
+    # The strict decoder always emits `questions`; an empty list is not a question.
+    normalized, _ = _normalize_stage_response("intent", {**slot, "questions": []}, {})
+    assert normalized["project_stem"] == slot["project_stem"]
+
+    asked = {
+        "goal": "x",
+        "questions": [
+            {
+                "text": "Q?",
+                "options": ["a", "b"],
+                "blocking": True,
+                "material": True,
+                "stage": "intent",
+            }
+        ],
+    }
+    normalized, _ = _normalize_stage_response("intent", asked, {})
+    assert set(normalized) == {"questions"}
+
+
+def test_noninteractive_contract_drops_questions_and_tells_the_model():
+    contract = build_stage_response_contract("intent", {}, allow_questions=False)
+    assert contract.allow_questions is False
+    assert "questions" not in contract.schema["properties"]
+    assert "CLARIFYING QUESTIONS ARE DISABLED" in _build_system(contract)
 
 
 @pytest.mark.parametrize("stage", ["intent", "functional_spec", "architecture", "bom"])
@@ -69,8 +158,7 @@ def test_provider_schema_and_stream_collection_limits_agree(stage, allow_questio
     state = {"architecture": {"sheets": [{"name": "POWER"}]}} if stage == "bom" else {}
     contract = build_stage_response_contract(stage, state, allow_questions=allow_questions)
     schema = contract.response_format["json_schema"]["schema"]
-    variants = schema.get("anyOf") or [schema]
-    properties = variants[0]["properties"]
+    properties = schema["properties"]
     for bound in STAGE_COLLECTION_BOUNDS[stage]:
         advertised_limit = properties[bound.field]["maxItems"]
         guard = _StreamingCollectionGuard((bound,))
@@ -83,7 +171,12 @@ def test_provider_schema_and_stream_collection_limits_agree(stage, allow_questio
         assert overflow["observed_count"] == advertised_limit + 1
         assert overflow["configured_total"] == advertised_limit
     if allow_questions:
-        assert variants[1]["properties"]["questions"]["maxItems"] == 5
+        # The interactive contract is one object: slot + `questions`, where an
+        # empty array is the normal "no question" answer.
+        assert properties["questions"]["maxItems"] == 5
+        assert properties["questions"]["minItems"] == 0
+    else:
+        assert "questions" not in properties
 
 
 def test_unit_schema_bounds_remain_authoritative_and_invocation_local() -> None:
@@ -95,15 +188,15 @@ def test_unit_schema_bounds_remain_authoritative_and_invocation_local() -> None:
     )
     # A later global application may never relax the unit's smaller ceiling.
     apply_collection_bounds(unit.schema, STAGE_COLLECTION_BOUNDS["bom"])
-    groups = unit.response_format["json_schema"]["schema"]["anyOf"][0]["properties"]["groups"]
+    groups = unit.response_format["json_schema"]["schema"]["properties"]["groups"]
     assert groups["minItems"] == 1
     assert groups["maxItems"] == 21
     fresh = build_stage_response_contract("bom", state)
-    assert fresh.schema["anyOf"][0]["properties"]["groups"]["maxItems"] == 64
+    assert fresh.schema["properties"]["groups"]["maxItems"] == 64
 
     wiring = build_stage_response_contract("wiring", {}, wiring_refs=("J1",))
     apply_collection_bounds(wiring.schema, (CollectionBound(field="pins", total=2),))
-    pins = wiring.response_format["json_schema"]["schema"]["anyOf"][0]["properties"]["pins"]
+    pins = wiring.response_format["json_schema"]["schema"]["properties"]["pins"]
     assert pins["maxItems"] == 2
 
 
@@ -114,7 +207,13 @@ def test_bom_contract_closes_group_sheet_and_reuses_schema_object():
 
     definitions = contract.schema["$defs"]
     assert definitions["BomComponentGroup"]["properties"]["sheet"]["enum"] == names
-    assert contract.response_format["json_schema"]["schema"] is contract.schema
+    provider_schema = contract.response_format["json_schema"]["schema"]
+    # The provider envelope is a strictified copy: same shape, but every object
+    # closed and every fixed-shape property required for OpenAI structured outputs.
+    assert provider_schema is not contract.schema
+    assert set(provider_schema["properties"]) == set(contract.schema["properties"])
+    assert provider_schema["additionalProperties"] is False
+    assert set(provider_schema["required"]) == set(provider_schema["properties"])
     assert "ADDRESSABLE LED OTPUT" not in names
     assert "SPEAKER OTPUT" not in names
 
@@ -1234,11 +1333,8 @@ def test_work_unit_contracts_are_v3_scoped_and_prompt_examples_are_unit_shaped()
 
     assert bom.response_format["json_schema"]["name"] == "kicraft_bom_response_v3"
     assert bom.schema["$defs"]["BomComponentGroup"]["properties"]["sheet"]["enum"] == ["MCU"]
-    bom_variant = next(
-        variant for variant in bom.schema["anyOf"] if "groups" in variant.get("properties", {})
-    )
-    assert bom_variant["properties"]["groups"]["minItems"] == 1
-    assert "groups" in bom_variant["required"]
+    assert bom.schema["properties"]["groups"]["minItems"] == 1
+    assert "groups" in bom.schema["required"]
     assert wiring.response_format["json_schema"]["name"] == "kicraft_wiring_response_v3"
     for definition in ("ConnectedPinAssignment", "NoConnectPinAssignment"):
         assert wiring.schema["$defs"][definition]["properties"]["ref"]["enum"] == [
@@ -1273,17 +1369,14 @@ def test_recipe_only_bom_work_unit_may_return_no_additional_groups():
     }
 
     contract = build_stage_response_contract("bom", state, bom_sheet="MCU")
-    bom_variant = next(
-        variant for variant in contract.schema["anyOf"] if "groups" in variant.get("properties", {})
-    )
 
-    assert "minItems" not in bom_variant["properties"]["groups"]
+    assert "minItems" not in contract.schema["properties"]["groups"]
 
 
 @pytest.mark.parametrize("allow_questions", [True, False])
 def test_architecture_provider_requires_explicit_nonempty_implementation_contracts(allow_questions):
     contract = build_stage_response_contract("architecture", {}, allow_questions=allow_questions)
-    architecture = (contract.schema.get("anyOf") or [contract.schema])[0]
+    architecture = contract.schema
     assert "requirements" in architecture["required"]
     assert architecture["properties"]["requirements"]["minItems"] == 1
     requirement = contract.schema["$defs"]["CircuitRequirement"]

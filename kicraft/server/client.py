@@ -646,6 +646,8 @@ class CappedOpenRouterClient:
             self.s,
             model=str(profile["model"]),
             design_profile=profile_name,
+            backend=str(profile["backend"]),
+            base_url=str(profile["base_url"]),
             provider_order=list(profile["provider_order"]),
             provider_allow_fallbacks=False,
             max_price_prompt=float(profile["max_price_prompt"]),
@@ -657,6 +659,8 @@ class CappedOpenRouterClient:
         """OpenRouter `provider` routing block (cost safety). Prefers the caching
         backend(s) in `provider_order`, allows bounded fallbacks, and caps the
         per-Mtok price so no single call can hit the expensive-backend tail."""
+        if getattr(self.s, "backend", "openrouter") != "openrouter":
+            return None
         prov: dict = {}
         if self.s.provider_order:
             prov["order"] = list(self.s.provider_order)
@@ -686,6 +690,36 @@ class CappedOpenRouterClient:
                     {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
                 ]
             break
+
+    @staticmethod
+    def _deepseek_effort(effort: str) -> str | None:
+        """Map OpenRouter-style reasoning effort to DeepSeek's three-level scale."""
+        effort = str(effort).strip().lower()
+        if effort in ("minimal", "low"):
+            return "low"
+        if effort in ("medium", "high", "xhigh"):
+            return "high"
+        if effort in ("max", "ultra"):
+            return "max"
+        return None
+
+    def _apply_deepseek_thinking(self, payload: dict) -> None:
+        """Translate OpenRouter's ``reasoning`` control into DeepSeek's OpenAI-format
+        thinking toggle. DeepSeek defaults to thinking ENABLED, so the disabled case
+        (the design default) must be sent explicitly to preserve non-thinking mode.
+        """
+        if getattr(self.s, "backend", "openrouter") != "deepseek":
+            return
+        reasoning = payload.pop("reasoning", None)
+        enabled = False
+        effort = None
+        if isinstance(reasoning, dict) and reasoning.get("enabled") is not False:
+            enabled = True
+            effort = reasoning.get("effort")
+        payload["thinking"] = {"type": "enabled" if enabled else "disabled"}
+        mapped = self._deepseek_effort(effort) if effort else None
+        if mapped:
+            payload["reasoning_effort"] = mapped
 
     def _configured_call_ceiling_usd(
         self,
@@ -744,11 +778,17 @@ class CappedOpenRouterClient:
         other non-transient 4xx failures are never retried.
         """
         url = f"{self.s.base_url}/chat/completions"
+        api_key = (
+            getattr(self.s, "deepseek_api_key", "")
+            if getattr(self.s, "backend", "openrouter") == "deepseek"
+            else self.s.api_key
+        )
         headers = {
-            "Authorization": f"Bearer {self.s.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
-            "X-Title": "KiCraft",
         }
+        if getattr(self.s, "backend", "openrouter") != "deepseek":
+            headers["X-Title"] = "KiCraft"
         max_retries = max(0, int(getattr(self.s, "llm_max_retries", 0)))
         backoff = float(getattr(self.s, "llm_retry_backoff_s", 1.0))
         for attempt in range(max_retries + 1):
@@ -837,18 +877,39 @@ class CappedOpenRouterClient:
         if not isinstance(collection_bounds, tuple):
             collection_bounds = ()
         payload = {k: v for k, v in body.items() if not k.startswith("_")}
-        payload.update(
-            {"stream": True, "stream_options": {"include_usage": True}, "usage": {"include": True}}
-        )
+        stream_opts: dict = {"stream": True, "stream_options": {"include_usage": True}}
+        if getattr(self.s, "backend", "openrouter") != "deepseek":
+            stream_opts["usage"] = {"include": True}
+        payload.update(stream_opts)
         payload.setdefault("model", self.s.model)
         payload.setdefault("max_tokens", self.s.max_tokens_per_call)
         prov = self._provider_block()
         if prov:
             payload["provider"] = prov
-        if self.s.enable_prompt_cache and isinstance(payload.get("messages"), list):
+        if (
+            getattr(self.s, "backend", "openrouter") != "deepseek"
+            and self.s.enable_prompt_cache
+            and isinstance(payload.get("messages"), list)
+        ):
             self._apply_cache_control(payload["messages"])
         call_ceiling_usd = self._configured_call_ceiling_usd(payload, reasoning_guard)
         run_id = meta_ctx.get("run_id")
+        # Capture the requested reasoning control for telemetry before the
+        # DeepSeek translation drops it from the payload.
+        reasoning_policy = payload.get("reasoning")
+        # Translate OpenRouter reasoning control to DeepSeek's thinking toggle
+        # AFTER the ceiling reservation (which still reads the `reasoning` dict).
+        self._apply_deepseek_thinking(payload)
+        # DeepSeek has no OpenAI structured-outputs (`json_schema`) mode -- it
+        # accepts `json_object` only. Keep the full schema for the in-stream
+        # property guard and telemetry, but send the looser form. The schema
+        # still travels verbatim in the prompt, and the deterministic stage
+        # commit re-validates it downstream.
+        response_format_guard = payload.get("response_format")
+        if getattr(self.s, "backend", "openrouter") == "deepseek":
+            rf = payload.get("response_format")
+            if isinstance(rf, dict) and rf.get("type") == "json_schema":
+                payload["response_format"] = {"type": "json_object"}
         # Mid-stream retry: _open_stream retries transient failures only up to
         # the 2xx header; a connection dropped DURING iter_lines (e.g.
         # "Connection broken: InvalidChunkLength" -- live board 625) used to
@@ -872,7 +933,7 @@ class CappedOpenRouterClient:
             received_content_chars = 0
             reasoning_recent = ""
             collection_guard = _StreamingCollectionGuard(
-                collection_bounds, payload.get("response_format")
+                collection_bounds, response_format_guard
             )
             stream_t0 = time.monotonic()
             try:
@@ -918,14 +979,21 @@ class CappedOpenRouterClient:
                             if ch.get("finish_reason"):
                                 finish = ch["finish_reason"]
                             delta = ch.get("delta") or {}
-                            if delta.get("reasoning"):
-                                reasoning.append(delta["reasoning"])
-                                reasoning_chars += len(delta["reasoning"])
-                                reasoning_recent = (reasoning_recent + delta["reasoning"])[
+                            # OpenRouter streams CoT as `delta.reasoning`; DeepSeek's
+                            # OpenAI-format endpoint uses `delta.reasoning_content`.
+                            reasoning_field = (
+                                "reasoning_content"
+                                if getattr(self.s, "backend", "openrouter") == "deepseek"
+                                else "reasoning"
+                            )
+                            if delta.get(reasoning_field):
+                                reasoning.append(delta[reasoning_field])
+                                reasoning_chars += len(delta[reasoning_field])
+                                reasoning_recent = (reasoning_recent + delta[reasoning_field])[
                                     -_REASONING_RECENT_CHARS:
                                 ]
                                 if on_delta:
-                                    on_delta({"reasoning": delta["reasoning"]})
+                                    on_delta({"reasoning": delta[reasoning_field]})
                             if delta.get("content"):
                                 received_content_chars += len(delta["content"])
                                 accepted, overflow = collection_guard.consume(delta["content"])
@@ -1051,7 +1119,7 @@ class CappedOpenRouterClient:
         msg["content_chars"] = content_chars
         msg["reasoning_chars"] = reasoning_chars
         msg["requested_max_tokens"] = payload.get("max_tokens")
-        msg["reasoning_policy"] = payload.get("reasoning")
+        msg["reasoning_policy"] = reasoning_policy
         msg["reasoning_policy_name"] = reasoning_guard.name if reasoning_guard else None
         msg["collection_counts"] = collection_guard.counts()
 
@@ -1066,11 +1134,14 @@ class CappedOpenRouterClient:
             # The provider generated the entire last delta, even the suffix
             # discarded by the guard. Charge that paid partial output as well.
             out_tok = out_tok or max(1, (reasoning_chars + received_content_chars) // 4)
-        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+        if getattr(self.s, "backend", "openrouter") == "deepseek":
+            cached = usage.get("prompt_cache_hit_tokens") or 0
+        else:
+            cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
         cost = float(usage.get("cost") or 0.0)
         if cost <= 0.0:  # never record 0 for real spend, or the ceiling under-counts
             cost = self._estimated_cost(payload["model"], in_tok, out_tok)
-        response_policy = (payload.get("response_format") or {}).get("json_schema") or {}
+        response_policy = (response_format_guard or {}).get("json_schema") or {}
         rec_meta = {
             "phase": meta_phase,
             "profile": getattr(self.s, "design_profile", "custom"),
@@ -1085,7 +1156,7 @@ class CappedOpenRouterClient:
             "reasoning_chars": reasoning_chars,
             "content_chars": content_chars,
             "max_tokens": payload.get("max_tokens"),
-            "reasoning_policy": payload.get("reasoning"),
+            "reasoning_policy": reasoning_policy,
             "collection_limit": collection_limit,
             **meta_ctx,
             "collection_counts": collection_guard.counts(),
@@ -1229,6 +1300,11 @@ class CappedOpenRouterClient:
             total_cost += cost
 
             assistant = {"role": "assistant", "content": msg.get("content")}
+            # DeepSeek requires prior reasoning_content to be passed back on every
+            # subsequent request that carries `tools` (else HTTP 400). OpenRouter
+            # does not, and a bare `reasoning_content` key is ignored there.
+            if getattr(self.s, "backend", "openrouter") == "deepseek" and msg.get("reasoning"):
+                assistant["reasoning_content"] = msg["reasoning"]
             tcs = msg.get("tool_calls") or []
             if tcs:
                 assistant["tool_calls"] = tcs
@@ -1354,7 +1430,10 @@ class CappedOpenRouterClient:
             body["response_format"] = response_format
         msg, cost = self._stream(body, on_delta=on_delta)
         total_cost += cost
-        messages.append({"role": "assistant", "content": msg.get("content")})
+        final_assistant = {"role": "assistant", "content": msg.get("content")}
+        if getattr(self.s, "backend", "openrouter") == "deepseek" and msg.get("reasoning"):
+            final_assistant["reasoning_content"] = msg["reasoning"]
+        messages.append(final_assistant)
         return {
             "text": msg.get("content") or "",
             "cost_usd": total_cost,

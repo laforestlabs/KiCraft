@@ -221,7 +221,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--role",
-        choices=["all", "flash", "pro", "reviewer", "judge"],
+        choices=["all", "luna", "deepseek", "reviewer", "judge"],
         default="all",
     )
     parser.add_argument("--metadata-only", action="store_true", help="skip the paid smoke call")

@@ -1087,7 +1087,7 @@ def test_button_requirement_accepts_physical_button_with_ancillary_passives():
     assert {group["id"] for group in validated["groups"]} == {"control_switch", "pullup"}
 
 
-def test_typed_coin_cell_holder_rejects_a_welded_cell_footprint():
+def test_typed_coin_cell_holder_replaces_a_welded_cell_footprint():
     state = _state()
     state["architecture"]["requirements"] = [
         {
@@ -1100,23 +1100,26 @@ def test_typed_coin_cell_holder_rejects_a_welded_cell_footprint():
         }
     ]
     unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("battery",))
-    with pytest.raises(WorkUnitValidationError) as caught:
-        validate_unit_candidate(
-            unit,
-            {
-                "groups": [
-                    {
-                        **_group("battery_holder", "A", prefix="BT"),
-                        "value": "CR2032",
-                        "symbol": "Device:Battery_Cell",
-                        "footprint": "Battery:Battery_Panasonic_CR2032-HFN_Horizontal_CircularHoles",
-                    }
-                ]
-            },
-            state,
-            {},
-        )
-    assert caught.value.defects["missing-requirement-implementation"] == ["battery"]
+    validated = validate_unit_candidate(
+        unit,
+        {
+            "groups": [
+                {
+                    **_group("battery_holder", "A", prefix="BT"),
+                    "value": "CR2032",
+                    "symbol": "Device:Battery_Cell",
+                    "footprint": "Battery:Battery_Panasonic_CR2032-HFN_Horizontal_CircularHoles",
+                }
+            ]
+        },
+        state,
+        {},
+    )
+    # The typed lowerer owns this requirement: the model's welded-cell footprint
+    # is discarded in favour of the real curated holder.
+    holder = validated["groups"][0]
+    assert holder["footprint"].startswith("Battery:BatteryHolder_")
+    assert holder["mpn"] == "BS-07-A1BJ001"
 
 
 def _battery_power_state():
@@ -1556,6 +1559,36 @@ def test_bom_unit_omits_absent_metadata_sentinels():
     assert "sourcing_note" not in validated["groups"][0]
     assert validated["groups"][0]["symbol"] == "Device:R"
     assert validated["groups"][0]["footprint"] == "Resistor_SMD:R_0603_1608Metric"
+
+
+def test_bom_value_descriptions_are_not_treated_as_mpns():
+    # Models put a value description in `mpn` ("47uH power inductor"); the §9.26
+    # sourcing gate rejects that as a non-orderable MPN and hard-fails the unit,
+    # so a description (whitespace / identical to the value) is dropped instead.
+    unit = StageWorkUnit("bom-s000", "bom", "A")
+    payload = {
+        "groups": [
+            {
+                **_group("inductor", "A"),
+                "value": "47uH",
+                "mpn": "47uH power inductor",
+                "sourcing_note": "keep me",
+            }
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, _state(), {})
+
+    assert "mpn" not in validated["groups"][0]
+    assert validated["groups"][0]["sourcing_note"] == "keep me"
+
+    kept = validate_unit_candidate(
+        unit,
+        {"groups": [{**_group("resistor", "A"), "value": "1k", "mpn": "RC0603FR-071KL"}]},
+        _state(),
+        {},
+    )
+    assert kept["groups"][0]["mpn"] == "RC0603FR-071KL"
 
 
 def test_curated_terminal_resolves_its_explicit_manufacturer_identity(tmp_path):
@@ -2168,9 +2201,12 @@ def test_model_owned_led_unit_cannot_use_zero_ohm_current_limiters():
             {**_group("limiter", "A"), "value": "0R"},
         ]
     }
-    with pytest.raises(WorkUnitValidationError) as rejected:
-        validate_unit_candidate(unit, payload, state, {})
-    assert rejected.value.defects["missing-led-current-limiter"] == ["led"]
+    # The typed lowerer owns this requirement: a 0R model limiter is discarded
+    # and the computed nonzero limiter is adopted instead.
+    validated = validate_unit_candidate(unit, payload, state, {})
+    assert sorted(group["id"] for group in validated["groups"]) == ["led", "resistor"]
+    resistor = next(group for group in validated["groups"] if group["id"] == "resistor")
+    assert resistor["value"] == "270R"
 
     payload["groups"][1]["value"] = "270R"
     validated = validate_unit_candidate(unit, payload, state, {})

@@ -18,6 +18,8 @@ from kicraft.server.stage_contracts import (
         ("MAX485ESA+", "MAX485ESA+T"),
         ("nRF52840", "NRF52840-QIAA-R7"),
         ("ULN2003", "ULN2003ADR"),
+        ("ULN2003", "ULN2003A"),
+        ("ULN2003A", "ULN2003ADR"),
         ("MCP23017", "MCP23017-E/SO"),
         ("STM32L0", "STM32L031K6T6"),
     ],

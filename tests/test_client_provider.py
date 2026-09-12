@@ -136,13 +136,13 @@ def test_design_profile_clone_reuses_guard_and_changes_only_route():
     guard = _RecordingGuard()
     settings = Settings(
         api_key="k",
-        design_profile="flash",
-        escalation_profile="pro",
+        design_profile="deepseek",
+        escalation_profile="luna",
         request_timeout_s=17,
     )
     original = CappedOpenRouterClient(settings, guard=guard)
-    escalated = original.with_design_profile("pro")
-    profile = DESIGN_PROFILES["pro"]
+    escalated = original.with_design_profile("luna")
+    profile = DESIGN_PROFILES["luna"]
     assert escalated is not original
     assert escalated.guard is guard
     assert escalated.s.model == profile["model"]
@@ -150,7 +150,7 @@ def test_design_profile_clone_reuses_guard_and_changes_only_route():
     assert escalated.s.max_price_prompt == profile["max_price_prompt"]
     assert escalated.s.max_price_completion == profile["max_price_completion"]
     assert escalated.s.request_timeout_s == 17
-    assert original.s.design_profile == "flash"
+    assert original.s.design_profile == "deepseek"
 
 
 def test_provider_block_omits_zero_price_cap():
@@ -1640,6 +1640,7 @@ def _clear_profile_env(monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
 
 
 @pytest.mark.parametrize("recovery", [False, True])
@@ -1650,11 +1651,15 @@ def test_stage_output_ceiling_admits_bounded_call_without_raising_project_budget
     from kicraft.server.stage_runtime import _response_policy
 
     _clear_profile_env(monkeypatch)
-    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "pro")
+    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "luna")
     monkeypatch.setenv("KICRAFT_STAGE_OUTPUT_LIMITS", '{"architecture":8192}')
     settings = Settings.from_env(dotenv=False)
     settings.ledger_path = tmp_path / "ledger.db"
-    settings.project_llm_budget_usd = 0.10
+    # A project budget that sits between the two call ceilings under the active
+    # profile's price caps (ceilings for 60k chars + 16384/8192 out are
+    # $0.02266 / $0.01283): the caller's unbounded 16384 request must be refused,
+    # the policy-bounded (8192) call must still fit.
+    settings.project_llm_budget_usd = 0.025
     guard = SpendGuard(settings)
     guard.record(settings.model, 100, 100, 0.007, meta={"run_id": "bounded", "stage": "intent"})
     client = CappedOpenRouterClient(settings, guard=guard)
@@ -1677,8 +1682,8 @@ def test_stage_output_ceiling_admits_bounded_call_without_raising_project_budget
 
     assert guard.spent_for_run("bounded") == pytest.approx(0.008)
     with pytest.raises(BudgetExceeded) as refused:
-        guard.preflight(call_ceiling_usd=0.093, run_id="bounded")
-    assert refused.value.limit_usd == 0.10
+        guard.preflight(call_ceiling_usd=0.02, run_id="bounded")
+    assert refused.value.limit_usd == 0.025
 
 
 @pytest.mark.parametrize(
@@ -1712,23 +1717,23 @@ def test_design_profiles_resolve_dated_models_and_finite_caps(monkeypatch):
 def test_escalation_profile_defaults_disabled_and_can_be_enabled(monkeypatch):
     _clear_profile_env(monkeypatch)
     settings = Settings.from_env(dotenv=False)
-    assert settings.design_profile == "flash"
+    assert settings.design_profile == "luna"
     assert settings.escalation_profile == ""
-    monkeypatch.setenv("KICRAFT_ESCALATION_PROFILE", "pro")
-    assert Settings.from_env(dotenv=False).escalation_profile == "pro"
+    monkeypatch.setenv("KICRAFT_ESCALATION_PROFILE", "deepseek")
+    assert Settings.from_env(dotenv=False).escalation_profile == "deepseek"
 
 
 def test_provider_fallback_profile_defaults_disabled_and_can_be_enabled(monkeypatch):
     _clear_profile_env(monkeypatch)
     settings = Settings.from_env(dotenv=False)
     assert settings.provider_fallback_profile == ""
-    monkeypatch.setenv("KICRAFT_PROVIDER_FALLBACK_PROFILE", "pro")
-    assert Settings.from_env(dotenv=False).provider_fallback_profile == "pro"
+    monkeypatch.setenv("KICRAFT_PROVIDER_FALLBACK_PROFILE", "deepseek")
+    assert Settings.from_env(dotenv=False).provider_fallback_profile == "deepseek"
 
 
 def test_escalation_profile_same_route_disables_and_unknown_fails(monkeypatch):
     _clear_profile_env(monkeypatch)
-    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "pro")
+    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "deepseek")
     assert Settings.from_env(dotenv=False).escalation_profile == ""
     monkeypatch.setenv("KICRAFT_ESCALATION_PROFILE", "unknown")
     with pytest.raises(SystemExit, match="KICRAFT_ESCALATION_PROFILE"):
@@ -1737,7 +1742,7 @@ def test_escalation_profile_same_route_disables_and_unknown_fails(monkeypatch):
 
 def test_provider_fallback_same_route_disables_and_unknown_fails(monkeypatch):
     _clear_profile_env(monkeypatch)
-    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "pro")
+    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "deepseek")
     assert Settings.from_env(dotenv=False).provider_fallback_profile == ""
     monkeypatch.setenv("KICRAFT_PROVIDER_FALLBACK_PROFILE", "unknown")
     with pytest.raises(SystemExit, match="KICRAFT_PROVIDER_FALLBACK_PROFILE"):
@@ -1746,10 +1751,227 @@ def test_provider_fallback_same_route_disables_and_unknown_fails(monkeypatch):
 
 def test_known_profile_rejects_mixed_model_or_price_cap(monkeypatch):
     _clear_profile_env(monkeypatch)
-    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "pro")
+    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "deepseek")
     monkeypatch.setenv("KICRAFT_MAX_PRICE_COMPLETION", "0.14")
     with pytest.raises(SystemExit, match="conflicts with design profile"):
         Settings.from_env(dotenv=False)
+
+
+# ---- DeepSeek direct backend (deepseek profile) ---------------------------
+
+
+def test_deepseek_profile_routes_designer_to_deepseek_backend(monkeypatch):
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    settings = Settings.from_env(dotenv=False)
+    assert settings.design_profile == "deepseek"
+    assert settings.backend == "deepseek"
+    assert settings.base_url == "https://api.deepseek.com"
+    assert settings.model == "deepseek-flash"
+    assert settings.provider_order == []
+    assert settings.deepseek_api_key == "ds-key"
+    assert settings.api_key == "test"  # OpenRouter key still resolved for review/judge
+
+
+def test_luna_profile_is_the_default_openrouter_route(monkeypatch):
+    _clear_profile_env(monkeypatch)
+    settings = Settings.from_env(dotenv=False)
+    assert settings.design_profile == "luna"
+    assert settings.backend == "openrouter"
+    assert settings.base_url == "https://openrouter.ai/api/v1"
+    assert settings.model == "openai/gpt-5.6-luna"
+    assert settings.provider_order == ["openai"]
+
+
+def test_deepseek_profile_requires_deepseek_api_key(monkeypatch):
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "deepseek")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    with pytest.raises(SystemExit, match="DEEPSEEK_API_KEY is not set"):
+        Settings.from_env(dotenv=False)
+
+
+def test_review_and_judge_routes_reset_to_openrouter(monkeypatch):
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setenv("KICRAFT_DESIGN_PROFILE", "deepseek")
+    settings = Settings.from_env(dotenv=False)  # deepseek -> DeepSeek API
+    assert settings.backend == "deepseek"
+    for routed in (settings.for_review(), settings.for_judge()):
+        assert routed.backend == "openrouter"
+        assert routed.base_url == "https://openrouter.ai/api/v1"
+
+
+def test_with_design_profile_switches_backend():
+    guard = _RecordingGuard()
+    original = CappedOpenRouterClient(
+        Settings(
+            api_key="or-key",
+            deepseek_api_key="ds-key",
+            backend="deepseek",
+            base_url="https://api.deepseek.com",
+            design_profile="deepseek",
+            escalation_profile="luna",
+        ),
+        guard=guard,
+    )
+    escalated = original.with_design_profile("luna")
+    assert escalated.guard is guard
+    assert escalated.s.backend == "openrouter"
+    assert escalated.s.base_url == "https://openrouter.ai/api/v1"
+    assert escalated.s.model == DESIGN_PROFILES["luna"]["model"]
+
+
+def test_stream_deepseek_omits_openrouter_fields_and_disables_thinking(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["payload"] = json
+        return _FakeResp(
+            [
+                {"choices": [{"delta": {"content": '{"x":1}'}}]},
+                {"choices": [{"finish_reason": "stop", "delta": {}}]},
+                {
+                    "usage": {
+                        "prompt_tokens": 1000,
+                        "completion_tokens": 50,
+                        "prompt_cache_hit_tokens": 800,
+                    }
+                },
+            ]
+        )
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    c = CappedOpenRouterClient(
+        Settings(
+            api_key="or-key",
+            backend="deepseek",
+            deepseek_api_key="ds-key",
+            base_url="https://api.deepseek.com",
+            model="deepseek-flash",
+            provider_order=[],
+            max_price_prompt=0.30,
+            max_price_completion=1.20,
+        ),
+        guard=_RecordingGuard(),
+    )
+    msg, cost = c._stream(
+        {
+            "messages": [
+                {"role": "system", "content": "SYS"},
+                {"role": "user", "content": "hi"},
+            ],
+            "_meta": "stream",
+            "_meta_ctx": {"run_id": "r1"},
+            "reasoning": {"enabled": False},
+        }
+    )
+    p = captured["payload"]
+    assert captured["url"] == "https://api.deepseek.com/chat/completions"
+    assert captured["headers"]["Authorization"] == "Bearer ds-key"
+    assert "X-Title" not in captured["headers"]
+    assert "provider" not in p
+    assert "usage" not in p  # OpenRouter's usage.include field is not sent
+    assert "reasoning" not in p
+    assert p["thinking"] == {"type": "disabled"}  # DeepSeek defaults to ON; must be explicit
+    assert p["messages"][0]["content"] == "SYS"  # no cache_control breakpoint applied
+    # No usage.cost from DeepSeek -> estimate from peak caps (1000 in, 50 out).
+    assert cost == pytest.approx((1000 * 0.30 + 50 * 1.20) / 1_000_000)
+    rec = c.guard.records[-1]
+    assert rec["meta"]["cached_tokens"] == 800  # DeepSeek prompt_cache_hit_tokens
+
+
+def test_stream_deepseek_enables_thinking_when_reasoning_enabled(monkeypatch):
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        captured["payload"] = json
+        return _FakeResp(
+            [
+                {"choices": [{"delta": {"content": '{"x":1}'}}]},
+                {"choices": [{"finish_reason": "stop", "delta": {}}]},
+                _usage_chunk(cost=0.0),
+            ]
+        )
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    c = CappedOpenRouterClient(
+        Settings(api_key="k", backend="deepseek", deepseek_api_key="dk", model="deepseek-flash"),
+        guard=_RecordingGuard(),
+    )
+    c._stream(
+        {
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning": {"max_tokens": 8000},
+        }
+    )
+    p = captured["payload"]
+    assert p["thinking"] == {"type": "enabled"}
+    assert "reasoning_effort" not in p  # no effort hint -> DeepSeek default high
+    assert "reasoning" not in p
+
+
+def test_deepseek_effort_mapping():
+    assert CappedOpenRouterClient._deepseek_effort("low") == "low"
+    assert CappedOpenRouterClient._deepseek_effort("medium") == "high"
+    assert CappedOpenRouterClient._deepseek_effort("max") == "max"
+    assert CappedOpenRouterClient._deepseek_effort("bogus") is None
+
+
+@pytest.mark.parametrize("backend", ["deepseek", "openrouter"])
+def test_json_schema_is_translated_only_for_the_deepseek_backend(monkeypatch, backend):
+    # DeepSeek has no OpenAI structured-outputs mode: the request carries the
+    # looser json_object form (the schema still rides verbatim in the prompt and
+    # the in-stream guard). OpenRouter keeps the strict json_schema envelope.
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None, stream=None):
+        captured["payload"] = json
+        return _FakeResp(
+            [
+                {"choices": [{"delta": {"content": '{"ok": true}'}}]},
+                {"choices": [{"finish_reason": "stop", "delta": {}}]},
+                _usage_chunk(cost=0.0),
+            ]
+        )
+
+    monkeypatch.setattr(client_mod.requests, "post", fake_post)
+    c = CappedOpenRouterClient(
+        Settings(
+            api_key="or-key",
+            backend=backend,
+            deepseek_api_key="ds-key",
+            base_url=(
+                "https://api.deepseek.com"
+                if backend == "deepseek"
+                else "https://openrouter.ai/api/v1"
+            ),
+            model="deepseek-flash" if backend == "deepseek" else "openai/gpt-5.6-luna",
+            max_price_prompt=0.30,
+            max_price_completion=1.20,
+        ),
+        guard=_RecordingGuard(),
+    )
+    schema = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "kicraft_test",
+            "strict": True,
+            "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+        },
+    }
+    c._stream(
+        {
+            "messages": [{"role": "user", "content": "return json"}],
+            "response_format": dict(schema),
+        }
+    )
+    if backend == "deepseek":
+        assert captured["payload"]["response_format"] == {"type": "json_object"}
+    else:
+        assert captured["payload"]["response_format"] == schema
 
 
 class _EndpointResponse:

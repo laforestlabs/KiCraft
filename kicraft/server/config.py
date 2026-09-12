@@ -13,6 +13,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
+from . import routing_config
+
 # Version of the legal documents in docs/legal/. Stamped into each user's consent
 # record at signup; bumping it (here and in the documents) forces existing users
 # to re-accept on their next visit. See docs/legal/README.md.
@@ -206,25 +208,51 @@ def _resolved_stage_output_limits() -> dict[str, int]:
     return limits
 
 
+# Designer profiles. Each resolves one exact model plus the backend that serves
+# it: "deepseek" (DeepSeek's own API, DEEPSEEK_API_KEY) or "openrouter"
+# (OPENROUTER_API_KEY). Exactly two profiles exist and the active one is final
+# -- there is no escalation tier and no provider-fallback route.
+#
+# ``luna`` (default) is OpenAI's GPT-5.6 Luna on OpenRouter, which implements
+# native structured outputs (`response_format: json_schema`, strict) that the
+# complex nested design slots depend on. It is pinned to OpenAI's standard
+# endpoint (`openai`, probed live 2026-09-11 for structured outputs + tools +
+# streaming + reasoning) and capped at that endpoint's price. The cheaper
+# `openai/flex` tier was rejected: flex is lower-priority traffic and a deploy
+# path must not trade reliability for the $0.10/Mtok difference.
+#
+# ``deepseek`` runs DeepSeek-V4.1-Flash (`deepseek-flash`) direct on DeepSeek.
+# DeepSeek has NO `json_schema` mode: the client sends `json_object` instead
+# (the schema still travels verbatim in the prompt). It is the cost profile that
+# trades the strict-schema guarantee for a lower price.
+#
+# ``max_price_*`` is the per-Mtok price ceiling. On OpenRouter it caps provider
+# routing; on DeepSeek it doubles as the spend estimate because DeepSeek returns
+# no `usage.cost`. DeepSeek uses the PEAK cache-miss rates ($0.30 / $1.20) so
+# the guard errs high and never under-counts off-peak spend.
 DESIGN_PROFILES: dict[str, dict[str, object]] = {
-    "flash": {
-        "model": "deepseek/deepseek-v4-flash-0731",
-        "provider_order": ["open-inference/fp8"],
-        "max_price_prompt": 0.11,
-        "max_price_completion": 0.24,
+    "luna": {
+        "model": "openai/gpt-5.6-luna",
+        "backend": "openrouter",
+        "base_url": "https://openrouter.ai/api/v1",
+        "provider_order": ["openai"],
+        "max_price_prompt": 0.20,
+        "max_price_completion": 1.20,
     },
-    "pro": {
-        "model": "deepseek/deepseek-v4-pro-0813",
-        "provider_order": ["alibaba"],
-        "max_price_prompt": 1.46,
-        "max_price_completion": 4.38,
+    "deepseek": {
+        "model": "deepseek-flash",
+        "backend": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "provider_order": [],
+        "max_price_prompt": 0.30,
+        "max_price_completion": 1.20,
     },
 }
 
 
 def _resolved_design_profile() -> tuple[str, dict[str, object]]:
     """Resolve and validate the operator-selected designer profile."""
-    name = os.environ.get("KICRAFT_DESIGN_PROFILE", "flash").strip().lower()
+    name = os.environ.get("KICRAFT_DESIGN_PROFILE", "luna").strip().lower()
     if name not in DESIGN_PROFILES:
         raise SystemExit(
             f"KICRAFT_DESIGN_PROFILE must be one of {sorted(DESIGN_PROFILES)}, got {name!r}"
@@ -296,11 +324,13 @@ class Settings:
     """Resolved server configuration. Build with `Settings.from_env()`."""
 
     api_key: str
-    model: str = "deepseek/deepseek-v4-flash-0731"
+    model: str = "openai/gpt-5.6-luna"
     design_profile: str = "custom"
     escalation_profile: str = ""
     provider_fallback_profile: str = ""
     base_url: str = "https://openrouter.ai/api/v1"
+    backend: str = "openrouter"  # "openrouter" | "deepseek" (which key/base_url serve calls)
+    deepseek_api_key: str = ""  # DEEPSEEK_API_KEY; used when backend == "deepseek"
     max_tokens_per_call: int = 1024
     daily_usd_ceiling: float = 5.0
     total_usd_ceiling: float = 50.0
@@ -494,9 +524,31 @@ class Settings:
                 "OPENROUTER_API_KEY is not set. Copy .env.example to .env and add your "
                 "key (the .env file is gitignored; never commit it)."
             )
-        profile_name, profile = _resolved_design_profile()
-        return cls(
+        deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+        # The admin routing config, when present and valid, is authoritative for
+        # the designer profile: its active_profile selects the route outright and
+        # its behavior keys overlay the env-derived values below. Because it wins
+        # over the env, a stale KICRAFT_MODEL/KICRAFT_PROVIDER_ORDER in .env must
+        # not trip the env-vs-profile conflict check (that check exists only for
+        # env-driven selection).
+        routing = routing_config.load()
+        if routing.authoritative:
+            profile_name = routing.active_profile
+            profile = DESIGN_PROFILES[profile_name]
+        else:
+            profile_name, profile = _resolved_design_profile()
+        backend = str(profile["backend"])
+        if backend == "deepseek" and not deepseek_key:
+            raise SystemExit(
+                f"KICRAFT_DESIGN_PROFILE={profile_name!r} routes the designer to the "
+                "DeepSeek API, but DEEPSEEK_API_KEY is not set. Add it to .env (the "
+                "file is gitignored; never commit it)."
+            )
+        settings = cls(
             api_key=key,
+            deepseek_api_key=deepseek_key,
+            backend=backend,
+            base_url=str(profile["base_url"]),
             model=str(profile["model"]),
             design_profile=profile_name,
             escalation_profile=_resolved_optional_design_profile(
@@ -665,11 +717,16 @@ class Settings:
             ),
             enable_electrical_review=_env_bool_default("KICRAFT_ELECTRICAL_REVIEW", True),
         )
+        # Admin behavior knobs (only when the routing file selected the profile;
+        # an ignored file leaves the env-derived values untouched).
+        return routing.apply(settings) if routing.authoritative else settings
 
     def for_review(self) -> "Settings":
         """Return the independently capped electrical-review route."""
         return replace(
             self,
+            backend="openrouter",
+            base_url="https://openrouter.ai/api/v1",
             provider_order=self.review_provider_order,
             provider_allow_fallbacks=False,
             max_price_prompt=self.review_max_price_prompt,
@@ -680,6 +737,8 @@ class Settings:
         """Return the independently capped Class-J route."""
         return replace(
             self,
+            backend="openrouter",
+            base_url="https://openrouter.ai/api/v1",
             provider_order=self.judge_provider_order,
             provider_allow_fallbacks=False,
             max_price_prompt=self.judge_max_price_prompt,
@@ -779,6 +838,7 @@ class Settings:
             "escalation_profile": self.escalation_profile,
             "provider_fallback_profile": self.provider_fallback_profile,
             "base_url": self.base_url,
+            "backend": self.backend,
             "max_tokens_per_call": self.max_tokens_per_call,
             "stage_output_limits": dict(self.stage_output_limits),
             "daily_usd_ceiling": self.daily_usd_ceiling,
@@ -804,6 +864,7 @@ class Settings:
             "enable_prompt_cache": self.enable_prompt_cache,
             "enable_core_defaults": self.enable_core_defaults,
             "eval_judge_model": self.eval_judge_model,
+            "design_reasoning_tokens": self.design_reasoning_tokens,
             "design_temperature": self.design_temperature,
             "review_model": self.review_model,
             "review_provider_order": self.review_provider_order,
