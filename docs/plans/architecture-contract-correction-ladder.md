@@ -1,14 +1,16 @@
 # Draft options + independent live-LLM tests: architecture contract convergence
 
-**Status: options implemented and arm-tested; no arm ships.** Every option from §4 is implemented
-behind `KICRAFT_CONTRACT_LADDER` (default `stock`, byte-identical to the shipped behaviour) at
-commit `312a69f`, with a routing test per arm and the `tools/ladder_experiment.py` operator
-harness. Round 1 ran every arm; round 2 re-ran the two nearest rivals **interleaved** with stock;
-the O2 budget control ran interleaved too. **No arm is separable from stock at the pre-registered
-sample size, so nothing ships and the default stays `stock`.** The headline result is not the arm
-ranking but two corrections to §1 — the baseline is 0.60 (not ≈0/3) and the session drift makes
-blocked arm ordering invalid — plus a re-derived option (O9, §8.5) that targets the dominant
-defect class directly. Spend: ≈$4.2 of the $10 ceiling. Full record: **§8**.
+**Status: options implemented and arm-tested; the re-derived fix implemented and measured; no arm
+ships.** Every option from §4 is implemented behind `KICRAFT_CONTRACT_LADDER` (default `stock`,
+byte-identical to the shipped behaviour) at commits `312a69f`/`3456e14`, with a routing test per
+arm and the `tools/ladder_experiment.py` operator harness; the re-derived O9 (`bound_nets`) landed
+at `f9ff0d3`. Round 1 ran every arm; round 2 re-ran the two nearest rivals **interleaved** with
+stock; the O2 budget control ran interleaved; the O9 fix round ran interleaved. **No arm — including
+O9 — is separable from stock at the pre-registered sample size, so nothing ships and the default
+stays `stock`.** The headline results are the corrections to §1 (the baseline is 0.55–0.60, not
+≈0/3; blocked arm ordering is invalid under session drift; and the rejection rate per draw is ~1.0
+whatever the leading defect class is, so per-class fixes remove work without changing the outcome).
+Spend: ≈$5.3 of the $10 ceiling. Full record: **§8**.
 
 **Subject:** the pipeline behaviours that make a brief die at `architecture` even when every
 individual blocking diagnostic is actionable, the contract text already forbids the defect, and
@@ -510,7 +512,7 @@ rather than the options refuted: this sample size cannot resolve a 0.2–0.5 dif
 overdispersion, and the pre-registered N is the limiting factor. A future round needs the
 interleaved design and N ≈ 40 per state per arm to separate an effect that size.
 
-### 8.5 Re-derived diagnosis and the option that follows (rule 5)
+### 8.5 Re-derived diagnosis and the option that follows (rule 5) — **O9 implemented and run**
 
 The rung-1 blocking code is a **deterministic contract gap**, not a ladder defect:
 
@@ -519,22 +521,72 @@ The rung-1 blocking code is a **deterministic contract gap**, not a ladder defec
 * every `missing_recipe_port` in the corpus is the ws2812 `data_out` port: "Include an output for
   driving addressable LED string" means precisely this port, and the model binds it
   (`data_out: LED_DATA_OUT`) without declaring `LED_DATA_OUT` as a net;
-* the model's repair for that diagnostic is often to **delete the binding** (§8.1/§8.3), which is
-  why the class repeats across rungs.
+* the model's repair for that diagnostic is often to **delete the binding**, which is why the
+  class repeats across rungs.
 
-**Proposed O9 (not implemented, not run — it needs its own pre-registration):** complete the
-declaration deterministically, in the posture of O6/O8 — when a requirement binds a recipe port
-to a net the architecture does not declare, declare that net with the endpoint the requiring
-sheet needs (plus the peer endpoint any other requirement binding the same net implies).
-Falsifier: the completion invents a net the model never intended (caught by the downstream
-wiring/BOM gates) or a build fails where stock passed. This targets the dominant defect class
-itself; the ladder arms only target its consequences.
+**O9 (`bound_nets`, implemented at `f9ff0d3`):** complete the declaration deterministically — the
+net a binding names is declared with the endpoint its requiring sheet needs, plus the peer sheets
+any other requirement binding that net implies; a single-sheet *output* also gets the off-board
+pin-header connector the net needs to have a pin (otherwise the net is one-pin and the build fails
+on a dangling net). Nothing is invented: the name comes from the binding, the sheets from the
+requirement set, the rails from the driver. An input with no peer, a requirement whose recipe does
+not resolve, and a fully declared architecture are all left byte-identical.
+
+Verified three ways:
+
+* **On the real dead board.** `tests/fixtures/ladder/kc-wgj6xe_architecture_rung1.json` is
+  KC-WGJ6XE's actual first reply: stock rejects it (`unknown_recipe_port_net`, `LED_DATA_OUT`);
+  `bound_nets` removes exactly that class, and with `completing` the reply **commits**. Replaying
+  every reconstructed historical rung offline gives the same narrow signature: the arm changes
+  only the candidates that carry an undeclared *bound* net, and leaves the power/`missing_recipe_port`
+  rejections alone.
+* **At the pin level**: the completed net has two pins (driver output `D1.2` plus the socket
+  `J1`), so the dangling-net failure the completion could otherwise paper over is structurally
+  impossible.
+* **Live, interleaved** (N=10 per state, drift-controlled — the only valid comparison here):
+
+| arm (interleaved) | commits/runs | rate | Wilson 95% | attempts/run | cost/run | corrections/run |
+|---|---|---|---|---|---|---|
+| stock | 11/20 | 0.55 | [0.34, 0.74] | 3.75 | $0.0167 | 2.20 |
+| `bound_nets` | 8/20 | 0.40 | [0.22, 0.61] | 3.80 | $0.0166 | 2.20 |
+| `bound_nets,completing` | 8/20 | 0.40 | [0.22, 0.61] | 3.65 | $0.0154 | 1.90 |
+
+**The arm fires, the endpoint does not move.** The class it removes disappears exactly as
+designed — `unknown_recipe_port_net`/`LED_DATA_OUT` is the rung-1 rejection in **14 of 20** stock
+runs and in **0 of 20** `bound_nets` runs (fingerprint of the completion in 18/20) — and yet the
+commit rate, attempts, cost and correction count are all flat. The reason is visible in the same
+data: with the LED class gone, rung 1 immediately rejects on the *next* class in line
+(`unrealizable_power_requirement` + `architecture_unowned_power_support` 5–6, `missing_recipe_port`
+5, `native_usb_connector_required` 1–5, `multiple_recipe_contracts` 2). **The rejection rate per
+draw is ~1.0 whatever the leading class is**, so a per-class deterministic completion removes work
+without changing the outcome; the ladder then spends the same corrections on the next class.
+
+That closes the plan's question with a sharper answer than §1 offered: architecture deaths are not
+caused by one missing rule (contract text, ladder, or completion). They are caused by each draw
+carrying *several* independent contract defects, of which the ladder fixes at most a couple. The
+measured levers that remain are, in order:
+
+1. **the power contract** (`unrealizable_power_requirement`,
+   `architecture_unowned_power_support`) — now the leading class. It is a *semantic* contract about
+   the user's power intent, not a KiCraft-side omission, so it needs contract/prompt work rather
+   than a completion;
+2. **unbound required ports** (`missing_recipe_port`, 5/20) — an omission with no net name to
+   recover, so it is the model's to make or the recipe's to relax (O8 is the one instance already
+   handled);
+3. a broader completion pass would have to cover *all* of them at once to move the endpoint, which
+   is a different (and much larger) pre-registration.
+
+**Shipping decision: unchanged.** The arm is inert by default and stays available; nothing about
+it is adopted on a flat endpoint.
 
 ### 8.6 Steps not run, and why
 
 * **Round 3 (combination)** — §5 conditions it on "the best arm"; no arm beat stock, and the same
   N cannot resolve a pair either.
-* **Round 4 (L2)** — §6.4 conditions it on a winner; nothing ships, so no full-chain spend.
+* **Round 4 (L2)** — §6.4 conditions it on a winner; nothing ships, so no full-chain spend. The
+  O9 completion's build-level falsifier is covered at the architecture level instead (the added
+  net has two pins, so it cannot be dangling); a five-stage build replay is owed if the arm is
+  ever adopted.
 * **Deploy** — no winner to ship. The arms and the correction-event telemetry are committed but
   **not deployed**: the running services still execute the previous code, and the default stays
   `stock` until an arm's default is deliberately flipped.
@@ -543,8 +595,8 @@ itself; the ladder arms only target its consequences.
 
 ### 8.7 Spend, artifacts, harness findings
 
-* Spent on this plan ≈ **$4.2 of the $10 ceiling** (round 1 + round 2 + O2 + two validation
-  replays; the day's ledger total is $4.39, which includes pre-experiment traffic).
+* Spent on this plan ≈ **$5.3 of the $10 ceiling** (round 1 + round 2 + O2 + the O9 fix round +
+  two validation replays; the day's ledger total is $5.42, which includes pre-experiment traffic).
 * Artifacts: `/tmp/ladder-exp/` — `runs.jsonl` (one row per run: commit, rungs, per-rung defect
   codes, lost declared content, cost, `at_utc`, artifact paths), `manifest-<label>-<board>.json`
   (arm, knobs, model, settings, repo head), `<label>-<board>-<stamp>.{events,trace}.jsonl`, and
