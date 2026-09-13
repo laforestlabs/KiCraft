@@ -16,6 +16,7 @@ from kicraft.design.models import (
     InterSheetNet,
     RecipeResolutionRecord,
     RecipeSelection,
+    Sheet,
     SheetPin,
 )
 from kicraft.design.part_identity import is_part_family, matches_part_identity
@@ -1249,12 +1250,126 @@ def _complete_native_usb_companions(result: ResolutionResult) -> None:
                 record.assumptions.append(note)
 
 
+def _native_usb_recipes_for(
+    requirement: CircuitRequirement,
+    recipes: tuple[RegisteredRecipe, ...],
+) -> list[RegisteredRecipe]:
+    """Every registered recipe one requirement's family/exact part can select."""
+    matches = list(_family_recipes(requirement.family, recipes))
+    exact = _recipe_for_exact(requirement.exact_part, recipes)
+    if exact is not None and exact not in matches:
+        matches.append(exact)
+    return matches
+
+
+def _native_usb_completion_sheet(architecture: Architecture, mcu_sheet: str) -> Sheet | None:
+    """The connector's own sheet (an existing USB sheet, else a new `USB` one)."""
+    for row in architecture.sheets:
+        if row.name == mcu_sheet:
+            continue
+        if "usb" in _identity(f"{row.name} {row.stem} {row.function}"):
+            return row
+    if any(row.name.upper() == "USB" or row.stem.upper() == "USB" for row in architecture.sheets):
+        return None
+    return Sheet(name="USB", stem="USB", function="USB data connector")
+
+
+def _complete_native_usb_data_connector(
+    architecture: Architecture,
+    requirements: list[CircuitRequirement],
+    recipes: tuple[RegisteredRecipe, ...],
+) -> tuple[list[CircuitRequirement], list[Sheet], list[InterSheetNet]] | None:
+    """O6: add the USB data connector a native-USB MCU makes mandatory.
+
+    The architecture contract already requires one physical USB data connector
+    bound to a native-USB MCU's own ``usb_dm``/``usb_dp`` nets. Completing the
+    requirement deterministically removes a defect the model can only ever fix
+    by spending another round, exactly as the resolver completes other
+    contracts. Returns None — leaving ``native_usb_connector_required`` to own
+    the defect — whenever the completion cannot be derived without inventing a
+    net, a sheet name, or polarity.
+    """
+    native = [
+        requirement
+        for requirement in requirements
+        if any(
+            row.definition.recipe in _NATIVE_USB_MCU_RECIPES
+            for row in _native_usb_recipes_for(requirement, recipes)
+        )
+    ]
+    if len(native) != 1:
+        return None
+    mcu = native[0]
+    dm, dp = mcu.ports.get("usb_dm"), mcu.ports.get("usb_dp")
+    if not dm or not dp or dm == dp:
+        return None
+    if any(
+        requirement.id != mcu.id
+        and requirement.ports.get("usb_dm") == dm
+        and requirement.ports.get("usb_dp") == dp
+        for requirement in requirements
+    ):
+        # An existing requirement already owns this pair; whether it resolves to
+        # a data-connector recipe is the companion matcher's judgement. Adding a
+        # second socket here would put an extra connector on the board.
+        return None
+    nets = {net.name: net for net in architecture.inter_sheet_nets}
+    if dm not in nets or dp not in nets:
+        return None  # Never invent a net the architecture did not declare.
+    sheet = _native_usb_completion_sheet(architecture, mcu.sheet)
+    if sheet is None:
+        return None
+    requirement_id = f"{mcu.id}_usb_connector"
+    if len(requirement_id) > 64:
+        return None
+    declared = {"GND", *architecture.power_nets, *nets}
+    vbus = mcu.ports.get("vbus") or next(
+        (candidate for candidate in ("VBUS", "+5V") if candidate in declared), None
+    )
+    if not vbus or vbus not in declared:
+        return None
+    requirements = [
+        *requirements,
+        CircuitRequirement(
+            id=requirement_id,
+            sheet=sheet.name,
+            role="connector",
+            family="usb-c-usb2-device",
+            exact_part="USB-C-USB2-DEVICE",
+            ports={
+                "vbus": vbus,
+                "gnd": mcu.ports.get("gnd", "GND"),
+                "usb_dm": dm,
+                "usb_dp": dp,
+            },
+        ),
+    ]
+    sheets = list(architecture.sheets)
+    if sheet not in sheets:
+        sheets.append(sheet)
+    completed_nets = [
+        net.model_copy(
+            update={
+                "endpoints": [
+                    *net.endpoints,
+                    SheetPin(sheet=sheet.name, direction="bidirectional"),
+                ]
+            }
+        )
+        if net.name in {dm, dp} and not any(e.sheet == sheet.name for e in net.endpoints)
+        else net
+        for net in architecture.inter_sheet_nets
+    ]
+    return requirements, sheets, completed_nets
+
+
 def resolve_architecture_recipes(
     architecture: Architecture | dict,
     intent: dict | BaseModel | None = None,
     registry: Iterable[RegisteredRecipe] | None = None,
     *,
     allowed_maturities: frozenset[str] = frozenset({"production"}),
+    complete_native_usb: bool = False,
 ) -> ResolutionResult:
     """Resolve supported requirements stably; protected misses are blocking."""
     architecture_model = Architecture.model_validate(architecture)
@@ -1318,6 +1433,13 @@ def resolve_architecture_recipes(
                 evidence=[sheet.name for sheet in architecture_model.sheets],
             )
         )
+    if complete_native_usb:
+        completion = _complete_native_usb_data_connector(architecture_model, requirements, recipes)
+        if completion is not None:
+            requirements, completed_sheets, completed_nets = completion
+            architecture_model = architecture_model.model_copy(
+                update={"sheets": completed_sheets, "inter_sheet_nets": completed_nets}
+            )
     architecture_model = architecture_model.model_copy(update={"requirements": requirements})
     primitive_families = {
         family for lowerer in registered_lowerers() for family in lowerer.families
@@ -1949,12 +2071,14 @@ def apply_architecture_recipe_resolution(
     intent: dict | BaseModel | None = None,
     *,
     allowed_maturities: frozenset[str] = frozenset({"production"}),
+    complete_native_usb: bool = False,
 ) -> Architecture:
     architecture_model = Architecture.model_validate(architecture)
     result = resolve_architecture_recipes(
         architecture_model,
         intent,
         allowed_maturities=allowed_maturities,
+        complete_native_usb=complete_native_usb,
     )
     if result.blocking:
         raise RecipeResolutionError(result.blocking)

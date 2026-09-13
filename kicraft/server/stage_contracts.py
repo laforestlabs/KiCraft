@@ -884,7 +884,17 @@ def _sheet_owns_usb_c_connector(sheet: dict) -> bool:
     )
 
 
-def _normalize_usb_c_requirements(payload: dict) -> dict:
+# Generic USB-C identities whose recipe is a power-only 5 V sink. When such a
+# connector's own sheet carries the MCU's D+/D- pair the sink identity is stale
+# and, under the `completing` ladder arm, is replaced by the USB2 device recipe
+# (see _normalize_usb_c_requirements and O6 in
+# docs/plans/architecture-contract-correction-ladder.md).
+_GENERIC_USB_C_SINK_IDENTITIES = frozenset({"usbc5vsink", "usbcpowersink"})
+
+
+def _normalize_usb_c_requirements(
+    payload: dict, *, complete_native_usb: bool = False
+) -> dict:
     """Complete generic connector contracts without changing their hardware role."""
     from kicraft.design.recipes.registry import get_recipe
 
@@ -967,6 +977,19 @@ def _normalize_usb_c_requirements(payload: dict) -> dict:
                 )
             requirement["family"] = "usb-c-breakout" if exposed_auxiliary else sink.family
             requirement["ports"] = ports
+            if (
+                complete_native_usb
+                and has_data
+                and not exposed_auxiliary
+                and exact in _GENERIC_USB_C_SINK_IDENTITIES
+            ):
+                # O6: a generic sink identity cannot carry the D+/D- pair this
+                # connector's own sheet exposes, and a stale exact part outranks
+                # the upgraded family downstream (the sink recipe is then
+                # unresolved, which blocks the MCU's mandatory native-USB
+                # companion). The connector wired to the MCU's USB pair *is* the
+                # USB2 device; bind the identity the resolver must select.
+                requirement["exact_part"] = sink.exact_part
         requirements.append(requirement)
     requirement_sheets = {
         str(row.get("sheet")) for row in requirements if isinstance(row, dict) and row.get("sheet")
@@ -1202,7 +1225,37 @@ def _validate_typed_inter_sheet_contracts(
     )
 
 
-def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> tuple[dict, int]:
+def _complete_hub75_optional_address(payload: dict) -> dict:
+    """O8: tie the HUB75 `addr_d` channel low when the model leaves it unused.
+
+    `addr_d` is the 13th address line a 1/32-scan panel needs; a 1/8- or
+    1/16-scan panel does not. Under the `addr_d_optional` arm an interface that
+    omits it gets the channel bound to GND, so the spare '245 input is tied low
+    (never floating) and the channel's buffer output keeps driving the connector
+    position — instead of failing the whole stage on an undeclared HUB75_D net.
+    """
+    requirements = []
+    for row in payload.get("requirements") or []:
+        if not isinstance(row, dict):
+            requirements.append(row)
+            continue
+        requirement = dict(row)
+        family = re.sub(r"[^a-z0-9]+", "", str(row.get("family") or "").lower())
+        ports = dict(row.get("ports") or {})
+        if family == "hub75levelshiftinterface" and not ports.get("addr_d"):
+            ports["addr_d"] = "GND"
+            requirement["ports"] = ports
+        requirements.append(requirement)
+    return {**payload, "requirements": requirements}
+
+
+def _normalize_stage_response(
+    stage: str,
+    payload: dict,
+    prompt_state: dict,
+    *,
+    ladder: frozenset[str] = frozenset(),
+) -> tuple[dict, int]:
     try:
         questions = payload.get("questions")
         if isinstance(questions, list) and questions:
@@ -1221,7 +1274,9 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
         if stage == "architecture":
             payload = _normalize_architecture_sheet_aliases(payload)
             payload = _complete_connector_requirements(payload)
-            payload = _normalize_usb_c_requirements(payload)
+            payload = _normalize_usb_c_requirements(
+                payload, complete_native_usb="completing" in ladder
+            )
             named_parts = (prompt_state.get("intent") or {}).get("named_parts") or []
             for requirement in payload.get("requirements") or []:
                 if not isinstance(requirement, dict) or requirement.get("exact_part"):
@@ -1245,6 +1300,8 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
                 "protected_identities",
             ):
                 payload.pop(field, None)
+            if "addr_d_optional" in ladder:
+                payload = _complete_hub75_optional_address(payload)
             response = ArchitectureStageResponse.model_validate(payload)
             _validate_lowerer_parameter_contracts(response)
             canonical = response.model_dump(exclude={"inter_sheet_net_ranges"}, exclude_none=True)
@@ -1290,6 +1347,7 @@ def _normalize_stage_response(stage: str, payload: dict, prompt_state: dict) -> 
                 resolved = apply_architecture_recipe_resolution(
                     validated,
                     prompt_state.get("intent") or {},
+                    complete_native_usb="completing" in ladder,
                 )
             except RecipeResolutionError as exc:
                 evidence = [row.model_dump(exclude_none=True) for row in exc.diagnostics]

@@ -531,6 +531,11 @@ _HUB75_SIGNALS = (
     ("addr_a", 9), ("addr_b", 10), ("addr_c", 11), ("addr_d", 12),
     ("clk", 13), ("lat", 14), ("oe", 15),
 )
+# The D address line is the 13th channel a 1/32-scan panel uses. A panel that
+# does not need it may leave it unused; the `addr_d_optional` ladder arm then
+# ties the spare '245 input low (a legal ground binding for this channel, hence
+# `allow_ground`) instead of demanding an undeclared HUB75_D net.
+_HUB75_GROUND_TIED_SIGNALS = frozenset({"addr_d"})
 _HUB75_GROUND_PINS = (4, 8, 16)
 HUB75_SN74HCT245_INTERFACE = _recipe(
     recipe="hub75-sn74hct245-interface@1",
@@ -541,7 +546,14 @@ HUB75_SN74HCT245_INTERFACE = _recipe(
         Port(name="gnd", direction="power"),
         # Semantic channel names, so a model can bind the interface it declared
         # (HUB75_OE, HUB75_CLK, …) by name instead of guessing input0..input11.
-        *(Port(name=name, direction="input") for name, _pin in _HUB75_SIGNALS),
+        *(
+            Port(
+                name=name,
+                direction="input",
+                allow_ground=name in _HUB75_GROUND_TIED_SIGNALS,
+            )
+            for name, _pin in _HUB75_SIGNALS
+        ),
     ),
     internal=tuple(f"shifted{i}" for i in range(len(_HUB75_SIGNALS))),
 

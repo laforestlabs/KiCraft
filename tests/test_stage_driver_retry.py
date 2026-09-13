@@ -3455,3 +3455,178 @@ def test_decode_splits_contract_rejections_from_bad_provider_json(
     )
     assert outcome.payload["failure_kind"] == expected
     assert outcome.payload["schema_error"].startswith("unsupported_recipe_endpoint")
+
+
+# --------------------------------------------------------------------------- #
+# Correction-ladder arms (docs/plans/architecture-contract-correction-ladder.md)
+# --------------------------------------------------------------------------- #
+def _ladder_client(replies, **overrides):
+    """A scripted client whose settings carry one KICRAFT_CONTRACT_LADDER arm."""
+    client = _ScriptedClient(replies)
+    client.s = Settings(api_key="test", **overrides)
+    return client
+
+
+def _bad_reply(text, finish_reason="stop"):
+    return {"text": text, "reasoning": "", "finish_reason": finish_reason, "cost_usd": 0.0}
+
+
+def _rungs(client):
+    """The call modes the drive actually spent, in order."""
+    return ["serialization" if call["serialization"] else "normal" for call in client.calls]
+
+
+def test_ladder_stock_spends_serialization_then_one_terminal_clean_slate(tmp_path):
+    client = _ladder_client([_bad_reply("not json at all")] * 4)
+    result = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    # 3 calls: draft, dedicated serialization, one clean-slate escape whose
+    # rejection is terminal by policy whatever the nominal budget allows.
+    assert _rungs(client) == ["normal", "serialization", "normal"]
+    assert result["results"][-1]["attempts"] == 3
+    assert result["results"][-1]["failure_kind"] == "invalid_json"
+
+
+def test_ladder_no_serialization_spends_only_preserving_corrections(tmp_path):
+    client = _ladder_client([_bad_reply("not json at all")] * 4, contract_ladder="no_serialization")
+    result = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert _rungs(client) == ["normal", "normal", "normal"]
+    assert all(call["reasoning"] == {"enabled": False} for call in client.calls[1:])
+    # The cleaner is told its own draft was malformed, never to start fresh.
+    assert "not a single complete JSON object" in client.calls[1]["messages"][-1]["content"]
+    assert result["results"][-1]["attempts"] == 3
+    assert result["results"][-1]["failure_kind"] == "invalid_json"
+
+
+def _contract_rejecting_normalizer(codes):
+    """Patch the normalizer to reject each reply with the next diagnostic code."""
+    from kicraft.server.stage_contracts import StageSchemaError
+
+    seen = {"n": 0}
+
+    def boom(*_args, **_kwargs):
+        code = codes[min(seen["n"], len(codes) - 1)]
+        seen["n"] += 1
+        raise StageSchemaError(
+            f"{code}: deterministic contract refused the candidate",
+            diagnostic={"code": code, "message": f"{code} at rung {seen['n']}", "evidence": []},
+        )
+
+    return boom
+
+
+def test_ladder_signature_continues_when_the_contract_defect_changed(tmp_path, monkeypatch):
+    replies = [_bad_reply("{}")] * 5
+
+    stock = _ladder_client(replies)
+    monkeypatch.setattr(
+        stage_driver_mod, "_normalize_stage_response", _contract_rejecting_normalizer(["a", "b", "c"])
+    )
+    stage_pipeline.drive_chain(["intent"], "a USB-powered LED", tmp_path / "stock",
+                               max_retries=3, client=stock)
+    assert _rungs(stock) == ["normal", "serialization", "normal"]
+    assert len(stock.calls) == 3
+
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "_normalize_stage_response",
+        _contract_rejecting_normalizer(["a", "b", "c", "d"]),
+    )
+    signature = _ladder_client(replies, contract_ladder="signature")
+    _results, _guard, state_path = stage_pipeline.drive_chain(
+        ["intent"], "a USB-powered LED", tmp_path / "sig", max_retries=3, client=signature
+    )
+    # A clean-slate response that failed on a different diagnostic is progress:
+    # the drive keeps correcting (never a second escape), to the call budget.
+    assert _rungs(signature) == ["normal", "serialization", "normal", "normal"]
+    assert state_path.endswith("state.json")
+
+
+def test_ladder_signature_keeps_a_repeated_contract_defect_terminal(tmp_path, monkeypatch):
+    client = _ladder_client([_bad_reply("{}")] * 5, contract_ladder="signature")
+    monkeypatch.setattr(
+        stage_driver_mod, "_normalize_stage_response", _contract_rejecting_normalizer(["a", "b", "b"])
+    )
+    result = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert len(client.calls) == 3
+    assert result["results"][-1]["failure_kind"] == "contract_rejected"
+
+
+def test_ladder_signature_never_rescues_a_diagnostic_free_parse_failure(tmp_path):
+    # invalid_json/truncated_json carry no diagnostic identity, so the escape
+    # stays terminal whatever the modality.
+    client = _ladder_client([_bad_reply("not json at all")] * 4, contract_ladder="signature")
+    result = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert len(client.calls) == 3
+    assert result["results"][-1]["failure_kind"] == "invalid_json"
+
+
+def test_ladder_preserving_clean_slate_carries_the_previous_candidate(tmp_path):
+    replies = [
+        _bad_reply("not json at all"),
+        _bad_reply("still not json"),
+        _bad_reply("also not json"),
+    ]
+    stock = _ladder_client(list(replies))
+    run_session(tmp_path / "stock", "a USB-powered LED", ["intent"], client=stock)
+    stock_clean_slate = stock.calls[-1]["messages"]
+    assert [row["role"] for row in stock_clean_slate][-1:] == ["user"]
+
+    preserving = _ladder_client(list(replies), contract_ladder="preserving")
+    run_session(tmp_path / "preserving", "a USB-powered LED", ["intent"], client=preserving)
+    messages = preserving.calls[-1]["messages"]
+    assert messages[-2] == {"role": "assistant", "content": "still not json"}
+    assert "Preserve every already-valid net" in messages[-1]["content"]
+    assert "Start from the binding state" not in messages[-1]["content"]
+
+
+def test_ladder_dropped_gate_names_content_the_revision_dropped(tmp_path):
+    def arch_like(include_d) -> str:
+        # Parseable JSON that the intent schema rejects (unknown keys) — the
+        # same shape the dropped-content gate reads its identities from.
+        payload = {
+            "goal": "a HUB75 board",
+            "inter_sheet_nets": [
+                {"name": name, "endpoints": [{"sheet": "MCU"}, {"sheet": "HUB75"}]}
+                for name in (("HUB75_D", "HUB75_OE") if include_d else ("HUB75_OE",))
+            ],
+            "requirements": [{"id": "hub75", "ports": {"addr_d": "HUB75_D"} if include_d else {}}],
+        }
+        return json.dumps(payload)
+
+    replies = [_bad_reply(arch_like(True)), _bad_reply(arch_like(False)), _bad_reply(arch_like(False))]
+
+    gate = _ladder_client(list(replies), contract_ladder="dropped_gate")
+    run_session(tmp_path / "gate", "a HUB75 board", ["intent"], client=gate)
+    # The loss is detectable only after the revision that dropped it: the note
+    # rides the correction built from rung 2's rejection (the clean-slate call).
+    clean_slate_message = gate.calls[2]["messages"][-1]["content"]
+    assert "REGRESSION FIX" in clean_slate_message
+    assert "'HUB75_D'" in clean_slate_message
+
+    stock = _ladder_client(list(replies))
+    run_session(tmp_path / "stock", "a HUB75 board", ["intent"], client=stock)
+    assert "REGRESSION FIX" not in stock.calls[2]["messages"][-1]["content"]
+
+
+def test_ladder_full_feedback_repeats_every_diagnostic_from_the_drive(tmp_path, monkeypatch):
+    replies = [_ok_intent_reply(), _ok_intent_reply(), _ok_intent_reply()]
+    client = _ladder_client(replies, contract_ladder="full_feedback")
+    calls = {"n": 0}
+
+    def fake_commit(stage, slot, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False, {"errors": ["§9.15 dangling signal nets"], "offenders": []}
+        if calls["n"] == 2:
+            return False, {"errors": ["§9.17 two-terminal self-short"], "offenders": []}
+        return True, {"ok": True}
+
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", fake_commit)
+    result = run_session(tmp_path, "a USB-powered LED", ["intent"], client=client)
+    assert result["status"] == "ok"
+    # The third correction carries BOTH gate errors, not only the latest rung's.
+    feedback = client.calls[2]["messages"][-1]["content"]
+    assert "ALL BLOCKING DEFECTS THIS STAGE HAS REPORTED" in feedback
+    assert "§9.15 dangling signal nets" in feedback
+    assert "§9.17 two-terminal self-short" in feedback
+

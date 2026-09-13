@@ -976,6 +976,73 @@ def _add_native_usb(payload, *, dm="USB_D_N", dp="USB_D_P", vbus="VBUS"):
     return payload
 
 
+def _power_sink_usb_architecture():
+    """The board whose only USB socket is a power sink wired to the MCU's D+/D-.
+
+    This is the contradiction that hard-blocked board KC-WGJ6XE at architecture:
+    the connector's sheet carries the MCU's USB data pair, so the sheet's
+    connector is the native-USB data connector — but a generic 5 V sink identity
+    cannot carry `usb_dm`/`usb_dp`, so the recipe went unresolved and the MCU's
+    mandatory companion reported `native_usb_connector_required`.
+    """
+    payload = _esp32_architecture_payload()
+    payload["power_nets"] = ["+3V3", "VBUS", "GND"]
+    payload["rail_voltages"] = {"+3V3": 3.3, "VBUS": 5.0}
+    payload["sheets"].append(
+        {"name": "USB", "stem": "USB", "function": "USB-C PD 5 V power input"}
+    )
+    payload["inter_sheet_nets"] = [
+        {
+            "name": net,
+            "endpoints": [
+                {"sheet": "MCU", "direction": "bidirectional"},
+                {"sheet": "USB", "direction": "bidirectional"},
+            ],
+        }
+        for net in ("USB_D_N", "USB_D_P")
+    ]
+    payload["requirements"] = [
+        {
+            "id": "mcu_core",
+            "sheet": "MCU",
+            "role": "mcu_core",
+            "family": "esp32-s3-module",
+            "exact_part": "ESP32-S3-MINI-1-N8",
+            "ports": {"vdd": "+3V3", "gnd": "GND", "usb_dm": "USB_D_N", "usb_dp": "USB_D_P"},
+        },
+        {
+            "id": "usb_power_input",
+            "sheet": "USB",
+            "role": "power_input",
+            "family": "usb-c-power-sink",
+            "exact_part": "USB-C-5V-SINK",
+            "ports": {"vbus": "VBUS", "gnd": "GND"},
+        },
+    ]
+    return payload
+
+
+def test_completing_arm_uses_the_boards_own_usb_socket_as_the_data_connector():
+    payload = _power_sink_usb_architecture()
+    with pytest.raises(StageSchemaError, match="native_usb_connector_required"):
+        _normalize_stage_response("architecture", json.loads(json.dumps(payload)), {"intent": {}})
+
+    canonical, _expanded = _normalize_stage_response(
+        "architecture",
+        json.loads(json.dumps(payload)),
+        {"intent": {}},
+        ladder=frozenset({"completing"}),
+    )
+    selection = next(
+        row for row in canonical["recipe_selections"] if row["requirement_ids"] == ["usb_power_input"]
+    )
+    assert selection["recipe"] == "usb-c-usb2-device@1"
+    assert selection["port_bindings"]["usb_dm"] == "USB_D_N"
+    assert selection["port_bindings"]["usb_dp"] == "USB_D_P"
+    # One socket, one series pair: the MCU recipe already owns it.
+    assert selection["parameters"]["series_resistors"] is False
+
+
 def _typed_esp32_architecture(**requirement_overrides):
     payload = _esp32_architecture_payload()
     include_usb = requirement_overrides.pop("usb", None)
@@ -3851,6 +3918,71 @@ def test_hub75_channels_bind_by_signal_name():
     assert {
         port: display.port_bindings[port] for port in signals.values()
     } == {port: f"HUB75_{signal}" for signal, port in signals.items()}
+
+
+def test_addr_d_optional_arm_ties_the_unused_hub75_channel_low():
+    """A board whose panel does not need HUB75's D line must not be blocked.
+
+    `addr_d` is the 13th channel: a 1/32-scan panel uses it, a 1/8 or 1/16 panel
+    does not. The `addr_d_optional` arm ties the spare '245 input low (never
+    floating, connector position still driven) instead of demanding an undeclared
+    HUB75_D net.
+    """
+    signals = {
+        "R0": "r0", "G0": "g0", "B0": "b0", "R1": "r1", "G1": "g1", "B1": "b1",
+        "A": "addr_a", "B": "addr_b", "C": "addr_c",
+        "CLK": "clk", "LAT": "lat", "OE": "oe",
+    }
+    payload = {
+        "sheets": [
+            {"name": "MCU", "stem": "MCU", "function": "microcontroller"},
+            {"name": "HUB75", "stem": "HUB75", "function": "HUB75 display connector"},
+        ],
+        "requirements": [
+            {"id": "display", "sheet": "HUB75", "role": "connector",
+             "family": "hub75-level-shift-interface", "exact_part": "HUB75-SN74HCT245",
+             "ports": {"gnd": "GND", "vdd_5v": "+5V"}},
+        ],
+        "power_nets": ["GND", "+5V"],
+        "inter_sheet_nets": [
+            {"name": f"HUB75_{signal}", "endpoints": [
+                {"sheet": "HUB75", "direction": "input"},
+                {"sheet": "MCU", "direction": "output"}]}
+            for signal in signals
+        ],
+        "mcu_present": False,
+        "topologies": {},
+    }
+    with pytest.raises(StageSchemaError, match="addr_d"):
+        _normalize_stage_response("architecture", json.loads(json.dumps(payload)), {})
+
+    canonical, _expanded = _normalize_stage_response(
+        "architecture",
+        json.loads(json.dumps(payload)),
+        {},
+        ladder=frozenset({"addr_d_optional"}),
+    )
+    display = next(
+        row for row in canonical["recipe_selections"] if row["requirement_ids"] == ["display"]
+    )
+    assert display["port_bindings"]["addr_d"] == "GND"
+    # The spare '245 A-side input sits on GND and the connector position is still
+    # driven by the buffered channel: no floating input, no one-pin net.
+    expansion = expand_recipe(RecipeSelection.model_validate(display))
+    shifted9 = [
+        endpoint
+        for connection in expansion.connections
+        if connection.net_name.endswith("shifted9")
+        for endpoint in connection.endpoints
+    ]
+    assert {endpoint.pin for endpoint in shifted9} == {"17", "12"}
+    grounded = [
+        endpoint
+        for connection in expansion.connections
+        if connection.net_name == "GND"
+        for endpoint in connection.endpoints
+    ]
+    assert any(endpoint.ref == "U2" and endpoint.pin == "3" for endpoint in grounded)
 
 
 def test_native_usb_failure_names_the_connector_recipe_that_satisfies_it():

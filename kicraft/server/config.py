@@ -299,6 +299,59 @@ def _stage_semantics_mode(value: str) -> Literal["observe", "repair", "enforce"]
     return mode
 
 
+# Correction-ladder arms (docs/plans/architecture-contract-correction-ladder.md).
+# One settings value selects the arm; `stock` is the shipped behaviour. Arms are
+# mutually exclusive EXPERIMENTS layered on the same driver — each changes one
+# decision point of the schema/contract correction ladder in `drive_stage` (or,
+# for `completing`/`addr_d_optional`, one deterministic recipe contract):
+#
+#   stock            no change (default)
+#   no_serialization KICRAFT_SERIALIZATION_RETRIES=0: no dedicated serialization
+#                    rung, so the clean-slate escape is unreachable (O1)
+#   signature        schema-path clean-slate is terminal only when the rejection
+#                    identity is unchanged, like the commit path (O3)
+#   preserving       the clean-slate rung carries the previous candidate and the
+#                    current diagnostics instead of a from-scratch slot (O4)
+#   dropped_gate     a correction names declared nets/ports the revision dropped
+#                    without a diagnostic asking for it (O5)
+#   completing       add the contract-mandated native-USB data connector instead
+#                    of blocking on `native_usb_connector_required` (O6)
+#   full_feedback    every correction carries every blocking diagnostic seen in
+#                    the drive, not only the current one (O7)
+#   addr_d_optional  HUB75 `addr_d` is an optional channel, tied off when unused
+#                    (O8)
+#
+# Multiple arms may be combined (comma-separated) for the combination round.
+CONTRACT_LADDER_MODES = frozenset(
+    {
+        "stock",
+        "no_serialization",
+        "signature",
+        "preserving",
+        "dropped_gate",
+        "completing",
+        "full_feedback",
+        "addr_d_optional",
+    }
+)
+
+
+def parse_contract_ladder(value: str) -> frozenset[str]:
+    """Split and validate a ``KICRAFT_CONTRACT_LADDER`` value into arm tokens."""
+    modes = frozenset(part.strip().lower() for part in str(value).split(",") if part.strip())
+    if not modes:
+        return frozenset({"stock"})
+    unknown = sorted(modes - CONTRACT_LADDER_MODES)
+    if unknown:
+        raise SystemExit(
+            f"KICRAFT_CONTRACT_LADDER must be a comma-separated subset of "
+            f"{sorted(CONTRACT_LADDER_MODES)}, got {unknown}"
+        )
+    if "stock" in modes and len(modes) > 1:
+        raise SystemExit("KICRAFT_CONTRACT_LADDER=stock cannot be combined with another arm")
+    return modes
+
+
 @dataclass(frozen=True)
 class StageResponsePolicy:
     """Immutable response policy for one design-stage drive.
@@ -382,6 +435,9 @@ class Settings:
     # Semantic diagnostics attempt one bounded repair by default. Operators may
     # select observe-only rollout or supported-family fabrication enforcement.
     stage_semantics: Literal["observe", "repair", "enforce"] = "repair"
+    # Correction-ladder arm(s) for the schema/contract path; see
+    # CONTRACT_LADDER_MODES. KICRAFT_CONTRACT_LADDER.
+    contract_ladder: str = "stock"
     # --- Design-stage reasoning budget + in-stream loop breaker ---------------
     # Structured design stages default to reasoning disabled. Operators may
     # opt in for architecture/BOM experiments, but recovery does not pay for a
@@ -599,6 +655,13 @@ class Settings:
             collection_bounds=dict(STAGE_COLLECTION_BOUNDS),
             stage_semantics=_stage_semantics_mode(
                 os.environ.get("KICRAFT_STAGE_SEMANTICS", cls.stage_semantics)
+            ),
+            contract_ladder=",".join(
+                sorted(
+                    parse_contract_ladder(
+                        os.environ.get("KICRAFT_CONTRACT_LADDER", cls.contract_ladder)
+                    )
+                )
             ),
             design_reasoning_tokens=int(
                 os.environ.get("KICRAFT_DESIGN_REASONING_TOKENS", cls.design_reasoning_tokens)
@@ -864,6 +927,7 @@ class Settings:
             "enable_prompt_cache": self.enable_prompt_cache,
             "enable_core_defaults": self.enable_core_defaults,
             "eval_judge_model": self.eval_judge_model,
+            "contract_ladder": self.contract_ladder,
             "design_reasoning_tokens": self.design_reasoning_tokens,
             "design_temperature": self.design_temperature,
             "review_model": self.review_model,

@@ -22,6 +22,7 @@ from kicraft.design.stage_semantics import (
     remove_mislabeled_functional_defaults,
 )
 from .config import (
+    CONTRACT_LADDER_MODES,
     STAGE_COLLECTION_BOUNDS,
     STAGE_SERIALIZATION_MAX_TOKENS,
     CollectionBound,
@@ -468,6 +469,96 @@ def _stable_commit_gate_codes(gate_ids: tuple[str, ...]) -> list[str]:
         if code not in stable:
             stable.append(code)
     return stable
+
+
+# --------------------------------------------------------------------------- #
+# Correction-ladder arms (docs/plans/architecture-contract-correction-ladder.md)
+# --------------------------------------------------------------------------- #
+def _contract_ladder_modes(client) -> frozenset[str]:
+    """The correction-ladder arms this drive runs (default: ``stock``)."""
+    raw = str(getattr(getattr(client, "s", None), "contract_ladder", "stock") or "stock")
+    modes = frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+    return (modes & CONTRACT_LADDER_MODES) or frozenset({"stock"})
+
+
+def _declared_identities(payload: dict) -> set[str]:
+    """The declared content a revision must preserve (O5).
+
+    ``inter_sheet_nets[*].name`` plus every non-empty ``requirements[*].ports``
+    value, each tagged by kind so a dropped net declaration is distinguishable
+    from a dropped port binding of the same name.
+    """
+    identities: set[str] = set()
+    for net in payload.get("inter_sheet_nets") or []:
+        if isinstance(net, dict) and net.get("name"):
+            identities.add(f"net:{net['name']}")
+    for net_range in payload.get("inter_sheet_net_ranges") or []:
+        if isinstance(net_range, dict) and net_range.get("name_pattern"):
+            identities.add(f"range:{net_range['name_pattern']}")
+    for requirement in payload.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        for value in (requirement.get("ports") or {}).values():
+            if value:
+                identities.add(f"port:{value}")
+    return identities
+
+
+def _identity_name(identity: str) -> str:
+    return identity.split(":", 1)[1]
+
+
+def _raw_declared_identities(raw: str) -> set[str] | None:
+    """Declared identities of ONE raw reply, or None when it is not one object."""
+    if not raw:
+        return None
+    try:
+        payload = _extract_json(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return _declared_identities(payload) if isinstance(payload, dict) else None
+
+
+def _schema_rejection_signature(
+    failure_kind: str | None,
+    diagnostic: dict | None,
+) -> tuple | None:
+    """Stable identity of one schema/contract rejection (the O3 comparison).
+
+    The schema path carries no signature today: ``contract_rejected``'s error
+    string is a constant whatever the defect, so the identity is built from the
+    blocking diagnostic codes (the outer code plus any the evidence carries) and
+    the names the diagnostic quotes — the same shape as
+    ``_commit_rejection_signature`` (ordered codes + offender identity), never a
+    second stall detector. Returns None when the rejection carries no diagnostic:
+    a parse failure has no identity to compare, so it stays terminal exactly as
+    before.
+    """
+    row = diagnostic if isinstance(diagnostic, dict) else {}
+    if not row.get("code"):
+        return None
+    codes: set[str] = {str(row["code"])}
+    texts: list[str] = [str(row.get("message") or "")]
+    for item in row.get("evidence") or []:
+        if isinstance(item, dict):
+            if item.get("code"):
+                codes.add(str(item["code"]))
+            if item.get("message"):
+                texts.append(str(item["message"]))
+            texts.extend(str(extra) for extra in item.get("evidence") or [])
+        else:
+            texts.append(str(item))
+    names = set(re.findall(r"'([^']{1,64})'", " ".join(texts)))
+    return (str(failure_kind or ""), tuple(sorted(codes)), tuple(sorted(names)))
+
+
+def _rejection_text(*parts: object) -> str:
+    """Everything a rejection told the model, for the O5 suppression check."""
+    return " ".join(
+        json.dumps(part, separators=(",", ":")) if isinstance(part, (dict, list)) else str(part)
+        for part in parts
+        if part is not None
+    )
 
 
 def _redacted_schema_error(detail: object) -> str | None:
@@ -1029,6 +1120,10 @@ class PreparedStage:
     policy: StageResponsePolicy
     tools: list[dict] | None
     executor: object | None
+    # Correction-ladder arms this drive runs (KICRAFT_CONTRACT_LADDER): the
+    # stage contracts read them to complete what they can complete
+    # deterministically (O6 native-USB companion, O8 HUB75 addr_d).
+    ladder: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -1204,7 +1299,10 @@ def decode_stage_response(
                 },
             )
         candidate, expanded = _normalize_stage_response(
-            prepared.stage, parsed, prepared.prompt_state
+            prepared.stage,
+            parsed,
+            prepared.prompt_state,
+            ladder=getattr(prepared, "ladder", frozenset()),
         )
         kind = "questions" if isinstance(candidate.get("questions"), list) else "candidate"
         return AttemptOutcome(
@@ -3324,6 +3422,7 @@ def drive_stage(
     # parts persist in the mpn cache + parts library and the executor memo
     # dedupes any re-issued lookup, so the dropped transcript is free to rebuild.
     base_messages = list(messages)
+    ladder_modes = _contract_ladder_modes(active_client)
     prepared = PreparedStage(
         stage=stage,
         prompt_state=prompt_state,
@@ -3333,6 +3432,7 @@ def drive_stage(
         policy=policy,
         tools=tools,
         executor=executor,
+        ladder=ladder_modes,
     )
 
     def _debug_context(raw_response: str) -> dict:
@@ -3373,6 +3473,79 @@ def drive_stage(
     # serialization retry consume the same immutable collection bounds.
     normal_cap = int(policy.normal_max_tokens)
     serialization_budget = max(0, int(policy.serialization_retries))
+    if "no_serialization" in ladder_modes:
+        # O1: no dedicated serialization rung. Contract rejections spend every
+        # remaining call on ordinary preserving corrections; because the
+        # clean-slate escape is armed only from inside the serialization
+        # sub-path, it is unreachable in this arm.
+        serialization_budget = 0
+    # O5 compares each revision's declared identities against the previous one;
+    # O7 accumulates every blocking diagnostic this drive has been shown.
+    ladder_previous_identities: set[str] | None = None
+    ladder_diagnostics: dict[str, str] = {}
+
+    def ladder_suffix(
+        raw_text: str,
+        rejection_text: str,
+        *,
+        diagnostic: dict | None = None,
+        commit_out: dict | None = None,
+    ) -> str:
+        """Extra text for the next correction: O5 dropped content + O7 history."""
+        nonlocal ladder_previous_identities
+        parts: list[str] = []
+        if "dropped_gate" in ladder_modes:
+            current = _raw_declared_identities(raw_text)
+            if current is not None:
+                if ladder_previous_identities is not None:
+                    lost = sorted(
+                        _identity_name(item)
+                        for item in ladder_previous_identities - current
+                        # A diagnostic that already names the item owns its fix.
+                        if _identity_name(item) not in rejection_text
+                    )
+                    if lost:
+                        parts.append(
+                            "\nREGRESSION FIX: the previous revision declared "
+                            + ", ".join(repr(name) for name in lost)
+                            + " and this revision dropped it. Restore every one "
+                            "unless a diagnostic above asks for its removal."
+                        )
+                ladder_previous_identities = current
+        if "full_feedback" in ladder_modes:
+            row = diagnostic if isinstance(diagnostic, dict) else {}
+            entries = [row] if row.get("code") else []
+            entries.extend(
+                item
+                for item in row.get("evidence") or []
+                if isinstance(item, dict) and item.get("code")
+            )
+            for entry in entries:
+                ladder_diagnostics[str(entry["code"])] = str(entry.get("message") or "")[:280]
+            for error in (commit_out or {}).get("errors") or []:
+                label = " ".join(str(error).split())[:60]
+                ladder_diagnostics.setdefault(f"commit:{label}", str(error)[:280])
+            if ladder_diagnostics:
+                parts.append(
+                    "\nALL BLOCKING DEFECTS THIS STAGE HAS REPORTED (fix every one; "
+                    "do not trade one for another):\n"
+                    + "\n".join(
+                        f"- {code}: {message}" for code, message in ladder_diagnostics.items()
+                    )
+                )
+        return "".join(parts)
+
+    def ladder_identities(raw_text: str, candidate: dict | None = None) -> list[str]:
+        """The rung's declared identities — what the O5 arm is measured on.
+
+        Recorded on the correction event so an operator can diff consecutive
+        rungs (which declared net or port binding a revision lost) without the
+        raw reply ever leaving the process.
+        """
+        if isinstance(candidate, dict):
+            return sorted(_declared_identities(candidate))
+        return sorted(_raw_declared_identities(raw_text) or [])
+
     temperature = _design_temperature(active_client)
     reasoning = policy.normal_reasoning
     reasoning_guard = policy.reasoning_guard
@@ -3751,11 +3924,27 @@ def drive_stage(
                         "call_mode": current_call_mode,
                         "schema_error": _redacted_schema_error(schema_error_detail),
                         "diagnostic": outcome.payload.get("diagnostic"),
+                        "declared_identities": ladder_identities(raw),
                         "model": _client_model(active_client),
                     }
                 )
             if was_clean_slate:
-                break
+                # O3: like the commit path, a rejected clean-slate is terminal
+                # only when the rejection identity is unchanged. A different
+                # defect set is progress and earns ordinary preserving
+                # corrections (never a second escape: clean_slate_spent stays).
+                # A rejection with no identity to compare (a parse failure)
+                # keeps the stock terminal behaviour.
+                rejection_identity = _schema_rejection_signature(
+                    kind, last.get("diagnostic")
+                )
+                if (
+                    "signature" not in ladder_modes
+                    or clean_slate_armed_signature is None
+                    or rejection_identity is None
+                    or rejection_identity == clean_slate_armed_signature
+                ):
+                    break
             if attempts >= provider_call_budget:
                 break
             if serialization_calls >= serialization_budget:
@@ -3768,6 +3957,11 @@ def drive_stage(
                         schema_error=schema_error_detail,
                         diagnostic=last.get("diagnostic"),
                         collection_limit=collection_limit,
+                    )
+                    + ladder_suffix(
+                        raw,
+                        _rejection_text(last.get("schema_error"), last.get("diagnostic")),
+                        diagnostic=last.get("diagnostic"),
                     ),
                 )
                 reasoning = {"enabled": False}
@@ -3788,6 +3982,10 @@ def drive_stage(
                 schema_error=schema_error_detail,
                 diagnostic=last.get("diagnostic"),
                 collection_limit=collection_limit,
+            ) + ladder_suffix(
+                raw,
+                _rejection_text(last.get("schema_error"), last.get("diagnostic")),
+                diagnostic=last.get("diagnostic"),
             )
             if schema_error and raw:
                 smessages.append({"role": "assistant", "content": raw})
@@ -3930,17 +4128,35 @@ def drive_stage(
                     break
                 clean_slate_spent = True
                 clean_slate_next = True
+                clean_slate_armed_signature = _schema_rejection_signature(
+                    skind, last.get("diagnostic")
+                )
+                # O4: the escape stays a single bounded call, but a preserving
+                # one — the candidate that was already closest to committing
+                # travels with it instead of a from-scratch slot.
+                preserve = "preserving" in ladder_modes
                 messages = _lean_retry(
-                    None,
+                    (sraw or None) if preserve else None,
                     _stage_recovery_message(
                         skind,
-                        "",
+                        sraw if preserve else "",
                         _collection_bounds_sentence(policy.collection_bounds),
                         schema_error=schema_error_detail,
                         diagnostic=last.get("diagnostic"),
                         collection_limit=scollection_limit,
                     )
-                    + " Start from the binding state; emit one fresh compact JSON object.",
+                    + (
+                        " Preserve every already-valid net, port binding and "
+                        "endpoint; change only the reported defect and emit one "
+                        "complete compact JSON object."
+                        if preserve
+                        else " Start from the binding state; emit one fresh compact JSON object."
+                    )
+                    + ladder_suffix(
+                        sraw,
+                        _rejection_text(last.get("schema_error"), last.get("diagnostic")),
+                        diagnostic=last.get("diagnostic"),
+                    ),
                 )
                 reasoning = {"enabled": False}
                 temperature = max(escape_temperature, 0.0)
@@ -4331,6 +4547,7 @@ def drive_stage(
                     "errors": out.get("errors"),
                     "offenders": out.get("offenders"),
                     "call_mode": current_call_mode,
+                    "declared_identities": ladder_identities(raw, obj),
                     "model": _client_model(active_client),
                 }
             )
@@ -4368,14 +4585,27 @@ def drive_stage(
             temperature = max(escape_temperature, 0.0)
             messages = _lean_retry(
                 None,
-                _retry_feedback(out, stage=stage, valid_refs=None),
+                _retry_feedback(out, stage=stage, valid_refs=None)
+                + ladder_suffix(
+                    raw,
+                    _rejection_text(out.get("errors"), out.get("offenders")),
+                    commit_out=out,
+                ),
             )
             continue
         # Bounded continuation: a post-escape response with a NEW signature
         # (or a first-seen signature) gets the ordinary preserving correction
         # feedback; it cannot re-arm the escape (clean_slate_spent stays True).
         _valid_refs = committed_bom_refs(state_path) if stage == "wiring" else None
-        messages = _lean_retry(raw, _retry_feedback(out, stage=stage, valid_refs=_valid_refs))
+        messages = _lean_retry(
+            raw,
+            _retry_feedback(out, stage=stage, valid_refs=_valid_refs)
+            + ladder_suffix(
+                raw,
+                _rejection_text(out.get("errors"), out.get("offenders")),
+                commit_out=out,
+            ),
+        )
 
     # Terminal failure: a stage whose JSON parsed but every commit gate
     # rejected it classifies as commit_rejected (never mislabeled a parse

@@ -1702,6 +1702,22 @@ def test_stage_output_ceiling_rejects_nonbinding_configuration(monkeypatch, limi
         Settings.from_env(dotenv=False)
 
 
+def test_contract_ladder_env_selects_validated_arms(monkeypatch):
+    _clear_profile_env(monkeypatch)
+    assert Settings.from_env(dotenv=False).contract_ladder == "stock"
+
+    monkeypatch.setenv("KICRAFT_CONTRACT_LADDER", "preserving,dropped_gate")
+    assert Settings.from_env(dotenv=False).contract_ladder == "dropped_gate,preserving"
+
+    monkeypatch.setenv("KICRAFT_CONTRACT_LADDER", "stock,preserving")
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        Settings.from_env(dotenv=False)
+
+    monkeypatch.setenv("KICRAFT_CONTRACT_LADDER", "invented")
+    with pytest.raises(SystemExit, match="KICRAFT_CONTRACT_LADDER"):
+        Settings.from_env(dotenv=False)
+
+
 def test_design_profiles_resolve_dated_models_and_finite_caps(monkeypatch):
     _clear_profile_env(monkeypatch)
     for name, expected in DESIGN_PROFILES.items():
