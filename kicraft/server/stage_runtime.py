@@ -739,6 +739,10 @@ _FAILURE_KIND_ERROR = {
     "truncated_json": "truncated JSON at the output token limit",
     "invalid_json": "no JSON in reply",
     "invalid_schema": "provider response did not satisfy the required JSON schema",
+    "contract_rejected": (
+        "the reply was schema-valid but a deterministic design contract refused it "
+        "(see the diagnostic)"
+    ),
     "provider_error": "provider error",
     "provider_rate_limited": "provider temporarily rate limited the request",
     "provider_upstream_5xx": "provider service was temporarily unavailable",
@@ -751,6 +755,15 @@ _FAILURE_KIND_ERROR = {
     "transport_connection": "provider connection failed",
     "transport_stream_interrupted": "provider response stream was interrupted",
 }
+
+# Both kinds arrive through StageSchemaError and take the same bounded
+# correction path. They differ in CAUSE: ``invalid_schema`` is unusable provider
+# output, while ``contract_rejected`` is a schema-clean candidate that a
+# semantic/recipe contract (an attached `diagnostic`) refused. Callers that gate
+# on "this was a schema-path failure" must use this set, never the single kind —
+# the label is for investigators, not for routing.
+_SCHEMA_REJECTION_KINDS = frozenset({"invalid_schema", "contract_rejected"})
+
 
 # Serialization recovery instruction: rebuild the pristine stage task/state and
 # demand ONE compact slot object, no tools, no markdown, no prose. The reply is
@@ -830,7 +843,7 @@ def _stage_recovery_message(
             template = _DUPLICATE_IDENTITY_RETRY_MSG
         else:
             template = _COLLECTION_LIMIT_RETRY_MSG
-    elif kind == "invalid_schema":
+    elif kind in _SCHEMA_REJECTION_KINDS:
         template = _SCHEMA_RETRY_MSG
     else:
         template = _SERIALIZATION_RETRY_MSG
@@ -1202,12 +1215,17 @@ def decode_stage_response(
             },
         )
     except StageSchemaError as exc:
+        diagnostic = getattr(exc, "diagnostic", None)
+        # A StageSchemaError that carries a diagnostic is a semantic/recipe
+        # contract refusing a schema-clean candidate, not malformed provider
+        # output. Label it separately so the failure_kind, the ledger and the
+        # investigation all name the cause instead of "this was JSON".
         return AttemptOutcome(
             "recoverable_failure",
             {
-                "failure_kind": "invalid_schema",
+                "failure_kind": "contract_rejected" if diagnostic else "invalid_schema",
                 "schema_error": str(exc),
-                "diagnostic": getattr(exc, "diagnostic", None),
+                "diagnostic": diagnostic,
             },
         )
     except (json.JSONDecodeError, ValueError):
@@ -2669,11 +2687,12 @@ def _drive_work_unit_stage(
             candidate, ref_to_unit, pin_to_unit, ref_to_unit_ids = aggregate()
             schema_ok = True
         except (StageSchemaError, TypeError, ValueError) as exc:
+            diagnostic = getattr(exc, "diagnostic", None)
             last = {
-                "failure_kind": "invalid_schema",
+                "failure_kind": "contract_rejected" if diagnostic else "invalid_schema",
                 "error": str(exc),
                 "schema_error": _redacted_schema_error(exc),
-                "diagnostic": getattr(exc, "diagnostic", None),
+                "diagnostic": diagnostic,
             }
     if last:
         return finalize_stage(
@@ -2992,11 +3011,12 @@ def _drive_work_unit_stage(
                 candidate, ref_to_unit, pin_to_unit, ref_to_unit_ids = aggregate()
             except (StageSchemaError, TypeError, ValueError) as exc:
                 candidates = prior_candidates
+                diagnostic = getattr(exc, "diagnostic", None)
                 last = {
-                    "failure_kind": "invalid_schema",
+                    "failure_kind": "contract_rejected" if diagnostic else "invalid_schema",
                     "error": str(exc),
                     "schema_error": _redacted_schema_error(exc),
-                    "diagnostic": getattr(exc, "diagnostic", None),
+                    "diagnostic": diagnostic,
                 }
                 break
             prior_signature = signature
@@ -3033,10 +3053,21 @@ def _drive_work_unit_stage(
 
 
 def _architecture_recipe_summaries(intent: dict) -> list[dict]:
-    """Do not offer unrelated MCU alternatives to an explicitly named design."""
+    """Do not offer unrelated MCU alternatives to an explicitly named design.
+
+    Identity comes from the reviewed ``part_identity`` relations as well as the
+    name shape: a brief naming an order code of a registered family (the
+    ESP32-S3-WROOM-1 ``-N16R8`` against the registered ``-N8R8``) must be offered
+    that family's recipe, or the stage is asked to bind a circuit it was never
+    shown and blocks on a variant it cannot discover. When the named parts
+    identify no MCU recipe, every MCU recipe stays on offer rather than starving
+    the stage.
+    """
+    from kicraft.design.part_identity import matches_part_identity
     from kicraft.design.recipes import get_recipe, recipe_summaries
 
     summaries = recipe_summaries()
+    raw_named = [str(value) for value in intent.get("named_parts") or []]
     named = {
         re.sub(r"[^a-z0-9]", "", str(value).lower()) for value in intent.get("named_parts") or []
     }
@@ -3058,6 +3089,11 @@ def _architecture_recipe_summaries(intent: dict) -> list[dict]:
             for selector in selectors
             if len(selector) >= 5
             for part in named
+        ) or any(
+            # Reviewed order-code membership preserves punctuation, so it gets
+            # the raw name, not the separator-stripped token above.
+            definition.exact_part and matches_part_identity(part, definition.exact_part)
+            for part in raw_named
         ):
             selected.add(summary["recipe"])
     if not selected:
@@ -3650,7 +3686,7 @@ def drive_stage(
             serialization_recovery=False,
             clean_slate=was_clean_slate,
         )
-        schema_error = outcome.payload.get("failure_kind") == "invalid_schema"
+        schema_error = outcome.payload.get("failure_kind") in _SCHEMA_REJECTION_KINDS
         schema_error_detail = outcome.payload.get("schema_error")
         kind = outcome.payload.get("failure_kind")
         if outcome.kind in {"candidate", "questions"}:
@@ -3822,7 +3858,10 @@ def drive_stage(
                 serialization_recovery=True,
                 clean_slate=was_clean_slate,
             )
-            schema_error = serialization_outcome.payload.get("failure_kind") == "invalid_schema"
+            schema_error = (
+                serialization_outcome.payload.get("failure_kind")
+                in _SCHEMA_REJECTION_KINDS
+            )
             schema_error_detail = serialization_outcome.payload.get("schema_error")
             skind = serialization_outcome.payload.get("failure_kind")
             if serialization_outcome.kind in {"candidate", "questions"}:

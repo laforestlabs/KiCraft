@@ -3719,3 +3719,135 @@ def test_rp2040_family_default_requires_and_binds_a_native_usb_connector():
     expansion = expand_recipe(core)
     assert all(part.recipe_role != "swd" for part in expansion.parts)
     assert {"24", "25"} <= {pin.pin for pin in expansion.no_connect_pins}
+
+
+# ---------------------------------------------------------------------------
+# order-code variants and semantic recipe ports (dfc1582 follow-ups)
+# ---------------------------------------------------------------------------
+
+def test_reviewed_order_code_variant_resolves_with_a_ledgered_substitution():
+    """A brief naming an order code of a registered family must not hard-block.
+
+    ESP32-S3-WROOM-1-N16R8 and the registered -N8R8 are one module per the
+    Espressif datasheet (same package, pin map, temperature grade and Octal-SPI
+    PSRAM; only the flash size differs), so the family recipe serves it — and the
+    deviation is recorded for the BOM to ledger, never applied silently.
+    """
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = _typed_esp32_architecture(
+        family="esp32-s3-wroom-1-module", exact_part="ESP32-S3-WROOM-1-N16R8"
+    )
+    result = resolve_architecture_recipes(
+        payload, {"named_parts": ["ESP32-S3-WROOM-1-N16R8"]}
+    )
+
+    assert not result.blocking
+    core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
+    assert core.recipe == "esp32-s3-wroom-1-minimal@1"
+    note = next(row for row in result.assumptions if "unregistered ordering code" in row)
+    assert "ESP32-S3-WROOM-1-N16R8" in note and "ESP32-S3-WROOM-1-N8R8" in note
+    assert "bom.substitutions" in note
+    # The record keeps the same note, so the deviation is auditable from the
+    # resolution artifacts and not only from the architecture slot.
+    record = next(row for row in result.records if row.requirement_id == "mcu_core")
+    assert note in record.assumptions
+
+
+def test_unreviewed_protected_variant_still_blocks_and_names_the_choice():
+    """A protected identity with no reviewed member must still block — and the
+    correction must name a binding the model can actually make."""
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = _typed_esp32_architecture(family="stm32f103c8", exact_part="STM32H743VIT6")
+    result = resolve_architecture_recipes(payload, {"named_parts": ["STM32H743VIT6"]})
+
+    diagnostic = next(
+        row for row in result.blocking if row.code == "unsupported_protected_variant"
+    )
+    assert "STM32H743VIT6" in diagnostic.evidence
+    assert any(row.startswith("canonical choice:") for row in diagnostic.evidence)
+    assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
+
+
+def test_named_order_code_offers_its_registered_family_to_the_stage():
+    """The architecture stage offers only the MCU recipes that can serve a named
+    design. A variant order code must offer its own family, or the stage is asked
+    to bind a circuit it was never shown."""
+    from kicraft.server.stage_runtime import _architecture_recipe_summaries
+
+    def mcus(named):
+        rows = _architecture_recipe_summaries({"named_parts": [named]})
+        return {row["recipe"] for row in rows if "mcu" in row["required_sheet_roles"]}
+
+    assert mcus("ESP32-S3-WROOM-1-N16R8") == {"esp32-s3-wroom-1-minimal@1"}
+    assert mcus("ESP32-S3-MINI-1-N8") == {"esp32-s3-mini-1-minimal@1"}
+    # An unrecognised MCU name must not starve the stage of every alternative.
+    assert len(mcus("ACME-WIDGET-9000")) > 1
+
+
+def test_hub75_recipe_exposes_named_channels_including_oe_and_d():
+    """The HUB75 interface must declare its real signals.
+
+    Opaque `input0..input11` ports made the interface unbindable by name, and pin
+    12 (the D address line) was grounded while OE had no port of its own.
+    """
+    definition = get_recipe("hub75-sn74hct245-interface@1")
+    names = [port.name for port in definition.ports]
+
+    assert names[:2] == ["vdd_5v", "gnd"]
+    assert names[2:] == [
+        "r0", "g0", "b0", "r1", "g1", "b1",
+        "addr_a", "addr_b", "addr_c", "addr_d", "clk", "lat", "oe",
+    ]
+    assert not any(name.startswith("input") for name in names)
+
+    connector = {pin.pin: pin.net for pin in definition.pins if pin.role == "connector"}
+    assert connector["15"] == "shifted12"          # OE is buffered, not direct
+    assert connector["12"] == "shifted9"           # D is a channel, not ground
+    assert {pin for pin, net in connector.items() if net == "gnd"} == {"4", "8", "16"}
+    # Every logic channel has a distinct level-shifted net, and the spare '245
+    # channels stay no-connects instead of floating.
+    assert len({net for net in connector.values() if net.startswith("shifted")}) == 13
+    assert {row.pin for row in definition.no_connects} == {"7", "8", "9", "11", "12", "13"}
+
+
+def test_hub75_channels_bind_by_signal_name():
+    """A declared HUB75 interface binds its channels to the recipe's semantic
+    ports (HUB75_OE → oe), which is what the architecture stage could not do."""
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    signals = {
+        "R0": "r0", "G0": "g0", "B0": "b0", "R1": "r1", "G1": "g1", "B1": "b1",
+        "A": "addr_a", "B": "addr_b", "C": "addr_c", "D": "addr_d",
+        "CLK": "clk", "LAT": "lat", "OE": "oe",
+    }
+    payload = {
+        "sheets": [
+            {"name": "MCU", "stem": "MCU", "function": "microcontroller"},
+            {"name": "HUB75", "stem": "HUB75", "function": "HUB75 display connector"},
+            {"name": "POWER", "stem": "POWER", "function": "5V input"},
+        ],
+        "requirements": [
+            {"id": "display", "sheet": "HUB75", "role": "connector",
+             "family": "hub75-level-shift-interface", "exact_part": "HUB75-SN74HCT245",
+             "ports": {"gnd": "GND", "vdd_5v": "+5V"}},
+        ],
+        "power_nets": ["GND", "+5V"],
+        "inter_sheet_nets": [
+            {"name": f"HUB75_{signal}", "endpoints": [
+                {"sheet": "HUB75", "direction": "input"},
+                {"sheet": "MCU", "direction": "output"}]}
+            for signal in signals
+        ],
+        "mcu_present": False,
+        "topologies": {},
+    }
+    result = resolve_architecture_recipes(payload)
+
+    assert not any(row.code == "unsupported_recipe_endpoint" for row in result.blocking)
+    display = next(row for row in result.selections if row.requirement_ids == ["display"])
+    assert display.recipe == "hub75-sn74hct245-interface@1"
+    assert {
+        port: display.port_bindings[port] for port in signals.values()
+    } == {port: f"HUB75_{signal}" for signal, port in signals.items()}

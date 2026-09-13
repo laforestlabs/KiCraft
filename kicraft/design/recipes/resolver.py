@@ -164,6 +164,82 @@ def _looks_exact_variant(value: str) -> bool:
     )
 
 
+def _registered_variant_for(
+    identity: str | None,
+    recipes: tuple[RegisteredRecipe, ...],
+) -> RegisteredRecipe | None:
+    """The single registered recipe that may serve ``identity``'s order code.
+
+    Membership is explicit and reviewed in ``part_identity`` — never inferred
+    from the name (``ESP32-S3-WROOM-1-N16R8`` is served by the recipe pinning the
+    ``-N8R8`` module because the datasheet lists them as one module differing only
+    in flash). An identity with no reviewed member, or one spanning two families,
+    returns None so the caller blocks instead of guessing.
+    """
+    if not identity or not identity.strip():
+        return None
+    matches = [
+        recipe
+        for recipe in recipes
+        if recipe.definition.exact_part
+        and recipe.definition.exact_part.strip().casefold() != identity.strip().casefold()
+        and matches_part_identity(identity, recipe.definition.exact_part)
+    ]
+    # Exactly one serving recipe in exactly one family: a second candidate means
+    # the identity is ambiguous, and guessing which variant to ship is not this
+    # function's call.
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _substitution_note(identity: str, recipe: RegisteredRecipe) -> str:
+    """Record, in the resolved architecture's own assumptions, that a requested
+    order code is served by a different registered variant — the deviation must
+    reach ``bom.substitutions`` (§9.33), never be silent."""
+    definition = recipe.definition
+    return (
+        f"{identity!r} is an unregistered ordering code of {definition.family!r}; "
+        f"served by {definition.recipe} ({definition.exact_part}). Record the "
+        f"deviation in bom.substitutions: wanted={identity!r}, "
+        f"got={definition.exact_part!r}, reason=<why>"
+    )
+
+
+def _registered_identity_choices(
+    identity: str,
+    recipes: tuple[RegisteredRecipe, ...],
+    *,
+    limit: int = 6,
+) -> list[str]:
+    """Canonical choice lines for the registered families that share a name stem
+    with ``identity``.
+
+    A blocking ``unsupported_protected_variant`` must name what CAN be bound, not
+    only what was refused — but dumping all ~35 registered families into the
+    correction feedback buries the answer. Only the plausible candidates (same
+    5-character identity stem) are offered, so a foreign ESP32-S3 order code is
+    answered with the ESP32-S3 families and a truly unknown part with nothing.
+    """
+    stem = _identity(identity)[:5]
+    if not stem:
+        return []
+    seen: dict[str, RegisteredRecipe] = {}
+    for recipe in recipes:
+        family = recipe.definition.family
+        if not family or family in seen:
+            continue
+        if any(
+            len(selector) >= 5 and selector[:5] == stem
+            for selector in _protected_selectors(recipe)
+        ):
+            seen[family] = recipe
+    return [
+        _recipe_requirement_choice(recipe.definition)
+        for recipe in list(seen.values())[:limit]
+    ]
+
+
 def _mcu_sheet(architecture: Architecture) -> str | None:
     owners = [
         sheet.name
@@ -177,6 +253,26 @@ _USB_PORT_ALIASES = {
     "usb_dm": ("USB_DM", "USB_D-", "USB_D_N", "D-"),
     "usb_dp": ("USB_DP", "USB_D+", "USB_D_P", "D+"),
 }
+
+# Net-label aliases per semantic port. The port's own name is always accepted in
+# addition to these (see _port_bindings), so an architecture may label a channel
+# either bare ('OE') or as the connector signal ('HUB75_OE').
+_HUB75_PORT_ALIASES = {
+    "r0": ("HUB75_R0",),
+    "g0": ("HUB75_G0",),
+    "b0": ("HUB75_B0",),
+    "r1": ("HUB75_R1",),
+    "g1": ("HUB75_G1",),
+    "b1": ("HUB75_B1",),
+    "addr_a": ("HUB75_A",),
+    "addr_b": ("HUB75_B",),
+    "addr_c": ("HUB75_C",),
+    "addr_d": ("HUB75_D",),
+    "clk": ("HUB75_CLK", "HUB75_CLOCK"),
+    "lat": ("HUB75_LAT", "HUB75_LATCH", "HUB75_STB"),
+    "oe": ("HUB75_OE",),
+}
+_PORT_ALIASES = {**_USB_PORT_ALIASES, **_HUB75_PORT_ALIASES}
 
 # Reviewed factory-native-programmable families: a new architecture must route
 # their USB pair to one physical data connector, never to a UART header.
@@ -436,7 +532,13 @@ def _port_bindings(
             )
         )
         port_identity = _net_identity(port_name)
-        aliases = {_net_identity(alias) for alias in _USB_PORT_ALIASES.get(port_name, (port_name,))}
+        aliases = {
+            _net_identity(port_name),
+            *(
+                _net_identity(alias)
+                for alias in _PORT_ALIASES.get(port_name, ())
+            ),
+        }
         exact_matches = [net for net in candidates if _net_identity(net) in aliases]
         matches = exact_matches or [
             net
@@ -1233,8 +1335,12 @@ def resolve_architecture_recipes(
         selected = _recipe_for_exact(named, recipes) or _recipe_for_unique_family_prefix(
             named, recipes
         )
+        sibling = (
+            _registered_variant_for(named, recipes) if selected is None else None
+        )
         if (
             selected is None
+            and sibling is None
             and _looks_protected(named, recipes)
             and _looks_exact_variant(named)
             and not any(
@@ -1250,10 +1356,14 @@ def resolve_architecture_recipes(
                 ResolutionDiagnostic(
                     code="unsupported_protected_variant",
                     message=f"protected variant {named!r} has no verified recipe",
-                    evidence=[named],
+                    evidence=[named, *_registered_identity_choices(named, recipes)],
                 )
             )
             continue
+        if sibling is not None:
+            note = _substitution_note(named, sibling)
+            if note not in result.assumptions:
+                result.assumptions.append(note)
         if selected is None:
             # Unregistered parts remain model-owned, but an exact user token
             # still needs a typed owner rather than a mention in sheet prose.
@@ -1306,11 +1416,17 @@ def resolve_architecture_recipes(
                     for recipe in _family_recipes(row.family, recipes)
                     for part in recipe.definition.parts
                 )
+                # An unregistered ordering code of a registered family is owned
+                # by a requirement bound to that family (the deviation is
+                # recorded as an assumption and ledgers at BOM under §9.33).
+                or (sibling is not None and row.family == sibling.definition.family)
             ]
         if not owners:
             choices = (
                 [_recipe_requirement_choice(selected.definition)] if selected is not None else []
             )
+            if sibling is not None:
+                choices = [_recipe_requirement_choice(sibling.definition)]
             result.blocking.append(
                 ResolutionDiagnostic(
                     code="missing_recipe_requirement",
@@ -1438,24 +1554,42 @@ def resolve_architecture_recipes(
             group.mpn and _identity(group.mpn) == _identity(requirement.exact_part)
             for group in artifact.groups
         )
+        assumption_rows: list[str] = []
         if (
             requirement.exact_part
             and selected is None
             and not lowerer_owns_exact
             and (family_matches or _looks_protected(requirement.exact_part, recipes))
         ):
-            result.blocking.append(
-                ResolutionDiagnostic(
-                    code="unsupported_protected_variant",
-                    requirement_id=requirement.id,
-                    message=(
-                        f"protected variant {requirement.exact_part!r} has no verified recipe"
-                    ),
-                    evidence=[requirement.exact_part],
+            sibling = _registered_variant_for(requirement.exact_part, recipes)
+            if sibling is None:
+                result.blocking.append(
+                    ResolutionDiagnostic(
+                        code="unsupported_protected_variant",
+                        requirement_id=requirement.id,
+                        message=(
+                            f"protected variant {requirement.exact_part!r} has no verified recipe"
+                        ),
+                        evidence=list(dict.fromkeys([
+                            requirement.exact_part,
+                            *(
+                                _recipe_requirement_choice(row.definition)
+                                for row in family_matches
+                            ),
+                            *_registered_identity_choices(requirement.exact_part, recipes),
+                        ])),
+                    )
                 )
-            )
-            continue
-        assumption_rows: list[str] = []
+                continue
+            # A registered family can serve this ordering code (same symbol,
+            # footprint and pin map): bind that family's recipe and surface the
+            # deviation as an assumption so BOM must ledger it (§9.33), instead
+            # of hard-blocking on an order code the registry has no reason to
+            # enumerate separately.
+            sibling_recipes = _family_recipes(sibling.definition.family, recipes)
+            if sibling_recipes:
+                family_matches = sibling_recipes
+            assumption_rows.append(_substitution_note(requirement.exact_part, sibling))
         if selected is None and family_matches:
             defaults = [recipe for recipe in family_matches if recipe.definition.default_for_family]
             if len(defaults) == 1:
@@ -1789,6 +1923,9 @@ def resolve_architecture_recipes(
     result.requirements = [resolved_requirements.get(row.id, row) for row in requirements]
     result.records.sort(key=lambda record: record.requirement_id)
     result.unresolved_requirements.sort()
+    # The same deviation note can be raised by the named-part pass and the
+    # requirement pass; assumptions are a set-like ledger, not a log.
+    result.assumptions = list(dict.fromkeys(result.assumptions))
     result.blocking.sort(
         key=lambda diagnostic: (
             diagnostic.code != "recipe_signal_in_power_nets",

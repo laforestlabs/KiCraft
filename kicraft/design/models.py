@@ -1217,8 +1217,11 @@ class StageStatus(BaseModel):
     tool_calls: int | None = None  # total BOM tool calls (None for non-BOM stages)
     # Terminal failure classification for a failed stage: one of
     # collection_limit / reasoning_loop / truncated_json / invalid_json /
-    # commit_rejected / provider_error / transport_error. None for a committed
-    # project written before the field existed. Derived, never free-form.
+    # invalid_schema / contract_rejected / commit_rejected / provider_error /
+    # transport_error. None for a committed project written before the field
+    # existed. Derived, never free-form. invalid_schema is unusable provider
+    # output; contract_rejected is a schema-clean candidate that a semantic or
+    # recipe contract refused (its `diagnostic` names the contract).
     failure_kind: str | None = None
 
 

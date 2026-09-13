@@ -14,6 +14,7 @@ Investigate a failed KiCraft run and hand back a fast, accurate picture of **why
 REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo "$HOME/KiCraft"); PY="$REPO/.venv/bin/python"
 "$PY" -m kicraft.cli.triage locate "<TARGET>"    # RUN dir + accounts.db row (paste RUN into later steps)
 "$PY" -m kicraft.cli.triage run    "<TARGET>"    # the unified failure verdict (start here)
+"$PY" -m kicraft.cli.triage stages "<TARGET>"    # LLM stages: what committed, what failed, why (§1b)
 "$PY" -m kicraft.cli.triage audits "<TARGET>"    # design-quality audits (run EVERY time, even rc0)
 "$PY" -m kicraft.cli.triage scan                   # cross-run systematic-vs-per-design ranking
 ```
@@ -40,6 +41,7 @@ A `build` is sequential: **synthesize+ERC → place leaves → compose+route par
 
 | build rc | died at | investigate |
 |---|---|---|
+| *(no rc)* | **an LLM stage never committed — the build never ran**: `VERDICT: LLM STAGE FAILURE at <stage>` | §1b |
 | 2 | state schema/read failure | the state.json itself (infra) |
 | 3 / 4 | incomplete state / synth input (incl. zero-pin `Mechanical:*` symbols killing stage-prep) | §1 schematic |
 | 5 | ERC errors | §1 schematic |
@@ -93,8 +95,75 @@ for (sheet, net), cs in sorted(nets.items()):
     eps = [(ep["ref"], ep["pin"], ptype(ep["ref"], ep["pin"])) for c in cs for ep in c["endpoints"]]
     drv = [f"{r}.{pin}" for r, pin, t in eps if t == "power_out"]
     print(f"  [{sheet}] {net}: {'DRIVEN by ' + ', '.join(drv) if drv else 'no driver -> needs PWR_FLAG'}")
+
 PY
 ```
+
+## 1b. LLM stage deep-dive — the build never ran (no rc, no board, no ERC)
+
+When `triage run` prints `LLM STAGE FAILURE at <stage>` (or its stage list shows a `FAIL`), **stop routing to §1/§2**: there is no schematic and no board, and rc2–7 do not apply. This is the largest failure class in the live corpus — read the scan header for the current count (`N of M runs with an event stream ended on an uncommitted stage`). No layout-based gate can see it: those runs have no `.experiments` and no ERC report.
+
+```bash
+"$PY" -m kicraft.cli.triage stages "<TARGET>"   # per-stage attempts, failure_kind, diagnostics, gate ids
+```
+
+**1. Which stage, and did it even finish?** `committed through X` / `terminal stage Y`: the failure is at the FIRST stage whose *final* status is not ok. `state.json:stage_status` is authoritative (last attempt wins — a stage that failed and was later re-run reads ok, so a stale `ok:false` event is not a live failure). `interrupted` (a `stage_start` with no `stage_done`) is a process death mid-stage — OOM, watchdog, provider hang. Investigate the process, not the contract.
+
+**2. `failure_kind` names the MECHANISM, not the cause.** `stage_status.error` is a fixed generic string from `_FAILURE_KIND_ERROR` and never names what went wrong — never quote it as a root cause.
+
+Since 2026-09-14 the driver splits the old conflated label: a `StageSchemaError` **carrying a diagnostic** is `contract_rejected` (a semantic/recipe contract refused a schema-clean candidate), while `invalid_schema` now means only unusable provider output. Both kinds take the same bounded correction path — the label is for the investigation, not for routing. Earlier runs carry only `invalid_schema`, so judge those by the diagnostic code.
+
+| `failure_kind` | mechanism | fix lives in |
+|---|---|---|
+| `contract_rejected` | a schema-clean candidate refused by a **semantic/recipe contract** — the `diagnostic` names it | §1b.3 — the contract; the model's JSON is a red herring |
+| `invalid_schema` **with** a diagnostic code | the same case from a run before the label split (pre-2026-09-14) | §1b.3 |
+| `invalid_schema` with no diagnostic | provider output really was unusable (malformed/empty) | serialization prompt; check the outer cause (`truncated_json`, `collection_limit`, a provider kind) |
+| `invalid_json` / `truncated_json` / `reasoning_loop` | no JSON at all / cut off at the token cap / the model looped (reasoning disabled on the retry) | output token budget (`_STAGE_MIN_TOKENS`), `_MAX_LOOP_RETRIES`, provider |
+| `collection_limit` | a bounded collection overflowed (`inter_sheet_nets`, `connections`, duplicate identities) | the bound + the retry hint in `_stage_recovery_message` |
+| `commit_rejected` | the candidate parsed *and was diagnosed*; the deterministic commit gates refused it | the named 9.x gate (§1b.4) |
+| `unit_repair_exhausted` / `repeated_unit_defect` | a work unit re-submitted the same rejection past `unit_repair_rounds` | the work-unit contract |
+| `unit_ownership_conflict` | same, and two units claim the same pin | work-unit ownership |
+| `provider_*` / `transport_*` | provider/network — **not a KiCraft bug** | re-run; check the provider, not the code |
+| `budget_refused` | the hard spend guard refused before the completion | budget profile |
+| `stage_prep_failed` | `stage-prep` could not resolve a symbol/footprint | parts library (§3[A]) |
+| `architecture_reconciliation_required` | the new architecture contradicts the committed state | the upstream stage |
+
+**3. The diagnostic code is the actionable taxonomy** (the `diagnostics:` block). These are deterministic contracts, so a code that recurs across designs is a coverage/contract gap, not model noise.
+
+| diagnostic code | what it means | owning module |
+|---|---|---|
+| `missing_recipe_port` | a requirement bound nets to ports the recipe does not declare | recipe def vs the architecture binding |
+| `missing_recipe_port_contract` | a signal binding has no owning inter-sheet endpoint | architecture inter-sheet contract |
+| `unknown_recipe_port_net` | a recipe binding names a net the architecture never declared | architecture |
+| `missing_recipe_requirement` / `missing_mcu_requirement` | a named part/MCU has no explicit owning requirement + sheet | architecture |
+| `missing_mcu_application_contract` | the MCU's application ports/capabilities cannot be bound (`output_<id>`, `input_<id>`, `touch_<id>`, `can_tx`/`can_rx`) | architecture + `pin_allocator` |
+| `unsupported_recipe_endpoint` | inter-sheet endpoints / required capabilities have no compatible recipe port or pin allocation — read the evidence's `available_ports=` | recipe ports (often a real coverage gap) |
+| `unsupported_protected_variant` | the brief named a protected module **ordering code** whose family has no registered recipe at all — the evidence now lists every registered family's `canonical choice:` line. A reviewed same-family order code no longer blocks: it resolves to the family recipe and records a substitution assumption (see below) | `resolver.resolve_architecture_recipes` named-part guard + recipe coverage |
+| `unavailable_recipe_gpio` | no allocatable recipe pin for the declared GPIO contracts — the message lists the reviewed allocatable set | `pin_allocator` vs architecture |
+| `unsatisfied_pin_capability` | the allocated pin cannot serve the required capability | `pin_allocator` |
+| `recipe_output_port_collision` / `recipe_signal_in_power_nets` / `conflicting_recipe_parameter` | two output-only ports on one net / a signal net placed in `power_nets` / unsupported parameter values | architecture bindings |
+| `unrealizable_power_requirement` (+ nested `architecture_unowned_power_support`) | a distribution-only requirement owns a BOM unit — no physical circuit implements it | architecture power sheet |
+| `architecture_<detector>` (`_power_block_as_sheet`, `_programming_decision_incomplete`, `_rail_source_unspecified`, `_wrong_signal_direction`, `_unavailable_core_default`, `_fragmented_physical_domain`, …) | `stage_semantics` flagged a detectable architecture defect; the semantic repair round did not clear it | `kicraft/design/stage_semantics.py` |
+| `functional_spec_<detector>` | same, one stage earlier | `kicraft/design/stage_semantics.py` |
+| `stage_contract_failed` / `architecture_unavailable_core_default` | a stage contract/`core_defaults` precondition was unmet | the stage contract |
+
+**4. Gate ids (commit_rejected), work units, and the attempt budget.** `rejection signatures` groups the retries by the runtime's own identity (`_commit_rejection_signature`: the 9.x gate ids, else the error text). A gate id recurring across designs (scan's `stage_sigs`) is a prompt/contract gap — the model keeps violating a documented gate; a gate id recurring within ONE design means repair rounds did not converge. A `(no gate id: …)` label means the error text is an opaque wrapper — the real cause is in the diagnostics.
+
+**`bom`/`wiring` run per work unit**, and for those the stage-level `error` is only a summary: the `work units:` block gives the failing unit's own validation error (`work unit bom-s001 invalid: missing-requirement-implementation=['db9_can']`), which is the actionable evidence — a unit-side contract the model could not satisfy. A unit stage also stops in the **per-unit repair loop** (`rounds=`), *not* on the attempt budget, so do not read `attempts == budget` as "breadth" there.
+
+`attempts` vs `budget>=N` matters, but its **interpretation depends on the path** — `triage stages` prints the right reading. The **schema/serialization** path has no stall rule and simply spends `provider_call_budget = max(2, _STAGE_MIN_RETRIES[stage]) + 1`, i.e. **architecture 4, bom 5, wiring 8, other stages 3** under the default `max_retries=2` (`_STAGE_MIN_RETRIES = {architecture: 3, bom: 4, wiring: 7}`; treat these as a floor — a caller may raise `max_retries`), so there `attempts == budget` = **breadth**: raising the budget only re-spends it, so fix what the diagnostics name. The **commit-rejection** path stops early on a repeated signature, so `attempts == budget` there means every attempt produced a *different* rejection. A rejection group carrying **more than one distinct diagnostic under one signature** means the error text is not a faithful signature — you cannot use it to tell progress from repetition.
+
+**When the brief names a real part KiCraft cannot build (a reviewed variant of a registered family).** The resolver binds the registered family recipe and records an `assumptions` entry naming the deviation — `'<part>' is an unregistered ordering code of '<family>'; served by <recipe> (<shipped part>). Record the deviation in bom.substitutions: wanted=…, got=…, reason=…` — which lands on the resolved architecture and on that requirement's `recipe_resolution` record. So the swap is **surfaced and auditable**, and the model is told to ledger it. Note the extent of the guarantee: the resolver rewrites the requirement's `exact_part` to the shipped part, so §9.33 does **not** independently force a `bom.substitutions` row for it — if you are auditing a shipped-vs-requested order-code difference, read the architecture assumption first, and treat a missing `bom.substitutions` row as a *quality* gap, not a gate hole. Membership is explicit in `design/part_identity.py` (`_DEVICE_MEMBERS`) and must stay reviewed + cited: never add a prefix rule to make a name resolve.
+
+**Decision order — do not blame the model for a library gap.**
+
+1. provider / transport / budget kind → re-run; not a code change.
+2. diagnostic code (recipe/library contract) → recipe coverage or the architecture↔recipe contract. The model cannot bind a port the recipe does not have.
+3. 9.x gate id → prompt/contract gap; the offender text names exactly what the gate wanted.
+4. only then: "the model is bad at this stage".
+
+**Reproduce it — §6(b.1), never guess.** `stage_driver replay --state <RUN>/.kicraft/state.json --stage <terminal stage>` re-runs exactly that stage against the frozen committed state (live LLM, capped budget). LLM verdicts are stochastic → **N-of-3**.
+
 
 ## 2. PCB deep-dive (rc 6/7)
 
@@ -150,7 +219,7 @@ Orthogonal defect classes the ERC/DRC gates cannot see. Read each block:
 
 - **[A] library provenance:** all `curated-default`/`kicad-standard` = clean. `home-fetched` recurring across designs = vendor it (`add-part --from-lcsc <C#> --into vendored` + `refresh_sample_previews.py`; corpus-wide view: `python -m kicraft.cli.part_query_report`). `UNKNOWN/MISSING` surviving to a build = resolver/validation hole (`design/cli_app.py` `_unresolved_symbols`/`_unresolved_footprints`).
 - **[B] BOM realness:** Pass A `SUSPECT/HALLUCINATED` = a priced C# not in the offline catalog (resolution bug or an online fallback bypassing it). Pass B `MPN-MISMATCH` = real-but-wrong part **candidate** — the matcher already normalizes separators/zero-padding, but verify against the part's role before reporting. Pass C `FABRICATED-LCSC` = a library manifest claims a nonexistent part — re-vendor. **Pass D is the new one:** an MPN deviation from a spec/brief-named part **with an empty `bom.substitutions` ledger** is the `silent_substitution` class (gates §9.23/§9.33 should have forced a ledger entry — name which one missed). The MCU programming-path verdict is deterministic (`mcu_programming_facts`); don't re-derive it by eye, and don't report BOOTSEL+USB (RP2040) or a UPDI pad as "unprogrammable" — §9.29 deliberately accepts those.
-- **[C] wheel-spin:** `high_attempts`+`recurring_error` = commit-validation whack-a-mole (often an unwinnable upstream contract). `RECONCILE DEATH` lines = the 2026-07-27 class (`unresolved BOM deficit after N reconcile pass(es)`, byte-identical recommit) — remaining known-deferred: advancing-chain + crystal deterministic-donor. `bom_rounds_maxed`/`tool_loop` = part-lookup thrash (cost driver). Same stuck stage + same error across designs = prompt/validation-contract bug, not a per-design hiccup.
+- **[C] wheel-spin:** `high_attempts`+`recurring_error` = commit-validation whack-a-mole (often an unwinnable upstream contract). `RECONCILE DEATH` lines = the 2026-07-27 class (`unresolved BOM deficit after N reconcile pass(es)`, byte-identical recommit) — remaining known-deferred: advancing-chain + crystal deterministic-donor. `bom_rounds_maxed`/`tool_loop` = part-lookup thrash (cost driver). Same stuck stage + same error across designs = prompt/validation-contract bug, not a per-design hiccup. **`triage audits` shows attempts/tool-loop shape but NOT *why* a stage never committed — for a stage that did not commit, go to §1b (`triage stages`), which reads the failure_kind/diagnostic/gate payloads this block summarizes.**
 - **[D] intent adherence:** the pipeline NOW captures + enforces mechanical standards (`FormFactor.standard`, form-factor + outline-shape promote gates — enforcement-mode-aware). The verdict distinguishes: standard **not captured** (detection gap) / non-conformant with **enforcement OFF** (advisory gap — invisible to ERC/DRC) / non-conformant while **enforced** (a **gate regression**, headline finding). Shaped boards: ring circumscription uses bbox corners (pessimal for circular content — known-deferred shaped-nesting item). Beyond mechanics, eyeball the BOM/architecture against the brief's named interfaces ("CAN node" → a CAN transceiver? "four mounting holes" → present?).
 - **[E] eval/report.json** (self-eval runs): before citing any historical "gate fired" claim, check `observer_rejected` — the judge used to affirm gates whose own evidence self-negated; screened entries are false positives.
 
@@ -168,7 +237,13 @@ Fallback for deployed web runs with no build.log: `journalctl -u kicraft-web` ar
 
 ## 5. Cross-run: systematic vs per-design
 
-`triage scan` ranks every failure mode by #designs hit (`>1 = SYSTEMATIC`, fix generalizes; `1` = this design's model output) across the projects dir + self-eval batches. **Read `latest=` and `sha=` before calling anything systematic** — a mode whose last hit predates the owning fix's deploy date is stale evidence; a hit **after** it is a **regression** (headline). Runs without a `sha=` predate the build stamp; date them by `latest=` + the auto-memory fix dates.
+`triage scan` ranks every failure mode by #designs hit (`>1 = SYSTEMATIC`, fix generalizes; `1` = this design's model output). It scans **two populations**: runs with a layout artifact (the board/schematic tiers + gate buckets) and — separately — **every run with an event stream**, including the runs that died before any board or ERC report existed. The header prints both counts (`X runs with layout or ERC artifacts`; `Y of Z runs with an event stream ended on an uncommitted stage`). The stage buckets the layout scan structurally cannot show:
+
+- `stage_kinds` — terminal stage : `failure_kind`.
+- `stage_diag` — terminal stage : **diagnostic code**. This is the actionable one (§1b.3); a code recurring across designs is a recipe-library/contract coverage gap.
+- `stage_sigs` — terminal stage : the gate ids that rejected the last candidate, plus, for unit stages, the failing work unit's check (`work unit <id> invalid: unresolved-footprint=…`). Either kind recurring across designs is a prompt/contract gap. An entry labelled `(no gate id: …)` means the rejection carried **no gate id at all** — the error text is an opaque wrapper, not a signature; read `stage_diag` for that run instead.
+
+**Read `latest=` and `sha=` before calling anything systematic** — a mode whose last hit predates the owning fix's deploy date is stale evidence; a hit **after** it is a **regression** (headline). Runs without a `sha=` predate the build stamp; date them by `latest=` + the auto-memory fix dates.
 
 ## 6. Gate every candidate finding — NEW, LIVE, REPRODUCIBLE?
 
@@ -196,7 +271,7 @@ Rules that keep replays honest:
 - Never DRC/validate a board copied without its `.kicad_pro`/`.prl`/`*_autoplacer.json` — bare copies get default netclass rules stamped in and manufacture fake violations.
 - Bisection is legitimate (a FreeRouting-era loop-hang was once pinned by bisecting 31 locked wires to one segment).
 
-**(b.1) LLM-stage replay — prompt / guardrail / wiring changes (live LLM, budget-capped $0.25).** The deterministic `cli_app replay` above can't exercise the LLM design stages, so a prompt or commit-validation change was previously unverifiable — it fell to a human. `stage_driver` now drives those stages live against the run's frozen `state.json`:
+**(b.1) LLM-stage replay — prompt / guardrail / wiring changes (live LLM, budget-capped $0.25).** The deterministic `cli_app replay` above can't exercise the LLM design stages, so a prompt or commit-validation change was previously unverifiable — it fell to a human. `stage_driver` now drives those stages live against the run's frozen `state.json`. Pick `--stage` from §1b (`triage stages` prints the terminal stage; replay the stage that FAILED, not the last one that committed):
 
 ```bash
 # Re-run ONE LLM stage (e.g. the failed wiring stage) from a frozen state.json
@@ -233,9 +308,12 @@ GAP <n>: <one-line name>                [code | footprint-library | gate-hole | 
 
 After the gap list: one paragraph per-run verdict (failing stage, specific failure, right coords) and the §3 audit findings **even when the build passed**. Pure per-design model output goes in the appendix — unless the same mistake recurs across designs (then it's a prompt/contract gap and ranks).
 
+**Stage gaps (§1b) use the same contract, with two substitutions.** The per-run verdict is "stage `<X>` failed with kind `<K>` / diagnostic `<code>` at attempt `<n>/<budget>`, committed through `<stage>`" — there is no failing board to describe. And `verify:` is an LLM-stage replay, not the board replay: `stage_driver replay --state <RUN>/.kicraft/state.json --stage <X> --budget 0.25` → expect `[ok] <X>` **N-of-3**, because a single LLM verdict is a coin flip. Quote the diagnostic `evidence=` / offender text verbatim in `source:` — it is the only thing that names the exact port/net/part the contract refused.
+
 ## 8. Headless mode (`KICRAFT_INVESTIGATE_HEADLESS=1` — the /admin/support runner)
 
-- **Budget: ~25 min hard** (the runner kills at 30). Skip §6b replay for anything dense (>10 leaves or a >600s original route budget); mark those findings `PLAUSIBLE (replay not run — headless budget)` and include the exact replay command in the report so a human can run it.
+- **Budget: ~25 min hard** (the runner kills at 30). Skip §6b replay for anything dense (>10 leaves or a >600s original route budget); mark those findings `PLAUSIBLE (replay not run — headless budget)` and include the exact replay command in the report so a human can run it. `triage stages` / `run` / `scan` are seconds — always affordable, and for an LLM-stage failure they are usually the whole investigation.
+- **Route on the verdict before spending anything.** If `triage run` says `LLM STAGE FAILURE`, your report is a §1b stage gap: `triage stages` (`--json` when you need the exact `evidence` strings) + the `stage_diag`/`stage_sigs` breadth from `scan`. Do not run §6b board replays — there is no board.
 - **Only your final message survives** (`omp -p` keeps the final assistant message; mid-run notes are discarded). The full §7 report — gap blocks, per-run verdict, audit findings — must be in that one final message, self-contained, no references to "above".
 - **Never launch a background replay or promise "I'll report back"** — the session ends with your final message and anything still running dies with it. Replay synchronously inside the budget, or skip it and mark the finding PLAUSIBLE with the exact command.
 - No user is present: never ask questions; make the conservative call and record the uncertainty in the report.

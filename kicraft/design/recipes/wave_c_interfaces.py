@@ -520,7 +520,18 @@ ADS1115_I2C_ADC = _i2c_device(
     interrupt_pin="2",
 )
 
-_HUB75_SIGNAL_PINS = (1, 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 15)
+# HUB75 (16-pin IDC) logic channels, in connector-pin order. Ground is pins 4, 8
+# and 16: pin 12 is the D address line (used by 1/32-scan panels), NOT a ground —
+# grounding it silently dropped the D channel. The two '245 banks carry all
+# thirteen channels, so U1 uses five of its eight and its three spare channels
+# are no-connects.
+_HUB75_SIGNALS = (
+    ("r0", 1), ("g0", 2), ("b0", 3),
+    ("r1", 5), ("g1", 6), ("b1", 7),
+    ("addr_a", 9), ("addr_b", 10), ("addr_c", 11), ("addr_d", 12),
+    ("clk", 13), ("lat", 14), ("oe", 15),
+)
+_HUB75_GROUND_PINS = (4, 8, 16)
 HUB75_SN74HCT245_INTERFACE = _recipe(
     recipe="hub75-sn74hct245-interface@1",
     family="hub75-level-shift-interface",
@@ -528,9 +539,12 @@ HUB75_SN74HCT245_INTERFACE = _recipe(
     ports=(
         Port(name="vdd_5v", direction="power"),
         Port(name="gnd", direction="power"),
-        *(Port(name=f"input{i}", direction="input") for i in range(12)),
+        # Semantic channel names, so a model can bind the interface it declared
+        # (HUB75_OE, HUB75_CLK, …) by name instead of guessing input0..input11.
+        *(Port(name=name, direction="input") for name, _pin in _HUB75_SIGNALS),
     ),
-    internal=tuple(f"shifted{i}" for i in range(12)),
+    internal=tuple(f"shifted{i}" for i in range(len(_HUB75_SIGNALS))),
+
     parts=(
         _part(
             "level_shifter",
@@ -559,24 +573,27 @@ HUB75_SN74HCT245_INTERFACE = _recipe(
         *(Pin(role="decoupling", index=u, pin="2", net="gnd") for u in range(2)),
         *(
             pin
-            for i, connector_pin in enumerate(_HUB75_SIGNAL_PINS)
+            for i, (name, connector_pin) in enumerate(_HUB75_SIGNALS)
             for pin in (
-                Pin(role="level_shifter", index=i // 8, pin=str(2 + i % 8), net=f"input{i}"),
+                Pin(role="level_shifter", index=i // 8, pin=str(2 + i % 8), net=name),
                 Pin(role="level_shifter", index=i // 8, pin=str(18 - i % 8), net=f"shifted{i}"),
                 Pin(role="connector", pin=str(connector_pin), net=f"shifted{i}"),
             )
         ),
-        *(Pin(role="connector", pin=str(pin), net="gnd") for pin in (4, 8, 12, 16)),
+        *(Pin(role="connector", pin=str(pin), net="gnd") for pin in _HUB75_GROUND_PINS),
     ),
     no_connects=tuple(
         NoConnect(role="level_shifter", index=1, pin=str(pin))
-        for pin in (6, 7, 8, 9, 11, 12, 13, 14)
+        for pin in (7, 8, 9, 11, 12, 13)
     ),
     source="https://www.ti.com/lit/ds/symlink/sn74hct245.pdf",
     assertions=(
         Assertion(
             code="hub75_level_translation",
-            message="All twelve HUB75 logic channels pass through HCT-family 3.3 V to 5 V translation",
+            message=(
+                "All thirteen HUB75 logic channels (R0 G0 B0 R1 G1 B1 A B C D CLK "
+                "LAT OE) pass through HCT-family 3.3 V to 5 V translation"
+            ),
         ),
     ),
 )

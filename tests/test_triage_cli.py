@@ -296,3 +296,259 @@ def test_leaf_gate_detail_contract():
               "failure_class"):
         assert k in detail, f"gate detail lost key {k} triage reads"
     assert detail["failure_class"] == "router_fail"
+
+
+# ---------------------------------------------------------------------------
+# LLM design stages — the failure class that dies before any board exists
+# ---------------------------------------------------------------------------
+
+def make_stage_run(tmp_path, *, status: dict, events: list[dict],
+                   stem: str = "BOARD") -> Path:
+    """A run whose LLM stages are its only artifacts (no .experiments, no ERC
+    report) — exactly the shape the layout scan cannot see."""
+    run = tmp_path / "1" / "999"
+    run.mkdir(parents=True, exist_ok=True)
+    (run / ".kicraft").mkdir(exist_ok=True)
+    _write(run / ".kicraft" / "state.json", {"stage_status": status})
+    (run / "events.jsonl").write_text(
+        "".join(json.dumps(e) + "\n" for e in events))
+    (run / "generated" / stem).mkdir(parents=True, exist_ok=True)
+    return run
+
+
+def _stage_events(stage: str, retries: list[dict], *, done: dict | None = None):
+    evs = [{"kind": "stage_start", "stage": stage, "model": "m"}]
+    evs += retries
+    evs.append(done or {"kind": "stage_done", "stage": stage, "ok": False})
+    return evs
+
+
+def test_stage_failure_kind_falls_back_to_state_status(tmp_path):
+    """Older runs' stage_done carries only {stage, ok, cost, attempts}. The
+    classification lives in state.json — reading the event alone loses it and
+    the failure reads as unclassified."""
+    run = make_stage_run(
+        tmp_path,
+        status={"wiring": {"ok": False, "attempts": 6, "failure_kind": "commit_rejected"}},
+        events=_stage_events("wiring", [
+            {"kind": "retry", "stage": "wiring",
+             "errors": ["9.15 no dangling signal nets: 39 signal net(s) wire a single pin"]},
+        ], done={"kind": "stage_done", "stage": "wiring", "ok": False,
+                 "cost": 0.0055, "attempts": 6}),
+    )
+    d = triage.collect_stages(run)
+    assert d["terminal_stage"] == "wiring"
+    assert d["terminal_failure_kind"] == "commit_rejected"
+    assert d["terminal_family"] == "gate-rejection"
+
+
+def test_contract_rejection_is_not_reported_as_malformed_json(tmp_path):
+    """A pre-`contract_rejected` run reports `invalid_schema` for BOTH malformed
+    provider output and a semantic/recipe contract rejection. With a diagnostic
+    code present the failure is the contract's, and chasing JSON formatting is
+    the wrong investigation."""
+    run = make_stage_run(
+        tmp_path,
+        status={"architecture": {"ok": False, "attempts": 4,
+                                 "failure_kind": "invalid_schema",
+                                 "provider_ok": True, "schema_ok": True}},
+        events=_stage_events("architecture", [{
+            "kind": "retry", "stage": "architecture",
+            "errors": ["provider response did not satisfy the required JSON schema"],
+            "failure_kind": "invalid_schema",
+            "diagnostic": {
+                "code": "multiple_recipe_contracts",
+                "evidence": [{"code": "unsupported_protected_variant"},
+                             {"code": "unsupported_recipe_endpoint"}]},
+        }]),
+    )
+    d = triage.collect_stages(run)
+    term = d["stages"][0]
+    assert d["terminal_family"] == "contract/recipe"
+    assert term["contract_rejection"] is True
+    assert term["legacy_schema_label"] is True
+    assert term["diagnostics"][0]["code"] == "multiple_recipe_contracts"
+    assert term["diagnostics"][0]["sub_codes"] == [
+        "unsupported_protected_variant", "unsupported_recipe_endpoint"]
+    assert term["budget_exhausted"] is True  # 4 == max(2, architecture 3) + 1
+
+
+def test_invalid_schema_without_diagnostic_stays_schema_output(tmp_path):
+    """No diagnostic code => a genuine provider/schema failure, family
+    schema-output. The distinction is the whole point of the label."""
+    run = make_stage_run(
+        tmp_path,
+        status={"architecture": {"ok": False, "failure_kind": "invalid_schema"}},
+        events=_stage_events("architecture", [{
+            "kind": "retry", "stage": "architecture",
+            "errors": ["provider response did not satisfy the required JSON schema"],
+            "failure_kind": "invalid_schema"}]),
+    )
+    term = triage.collect_stages(run)["stages"][0]
+    assert term["family"] == "schema-output"
+    assert term["contract_rejection"] is False
+    assert term["legacy_schema_label"] is False
+
+
+def test_contract_rejected_kind_classifies_when_the_label_is_honest(tmp_path):
+    """The stage driver labels a contract rejection `contract_rejected`, so the
+    reader must classify it without needing the diagnostic-code backstop."""
+    run = make_stage_run(
+        tmp_path,
+        status={"architecture": {"ok": False, "failure_kind": "contract_rejected",
+                                 "attempts": 4}},
+        events=_stage_events("architecture", [{
+            "kind": "retry", "stage": "architecture",
+            "errors": ["the reply was schema-valid but a deterministic design contract refused it"],
+            "failure_kind": "contract_rejected",
+            "diagnostic": {"code": "unsupported_recipe_endpoint"}}]),
+    )
+    d = triage.collect_stages(run)
+    term = d["stages"][0]
+    assert d["terminal_failure_kind"] == "contract_rejected"
+    assert d["terminal_family"] == "contract/recipe"
+    assert term["contract_rejection"] is True
+    assert term["legacy_schema_label"] is False
+
+
+def test_resolved_stage_failure_is_not_a_terminal_failure(tmp_path):
+    """A stage that failed and was later re-run reads ok in stage_status (last
+    attempt wins). The stale ok=false stage_done must not resurrect it."""
+    run = make_stage_run(
+        tmp_path,
+        status={"architecture": {"ok": True, "attempts": 2}},
+        events=_stage_events("architecture", [], done={
+            "kind": "stage_done", "stage": "architecture", "ok": False}) + [
+            {"kind": "stage_start", "stage": "architecture"},
+            {"kind": "stage_done", "stage": "architecture", "ok": True}],
+    )
+    d = triage.collect_stages(run)
+    assert d["terminal_stage"] is None
+    assert d["all_committed"] is False  # the other four still uncommitted
+
+
+def test_interrupted_stage_is_reported(tmp_path):
+    """An exception can escape between stage_start and stage_done; the
+    unmatched start identifies the interrupted stage."""
+    run = make_stage_run(
+        tmp_path,
+        status={"architecture": {"ok": True}},
+        events=[{"kind": "stage_start", "stage": "architecture"},
+                {"kind": "stage_done", "stage": "architecture", "ok": True},
+                {"kind": "stage_start", "stage": "bom"},
+                {"kind": "retry", "stage": "bom", "errors": ["x"]}],
+    )
+    d = triage.collect_stages(run)
+    assert d["interrupted"] == ["bom"]
+    assert d["terminal_stage"] == "bom"
+
+
+def test_run_verdict_names_the_stage_not_the_schematic(tmp_path):
+    """The mis-route this reader exists to fix: an uncommitted stage means the
+    build never ran, so 'investigate the schematic' is a dead end."""
+    run = make_stage_run(
+        tmp_path,
+        status={"functional_spec": {"ok": True},
+                "architecture": {"ok": False, "failure_kind": "invalid_schema"}},
+        events=_stage_events("architecture", [{
+            "kind": "retry", "stage": "architecture", "errors": ["x"],
+            "diagnostic": {"code": "missing_recipe_port"}}]),
+    )
+    data = triage.collect_run(run)
+    assert "LLM STAGE FAILURE at architecture" in data["verdict"]
+    assert "schematic" not in data["verdict"]
+
+
+def test_scan_sees_stage_only_failures_the_layout_scan_cannot(tmp_path):
+    """A run with an event stream and no layout artifact must rank in the
+    stage buckets — and must NOT inflate the layout tier count."""
+    make_stage_run(
+        tmp_path,
+        status={"bom": {"ok": False, "failure_kind": "unit_repair_exhausted"}},
+        events=_stage_events("bom", [
+            {"kind": "retry", "stage": "bom", "errors": ["9.33 spec-named part accountability"]}]),
+    )
+    data = triage.collect_scan([tmp_path])
+    assert data["run_count"] == 0            # no layout artifact anywhere
+    assert data["pipeline_run_count"] == 1
+    assert data["stage_fail_run_count"] == 1
+    assert data["stage_kinds"] == {"bom: unit_repair_exhausted": ["1/999"]}
+    assert data["stage_sigs"] == {"bom: 9.33": ["1/999"]}
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("9.15 no dangling signal nets: 39 signal net(s) wire a single pin",
+     "9.15 no dangling signal nets: <n> signal net(s) wire a single pin"),
+    ("9.26 BOM part(s) not orderable: U1 needs stock",
+     "9.26 BOM part(s) not orderable: <ref> needs stock"),
+])
+def test_norm_stage_error_keeps_the_gate_code(raw, expected):
+    """The gate code names the contract and must survive; per-instance counts
+    and refdes must not, or one family splits into a row per design."""
+    assert triage.norm_stage_error(raw) == expected
+
+
+def test_unit_repair_failure_reports_the_failing_unit(tmp_path):
+    """A unit stage's stage-level error is a summary string. The actionable
+    evidence is the failing work unit's own validation error, which only the
+    work_unit_attempt events carry."""
+    bad = "work unit bom-s001 invalid: missing-requirement-implementation=['db9_can']"
+    run = make_stage_run(
+        tmp_path,
+        status={"bom": {"ok": False, "attempts": 5, "rounds": 8,
+                        "failure_kind": "unit_repair_exhausted"}},
+        events=_stage_events("bom", [], done={
+            "kind": "stage_done", "stage": "bom", "ok": False}) + [
+            {"kind": "work_unit_attempt", "stage": "bom", "unit_id": "bom-s000",
+             "unit_sheet": "STM32 MCU", "outcome": "candidate"},
+            {"kind": "work_unit_attempt", "stage": "bom", "unit_id": "bom-s001",
+             "unit_sheet": "DB9 CAN INTERFACE", "outcome": "invalid_work_unit",
+             "schema_error": bad},
+            {"kind": "work_unit_attempt", "stage": "bom", "unit_id": "bom-s001",
+             "unit_sheet": "DB9 CAN INTERFACE", "outcome": "invalid_work_unit",
+             "schema_error": bad},
+        ],
+    )
+    term = triage.collect_stages(run)["stages"][0]
+    assert term["family"] == "unit-repair"
+    assert [u["unit_id"] for u in term["units"]] == ["bom-s000", "bom-s001"]
+    bad_unit = [u for u in term["units"] if not u["ok"]]
+    assert len(bad_unit) == 1
+    assert bad_unit[0]["outcomes"] == {"invalid_work_unit": 2}
+    assert bad_unit[0]["errors"] == [bad]
+
+
+def test_budget_note_does_not_misread_a_unit_repair_stop(tmp_path):
+    """attempts == budget is a coincidence for a unit stage: the stop rule is
+    the per-unit repair loop, not the provider-call budget. Calling that
+    'breadth' would send the reader to raise a budget that is not the limit."""
+    unit_row = {"budget_exhausted": True, "attempts": 5, "attempt_budget": 5,
+                "failure_kind": "unit_repair_exhausted", "rounds": 8,
+                "units": [{"unit_id": "bom-s001"}]}
+    note = triage._budget_note(unit_row)
+    assert "per-unit repair loop" in note and "BREADTH" not in note
+    # ... while the schema path, which has no stall rule, really is breadth.
+    for kind in ("invalid_schema", "contract_rejected", "truncated_json"):
+        assert "BREADTH" in triage._budget_note(
+            {"budget_exhausted": True, "attempts": 4, "attempt_budget": 4,
+             "failure_kind": kind, "units": []})
+    # A commit rejection has a stall rule, so "breadth" would mislead there even
+    # when the diagnosis bucket is a contract family.
+    commit = triage._budget_note(
+        {"budget_exhausted": True, "attempts": 8, "attempt_budget": 8,
+         "failure_kind": "commit_rejected", "family": "contract/recipe", "units": []})
+    assert "DIFFERENT rejection" in commit and "BREADTH" not in commit
+    assert triage._budget_note({"budget_exhausted": False}) is None
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("work unit bom-s001 invalid: missing-requirement-implementation=['db9_can']",
+     "work unit <id> invalid: missing-requirement-implementation=…"),
+    ("work unit b-1 invalid: no-parts=['J1', 'U2']",
+     "work unit <id> invalid: no-parts=…"),
+])
+def test_norm_unit_error_is_a_stable_cross_run_key(raw, expected):
+    """Unit id and argued values are per-instance; the failing check is not, or
+    the same contract gap ranks as a separate row per design."""
+    assert triage.norm_unit_error(raw) == expected
+

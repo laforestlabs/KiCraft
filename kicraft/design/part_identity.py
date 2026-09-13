@@ -34,7 +34,18 @@ _DEVICE_MEMBERS: dict[str, frozenset[str]] = {
     "uln2003": frozenset({"uln2003adr", "uln2003a"}),
     "uln2003a": frozenset({"uln2003a", "uln2003adr"}),
     "mcp23017": frozenset({"mcp23017-e/so"}),
+    # Espressif ESP32-S3-WROOM-1 datasheet v1.8, Table 1-1 "Series Comparison":
+    # N8R8 and N16R8 are the same module — 18.0 x 25.5 x 3.1 mm package, the
+    # same pin map, the same -40 ~ 65 C ambient grade and the same 8 MB
+    # Octal-SPI PSRAM — differing only in Quad-SPI flash capacity (8 vs 16 MB).
+    # Neither is the other's base device or a different package, so serving one
+    # with the other is a memory-capacity deviation the BOM must LEDGER
+    # (bom.substitutions, §9.33); it must never be a silent substitution.
+    # https://documentation.espressif.com/esp32-s3-wroom-1_wroom-1u_datasheet_en.pdf
+    "esp32-s3-wroom-1-n16r8": frozenset({"esp32-s3-wroom-1-n8r8"}),
+    "esp32-s3-wroom-1-n8r8": frozenset({"esp32-s3-wroom-1-n16r8"}),
 }
+
 
 # ST's STM32L031K6 product page lists STM32L031K6T6 in the STM32L0 series;
 # ordering scheme: K=32 pins, 6=32-Kbyte flash, T=LQFP, 6=-40..85 Celsius.

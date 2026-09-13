@@ -502,9 +502,9 @@ def _classify(record: dict, state: dict, events: list[dict]) -> tuple[str, str |
         or "no json" in terminal_text
     ):
         return "serialization", failed_stage, failure_kind or "invalid_json"
-    if failure_kind == "invalid_schema" or any(
+    if failure_kind in {"invalid_schema", "contract_rejected"} or any(
         phrase in terminal_text
-        for phrase in ("stage contract failed", "stage-prep failed", "schema")
+        for phrase in ("stage contract failed", "stage-prep failed", "schema", "contract")
     ):
         return "schema_contract", failed_stage, failure_kind or "invalid_schema"
     if failure_kind == "commit_rejected":

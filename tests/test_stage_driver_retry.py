@@ -3405,3 +3405,53 @@ def test_noninteractive_default_policy_applies_to_every_stage(tmp_path, monkeypa
     assert seen == [
         (stage, stage_driver_mod.NONINTERACTIVE_DEFAULTS_INSTRUCTION) for stage in stages
     ]
+
+
+def test_contract_rejection_gets_the_schema_correction_not_a_reserialize():
+    """A semantic/recipe contract rejection must be corrected, not reserialized.
+
+    `invalid_schema` and `contract_rejected` share the StageSchemaError path, so
+    a new kind that misses the template branch silently hands the model the
+    "your reply was not a single complete JSON object" instruction — which is
+    both false and useless for a candidate that parsed fine.
+    """
+    common = dict(raw='{"sheets": []}', bounds_sentence="", schema_error="unsupported_recipe_endpoint: ...")
+    contract = stage_driver_mod._stage_recovery_message("contract_rejected", **common)
+    schema = stage_driver_mod._stage_recovery_message("invalid_schema", **common)
+
+    assert contract == schema
+    assert "failed KiCraft's local slot validation" in contract
+    assert "not a single complete JSON object" not in contract
+
+
+@pytest.mark.parametrize("diagnostic,expected", [
+    ({"code": "unsupported_recipe_endpoint"}, "contract_rejected"),
+    (None, "invalid_schema"),
+])
+def test_decode_splits_contract_rejections_from_bad_provider_json(
+    monkeypatch, diagnostic, expected
+):
+    """The label split is exactly 'did a contract attach a diagnostic'.
+
+    A recipe/semantic contract refusing a schema-clean candidate is not the
+    provider failing to produce JSON, and the durable failure_kind must say so.
+    """
+    from types import SimpleNamespace
+
+    from kicraft.server.stage_contracts import StageSchemaError
+
+    def boom(*_args, **_kwargs):
+        raise StageSchemaError("unsupported_recipe_endpoint: no compatible port",
+                               diagnostic=diagnostic)
+
+    monkeypatch.setattr(stage_driver_mod, "_normalize_stage_response", boom)
+    facts = stage_driver_mod.ProviderFacts(
+        raw='{"sheets": []}', finish="stop", rounds=None, tool_calls=None,
+        cost_usd=0.0, had_content=True, loop_detected=False,
+        collection_limit=None, loop_abort_reason=None, collection_counts={},
+    )
+    outcome = stage_driver_mod.decode_stage_response(
+        SimpleNamespace(stage="architecture", prompt_state={}), facts
+    )
+    assert outcome.payload["failure_kind"] == expected
+    assert outcome.payload["schema_error"].startswith("unsupported_recipe_endpoint")
