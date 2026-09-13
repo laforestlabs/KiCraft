@@ -9,7 +9,9 @@ from kicraft.autoplacer.brain.leaf_geometry import repair_leaf_placement_legalit
 from kicraft.autoplacer.brain.leaf_routing import _place_fabricated_edge_interfaces
 from kicraft.autoplacer.brain.types import BoardState, Component, Layer, Pad, Point
 
+from kicraft.design.lowering import lower_requirement
 from kicraft.design.models import BOM, RecipeSelection
+from kicraft.design import models
 from kicraft.design.recipes import expand_recipe, expand_selections
 from kicraft.design.recipes.pin_allocator import PinAllocationError, allocate_pins
 from kicraft.design.recipes.registry import get_recipe, locked_pin_assignments
@@ -974,6 +976,84 @@ def _add_native_usb(payload, *, dm="USB_D_N", dp="USB_D_P", vbus="VBUS"):
         for net in (dm, dp)
     )
     return payload
+
+
+def test_bound_nets_arm_declares_the_net_a_port_binding_names():
+    """KC-WGJ6XE's dominant rung-1 rejection is a declaration the model omitted.
+
+    The WS2812 string driver binds `data_out` to `LED_DATA_OUT` and never declares
+    that net, so the stage dies on `unknown_recipe_port_net` — and the model's own
+    repair is usually to delete the binding instead. The `bound_nets` arm declares
+    what the binding already asserts, and gives the net the off-board output
+    connector it needs to have a pin (the brief asks for "an output for driving
+    addressable LED string"). The fixture is the real rung-1 reply of the board
+    that died; it also carries the native-USB defect, which this arm does not own.
+    """
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "ladder" / "kc-wgj6xe_architecture_rung1.json")
+        .read_text(encoding="utf-8")
+    )
+    with pytest.raises(StageSchemaError, match="unknown_recipe_port_net"):
+        _normalize_stage_response("architecture", json.loads(json.dumps(fixture)), {})
+
+    with pytest.raises(StageSchemaError, match="native_usb_connector_required") as uncleared:
+        _normalize_stage_response(
+            "architecture", json.loads(json.dumps(fixture)), {}, ladder=frozenset({"bound_nets"})
+        )
+    assert "LED_DATA_OUT" not in str(uncleared.value)
+
+    canonical, _expanded = _normalize_stage_response(
+        "architecture",
+        json.loads(json.dumps(fixture)),
+        {},
+        ladder=frozenset({"bound_nets", "completing"}),
+    )
+    net = next(row for row in canonical["inter_sheet_nets"] if row["name"] == "LED_DATA_OUT")
+    assert {endpoint["sheet"] for endpoint in net["endpoints"]} == {"LED OUTPUT"}
+    connector = next(
+        row
+        for row in canonical["requirements"]
+        if row["id"] == "addressable_led_output_data_out_connector"
+    )
+    assert connector["family"] == "pin-header"
+    assert connector["ports"]["pin1"] == "LED_DATA_OUT"
+    assert {connector["ports"].get("pin2"), connector["ports"].get("pin3")} == {"GND", "+5V"}
+    # The net now has two physical pins: the driver's own output and the socket.
+    header = lower_requirement(models.CircuitRequirement.model_validate(connector))
+    assert [pin.net for pin in header.pins] == ["LED_DATA_OUT", "GND", "+5V"]
+
+
+def test_bound_nets_arm_leaves_an_input_with_no_peer_to_its_diagnostic():
+    """An undeclared net with no peer and no board-external output is not invented."""
+    payload = _esp32_architecture_payload()
+    payload["power_nets"] = ["+3V3", "GND"]
+    payload["requirements"] = [
+        {
+            "id": "io_header",
+            "sheet": "MCU",
+            "role": "connector",
+            "family": "pin-header",
+            "ports": {"pin1": "MYSTERY_IN"},
+        },
+    ]
+    with pytest.raises(StageSchemaError):
+        _normalize_stage_response(
+            "architecture",
+            json.loads(json.dumps(payload)),
+            {},
+            ladder=frozenset({"bound_nets"}),
+        )
+
+
+def test_bound_nets_arm_is_inert_for_a_fully_declared_architecture():
+    payload = _add_native_usb(_esp32_architecture_payload())
+    stock, _expanded = _normalize_stage_response(
+        "architecture", json.loads(json.dumps(payload)), {}
+    )
+    armed, _expanded = _normalize_stage_response(
+        "architecture", json.loads(json.dumps(payload)), {}, ladder=frozenset({"bound_nets"})
+    )
+    assert armed == stock
 
 
 def _power_sink_usb_architecture():

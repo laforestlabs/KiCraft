@@ -1,0 +1,537 @@
+{
+  "topologies": {
+    "USB_C_PD_INPUT": "USB-C 5 V sink with CC pull-downs",
+    "POWER_DISTRIBUTION": "Protected 5 V distribution plus synchronous buck conversion to 3.3 V",
+    "ESP32_S3_CONTROLLER": "ESP32-S3-WROOM-1-N16R8 native-USB controller",
+    "HUB75_DISPLAY_INTERFACE": "5 V SN74HCT245 level-shifted HUB75 interface",
+    "ADDRESSABLE_LED_OUTPUT": "WS2812-compatible 5 V addressable LED output",
+    "SPEAKER_OUTPUT": "External low-power speaker output header driven by ESP32 audio PWM"
+  },
+  "rail_voltages": {
+    "VBUS": 5.0,
+    "+5V": 5.0,
+    "+3V3": 3.3,
+    "GND": 0.0
+  },
+  "comms_protocols": [
+    "USB 2.0 FS",
+    "HUB75",
+    "WS2812"
+  ],
+  "mcu_present": true,
+  "sheets": [
+    {
+      "name": "USB INPUT",
+      "stem": "USB_INPUT",
+      "function": "Accept USB-C power and provide the 5 V input rail.",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    },
+    {
+      "name": "POWER",
+      "stem": "POWER",
+      "function": "Distribute 5 V and regulate it to the 3.3 V logic rail.",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    },
+    {
+      "name": "MCU",
+      "stem": "MCU",
+      "function": "Run firmware and generate native USB, HUB75, LED, and speaker control signals.",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    },
+    {
+      "name": "HUB75",
+      "stem": "HUB75",
+      "function": "Level-shift and expose the parallel HUB75 display interface.",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    },
+    {
+      "name": "LED OUTPUT",
+      "stem": "LED_OUTPUT",
+      "function": "Provide a protected 5 V supply and WS2812-compatible data output.",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    },
+    {
+      "name": "SPEAKER",
+      "stem": "SPEAKER",
+      "function": "Expose a 3.3 V PWM audio drive and speaker return connector.",
+      "from_library": null,
+      "library_instance": null,
+      "replication_group": null,
+      "replication_instance": null
+    }
+  ],
+  "power_nets": [
+    "VBUS",
+    "+5V",
+    "+3V3",
+    "GND"
+  ],
+  "inter_sheet_nets": [
+    {
+      "name": "VBUS",
+      "endpoints": [
+        {
+          "sheet": "USB INPUT",
+          "direction": "output"
+        },
+        {
+          "sheet": "POWER",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "+5V",
+      "endpoints": [
+        {
+          "sheet": "POWER",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        },
+        {
+          "sheet": "LED OUTPUT",
+          "direction": "input"
+        },
+        {
+          "sheet": "SPEAKER",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "+3V3",
+      "endpoints": [
+        {
+          "sheet": "POWER",
+          "direction": "output"
+        },
+        {
+          "sheet": "MCU",
+          "direction": "input"
+        },
+        {
+          "sheet": "SPEAKER",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "GND",
+      "endpoints": [
+        {
+          "sheet": "USB INPUT",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "POWER",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "MCU",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "LED OUTPUT",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "SPEAKER",
+          "direction": "bidirectional"
+        }
+      ]
+    },
+    {
+      "name": "USB_D_P",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "USB INPUT",
+          "direction": "bidirectional"
+        }
+      ]
+    },
+    {
+      "name": "USB_D_N",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "USB INPUT",
+          "direction": "bidirectional"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_R0",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_G0",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_B0",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_R1",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_G1",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_B1",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_A",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_B",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_C",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_D",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_CLK",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_LAT",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "HUB75_OE",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "HUB75",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "LED_DATA",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "LED OUTPUT",
+          "direction": "input"
+        }
+      ]
+    },
+    {
+      "name": "SPEAKER_PWM",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "output"
+        },
+        {
+          "sheet": "SPEAKER",
+          "direction": "input"
+        }
+      ]
+    }
+  ],
+  "assumptions": [
+    "USB-C input is a 5 V sink using standard CC pull-downs; no higher-voltage PD contract is required (defaulted)",
+    "+5V is the protected, distributed VBUS rail and is distinct from raw VBUS by input protection/filtering (defaulted)",
+    "3.3 V regulation uses TLV62569DBVR, rated for approximately 1 A output from 5 V (defaulted)",
+    "ESP32-S3-WROOM-1-N16R8 uses native USB for programming with onboard USB-C data connectivity and no USB-UART bridge (defaulted)",
+    "HUB75 interface uses the hub75-sn74hct245-interface recipe and common HUB75 signal naming (defaulted)",
+    "Addressable LED output uses WS2812B-B/T signaling with a 5 V external-string supply and series data resistor (defaulted)",
+    "Speaker output is a low-power external PWM speaker connector; no audio amplifier IC is added because the brief requests an output (defaulted)",
+    "Larger ESP32-S3-WROOM-1 module is retained because the named N16R8 part is explicit (defaulted)",
+    "USB programming power is host-supplied VBUS and is not tied to a battery or alternate board power source (defaulted)"
+  ],
+  "requirements": [
+    {
+      "id": "usb_c_pd_input",
+      "sheet": "USB INPUT",
+      "role": "power_input",
+      "family": "usb-c-power-sink",
+      "exact_part": "USB-C-5V-SINK",
+      "parameters": {},
+      "ports": {
+        "vbus": "VBUS",
+        "gnd": "GND"
+      },
+      "interfaces": [],
+      "functional_blocks": [
+        "USB_C_PD_INPUT"
+      ]
+    },
+    {
+      "id": "logic_regulator",
+      "sheet": "POWER",
+      "role": "regulator",
+      "family": "tlv62569-3v3",
+      "exact_part": "TLV62569DBVR",
+      "parameters": {
+        "output_voltage": 3.3
+      },
+      "ports": {
+        "input": "+5V",
+        "gnd": "GND",
+        "output": "+3V3"
+      },
+      "interfaces": [],
+      "functional_blocks": [
+        "POWER_DISTRIBUTION"
+      ]
+    },
+    {
+      "id": "esp32_controller",
+      "sheet": "MCU",
+      "role": "mcu_core",
+      "family": "esp32-s3-wroom-1-module",
+      "exact_part": "ESP32-S3-WROOM-1-N16R8",
+      "parameters": {
+        "native_usb": true
+      },
+      "ports": {
+        "vdd": "+3V3",
+        "gnd": "GND",
+        "usb_dm": "USB_D_N",
+        "usb_dp": "USB_D_P",
+        "output_hub75_r0": "HUB75_R0",
+        "output_hub75_g0": "HUB75_G0",
+        "output_hub75_b0": "HUB75_B0",
+        "output_hub75_r1": "HUB75_R1",
+        "output_hub75_g1": "HUB75_G1",
+        "output_hub75_b1": "HUB75_B1",
+        "output_hub75_a": "HUB75_A",
+        "output_hub75_b": "HUB75_B",
+        "output_hub75_c": "HUB75_C",
+        "output_hub75_d": "HUB75_D",
+        "output_hub75_clk": "HUB75_CLK",
+        "output_hub75_lat": "HUB75_LAT",
+        "output_hub75_oe": "HUB75_OE",
+        "output_led": "LED_DATA",
+        "output_speaker": "SPEAKER_PWM"
+      },
+      "interfaces": [],
+      "functional_blocks": [
+        "ESP32_S3_CONTROLLER"
+      ]
+    },
+    {
+      "id": "hub75_interface",
+      "sheet": "HUB75",
+      "role": "bus_interface",
+      "family": "hub75-level-shift-interface",
+      "exact_part": "HUB75-SN74HCT245",
+      "parameters": {},
+      "ports": {
+        "vdd_5v": "+5V",
+        "gnd": "GND",
+        "r0": "HUB75_R0",
+        "g0": "HUB75_G0",
+        "b0": "HUB75_B0",
+        "r1": "HUB75_R1",
+        "g1": "HUB75_G1",
+        "b1": "HUB75_B1",
+        "addr_a": "HUB75_A",
+        "addr_b": "HUB75_B",
+        "addr_c": "HUB75_C",
+        "addr_d": "HUB75_D",
+        "clk": "HUB75_CLK",
+        "lat": "HUB75_LAT",
+        "oe": "HUB75_OE"
+      },
+      "interfaces": [],
+      "functional_blocks": [
+        "HUB75_DISPLAY_INTERFACE"
+      ]
+    },
+    {
+      "id": "addressable_led_output",
+      "sheet": "LED OUTPUT",
+      "role": "driver",
+      "family": "ws2812-output",
+      "exact_part": "WS2812B-B/T",
+      "parameters": {},
+      "ports": {
+        "vdd": "+5V",
+        "gnd": "GND",
+        "data_in": "LED_DATA",
+        "data_out": "LED_DATA_OUT"
+      },
+      "interfaces": [],
+      "functional_blocks": [
+        "ADDRESSABLE_LED_OUTPUT"
+      ]
+    },
+    {
+      "id": "speaker_output",
+      "sheet": "SPEAKER",
+      "role": "connector",
+      "family": "pin-header",
+      "exact_part": null,
+      "parameters": {
+        "rows": 1,
+        "gender": "male"
+      },
+      "ports": {
+        "pin1": "SPEAKER_PWM",
+        "pin2": "GND"
+      },
+      "interfaces": [],
+      "functional_blocks": [
+        "SPEAKER_OUTPUT"
+      ]
+    }
+  ],
+  "inter_sheet_net_ranges": []
+}

@@ -320,6 +320,9 @@ def _stage_semantics_mode(value: str) -> Literal["observe", "repair", "enforce"]
 #                    the drive, not only the current one (O7)
 #   addr_d_optional  HUB75 `addr_d` is an optional channel, tied off when unused
 #                    (O8)
+#   bound_nets       declare the net a recipe port binding already names, plus the
+#                    off-board output connector a single-sheet output needs to
+#                    have a pin (O9)
 #
 # Multiple arms may be combined (comma-separated) for the combination round.
 CONTRACT_LADDER_MODES = frozenset(
@@ -332,6 +335,7 @@ CONTRACT_LADDER_MODES = frozenset(
         "completing",
         "full_feedback",
         "addr_d_optional",
+        "bound_nets",
     }
 )
 

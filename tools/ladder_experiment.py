@@ -36,7 +36,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-from kicraft.server.config import CONTRACT_LADDER_MODES, Settings  # noqa: E402
+from kicraft.server.config import Settings, parse_contract_ladder  # noqa: E402
 from kicraft.server.stage_pipeline import drive_replay  # noqa: E402
 
 
@@ -123,8 +123,10 @@ def _spent_total(owner) -> float:
 
 
 def run_arm(args) -> int:
-    if args.arm != "stock" and args.arm not in CONTRACT_LADDER_MODES:
-        print(f"unknown arm {args.arm!r}; one of {sorted(CONTRACT_LADDER_MODES)}", file=sys.stderr)
+    try:
+        parse_contract_ladder(args.arm)
+    except SystemExit as exc:
+        print(str(exc), file=sys.stderr)
         return 2
     os.environ["KICRAFT_CONTRACT_LADDER"] = args.arm
     label = args.label or args.arm
@@ -316,8 +318,10 @@ def run_full(args) -> int:
     from kicraft.server.stage_pipeline import run_pipeline
     from kicraft.server.stage_state import DESIGN_STAGES
 
-    if args.arm != "stock" and args.arm not in CONTRACT_LADDER_MODES:
-        print(f"unknown arm {args.arm!r}", file=sys.stderr)
+    try:
+        parse_contract_ladder(args.arm)
+    except SystemExit as exc:
+        print(str(exc), file=sys.stderr)
         return 2
     os.environ["KICRAFT_CONTRACT_LADDER"] = args.arm
     out = Path(args.out).expanduser()

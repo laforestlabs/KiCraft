@@ -1249,6 +1249,131 @@ def _complete_hub75_optional_address(payload: dict) -> dict:
     return {**payload, "requirements": requirements}
 
 
+def _declared_net_names(payload: dict) -> set[str]:
+    names = {"GND"}
+    names.update(str(net) for net in payload.get("power_nets") or [])
+    names.update(str(net) for net in (payload.get("rail_voltages") or {}))
+    names.update(
+        str(net["name"])
+        for net in payload.get("inter_sheet_nets") or []
+        if isinstance(net, dict) and net.get("name")
+    )
+    for net_range in payload.get("inter_sheet_net_ranges") or []:
+        if not isinstance(net_range, dict):
+            continue
+        pattern = str(net_range.get("name_pattern") or "")
+        try:
+            numbers = range(int(net_range["start"]), int(net_range["end"]) + 1)
+        except (KeyError, TypeError, ValueError):
+            continue
+        names.update(pattern.replace("{n}", str(number)) for number in numbers)
+    return names
+
+
+def _recipe_ports_for_requirement(family: str, exact_part: object):
+    """The recipe ports a requirement's family/exact part selects (or nothing)."""
+    from kicraft.design.recipes.registry import registered_recipes
+    from kicraft.design.recipes.resolver import _family_recipes, _recipe_for_exact
+
+    recipes = tuple(registered_recipes())
+    matches = list(_family_recipes(str(family or ""), recipes))
+    exact = _recipe_for_exact(exact_part, recipes)
+    if exact is not None and exact not in matches:
+        matches.append(exact)
+    return matches[0].definition.ports if matches else ()
+
+
+def _complete_bound_port_nets(payload: dict) -> dict:
+    """O9: declare the nets a port binding already names.
+
+    A recipe port bound to a net the architecture never declares is the dominant
+    rung-1 rejection (`unknown_recipe_port_net`): the model asserts "this port is
+    on net X" and then loses the stage on a declaration it omitted. Under the
+    `bound_nets` arm the architecture completes what it was told: net X is
+    declared with the endpoint its requiring sheet needs, plus the peer sheets
+    any other requirement binding X already implies. A signal that leaves the
+    board from one sheet (`data_out` on a WS2812 string driver, whose brief says
+    "include an output for driving addressable LED string") additionally gets the
+    physical output connector the net needs to have a pin — otherwise the net is
+    one-pin and the build fails on a dangling net, which is exactly the defect it
+    would have papered over.
+
+    Nothing is invented: the net name comes from the binding, the endpoints from
+    the requiring/peer sheets, and the connector binds the driver's own rails.
+    Requirements whose recipe cannot be resolved, power ports, and nets already
+    covered by a declaration are all left to the existing diagnostics.
+    """
+    requirements = list(payload.get("requirements") or [])
+    if not requirements:
+        return payload
+    declared = _declared_net_names(payload)
+    nets = list(payload.get("inter_sheet_nets") or [])
+    added_nets: list[dict] = []
+    added_requirements: list[dict] = []
+    for row in requirements:
+        if not isinstance(row, dict):
+            continue
+        ports = {}
+        for port in _recipe_ports_for_requirement(row.get("family"), row.get("exact_part")):
+            ports[port.name] = port
+        bindings = row.get("ports") or {}
+        for name, port in ports.items():
+            net = bindings.get(name)
+            if not net or net in declared or port.direction == "power":
+                continue
+            if re.fullmatch(r"[+-]?\d+(\.\d+)?V(\d+)?", str(net)):
+                continue  # a rail written as a name, not a declaration to invent
+            peer_sheets = sorted(
+                {
+                    str(other.get("sheet"))
+                    for other in requirements
+                    if isinstance(other, dict)
+                    and other is not row
+                    and net in (other.get("ports") or {}).values()
+                }
+                - {str(row.get("sheet"))}
+            )
+            endpoints = [
+                {"sheet": row.get("sheet"), "direction": port.direction},
+                *(  # a peer sheet's direction is not ours to claim
+                    {"sheet": sheet, "direction": "bidirectional"} for sheet in peer_sheets
+                ),
+            ]
+            if not peer_sheets and port.direction == "output":
+                requirement_id = f"{row.get('id')}_{name}_connector"
+                if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", requirement_id):
+                    continue
+                connector_ports = {"pin1": net}
+                for rail_port in ("gnd", "vdd", "vdd_5v"):
+                    rail = bindings.get(rail_port)
+                    if rail:
+                        connector_ports[f"pin{len(connector_ports) + 1}"] = rail
+                added_requirements.append(
+                    {
+                        "id": requirement_id,
+                        "sheet": row.get("sheet"),
+                        "role": "connector",
+                        "family": "pin-header",
+                        "parameters": {"rows": 1, "gender": "male"},
+                        "ports": connector_ports,
+                        "interfaces": [],
+                        "functional_blocks": list(row.get("functional_blocks") or []),
+                    }
+                )
+                endpoints.append({"sheet": row.get("sheet"), "direction": "input"})
+            if len(endpoints) < 2:
+                continue  # an input with no peer keeps its diagnostic
+            added_nets.append({"name": str(net), "endpoints": endpoints})
+            declared.add(str(net))
+    if not added_nets and not added_requirements:
+        return payload
+    return {
+        **payload,
+        "inter_sheet_nets": [*nets, *added_nets],
+        "requirements": [*requirements, *added_requirements],
+    }
+
+
 def _normalize_stage_response(
     stage: str,
     payload: dict,
@@ -1302,6 +1427,8 @@ def _normalize_stage_response(
                 payload.pop(field, None)
             if "addr_d_optional" in ladder:
                 payload = _complete_hub75_optional_address(payload)
+            if "bound_nets" in ladder:
+                payload = _complete_bound_port_nets(payload)
             response = ArchitectureStageResponse.model_validate(payload)
             _validate_lowerer_parameter_contracts(response)
             canonical = response.model_dump(exclude={"inter_sheet_net_ranges"}, exclude_none=True)
