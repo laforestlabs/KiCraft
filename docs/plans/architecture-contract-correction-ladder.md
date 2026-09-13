@@ -1,11 +1,15 @@
-# Architecture contract convergence — the correction ladder
+# Draft options + independent live-LLM tests: architecture contract convergence
 
-**Status:** plan only. The §2 "already fixed" items are shipped (`ae3584c`, `c410ad3`); the
-options in §5 are **not** implemented, and §6/§7/§8 are the work this document authorises.
-**Subject:** every brief whose `architecture` stage dies on *sequential, individually
-actionable* contract diagnostics — the model fixes the flagged defect, the next attempt
-surfaces (or regresses) another, and the ladder runs out before the candidate is clean.
-**Test brief (fixed for every experiment here):**
+**Status: plan only — not executed.** Options are drafted, not implemented; no arm has been run.
+One **smoke replay** was spent to validate the harness against the live provider (**$0.0165**, one
+`architecture` call sequence on `1/825`); everything else in §1 is artifact analysis or a
+scripted-client (no-model) trace. Running the arms in §4 is the work this document authorises.
+
+**Subject:** the pipeline behaviours that make a brief die at `architecture` even when every
+individual blocking diagnostic is actionable, the contract text already forbids the defect, and
+the model demonstrably fixes what it is told about.
+
+**Test brief (fixed for every arm — no paraphrasing, no variants):**
 
 ```
 make a board with USB C PD power input (configured for 5V) to an ESP32-S3-WROOM-1-N16R8
@@ -13,27 +17,50 @@ that drives a HUB75 display. Include an output for driving addressable LED strin
 speaker.
 ```
 
-**Boards in evidence:** `KC-M2DW6N` = `1/824`, `KC-WGJ6XE` = `1/825` (both this brief).
-**Predecessors:** `docs/plans/kc-2pfpvd-wiring-deadlock-escalation.md` (the clean-slate
-transition and the "no second stall detector" rule), `docs/plans/llm-stage-evidence-driven-recovery-2026-09-11.md`
-(the owning 34/34 loop and its live A/B methodology), `docs/plans/deepseek-v4-flash-json-budget-fix.md`.
+**Boards in evidence:** `KC-M2DW6N` = `~/.kicraft/projects/1/824`, `KC-WGJ6XE` =
+`~/.kicraft/projects/1/825` — both this brief, both `architecture` deaths, both after the
+`ae3584c` recipe fixes.
+**Predecessors:** `kc-2pfpvd-wiring-deadlock-escalation.md` (the clean-slate transition; the
+"no second stall detector" rule), `llm-stage-evidence-driven-recovery-2026-09-11.md` (the live
+A/B methodology), `recipe-and-deterministic-lowering-expansion-2026-09-09.md` (complete
+deterministically instead of asking), `deepseek-v4-flash-json-budget-fix.md`.
 
 ---
 
-## 1. Why this is not "the model can't do it"
+## 1. Corrected framing: what the failures are *not*
 
-The mechanism is verified, not inferred. Reproduce the call accounting with the repo's
-scripted client (**no LLM, $0**):
+I previously reported this class as "the ladder gives 2 corrections, the brief needs 3". Reading
+the *canonical model-facing contract* (`stages/architecture.md`, 319 lines, given to the model
+every architecture call) refines that — and it matters, because it changes which options are
+worth testing.
+
+**The contract already mandates exactly what the model failed to do.**
+
+| observed defect | contract text the model was given |
+|---|---|
+| `native_usb_connector_required` — the model declared a power-only USB-C and no data connector | `architecture.md:90` — *"**Native-USB family ⇒ a physical USB data connector is MANDATORY.** … add a USB device requirement (role `connector`, family `usb-c-usb2-device`) on its own USB sheet, bind the MCU's `usb_dm` to `USB_D_N` and `usb_dp` to `USB_D_P`, and declare each of those as an inter-sheet net with TWO bidirectional endpoints"* |
+| `unknown_recipe_port_net['HUB75_D']` in rung 2 after rung 1 had declared it | `architecture.md:170-171` — *"For each selected recipe, preserve every required external port listed in `extras.circuit_recipes`"*; `:221` — *"A compact recovery is still a complete architecture … Preserve … required nets"*; `:47` — never *"drop a required net to fit"* |
+
+So these are **not** comprehension failures and **not** missing instructions: the rule, the
+recipe family and even the net names are in the prompt, and the model fixed each defect the
+moment it was named (`native_usb…` and `LED_DATA_OUT` both cleared on the next rung). What
+remains is (a) **non-compliance on the first draft**, and (b) **losing previously-correct
+content while regenerating** to fix a different defect.
+
+### 1.1 The ladder (verified, $0)
+
+Reproduce the call accounting with the repo's scripted client — canned replies, no provider
+call, so this measures the **driver's control flow**, nothing about the model:
 
 ```python
-# tests/test_stage_driver_retry.py already provides _ScriptedClient + _OK_INTENT.
+# tests/test_stage_driver_retry.py provides _ScriptedClient + _OK_INTENT.
 import json, sys, tempfile
 from pathlib import Path
 sys.path.insert(0, "tests")
 import test_stage_driver_retry as T
 from kicraft.server.session import run_session
 
-BAD = {  # schema-valid, always fails a deterministic contract (missing MCU ports)
+BAD = {  # schema-valid; always fails a deterministic contract (missing MCU ports)
     "sheets": [{"name": "MCU", "stem": "MCU", "function": "ESP32-S3-WROOM-1 microcontroller"},
                {"name": "POWER", "stem": "POWER", "function": "USB-C PD 5V input"}],
     "power_nets": ["GND", "+5V", "+3V3", "VBUS"], "rail_voltages": {"+3V3": 3.3, "+5V": 5.0},
@@ -43,346 +70,337 @@ BAD = {  # schema-valid, always fails a deterministic contract (missing MCU port
                       "ports": {"gnd": "GND"}, "interfaces": []}],
     "inter_sheet_nets": [],
 }
-reply = lambda p: {"text": json.dumps(p), "reasoning": "", "finish_reason": "stop",
-                   "cost_usd": 0.0}
+reply = lambda p: {"text": json.dumps(p), "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0}
 client = T._ScriptedClient([reply(json.loads(T._OK_INTENT))] + [reply(BAD)] * 12)
 client.s = T.Settings(api_key="test")
 res = run_session(Path(tempfile.mkdtemp()), "USB-C PD 5V to an ESP32-S3-WROOM-1-N16R8",
                   ["intent", "architecture"], client=client)
 arch = next(r for r in res["results"] if r["stage"] == "architecture")
-print("arch calls        :", len(client.calls) - 1)                      # -> 3
-print("modes             :", ["serialization" if c["serialization"] else "normal"
-                              for c in client.calls[1:]])              # -> normal, serialization, normal
-# NOTE: the client's `serialization` flag is False for BOTH plain and clean-slate
-# calls; the third call is the clean-slate rung. The rung is what `call_mode`
-# records (trace observer + `retry` events since c410ad3), not this flag.
-print("reported attempts :", arch["attempts"], arch["failure_kind"])    # -> 3 contract_rejected
-# and because _stage_max_retries("architecture", 2) == 3, provider_call_budget == 4
+print(len(client.calls) - 1, arch["attempts"], arch["failure_kind"])   # -> 3 3 contract_rejected
 ```
 
-That last line is the whole finding: **4-slot budget, 3 calls, terminal.**
+`attempts=3` while `provider_call_budget = 4` (`stage_runtime.py:3404`), because the ladder is
+`normal → serialization → clean_slate` and **a rejected clean-slate escape is terminal
+unconditionally** on this path (`if was_clean_slate: break`, `stage_runtime.py:3757` — no
+signature comparison, unlike the commit path). Measured live on `1/825`: the smoke replay
+reproduced `attempts=3` / `contract_rejected` for **$0.0165** in 54s.
 
-### 1.1 The ladder, verified
+### 1.2 The two boards were converging
 
-`architecture` with the default profile makes **3 provider calls**, in this order:
-
-| call | rung | what it is | code |
+| board | rung 1 (`normal`) | rung 2 (`serialization`) | rung 3 (`clean_slate`) |
 |---|---|---|---|
-| 1 | `normal` | the first draft | — |
-| 2 | `serialization` | one dedicated tool-free "re-emit one compact JSON object" call | `stage_runtime.py:3778` |
-| 3 | `clean_slate` | a fresh re-emit from the binding state, previous candidate **discarded** | armed at `stage_runtime.py:3929-3932` |
+| `1/824` | `unrealizable_power_requirement` | `multiple_recipe_contracts` | same → rejected → terminal |
+| `1/825` | `native_usb_connector_required` + `unknown_recipe_port_net['LED_DATA_OUT']` | `unknown_recipe_port_net['HUB75_D']` | `HUB75_D` → rejected → terminal |
 
-- `max_retries = _stage_max_retries("architecture", 2) = 3` (`stage_runtime.py:253,263`) →
-  `provider_call_budget = 4` (`stage_runtime.py:3404`) and `for attempt in range(4)`
-  (`stage_runtime.py:3442`). **The 4th slot is never spendable on this path**: after the
-  clean-slate call, `if was_clean_slate: break` (`stage_runtime.py:3757`) ends the stage,
-  and — unlike the commit path — **no signature comparison happens first**.
-- So a contract-rejection sequence gets **two corrections after the first failure**, and
-  `attempts = 3` with `budget = 4` means "terminal by policy", **not** "out of budget".
+`1/825`: **2 defects → 1 defect → 1 defect.** The last rung is a *fresh* re-emit
+(`_lean_retry(None, …)`, armed at `stage_runtime.py:3929-3932`) that discards the candidate,
+so the rung that was one field away from committing was replaced by a from-scratch draft.
 
-Measured on the live board (`triage stages KC-WGJ6XE`):
+### 1.3 Breadth and baseline
 
-```
-attempt ladder: 1 normal(contract_rejected) -> 2 serialization(contract_rejected)
-                -> 3 clean_slate(contract_rejected)   [rungs inferred — pre-2026-09-13 artifact]
-** terminal BY POLICY: … leaving a slot of its 4-call budget unspent. **
-```
-
-### 1.2 The two boards were *converging*
-
-| board | rung 1 defects | rung 2 | rung 3 (`clean_slate`) |
-|---|---|---|---|
-| `1/824` | `unrealizable_power_requirement` | `multiple_recipe_contracts` (variant + HUB75 endpoint) | same as rung 2 → rejected |
-| `1/825` | `native_usb_connector_required` + `unknown_recipe_port_net['LED_DATA_OUT']` | `unknown_recipe_port_net['HUB75_D']` | `HUB75_D` again → rejected |
-
-`1/825` went **2 defects → 1 defect** across rungs, then the fresh-start rung threw away the
-nearly-correct candidate and reproduced the remaining one. `HUB75_D` is present in attempt 1's
-`available_nets=` and absent from attempt 2's — the model regressed its own correct content
-while fixing a different defect.
-
-### 1.3 What is *not* the problem
-
-- **Not coverage.** The brief commits today: `KC-JPYUYS` (`1/784`) and `KC-KJ76KX` (`1/700`)
-  built it with one USB-C (`TYPE-C-31-M-12`) serving PD power *and* USB data. The recipe
-  coverage for the named part was fixed in `ae3584c`.
-- **Not the contract being unsatisfiable.** Each diagnostic is actionable and the model
-  demonstrably fixed each one it was shown (`native_usb…` and `LED_DATA_OUT` both cleared).
-- **Not budget.** Predictions in §5 are pre-registered precisely so the budget arm (O2) can
-  falsify this claim.
-- **Not the model choice.** Both boards ran `openai/gpt-5.6-luna` — the production profile.
-
-### 1.4 Breadth
-
-Across the 540 local event streams, **70** carry the terminal-by-policy signature
-(schema-path terminal + a serialization rung spent + `attempts >= 3`): `architecture` 63,
-`functional_spec` 7. For pre-`c410ad3` artifacts the rung is *deduced* (a failed serialization
-is always followed by the clean-slate escape); post-`c410ad3` runs record it exactly.
+- **70** of 540 local event streams carry the terminal-by-policy signature (schema-path
+  terminal + a serialization rung spent + `attempts >= 3`): `architecture` 63,
+  `functional_spec` 7. (Pre-`c410ad3` artifacts: rung deduced; post-`c410ad3`: recorded.)
+- This brief's architecture stage: **0/2** committed across the two web runs, and **0/1** in the
+  live smoke replay → baseline ≈ 0/3 before any arm.
 
 ---
 
 ## 2. Already fixed — do not redo
 
-| fix | commit | effect |
-|---|---|---|
-| `contract_rejected` split from `invalid_schema` | `ae3584c` | the label names the cause; both take the same correction path (`_SCHEMA_REJECTION_KINDS`) |
-| reviewed order-code variants resolve instead of hard-blocking | `ae3584c` | `ESP32-S3-WROOM-1-N16R8` binds the WROOM-1 recipe with a recorded deviation |
-| HUB75 recipe ports are the real signals (`r0…oe`), D on pin 12 | `ae3584c` | `HUB75_OE`/`HUB75_D` are bindable; pin 12 is no longer grounded |
-| `retry.call_mode` records the rung | `c410ad3` | the ladder is observable |
-| `triage` reconstructs + prints the ladder; `terminal BY POLICY` | `c410ad3` | `attempts < budget` is no longer misread as breadth |
-| `native_usb_connector_required` names the satisfying recipe | `c410ad3` | `canonical choice: recipe=usb-c-usb2-device@1; …` |
+| fix | commit |
+|---|---|
+| `contract_rejected` split from `invalid_schema` (the label now names the cause) | `ae3584c` |
+| reviewed order-code variants resolve instead of hard-blocking | `ae3584c` |
+| HUB75 recipe ports are real signals (`r0…oe`), D on pin 12, GND on 4/8/16 | `ae3584c` |
+| `retry.call_mode` records the rung; `triage` prints the ladder + `terminal BY POLICY` | `c410ad3` |
+| `native_usb_connector_required` names the satisfying recipe | `c410ad3` |
 
 ---
 
-## 3. The decision this plan exists to make
+## 3. How every option is tested — the shared protocol
 
-> Which of O1–O6 (§5) improves the architecture commit rate enough to justify its risk —
-> chosen by a pre-registered live A/B on the fixed brief, not by argument.
+Each option is tested **independently**: its own arm, its own knob, identical frozen source,
+reviewed on its own primary endpoint. No arm's result may be inferred from another's, and every
+arm is reported whether it wins or loses.
 
-Three things must be true before any arm can win: it must **not** weaken a deterministic gate,
-it must **not** add a second stall detector (`kc-2pfpvd` rule: reuse the existing
-exact-repeat/clean-slate transition), and it must be measurable from artifacts.
+### 3.1 Frozen inputs (both are the pre-architecture state: `intent` + `functional_spec` committed)
+
+```bash
+S824=$HOME/.kicraft/projects/1/824/.kicraft/state.json   # KC-M2DW6N: named HUB75 + USB Type-C
+S825=$HOME/.kicraft/projects/1/825/.kicraft/state.json   # KC-WGJ6XE: named USB-C
+```
+
+They are two independent draws of the brief. Every arm runs against **both** (a knob that only
+helps one draw is not a general fix).
+
+### 3.2 One option = one arm, one knob
+
+- Source is identical across arms: implement every option behind **one** settings value,
+  `KICRAFT_CONTRACT_LADDER` ∈ `stock | no_serialization | signature | preserving |
+  dropped_gate | completing | full_feedback` (plus O2's pre-existing `--max-retries`, and O8's
+  recipe/setting if adopted). Default stays `stock` until §6.4.
+- Only the arm's knob differs from `stock`. Nothing else: same profile, model, temperature,
+  prompt, budget cap.
+- Arms run **sequentially** (shared spend guard; never concurrent).
+
+### 3.3 Runner — no production change required
+
+`drive_replay` accepts both sinks
+(`stage_pipeline.py:179-188`: `budget_usd, max_retries, progress, core_defaults, client,
+attempt_observer`). So an operator script gets the full metric set today:
+
+```python
+# tools/… (throwaway operator script; not production code)
+from kicraft.server.stage_pipeline import drive_replay
+events, attempts = [], []
+out = drive_replay(
+    state_path, "architecture",
+    budget_usd=0.25, max_retries=3,          # 3 == production caller value
+    progress=events.append,                  # retry/stage_done → call_mode + diagnostics
+    attempt_observer=attempts.append,        # sanitized trace (rungs, outcomes)
+)
+```
+
+Equivalently, per run via the CLI (one run at a time, keeping every trace):
+
+```bash
+KICRAFT_CONTRACT_LADDER=<arm> "$PY" -m kicraft.server.stage_driver replay \
+  --state "$S825" --stage architecture --max-retries 3 --budget 0.25 \
+  --trace-jsonl "/tmp/ladder-exp/<arm>-825-r<N>.jsonl"
+```
+
+**Verified measurement facts** (from the smoke replay's trace): `attempt_observer` records
+`provider_attempt`, **`call_mode`** (`normal` | `serialization` | `clean_slate`), `outcome`,
+`model`, `provider`, and — for commit-path rejections — `commit_result`/`rejection_signature`.
+For **schema-path** rejections those three are `null` and there is **no diagnostic field**, so
+the trace alone gives rungs and outcomes but **not** which defects each rung hit. The `progress`
+sink supplies them: `retry` events carry `call_mode` **and** `diagnostic` since `c410ad3`.
+Therefore: **primary endpoint from the trace, defect trajectory from `progress`** — and no
+production change is needed before spending. (Adding the diagnostic to the observer record
+remains a nice-to-have for `triage`; see §7.)
+
+### 3.4 Metrics
+
+Primary (the only input to §6.3):
+- **architecture commit rate** over the arm's N, per state and pooled.
+
+Secondary, for attribution:
+- rungs taken; terminating rung; `attempts`; effective budget;
+- **defect trajectory**: distinct blocking diagnostics per rung (converging / flat / shuffling);
+- **dropped declared content**: `inter_sheet_nets[*].name` (and `requirements[*].ports` values)
+  present in rung *i* and absent in rung *i+1* without any diagnostic naming them — this is the
+  measured mechanism behind `HUB75_D`;
+- cost per run, wall time, and every aborted/failed run.
+
+### 3.5 Sample size and cost
+
+Observed: `architecture` ≈ **$0.017–0.025 per run**, ≈ **54 s** wall.
+N=10 per arm per state in round 1 (20 runs/arm ≈ $0.35–0.50, ≈ 18 min).
+
+| round | arms | runs | est. cost |
+|---|---|---|---|
+| 1 — singles | O1–O8 (8 arms) | 8 × 20 = 160 | ~$3–4 |
+| 2 — confirmation | top 2 arms, N=20 | 2 × 40 = 80 | ~$1.5–2 |
+| 3 — combination | O5+k best pairing | 20 | ~$0.5 |
+| 4 — L2 end-to-end | top 2 arms | 2 × 5 full chains | ~$1–3 |
+| | | | **≈ $6–9.5 of the $10 ceiling** |
+
+Hard stop at **$10** total for this plan; report actuals against it. Per-run cap `--budget 0.25`;
+daily ceiling $20 and project budget $0.60 (`.env`) already permit this.
+
+### 3.6 Decision rule (pre-registered, before any run)
+
+1. Discard any arm that weakens a deterministic gate, breaks a test, or needs a contract-text
+   change not covered by its option.
+2. Rank by **architecture commit rate** (pooled over both states). Ties → lower cost → smaller
+   diff → fewer new settings.
+3. Adopt only if the winner beats `stock` by **≥ 2/N** with the interval reported. Otherwise
+   record the negative result and keep `stock`; a negative result is a deliverable.
+4. Re-run the winner and its nearest rival at N=20 and adopt on the pooled result.
+5. Every arm states its **falsifier** (§4). An arm that wins while its falsifier obtains means
+   §1's diagnosis is wrong: stop, revise the diagnosis, re-derive the options.
+6. Report all runs, including aborted ones and their cost. No survivor-only reporting.
+7. Independence: no cross-arm inference; each arm's verdict is computed from its own runs.
 
 ---
 
-## 4. Instrumentation to land *before* the first paid arm
+## 4. Options
 
-Without these the comparison is unmeasurable or unfair.
+Each is: **Fix** → **Mechanism** (verified `file:line`) → **Independent test** → **Success** →
+**Falsifier** → **Risk / cost**.
 
-1. **Effective budget in telemetry.** Add `attempt_budget` (and the rungs taken) to the
-   `stage_done` event and `StageStatus`, so `triage` stops deriving a floor
-   (`stage_runtime.py:3404`; `design/models.py` `StageStatus`). Removes the floor/ceiling
-   ambiguity permanently.
-2. **Per-rung diagnostics — genuinely missing today.** `--trace-jsonl` is the right instrument
-   but it is incomplete for this purpose. `_observe_attempt` (`stage_runtime.py:648-680`)
-   records, per provider attempt: `provider_attempt`, **`call_mode`**, `outcome`,
-   `candidate`, `commit_result`, `rejection_signature`, `clean_slate_*`, `escalated`,
-   `unit_*`. It is invoked for a schema-path failure with **no `candidate` and no
-   `commit_result`**, so the trace carries the *rung* and the *outcome kind* but **not the
-   diagnostics** that rung was rejected for. The defect trajectory (§1.2) is therefore not
-   measurable from the trace as-is. Land the observer record's schema-path diagnostic
-   (e.g. pass the normalized `diagnostic`/`schema_error` through `commit_result` or a new
-   `diagnostic` field) and read it in `triage`.
-   *Fallback if that is deferred:* the replay CLI does not persist progress events (already
-   noted in `kc-2pfpvd-wiring-deadlock-escalation.md`), so drive the arms through a short
-   operator script calling `drive_replay(..., progress=collector.append)` and capture the
-   `retry` events (which now carry `call_mode` + `diagnostic`).
-3. **Arm manifest.** One frozen record per arm: source SHA, `KICRAFT_*` env, profile, model,
-   `--max-retries`, `--budget`, frozen state path, `--trace-jsonl` path. The repo rule is
-   same-code comparison across arms — the *only* permitted difference is the arm's knob.
-4. **Confirm the lever is live.** `Settings.serialization_retries` (`config.py:816`, env
-   `KICRAFT_SERIALIZATION_RETRIES`, `config.py:588`) already reaches `StageResponsePolicy`;
-   the `serialization_retries=1` at `stage_runtime.py:1016` is only the fallback for clients
-   without `design_stage_policy`. **Verify on the production profile** before arming O1,
-   because the whole arm depends on it.
-5. **CLI defaults.** `replay --max-retries` defaults to `2` (`stage_driver.py:74`), which is
-   the production caller value → `_stage_max_retries("architecture", 2) = 3` → budget 4. Arms
-   must state their value explicitly rather than inherit it silently.
+### O1 — drop the serialization rung for contract rejections
+**Fix:** on a schema/contract rejection, spend the next call on a *preserving correction* instead
+of the dedicated "re-emit one compact JSON object" call.
+**Mechanism:** `serialization_calls(0) >= serialization_budget(0)` on the first failure routes to
+the plain-correction branch (`stage_runtime.py:3761`); the production knob already exists
+(`Settings.serialization_retries`, `config.py:816`, env `KICRAFT_SERIALIZATION_RETRIES`).
+Counted: `stock` = 3 calls (draft, serialization, clean-slate); O1 = **up to 4 calls, all
+preserving, no clean-slate** (the clean-slate is armed only inside the serialization sub-path,
+`stage_runtime.py:3929-3932`, so O1 also removes the fresh-start escape).
+**Independent test:** arm `no_serialization` (`KICRAFT_SERIALIZATION_RETRIES=0`), N=10 × 2 states.
+**Success:** commit rate ≥ stock + 2/N, and per-rung defect sets shrink.
+**Falsifier:** rate unchanged/worse ⇒ more preserving corrections do not help (the model churns
+defects regardless).
+**Risk:** low (settings-only; no detector change). **Cost:** $0 code.
 
----
+### O2 — more budget, same ladder  *(the control)*
+**Fix:** none; tests whether the limit is the budget rather than the terminal rule.
+**Mechanism:** `provider_call_budget = max_retries + 1` (`stage_runtime.py:3404`).
+**Independent test:** arm `--max-retries 5` (budget 6), N=10 × 2 states.
+**Success:** — none is expected.
+**Falsifier of the diagnosis:** *any* improvement. If more budget helps, §1.1 is wrong (the
+clean-slate terminal would not be binding), and every other option's rationale must be re-derived
+before adoption.
+**Risk:** none. **Cost:** $0 code.
 
-## 5. Options
-
-Each is stated as mechanism → predicted effect → **falsifiable prediction** → risk → cost.
-The falsifiable prediction is the point: an arm that wins while its prediction fails means the
-§1 diagnosis is wrong and the plan must be revised before adopting anything.
-
-### O0 — baseline (control)
-Default ladder, default budget. Expected: architecture commit rate = the observed one
-(2/2 attempts of this brief died; `1/824`, `1/825`).
-
-### O1 — no serialization rung for contract rejections
-`KICRAFT_SERIALIZATION_RETRIES=0` → `serialization_calls(0) >= serialization_budget(0)` is
-true on the first failure (`stage_runtime.py:3761`), so every schema-path failure takes the
-plain-correction branch and the budget is spent on corrections.
-Counted precisely: baseline = **3 calls** (draft, serialization re-emit, clean-slate fresh
-start); O1 = **up to 4 calls** (draft + 3 preserving corrections, each with the previous
-candidate + the current diagnostics).
-**Side effect that must be stated:** the clean-slate rung is armed *only* inside the
-serialization sub-path (`stage_runtime.py:3929-3932`), so O1 removes the fresh-start escape
-entirely on this path — corrections only, no escalation.
-**Predicted:** commit rate rises (3 corrections vs 2 rounds, and no rung discards the
-candidate). **Falsified if** commit rate is unchanged or worse — which would mean more
-corrections do not help because the model churns defects regardless.
-**Risk:** low (settings-only on the production path; no detector changes). **Cost:** $0 code.
-
-### O2 — more budget, same ladder
-`stage_driver replay --max-retries 5` (budget 6).
-**Predicted: NO improvement** — the terminal rule is `if was_clean_slate: break`, so the extra
-slots are unreachable. **This arm is the control for the diagnosis.** If it *does* improve the
-commit rate, §1.1 is wrong and every other arm's rationale needs re-deriving.
-**Cost:** $0 code.
-
-### O3 — signature-aware clean-slate (reuse the commit path's rule)
-Give the schema path the rule the commit path already has: a rejected clean-slate is terminal
-**only when its rejection signature is unchanged**; a *different* signature continues with
-ordinary preserving corrections (`next_attempt` semantics, `stage_runtime.py:4364` and
-`_commit_rejection_signature`). This reuses the existing transition rather than adding a
-detector, per the `kc-2pfpvd` constraint.
-**Predicted:** commit rate rises for *converging* runs (§1.2) and stays flat for runs that
-repeat one defect — the intended "no progress from a fresh start is still terminal" behaviour
-is preserved. **Falsified if** the defect-set trajectory is flat (repeat) yet commits rise.
-**Risk:** medium — changes a terminal rule; needs the signature to be meaningful on this path
-(note: the schema path currently has *no* signature at all, and `contract_rejected`'s error
-text is a constant — so the signature must come from the diagnostic codes, not the message.
-That is the substance of this option).
-**Cost:** ~1 day incl. tests.
+### O3 — signature-aware clean-slate terminal
+**Fix:** give the schema path the rule the commit path already has: a rejected clean-slate is
+terminal **only when the rejection identity is unchanged**; when the defect set differs, continue
+with ordinary preserving corrections.
+**Mechanism:** replace the unconditional `if was_clean_slate: break` (`stage_runtime.py:3757`)
+with a comparison against the armed rejection identity, reusing
+`_commit_rejection_signature` semantics (`stage_runtime.py:4364` region) rather than inventing a
+second detector — required by the `kc-2pfpvd` rule. **Substance of the option:** the schema path
+has *no* signature today and `contract_rejected`'s message is a constant, so the identity must be
+built from the diagnostic codes (e.g. the sorted set of blocking codes + the named nets).
+**Independent test:** arm `signature`, N=10 × 2 states; also report how many runs still terminate
+with an *unchanged* defect set (those must keep terminating).
+**Success:** commit rate up, and the "no progress from a fresh start" behaviour preserved for
+flat trajectories.
+**Falsifier:** commits rise only where the trajectory was flat/same-defect ⇒ the rescue came from
+defeating the no-progress rule, not from recognising progress.
+**Risk:** medium (changes a terminal rule). **Cost:** ~1 day incl. tests.
 
 ### O4 — preserving clean-slate
-Keep the rung but make it **preserving**: instead of `_lean_retry(None, …)` (fresh slot), send
-the previous candidate plus every current blocking diagnostic and an explicit
-"do not drop a declared net" line, i.e. a full-defect correction. Targets §1.2's regression
-directly.
-**Predicted:** removes the "fixed X, lost Y" defect at the last rung. **Falsified if** the same
-regression recurs with the previous candidate in the transcript.
-**Risk:** medium (message construction only; no new detector, no new call).
-**Cost:** ~1 day incl. tests.
+**Fix:** keep the last rung but make it *preserving*: send the previous candidate plus every
+current blocking diagnostic instead of a from-scratch slot.
+**Mechanism:** the arming site builds `_lean_retry(None, …)` (`stage_runtime.py:3929-3932`);
+change to `_lean_retry(raw, <all current diagnostics>)` for contract rejections.
+**Independent test:** arm `preserving`, N=10 × 2 states.
+**Success:** `dropped declared content` = 0 across rungs **and** commit rate up.
+**Falsifier:** the same regression recurs with the candidate in the transcript ⇒ the loss is not
+an information problem.
+**Risk:** medium (message construction only; no new call, no new detector). **Cost:** ~1 day.
 
-### O5 — feedback completeness (no ladder change)
-Send **all** current blocking diagnostics (not only the terminal/current one) in every
-correction, with a per-defect fix instruction naming the two legal operations (declare the net
-/ drop the binding; bind the data-connector recipe / accept the sink posture), and an explicit
-"preserve every previously declared net unless the diagnostic says otherwise".
-**Predicted:** fewer rungs per convergence. **Falsified if** the model still regresses content
-it was told to preserve.
-**Risk:** low. **Cost:** ~0.5 day (messages + a test asserting every blocking code appears).
+### O5 — mechanical dropped-content gate
+**Fix:** *enforce* the preservation rule that the contract text already states
+(`architecture.md:170-171`, `:221`) instead of asking for it again in prose: after a rejection,
+diff the previously seen candidate's declared identities (`inter_sheet_nets[*].name`,
+`requirements[*].ports` values) against the new one; any identity that disappeared and is not
+named by a current diagnostic is a **regression**, corrected with one targeted message naming the
+lost items.
+**Mechanism:** new check in the correction path of `drive_stage` (the previous candidate `raw` is
+already carried by `_lean_retry`); no gate is weakened — a dropped declared net is *more*
+rejections, not fewer.
+**Independent test:** arm `dropped_gate`, N=10 × 2 states; measure `dropped declared content` per
+rung as the direct endpoint.
+**Success:** drops → 0 and commit rate up.
+**Falsifier:** the model still drops items when the exact lost names are listed ⇒ detection is not
+the missing piece and the option is withdrawn.
+**Risk:** low-medium (adds corrections, never accepts a weaker board). **Cost:** ~1 day.
+**Why this is the lead hypothesis:** it targets the *measured* mechanism (§1.2) and the contract
+already forbids the behaviour, so the gap is enforcement, not instruction.
 
-### O6 — is `addr_d` actually required? (electrical, not ladder)
-`ae3584c` made all 13 HUB75 channels `required=True` (`wave_c_interfaces.py:528-534`), which
-*introduced* a mandatory `HUB75_D` net — one of `1/825`'s three defects. A 1/16-scan panel does
-not use D.
-Options: keep `required` (complete 1/32 support, 13 buffered channels); or mark `addr_d`
-`required=False` and tie the spare '245 channel low in the recipe (no floating input, D
-optional at the interface).
-**Predicted:** making it optional removes one defect from the class. **Falsified if** boards
-that omit D then fail the socket/buffer completeness checks.
-**Risk:** medium — an electrical contract change; needs a datasheet-grade justification either
-way, and a decided default for which panels we support.
-**Cost:** ~0.5 day + a fixture.
+### O6 — complete the native-USB companion deterministically instead of blocking
+**Fix:** when a native-USB MCU recipe is selected and no USB data connector exists, *add* the
+`usb-c-usb2-device` requirement bound to the MCU's own DM/DP nets — a deterministic completion,
+the same posture the resolver already takes for other contracts — rather than emitting
+`native_usb_connector_required` and spending a correction round.
+**Mechanism:** `resolver._complete_native_usb_companions` (`resolver.py:1153`) currently blocks
+(`:1183`); the rule and the exact recipe family/net names are already contract text
+(`architecture.md:90`).
+**Independent test:** arm `completing`, N=10 × 2 states; then **L2** (all five stages + build)
+for 3 runs to prove the added connector flows through BOM/wiring.
+**Success:** architecture commits on rung 1 for this brief, L2 still passes §9.29 programming
+access and the board routes.
+**Falsifier:** the deterministic connector breaks the programming-path gate, the connector
+requirement conflicts with a model-declared power-only sink, or L2 fails where `stock` L2 passed.
+**Risk:** medium-high — it turns a design decision into an automatic one. **Cost:** ~1-2 days.
+**Design question this arm answers:** should KiCraft *complete* a contract-mandated part, or keep
+the model accountable for it? (Precedent: `recipe-and-deterministic-lowering-expansion-2026-09-09.md`
+prefers deterministic completion.)
+
+### O7 — full-defect feedback per correction
+**Fix:** every correction carries *all* current blocking diagnostics (each with its legal fix),
+not only the current one.
+**Mechanism:** `_retry_feedback` / `_stage_recovery_message` today carry the single rejection;
+`RecipeResolutionError.diagnostics` already holds the full set.
+**Independent test:** arm `full_feedback`, N=10 × 2 states.
+**Success:** fewer rungs per convergence; commit rate up.
+**Falsifier:** no change — **likely**, because the contract already states both mandates in prose
+(§1), which makes "more prose" the weakest hypothesis and this arm the cheapest way to falsify it.
+**Risk:** low. **Cost:** ~0.5 day.
+
+### O8 — is HUB75's `addr_d` required at all? *(electrical, contract-coupled)*
+**Fix:** decide whether the 13th channel is mandatory. `ae3584c` made all 13 HUB75 channels
+`required=True` (`wave_c_interfaces.py:528-534`), which *introduced* a mandatory `HUB75_D` net and
+was one of `1/825`'s three defects. A 1/16-scan panel does not use D.
+**Mechanism:** keep required (complete 1/32 support, 13 buffered channels, contract-consistent
+with `architecture.md:170-171`) **or** mark `addr_d` optional and tie the spare '245 channel low
+in the recipe (no floating input; D optional at the interface) — the latter also needs the
+contract text and the completeness checks updated.
+**Independent test:** arm `addr_d_optional` (recipe + setting), N=10 × 2 states.
+**Success:** the defect count for this brief drops by one with no new failure class, and no board
+that *omits* D fails a socket/buffer/ERC check.
+**Falsifier:** boards omitting D then fail completeness, or the tie-off shows an ERC/floating-input
+defect.
+**Risk:** medium — an electrical contract change needs a source-grade justification and a decided
+panel default. **Cost:** ~0.5 day + fixture.
 
 ### Ranking hypothesis (to be tested, not assumed)
-O5 (cheapest, no routing change) → O4/O3 (target the two measured mechanisms) → O1 (blunt:
-more corrections, no escalation) → O2 (control) → O6 (independent).
+O5 (targets the measured mechanism, no gate weakening) → O3/O4 (target the terminal/regeneration
+mechanisms) → O6 (removes a defect deterministically; highest blast radius) → O1 (blunt) → O7
+(likely null) → O2 (control) → O8 (independent, electrical).
 
 ---
 
-## 6. Live experiment design
+## 5. Combination round
 
-### 6.1 Arms and sample
-
-| arm | knob | code change | N (architecture replays) |
-|---|---|---|---|
-| O0 | none (default ladder) | none | 10 |
-| O1 | `KICRAFT_SERIALIZATION_RETRIES=0` | none | 10 |
-| O2 | `--max-retries 5` | none | 10 |
-| O3 | env/flag for signature-aware clean-slate | §5.O3 | 10 |
-| O4 | env/flag for preserving clean-slate | §5.O4 | 10 |
-| O5 | env/flag for full-defect feedback | §5.O5 | 10 |
-
-Implement O3/O4/O5 behind **one** settings value (e.g. `KICRAFT_CONTRACT_LADDER` ∈
-`stock|signature|preserving|full_feedback`) so all arms run identical source. N=10 is the
-starting point; extend the top two arms to 20 before adopting (see 6.5).
-
-### 6.2 Frozen inputs (both are the *pre-architecture* state: intent + functional_spec committed)
-
-```bash
-S824=$HOME/.kicraft/projects/1/824/.kicraft/state.json   # KC-M2DW6N
-S825=$HOME/.kicraft/projects/1/825/.kicraft/state.json   # KC-WGJ6XE
-```
-
-Run each arm against **both** states (they are different draws of the same brief: `1/824`
-declared `HUB75` + `USB Type-C`, `1/825` declared `USB-C`), plus the web end-to-end check in 6.4.
-
-### 6.3 Command (per run, per arm)
-
-```bash
-REPO=$HOME/KiCraft; PY=$REPO/.venv/bin/python
-OUT=$(mktemp -d)/arm-O1-824-r3.jsonl
-KICRAFT_SERIALIZATION_RETRIES=0 \
-  "$PY" -m kicraft.server.stage_driver replay \
-    --state "$S824" --stage architecture --max-retries 3 --budget 0.25 \
-    --trace-jsonl "$OUT"
-```
-
-`replay` copies the state into a fresh temp workspace, so no run dir is mutated, and
-`--trace-jsonl` (`stage_driver.py:135`) writes the sanitized per-attempt records the metrics
-come from. **Never** run arms concurrently against the same `--budget`/guard; one run at a time,
-retaining every trace.
-
-### 6.4 Metrics (from the trace + `triage`, not from prose)
-
-Primary endpoint, per arm:
-- **architecture commit rate** over the arm's N (the only thing the decision uses).
-
-Secondary / diagnostic:
-- rungs taken and which rung terminated; `attempts` and the effective budget;
-- **defect trajectory**: number of distinct blocking diagnostics at rung 1 vs the terminal rung
-  (converging / flat / shuffling);
-- regressions: a net or requirement declared in rung 1 and missing in a later rung;
-- cost per run, wall time;
-- for the top two arms only: **L2 = all five stages commit + `build` reaches layout** for the
-  brief through `stage_driver run --brief "<the brief>"`, 5 runs each — the real product
-  acceptance, not just the stage. **Report the terminal stage of every L2 run.** This brief
-  class has a separate history of dying later (`bom`/`wiring` — `kc-2pfpvd`, `kc-vkut5h`,
-  `kc-jmsmve`), so an architecture win must not be read as an end-to-end win, and an L2 failure
-  must be attributed to the stage that actually failed rather than to the ladder.
-
-### 6.5 Decision rule (pre-registered)
-
-1. Eliminate any arm that regresses a deterministic gate or a test.
-2. Among the rest, pick the highest architecture commit rate; ties → lower cost; then → smaller
-   diff.
-3. Adopt only if the winner beats O0 by ≥ 2/N with the interval reported; otherwise keep the
-   status quo and record the negative result.
-4. O2's result is reported regardless: it is the diagnosis's own control.
-5. Re-run the winner and its nearest rival at N=20 before the code is adopted; adopt on the
-   pooled result.
-6. Report every failed/aborted run and its cost (no survivor-only reporting).
-
-### 6.6 Cost
-
-Observed for this brief: `architecture` ≈ **$0.018–0.025/run** (`1/825` $0.0182 for 3 calls,
-`1/824` $0.0250). Six arms × 10 runs × 2 states ≈ 120 replays ≈ **$2.5**, plus the L2 escalation
-(2 arms × 5 full chains ≈ $1–3, dominated by `bom`/`wiring`). Hard-cap each run at `--budget 0.25`
-and stop the whole experiment if spend exceeds **$10**.
+Options are not mutually exclusive. After round 1, take the best arm and pair it with O5 or O3
+(whichever was not in the pair), and test one combined arm under the same protocol.
+**Pre-registered rule:** the combination ships only if it beats **both** singles; otherwise ship
+the single. Combinations never justify a larger budget cap or a weakened gate.
 
 ---
 
-## 7. Reader / skill follow-ups still open
+## 6. Execution order, acceptance, rollout
+
+1. **Instrumentation that the experiment genuinely needs** — only what §3.3 lacks: an operator
+   script that writes `progress` events and the observer trace per run, plus the arm manifest
+   (§3.2). No production change is required for round 1. *(Skip §4.1/§4.2 of the earlier revision:
+   the effective-budget and per-rung-diagnostic telemetry is a `triage` improvement, not a
+   prerequisite — `progress` already carries both.)*
+2. Implement every option behind `KICRAFT_CONTRACT_LADDER` (default `stock`) with a **routing
+   test per mode** using the scripted client — no LLM: assert which call each mode makes and
+   whether the terminal rule fires. This is what makes a null live result interpretable.
+3. Run round 1 (O1–O8), then round 2 (N=20 on the top two), then §5's combination, then L2 for
+   the winner. Keep every trace, event log and manifest.
+4. Ship the winner (`KICRAFT_CONTRACT_LADDER` default flipped **or** the adopted recipe/contract
+   change) only after round 2, with: full suite green; the winner's rungs visible on one fresh
+   live run of the brief; `deploy/deploy-production.sh` (web 200 + `[build-worker] ready`). The
+   34-brief canary stays out of the deploy path (`AGENTS.md`); run it manually if wanted.
+5. Post-deploy: re-scan the corpus after ~20 subsequent `architecture` runs and report the
+   terminal-by-policy count before/after (§1.3) — not a single-board anecdote.
+
+## 7. Reader / skill follow-ups still open (not blockers for §6)
 
 | # | gap | fix |
 |---|---|---|
-| D1 | `triage stages` prints the ladder but not the **defect trajectory**; the converging signature (§1.2) is found by hand | diff the diagnostics of consecutive rungs and print `rung 1: 2 defects -> rung 2: 1 defect (HUB75_D retained? no)` |
-| D2 | `scan` ranks `stage_diag` for the **terminal** rung only | rank diagnostics across *all* rungs so "which contracts the model churns" is visible corpus-wide |
-| D3 | the effective ceiling is derived, not recorded (this plan's §4.1) | record `attempt_budget` + rungs in `stage_done`/`StageStatus` |
-| D4 | the two `samples.py` hero briefs are this brief class (`esp32-hub75-controller`, `esp32-robot-controller`); a failing hero brief is a product-visible defect | after the winning arm ships, add the brief to the **manual** `deploy/verify-design-canary.sh` subset (never the deploy gate — see `AGENTS.md`) and record its commit rate |
-
----
-
-## 8. Acceptance and rollout
-
-1. Land §4 instrumentation first (it is needed to measure anything), with tests.
-2. Implement O3/O4/O5 behind `KICRAFT_CONTRACT_LADDER` (default `stock`), with a test per mode
-   asserting the *routing* (which call is made, whether the terminal rule fires) — scripted
-   client, no LLM.
-3. Run the arms per §6; keep every trace and the manifest.
-4. Ship the winner with the default flipped **only** after the N=20 re-run, plus:
-   - full suite green,
-   - the winning arm's `triage` ladder visible on a fresh live run of the brief,
-   - `deploy/deploy-production.sh` (web 200 + `[build-worker] ready`). The 34-brief canary stays
-     out of the deploy path (see `AGENTS.md`); run it manually if desired.
-5. Re-scan the corpus after ~20 subsequent `architecture` runs: the terminal-by-policy
-   signature (§1.4) should fall; report the before/after counts rather than a single-board
-   anecdote.
+| D1 | `triage stages` prints the ladder but not the **defect trajectory** | diff consecutive rungs' diagnostics and print `rung 1: 2 defects -> rung 2: 1 defect (HUB75_D lost)` |
+| D2 | `scan` ranks `stage_diag` for the **terminal** rung only | rank diagnostics across all rungs (which contracts the model churns, corpus-wide) |
+| D3 | the effective ceiling is derived, not recorded | record `attempt_budget` + rungs in `stage_done`/`StageStatus`; also add the schema-path diagnostic to the observer record so `--trace-jsonl` is self-sufficient |
+| D4 | the two `samples.py` hero briefs are this brief class | after the winner ships, add the brief to the **manual** `deploy/verify-design-canary.sh` subset (never the deploy gate) and record its commit rate |
 
 ## Non-goals
 
-- No weakening of any deterministic gate, and no post-hoc netlist normaliser to paper over a
-  dropped net.
-- No second stall detector: changes to the clean-slate rule must reuse
+- No weakening of any deterministic gate; no netlist normaliser to paper over a dropped net.
+- No second stall detector: any clean-slate change reuses the existing
   `_commit_rejection_signature`/`next_attempt` semantics (`kc-2pfpvd` rule).
-- No change to the **commit** path's ladder (it already has the signature rule); this plan is
-  the schema/contract path only.
-- No new recipe coverage for this brief — `ae3584c` closed it, and `1/784`/`1/700` prove it.
-- No prompt-example tuning of the architecture stage beyond O5's explicit feedback
-  completeness.
-- No change to the 34-brief canary or the deploy path.
+- The **commit** path's ladder already has the signature rule and is out of scope; this plan is
+  the schema/contract path.
+- No new recipe coverage for this brief (`ae3584c` closed it; `1/784`, `1/700` prove the brief
+  commits).
+- No prompt-example tuning beyond O7's full-defect feedback.
+- No change to the 34-brief canary or the deploy gate. No spend beyond the $10 ceiling.
