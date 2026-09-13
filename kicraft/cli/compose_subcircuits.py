@@ -57,7 +57,10 @@ from kicraft.autoplacer.brain.parent_adapter import (
     synthetic_block_ref,
 )
 from kicraft.layout_editor.model import ManualLayout, load_manual_layout
-from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+from kicraft.autoplacer.brain.placement_solver import (
+    PlacementSolver,
+    _set_block_rotation,
+)
 from kicraft.autoplacer.brain.subcircuit_composer import (
     AttachmentConstraint,
     ChildArtifactPlacement,
@@ -103,6 +106,18 @@ from kicraft.cli._compose_state import (  # noqa: E402
     CompositionEntry,
     ParentCompositionState,
 )
+
+
+class ConnectorOrientationError(RuntimeError):
+    """An edge-pinned connector cannot be placed with its mouth off-board.
+
+    Raised by ``_compose_artifacts`` before any stamping/routing so a candidate
+    whose wire-entry mouth faces inward -- or whose mouth could not be measured
+    at all -- is rejected instead of routed and then rejected at the end. The
+    message carries the fab gate's own reason prefixes (``connector_misoriented:
+    <ref>`` / ``connector_orientation_unmeasured:<ref>``) so an operator sees
+    the same vocabulary at both gates.
+    """
 
 
 def _emit_inspector_bundle(routed_pcb: Path) -> None:
@@ -1375,6 +1390,117 @@ def _ensure_edge_blocks_extremal(
     return shifted
 
 
+def _directional_edge_candidate(comp: Component) -> bool:
+    """True when an edge-pinned component HAS a directional body but no
+    measured opening -- i.e. its mouth should have been measurable.
+
+    Mirrors the fab gate's classification (``connector_edge_gap``): a
+    through-hole part whose body (courtyard + pad copper, ``physical_bbox``)
+    is deeper than ``MIN_DIRECTIONAL_DEPTH_MM`` in BOTH axes is a directional
+    connector, so a missing opening is a measurement defect rather than a
+    mouthless part. A bare pin-header strip, a switch or an SMD part is not
+    judged here.
+    """
+    from kicraft.autoplacer.brain.connector_edge_gap import (
+        MIN_DIRECTIONAL_DEPTH_MM,
+    )
+
+    if not comp.is_through_hole:
+        return False
+    tl, br = comp.physical_bbox()
+    return min(br.x - tl.x, br.y - tl.y) > MIN_DIRECTIONAL_DEPTH_MM
+
+
+def _replica_rotation_groups(
+    loaded_artifacts,
+    synthetic_refs: dict[int, str],
+    block_zones: dict[str, dict[str, Any]],
+) -> list[list[str]]:
+    """Group each donor artifact with its present, unconstrained replicas.
+
+    Returns instance-path groups, each starting with the donor. A replica whose
+    donor is not in this loaded set forms no group (the donor lives in another
+    parent/subset). A class with ANY attachment/edge-zoned member is left
+    entirely under the existing attachment constraints: a connector on another
+    edge must still rotate rigidly to face outward, and matching orientation
+    must never be forced at the expense of physical access.
+
+    Malformed cycles/self-donors inside the loaded set are errors rather than a
+    silent partial group.
+    """
+    by_path = {art.instance_path: index for index, art in enumerate(loaded_artifacts)}
+    donor_of: dict[str, str] = {}
+    for art in loaded_artifacts:
+        donor = art.layout.replicated_from
+        if not donor:
+            continue
+        path = art.instance_path
+        if str(donor) == path:
+            raise ValueError(f"replica_rotation_cycle:{path}")
+        donor_of[path] = str(donor)
+
+    def _root(path: str) -> str | None:
+        seen = {path}
+        cursor = donor_of[path]
+        while True:
+            if cursor in seen:
+                raise ValueError(f"replica_rotation_cycle:{path}")
+            if cursor not in by_path:
+                return None  # donor outside this parent/subset
+            seen.add(cursor)
+            nxt = donor_of.get(cursor)
+            if nxt is None:
+                return cursor
+            cursor = nxt
+
+    members_by_root: dict[str, list[str]] = {}
+    for art in loaded_artifacts:
+        path = art.instance_path
+        if path not in donor_of:
+            continue
+        root = _root(path)
+        if root is None:
+            continue
+        members_by_root.setdefault(root, []).append(path)
+
+    groups: list[list[str]] = []
+    for root in sorted(members_by_root):
+        members = sorted(members_by_root[root])
+        refs = [synthetic_refs[by_path[path]] for path in (root, *members)]
+        if any(ref in block_zones for ref in refs):
+            continue
+        groups.append([root, *members])
+    return groups
+
+
+def _validate_replica_rotations(
+    placements: dict[str, ChildArtifactPlacement],
+    groups: list[list[str]],
+) -> None:
+    """Hard invariant: every coupled replica shares its donor's parent rotation.
+
+    Called immediately after automatic artifact-placement recovery and its
+    post-passes, before geometry/stamping work. A missing group member or an
+    unequal angle raises here instead of only marking the candidate's geometry
+    validation unaccepted -- some candidate-picking paths record geometry
+    rejections without hard-rejecting them.
+    """
+    for group in groups:
+        if not group:
+            continue
+        reference = placements.get(group[0])
+        if reference is None:
+            raise ValueError(f"replica_rotation_mismatch:{group[0]}")
+        for instance_path in group[1:]:
+            placement = placements.get(instance_path)
+            if placement is None:
+                raise ValueError(f"replica_rotation_mismatch:{instance_path}")
+            if not angles_close(
+                float(placement.rotation), float(reference.rotation), tol=1e-6
+            ):
+                raise ValueError(f"replica_rotation_mismatch:{instance_path}")
+
+
 def _compose_artifacts(
     loaded_artifacts,
     *,
@@ -1531,6 +1657,33 @@ def _compose_artifacts(
 
     for ref, comp in parent_local.items():
         synthetic_comps[ref] = comp
+
+    # --- Replica orientation coupling (automatic layout only) -----------
+    # Identical-leaf replicas are rigid copies of one solved donor. Without
+    # coupling, the parent rotation search optimizes each synthetic block
+    # independently, so the copies ship at different parent orientations even
+    # though their internal leaf geometry matches. Only automatic, fully
+    # unconstrained classes are coupled; manual layout and any class with an
+    # attachment/edge zone keeps its existing constraints, and each coupled
+    # member is initialised at the donor's rotation with its own measured
+    # extents so the solver only has to search one shared angle.
+    replica_rotation_groups: list[list[str]] = []
+    if manual_layout is None:
+        replica_rotation_groups = _replica_rotation_groups(
+            loaded_artifacts, synthetic_refs, block_zones
+        )
+        path_to_ref = {
+            art.instance_path: synthetic_refs[i]
+            for i, art in enumerate(loaded_artifacts)
+        }
+        for group in replica_rotation_groups:
+            donor_ref = path_to_ref[group[0]]
+            donor_rotation = float(synthetic_comps[donor_ref].rotation)
+            for path in group:
+                comp = synthetic_comps[path_to_ref[path]]
+                _set_block_rotation(comp, donor_rotation)
+                if path != group[0]:
+                    comp.block_replication_donor = donor_ref
 
     # Brief-requested outline shape (autoplacer.json ``board_outline``) with a
     # size target bounds the seed to its largest inscribable content rect, so
@@ -1810,6 +1963,11 @@ def _compose_artifacts(
 
         # --- Recover artifact placements from solver output ---
         placements_dict = placements_from_solved_state(solved, list(loaded_artifacts), synthetic_refs)
+        # Hard invariant seam: coupled replicas must have ended at one parent
+        # rotation. Raised before geometry/stamping so a mismatched candidate
+        # cannot proceed (geometry_validation.accepted=False alone is not a
+        # rejection guarantee in the candidate-picking paths).
+        _validate_replica_rotations(placements_dict, replica_rotation_groups)
         parent_local_solved: dict[str, Component] = {
             ref: solved[ref] for ref in parent_local if ref in solved
         }
@@ -1999,10 +2157,11 @@ def _compose_artifacts(
     # Verify every edge-pinned connector with a detectable mouth ended up
     # facing OUTWARD on its assigned edge. _filter_rotations_for_connector_opening
     # should have guaranteed this, so a violation here means an unsatisfiable
-    # multi-connector leaf or an undetected regression -- surface it loudly
-    # rather than silently shipping a board whose USB port faces inward.
-    misoriented_connectors: list[str] = []
-    unverifiable_connectors: list[str] = []
+    # multi-connector leaf or an undetected regression -- reject the candidate
+    # HERE, before the stamp/route work, rather than routing a board whose USB
+    # port faces inward and only failing it at the final promote gate.
+    orientation_rejections: list[str] = []
+    mouthless_edge_refs: list[str] = []
     for c in all_constraints:
         if c.target != "edge" or c.source != "child_artifact" or c.child_index is None:
             continue
@@ -2013,31 +2172,34 @@ def _compose_artifacts(
         if comp is None:
             continue
         if comp.opening_direction is None:
-            # No detectable mouth: nothing to verify against. This used to be
-            # a silent `continue`, which is how the KC-YJ7Q69 screw terminals
-            # (markerless footprint) shipped facing along the board edge.
-            unverifiable_connectors.append(c.ref)
+            # No detectable mouth. A deep-bodied TH part has a directional body,
+            # so "no measurement" is a defect the fab gate will also refuse
+            # (connector_facings -> unverified_directional/unknown_mouth);
+            # anything else (a shallow strip, an SMD part) genuinely has no
+            # mouth to verify and stays informational.
+            if _directional_edge_candidate(comp):
+                orientation_rejections.append(
+                    f"connector_orientation_unmeasured:{c.ref}"
+                )
+            else:
+                mouthless_edge_refs.append(c.ref)
             continue
         board_opening = opening_board_angle(comp.opening_direction, comp.rotation)
         want = edge_outward_angle(comp.layer, c.value)
         if not angles_close(board_opening, want):
-            misoriented_connectors.append(c.ref)
-    if misoriented_connectors:
-        logger.warning(
-            "Edge connector(s) %s face INWARD after composition (mouth not at "
-            "the board edge) -- the port may be unmateable. Check that the "
-            "leaf rotation candidates were not over-constrained and that the "
-            "connector's opening_direction was detected correctly.",
-            ", ".join(sorted(misoriented_connectors)),
+            orientation_rejections.append(
+                f"connector_misoriented:{c.ref}(mouth {board_opening:.0f}deg vs "
+                f"{c.value} outward {want:.0f}deg)"
+            )
+    if mouthless_edge_refs:
+        logger.info(
+            "Edge connector(s) %s have no detectable opening direction and no "
+            "directional body -- orientation was NEITHER placed deliberately "
+            "NOR verifiable here.",
+            ", ".join(sorted(set(mouthless_edge_refs))),
         )
-    if unverifiable_connectors:
-        logger.warning(
-            "Edge connector(s) %s have no detectable opening direction -- "
-            "orientation was NEITHER placed deliberately NOR verifiable here. "
-            "Add a 'PCB Edge' Dwgs.User marker to the footprint (the fab gate "
-            "will flag these as connector-mouth-unverifiable).",
-            ", ".join(sorted(set(unverifiable_connectors))),
-        )
+    if orientation_rejections:
+        raise ConnectorOrientationError(", ".join(orientation_rejections))
 
     same_side_overlap_conflicts: list[tuple[str, str]] = []
     tht_keepout_violations: list[tuple[str, str]] = []
@@ -2173,6 +2335,9 @@ def _compose_artifacts(
         "strategy": "unified_solver",
         "board_width_mm": round(outline_w, 2),
         "board_height_mm": round(outline_h, 2),
+        # Identical-leaf classes whose parent rotation was coupled (empty when
+        # nothing was coupled, e.g. manual layout or all-constrained classes).
+        "replica_rotation_groups": [list(group) for group in replica_rotation_groups],
     }
     # Area-waste visibility (PCB area-compaction plan, Phase 0): parent-level
     # utilization/aspect metrics ride in packing_metadata -> parent_pipeline.json
@@ -2835,6 +3000,7 @@ def _search_best_layout(
     cand_states: list[ParentCompositionState] = []
     cand_payloads: list[list[dict[str, Any]]] = []
     cand_pcb_paths: list[Path] = []
+    orientation_rejected: list[str] = []
 
     # Brief-requested outline shape: center the aspect sweep on the shape's
     # own aspect (a circle wants square-ish content; a 60x40 rounded_rect
@@ -2913,19 +3079,30 @@ def _search_best_layout(
                 _pass_suffix, _seed_override = _passes[_pass_idx]
                 _pass_idx += 1
                 t_solve = time.perf_counter()
-                state, payloads = _compose_artifacts(
-                    loaded_artifacts,
-                    spacing_mm=spacing_mm,
-                    rotation_step_deg=rotation_step_deg,
-                    parent_definition=parent_definition,
-                    pcb_path=pcb_path,
-                    cfg=wave_cfg,
-                    seed=seed_i,
-                    seed_area_overhead=seed_overhead_i,
-                    seed_aspect_target=seed_aspect_i,
-                    seed_size_override=_seed_override,
-                    manual_layout=manual_layout,
-                )
+                try:
+                    state, payloads = _compose_artifacts(
+                        loaded_artifacts,
+                        spacing_mm=spacing_mm,
+                        rotation_step_deg=rotation_step_deg,
+                        parent_definition=parent_definition,
+                        pcb_path=pcb_path,
+                        cfg=wave_cfg,
+                        seed=seed_i,
+                        seed_area_overhead=seed_overhead_i,
+                        seed_aspect_target=seed_aspect_i,
+                        seed_size_override=_seed_override,
+                        manual_layout=manual_layout,
+                    )
+                except ConnectorOrientationError as exc:
+                    # Rejected before any stamping/routing: this candidate
+                    # cannot produce a mateable port. Try the next seed; if no
+                    # candidate survives, the round fails with the reasons.
+                    orientation_rejected.append(str(exc))
+                    print(
+                        f"[candidate-search] cand={i}{_pass_suffix} rejected "
+                        f"before routing: {exc}"
+                    )
+                    continue
                 place_solve_ms = (time.perf_counter() - t_solve) * 1000.0
                 state.phase_timings["place_solve_ms"] = place_solve_ms
 
@@ -3201,6 +3378,13 @@ def _search_best_layout(
     total_search_ms = (time.perf_counter() - t_search_start) * 1000.0
 
     if not candidates:
+        if orientation_rejected:
+            raise ConnectorOrientationError(
+                "every one of "
+                f"{len(orientation_rejected)} candidate(s) was rejected before "
+                "routing for connector orientation: "
+                + "; ".join(sorted(set(orientation_rejected)))
+            )
         # K iterations exited the budget loop with zero successful
         # appends. Either k <= 0 was passed or the time_budget_s was so
         # tight that the very first compose blew it. Either way it's a
@@ -3333,6 +3517,7 @@ def _search_best_layout(
         "tried": len(candidates),
         "accepted": len(accepted_recs),
         "rejected_drc": len(candidates) - len(accepted_recs),
+        "orientation_rejected": len(orientation_rejected),
         "shape_fitted": sum(1 for c in candidates if c.shape_fitted),
         "best_index": winner_idx,
         "best_seed": winner_rec.seed,

@@ -1994,17 +1994,25 @@ class _SignalAssignment:
 
 
 _USB_DOMAIN_SUFFIX = r"(?:[-_]?(?:5V|3V3|MCU|POWER|ESP32|ISO|LV|HV))?"
-_KNOWN_SIGNAL_ASSIGNMENTS: tuple[_SignalAssignment, ...] = (
+# (family regex, D- pin function, D+ pin function); case-insensitive. These
+# reviewed families are factory-native-programmable over their own USB pair.
+_NATIVE_USB_FAMILIES: tuple[tuple[re.Pattern, str, str], ...] = (
+    (re.compile(r"esp32[-_ ]?s3", re.I), "IO19", "IO20"),
+    (re.compile(r"esp32[-_ ]?c3", re.I), "IO18", "IO19"),
+    (re.compile(r"rp2040", re.I), "USB_DM", "USB_DP"),
+)
+_KNOWN_SIGNAL_ASSIGNMENTS: tuple[_SignalAssignment, ...] = tuple(
     _SignalAssignment(
-        name="esp32s3_native_usb",
-        family=re.compile(r"esp32[-_ ]?s3", re.I),
+        name=f"{re.sub(r'[^a-z0-9]', '', family.pattern.lower())}_native_usb",
+        family=family,
         signals=(
             # Exact differential forms with ONE optional known domain suffix;
             # no loose substring matching (USB_P, USBD, USB_DPH are not D+).
-            (re.compile(rf"^USB_D(?:\+|_?P){_USB_DOMAIN_SUFFIX}$", re.I), "IO20", "D+"),
-            (re.compile(rf"^USB_D(?:-|_?[NM]){_USB_DOMAIN_SUFFIX}$", re.I), "IO19", "D-"),
+            (re.compile(rf"^USB_D(?:\+|_?P){_USB_DOMAIN_SUFFIX}$", re.I), dp_pin, "D+"),
+            (re.compile(rf"^USB_D(?:-|_?[NM]){_USB_DOMAIN_SUFFIX}$", re.I), dm_pin, "D-"),
         ),
-    ),
+    )
+    for family, dm_pin, dp_pin in _NATIVE_USB_FAMILIES
 )
 
 
@@ -2080,7 +2088,7 @@ def _check_known_signal_assignments(part, info, nets) -> list[str]:
                 else:
                     target += f", currently on net {cur!r} (swap the two)"
         bad.append(
-            f"[{assignment.name}] {net!r} is the ESP32-S3's native USB "
+            f"[{assignment.name}] {net!r} is a native USB "
             f"{role} data line (fixed silicon function), but it is wired "
             f"to {_pin_label(part.ref, num, nm)}. {action}{target}; "
             "do not substitute other GPIOs"
@@ -2316,7 +2324,14 @@ def check_mcu_programming_path(bom) -> CheckResult:
     )
 
 
+# Connector / access-point refs are never the controller even when their value
+# names one: J1 "ESP32-S3 UART PROGRAM" is a header, not a second MCU.
+_MCU_ACCESS_REF_PREFIXES = frozenset({"J", "P", "CN", "CONN", "X", "H", "TP"})
+
+
 def _is_mcu_part(part) -> bool:
+    if _ref_prefix(part.ref) in _MCU_ACCESS_REF_PREFIXES:
+        return False
     ident = f"{part.symbol} {part.value}"
     return bool(
         _ESP_FAMILY_RE.search(ident)
@@ -2416,6 +2431,206 @@ def _family_strap_gaps(bom, mcus, access) -> list[str]:
     return gaps
 
 
+_USB_CONNECTOR_DM_PIN_RE = re.compile(r"^(?:DN|DM|D-|USB_?DM|USB_D-)\d*$", re.I)
+_USB_CONNECTOR_DP_PIN_RE = re.compile(r"^(?:DP|D\+|USB_?DP|USB_D\+)\d*$", re.I)
+_USB_HEADER_IDENTITY_RE = re.compile(r"conn_01x|pinheader|pin header|\bheader\b", re.I)
+_NATIVE_USB_OFFENDER_PREFIX = "native_usb_programming_required"
+# Reviewed USBLC6-2SC6 feed-through pairs: connector-side line to device-side
+# line. 2 = GND and 5 = VBUS are rails and are never crossed.
+_USBLC6_FEED_THROUGH = {"1": "3", "3": "1", "6": "4", "4": "6"}
+_USB_SERIES_REF_PREFIXES = frozenset({"R", "RV", "RT", "RP"})
+
+
+def _usb_connector_pins(info, ref) -> tuple[list[str], list[str]]:
+    """(D- pin numbers, D+ pin numbers) resolved from the symbol's pin names."""
+    pins = info.get(ref) or {}
+    dm = sorted(
+        num for num, pin in pins.items() if _USB_CONNECTOR_DM_PIN_RE.match(pin["name"] or "")
+    )
+    dp = sorted(
+        num for num, pin in pins.items() if _USB_CONNECTOR_DP_PIN_RE.match(pin["name"] or "")
+    )
+    return dm, dp
+
+
+def _usb_data_connector_parts(bom, info) -> list:
+    """Socket parts that expose both a D- and a D+ pin (not a header/bridge).
+
+    A UART bridge (CH340/CP210x/FT232/...) also carries D-/D+ pins on its host
+    side, but it is not a USB *data connector*: nothing plugs into it, and its
+    device side speaks UART. It must never satisfy a native-USB programming
+    contract.
+    """
+    out = []
+    for part in bom.parts:
+        if _ref_prefix(part.ref) not in (_CONNECTOR_PREFIXES | {"H"}):
+            continue
+        ident = f"{part.symbol} {part.value} {part.sourcing_note or ''}"
+        if not _USB_PART_RE.search(ident) or _USB_HEADER_IDENTITY_RE.search(ident):
+            continue
+        if _USB_UART_BRIDGE_RE.search(ident):
+            continue
+        if part.ref not in info:
+            out.append(part)  # unresolvable symbol: accept the USB identity
+            continue
+        dm, dp = _usb_connector_pins(info, part.ref)
+        if dm and dp:
+            out.append(part)
+    return out
+
+
+def _usb_series_other_pin(part, pin, info, nets) -> str | None:
+    """The far pin of a real two-terminal series resistor, else None."""
+    if _ref_prefix(part.ref) not in _USB_SERIES_REF_PREFIXES:
+        return None
+    pins = info.get(part.ref) or {}
+    if len(pins) != 2:
+        return None
+    others = [num for num in pins if num != pin]
+    if len(others) != 1:
+        return None
+    wired = nets.get(part.ref, {})
+    if not wired.get(pin) or not wired.get(others[0]):
+        return None
+    if wired[pin] == wired[others[0]]:
+        return None
+    return others[0]
+
+
+def _usb_feed_through_other_pin(part, pin) -> str | None:
+    ident = f"{part.symbol} {part.value} {part.mpn or ''}"
+    if not re.search(r"usblc6", ident, re.I):
+        return None
+    return _USBLC6_FEED_THROUGH.get(pin)
+
+
+def _usb_reachable_pins(bom, info, nets, by_ref, start_pins) -> set[tuple[str, str]]:
+    """Reachability over same-net copper and the two permitted series elements."""
+    net_pins: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for connection in bom.connections:
+        for endpoint in connection.endpoints:
+            net_pins[connection.net_name].append((endpoint.ref, endpoint.pin))
+    reachable: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str]] = set()
+    stack = list(start_pins)
+    while stack:
+        ref, pin = stack.pop()
+        if (ref, pin) in seen:
+            continue
+        seen.add((ref, pin))
+        net = nets.get(ref, {}).get(pin)
+        if not net:
+            continue
+        # Never bridge through a rail or ground: D-/D+ are signal conductors.
+        if _net_looks_ground(net) or _net_is_positive_rail(net) or _net_looks_power(net):
+            continue
+        endpoints = net_pins.get(net, [])
+        reachable.update(endpoints)
+        for endpoint_ref, endpoint_pin in endpoints:
+            part = by_ref.get(endpoint_ref)
+            if part is None:
+                continue
+            other = _usb_series_other_pin(part, endpoint_pin, info, nets)
+            if other is None:
+                other = _usb_feed_through_other_pin(part, endpoint_pin)
+            if other is not None:
+                stack.append((endpoint_ref, other))
+    return reachable
+
+
+def _native_usb_programming_gaps(bom, mcus) -> list[str]:
+    """§9.29 native-USB proof: each reviewed native MCU's D-/D+ must reach the
+    correspondingly named pins of ONE physical USB data connector.
+
+    Part-presence runs at BOM commit (before wiring); the reachability proof
+    runs once connections exist. Net names never substitute for the physical
+    pins, so renaming a net cannot fake a connection.
+    """
+    info, _pin_count = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    by_ref = {part.ref: part for part in bom.parts}
+    connectors = _usb_data_connector_parts(bom, info)
+    gaps: list[str] = []
+    for part in mcus:
+        ident = f"{part.symbol} {part.value}".strip()
+        family = next((row for row in _NATIVE_USB_FAMILIES if row[0].search(ident)), None)
+        if family is None:
+            continue
+        _family_re, dm_fn, dp_fn = family
+        offender = f"{_NATIVE_USB_OFFENDER_PREFIX}:{part.ref}"
+        if not bom.connections:
+            if not connectors:
+                gaps.append(
+                    f"{offender} ({ident}): native USB programming needs one "
+                    "physical USB data connector (a receptacle with real D-/D+ "
+                    "pins); a header, UART bridge or power-only connector cannot "
+                    "replace it"
+                )
+            continue
+        pins = info.get(part.ref) or {}
+        dm_pins = sorted(
+            num for num, pin in pins.items() if dm_fn in (pin["name"] or "").upper()
+        )
+        dp_pins = sorted(
+            num for num, pin in pins.items() if dp_fn in (pin["name"] or "").upper()
+        )
+        if not dm_pins or not dp_pins:
+            gaps.append(
+                f"{offender} ({ident}): the native USB {dm_fn}/{dp_fn} pins are "
+                "unresolvable on this symbol; restore the reviewed device symbol"
+            )
+            continue
+        wired = nets.get(part.ref, {})
+        dm_net = next((wired[num] for num in dm_pins if wired.get(num)), None)
+        dp_net = next((wired[num] for num in dp_pins if wired.get(num)), None)
+        if dm_net is None or dp_net is None:
+            gaps.append(
+                f"{offender} ({ident}): {dm_fn}/{dp_fn} native USB data line is "
+                "left open; both D- and D+ must reach the USB data connector"
+            )
+            continue
+        if dm_net == dp_net:
+            gaps.append(
+                f"{offender} ({ident}): native USB D- and D+ share net "
+                f"{dm_net!r}; the pair must stay distinct into the connector"
+            )
+            continue
+        reachable_dm = _usb_reachable_pins(
+            bom, info, nets, by_ref, [(part.ref, num) for num in dm_pins]
+        )
+        reachable_dp = _usb_reachable_pins(
+            bom, info, nets, by_ref, [(part.ref, num) for num in dp_pins]
+        )
+        ok = False
+        swapped = False
+        for connector in connectors:
+            connector_dm, connector_dp = _usb_connector_pins(info, connector.ref)
+            if not (connector_dm and connector_dp):
+                continue
+            d_ok = any((connector.ref, num) in reachable_dm for num in connector_dm)
+            p_ok = any((connector.ref, num) in reachable_dp for num in connector_dp)
+            if d_ok and p_ok:
+                ok = True
+                break
+            if any((connector.ref, num) in reachable_dm for num in connector_dp) or any(
+                (connector.ref, num) in reachable_dp for num in connector_dm
+            ):
+                swapped = True
+        if ok:
+            continue
+        reason = (
+            "D- and D+ are swapped at the connector"
+            if swapped
+            else "no series path reaches a connector's corresponding pins (open "
+            "line, wrong pin, or a path ending at a header/bridge)"
+        )
+        gaps.append(
+            f"{offender} ({ident}): native USB D-/D+ do not both reach the "
+            f"correspondingly named pins of one physical USB data connector -- {reason}"
+        )
+    return gaps
+
+
 def check_mcu_programming_access(bom) -> CheckResult:
     """§9.29 (hard) -- an MCU board must be physically programmable.
 
@@ -2471,6 +2686,7 @@ def check_mcu_programming_access(bom) -> CheckResult:
         )
     bad: list[str] = []
     bad.extend(_family_strap_gaps(bom, mcus, access))
+    bad.extend(_native_usb_programming_gaps(bom, mcus))
     if bom.connections:
         from collections import defaultdict as _dd
 

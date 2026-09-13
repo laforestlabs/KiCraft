@@ -42,6 +42,7 @@ from kicraft.autoplacer.brain.parent_adapter import (
     attachment_constraints_to_zones,
     synthetic_block_ref,
 )
+from kicraft.autoplacer.brain.geometry import rotate_vector
 from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.subcircuit_composer import (
     LeafBlockerSet,
@@ -49,6 +50,8 @@ from kicraft.autoplacer.brain.subcircuit_composer import (
 )
 from kicraft.autoplacer.brain.subcircuit_instances import (
     LoadedSubcircuitArtifact,
+    transform_loaded_artifact,
+    transformed_component_map,
 )
 from kicraft.autoplacer.brain.types import (
     BoardState,
@@ -58,6 +61,9 @@ from kicraft.autoplacer.brain.types import (
     Point,
     SubCircuitId,
     SubCircuitLayout,
+    angles_close,
+    edge_outward_angle,
+    opening_board_angle,
 )
 
 
@@ -911,3 +917,287 @@ def test_compose_artifacts_propagates_backside_through_hole_cfg():
         "with block_force_back_only=True, _blocker_pair_compatible should "
         "return True (compatible) for an otherwise-conflicting front-only pair"
     )
+
+
+# ---------------------------------------------------------------------------
+# Identical-leaf replicas: parent orientation coherence at compose time.
+#
+# Two copies of one solvable leaf are rigid copies of the donor, but the parent
+# rotation search used to optimize each synthetic block independently, so the
+# copies could end at different parent angles (the reported KC-DZQ76R defect).
+# Compose now couples an UNCONSTRAINED donor+replica class; these tests run the
+# real solver through ``_compose_artifacts`` with asymmetric neighbours.
+
+
+def _replica_id(name: str) -> SubCircuitId:
+    return SubCircuitId(
+        sheet_name=name,
+        sheet_file=f"{name.lower()}.kicad_sch",
+        instance_path=f"/{name.lower()}",
+    )
+
+
+def _front_pad(ref: str, pad_id: str, x: float, y: float) -> Pad:
+    return Pad(ref=ref, pad_id=pad_id, pos=Point(x, y), net="", layer=Layer.FRONT)
+
+
+def _replica_artifact(
+    name: str,
+    components: dict[str, Component],
+    width: float,
+    height: float,
+    *,
+    replicated_from: str | None = None,
+) -> LoadedSubcircuitArtifact:
+    layout = SubCircuitLayout(
+        subcircuit_id=_replica_id(name),
+        components=components,
+        traces=[],
+        vias=[],
+        bounding_box=(width, height),
+        ports=[],
+        interface_anchors=[],
+        score=75.0,
+        replicated_from=replicated_from,
+    )
+    return LoadedSubcircuitArtifact(
+        artifact_dir=f"/fake/{name}",
+        metadata={},
+        debug={},
+        layout=layout,
+        source_files={},
+    )
+
+
+def _driver_leaf(prefix: str) -> dict[str, Component]:
+    """Identical two-part leaf body; only the refs differ between copies."""
+    return {
+        f"{prefix}1": Component(
+            ref=f"{prefix}1",
+            value="DRV8833",
+            pos=Point(5.0, 8.0),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=10.0,
+            height_mm=16.0,
+            kind="ic",
+            pads=[
+                _front_pad(f"{prefix}1", "1", 1.0, 8.0),
+                _front_pad(f"{prefix}1", "2", 9.0, 8.0),
+            ],
+        ),
+        f"{prefix}2": Component(
+            ref=f"{prefix}2",
+            value="100n",
+            pos=Point(14.0, 4.0),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=2.0,
+            height_mm=1.0,
+            kind="passive",
+            pads=[
+                _front_pad(f"{prefix}2", "1", 13.5, 4.0),
+                _front_pad(f"{prefix}2", "2", 14.5, 4.0),
+            ],
+        ),
+    }
+
+
+def _wide_power_artifact() -> LoadedSubcircuitArtifact:
+    """Asymmetric neighbour so block rotation is a real choice, not a no-op."""
+    return _replica_artifact(
+        "POWER",
+        {
+            "U9": Component(
+                ref="U9",
+                value="BUCK",
+                pos=Point(6.0, 3.0),
+                rotation=0.0,
+                layer=Layer.FRONT,
+                width_mm=12.0,
+                height_mm=4.0,
+                kind="ic",
+                pads=[_front_pad("U9", "1", 1.0, 3.0), _front_pad("U9", "2", 11.0, 3.0)],
+            )
+        },
+        20.0,
+        8.0,
+    )
+
+
+def test_compose_keeps_unconstrained_replicas_at_one_angle_and_pure_translation():
+    """End-to-end solver: coupled copies share an angle and differ by translation."""
+    from kicraft.cli.compose_subcircuits import _compose_artifacts
+
+    donor = _replica_artifact("DRIVER_A", _driver_leaf("U"), 20.0, 20.0)
+    replica = _replica_artifact(
+        "DRIVER_B", _driver_leaf("R"), 20.0, 20.0, replicated_from="/driver_a"
+    )
+    state, _ = _compose_artifacts(
+        [donor, replica, _wide_power_artifact()],
+        spacing_mm=2.0,
+        rotation_step_deg=0.0,
+        parent_definition=None,
+        pcb_path=None,
+        cfg={},
+        seed=0,
+    )
+
+    assert state.packing_metadata["replica_rotation_groups"] == [
+        ["/driver_a", "/driver_b"]
+    ]
+
+    entries = {entry.instance_path: entry for entry in state.entries}
+    donor_entry = entries["/driver_a"]
+    replica_entry = entries["/driver_b"]
+    assert angles_close(donor_entry.rotation, replica_entry.rotation, tol=1e-6), (
+        "coupled replicas ended at "
+        f"{donor_entry.rotation} vs {replica_entry.rotation}"
+    )
+
+    donor_view = transformed_component_map(
+        transform_loaded_artifact(donor, donor_entry.origin, donor_entry.rotation)
+    )
+    replica_view = transformed_component_map(
+        transform_loaded_artifact(replica, replica_entry.origin, replica_entry.rotation)
+    )
+    delta = Point(
+        replica_entry.origin.x - donor_entry.origin.x,
+        replica_entry.origin.y - donor_entry.origin.y,
+    )
+    for donor_ref, replica_ref in (("U1", "R1"), ("U2", "R2")):
+        a = donor_view[donor_ref]
+        b = replica_view[replica_ref]
+        assert a.rotation == b.rotation
+        assert (a.width_mm, a.height_mm) == (b.width_mm, b.height_mm)
+        # Same rigid local geometry, offset only by the translation between the
+        # two recovered artifact origins.
+        assert b.pos.x - a.pos.x == pytest.approx(delta.x)
+        assert b.pos.y - a.pos.y == pytest.approx(delta.y)
+
+
+def _connector_leaf(ref: str, resistor_ref: str) -> dict[str, Component]:
+    """A self-consistent USB-C stub plus its CC resistor (rigid pair)."""
+    return {
+        ref: Component(
+            ref=ref,
+            value="USB-C",
+            pos=Point(6.0, 5.0),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=9.0,
+            height_mm=3.0,
+            kind="connector",
+            body_center=Point(6.0, 5.0),
+            opening_direction=90.0,  # local mouth faces +y
+            pads=[_front_pad(ref, "A1", 2.0, 3.5), _front_pad(ref, "A2", 10.0, 3.5)],
+        ),
+        resistor_ref: Component(
+            ref=resistor_ref,
+            value="5k1",
+            pos=Point(10.0, 1.0),
+            rotation=0.0,
+            layer=Layer.FRONT,
+            width_mm=2.0,
+            height_mm=1.0,
+            kind="passive",
+            pads=[
+                _front_pad(resistor_ref, "1", 9.5, 1.0),
+                _front_pad(resistor_ref, "2", 10.5, 1.0),
+            ],
+        ),
+    }
+
+
+def test_edge_constrained_replicas_keep_rigid_reuse_and_face_outward():
+    """Constrained copies on different edges: rigid reuse, both facing outward.
+
+    Matching orientation must never be forced at the expense of physical
+    access, so a class with any edge-zoned member is left uncoupled and each
+    copy rotates rigidly to its own edge.
+    """
+    from kicraft.cli.compose_subcircuits import _compose_artifacts
+
+    core = _replica_artifact(
+        "CORE",
+        {
+            "U2": Component(
+                ref="U2",
+                value="MCU",
+                pos=Point(10.0, 8.0),
+                rotation=0.0,
+                layer=Layer.FRONT,
+                width_mm=8.0,
+                height_mm=8.0,
+                kind="ic",
+                pads=[_front_pad("U2", "1", 7.0, 8.0), _front_pad("U2", "2", 13.0, 8.0)],
+            )
+        },
+        20.0,
+        16.0,
+    )
+    bottom = _replica_artifact("CONN_BOTTOM", _connector_leaf("J1", "R1"), 12.0, 6.0)
+    top = _replica_artifact(
+        "CONN_TOP",
+        _connector_leaf("J2", "R2"),
+        12.0,
+        6.0,
+        replicated_from="/conn_bottom",
+    )
+    cfg = {
+        "component_zones": {"J1": {"edge": "bottom"}, "J2": {"edge": "top"}},
+        "connector_edge_overhang_mm": 0.5,
+    }
+    state, _ = _compose_artifacts(
+        [core, bottom, top],
+        spacing_mm=2.0,
+        rotation_step_deg=0.0,
+        parent_definition=None,
+        pcb_path=None,
+        cfg=cfg,
+        seed=0,
+    )
+
+    assert state.packing_metadata["replica_rotation_groups"] == []
+
+    expectations = {
+        "/conn_bottom": ("J1", bottom, "bottom"),
+        "/conn_top": ("J2", top, "top"),
+    }
+    rotations: dict[str, float] = {}
+    for entry in state.entries:
+        wanted = expectations.get(entry.instance_path)
+        if wanted is None:
+            continue
+        connector_ref, artifact, edge = wanted
+        rotations[entry.instance_path] = entry.rotation
+        view = transformed_component_map(
+            transform_loaded_artifact(artifact, entry.origin, entry.rotation)
+        )
+        connector = view[connector_ref]
+        board_opening = opening_board_angle(
+            connector.opening_direction, connector.rotation
+        )
+        assert board_opening == edge_outward_angle(Layer.FRONT, edge), (
+            f"{entry.instance_path}:{connector_ref} mouth faces {board_opening} "
+            f"deg, expected outward from the {edge} edge"
+        )
+        # Rigid internal reuse: the resistor stays at its rotated local offset
+        # from the connector, at whatever rotation this edge required.
+        resistor_ref = "R" + connector_ref[1:]
+        local_connector = artifact.layout.components[connector_ref].pos
+        local_resistor = artifact.layout.components[resistor_ref].pos
+        rotated = rotate_vector(
+            Point(
+                local_resistor.x - local_connector.x,
+                local_resistor.y - local_connector.y,
+            ),
+            entry.rotation,
+        )
+        resistor = view[resistor_ref]
+        assert resistor.pos.x - connector.pos.x == pytest.approx(rotated.x)
+        assert resistor.pos.y - connector.pos.y == pytest.approx(rotated.y)
+
+    # One rigid rotation per edge -- deliberately NOT a shared angle.
+    assert set(rotations) == {"/conn_bottom", "/conn_top"}
+    assert not angles_close(rotations["/conn_bottom"], rotations["/conn_top"], tol=1e-6)

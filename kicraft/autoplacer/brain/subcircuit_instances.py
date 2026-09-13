@@ -332,6 +332,7 @@ def _layout_from_artifact_payload(
     antenna_edge_intents = _parse_antenna_edge_intents(canonical)
     bbox = _parse_bbox(canonical, solved_components)
     score = _parse_score(canonical.get("score"))
+    replicated_from = _replicated_from_from_payload(subcircuit_id, canonical, metadata)
 
     artifact_paths = dict(metadata.get("artifact_paths", {}))
 
@@ -347,8 +348,38 @@ def _layout_from_artifact_payload(
         score=score,
         artifact_paths=artifact_paths,
         antenna_edge_intents=antenna_edge_intents,
+        replicated_from=replicated_from,
         frozen=True,
     )
+
+
+def _replicated_from_from_payload(
+    subcircuit_id,
+    canonical: dict[str, Any],
+    metadata: dict[str, Any],
+) -> str | None:
+    """Recover a replica's donor instance path from the artifact payloads.
+
+    The canonical solved-layout payload is authoritative (``remap_solved_layout``
+    writes ``replicated_from`` there); the artifact metadata carries the same
+    field for readers of metadata alone. When both are present they MUST agree --
+    a silent pick would let a replica claim two different donors and break the
+    parent orientation coupling that keys on this value.
+    """
+    canonical_value = canonical.get("replicated_from")
+    metadata_value = metadata.get("replicated_from")
+    if (
+        canonical_value
+        and metadata_value
+        and str(canonical_value) != str(metadata_value)
+    ):
+        raise ValueError(
+            "replica_metadata_conflict:"
+            f"{subcircuit_id.instance_path}"
+            f"(canonical={canonical_value!r} metadata={metadata_value!r})"
+        )
+    value = canonical_value or metadata_value
+    return str(value) if value else None
 
 
 def _subcircuit_id_from_metadata(metadata: dict[str, Any]):

@@ -21,7 +21,10 @@ _PROGRAM_HEADER = (
     "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
 )
 _REVIEW_DATE = "2026-09-09"
-_OPTIONAL_USB_PINS: dict[str, tuple[str, str]] = {}
+# Module recipes with a factory-supported native USB pair (S3-WROOM, C3).
+_NATIVE_USB_PINS: dict[str, tuple[str, str]] = {}
+# Fixed UART0 pins for those native modules, marked no-connect when unbound.
+_NATIVE_USB_UART_PINS: dict[str, tuple[str, str]] = {}
 _AUTO_RESET_BOOT_HIGH_PINS: dict[str, tuple[str, ...]] = {}
 _AUTO_RESET_SCHEMATIC = "https://dl.espressif.com/dl/schematics/esp32_devkitc_v4-sch-20180607a.pdf"
 _AUTO_RESET_TRANSISTOR_DATASHEET = "https://www.onsemi.com/pdf/datasheet/mmbt3904lt1-d.pdf"
@@ -72,9 +75,10 @@ def _module_recipe(
     boot_high_gpios: frozenset[int] = frozenset(),
 ) -> RecipeDefinition:
     fixed = {boot_gpio}
+    native_usb = usb_pins is not None
     if usb_pins:
         fixed.update(gpio for gpio, pin in gpio_to_pin.items() if pin in usb_pins)
-    internal_nets = ["en", "boot", "uart_tx", "uart_rx"]
+    internal_nets = ["en", "boot"] if native_usb else ["en", "boot", "uart_tx", "uart_rx"]
     parts = [
         Group(
             role="mcu",
@@ -142,13 +146,19 @@ def _module_recipe(
             footprint="Button_Switch_SMD:SW_SPST_TL3342",
             sheet_role="mcu",
         ),
-        Group(
-            role="program_header",
-            reference_prefix="J",
-            value="UART PROGRAM",
-            symbol="Connector_Generic:Conn_01x06",
-            footprint="Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
-            sheet_role="mcu",
+        *(
+            ()
+            if native_usb
+            else (
+                Group(
+                    role="program_header",
+                    reference_prefix="J",
+                    value="UART PROGRAM",
+                    symbol="Connector_Generic:Conn_01x06",
+                    footprint="Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+                    sheet_role="mcu",
+                ),
+            )
         ),
     ]
     pins = [
@@ -156,8 +166,14 @@ def _module_recipe(
         *(Pin(role="mcu", pin=pin, net="gnd") for pin in ground_pins),
         Pin(role="mcu", pin=en_pin, net="en"),
         Pin(role="mcu", pin=gpio_to_pin[boot_gpio], net="boot"),
-        Pin(role="mcu", pin=uart_tx_pin, net="uart_tx"),
-        Pin(role="mcu", pin=uart_rx_pin, net="uart_rx"),
+        *(
+            ()
+            if native_usb
+            else (
+                Pin(role="mcu", pin=uart_tx_pin, net="uart_tx"),
+                Pin(role="mcu", pin=uart_rx_pin, net="uart_rx"),
+            )
+        ),
         Pin(role="bulk_decoupling", pin="1", net="vdd"),
         Pin(role="bulk_decoupling", pin="2", net="gnd"),
         Pin(role="local_decoupling", pin="1", net="vdd"),
@@ -172,12 +188,18 @@ def _module_recipe(
         Pin(role="reset_button", pin="2", net="gnd"),
         Pin(role="boot_button", pin="1", net="boot"),
         Pin(role="boot_button", pin="2", net="gnd"),
-        Pin(role="program_header", pin="1", net="vdd"),
-        Pin(role="program_header", pin="2", net="gnd"),
-        Pin(role="program_header", pin="3", net="uart_tx"),
-        Pin(role="program_header", pin="4", net="uart_rx"),
-        Pin(role="program_header", pin="5", net="en"),
-        Pin(role="program_header", pin="6", net="boot"),
+        *(
+            ()
+            if native_usb
+            else (
+                Pin(role="program_header", pin="1", net="vdd"),
+                Pin(role="program_header", pin="2", net="gnd"),
+                Pin(role="program_header", pin="3", net="uart_tx"),
+                Pin(role="program_header", pin="4", net="uart_rx"),
+                Pin(role="program_header", pin="5", net="en"),
+                Pin(role="program_header", pin="6", net="boot"),
+            )
+        ),
     ]
     ports = [
         Port(name="vdd", direction="power"),
@@ -192,14 +214,15 @@ def _module_recipe(
     if usb_pins:
         ports.extend(
             (
-                Port(name="usb_dm", direction="bidirectional", required=False),
-                Port(name="usb_dp", direction="bidirectional", required=False),
+                Port(name="usb_dm", direction="bidirectional"),
+                Port(name="usb_dp", direction="bidirectional"),
             )
         )
-        parameters["native_usb"] = False
-        allowed["native_usb"] = (False, True)
+        parameters["native_usb"] = True
+        allowed["native_usb"] = (True,)
         internal_nets.extend(("usb_dm", "usb_dp"))
-        _OPTIONAL_USB_PINS[recipe] = usb_pins
+        _NATIVE_USB_PINS[recipe] = usb_pins
+        _NATIVE_USB_UART_PINS[recipe] = (uart_tx_pin, uart_rx_pin)
     _AUTO_RESET_BOOT_HIGH_PINS[recipe] = tuple(
         gpio_to_pin[gpio] for gpio in sorted(boot_high_gpios)
     )
@@ -250,7 +273,12 @@ def _module_recipe(
             ),
             Assertion(
                 code="mcu_programming_access",
-                message="UART, enable, boot, power, and ground reach a physical header",
+                message=(
+                    "Native USB D-/D+ reach one physical USB data connector, "
+                    "with enable and boot recovery access"
+                    if native_usb
+                    else "UART, enable, boot, power, and ground reach a physical header"
+                ),
             ),
         ),
         source_documents=(
@@ -985,26 +1013,29 @@ def expand_wave_a_mcu(resolved):
                 if allocation is None:
                     internal_nets.append(net)
                     pins.append(Pin(role="mcu", pin=pin, net=net))
-    usb_pins = _OPTIONAL_USB_PINS.get(definition.recipe)
+    usb_pins = _NATIVE_USB_PINS.get(definition.recipe)
     if usb_pins is not None:
-        if resolved.parameters["native_usb"]:
-            if not {"usb_dm", "usb_dp"} <= bindings.keys():
-                raise ValueError(
-                    f"recipe {definition.recipe} native_usb=True requires usb_dm and usb_dp bindings"
-                )
-            pins.extend(
-                (
-                    Pin(role="mcu", pin=usb_pins[0], net="usb_dm"),
-                    Pin(role="mcu", pin=usb_pins[1], net="usb_dp"),
-                )
+        if not {"usb_dm", "usb_dp"} <= bindings.keys():
+            raise ValueError(
+                f"recipe {definition.recipe} requires usb_dm and usb_dp bindings"
             )
-        else:
-            no_connects.extend(
-                (
-                    NoConnect(role="mcu", pin=usb_pins[0]),
-                    NoConnect(role="mcu", pin=usb_pins[1]),
-                )
+        pins.extend(
+            (
+                Pin(role="mcu", pin=usb_pins[0], net="usb_dm"),
+                Pin(role="mcu", pin=usb_pins[1], net="usb_dp"),
             )
+        )
+        # Fixed UART0 pins carry an application/bridge circuit only when the
+        # architecture binds them; otherwise native USB is the whole story.
+        for name, pin in zip(
+            ("uart_tx", "uart_rx"),
+            _NATIVE_USB_UART_PINS[definition.recipe],
+            strict=True,
+        ):
+            if name in bindings:
+                pins.append(Pin(role="mcu", pin=pin, net=name))
+            else:
+                no_connects.append(NoConnect(role="mcu", pin=pin))
     return expand_static_definition(
         definition.model_copy(
             update={

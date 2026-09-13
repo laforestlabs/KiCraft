@@ -178,6 +178,28 @@ _USB_PORT_ALIASES = {
     "usb_dp": ("USB_DP", "USB_D+", "USB_D_P", "D+"),
 }
 
+# Reviewed factory-native-programmable families: a new architecture must route
+# their USB pair to one physical data connector, never to a UART header.
+_NATIVE_USB_MCU_RECIPES = frozenset(
+    {
+        "esp32-s3-mini-1-minimal@1",
+        "esp32-s3-wroom-1-minimal@1",
+        "esp32-c3-mini-1-minimal@1",
+        "rp2040-minimal@2",
+    }
+)
+# Recipes whose expansion already carries the 22R MCU-side series pair, so a
+# companion connector must not add a second one.
+_MCU_OWNED_USB_SERIES_RECIPES = frozenset(
+    {
+        "esp32-s3-mini-1-minimal@1",
+        "esp32-s3-wroom-1-minimal@1",
+        "esp32-c3-mini-1-minimal@1",
+    }
+)
+# Reviewed USB data-connector recipes: expose both D-/D+ and a physical socket.
+_USB_DATA_CONNECTOR_RECIPES = frozenset({"usb-c-usb2-device@1"})
+
 
 def _net_identity(value: str) -> str:
     """Ignore naming separators without erasing electrical polarity."""
@@ -1026,6 +1048,98 @@ def _unowned_endpoint_diagnostics(
     ]
 
 
+def _complete_native_usb_companions(result: ResolutionResult) -> None:
+    """Require one USB data connector per native-USB MCU, with matching polarity.
+
+    Matching is by EQUALITY of both polarity-specific port bindings (and two
+    distinct nets), never by intersection of arbitrary bindings or shared GND.
+    One connector pair cannot serve two MCU USB peripherals.
+    """
+    native = [row for row in result.selections if row.recipe in _NATIVE_USB_MCU_RECIPES]
+    if not native:
+        return
+    connectors = [
+        row for row in result.selections if row.recipe in _USB_DATA_CONNECTOR_RECIPES
+    ]
+    used: dict[str, list[tuple]] = defaultdict(list)
+    for mcu in native:
+        requirement_id = mcu.requirement_ids[0] if mcu.requirement_ids else None
+        dm = mcu.port_bindings.get("usb_dm")
+        dp = mcu.port_bindings.get("usb_dp")
+        matches = [
+            connector
+            for connector in connectors
+            if dm
+            and dp
+            and dm != dp
+            and connector.port_bindings.get("usb_dm") == dm
+            and connector.port_bindings.get("usb_dp") == dp
+        ]
+        if len(matches) != 1:
+            result.blocking.append(
+                ResolutionDiagnostic(
+                    code="native_usb_connector_required",
+                    requirement_id=requirement_id,
+                    recipe=mcu.recipe,
+                    sheet=mcu.sheets.get("mcu"),
+                    message=(
+                        f"requirement {requirement_id!r}, recipe {mcu.recipe}, "
+                        f"sheet {mcu.sheets.get('mcu')!r}: native USB programming "
+                        "requires one physical USB data connector bound to the same "
+                        "usb_dm and usb_dp nets; a header, UART bridge, power-only "
+                        "USB-C sink or unrelated connector cannot satisfy it"
+                    ),
+                    evidence=[
+                        f"usb_dm={dm!r}",
+                        f"usb_dp={dp!r}",
+                        *(
+                            f"{row.recipe}.ports usb_dm={row.port_bindings.get('usb_dm')!r}, "
+                            f"usb_dp={row.port_bindings.get('usb_dp')!r}"
+                            for row in connectors
+                        ),
+                    ],
+                )
+            )
+            continue
+        used[matches[0].instance].append((mcu, matches[0], requirement_id))
+    for instance, users in used.items():
+        if len(users) > 1:
+            for mcu, _connector, requirement_id in users:
+                result.blocking.append(
+                    ResolutionDiagnostic(
+                        code="native_usb_bus_conflict",
+                        requirement_id=requirement_id,
+                        recipe=mcu.recipe,
+                        sheet=mcu.sheets.get("mcu"),
+                        message=(
+                            f"requirement {requirement_id!r}, recipe {mcu.recipe}, "
+                            f"sheet {mcu.sheets.get('mcu')!r}: one USB data "
+                            f"connector pair ({instance}) cannot serve two MCU "
+                            "native USB peripherals; give each MCU its own connector"
+                        ),
+                        evidence=[row.recipe for row, _c, _r in users],
+                    )
+                )
+            continue
+        mcu, connector, _requirement_id = users[0]
+        if mcu.recipe not in _MCU_OWNED_USB_SERIES_RECIPES:
+            continue
+        if connector.parameters.get("series_resistors") is False:
+            continue
+        connector.parameters["series_resistors"] = False
+        connector_requirement = (
+            connector.requirement_ids[0] if connector.requirement_ids else None
+        )
+        note = (
+            f"{connector_requirement}: series_resistors=False because {mcu.recipe} "
+            "owns the USB series pair"
+        )
+        result.assumptions.append(note)
+        for record in result.records:
+            if record.requirement_id == connector_requirement:
+                record.assumptions.append(note)
+
+
 def resolve_architecture_recipes(
     architecture: Architecture | dict,
     intent: dict | BaseModel | None = None,
@@ -1554,6 +1668,7 @@ def resolve_architecture_recipes(
                     ],
                 )
             )
+            result.blocking.extend(port_diagnostics)
             continue
         if port_diagnostics:
             result.blocking.extend(port_diagnostics)
@@ -1659,6 +1774,7 @@ def resolve_architecture_recipes(
                 update={"exact_part": exact_part, "ports": {**requirement.ports, **bindings}}
             )
         )
+    _complete_native_usb_companions(result)
     for net, owners in sorted(output_nets.items()):
         if len(owners) > 1:
             result.blocking.append(

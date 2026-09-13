@@ -14,6 +14,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from kicraft.autoplacer.brain.subcircuit_instances import (
+    _layout_from_artifact_payload,
+    load_solved_artifact,
+)
 from kicraft.autoplacer.brain.types import Component, Layer, Pad, Point
 from kicraft.cli._leaf_replication import (
     finalize_leaf_replication,
@@ -192,6 +198,39 @@ def test_materialize_sibling_writes_remapped_artifacts(tmp_path: Path):
     # required-by-compose files all present
     assert (sib_dir / "metadata.json").exists()
     assert (sib_dir / "debug.json").exists()
+    # The loaded sibling layout must expose its donor: parent compose couples
+    # replica orientations on this value.
+    loaded = load_solved_artifact(sib_dir)
+    assert loaded.layout.replicated_from == "/o1"
+
+
+def test_layout_replicated_from_reads_canonical_and_metadata():
+    layout = _layout_from_artifact_payload(
+        {"instance_path": "/o2", "replicated_from": "/o1"},
+        {},
+        {"components": {}, "replicated_from": "/o1"},
+    )
+    assert layout.replicated_from == "/o1"
+
+
+def test_layout_replicated_from_falls_back_to_metadata():
+    layout = _layout_from_artifact_payload(
+        {"instance_path": "/o2", "replicated_from": "/o1"}, {}, {}
+    )
+    assert layout.replicated_from == "/o1"
+    # A plain donor/leaf artifact has no donor identity at all.
+    plain = _layout_from_artifact_payload({"instance_path": "/o1"}, {}, {})
+    assert plain.replicated_from is None
+
+
+def test_layout_replicated_from_conflict_is_an_error():
+    """Two disagreeing donor claims must not be resolved silently."""
+    with pytest.raises(ValueError, match=r"^replica_metadata_conflict:/o2"):
+        _layout_from_artifact_payload(
+            {"instance_path": "/o2", "replicated_from": "/o1"},
+            {},
+            {"components": {}, "replicated_from": "/o9"},
+        )
 
 
 def test_finalize_refreshes_sibling_from_pinned_representative(tmp_path: Path):
@@ -253,6 +292,9 @@ def test_finalize_refreshes_sibling_from_pinned_representative(tmp_path: Path):
     assert refreshed["components"]["U2"]["pads"][0]["net"] == "IN2"
     assert refreshed["traces"][0]["net"] == "IN2"
     assert refreshed["instance_path"] == "/o2"
+    # The post-pin refresh must not lose the donor identity parent compose
+    # couples replica orientations on.
+    assert refreshed["replicated_from"] == "/o1"
     # The editor-facing routed board is (re)derived from the rep's pinned
     # board with the sibling's refs -- a sibling missing this file is
     # invisible to the manual layout editor.

@@ -6,9 +6,11 @@ All tests use synthetic data only; no pcbnew dependency.
 from __future__ import annotations
 
 import copy
+from types import SimpleNamespace
 
 
 from kicraft.autoplacer.brain.types import (
+    BlockRotationGeometry,
     BoardState,
     Component,
     Layer,
@@ -272,3 +274,120 @@ class TestSARefineScoreImprovement:
 
         # SA should return best-seen, which is >= initial
         assert final_score >= initial_score
+
+
+# ---------------------------------------------------------------------------
+# Coupled replica groups: a rotation proposal moves the whole group and a
+# rejected move restores every member's exact extents.
+
+
+def _replica_block(ref: str, *, donor: str | None = None) -> Component:
+    """Synthetic block with distinctive, non-square per-rotation extents."""
+    dims = {
+        0.0: (4.0, 2.0),
+        90.0: (2.0, 4.0),
+        180.0: (8.0, 6.0),
+        270.0: (6.0, 8.0),
+    }
+    comp = Component(
+        ref=ref,
+        value=ref,
+        pos=Point(20.0, 20.0),
+        rotation=0.0,
+        layer=Layer.FRONT,
+        width_mm=4.0,
+        height_mm=2.0,
+        kind="subcircuit",
+        body_center=Point(20.0, 20.0),
+        block_artifact_origin_offset=Point(2.0, 1.0),
+        block_rotation_geometry={
+            rot: BlockRotationGeometry(width_mm=w, height_mm=h)
+            for rot, (w, h) in dims.items()
+        },
+        block_replication_donor=donor,
+    )
+    return comp
+
+
+class _PrefersAngle:
+    """Scorer that rewards exactly one shared group angle."""
+
+    def __init__(self, comps: dict[str, Component], group: tuple[str, ...], angle: float):
+        self._comps = comps
+        self._group = group
+        self._angle = angle
+
+    def score(self, *_args):
+        angles = {float(self._comps[ref].rotation) for ref in self._group}
+        return SimpleNamespace(total=1.0 if angles == {self._angle} else 0.0)
+
+
+class TestSARefineReplicaGroups:
+    """``_sa_refine`` moves a coupled replica group as one unit."""
+
+    def _solver(self, comps, seed: int) -> tuple[PlacementSolver, BoardState]:
+        state = _make_board_state(comps)
+        solver = _make_solver(state, seed=seed)
+        return solver, state
+
+    def test_group_rotation_move_is_accepted_for_every_member(self):
+        comps = {
+            "BLOCK_A": _replica_block("BLOCK_A"),
+            "BLOCK_B": _replica_block("BLOCK_B", donor="BLOCK_A"),
+        }
+        solver, state = self._solver(comps, seed=7)
+        scorer = _PrefersAngle(comps, ("BLOCK_A", "BLOCK_B"), 90.0)
+
+        result = solver._sa_refine(
+            comps,
+            state,
+            scorer,
+            max_iters=200,
+            init_temp=0.001,
+            cooling_rate=1.0,
+            swap_prob=0.0,
+            rotation_prob=1.0,
+        )
+
+        assert result["BLOCK_A"].rotation == result["BLOCK_B"].rotation == 90.0
+        for ref in ("BLOCK_A", "BLOCK_B"):
+            assert (result[ref].width_mm, result[ref].height_mm) == (2.0, 4.0)
+
+    def test_rejected_group_rotation_restores_every_member_extents(self):
+        """A rejected move must roll back all members, not just the proposer."""
+        comps = {
+            "BLOCK_A": _replica_block("BLOCK_A"),
+            "BLOCK_B": _replica_block("BLOCK_B", donor="BLOCK_A"),
+        }
+        solver, state = self._solver(comps, seed=11)
+        group = ("BLOCK_A", "BLOCK_B")
+
+        class _RejectRotations:
+            def __init__(self):
+                self.group_move_scores = 0
+
+            def score(self, *_args):
+                angles = {float(comps[ref].rotation) for ref in group}
+                if len(angles) == 1 and angles != {0.0}:
+                    self.group_move_scores += 1
+                return SimpleNamespace(total=100.0 if angles == {0.0} else 0.0)
+
+        scorer = _RejectRotations()
+
+        solver._sa_refine(
+            comps,
+            state,
+            scorer,
+            max_iters=200,
+            init_temp=0.001,
+            cooling_rate=1.0,
+            swap_prob=0.0,
+            rotation_prob=1.0,
+        )
+
+        # The group really was moved together before each rejection...
+        assert scorer.group_move_scores > 0
+        # ...and every member came back to its exact initial rotation/extents.
+        for ref in group:
+            assert comps[ref].rotation == 0.0
+            assert (comps[ref].width_mm, comps[ref].height_mm) == (4.0, 2.0)

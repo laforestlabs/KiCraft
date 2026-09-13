@@ -157,3 +157,35 @@ def test_end_to_end_build_then_remap():
     out = remap_solved_layout(rep_layout, ref_map, net_map, {"instance_path": "/Y"})
     assert out["traces"][0]["net"] == "STEP_Y"
     assert set(out["components"]) == {"U2", "C2"}
+
+
+def test_remapped_layout_loads_with_donor_identity():
+    """A sibling's canonical layout carries the donor path the parent keys on.
+
+    ``_layout_from_artifact_payload`` must surface ``replicated_from`` from the
+    canonical solved layout (with the sibling metadata agreeing), otherwise
+    parent compose cannot tell which blocks are identical copies and replica
+    orientations drift apart again.
+    """
+    from kicraft.autoplacer.brain.subcircuit_instances import (
+        _layout_from_artifact_payload,
+    )
+
+    rep_layout = {
+        "instance_path": "/STEPPER_AXIS_X",
+        "components": {},
+        "traces": [],
+        "vias": [],
+        "interface_anchors": [],
+        "ports": [],
+    }
+    out = remap_solved_layout(rep_layout, {}, {}, {"instance_path": "/STEPPER_AXIS_Y"})
+    assert out["replicated_from"] == "/STEPPER_AXIS_X"
+
+    layout = _layout_from_artifact_payload(
+        {"instance_path": "/STEPPER_AXIS_Y", "replicated_from": "/STEPPER_AXIS_X"},
+        {},
+        out,
+    )
+    assert layout.replicated_from == "/STEPPER_AXIS_X"
+    assert layout.subcircuit_id.instance_path == "/STEPPER_AXIS_Y"

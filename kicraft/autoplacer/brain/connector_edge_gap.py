@@ -22,6 +22,13 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+# A TH part whose body (courtyard + pad copper) is at least this deep in BOTH
+# axes has a directional body: an unmeasurable opening on one is a real
+# measurement gap, not a mouthless strip. Calibrated between a bare 2.54 mm
+# pin-header strip (3.63 mm) and a 2P screw terminal (7.89 mm). Shared with
+# compose's pre-routing orientation gate so the two cannot drift.
+MIN_DIRECTIONAL_DEPTH_MM = 4.0
+
 _SIDES = ("left", "right", "top", "bottom")
 
 # Ref-designator classes that get zoned to an edge for USER ACCESS, not for an
@@ -213,8 +220,8 @@ def stranded(gaps: list[EdgeGap]) -> list[EdgeGap]:
 class FacingVerdict:
     ref: str
     edge: str
-    status: str  # "ok" | "misoriented" | "unknown_mouth"
-    opening_board_deg: float | None  # board-space mouth angle; None = undetectable
+    status: str  # "ok" | "misoriented" | "unknown_mouth" | "unverified_directional"
+    opening_board_deg: float | None  # board-space mouth angle; None = unmeasured
     outward_deg: float  # board-space outward angle of the assigned edge
 
 
@@ -223,7 +230,7 @@ def connector_facings(
     component_zones: dict[str, Any] | None,
     *,
     tol_deg: float = 5.0,
-    min_directional_depth_mm: float = 4.0,
+    min_directional_depth_mm: float = MIN_DIRECTIONAL_DEPTH_MM,
 ) -> list[FacingVerdict]:
     """Does each edge-zoned connector's wire-entry mouth face OFF-board?
 
@@ -241,6 +248,14 @@ def connector_facings(
                          footprint (add a "PCB Edge" Dwgs.User marker) -- these
                          parts are exactly one silent inversion away from
                          shipping misoriented.
+        unverified_directional
+                      -> a recognized horizontal screw/plug terminal row with
+                         no opening datum (unreviewed variant, no marker).
+                         Its body overhang is NOT evidence of its mouth, so
+                         the gate reports it as unmeasured rather than
+                         asserting a direction it cannot measure. A zoned ref
+                         that has no footprint on the board reports the same
+                         status: it cannot be verified either.
 
     Shallow-bodied undetectable parts (bare pin-header strips, vertical
     receptacles) are omitted: they have no meaningful mouth to verify. The
@@ -252,6 +267,7 @@ def connector_facings(
     import pcbnew
 
     from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+    from kicraft.parts_library.footprint_opening import is_horizontal_terminal
 
     from .types import Layer, angles_close, edge_outward_angle, opening_board_angle
 
@@ -264,6 +280,12 @@ def connector_facings(
             continue
         fp = fps.get(ref)
         if fp is None:
+            out.append(
+                FacingVerdict(
+                    ref, edge, "unverified_directional", None,
+                    edge_outward_angle(Layer.FRONT, edge),
+                )
+            )
             continue
         if _access_only_connector(ref, fp):
             continue
@@ -271,6 +293,16 @@ def connector_facings(
         outward = edge_outward_angle(layer, edge)
         opening_local = detect_opening_direction(fp)
         if opening_local is None:
+            name = ""
+            try:
+                name = str(fp.GetFPID().GetLibItemName())
+            except Exception:  # noqa: BLE001 -- API shape varies across KiCad
+                name = ""
+            if is_horizontal_terminal(name):
+                out.append(
+                    FacingVerdict(ref, edge, "unverified_directional", None, outward)
+                )
+                continue
             has_hole = any(p.HasHole() for p in fp.Pads())
             bb = _mouth_bbox(fp, pcbnew)
             depth = min(

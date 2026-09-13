@@ -262,21 +262,63 @@ def _enum_to_layer(layer: Layer) -> int:
     return pcbnew.B_Cu if layer == Layer.BACK else pcbnew.F_Cu
 
 
+def _footprint_item_name(fp) -> str:
+    """Bare footprint name ("TerminalBlock_Phoenix_MKDS-1,5-2_...") from the
+    loaded FPID. Never reads the ref or the user Value: orientation must come
+    from the physical footprint, not from text a model can rewrite."""
+    try:
+        return str(fp.GetFPID().GetLibItemName())
+    except Exception:  # noqa: BLE001 -- API shape varies across KiCad
+        return ""
+
+
 def detect_opening_direction(fp) -> float | None:
     """Detect which direction the connector opening faces, in LOCAL coords.
 
-    Detects the board-space opening direction by comparing pad bbox to body
-    bbox (courtyard + fab graphics) — all in board-space coords straight from
-    pcbnew, no rotation math.  Then converts to local with one addition:
-    local_angle = (board_angle + rotation) % 360.
+    Sources, in priority order:
 
-    Returns 0/90/180/270 in local coords, or None.
+    1. An explicit ``PCB Edge``/``Board Edge`` Dwgs.User marker -- the
+       footprint author's declaration, authoritative when present.
+    2. The reviewed stock-footprint table (``kicraft.parts_library.
+       footprint_opening``) for a known horizontal screw terminal. Boards
+       synthesized before the loader stamped that marker, and boards whose
+       footprint was copied in already-loaded, carry none; the datum is
+       physical family metadata, so measuring it here is not a fallback guess.
+    3. Body (courtyard + fab) overhang / pad-cluster asymmetry, for every
+       other connector type: a USB/edge connector's shell overhangs its pins
+       toward the mating mouth.
+
+    A known horizontal terminal with NO datum (an unreviewed variant) stops at
+    None: its rear-body asymmetry is not evidence of its mouth, and a tuned
+    threshold that flips this geometry is a coin flip on the next one.
+
+    Board-space measurements come straight from pcbnew; the single conversion
+    to local coords is ``local = (board + rotation) % 360``. Returns
+    0/90/180/270 in local coords, or None.
     """
+    from kicraft.parts_library.footprint_opening import (
+        explicit_edge_marker_direction,
+        is_horizontal_terminal,
+        reviewed_connector_opening,
+    )
+
     # --- Board-space pad bbox ---
     pad_xs = [pcbnew.ToMM(p.GetPosition().x) for p in fp.Pads()]
     pad_ys = [pcbnew.ToMM(p.GetPosition().y) for p in fp.Pads()]
     if not pad_xs:
         return None
+
+    # (1) Explicit "PCB Edge" / "Board Edge" marker on Dwgs.User.
+    marker_local = explicit_edge_marker_direction(pcbnew, fp)
+    if marker_local is not None:
+        return marker_local
+
+    footprint_name = _footprint_item_name(fp)
+
+    # (2) Reviewed stock-terminal family datum.
+    reviewed = reviewed_connector_opening(footprint_name)
+    if reviewed is not None:
+        return reviewed[0]
 
     # --- Board-space body bbox from courtyard + fab ---
     body_xs, body_ys = [], []
@@ -298,61 +340,43 @@ def detect_opening_direction(fp) -> float | None:
     pad_cx = (min(pad_xs) + max(pad_xs)) / 2
     pad_cy = (min(pad_ys) + max(pad_ys)) / 2
 
-    opening_board = None
+    # (3) A horizontal screw terminal whose datum is unreviewed has no
+    # measurable mouth here -- stop instead of guessing from its body.
+    if is_horizontal_terminal(footprint_name):
+        return None
 
-    # (1) Explicit "PCB Edge" / "Board Edge" marker on Dwgs.User -- the
-    # footprint author telling us exactly where the board edge belongs.
-    # Authoritative when present (most vendor USB footprints carry it).
-    for item in fp.GraphicalItems():
-        if item.GetLayer() != pcbnew.Dwgs_User:
-            continue
-        try:
-            text = item.GetText()
-        except Exception:
-            continue
-        if not text or "edge" not in text.lower():
-            continue
-        tp = item.GetPosition()
-        off_x = pcbnew.ToMM(tp.x) - pad_cx
-        off_y = pcbnew.ToMM(tp.y) - pad_cy
-        if abs(off_x) > abs(off_y):
-            opening_board = 0 if off_x > 0 else 180
-        else:
-            opening_board = 90 if off_y > 0 else 270
-        break
-
-    # (2) Body (courtyard + fab) extends asymmetrically past the pad cluster:
+    # (4) Body (courtyard + fab) extends asymmetrically past the pad cluster:
     # a USB/edge connector's shell overhangs its pins toward the mating mouth.
-    if opening_board is None:
-        extensions = {
-            0: max(body_xs) - max(pad_xs),  # +X (right)
-            180: min(pad_xs) - min(body_xs),  # -X (left)
-            90: max(body_ys) - max(pad_ys),  # +Y (down)
-            270: min(pad_ys) - min(body_ys),  # -Y (up)
-        }
-        ranked = sorted(extensions.items(), key=lambda kv: kv[1], reverse=True)
-        best_dir, best_ext = ranked[0]
-        _, second_ext = ranked[1]
-        if best_ext >= 1.0 and (best_ext - second_ext) >= 0.5:
-            opening_board = best_dir
-        else:
-            # Axis-pair fallback: a wide-shell connector (USB-A class) has
-            # large SYMMETRIC lateral skirts that tie the global runner-up
-            # and mask a decisive fore/aft mouth overhang (KC-3WN46Z: 2.41
-            # vs 1.70 fore/aft lost to 1.95 laterals by 0.04mm). The mouth
-            # question is fore-vs-aft, so compare each direction against its
-            # 180-degree opposite; fire only when exactly one axis is
-            # decisive, keeping genuinely ambiguous bodies undetected.
-            asym = {d: extensions[d] - extensions[(d + 180) % 360]
-                    for d in (0, 90, 180, 270)}
-            x_dir = 0 if asym[0] >= asym[180] else 180
-            y_dir = 90 if asym[90] >= asym[270] else 270
-            x_decisive = asym[x_dir] >= 0.5 and extensions[x_dir] >= 1.0
-            y_decisive = asym[y_dir] >= 0.5 and extensions[y_dir] >= 1.0
-            if x_decisive != y_decisive:
-                opening_board = x_dir if x_decisive else y_dir
+    extensions = {
+        0: max(body_xs) - max(pad_xs),  # +X (right)
+        180: min(pad_xs) - min(body_xs),  # -X (left)
+        90: max(body_ys) - max(pad_ys),  # +Y (down)
+        270: min(pad_ys) - min(body_ys),  # -Y (up)
+    }
+    ranked = sorted(extensions.items(), key=lambda kv: kv[1], reverse=True)
+    best_dir, best_ext = ranked[0]
+    _, second_ext = ranked[1]
+    opening_board = None
+    if best_ext >= 1.0 and (best_ext - second_ext) >= 0.5:
+        opening_board = best_dir
+    else:
+        # Axis-pair fallback: a wide-shell connector (USB-A class) has
+        # large SYMMETRIC lateral skirts that tie the global runner-up
+        # and mask a decisive fore/aft mouth overhang (KC-3WN46Z: 2.41
+        # vs 1.70 fore/aft lost to 1.95 laterals by 0.04mm). The mouth
+        # question is fore-vs-aft, so compare each direction against its
+        # 180-degree opposite; fire only when exactly one axis is
+        # decisive, keeping genuinely ambiguous bodies undetected.
+        asym = {d: extensions[d] - extensions[(d + 180) % 360]
+                for d in (0, 90, 180, 270)}
+        x_dir = 0 if asym[0] >= asym[180] else 180
+        y_dir = 90 if asym[90] >= asym[270] else 270
+        x_decisive = asym[x_dir] >= 0.5 and extensions[x_dir] >= 1.0
+        y_decisive = asym[y_dir] >= 0.5 and extensions[y_dir] >= 1.0
+        if x_decisive != y_decisive:
+            opening_board = x_dir if x_decisive else y_dir
 
-    # (3) Pad cluster sits off-center inside the body: the pins/tail crowd one
+    # (5) Pad cluster sits off-center inside the body: the pins/tail crowd one
     # end and the mouth is the far side. Catches connectors whose courtyard is
     # near-symmetric but whose pads are clearly biased toward the back.
     if opening_board is None:

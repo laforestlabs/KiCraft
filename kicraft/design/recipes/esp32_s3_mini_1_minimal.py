@@ -103,19 +103,17 @@ ESP32_S3_MINI_1_MINIMAL = RecipeDefinition(
     ),
     protected_aliases=("ESP32-S3", "ESP32-S3 module"),
     required_sheet_roles=("mcu",),
-    parameter_defaults={"native_usb": False},
-    allowed_parameters={"native_usb": (False, True)},
+    parameter_defaults={"native_usb": True},
+    allowed_parameters={"native_usb": (True,)},
     ports=(
         Port(name="vdd", direction="power"),
         Port(name="gnd", direction="power"),
-        Port(name="usb_dm", direction="bidirectional", required=False),
-        Port(name="usb_dp", direction="bidirectional", required=False),
+        Port(name="usb_dm", direction="bidirectional"),
+        Port(name="usb_dp", direction="bidirectional"),
     ),
     internal_nets=(
         "en_rc",
         "boot_gpio0",
-        "uart0_tx",
-        "uart0_rx",
         "usb_dm_raw",
         "usb_dp_raw",
     ),
@@ -186,17 +184,6 @@ ESP32_S3_MINI_1_MINIMAL = RecipeDefinition(
             footprint="Button_Switch_SMD:SW_SPST_TL3342",
             sheet_role="mcu",
         ),
-        Group(
-            role="program_header",
-            reference_prefix="J",
-            value="ESP32-S3 UART PROGRAM",
-            symbol="Connector_Generic:Conn_01x06",
-            footprint=(
-                "Connector_PinHeader_2.54mm:"
-                "PinHeader_1x06_P2.54mm_Vertical"
-            ),
-            sheet_role="mcu",
-        ),
     ),
     pins=(
         Pin(role="mcu", pin="3", net="vdd"),
@@ -217,17 +204,11 @@ ESP32_S3_MINI_1_MINIMAL = RecipeDefinition(
         Pin(role="reset_button", pin="2", net="gnd"),
         Pin(role="boot_button", pin="1", net="boot_gpio0"),
         Pin(role="boot_button", pin="2", net="gnd"),
-        Pin(role="mcu", pin="39", net="uart0_tx"),
-        Pin(role="mcu", pin="40", net="uart0_rx"),
-        Pin(role="program_header", pin="1", net="vdd"),
-        Pin(role="program_header", pin="2", net="gnd"),
-        Pin(role="program_header", pin="3", net="uart0_tx"),
-        Pin(role="program_header", pin="4", net="uart0_rx"),
-        Pin(role="program_header", pin="5", net="en_rc"),
-        Pin(role="program_header", pin="6", net="boot_gpio0"),
     ),
     no_connects=(
         NoConnect(role="mcu", pin="7"),
+        NoConnect(role="mcu", pin="39"),
+        NoConnect(role="mcu", pin="40"),
         NoConnect(role="mcu", pin="41"),
         NoConnect(role="mcu", pin="44"),
     ),
@@ -275,7 +256,10 @@ ESP32_S3_MINI_1_MINIMAL = RecipeDefinition(
         ),
         Assertion(
             code="esp32_s3_programming_access",
-            message="UART0, EN, GPIO0, VDD, and GND reach the programming header",
+            message=(
+                "Native USB D-/D+ (GPIO19/GPIO20) reach one physical USB data "
+                "connector, with BOOT and EN/RESET recovery access"
+            ),
         ),
     ),
     source_documents=(
@@ -300,51 +284,41 @@ ESP32_S3_MINI_1_MINIMAL = RecipeDefinition(
 def expand_esp32_s3_mini_1(
     resolved: ResolvedRecipeSelection,
 ):
-    """Materialize optional USB and no-connect every unallocated application GPIO."""
-    native_usb = bool(resolved.parameters["native_usb"])
+    """Materialize the native-USB series pair and no-connect unallocated GPIOs."""
     selection = resolved.selection
-    if native_usb and not {"usb_dm", "usb_dp"} <= set(selection.port_bindings):
-        raise ValueError(
-            f"recipe {_RECIPE_ID} native_usb=True requires usb_dm and usb_dp bindings"
-        )
     parts = list(ESP32_S3_MINI_1_MINIMAL.parts)
     pins = list(ESP32_S3_MINI_1_MINIMAL.pins)
     no_connects = list(ESP32_S3_MINI_1_MINIMAL.no_connects)
-    if native_usb:
-        parts.extend(
-            [
-                Group(
-                    role="usb_dm_series",
-                    reference_prefix="R",
-                    value="22R",
-                    symbol="Device:R",
-                    footprint="Resistor_SMD:R_0603_1608Metric",
-                    sheet_role="mcu",
-                ),
-                Group(
-                    role="usb_dp_series",
-                    reference_prefix="R",
-                    value="22R",
-                    symbol="Device:R",
-                    footprint="Resistor_SMD:R_0603_1608Metric",
-                    sheet_role="mcu",
-                ),
-            ]
-        )
-        pins.extend(
-            [
-                Pin(role="mcu", pin="23", net="usb_dm_raw"),
-                Pin(role="usb_dm_series", pin="1", net="usb_dm_raw"),
-                Pin(role="usb_dm_series", pin="2", net="usb_dm"),
-                Pin(role="mcu", pin="24", net="usb_dp_raw"),
-                Pin(role="usb_dp_series", pin="1", net="usb_dp_raw"),
-                Pin(role="usb_dp_series", pin="2", net="usb_dp"),
-            ]
-        )
-    else:
-        no_connects.extend(
-            [NoConnect(role="mcu", pin="23"), NoConnect(role="mcu", pin="24")]
-        )
+    parts.extend(
+        [
+            Group(
+                role="usb_dm_series",
+                reference_prefix="R",
+                value="22R",
+                symbol="Device:R",
+                footprint="Resistor_SMD:R_0603_1608Metric",
+                sheet_role="mcu",
+            ),
+            Group(
+                role="usb_dp_series",
+                reference_prefix="R",
+                value="22R",
+                symbol="Device:R",
+                footprint="Resistor_SMD:R_0603_1608Metric",
+                sheet_role="mcu",
+            ),
+        ]
+    )
+    pins.extend(
+        [
+            Pin(role="mcu", pin="23", net="usb_dm_raw"),
+            Pin(role="usb_dm_series", pin="1", net="usb_dm_raw"),
+            Pin(role="usb_dm_series", pin="2", net="usb_dm"),
+            Pin(role="mcu", pin="24", net="usb_dp_raw"),
+            Pin(role="usb_dp_series", pin="1", net="usb_dp_raw"),
+            Pin(role="usb_dp_series", pin="2", net="usb_dp"),
+        ]
+    )
     allocated = {allocation.pin for allocation in selection.pin_allocations}
     fixed = {pin.pin for pin in pins if pin.role == "mcu"}
     already_no_connect = {

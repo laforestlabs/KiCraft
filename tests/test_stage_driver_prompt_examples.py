@@ -944,10 +944,10 @@ def test_typed_signal_boundary_check_runs_after_existing_peer_completion():
     payload = {
         "sheets": [
             {"name": "MCU", "stem": "MCU", "function": "ESP32-S3 controller"},
-            {"name": "HEADER", "stem": "HEADER", "function": "Native USB header"},
+            {"name": "USB", "stem": "USB", "function": "USB-C device connector"},
         ],
-        "rail_voltages": {"+3V3": 3.3},
-        "power_nets": ["+3V3", "GND"],
+        "rail_voltages": {"+3V3": 3.3, "VBUS": 5.0},
+        "power_nets": ["+3V3", "VBUS", "GND"],
         "inter_sheet_nets": [],
         "requirements": [
             {
@@ -961,12 +961,15 @@ def test_typed_signal_boundary_check_runs_after_existing_peer_completion():
                 "interfaces": ["usb_device"],
             },
             {
-                "id": "header",
-                "sheet": "HEADER",
+                # A native-family MCU's USB pair must reach a physical USB data
+                # connector: a bare header no longer satisfies the contract.
+                "id": "usb_connector",
+                "sheet": "USB",
                 "role": "connector",
-                "family": "pin-header",
+                "family": "usb-c-usb2-device",
+                "exact_part": "USB-C-USB2-DEVICE",
                 "functional_blocks": ["USB"],
-                "ports": {"pin1": "D_P", "pin2": "D_N", "pin3": "GND"},
+                "ports": {"vbus": "VBUS", "gnd": "GND", "usb_dp": "D_P", "usb_dm": "D_N"},
             },
         ],
     }
@@ -985,7 +988,8 @@ def test_typed_signal_boundary_check_runs_after_existing_peer_completion():
     assert {
         row["name"]: {endpoint["sheet"] for endpoint in row["endpoints"]}
         for row in normalized["inter_sheet_nets"]
-    } == {net: {"MCU", "HEADER"} for net in ("D_P", "D_N")}
+        if row["name"] in ("D_P", "D_N")
+    } == {net: {"MCU", "USB"} for net in ("D_P", "D_N")}
     assert normalized["recipe_selections"][0]["port_bindings"]["usb_dp"] == "D_P"
     assert normalized["recipe_selections"][0]["port_bindings"]["usb_dm"] == "D_N"
 

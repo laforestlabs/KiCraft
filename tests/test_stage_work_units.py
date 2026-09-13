@@ -1414,7 +1414,12 @@ def test_bom_unit_prunes_exact_recipe_duplicate_but_rejects_conflict():
             "recipe": "esp32-s3-mini-1-minimal@1",
             "instance": "mcu_core",
             "sheets": {"mcu": "A"},
-            "port_bindings": {"gnd": "GND", "vdd": "+3V3"},
+            "port_bindings": {
+                "gnd": "GND",
+                "vdd": "+3V3",
+                "usb_dm": "USB_D_N",
+                "usb_dp": "USB_D_P",
+            },
             "requirement_ids": ["mcu_core"],
         }
     ]

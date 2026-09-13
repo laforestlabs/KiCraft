@@ -68,8 +68,18 @@ def load_footprint(
         normalize_pth_pads_for_fab,
         repair_malformed_courtyard,
     )
+    from kicraft.parts_library.footprint_opening import (
+        annotate_connector_opening,
+    )
 
     repair_malformed_courtyard(fp)
+    if annotate_connector_opening(pcbnew_mod, fp, name):
+        print(
+            f"footprint {library}:{name}: stamped the reviewed wire-entry "
+            f"'PCB Edge' marker (stock horizontal screw terminal; body "
+            f"overhang does not identify its mouth)",
+            file=sys.stderr,
+        )
     pth_changes = normalize_pth_pads_for_fab(fp)
     if pth_changes:
         print(

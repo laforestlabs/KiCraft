@@ -312,3 +312,302 @@ def test_validate_part_quiet_on_marked_connector(capsys):
     )
     assert rc == 0
     assert "no detectable opening" not in capsys.readouterr().err
+
+
+# --- KC-DZQ76R: the stock MKDS horizontal terminal family ----------------
+#
+# The stock Phoenix MKDS-1,5 horizontal terminal has no "PCB Edge" marker and
+# its rear courtyard reaches 0.61mm further from the pad row than the front,
+# which beat the body-overhang heuristic's 0.5mm threshold: the placer aimed
+# the screwdriver mouths INTO the board. The reviewed datum is +Y/90deg.
+
+STOCK_LIB = Path("/usr/share/kicad/footprints/TerminalBlock_Phoenix.pretty")
+
+
+def _mkds_name(n: int) -> str:
+    return (
+        f"TerminalBlock_Phoenix_MKDS-1,5-{n}_1x{n:02d}_P5.00mm_Horizontal"
+    )
+
+
+def _stock_terminal(n: int):
+    pcbnew = pytest.importorskip("pcbnew")
+    if not STOCK_LIB.is_dir():
+        pytest.skip("stock TerminalBlock_Phoenix library not installed")
+    fp = pcbnew.FootprintLoad(str(STOCK_LIB), _mkds_name(n))
+    assert fp is not None, f"{_mkds_name(n)} missing from {STOCK_LIB}"
+    return pcbnew, fp
+
+
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+def test_mkds_family_opening_is_the_wire_face(count):
+    """Every count the screw-terminal lowerer emits (2..12) reads +Y/90deg.
+
+    The reviewed entry is also the load-time annotation datum, so placement,
+    the fab gate and the stamped marker cannot disagree.
+    """
+    from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+    from kicraft.parts_library.footprint_opening import (
+        is_horizontal_terminal,
+        reviewed_connector_opening,
+    )
+
+    pcbnew, fp = _stock_terminal(count)
+    name = _mkds_name(count)
+    assert is_horizontal_terminal(name)
+    opening_deg, (marker_x, marker_y) = reviewed_connector_opening(name)
+    assert opening_deg == 90.0
+    # Marker sits on the family's front Fab datum (y=+4.6mm), centred between
+    # the first and last screw pad (pads at 0, 5.00, ... mm).
+    assert marker_y == 4.6
+    assert marker_x == (count - 1) * 5.00 / 2
+    assert detect_opening_direction(fp) == 90.0
+    # Local direction is invariant to board orientation.
+    for rot in (90.0, 180.0, 270.0):
+        fp.SetOrientationDegrees(rot)
+        assert detect_opening_direction(fp) == 90.0
+
+
+def test_annotate_adds_marker_once_and_preserves_an_explicit_one():
+    from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+    from kicraft.parts_library.footprint_opening import annotate_connector_opening
+
+    pcbnew, fp = _stock_terminal(4)
+    name = _mkds_name(4)
+    assert annotate_connector_opening(pcbnew, fp, name) is True
+    markers = [
+        i for i in fp.GraphicalItems()
+        if i.GetLayer() == pcbnew.Dwgs_User and "edge" in i.GetText().lower()
+    ]
+    assert len(markers) == 1
+    # Idempotent: a second call sees the marker and adds nothing.
+    assert annotate_connector_opening(pcbnew, fp, name) is False
+    assert len([
+        i for i in fp.GraphicalItems()
+        if i.GetLayer() == pcbnew.Dwgs_User and "edge" in i.GetText().lower()
+    ]) == 1
+
+    # An author-declared marker is authoritative: a *different* direction is
+    # left exactly as written, not overwritten with the reviewed datum.
+    pcbnew2, fp2 = _stock_terminal(4)
+    author = pcbnew2.PCB_TEXT(fp2)
+    author.SetText("Board Edge")
+    author.SetLayer(pcbnew2.Dwgs_User)
+    author.SetPosition(
+        pcbnew2.VECTOR2I(pcbnew2.FromMM(7.5), pcbnew2.FromMM(-4.6))
+    )
+    fp2.Add(author)
+    assert annotate_connector_opening(pcbnew2, fp2, name) is False
+    assert detect_opening_direction(fp2) == 270.0
+
+
+def test_annotation_rejects_contradictory_markers():
+    from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+    from kicraft.parts_library.footprint_opening import (
+        annotate_connector_opening,
+        explicit_edge_marker_direction,
+    )
+
+    pcbnew, fp = _stock_terminal(4)
+    for y in (4.6, -4.6):
+        text = pcbnew.PCB_TEXT(fp)
+        text.SetText("PCB Edge")
+        text.SetLayer(pcbnew.Dwgs_User)
+        text.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(7.5), pcbnew.FromMM(y)))
+        fp.Add(text)
+
+    with pytest.raises(ValueError, match="contradictory"):
+        explicit_edge_marker_direction(pcbnew, fp)
+    with pytest.raises(ValueError, match="contradictory"):
+        annotate_connector_opening(pcbnew, fp, _mkds_name(4))
+    with pytest.raises(ValueError, match="contradictory"):
+        detect_opening_direction(fp)
+
+
+def test_unreviewed_horizontal_terminal_is_unmeasured():
+    """A horizontal terminal whose actual model was never reviewed must NOT be
+    guessed at from its body: asymmetry is not evidence of a mouth."""
+    from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+    from kicraft.parts_library.footprint_opening import (
+        is_horizontal_terminal,
+        reviewed_connector_opening,
+    )
+
+    pcbnew, _ = _stock_terminal(2)  # 5.00mm family (reviewed)
+    unknown = "TerminalBlock_Phoenix_MKDS-1,5-2-5.08_1x02_P5.08mm_Horizontal"
+    assert is_horizontal_terminal(unknown)
+    assert reviewed_connector_opening(unknown) is None
+    other = pcbnew.FootprintLoad(str(STOCK_LIB), unknown)
+    assert other is not None
+    assert detect_opening_direction(other) is None
+
+
+def test_vertical_terminal_is_not_a_directional_terminal():
+    from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+    from kicraft.parts_library.footprint_opening import is_horizontal_terminal
+
+    vertical = (
+        "TerminalBlock_Phoenix_PTSM-0,5-2-2,5-V-SMD_1x02-1MP_P2.50mm_Vertical"
+    )
+    assert not is_horizontal_terminal(vertical)
+    assert not is_horizontal_terminal("Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical")
+    assert not is_horizontal_terminal("Battery_Holder_Keystone_3001")
+    pcbnew = pytest.importorskip("pcbnew")
+    if not STOCK_LIB.is_dir():
+        pytest.skip("stock TerminalBlock_Phoenix library not installed")
+    fp = pcbnew.FootprintLoad(str(STOCK_LIB), vertical)
+    assert fp is not None
+    # Vertical terminals keep whatever the geometric heuristics say (they are
+    # not gated on a family datum); the point is only that they are not
+    # *classified* as directional terminals.
+    detect_opening_direction(fp)
+
+
+def _mkds_board(
+    tmp_path: Path,
+    *,
+    count: int,
+    rotation: float,
+    edge: str,
+    back: bool = False,
+    ref: str = "J2",
+    name: str | None = None,
+) -> Path:
+    """Real board: one MKDS terminal, an outline, and its edge zone."""
+    pcbnew = pytest.importorskip("pcbnew")
+    if not STOCK_LIB.is_dir():
+        pytest.skip("stock TerminalBlock_Phoenix library not installed")
+    fp_name = name or _mkds_name(count)
+    fp = pcbnew.FootprintLoad(str(STOCK_LIB), fp_name)
+    assert fp is not None, f"{fp_name} missing from {STOCK_LIB}"
+    board = pcbnew.CreateEmptyBoard()
+    fp.SetReference(ref)
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(150), pcbnew.FromMM(100)))
+    board.Add(fp)
+    if back:
+        fp.Flip(fp.GetPosition(), False)
+    fp.SetOrientationDegrees(rotation)
+    rect = pcbnew.PCB_SHAPE(board)
+    rect.SetShape(pcbnew.SHAPE_T_RECT)
+    rect.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(130), pcbnew.FromMM(80)))
+    rect.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(170), pcbnew.FromMM(120)))
+    rect.SetLayer(pcbnew.Edge_Cuts)
+    board.Add(rect)
+    out = tmp_path / f"mkds_{count}_{int(rotation)}_{edge}_{int(back)}.kicad_pcb"
+    pcbnew.SaveBoard(str(out), board)
+    return out
+
+
+def test_mkds_terminal_faces_its_zoned_edge(tmp_path):
+    """rot 0 puts the +Y wire mouth out the bottom edge; rot 180 buries it."""
+    from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
+
+    zones = {"J2": {"edge": "bottom"}}
+    ok = _mkds_board(tmp_path, count=4, rotation=0.0, edge="bottom")
+    (v,) = connector_facings(str(ok), zones)
+    assert v.status == "ok" and v.opening_board_deg == 90.0
+
+    buried = _mkds_board(tmp_path, count=4, rotation=180.0, edge="bottom")
+    (v,) = connector_facings(str(buried), zones)
+    assert v.status == "misoriented" and v.opening_board_deg == 270.0
+
+
+def test_mkds_terminal_back_side_uses_the_shared_convention(tmp_path):
+    """Flipping to B.Cu mirrors local X and restores rotation 180, so the +Y
+    mouth ends up pointing at board -Y: it can face a TOP edge, not a bottom
+    one. Asserted through the same edge_outward_angle/opening_board_angle pair
+    the placer solves with -- no second transform formula."""
+    from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
+
+    back_top = _mkds_board(tmp_path, count=2, rotation=180.0, edge="top", back=True)
+    (v,) = connector_facings(str(back_top), {"J2": {"edge": "top"}})
+    assert v.status == "ok"
+
+    back_bottom = _mkds_board(
+        tmp_path, count=2, rotation=180.0, edge="bottom", back=True
+    )
+    (v,) = connector_facings(str(back_bottom), {"J2": {"edge": "bottom"}})
+    assert v.status == "misoriented"
+
+
+def test_facing_blocks_unmeasured_horizontal_terminal(tmp_path):
+    """A horizontal terminal with neither marker nor reviewed datum is a
+    blocking 'unmeasured' verdict, not a warning: the gate cannot certify a
+    direction, so it must not certify the board."""
+    from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
+    from kicraft.design.cli_app import _connector_misoriented
+
+    pcb = _mkds_board(
+        tmp_path, count=2, rotation=0.0, edge="bottom",
+        name="TerminalBlock_Phoenix_MKDS-1,5-2-5.08_1x02_P5.08mm_Horizontal",
+    )
+    (v,) = connector_facings(str(pcb), {"J2": {"edge": "bottom"}})
+    assert v.status == "unverified_directional"
+
+    (tmp_path / "X_autoplacer.json").write_text(
+        json.dumps({"component_zones": {"J2": {"edge": "bottom"}}})
+    )
+    blocking, warnings = _connector_misoriented(pcb)
+    assert blocking == ["connector_orientation_unmeasured:J2"]
+    assert warnings == []
+
+
+def test_facing_blocks_zoned_ref_missing_from_board(tmp_path):
+    """A zone whose ref is not on the board cannot be verified either."""
+    from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
+    from kicraft.design.cli_app import _connector_misoriented
+
+    pcb = _mkds_board(tmp_path, count=2, rotation=0.0, edge="bottom")
+    (v,) = connector_facings(str(pcb), {"J9": {"edge": "bottom"}})
+    assert v.status == "unverified_directional"
+
+    (tmp_path / "X_autoplacer.json").write_text(
+        json.dumps({"component_zones": {"J9": {"edge": "bottom"}}})
+    )
+    blocking, _ = _connector_misoriented(pcb)
+    assert blocking == ["connector_orientation_unmeasured:J9"]
+
+
+def test_fab_gate_reports_measurement_failure_as_unmeasured(tmp_path, monkeypatch):
+    """A failure to measure is blocking and named, never a silent success."""
+    from kicraft.design import cli_app
+
+    pcb = _mkds_board(tmp_path, count=2, rotation=0.0, edge="bottom")
+    (tmp_path / "X_autoplacer.json").write_text(
+        json.dumps({"component_zones": {"J2": {"edge": "bottom"}}})
+    )
+
+    import kicraft.autoplacer.brain.connector_edge_gap as gap
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("pcbnew exploded")
+
+    monkeypatch.setattr(gap, "connector_facings", _boom)
+    blocking, warnings = cli_app._connector_misoriented(pcb)
+    assert blocking == ["connector_orientation_unmeasured:RuntimeError"]
+    assert warnings == []
+
+
+def test_directional_edge_candidate_truth_table():
+    """The pre-routing compose gate only refuses an edge-pinned part that HAS a
+    directional body: a shallow strip or an SMD part has no mouth to verify."""
+    from kicraft.autoplacer.brain.types import Component, Layer, Pad, Point
+    from kicraft.cli.compose_subcircuits import _directional_edge_candidate
+
+    def _comp(*, ref, tht, w, h, opening):
+        return Component(
+            ref=ref, value="X", pos=Point(0.0, 0.0), rotation=0.0,
+            layer=Layer.FRONT, width_mm=w, height_mm=h, kind="connector",
+            is_through_hole=tht,
+            pads=[Pad(ref=ref, pad_id="1", pos=Point(0.0, 0.0), net="A",
+                      layer=Layer.FRONT)],
+            opening_direction=opening,
+        )
+
+    # Real stock 4P MKDS screw terminal: 13 x 10.81 mm courtyard, THT.
+    assert _directional_edge_candidate(_comp(ref="J2", tht=True, w=11.0, h=10.81, opening=None))
+    # Bare 1x03 pin-header strip: 3.63 mm deep -- not directional.
+    assert not _directional_edge_candidate(_comp(ref="J9", tht=True, w=3.63, h=8.71, opening=None))
+    # SMD part: no through-hole body.
+    assert not _directional_edge_candidate(_comp(ref="U9", tht=False, w=8.0, h=8.0, opening=None))
+

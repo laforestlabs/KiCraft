@@ -46,7 +46,13 @@ def test_recipe_expansion_is_deterministic_and_provenanced():
         edge_interfaces=first.edge_interfaces,
     )
     assert check_net_coverage(bom).ok
-    assert check_mcu_programming_access(bom).ok
+    # Native programming: the bare RP2040 recipe carries no USB socket, so the
+    # hard §9.29 native-USB gate reports the missing physical connector.
+    access = check_mcu_programming_access(bom)
+    assert not access.ok
+    assert any(
+        offender.startswith("native_usb_programming_required:") for offender in access.offenders
+    )
 
 
 def test_multiple_recipe_instances_allocate_disjoint_references():
@@ -193,7 +199,12 @@ def test_rp2040_v2_scopes_internal_nets_and_binds_power_ports():
         recipe="rp2040-minimal@2",
         instance="main",
         sheets={"mcu": "MCU", "io": "IO"},
-        port_bindings={"vdd": "+3V3", "gnd": "GND"},
+        port_bindings={
+            "vdd": "+3V3",
+            "gnd": "GND",
+            "usb_dm": "USB_D_N",
+            "usb_dp": "USB_D_P",
+        },
         requirement_ids=["mcu_core"],
     )
     first = expand_recipe(selection)
@@ -226,8 +237,13 @@ def test_allocator_owned_wiring_pin_rejects_model_overwrite():
         recipe="esp32-s3-mini-1-minimal@1",
         instance="main",
         sheets={"mcu": "MCU"},
-        parameters={"native_usb": False},
-        port_bindings={"vdd": "+3V3", "gnd": "GND"},
+        parameters={"native_usb": True},
+        port_bindings={
+            "vdd": "+3V3",
+            "gnd": "GND",
+            "usb_dm": "USB_D_N",
+            "usb_dp": "USB_D_P",
+        },
         requirement_ids=["mcu_core"],
         pin_allocations=[RecipePinAllocation(net="APP_OUT", pin="5", capability="output")],
     )
@@ -641,16 +657,24 @@ def _esp32_architecture_payload():
 
 
 def test_architecture_exact_esp32_part_resolves_without_model_selection():
+    payload = _add_native_usb(_esp32_architecture_payload())
     canonical, _expanded = _normalize_stage_response(
         "architecture",
-        _esp32_architecture_payload(),
+        payload,
         {"intent": {"named_parts": ["ESP32-S3-MINI-1-N8"]}},
     )
-    assert canonical["requirements"][0]["exact_part"] == "ESP32-S3-MINI-1-N8"
-    selection = canonical["recipe_selections"][0]
-    assert selection["recipe"] == "esp32-s3-mini-1-minimal@1"
-    assert selection["port_bindings"] == {"gnd": "GND", "vdd": "+3V3"}
-    assert canonical["recipe_resolution"][0]["recipe"] == selection["recipe"]
+    mcu = next(row for row in canonical["requirements"] if row["role"] == "mcu_core")
+    assert mcu["exact_part"] == "ESP32-S3-MINI-1-N8"
+    selection = next(
+        row for row in canonical["recipe_selections"] if row["recipe"] == "esp32-s3-mini-1-minimal@1"
+    )
+    assert selection["port_bindings"] == {
+        "gnd": "GND",
+        "vdd": "+3V3",
+        "usb_dm": "USB_D_N",
+        "usb_dp": "USB_D_P",
+    }
+    assert any(row["recipe"] == selection["recipe"] for row in canonical["recipe_resolution"])
 
 
 def test_architecture_unique_family_prefix_selects_registered_exact_part():
@@ -880,24 +904,26 @@ def test_recipe_ports_bind_unique_declared_net_suffixes():
 
 
 def test_architecture_discards_unknown_provider_unresolved_ids_before_resolution():
-    payload = _esp32_architecture_payload()
+    payload = _add_native_usb(_esp32_architecture_payload())
     payload["unresolved_requirement_ids"] = ["req_mcu", "req_power"]
 
     canonical, _expanded = _normalize_stage_response("architecture", payload, {})
 
     assert canonical["unresolved_requirement_ids"] == []
-    assert canonical["requirements"][0]["exact_part"] == "ESP32-S3-MINI-1-N8"
+    mcu = next(row for row in canonical["requirements"] if row["role"] == "mcu_core")
+    assert mcu["exact_part"] == "ESP32-S3-MINI-1-N8"
 
 
 def test_architecture_family_default_records_typed_exact_part():
     canonical, _expanded = _normalize_stage_response(
         "architecture",
-        _esp32_architecture_payload(),
+        _add_native_usb(_esp32_architecture_payload()),
         {"intent": {}},
     )
 
-    assert canonical["requirements"][0]["family"] == "esp32-s3-module"
-    assert canonical["requirements"][0]["exact_part"] == "ESP32-S3-MINI-1-N8"
+    mcu = next(row for row in canonical["requirements"] if row["role"] == "mcu_core")
+    assert mcu["family"] == "esp32-s3-module"
+    assert mcu["exact_part"] == "ESP32-S3-MINI-1-N8"
 
 
 def test_architecture_unsupported_protected_esp32_variant_blocks():
@@ -907,13 +933,52 @@ def test_architecture_unsupported_protected_esp32_variant_blocks():
     ):
         _normalize_stage_response(
             "architecture",
-            _esp32_architecture_payload(),
+            _add_native_usb(_esp32_architecture_payload()),
             {"intent": {"named_parts": ["ESP32-S3-WROOM-1-N16R8"]}},
         )
 
 
+_NATIVE_FIXTURE_FAMILIES = {
+    "esp32-s3-module",
+    "esp32-s3-wroom-1-module",
+    "esp32-c3-mini-1-module",
+    "rp2040",
+}
+
+
+def _add_native_usb(payload, *, dm="USB_D_N", dp="USB_D_P", vbus="VBUS"):
+    """Append the mandatory USB data companion for a native-USB MCU fixture."""
+    payload["power_nets"] = list(
+        dict.fromkeys([*(payload.get("power_nets") or []), vbus, "GND"])
+    )
+    payload.setdefault("rail_voltages", {})[vbus] = 5.0
+    payload["sheets"].append({"name": "USB", "stem": "USB", "function": "USB connector"})
+    payload.setdefault("requirements", []).append(
+        {
+            "id": "usb_connector",
+            "sheet": "USB",
+            "role": "connector",
+            "family": "usb-c-usb2-device",
+            "exact_part": "USB-C-USB2-DEVICE",
+            "ports": {"vbus": vbus, "gnd": "GND", "usb_dm": dm, "usb_dp": dp},
+        }
+    )
+    payload.setdefault("inter_sheet_nets", []).extend(
+        {
+            "name": net,
+            "endpoints": [
+                {"sheet": "MCU", "direction": "bidirectional"},
+                {"sheet": "USB", "direction": "bidirectional"},
+            ],
+        }
+        for net in (dm, dp)
+    )
+    return payload
+
+
 def _typed_esp32_architecture(**requirement_overrides):
     payload = _esp32_architecture_payload()
+    include_usb = requirement_overrides.pop("usb", None)
     requirement = {
         "id": "mcu_core",
         "sheet": "MCU",
@@ -926,6 +991,10 @@ def _typed_esp32_architecture(**requirement_overrides):
         **requirement_overrides,
     }
     payload["requirements"] = [requirement]
+    if include_usb is None:
+        include_usb = requirement["family"] in _NATIVE_FIXTURE_FAMILIES
+    if include_usb:
+        _add_native_usb(payload)
     return payload
 
 
@@ -936,19 +1005,9 @@ def _typed_esp32_architecture(**requirement_overrides):
 def test_recipe_usb_aliases_preserve_polarity_and_supply_sign(dm, dp):
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
-    payload = _typed_esp32_architecture(ports={}, interfaces=["usb_device"])
+    payload = _typed_esp32_architecture(ports={}, interfaces=["usb_device"], usb=False)
     payload["power_nets"] = ["-3V3", "+3V3", "GND"]
-    payload["sheets"].append({"name": "USB", "stem": "USB", "function": "USB connector"})
-    payload["inter_sheet_nets"] = [
-        {
-            "name": name,
-            "endpoints": [
-                {"sheet": "USB", "direction": "bidirectional"},
-                {"sheet": "MCU", "direction": "bidirectional"},
-            ],
-        }
-        for name in (dp, dm)
-    ]
+    _add_native_usb(payload, dm=dm, dp=dp)
 
     result = resolve_architecture_recipes(payload)
 
@@ -961,102 +1020,90 @@ def test_recipe_usb_aliases_preserve_polarity_and_supply_sign(dm, dp):
     }
 
 
-def test_typed_usb_connector_peers_complete_distinct_polarity_contracts():
+def test_native_usb_connector_peer_completes_distinct_polarity_contracts():
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
-    payload = _typed_esp32_architecture(interfaces=["usb_device"])
+    payload = _typed_esp32_architecture(interfaces=["usb_device"], usb=False)
+    payload["power_nets"] = ["+3V3", "VBUS", "GND"]
+    payload["rail_voltages"] = {"+3V3": 3.3, "VBUS": 5.0}
     payload["sheets"].append({"name": "USB", "stem": "USB", "function": "USB connector"})
     payload["requirements"].append(
         {
             "id": "connector",
             "sheet": "USB",
             "role": "connector",
-            "family": "application-connector",
-            "ports": {"D+": "HOST_POSITIVE", "D-": "HOST_NEGATIVE"},
+            "family": "usb-c-usb2-device",
+            "exact_part": "USB-C-USB2-DEVICE",
+            "ports": {
+                "vbus": "VBUS",
+                "gnd": "GND",
+                "usb_dp": "HOST_POSITIVE",
+                "usb_dm": "HOST_NEGATIVE",
+            },
         }
-    )
-
-    result = resolve_architecture_recipes(payload)
-
-    assert not result.blocking
-    assert result.selections[0].port_bindings["usb_dp"] == "HOST_POSITIVE"
-    assert result.selections[0].port_bindings["usb_dm"] == "HOST_NEGATIVE"
-    nets = {net.name: net for net in result.completed_nets}
-    assert set(nets) == {"HOST_POSITIVE", "HOST_NEGATIVE"}
-    assert all(
-        {endpoint.sheet for endpoint in net.endpoints} == {"MCU", "USB"} for net in nets.values()
-    )
-
-
-def _c3_remote_usb_architecture():
-    payload = _typed_esp32_architecture(
-        family="esp32-c3-mini-1-module",
-        exact_part="ESP32-C3-MINI-1-N4",
-        parameters={"native_usb": False},
-    )
-    payload["sheets"][0]["function"] = "ESP32-C3 MCU"
-    payload["topologies"] = {"MCU": "ESP32-C3"}
-    payload["sheets"].extend(
-        [
-            {"name": "USB", "stem": "USB", "function": "USB connector"},
-            {"name": "BRIDGE", "stem": "BRIDGE", "function": "external UART bridge"},
-        ]
-    )
-    payload["requirements"].extend(
-        [
-            {
-                "id": "connector",
-                "sheet": "USB",
-                "role": "connector",
-                "family": "application-connector",
-                "ports": {"usb_dp": "USB_D_P", "usb_dm": "USB_D_N"},
-            },
-            {
-                "id": "bridge",
-                "sheet": "BRIDGE",
-                "role": "bus_interface",
-                "family": "external-uart-bridge",
-                "ports": {"usb_dp": "USB_D_P", "usb_dm": "USB_D_N"},
-            },
-        ]
     )
     payload["inter_sheet_nets"] = [
         {
             "name": net,
             "endpoints": [
                 {"sheet": "USB", "direction": "bidirectional"},
-                {"sheet": "BRIDGE", "direction": "bidirectional"},
+                {"sheet": "MCU", "direction": "bidirectional"},
             ],
         }
-        for net in ("USB_D_P", "USB_D_N")
+        for net in ("HOST_POSITIVE", "HOST_NEGATIVE")
     ]
-    return payload
 
-
-@pytest.mark.parametrize("declared_contract", [False, True])
-def test_remote_usb_connector_does_not_enable_or_wire_c3_native_usb(declared_contract):
-    from kicraft.design.recipes.resolver import resolve_architecture_recipes
-
-    payload = _c3_remote_usb_architecture()
-    if not declared_contract:
-        payload["inter_sheet_nets"] = []
     result = resolve_architecture_recipes(payload)
 
     assert not result.blocking
     core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
-    assert core.parameters["native_usb"] is False
-    assert core.port_bindings == {"vdd": "+3V3", "gnd": "GND"}
-    expansion = expand_recipe(core)
-    assert not {"USB_D_P", "USB_D_N"} & {
-        connection.net_name for connection in expansion.connections
-    }
-    assert not result.completed_nets
+    connector = next(row for row in result.selections if row.requirement_ids == ["connector"])
+    assert core.port_bindings["usb_dp"] == "HOST_POSITIVE"
+    assert core.port_bindings["usb_dm"] == "HOST_NEGATIVE"
+    assert connector.port_bindings["usb_dp"] == "HOST_POSITIVE"
+    assert connector.port_bindings["usb_dm"] == "HOST_NEGATIVE"
+
+
+def _c3_native_usb_architecture():
+    payload = _typed_esp32_architecture(
+        family="esp32-c3-mini-1-module",
+        exact_part="ESP32-C3-MINI-1-N4",
+    )
+    payload["sheets"][0]["function"] = "ESP32-C3 MCU"
+    payload["topologies"] = {"MCU": "ESP32-C3"}
+    payload["sheets"].append({"name": "BRIDGE", "stem": "BRIDGE", "function": "external UART bridge"})
+    payload["requirements"].append(
+        {
+            "id": "bridge",
+            "sheet": "BRIDGE",
+            "role": "bus_interface",
+            "family": "external-uart-bridge",
+            "ports": {"usb_dp": "USB_D_P", "usb_dm": "USB_D_N"},
+        }
+    )
+    for net in payload["inter_sheet_nets"]:
+        if net["name"] in ("USB_D_N", "USB_D_P"):
+            net["endpoints"].append({"sheet": "BRIDGE", "direction": "bidirectional"})
+    return payload
+
+
+def test_obsolete_bridge_or_header_programming_is_rejected_for_native_usb():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    # native_usb=False is no longer an accepted generation input (hidden behind
+    # normal parameter validation, never a silent rewrite).
+    payload = _c3_native_usb_architecture()
+    payload["requirements"][0]["parameters"] = {"native_usb": False}
+    result = resolve_architecture_recipes(payload)
+    diagnostic = next(row for row in result.blocking if row.requirement_id == "mcu_core")
+    assert diagnostic.code == "conflicting_recipe_parameter"
+    assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
 
 
 def test_remote_usb_does_not_hide_missing_c3_uart_application_contract():
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
-    payload = _c3_remote_usb_architecture()
+    payload = _c3_native_usb_architecture()
     payload["inter_sheet_nets"].extend(
         [
             {
@@ -1078,34 +1125,39 @@ def test_remote_usb_does_not_hide_missing_c3_uart_application_contract():
     assert diagnostic.code == "missing_mcu_application_contract"
     assert {"UART_TXD", "UART_RXD"} <= set(diagnostic.evidence)
     assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
-    assert not result.completed_nets
-
-
-def test_explicit_remote_usb_binding_still_requires_mcu_ownership():
-    from kicraft.design.recipes.resolver import resolve_architecture_recipes
-
-    payload = _c3_remote_usb_architecture()
-    payload["requirements"][0]["ports"].update(usb_dp="USB_D_P", usb_dm="USB_D_N")
-    result = resolve_architecture_recipes(payload)
-
-    diagnostic = next(row for row in result.blocking if row.requirement_id == "mcu_core")
-    assert diagnostic.code == "missing_recipe_port_contract"
-    assert {"USB_D_P", "USB_D_N"} <= set(diagnostic.evidence)
-    assert not result.completed_nets
 
 
 def test_explicit_unknown_usb_binding_is_not_replaced_by_owned_alias():
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
-    payload = _c3_remote_usb_architecture()
+    payload = _typed_esp32_architecture(usb=False)
     payload["requirements"][0]["ports"].update(usb_dp="MISSPELLED_DP", usb_dm="MISSPELLED_DM")
-    for net in payload["inter_sheet_nets"]:
-        net["endpoints"].append({"sheet": "MCU", "direction": "bidirectional"})
+    payload["power_nets"] = ["+3V3", "VBUS", "GND"]
+    payload["sheets"].append({"name": "USB", "stem": "USB", "function": "USB connector"})
+    payload["requirements"].append(
+        {
+            "id": "connector",
+            "sheet": "USB",
+            "role": "connector",
+            "family": "usb-c-usb2-device",
+            "exact_part": "USB-C-USB2-DEVICE",
+            "ports": {"vbus": "VBUS", "gnd": "GND", "usb_dp": "USB_D_P", "usb_dm": "USB_D_N"},
+        }
+    )
+    payload["inter_sheet_nets"] = [
+        {
+            "name": net,
+            "endpoints": [
+                {"sheet": "USB", "direction": "bidirectional"},
+                {"sheet": "MCU", "direction": "bidirectional"},
+            ],
+        }
+        for net in ("USB_D_P", "USB_D_N", "MISSPELLED_DP", "MISSPELLED_DM")
+    ]
     result = resolve_architecture_recipes(payload)
 
-    diagnostic = next(row for row in result.blocking if row.requirement_id == "mcu_core")
-    assert diagnostic.code == "unknown_recipe_port_net"
-    assert {"MISSPELLED_DP", "MISSPELLED_DM"} <= set(diagnostic.evidence)
+    codes = {row.code for row in result.blocking if row.requirement_id == "mcu_core"}
+    assert codes & {"unknown_recipe_port_net", "missing_mcu_application_contract"}
     assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
 
 
@@ -1270,6 +1322,16 @@ def test_legacy_named_peripheral_cannot_reassign_later_mcu_sheet():
         }
         for name in ("CAN_TX", "CAN_RX", "CANH", "CANL")
     ]
+    _add_native_usb(payload)
+    payload["requirements"].append(
+        {
+            "id": "can",
+            "sheet": "CAN",
+            "role": "bus_interface",
+            "family": "sn65hvd230-can-node",
+            "exact_part": "SN65HVD230",
+        }
+    )
 
     result = resolve_architecture_recipes(
         payload, {"named_parts": ["SN65HVD230", "ESP32-S3-MINI-1-N8"]}
@@ -1666,6 +1728,7 @@ def test_direct_typed_pad_cannot_reassign_an_incompatible_explicit_contract(conf
         core["family"] = "esp32-s3-module"
         core["ports"].pop("updi")
         core["ports"]["gpio21"] = "TOUCH0"  # No reviewed touch channel on GPIO21.
+        _add_native_usb(architecture)
     else:
         architecture["recipe_selections"] = [
             {
@@ -1683,7 +1746,7 @@ def test_direct_typed_pad_cannot_reassign_an_incompatible_explicit_contract(conf
             }
         ]
     result = resolve_architecture_recipes(architecture)
-    assert not result.selections
+    assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
     diagnostic = next(row for row in result.blocking if row.code == "conflicting_pin_capability")
     assert "touch" in diagnostic.evidence
 
@@ -1967,11 +2030,22 @@ def test_mcu_recipe_preserves_valid_gpio_and_rejects_unavailable_contract():
         _normalize_stage_response("architecture", payload, {})
     assert rejected.value.diagnostic["requirement_id"] == "mcu_core"
     assert "GPIO99" in rejected.value.diagnostic["evidence"]
-    assert {net["name"] for net in payload["inter_sheet_nets"]} == {"GPIO1", "GPIO99"}
+    assert {net["name"] for net in payload["inter_sheet_nets"]} == {
+        "USB_D_N",
+        "USB_D_P",
+        "GPIO1",
+        "GPIO99",
+    }
 
-    payload["inter_sheet_nets"] = payload["inter_sheet_nets"][:1]
+    payload["inter_sheet_nets"] = [
+        net for net in payload["inter_sheet_nets"] if net["name"] != "GPIO99"
+    ]
     canonical, _expanded = _normalize_stage_response("architecture", payload, {})
-    assert {net["name"] for net in canonical["inter_sheet_nets"]} == {"GPIO1"}
+    assert {net["name"] for net in canonical["inter_sheet_nets"]} == {
+        "USB_D_N",
+        "USB_D_P",
+        "GPIO1",
+    }
     assert canonical["recipe_selections"][0]["pin_allocations"][0]["net"] == "GPIO1"
 
 
@@ -2057,17 +2131,8 @@ def test_frozen_c3_connector_requirement_cannot_hide_missing_mcu_ownership():
 
 
 def test_typed_named_mcu_cannot_be_dropped_by_false_presence_flag():
-    payload = _esp32_architecture_payload()
+    payload = _add_native_usb(_esp32_architecture_payload())
     payload["mcu_present"] = False
-    payload["requirements"] = [
-        {
-            "id": "application_connector",
-            "sheet": "MCU",
-            "role": "connector",
-            "family": "application-connector",
-            "ports": {},
-        }
-    ]
     canonical, _expanded = _normalize_stage_response(
         "architecture", payload, {"intent": {"named_parts": ["ESP32-S3-MINI-1-N8"]}}
     )
@@ -2166,56 +2231,53 @@ def test_recipe_resolver_requires_conditional_usb_ports_and_declared_nets():
     with pytest.raises(StageSchemaError, match="missing_recipe_port"):
         _normalize_stage_response(
             "architecture",
-            _typed_esp32_architecture(parameters={"native_usb": True}),
+            _typed_esp32_architecture(usb=False),
             {},
         )
     with pytest.raises(StageSchemaError, match="unknown_recipe_port_net"):
         _normalize_stage_response(
             "architecture",
             _typed_esp32_architecture(
+                usb=False,
                 ports={
                     "vdd": "+3V3",
                     "gnd": "GND",
                     "usb_dm": "UNDECLARED_DM",
                     "usb_dp": "UNDECLARED_DP",
-                }
+                },
             ),
             {},
         )
 
 
-def test_esp32_optional_usb_and_internal_nets_are_instance_scoped():
+def test_esp32_native_usb_and_internal_nets_are_instance_scoped():
     base = RecipeSelection(
         recipe="esp32-s3-mini-1-minimal@1",
         instance="main",
         sheets={"mcu": "MCU"},
-        parameters={"native_usb": False},
-        port_bindings={"vdd": "+3V3", "gnd": "GND"},
+        parameters={"native_usb": True},
+        port_bindings={
+            "vdd": "+3V3",
+            "gnd": "GND",
+            "usb_dm": "USB_D_N",
+            "usb_dp": "USB_D_P",
+        },
         requirement_ids=["mcu_core"],
     )
-    without_usb = expand_recipe(base)
-    with_usb = expand_recipe(
-        base.model_copy(
-            update={
-                "parameters": {"native_usb": True},
-                "port_bindings": {
-                    "vdd": "+3V3",
-                    "gnd": "GND",
-                    "usb_dm": "USB_DM",
-                    "usb_dp": "USB_DP",
-                },
-            }
-        )
-    )
+    with_usb = expand_recipe(base)
     second = expand_recipe(
         base.model_copy(update={"instance": "aux", "requirement_ids": ["aux_core"]})
     )
-    assert len(with_usb.parts) == len(without_usb.parts) + 2
-    assert set(without_usb.ownership.internal_nets).isdisjoint(second.ownership.internal_nets)
-    assert {pin.pin for pin in without_usb.no_connect_pins} >= {"23", "24"}
+    assert all(part.recipe_role != "program_header" for part in with_usb.parts)
+    assert {part.recipe_role for part in with_usb.parts if part.value == "22R"} == {
+        "usb_dm_series",
+        "usb_dp_series",
+    }
+    assert set(with_usb.ownership.internal_nets).isdisjoint(second.ownership.internal_nets)
+    assert {pin.pin for pin in with_usb.no_connect_pins} >= {"39", "40"}
     assert {connection.net_name for connection in with_usb.connections} >= {
-        "USB_DM",
-        "USB_DP",
+        "USB_D_N",
+        "USB_D_P",
     }
 
 
@@ -2405,7 +2467,7 @@ def test_interface_alias_failures_preserve_required_and_actual_bindings(ports, c
         assert f"{key!r}: {net!r}" in diagnostic.message
     assert any("required_keys=" in value for value in diagnostic.evidence)
     assert any("actual_bindings=" in value for value in diagnostic.evidence)
-    assert not result.selections
+    assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
 
 
 def test_advertised_interface_keys_allocate_their_bound_nets():
@@ -2486,13 +2548,17 @@ def test_pin_allocator_honors_explicit_gpio_number_ports():
     ],
 )
 def test_wave_a_mcu_recipes_expand_with_complete_ownership(recipe):
+    native_usb_recipes = {"esp32-s3-wroom-1-minimal@1", "esp32-c3-mini-1-minimal@1"}
     definition = get_recipe(recipe)
+    bindings = {"vdd": "+3V3", "gnd": "GND"}
+    if recipe in native_usb_recipes:
+        bindings |= {"usb_dm": "USB_D_N", "usb_dp": "USB_D_P"}
     expansion = expand_recipe(
         RecipeSelection(
             recipe=recipe,
             instance="main",
             sheets={"mcu": "MCU"},
-            port_bindings={"vdd": "+3V3", "gnd": "GND"},
+            port_bindings=bindings,
         )
     )
     assert definition.maturity == "production"
@@ -2502,7 +2568,11 @@ def test_wave_a_mcu_recipes_expand_with_complete_ownership(recipe):
     assert all(part.resolution_source == "recipe" for part in expansion.parts)
     owned_pins = {(pin.ref, pin.pin) for pin in expansion.ownership.pins}
     assert len(owned_pins) == len(expansion.ownership.pins)
-    assert any(part.ref.startswith("J") for part in expansion.parts)
+    if recipe in native_usb_recipes:
+        # Native-USB modules ship no UART programming header.
+        assert all(part.recipe_role != "program_header" for part in expansion.parts)
+    else:
+        assert any(part.ref.startswith("J") for part in expansion.parts)
     from pathlib import Path
 
     from kicraft.design.synthesis.symbol_pinout import lookup_pins
@@ -2821,12 +2891,13 @@ def test_c3_supply_completion_uses_unique_typed_rail_and_persists_binding():
     from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
 
     payload = _typed_esp32_architecture(
-        family="esp32-c3-mini-1-module", exact_part="ESP32-C3-MINI-1-N4", ports={}
+        family="esp32-c3-mini-1-module", exact_part="ESP32-C3-MINI-1-N4", ports={}, usb=False
     )
     payload["sheets"][0]["function"] = "ESP32-C3 MCU"
     payload["topologies"] = {"MCU": "ESP32-C3"}
     payload["rail_voltages"] = {"VCC_3V3": 3.3, "VCC_5V": 5.0}
     payload["power_nets"] = ["VCC_3V3", "VCC_5V", "GND"]
+    _add_native_usb(payload)
     result = apply_architecture_recipe_resolution(payload)
     assert result.requirements[0].ports["vdd"] == "VCC_3V3"
     assert result.recipe_selections[0].port_bindings["vdd"] == "VCC_3V3"
@@ -2928,7 +2999,7 @@ def test_c3_supply_endpoint_disambiguates_equal_voltage_rails_without_guessing()
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
     payload = _typed_esp32_architecture(
-        family="esp32-c3-mini-1-module", exact_part="ESP32-C3-MINI-1-N4", ports={}
+        family="esp32-c3-mini-1-module", exact_part="ESP32-C3-MINI-1-N4", ports={}, usb=False
     )
     payload["sheets"][0]["function"] = "ESP32-C3 MCU"
     payload["topologies"] = {"MCU": "ESP32-C3"}
@@ -2938,7 +3009,7 @@ def test_c3_supply_endpoint_disambiguates_equal_voltage_rails_without_guessing()
     assert any(
         row.code == "missing_recipe_port" and "vdd" in row.evidence for row in ambiguous.blocking
     )
-    assert not ambiguous.selections
+    assert not any(row.requirement_ids == ["mcu_core"] for row in ambiguous.selections)
 
     payload["sheets"].append({"name": "POWER", "stem": "POWER", "function": "power supply"})
     payload["inter_sheet_nets"] = [
@@ -2950,6 +3021,7 @@ def test_c3_supply_endpoint_disambiguates_equal_voltage_rails_without_guessing()
             ],
         }
     ]
+    _add_native_usb(payload)
     bound = resolve_architecture_recipes(payload)
     assert not bound.blocking
     assert bound.requirements[0].ports["vdd"] == "CORE_RAIL"
@@ -2959,11 +3031,11 @@ def test_c3_supply_endpoint_disambiguates_equal_voltage_rails_without_guessing()
     assert any(
         row.code == "missing_recipe_port" and "vdd" in row.evidence for row in incompatible.blocking
     )
-    assert not incompatible.selections
+    assert not any(row.requirement_ids == ["mcu_core"] for row in incompatible.selections)
 
 
 def _c3_typed_programming_architecture(*, handshakes=True):
-    payload = _c3_remote_usb_architecture()
+    payload = _c3_native_usb_architecture()
     bridge = payload["requirements"][2]
     bridge.update(family="usb-uart-bridge", exact_part="CH340C")
     bridge["ports"].update(vdd="+3V3", gnd="GND", tx="HOST_TO_MCU", rx="MCU_TO_HOST")
@@ -3188,18 +3260,20 @@ def test_c3_typed_uart_bridge_uses_fixed_pins_and_preserves_all_ten_gpios(
     core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
     assert core.port_bindings["uart_rx"] == "HOST_TO_MCU"
     assert core.port_bindings["uart_tx"] == "MCU_TO_HOST"
-    assert core.parameters["native_usb"] is False
+    assert core.parameters["native_usb"] is True
     assert {row.net for row in core.pin_allocations} == {f"GPIO{gpio}" for gpio in (*range(9), 10)}
     assert not {row.pin for row in core.pin_allocations} & {"8", "23", "26", "27", "30", "31"}
     expansion = expand_recipe(core)
     refs = {part.recipe_role: part.ref for part in expansion.parts}
+    assert "program_header" not in refs
     nets = {
         (endpoint.ref, endpoint.pin): connection.net_name
         for connection in expansion.connections
         for endpoint in connection.endpoints
     }
-    assert nets[refs["mcu"], "30"] == nets[refs["program_header"], "4"] == "HOST_TO_MCU"
-    assert nets[refs["mcu"], "31"] == nets[refs["program_header"], "3"] == "MCU_TO_HOST"
+    mcu = refs["mcu"]
+    assert nets[mcu, "30"] == "HOST_TO_MCU"
+    assert nets[mcu, "31"] == "MCU_TO_HOST"
     assert {
         pin: net
         for (ref, pin), net in nets.items()
@@ -3225,18 +3299,10 @@ def test_c3_typed_uart_bridge_uses_fixed_pins_and_preserves_all_ten_gpios(
         for endpoint in connection.endpoints
         if endpoint.ref == bridge_ref
     }
-    assert bridge_nets["2"] == nets[refs["mcu"], "30"] == "HOST_TO_MCU"
-    assert bridge_nets["3"] == nets[refs["mcu"], "31"] == "MCU_TO_HOST"
-    assert (
-        nets[refs["mcu"], "8"]
-        == nets[refs["reset_button"], "1"]
-        == nets[refs["program_header"], "5"]
-    )
-    assert (
-        nets[refs["mcu"], "23"]
-        == nets[refs["boot_button"], "1"]
-        == nets[refs["program_header"], "6"]
-    )
+    assert bridge_nets["2"] == nets[mcu, "30"] == "HOST_TO_MCU"
+    assert bridge_nets["3"] == nets[mcu, "31"] == "MCU_TO_HOST"
+    assert nets[mcu, "8"] == nets[refs["reset_button"], "1"]
+    assert nets[mcu, "23"] == nets[refs["boot_button"], "1"]
     assert {(pin.ref, pin.pin) for pin in expansion.no_connect_pins}.isdisjoint(nets)
     ownership = [(pin.ref, pin.pin) for pin in expansion.ownership.pins]
     assert len(ownership) == len(set(ownership))
@@ -3265,6 +3331,8 @@ def test_esp32_auto_reset_expansion_has_reference_electrical_truth_table(dtr, rt
             port_bindings={
                 "vdd": "+3V3",
                 "gnd": "GND",
+                "usb_dm": "USB_D_N",
+                "usb_dp": "USB_D_P",
                 "uart_tx": "SERIAL_OUT",
                 "uart_rx": "SERIAL_IN",
                 "dtr_n": "HOST_DTR_N",
@@ -3312,7 +3380,12 @@ def test_unused_fixed_programming_ports_are_private_and_add_no_support_parts():
             recipe="esp32-c3-mini-1-minimal@1",
             instance=instance,
             sheets={"mcu": "MCU"},
-            port_bindings={"vdd": "+3V3", "gnd": "GND"},
+            port_bindings={
+                "vdd": "+3V3",
+                "gnd": "GND",
+                "usb_dm": "USB_D_N",
+                "usb_dp": "USB_D_P",
+            },
         )
         for instance in ("first", "second")
     ]
@@ -3325,16 +3398,18 @@ def test_unused_fixed_programming_ports_are_private_and_add_no_support_parts():
                 connection.net_name
                 for connection in expansion.connections
                 if any(
-                    endpoint.ref == mcu and endpoint.pin in {"8", "23", "30", "31"}
+                    endpoint.ref == mcu and endpoint.pin in {"8", "23"}
                     for endpoint in connection.endpoints
                 )
             }
         )
+        ncs = {(pin.ref, pin.pin) for pin in expansion.no_connect_pins}
+        assert (mcu, "30") in ncs and (mcu, "31") in ncs  # unused UART0 is NC
         assert not any(part.recipe_role.startswith("auto_reset") for part in expansion.parts)
         assert not {"dtr_n", "rts_n"} & {
             connection.net_name for connection in expansion.connections
         }
-    assert len(private[0]) == len(private[1]) == 4
+    assert len(private[0]) == len(private[1]) == 2
     assert private[0].isdisjoint(private[1])
 
 
@@ -3468,7 +3543,12 @@ def test_programming_peer_cannot_claim_remote_only_nets_even_with_matching_label
     result = resolve_architecture_recipes(payload)
     assert not result.blocking
     core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
-    assert core.port_bindings == {"vdd": "+3V3", "gnd": "GND"}
+    assert core.port_bindings == {
+        "vdd": "+3V3",
+        "gnd": "GND",
+        "usb_dm": "USB_D_N",
+        "usb_dp": "USB_D_P",
+    }
     assert not any(part.ref.startswith("Q") for part in expand_recipe(core).parts)
 
 
@@ -3491,3 +3571,151 @@ def test_direct_expansion_rejects_incomplete_disabled_or_aliased_auto_reset(enab
                 port_bindings={"vdd": "+3V3", "gnd": "GND", **ports},
             )
         )
+
+
+def _native_usb_selections():
+    payload = _esp32_architecture_payload()
+    payload["rail_voltages"] = {"+3V3": 3.3, "VBUS": 5.0}
+    payload["power_nets"] = ["+3V3", "VBUS", "GND"]
+    payload["sheets"].append({"name": "USB", "stem": "USB", "function": "USB connector"})
+    payload["inter_sheet_nets"] = [
+        {
+            "name": net,
+            "endpoints": [
+                {"sheet": "MCU", "direction": "bidirectional"},
+                {"sheet": "USB", "direction": "bidirectional"},
+            ],
+        }
+        for net in ("USB_D_N", "USB_D_P")
+    ]
+    payload["requirements"] = [
+        {
+            "id": "mcu_core",
+            "sheet": "MCU",
+            "role": "mcu_core",
+            "family": "esp32-s3-module",
+            "exact_part": "ESP32-S3-MINI-1-N8",
+            "ports": {
+                "vdd": "+3V3",
+                "gnd": "GND",
+                "usb_dm": "USB_D_N",
+                "usb_dp": "USB_D_P",
+            },
+        },
+        {
+            "id": "usb_connector",
+            "sheet": "USB",
+            "role": "connector",
+            "family": "usb-c-usb2-device",
+            "exact_part": "USB-C-USB2-DEVICE",
+            "ports": {
+                "vbus": "VBUS",
+                "gnd": "GND",
+                "usb_dm": "USB_D_N",
+                "usb_dp": "USB_D_P",
+            },
+        },
+    ]
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    result = resolve_architecture_recipes(payload)
+    assert not result.blocking
+    selections = {row.requirement_ids[0]: row for row in result.selections}
+    return selections["mcu_core"], selections["usb_connector"]
+
+
+def test_native_usb_pair_uses_connector_owned_names_and_one_series_pair():
+    core, connector = _native_usb_selections()
+    # The MCU owns the only 22R series pair; the companion drops its own.
+    assert connector.parameters["series_resistors"] is False
+    mcu_expansion = expand_recipe(core)
+    connector_expansion = expand_recipe(connector)
+    mcu_roles = [part.recipe_role for part in mcu_expansion.parts]
+    assert mcu_roles.count("usb_dm_series") == 1
+    assert mcu_roles.count("usb_dp_series") == 1
+    assert all(part.recipe_role != "usb_series" for part in connector_expansion.parts)
+    # ESD feed-through: the connector's device-side pins sit on the MCU pair.
+    esd = next(part for part in connector_expansion.parts if part.recipe_role == "esd")
+    nets = {
+        endpoint.pin: connection.net_name
+        for connection in connector_expansion.connections
+        for endpoint in connection.endpoints
+        if endpoint.ref == esd.ref
+    }
+    assert nets["3"] == "USB_D_N" and nets["4"] == "USB_D_P"
+    # Independent CC pull-downs and host VBUS are not the MCU pair or +3V3.
+    pulls = {part.ref for part in connector_expansion.parts if part.recipe_role == "cc_pulldown"}
+    assert len(pulls) == 2
+    assert "USB_D_N" not in {net.net_name for net in connector_expansion.connections
+                             if any(ep.ref in pulls for net in [net] for ep in net.endpoints)}
+    connector_nets = {connection.net_name for connection in connector_expansion.connections}
+    assert "VBUS" in connector_nets
+    assert not {"+3V3", "VBAT"} & connector_nets
+
+
+def test_rp2040_family_default_requires_and_binds_a_native_usb_connector():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = {
+        "topologies": {"MCU": "RP2040 modules"},
+        "rail_voltages": {"+3V3": 3.3, "VBUS": 5.0},
+        "comms_protocols": ["USB"],
+        "mcu_present": True,
+        "sheets": [
+            {"name": "MCU", "stem": "MCU", "function": "RP2040 microcontroller"},
+            {"name": "IO", "stem": "IO", "function": "castellated IO"},
+            {"name": "USB", "stem": "USB", "function": "USB connector"},
+        ],
+        "power_nets": ["+3V3", "VBUS", "GND"],
+        "inter_sheet_nets": [
+            {
+                "name": net,
+                "endpoints": [
+                    {"sheet": "MCU", "direction": "bidirectional"},
+                    {"sheet": "USB", "direction": "bidirectional"},
+                ],
+            }
+            for net in ("USB_D_N", "USB_D_P")
+        ],
+        "requirements": [
+            {
+                "id": "mcu_core",
+                "sheet": "MCU",
+                "role": "mcu_core",
+                "family": "rp2040",
+                "exact_part": "RP2040",
+                "ports": {
+                    "vdd": "+3V3",
+                    "gnd": "GND",
+                    "usb_dm": "USB_D_N",
+                    "usb_dp": "USB_D_P",
+                },
+            },
+            {
+                "id": "usb_connector",
+                "sheet": "USB",
+                "role": "connector",
+                "family": "usb-c-usb2-device",
+                "exact_part": "USB-C-USB2-DEVICE",
+                "ports": {
+                    "vbus": "VBUS",
+                    "gnd": "GND",
+                    "usb_dm": "USB_D_N",
+                    "usb_dp": "USB_D_P",
+                },
+            },
+        ],
+        "assumptions": [],
+    }
+    result = resolve_architecture_recipes(payload)
+    assert not result.blocking
+    core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
+    connector = next(row for row in result.selections if row.requirement_ids == ["usb_connector"])
+    assert core.recipe == "rp2040-minimal@2"
+    assert core.port_bindings["usb_dm"] == "USB_D_N"
+    assert core.port_bindings["usb_dp"] == "USB_D_P"
+    # RP2040 has no MCU-side series pair, so the connector keeps its own.
+    assert connector.parameters["series_resistors"] is True
+    expansion = expand_recipe(core)
+    assert all(part.recipe_role != "swd" for part in expansion.parts)
+    assert {"24", "25"} <= {pin.pin for pin in expansion.no_connect_pins}

@@ -218,7 +218,11 @@ def _valid_bom() -> dict:
         "parts": [
             {
                 "ref": "U1",
-                "value": "ESP32-S3-WROOM-1",
+                # Classic ESP32-WROOM-32 has no native USB, so its flashing
+                # path is the CH340C bridge below -- the fixture stays a
+                # 2-pin stand-in symbol on purpose (the reviewed native-USB
+                # families require a real data socket with DN/DP pins).
+                "value": "ESP32-WROOM-32",
                 "symbol": "Device:R",  # cheap stand-in; pin lookup tests skip if KiCad missing
                 "footprint": "Resistor_SMD:R_0402_1005Metric",
                 "sheet": "MCU",
@@ -232,7 +236,9 @@ def _valid_bom() -> dict:
             },
             {
                 # §9.29 programming access: an MCU BOM must carry a programming
-                # path part (this ESP32 flashes over USB) or BOM commit rejects.
+                # path part, and the classic ESP32's is the bridge below; this
+                # USB socket is the connector-class access part (2-pin
+                # stand-in symbol keeps the wiring-coverage assertions exact).
                 "ref": "J3",
                 "value": "USB-C receptacle",
                 "symbol": "Device:R",  # cheap stand-in, same as U1 above

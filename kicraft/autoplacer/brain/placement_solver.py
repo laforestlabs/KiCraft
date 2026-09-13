@@ -161,6 +161,24 @@ def antenna_faces_edge(intent: AntennaEdgeIntent, comp: Component) -> bool:
     return abs(got.x - want.x) <= 1e-6 and abs(got.y - want.y) <= 1e-6
 
 
+def _set_block_rotation(comp: Component, rotation: float) -> None:
+    """Apply an exact synthetic-block rotation and its measured extents.
+
+    ``block_rotation_geometry`` holds the block's per-rotation width/height
+    (90°/270° are NOT always exact transposes of 0°/180°, because the extents
+    come from the leaf's real content bbox). A rotation with no recorded
+    geometry is an error rather than a transpose guess: guessing would stamp
+    extents the artifact was never measured at.
+    """
+    rot = float(rotation)
+    geom = (comp.block_rotation_geometry or {}).get(rot)
+    if geom is None:
+        raise ValueError(f"missing_block_rotation_geometry:{comp.ref}@{rot:g}")
+    comp.rotation = rot
+    comp.width_mm = geom.width_mm
+    comp.height_mm = geom.height_mm
+
+
 class PlacementSolver:
     """Force-directed placement with edge-first constraints and scoring feedback.
 
@@ -2047,6 +2065,11 @@ class PlacementSolver:
         """
         work_state.components = comps
 
+        # Replica rotation groups are built ONCE per pass; the per-candidate
+        # search below must not re-derive membership or intersections.
+        groups = self._replica_rotation_groups(comps)
+        handled_groups: set[str] = set()
+
         for ref, comp in comps.items():
             if comp.kind == "mounting_hole":
                 continue
@@ -2060,6 +2083,21 @@ class PlacementSolver:
             # components, locked still means hands-off.
             is_subcircuit_block = comp.kind == "subcircuit" and comp.block_rotation_geometry
             if comp.locked and not is_subcircuit_block:
+                continue
+
+            # Coupled replicas: rotate the whole group jointly, once. A group
+            # containing an edge-pinned member is never coupled here -- the
+            # side-orientation contract owns that member's rotation.
+            group = groups.get(ref)
+            if group is not None and any(
+                member in self._pinned_targets for member in group
+            ):
+                group = None
+            if group is not None:
+                if ref in handled_groups:
+                    continue
+                handled_groups.update(group)
+                self._optimize_block_rotation_group(group, comps, work_state)
                 continue
 
             rotations = comp.allowed_rotations if comp.allowed_rotations else [0, 90, 180, 270]
@@ -2091,6 +2129,53 @@ class PlacementSolver:
             # Apply best rotation (revert from the last-tried candidate)
             rotate_component_in_place(comp, best_rot - comp.rotation)
 
+    def _replica_rotation_groups(
+        self, comps: dict[str, Component]
+    ) -> dict[str, tuple[str, ...]]:
+        """Map every coupled replica ref to its full rotation group.
+
+        Parent compose tags each replica of an UNCONSTRAINED identical-leaf
+        class with ``block_replication_donor`` (the donor's synthetic ref).
+        Expanding that into ref -> ``(donor, replicas...)`` once per pass keeps
+        group membership out of the per-candidate rotation loop.
+        """
+        members: dict[str, list[str]] = {}
+        for ref, comp in comps.items():
+            donor = getattr(comp, "block_replication_donor", None)
+            if donor and donor != ref and donor in comps:
+                members.setdefault(donor, []).append(ref)
+        groups: dict[str, tuple[str, ...]] = {}
+        for donor, replicas in members.items():
+            group = (donor, *sorted(replicas))
+            for ref in group:
+                groups[ref] = group
+        return groups
+
+    def _replica_rotation_candidates(
+        self, group: tuple[str, ...], comps: dict[str, Component]
+    ) -> list[float]:
+        """Angles a coupled replica group can take as one joint move.
+
+        The intersection of every member's ``allowed_rotations`` (unrestricted
+        when None) with its own available ``block_rotation_geometry`` keys: a
+        member with no geometry at an angle cannot be stamped there, so the
+        group cannot move there either.
+        """
+        candidates: set[float] | None = None
+        for ref in group:
+            comp = comps[ref]
+            allowed = comp.allowed_rotations
+            member = (
+                {float(r) for r in allowed}
+                if allowed
+                else {0.0, 90.0, 180.0, 270.0}
+            )
+            member &= {float(r) for r in (comp.block_rotation_geometry or {})}
+            candidates = member if candidates is None else candidates & member
+        if not candidates:
+            raise ValueError(f"replica_rotation_conflict:{group[0]}")
+        return sorted(candidates)
+
     def _optimize_block_rotation(
         self,
         comp: Component,
@@ -2120,12 +2205,9 @@ class PlacementSolver:
             rot = float(rot)
             if rot == orig_rot:
                 continue
-            geom = geo_by_rot.get(rot)
-            if geom is None:
+            if geo_by_rot.get(rot) is None:
                 continue
-            comp.rotation = rot
-            comp.width_mm = geom.width_mm
-            comp.height_mm = geom.height_mm
+            _set_block_rotation(comp, rot)
 
             score = self._score_rotation_for_block(work_state)
             if score > best_score:
@@ -2138,10 +2220,52 @@ class PlacementSolver:
             comp.width_mm = orig_w
             comp.height_mm = orig_h
         else:
-            geom = geo_by_rot[best_rot]
-            comp.rotation = best_rot
-            comp.width_mm = geom.width_mm
-            comp.height_mm = geom.height_mm
+            _set_block_rotation(comp, best_rot)
+
+    def _optimize_block_rotation_group(
+        self,
+        group: tuple[str, ...],
+        comps: dict[str, Component],
+        work_state: BoardState,
+    ) -> None:
+        """Choose ONE rotation for a whole coupled replica group.
+
+        Every candidate is applied to ALL members before the single global
+        ``_score_rotation_for_block`` call, so the winner is the angle that
+        scores best for the group and its neighbours together -- never the
+        donor's angle copied onto siblings after scoring the donor alone. The
+        whole group is restored after a rejected candidate; ties keep the
+        group's current (initial) angle.
+        """
+        candidates = self._replica_rotation_candidates(group, comps)
+        initial_rot = float(comps[group[0]].rotation)
+        saved = {
+            ref: (comps[ref].rotation, comps[ref].width_mm, comps[ref].height_mm)
+            for ref in group
+        }
+
+        best_rot = initial_rot
+        best_score = self._score_rotation_for_block(work_state)
+
+        for rot in candidates:
+            if rot == initial_rot:
+                continue
+            for ref in group:
+                _set_block_rotation(comps[ref], rot)
+            score = self._score_rotation_for_block(work_state)
+            if score > best_score:
+                best_score = score
+                best_rot = rot
+
+        if best_rot == initial_rot:
+            # Restore the exact pre-search extents left over from the last
+            # rejected candidate.
+            for ref in group:
+                comp = comps[ref]
+                comp.rotation, comp.width_mm, comp.height_mm = saved[ref]
+        else:
+            for ref in group:
+                _set_block_rotation(comps[ref], best_rot)
 
     def _score_rotation_for_block(self, work_state: BoardState) -> float:
         """Placement-signal score for synthetic leaf block rotation choice.
@@ -2558,6 +2682,18 @@ class PlacementSolver:
         if not unlocked:
             return best_comps
 
+        # Coupled replica groups, built ONCE for this SA pass. A group is only
+        # eligible when every member is unlocked and unpinned, so pinned/locked
+        # behavior is untouched.
+        pinned = getattr(self, "_pinned_targets", {})
+        groups = {
+            ref: group
+            for ref, group in self._replica_rotation_groups(comps).items()
+            if all(
+                not comps[m].locked and m not in pinned for m in group
+            )
+        }
+
         # Board bounds for clamping
         tl = work_state.board_outline[0]
         br = work_state.board_outline[1]
@@ -2611,33 +2747,58 @@ class PlacementSolver:
                     _update_pad_positions(comp_b, old_a, comp_b.rotation)
 
             elif roll < swap_prob + rotation_prob:
-                # Rotation perturbation
+                # Rotation perturbation. A selected member of a coupled replica
+                # group proposes a SHARED angle: every member moves, the whole
+                # state is scored once, and the group is accepted or restored
+                # together. Ungrouped components keep the per-instance move.
                 ref = rng.choice(unlocked)
                 comp = comps[ref]
-                old_rot = comp.rotation
-                if comp.allowed_rotations:
-                    candidates = [r for r in comp.allowed_rotations if r != old_rot]
-                    if not candidates:
-                        continue
-                    new_rot = float(rng.choice(candidates))
+                group = groups.get(ref)
+                if group is not None:
+                    group_rot = float(comps[group[0]].rotation)
+                    candidates = [
+                        r
+                        for r in self._replica_rotation_candidates(group, comps)
+                        if r != group_rot
+                    ]
                 else:
-                    # Try 90-degree rotation increments
-                    new_rot = (old_rot + rng.choice([90.0, 180.0, 270.0])) % 360.0
-                # Keep the width/height AABB in sync with the rotation so
-                # the scorer/legality passes and the eventual stamp see the
-                # same extents. Blocks carry per-rotation geometry (not
-                # always exact transposes); skip the move if the target
-                # rotation has no geometry entry.
+                    old_rot = comp.rotation
+                    if comp.allowed_rotations:
+                        candidates = [r for r in comp.allowed_rotations if r != old_rot]
+                    else:
+                        # Try 90-degree rotation increments
+                        candidates = [
+                            (old_rot + delta) % 360.0
+                            for delta in (90.0, 180.0, 270.0)
+                        ]
+                if not candidates:
+                    continue
+                new_rot = float(rng.choice(candidates))
+
+                # Sync each moved component's AABB with the rotation so the
+                # scorer/legality passes and the eventual stamp see the same
+                # extents. Blocks carry per-rotation geometry (not always exact
+                # transposes); skip the move if the target rotation has no
+                # geometry entry.
+                move_refs = group if group is not None else (ref,)
                 block_geom = None
-                if comp.kind == "subcircuit":
+                if group is None and comp.kind == "subcircuit":
                     block_geom = (comp.block_rotation_geometry or {}).get(float(new_rot))
                     if block_geom is None:
                         continue
-                old_w, old_h = comp.width_mm, comp.height_mm
-                rotate_component_in_place(comp, new_rot - old_rot)
-                if block_geom is not None:
-                    comp.width_mm = block_geom.width_mm
-                    comp.height_mm = block_geom.height_mm
+                saved = {
+                    m: (comps[m].rotation, comps[m].width_mm, comps[m].height_mm)
+                    for m in move_refs
+                }
+                old_rot = comp.rotation
+                if group is not None:
+                    for m in move_refs:
+                        _set_block_rotation(comps[m], new_rot)
+                else:
+                    rotate_component_in_place(comp, new_rot - old_rot)
+                    if block_geom is not None:
+                        comp.width_mm = block_geom.width_mm
+                        comp.height_mm = block_geom.height_mm
 
                 work_state.components = comps
                 new_score = scorer.score().total
@@ -2651,9 +2812,18 @@ class PlacementSolver:
                         best_comps = {r: copy.deepcopy(c) for r, c in comps.items()}
                         improved += 1
                 else:
-                    # Revert rotation and restore the exact saved extents
-                    rotate_component_in_place(comp, old_rot - new_rot)
-                    comp.width_mm, comp.height_mm = old_w, old_h
+                    # Revert: restore every moved member's exact rotation and
+                    # extents. A coupled group is restored from the snapshot
+                    # (set_block_rotation is its own inverse); a single block or
+                    # pad-bearing component is rotated back so its pads/body
+                    # center return too.
+                    if group is not None:
+                        for m in move_refs:
+                            member = comps[m]
+                            member.rotation, member.width_mm, member.height_mm = saved[m]
+                    else:
+                        rotate_component_in_place(comp, old_rot - new_rot)
+                        comp.width_mm, comp.height_mm = saved[ref][1], saved[ref][2]
 
             else:
                 # Single component displacement

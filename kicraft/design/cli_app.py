@@ -4556,12 +4556,16 @@ def _connector_stranded_refs(pcb: Path) -> list[str]:
 def _connector_misoriented(pcb: Path) -> tuple[list[str], list[str]]:
     """Edge-zoned connectors whose wire-entry mouth does not face off-board.
 
-    ``(blocking, warnings)``: *blocking* = mouth direction is KNOWN and points
-    the wrong way (a 90-degree screw terminal facing along/into the board is
-    physically unusable -- KC-YJ7Q69 shipped fab_ready this way); *warnings* =
-    deep-bodied TH connectors whose mouth cannot be detected (footprint lacks a
-    "PCB Edge" Dwgs.User marker), i.e. the gate cannot verify them. Returns
-    ([], []) when nothing is zoned or on any error, mirroring the stranded gate.
+    ``(blocking, warnings)``: *blocking* = the mouth direction is KNOWN and
+    points the wrong way (a 90-degree screw terminal facing along/into the board
+    is physically unusable -- KC-YJ7Q69 shipped fab_ready this way), or is a
+    recognized directional terminal / unrouted zoned ref whose mouth could not
+    be measured at all (``connector_orientation_unmeasured`` -- KC-DZQ76R's
+    J2/J3/J4 shipped because an unmeasurable mouth was only ever a warning);
+    *warnings* = deep-bodied TH connectors whose mouth cannot be detected
+    (footprint lacks a "PCB Edge" Dwgs.User marker). An empty, successfully
+    read zone set returns no findings. A failure to measure at all is blocking,
+    not silent success: the gate cannot certify what it could not read.
     """
     try:
         from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
@@ -4578,6 +4582,10 @@ def _connector_misoriented(pcb: Path) -> tuple[list[str], list[str]]:
                     f"{v.opening_board_deg:.0f}deg vs {v.edge} outward "
                     f"{v.outward_deg:.0f}deg)"
                 )
+            elif v.status == "unverified_directional":
+                blocking.append(
+                    f"connector_orientation_unmeasured:{v.ref}"
+                )
             elif v.status == "unknown_mouth":
                 warnings.append(
                     f"connector mouth unverifiable {v.ref}@{v.edge} -- "
@@ -4586,8 +4594,10 @@ def _connector_misoriented(pcb: Path) -> tuple[list[str], list[str]]:
                     "footprint so orientation can be placed and verified"
                 )
         return blocking, warnings
-    except Exception:
-        return [], []
+    except Exception as exc:  # noqa: BLE001 -- report the failure, never hide it
+        return [
+            f"connector_orientation_unmeasured:{type(exc).__name__}"
+        ], []
 
 
 def _antenna_edge_contract_violations(pcb: Path) -> list[str]:

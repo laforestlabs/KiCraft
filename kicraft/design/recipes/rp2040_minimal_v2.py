@@ -20,8 +20,6 @@ _INTERNAL_NETS = (
     "XIN",
     "XOUT_RAW",
     "XOUT",
-    "SWCLK",
-    "SWDIO",
     "DVDD_1V1",
 )
 
@@ -41,8 +39,8 @@ RP2040_MINIMAL_V2: RecipeDefinition = RP2040_MINIMAL.model_copy(
         "ports": (
             Port(name="vdd", direction="power"),
             Port(name="gnd", direction="power"),
-            Port(name="usb_dm", direction="bidirectional", required=False),
-            Port(name="usb_dp", direction="bidirectional", required=False),
+            Port(name="usb_dm", direction="bidirectional"),
+            Port(name="usb_dp", direction="bidirectional"),
             *(
                 Port(name=f"gpio{index}", direction="bidirectional", required=False)
                 for index in range(30)
@@ -87,8 +85,11 @@ RP2040_MINIMAL_V2: RecipeDefinition = RP2040_MINIMAL.model_copy(
                 message="QSPI chip select has a physical BOOTSEL path",
             ),
             Assertion(
-                code="rp2040_swd_access",
-                message="SWDIO, SWCLK, VDD, and GND reach the SWD header",
+                code="rp2040_native_usb_programming",
+                message=(
+                    "Native USB D-/D+ reach one physical USB data connector, "
+                    "with BOOTSEL-to-QSPI_CS first-flash and recovery access"
+                ),
             ),
         ),
         "source_documents": (

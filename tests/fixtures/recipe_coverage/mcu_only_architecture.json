@@ -1,9 +1,10 @@
 {
   "topologies": {
-    "MCU": "ESP32-S3-MINI-1-N8 controller; +3V3 supplied externally; UART programming and BOOT/reset recovery"
+    "MCU": "ESP32-S3-MINI-1-N8 controller; +3V3 supplied externally; native USB programming and BOOT/reset recovery"
   },
   "rail_voltages": {
-    "+3V3": 3.3
+    "+3V3": 3.3,
+    "VBUS": 5.0
   },
   "comms_protocols": [
     "UART"
@@ -14,15 +15,48 @@
       "name": "MCU",
       "stem": "MCU",
       "function": "ESP32-S3-MINI-1-N8 controller"
+    },
+    {
+      "name": "USB",
+      "stem": "USB",
+      "function": "USB connector"
     }
   ],
   "power_nets": [
-    "+3V3"
+    "+3V3",
+    "VBUS"
   ],
-  "inter_sheet_nets": [],
+  "inter_sheet_nets": [
+    {
+      "name": "USB_D_N",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "USB",
+          "direction": "bidirectional"
+        }
+      ]
+    },
+    {
+      "name": "USB_D_P",
+      "endpoints": [
+        {
+          "sheet": "MCU",
+          "direction": "bidirectional"
+        },
+        {
+          "sheet": "USB",
+          "direction": "bidirectional"
+        }
+      ]
+    }
+  ],
   "assumptions": [
     "External +3V3 source provides at least 500mA",
-    "auto_esp32_s3_module: native_usb=False from registered circuit recipe"
+    "auto_esp32_s3_module: native_usb=True from registered circuit recipe"
   ],
   "recipe_selections": [
     {
@@ -32,14 +66,36 @@
         "mcu": "MCU"
       },
       "parameters": {
-        "native_usb": false
+        "native_usb": true
       },
       "port_bindings": {
         "gnd": "GND",
-        "vdd": "+3V3"
+        "vdd": "+3V3",
+        "usb_dm": "USB_D_N",
+        "usb_dp": "USB_D_P"
       },
       "requirement_ids": [
         "auto_esp32_s3_module"
+      ],
+      "pin_allocations": []
+    },
+    {
+      "recipe": "usb-c-usb2-device@1",
+      "instance": "usb_connector",
+      "sheets": {
+        "power": "USB"
+      },
+      "parameters": {
+        "series_resistors": false
+      },
+      "port_bindings": {
+        "gnd": "GND",
+        "vbus": "VBUS",
+        "usb_dm": "USB_D_N",
+        "usb_dp": "USB_D_P"
+      },
+      "requirement_ids": [
+        "usb_connector"
       ],
       "pin_allocations": []
     }
@@ -51,10 +107,29 @@
       "role": "mcu_core",
       "family": "esp32-s3-module",
       "exact_part": "ESP32-S3-MINI-1-N8",
+      "parameters": {
+        "native_usb": true
+      },
+      "ports": {
+        "gnd": "GND",
+        "vdd": "+3V3",
+        "usb_dm": "USB_D_N",
+        "usb_dp": "USB_D_P"
+      },
+      "interfaces": []
+    },
+    {
+      "id": "usb_connector",
+      "sheet": "USB",
+      "role": "connector",
+      "family": "usb-c-usb2-device",
+      "exact_part": "USB-C-USB2-DEVICE",
       "parameters": {},
       "ports": {
         "gnd": "GND",
-        "vdd": "+3V3"
+        "vbus": "VBUS",
+        "usb_dm": "USB_D_N",
+        "usb_dp": "USB_D_P"
       },
       "interfaces": []
     }
@@ -65,7 +140,15 @@
       "recipe": "esp32-s3-mini-1-minimal@1",
       "exact_part": "ESP32-S3-MINI-1-N8",
       "assumptions": [
-        "auto_esp32_s3_module: native_usb=False from registered circuit recipe"
+        "auto_esp32_s3_module: native_usb=True from registered circuit recipe"
+      ]
+    },
+    {
+      "requirement_id": "usb_connector",
+      "recipe": "usb-c-usb2-device@1",
+      "exact_part": "USB-C-USB2-DEVICE",
+      "assumptions": [
+        "usb_connector: series_resistors=False because esp32-s3-mini-1-minimal@1 owns the USB series pair"
       ]
     }
   ],

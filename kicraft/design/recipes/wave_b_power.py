@@ -147,6 +147,8 @@ USB_C_USB2_DEVICE = _power_recipe(
     family="usb-c-usb2-device",
     exact_part="USB-C-USB2-DEVICE",
     protected=("TYPE-C-31-M-12", "USBLC6-2SC6"),
+    parameters={"series_resistors": True},
+    allowed={"series_resistors": (False, True)},
     ports=(
         Port(name="vbus", direction="power"),
         Port(name="gnd", direction="power"),
@@ -808,6 +810,38 @@ TPS54331_ADJUSTABLE = _buck(
     feedback_bottom="22k",
     enable_divider=True,
 )
+
+
+def expand_usb_c_usb2_device(resolved):
+    """Drop the connector-owned 22R pair when the MCU already owns it."""
+    from .registry import expand_static_definition
+
+    definition = USB_C_USB2_DEVICE
+    if not resolved.parameters.get("series_resistors", True):
+        definition = definition.model_copy(
+            update={
+                "internal_nets": tuple(
+                    net
+                    for net in definition.internal_nets
+                    if net not in {"dp_esd", "dm_esd"}
+                ),
+                "parts": tuple(
+                    part for part in definition.parts if part.role != "usb_series"
+                ),
+                "pins": tuple(
+                    (
+                        pin.model_copy(update={"net": {"3": "usb_dm", "4": "usb_dp"}[pin.pin]})
+                        if pin.role == "esd" and pin.pin in {"3", "4"}
+                        else pin
+                    )
+                    for pin in definition.pins
+                    if pin.role != "usb_series"
+                ),
+            }
+        )
+    return expand_static_definition(definition, resolved)
+
+
 WAVE_B_POWER_RECIPES = (
     USB_C_5V_SINK,
     USB_C_USB2_DEVICE,

@@ -205,6 +205,14 @@ class Component:
     # values swap relative to 0°/180°. Used by the placement solver to
     # try alternate block rotations without recomputing geometry.
     block_rotation_geometry: dict[float, "BlockRotationGeometry"] | None = None
+    # Synthetic ref of the donor block this block is an identical replica of
+    # (see the identical-leaf reuse path). Set by parent compose only for
+    # replicas in an UNCONSTRAINED replica group; the placement solver then
+    # searches one shared rotation for the whole group so rigid copies of the
+    # same circuit cannot end up at different parent orientations. None for a
+    # donor, for a constrained replica (which keeps its attachment
+    # constraints), and for every ordinary leaf block.
+    block_replication_donor: str | None = None
 
     @property
     def area(self) -> float:
@@ -616,6 +624,10 @@ class SubCircuitLayout:
     score: float = 0.0
     artifact_paths: dict[str, str] = field(default_factory=dict)
     antenna_edge_intents: list[AntennaEdgeIntent] = field(default_factory=list)
+    # Instance path of the donor artifact this layout is an identical rigid
+    # copy of (identical-leaf reuse: ``materialize_sibling`` /
+    # ``remap_solved_layout``). None for a donor or an ordinary leaf.
+    replicated_from: str | None = None
     frozen: bool = True
 
     @property

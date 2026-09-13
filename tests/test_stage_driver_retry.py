@@ -1567,17 +1567,18 @@ def test_recipe_complete_mcu_bom_and_wiring_skip_provider_calls(tmp_path, monkey
     assert bom_result["work_units"] == wiring_result["work_units"] == 0
     assert bom_result["attempts"] == wiring_result["attempts"] == 0
     assert client.calls == []
-    assert all(
-        part["recipe_id"] == "esp32-s3-mini-1-minimal@1" for part in committed["bom"]["parts"]
-    )
+    assert {
+        part["recipe_id"] for part in committed["bom"]["parts"]
+    } == {"esp32-s3-mini-1-minimal@1", "usb-c-usb2-device@1"}
     assert committed["bom"]["recipe_ownership"][0]["pins"]
     assert committed["wiring"]["connections"]
     assert committed["wiring"]["no_connect_pins"]
     recipe_events = [event for event in progress if event.get("kind") == "recipe_selected"]
-    assert [event["stage"] for event in recipe_events] == ["bom", "wiring"]
+    assert [event["stage"] for event in recipe_events] == ["bom", "bom", "wiring", "wiring"]
     assert all(event["owned_call_count"] == 0 for event in recipe_events)
     assert all(
-        event["resolution"][0]["requirement_id"] == "auto_esp32_s3_module"
+        event["resolution"][0]["requirement_id"]
+        in {"auto_esp32_s3_module", "usb_connector"}
         for event in recipe_events
     )
 
