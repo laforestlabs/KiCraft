@@ -127,6 +127,7 @@ def run_arm(args) -> int:
         print(f"unknown arm {args.arm!r}; one of {sorted(CONTRACT_LADDER_MODES)}", file=sys.stderr)
         return 2
     os.environ["KICRAFT_CONTRACT_LADDER"] = args.arm
+    label = args.label or args.arm
     state = Path(args.state).expanduser()
     board = args.board or state.parent.parent.name
     out = Path(args.out).expanduser()
@@ -134,6 +135,7 @@ def run_arm(args) -> int:
     runs_path = out / "runs.jsonl"
     manifest = {
         "arm": args.arm,
+        "label": label,
         "board": board,
         "state": str(state),
         "runs_requested": args.runs,
@@ -146,7 +148,7 @@ def run_arm(args) -> int:
         "settings": Settings.from_env().redacted(),
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    (out / f"manifest-{args.arm}-{board}.json").write_text(
+    (out / f"manifest-{label}-{board}.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
     print(
@@ -167,7 +169,20 @@ def run_arm(args) -> int:
             if spent_start is None:
                 spent_start = _spent_total(client)
             started = time.monotonic()
-            record: dict = {"arm": args.arm, "board": board, "run": index}
+            # One unique artifact pair per run: an interleaved driver invokes this
+            # script once per run with `--runs 1`, so a label+index name would
+            # overwrite the previous run's events and trace.
+            stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+            events_path = out / f"{label}-{board}-{stamp}.events.jsonl"
+            trace_path = out / f"{label}-{board}-{stamp}.trace.jsonl"
+            record: dict = {
+                "arm": args.arm,
+                "label": label,
+                "board": board,
+                "run": index,
+                "at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "artifacts": {"events": str(events_path), "trace": str(trace_path)},
+            }
             try:
                 result = drive_replay(
                     state,
@@ -178,13 +193,13 @@ def run_arm(args) -> int:
                     attempt_observer=trace.append,
                     client=client,
                 )
-                (out / f"{args.arm}-{board}-r{index}.events.jsonl").write_text(
+                events_path.write_text(
                     "".join(
                         json.dumps(event, separators=(",", ":")) + "\n" for event in events
                     ),
                     encoding="utf-8",
                 )
-                (out / f"{args.arm}-{board}-r{index}.trace.jsonl").write_text(
+                trace_path.write_text(
                     "".join(
                         json.dumps(row, separators=(",", ":")) + "\n" for row in trace
                     ),
@@ -233,7 +248,7 @@ def summarise(out: Path) -> int:
     rows = [json.loads(line) for line in runs_path.read_text(encoding="utf-8").splitlines()]
     arms: dict[str, dict] = {}
     for row in rows:
-        key = f"{row['arm']}"
+        key = str(row.get("label") or row["arm"])
         bucket = arms.setdefault(key, {"runs": 0, "commits": 0, "aborted": 0, "cost": 0.0, "boards": {}})
         bucket["runs"] += 1
         bucket["commits"] += 1 if row.get("commit") else 0
@@ -354,6 +369,11 @@ def main(argv=None) -> int:
     parser.add_argument("--arm", help="the KICRAFT_CONTRACT_LADDER arm to run")
     parser.add_argument("--state", help="frozen state.json (intent+functional_spec committed)")
     parser.add_argument("--board", help="board label for the artifact names (default: project id)")
+    parser.add_argument(
+        "--label",
+        help="scoreboard label for these runs (default: the arm name); use it to keep a "
+        "re-measurement or a knob variant separate from the arm's round-1 rows",
+    )
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--budget", type=float, default=0.25, help="per-run USD cap")
     parser.add_argument("--max-retries", type=int, default=3, help="the production caller value")

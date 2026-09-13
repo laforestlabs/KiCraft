@@ -1,9 +1,14 @@
 # Draft options + independent live-LLM tests: architecture contract convergence
 
-**Status: plan only — not executed.** Options are drafted, not implemented; no arm has been run.
-One **smoke replay** was spent to validate the harness against the live provider (**$0.0165**, one
-`architecture` call sequence on `1/825`); everything else in §1 is artifact analysis or a
-scripted-client (no-model) trace. Running the arms in §4 is the work this document authorises.
+**Status: options implemented and arm-tested; no arm ships.** Every option from §4 is implemented
+behind `KICRAFT_CONTRACT_LADDER` (default `stock`, byte-identical to the shipped behaviour) at
+commit `312a69f`, with a routing test per arm and the `tools/ladder_experiment.py` operator
+harness. Round 1 ran every arm; round 2 re-ran the two nearest rivals **interleaved** with stock;
+the O2 budget control ran interleaved too. **No arm is separable from stock at the pre-registered
+sample size, so nothing ships and the default stays `stock`.** The headline result is not the arm
+ranking but two corrections to §1 — the baseline is 0.60 (not ≈0/3) and the session drift makes
+blocked arm ordering invalid — plus a re-derived option (O9, §8.5) that targets the dominant
+defect class directly. Spend: ≈$4.2 of the $10 ceiling. Full record: **§8**.
 
 **Subject:** the pipeline behaviours that make a brief die at `architecture` even when every
 individual blocking diagnostic is actionable, the contract text already forbids the defect, and
@@ -404,3 +409,161 @@ the single. Combinations never justify a larger budget cap or a weakened gate.
   commits).
 - No prompt-example tuning beyond O7's full-defect feedback.
 - No change to the 34-brief canary or the deploy gate. No spend beyond the $10 ceiling.
+
+---
+
+## 8. Execution record (this run)
+
+### 8.1 The $0 measurement that reframed the plan
+
+Each rung of the two historical boards is reconstructible from the `answer_delta` stream, so the
+defect trajectory replays offline through `_normalize_stage_response` (no model call):
+
+| `1/825` rung | mode | blocking defect | declared content lost vs the previous rung |
+|---|---|---|---|
+| 1 | normal | `native_usb_connector_required` (ESP32) + `unknown_recipe_port_net['LED_DATA_OUT']` | — |
+| 2 | serialization | `missing_recipe_port` (ws2812 `data_out`) | `port:LED_DATA_OUT`: the binding was deleted instead of the net declared |
+| 3 | clean_slate | `unknown_recipe_port_net['HUB75_D']` → terminal | `net:HUB75_D` |
+
+Corrections to §1.2: the content loss happened on the **clean-slate** rung, and that rung's own
+diagnostic **did** name the net it lost. The "without any diagnostic naming them" clause holds
+for the first loss (`port:LED_DATA_OUT` — the replacement diagnostic names only the port), not
+the second, so O5's suppression rule is a no-op on the second loss by construction.
+
+### 8.2 What each arm does (scripted client, no model)
+
+`tests/test_stage_driver_retry.py::test_ladder_*` pins the call sequence per arm and whether the
+terminal rule fires; `tests/test_design_recipes.py` pins the two deterministic completions at the
+recipe level. Confirmed live: `no_serialization` spent **0 of 62** calls on a serialization rung
+and never armed the clean-slate escape; stock spent 20 serialization + 4 clean-slate calls in 21
+runs.
+
+Deviations from the drafted options, both to avoid inventing hardware:
+
+* **O6** completes the connector the board *already* declared: a power-only USB-C sink whose own
+  sheet carries the MCU's D+/D- pair becomes the `usb-c-usb2-device` the contract mandates
+  (verified on the real `825` rung-1 candidate: `native_usb_connector_required` disappears, two
+  defects → one). A connector requirement is added only when *no* requirement owns the MCU's USB
+  pair, so the arm never puts a second socket on the board.
+* **O8** ties the unused 13th HUB75 channel to GND instead of "marking `addr_d` optional": the
+  optional flag alone leaves the spare '245 input on a one-pin literal net, which §9.15 rejects
+  — the plan's own falsifier, measured before choosing. The tie-off keeps the input off the
+  float and the connector position driven, asserted pin-by-pin (`U2.3` on GND, `shifted9` =
+  `U2.17` + `J1.12`).
+
+### 8.3 Round 1 — every arm, N=10 per state, run as blocks
+
+| arm | commits/runs | rate | Wilson 95% | per board |
+|---|---|---|---|---|
+| stock | 12/20 | 0.60 | [0.39, 0.78] | 824 7/10, 825 5/10 |
+| O1 no_serialization | 6/20 | 0.30 | [0.15, 0.52] | 824 3/10, 825 3/10 |
+| O3 signature | 6/20 | 0.30 | [0.15, 0.52] | 824 3/10, 825 3/10 |
+| O4 preserving | 6/20 | 0.30 | [0.15, 0.52] | 824 2/10, 825 4/10 |
+| O5 dropped_gate | 4/20 | 0.20 | [0.08, 0.42] | 824 2/10, 825 2/10 |
+| O6 completing | 5/20 | 0.25 | [0.11, 0.47] | 824 4/10, 825 1/10 |
+| O7 full_feedback | 3/20 | 0.15 | [0.05, 0.36] | 824 0/10, 825 3/10 |
+| O8 addr_d_optional | 9/20 | 0.45 | [0.26, 0.66] | 824 5/10, 825 4/10 |
+
+Two premises of §1 are falsified or relocated:
+
+* **The baseline is 0.60, not ≈0/3.** The same frozen `825` state commits about half the time;
+  the historical deaths — and this plan's own smoke replay — are the tail of a stochastic
+  process, not a systematic death. Every arm's interval overlaps stock's, and all point
+  estimates sit *below* it, which in a blocked design is the signature of drift, not of knobs.
+* **The measured mechanism (§1.2) is real**: 15 of 21 stock runs lost at least one declared net
+  or port binding between rungs, `LED_DATA_OUT` 13 times.
+
+### 8.4 Round 2 — interleaved (drift-controlled), and the O2 control
+
+Round 1 ran arms as blocks, so model/provider drift over the session is indistinguishable from an
+arm effect. Round 2 interleaved `stock` with its two nearest rivals run-by-run (N=10 per state,
+20 pooled per arm), and the O2 control interleaved stock against stock with `--max-retries 5`
+(a provider-call budget of 6):
+
+| label | commits/runs | rate | Wilson 95% | per board |
+|---|---|---|---|---|
+| interleaved stock | 4/20 | 0.20 | [0.08, 0.42] | 824 1/10, 825 3/10 |
+| interleaved O8 addr_d_optional | 10/20 | 0.50 | [0.30, 0.70] | 824 5/10, 825 5/10 |
+| interleaved O4 preserving | 9/20 | 0.45 | [0.26, 0.66] | 824 6/10, 825 3/10 |
+| O2 stock, budget 4 | 6/20 | 0.30 | [0.15, 0.52] | 824 2/10, 825 4/10 |
+| O2 stock, budget 6 | 6/20 | 0.30 | [0.15, 0.52] | 824 3/10, 825 3/10 |
+
+Three results:
+
+1. **Drift is confirmed and large**: stock measures 0.60 in round 1 and 0.20 in round 2 on
+   identical inputs (and 0.30 in the O2 window). Round 1's arm ordering is therefore not evidence
+   about the arms — the direction reverses when interleaved.
+2. **The interleaved ordering cannot be attributed either**: the arm mechanisms do not fire often
+   enough to explain +25 to +30 points. Every `missing_recipe_port` in the stock artifacts is the
+   ws2812 `data_out` port; `addr_d` appears in 3 of 40 stock artifacts, so O8's tie-off is nearly
+   a no-op on this brief. Run-to-run overdispersion dominates: the clean-slate rung is reached in
+   4/21 stock runs but 8/20 `preserving` runs, a count the knob cannot change (it only alters the
+   message *after* the serialization failure).
+3. **O2 is a clean null**: doubling the budget changes nothing (6/20 vs 6/20; the 6 runs that
+   used the extra calls all still failed). The binding constraint is the terminal rule and the
+   defect mix, not the number of attempts — the O2 falsifier does not obtain.
+
+**Verdict (rule 3 and rule 5):** no arm is separable from stock at N=10 per state
+(`addr_d_optional` vs interleaved stock is Fisher p ≈ 0.07; the rest are worse), so the shipped
+default stays `stock` and the negative result is recorded. The experiment is *inconclusive*
+rather than the options refuted: this sample size cannot resolve a 0.2–0.5 difference under this
+overdispersion, and the pre-registered N is the limiting factor. A future round needs the
+interleaved design and N ≈ 40 per state per arm to separate an effect that size.
+
+### 8.5 Re-derived diagnosis and the option that follows (rule 5)
+
+The rung-1 blocking code is a **deterministic contract gap**, not a ladder defect:
+
+* in 16 of 21 stock runs the first rejection is `unknown_recipe_port_net` — a requirement binds a
+  recipe port to a net the architecture never declares;
+* every `missing_recipe_port` in the corpus is the ws2812 `data_out` port: "Include an output for
+  driving addressable LED string" means precisely this port, and the model binds it
+  (`data_out: LED_DATA_OUT`) without declaring `LED_DATA_OUT` as a net;
+* the model's repair for that diagnostic is often to **delete the binding** (§8.1/§8.3), which is
+  why the class repeats across rungs.
+
+**Proposed O9 (not implemented, not run — it needs its own pre-registration):** complete the
+declaration deterministically, in the posture of O6/O8 — when a requirement binds a recipe port
+to a net the architecture does not declare, declare that net with the endpoint the requiring
+sheet needs (plus the peer endpoint any other requirement binding the same net implies).
+Falsifier: the completion invents a net the model never intended (caught by the downstream
+wiring/BOM gates) or a build fails where stock passed. This targets the dominant defect class
+itself; the ladder arms only target its consequences.
+
+### 8.6 Steps not run, and why
+
+* **Round 3 (combination)** — §5 conditions it on "the best arm"; no arm beat stock, and the same
+  N cannot resolve a pair either.
+* **Round 4 (L2)** — §6.4 conditions it on a winner; nothing ships, so no full-chain spend.
+* **Deploy** — no winner to ship. The arms and the correction-event telemetry are committed but
+  **not deployed**: the running services still execute the previous code, and the default stays
+  `stock` until an arm's default is deliberately flipped.
+* **Step 5 corpus rescan** — the "before" count is recorded in §8.8; there is no shipped change
+  to re-scan after. Re-run it after any default flip.
+
+### 8.7 Spend, artifacts, harness findings
+
+* Spent on this plan ≈ **$4.2 of the $10 ceiling** (round 1 + round 2 + O2 + two validation
+  replays; the day's ledger total is $4.39, which includes pre-experiment traffic).
+* Artifacts: `/tmp/ladder-exp/` — `runs.jsonl` (one row per run: commit, rungs, per-rung defect
+  codes, lost declared content, cost, `at_utc`, artifact paths), `manifest-<label>-<board>.json`
+  (arm, knobs, model, settings, repo head), `<label>-<board>-<stamp>.{events,trace}.jsonl`, and
+  `analyze.py` (Wilson intervals, ladder shapes, defect trajectory, losses).
+* Harness / operations findings:
+  1. A supervised process inherits this session's stale `KICRAFT_*` environment, which overrides
+     `.env` (`load_dotenv` never overrides) and carried an invalid
+     `KICRAFT_DESIGN_PROFILE=flash`. Arm drivers must clear inherited `KICRAFT_*` first; the same
+     hazard applies to `deploy/restart-*.sh` when run from such a shell.
+  2. `--runs 1` (needed for interleaving) overwrote the previous run's artifacts until the naming
+     gained a timestamp. Round 2's per-run events/traces are therefore incomplete (6 of 60
+     survive); its `runs.jsonl` rows are intact, and the primary endpoint needs only those.
+  3. The serialization rung still emits no `retry` event, so the defect trajectory misses that
+     rung (plan item D3). The `declared_identities` key added to correction events makes the
+     dropped-content metric computable without the raw reply.
+
+### 8.8 Corpus "before" count (terminal-by-policy)
+
+`tools/ladder_experiment.py --scan` (production `triage` semantics over 48 local project event
+streams): `architecture` 2 terminal-by-policy, `wiring` 1, every other stage 0. §1.3's 70-of-540
+used a wider corpus and a deduced-rung signature; this is the precise post-`c410ad3` count on the
+local project streams, and the reference number for a post-flip rescan.
