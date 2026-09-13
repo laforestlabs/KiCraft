@@ -370,7 +370,7 @@ def test_contract_rejection_is_not_reported_as_malformed_json(tmp_path):
     assert term["diagnostics"][0]["code"] == "multiple_recipe_contracts"
     assert term["diagnostics"][0]["sub_codes"] == [
         "unsupported_protected_variant", "unsupported_recipe_endpoint"]
-    assert term["budget_exhausted"] is True  # 4 == max(2, architecture 3) + 1
+    assert term["attempt_budget_floor"] == 4   # max(2, architecture 3) + 1
 
 
 def test_invalid_schema_without_diagnostic_stays_schema_output(tmp_path):
@@ -518,11 +518,65 @@ def test_unit_repair_failure_reports_the_failing_unit(tmp_path):
     assert bad_unit[0]["errors"] == [bad]
 
 
+def test_ladder_reports_the_clean_slate_escape_as_terminal(tmp_path):
+    """A rejected clean-slate escape ends the stage BY POLICY with budget unspent.
+
+    Reading `attempts < budget` as "it had attempts left, so it was breadth"
+    would send a reader to raise a budget that never governs this path.
+    """
+    run = make_stage_run(
+        tmp_path,
+        status={"architecture": {"ok": False, "attempts": 3,
+                                 "failure_kind": "contract_rejected"}},
+        events=_stage_events("architecture", [
+            {"kind": "retry", "stage": "architecture", "errors": ["a"],
+             "failure_kind": "contract_rejected", "call_mode": "normal",
+             "diagnostic": {"code": "native_usb_connector_required"}},
+            {"kind": "serialization_recovery", "stage": "architecture",
+             "failure_kind": "contract_rejected"},
+            {"kind": "retry", "stage": "architecture", "errors": ["b"],
+             "failure_kind": "contract_rejected", "call_mode": "clean_slate",
+             "diagnostic": {"code": "unknown_recipe_port_net"}},
+        ]),
+    )
+    term = triage.collect_stages(run)["stages"][0]
+
+    assert [r["mode"] for r in term["ladder"]["rungs"]] == [
+        "normal", "serialization", "clean_slate"]
+    assert term["ladder"]["clean_slate_rejected"] is True
+    assert term["ladder"]["inferred"] is False
+    assert term["terminal_by_policy"] is True
+    assert term["budget_spent"] is False          # a slot was never spendable
+    note = triage._budget_note(term)
+    assert "BY POLICY" in note and "BREADTH" not in note
+
+
+def test_ladder_infers_rungs_on_artifacts_without_call_mode(tmp_path):
+    """`call_mode` on retry events is new; an older run must still yield the
+    ladder, and must say that it was inferred."""
+    run = make_stage_run(
+        tmp_path,
+        status={"architecture": {"ok": False, "attempts": 3,
+                                 "failure_kind": "invalid_schema"}},
+        events=_stage_events("architecture", [
+            {"kind": "retry", "stage": "architecture", "errors": ["a"],
+             "failure_kind": "invalid_schema"},
+        ]) + [{"kind": "serialization_recovery", "stage": "architecture",
+               "failure_kind": "invalid_schema"}],
+    )
+    term = triage.collect_stages(run)["stages"][0]
+
+    assert [r["mode"] for r in term["ladder"]["rungs"]] == [
+        "normal", "serialization", "clean_slate"]
+    assert term["ladder"]["inferred"] is True
+    assert term["terminal_by_policy"] is True
+
+
 def test_budget_note_does_not_misread_a_unit_repair_stop(tmp_path):
     """attempts == budget is a coincidence for a unit stage: the stop rule is
     the per-unit repair loop, not the provider-call budget. Calling that
     'breadth' would send the reader to raise a budget that is not the limit."""
-    unit_row = {"budget_exhausted": True, "attempts": 5, "attempt_budget": 5,
+    unit_row = {"budget_spent": True, "attempts": 5, "attempt_budget_floor": 5,
                 "failure_kind": "unit_repair_exhausted", "rounds": 8,
                 "units": [{"unit_id": "bom-s001"}]}
     note = triage._budget_note(unit_row)
@@ -530,15 +584,15 @@ def test_budget_note_does_not_misread_a_unit_repair_stop(tmp_path):
     # ... while the schema path, which has no stall rule, really is breadth.
     for kind in ("invalid_schema", "contract_rejected", "truncated_json"):
         assert "BREADTH" in triage._budget_note(
-            {"budget_exhausted": True, "attempts": 4, "attempt_budget": 4,
+            {"budget_spent": True, "attempts": 4, "attempt_budget_floor": 4,
              "failure_kind": kind, "units": []})
     # A commit rejection has a stall rule, so "breadth" would mislead there even
     # when the diagnosis bucket is a contract family.
     commit = triage._budget_note(
-        {"budget_exhausted": True, "attempts": 8, "attempt_budget": 8,
+        {"budget_spent": True, "attempts": 8, "attempt_budget_floor": 8,
          "failure_kind": "commit_rejected", "family": "contract/recipe", "units": []})
     assert "DIFFERENT rejection" in commit and "BREADTH" not in commit
-    assert triage._budget_note({"budget_exhausted": False}) is None
+    assert triage._budget_note({"budget_spent": False}) is None
 
 
 @pytest.mark.parametrize("raw,expected", [

@@ -3851,3 +3851,33 @@ def test_hub75_channels_bind_by_signal_name():
     assert {
         port: display.port_bindings[port] for port in signals.values()
     } == {port: f"HUB75_{signal}" for signal, port in signals.items()}
+
+
+def test_native_usb_failure_names_the_connector_recipe_that_satisfies_it():
+    """KC-WGJ6XE burned a correction round guessing the fix.
+
+    The diagnostic listed only the two nets, so a model that declared a
+    power-only USB-C (the brief's "USB C PD power input") had nothing to bind:
+    it has to be told a USB data connector recipe exists and what it expects.
+    """
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = _typed_esp32_architecture(
+        family="esp32-s3-wroom-1-module", exact_part="ESP32-S3-WROOM-1-N8R8"
+    )
+    # The brief asked for a "USB C PD power input": the model declares a
+    # power-only sink, which cannot program the module's native USB.
+    connector = next(row for row in payload["requirements"] if row["id"] == "usb_connector")
+    connector.update(
+        family="usb-c-power-sink",
+        exact_part="USB-C-5V-SINK",
+        ports={"vbus": "VBUS", "gnd": "GND"},
+    )
+    result = resolve_architecture_recipes(payload)
+
+    diagnostic = next(
+        row for row in result.blocking if row.code == "native_usb_connector_required"
+    )
+    assert any(row.startswith("canonical choice:") for row in diagnostic.evidence)
+    assert any("usb-c-usb2-device@1" in row for row in diagnostic.evidence)
+    assert "usb_dm='USB_D_N'" in diagnostic.evidence

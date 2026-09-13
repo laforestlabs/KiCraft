@@ -457,13 +457,13 @@ def collect_stage_diagnostics(events: list[dict]) -> list[dict]:
 
 
 def _stage_attempt_budget(stage: str) -> int | None:
-    """The DEFAULT provider-call budget for a stage (max_retries + 1).
+    """The stage's provider-call budget **floor** (max_retries + 1).
 
-    ``attempts == budget`` is the difference between "the contract is
-    unreachable" and "the stage ran out of breadth": the commit-rejection path
-    stops early on a repeated signature, but the schema/serialization path has
-    no such rule and simply spends this budget. A caller may raise max_retries,
-    so this is the floor, not a promise — read it as "at least".
+    NOT the effective ceiling on the schema/contract path: that path spends one
+    slot on a dedicated `serialization` recovery and one on the one-shot
+    `clean_slate` escape, and a rejected clean-slate ends the stage with a slot
+    still unspent (verified: an architecture stage makes 3 calls with a nominal
+    budget of 4). Read the attempt ladder for what actually happened.
     """
     try:
         from kicraft.server.stage_runtime import _STAGE_MIN_RETRIES
@@ -565,19 +565,33 @@ def norm_unit_error(text) -> str:
 
 
 def _budget_note(row: dict) -> str | None:
-    """How to read ``attempts == budget`` — the interpretation depends on which
-    stop rule governs that path. The schema/serialization path has no stall
-    rule; the commit path stops on a repeated signature; a unit stage stops in
-    the per-unit repair loop, where the attempt count is incidental.
+    """How to read attempts against the provider-call budget for THIS path.
+
+    Three different stop rules share one counter, so a bare
+    ``attempts == budget`` is not a diagnosis:
+
+    - a rejected **clean-slate** escape is terminal by policy, with a slot still
+      unspent (the schema/contract path),
+    - the **commit** path stops early on a repeated rejection signature,
+    - a **unit** stage stops in the per-unit repair loop, where the attempt
+      count is incidental.
 
     Keyed on the failure KIND, not the family: a family is a diagnosis bucket and
-    a `commit_rejected` run that happened to be diagnosed with a recipe code must
-    still get the commit path's reading.
+    a `commit_rejected` run diagnosed with a recipe code must still get the
+    commit path's reading.
     """
-    if not row.get("budget_exhausted"):
+    if row.get("terminal_by_policy"):
+        return ("** terminal BY POLICY: the last attempt was the one-shot clean-slate "
+                "escape and it was rejected — on this path that ends the stage "
+                "unconditionally, with no signature comparison (unlike the commit path), "
+                f"leaving a slot of its {row.get('attempt_budget_floor')}-call budget "
+                "unspent. The stage needed more CORRECTION rounds than the ladder gives, "
+                "not more budget. Compare the diagnostics per rung to see whether it was "
+                "converging (fewer defects) or repeating the same one. **")
+    if not row.get("budget_spent"):
         return None
-    head = (f"attempts ({row['attempts']}) == the default provider-call budget "
-            f"({row['attempt_budget']} = max(2, min_retries)+1)")
+    head = (f"attempts ({row['attempts']}) == the provider-call budget "
+            f"({row['attempt_budget_floor']})")
     kind = row.get("failure_kind")
     if kind in _SERIALIZATION_KINDS or kind in ("invalid_schema", "contract_rejected"):
         return (f"** {head} and this path has NO stall rule: the stage gave out on "
@@ -622,6 +636,57 @@ def _stage_family(failure_kind: str | None, codes: list[str]) -> str:
     return failure_kind or "unknown"
 
 
+def collect_stage_ladder(events: list[dict], attempts: int | None) -> dict:
+    """Reconstruct a stage's correction ladder.
+
+    A failed attempt is retried down a fixed ladder: a plain correction
+    (`normal`), then ONE dedicated tool-free `serialization` call, then ONE
+    `clean_slate` escape that re-emits the slot from the binding state. A
+    rejected clean-slate escape ends the stage **by policy** — the nominal
+    provider-call budget still has a slot left that is never spendable, so
+    neither "out of budget" nor "more attempts would fix it" is true.
+
+    Two signals, because the serialization rung does not emit a `retry`:
+    `retry.call_mode` (normal|clean_slate, from 2026-09-13) and the
+    `serialization_recovery` events. On older artifacts the rung names are
+    deduced from the call counts, and only when that deduction is sound — a
+    failed serialization is always followed by the one-shot clean-slate escape —
+    so the result reports `inferred: True` instead of inventing modes.
+    """
+    rungs: list[dict] = []
+    for e in events:
+        kind = e.get("kind")
+        if kind == "retry" and e.get("call_mode"):
+            rungs.append({"mode": str(e["call_mode"]), "failure_kind": e.get("failure_kind")})
+        elif kind == "serialization_recovery":
+            rungs.append({"mode": "serialization", "failure_kind": e.get("failure_kind")})
+    has_modes = any(e.get("kind") == "retry" and e.get("call_mode") for e in events)
+    inferred = False
+    if not has_modes:
+        retries = [e for e in events if e.get("kind") == "retry"]
+        serializations = [e for e in events if e.get("kind") == "serialization_recovery"]
+        if retries or serializations:
+            inferred = True
+            rungs = []
+            if retries:
+                # The first rung is a plain correction; the mode of any further
+                # `retry` is not recorded, so only the certain rungs are named.
+                rungs.append({"mode": "normal", "failure_kind": retries[0].get("failure_kind")})
+            rungs += [{"mode": "serialization", "failure_kind": e.get("failure_kind")}
+                      for e in serializations]
+            if serializations and attempts and attempts > len(rungs):
+                rungs.append({"mode": "clean_slate",
+                              "failure_kind": retries[-1].get("failure_kind") if retries else None})
+    return {
+        "rungs": rungs,
+        "serialization_calls": sum(
+            1 for e in events if e.get("kind") == "serialization_recovery"),
+        # The last attempt was the one-shot clean-slate escape and it failed.
+        "clean_slate_rejected": bool(rungs and rungs[-1]["mode"] == "clean_slate"),
+        "inferred": inferred,
+    }
+
+
 def collect_stages(run: Path) -> dict:
     """The LLM design stages: what committed, what failed, and why.
 
@@ -664,12 +729,16 @@ def collect_stages(run: Path) -> dict:
             if e.get("kind") == "retry" and e.get("failure_kind"))
         attempts = stat.get("attempts") or (len(rejections) or None)
         budget = _stage_attempt_budget(stage)
+        ladder = collect_stage_ladder(events, attempts)
         rows.append({
             "stage": stage,
             "ok": ok,
             "attempts": attempts,
-            "attempt_budget": budget,
-            "budget_exhausted": bool(attempts and budget and attempts >= budget),
+            # A floor, not the effective ceiling: the ladder below decides.
+            "attempt_budget_floor": budget,
+            "budget_spent": bool(attempts and budget and attempts >= budget),
+            "ladder": ladder,
+            "terminal_by_policy": bool(not ok and ladder["clean_slate_rejected"]),
             "rounds": stat.get("rounds"),
             "tool_calls": stat.get("tool_calls"),
             "cost_usd": stat.get("cost_usd"),
@@ -723,7 +792,7 @@ def print_stages(d: dict) -> None:
     for s in d["stages"]:
         mark = "ok  " if s["ok"] else ("FAIL" if s["ok"] is False else "?   ")
         print(f"\n{mark} {s['stage']:16s} attempts={s['attempts']} "
-              f"budget>={s['attempt_budget']} rounds={s['rounds']} "
+              f"budget>={s['attempt_budget_floor']} rounds={s['rounds']} "
               f"cost=${s['cost_usd'] or 0:.4f} wall={s['wall_s']}s")
         if s["ok"]:
             continue
@@ -733,6 +802,13 @@ def print_stages(d: dict) -> None:
             print(f"     error: {_WS_RE.sub(' ', str(s['error']))[:300]}")
         if s["attempt_failure_kinds"]:
             print(f"     attempt kinds: {json.dumps(s['attempt_failure_kinds'])}")
+        if s["ladder"]["rungs"]:
+            chain = " -> ".join(
+                f"{i + 1} {r['mode']}" + (f"({r['failure_kind']})" if r["failure_kind"] else "")
+                for i, r in enumerate(s["ladder"]["rungs"]))
+            print(f"     attempt ladder: {chain}"
+                  + ("   [rungs inferred — pre-2026-09-13 artifact]"
+                     if s["ladder"]["inferred"] else ""))
         if s["contract_rejection"]:
             print("     ** NOT a malformed-JSON failure: the provider produced schema-clean\n"
                   "        output that a semantic/recipe contract rejected."

@@ -23,7 +23,7 @@ from kicraft.design.synthesis.validation import _net_voltage, named_part_tokens
 
 from .models import RecipeDefinition, RegisteredRecipe
 from .pin_allocator import PinAllocationError, allocate_requirement_pins
-from .registry import protected_identities, registered_recipes
+from .registry import get_recipe, protected_identities, registered_recipes
 
 _PROGRAMMING_PEER_PORTS = {
     "uart_tx": "rx",
@@ -1194,6 +1194,13 @@ def _complete_native_usb_companions(result: ResolutionResult) -> None:
                     evidence=[
                         f"usb_dm={dm!r}",
                         f"usb_dp={dp!r}",
+                        # Name what CAN satisfy this: with no data connector
+                        # declared, a model that read the message had only the two
+                        # net names to work from and had to guess the recipe.
+                        *(
+                            _recipe_requirement_choice(get_recipe(recipe))
+                            for recipe in sorted(_USB_DATA_CONNECTOR_RECIPES)
+                        ),
                         *(
                             f"{row.recipe}.ports usb_dm={row.port_bindings.get('usb_dm')!r}, "
                             f"usb_dp={row.port_bindings.get('usb_dp')!r}"

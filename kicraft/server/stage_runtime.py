@@ -3670,6 +3670,7 @@ def drive_stage(
                             + (f" ({loop_abort_reason})" if loop_abort_reason else "")
                             + " — retrying once with reasoning disabled"
                         ],
+                        "call_mode": current_call_mode,
                         "model": _client_model(active_client),
                     }
                 )
@@ -3743,6 +3744,11 @@ def drive_stage(
                         "stage": stage,
                         "errors": [last["error"]],
                         "failure_kind": kind,
+                        # Which rung of the correction ladder this attempt took:
+                        # normal | clean_slate | serialization. A reader needs it
+                        # because a rejected clean-slate escape is terminal by
+                        # policy, whatever the nominal budget still allows.
+                        "call_mode": current_call_mode,
                         "schema_error": _redacted_schema_error(schema_error_detail),
                         "diagnostic": outcome.payload.get("diagnostic"),
                         "model": _client_model(active_client),
@@ -4324,6 +4330,7 @@ def drive_stage(
                     "stage": stage,
                     "errors": out.get("errors"),
                     "offenders": out.get("offenders"),
+                    "call_mode": current_call_mode,
                     "model": _client_model(active_client),
                 }
             )
