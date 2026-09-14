@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -36,6 +37,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from kicraft.design.architecture_intent import EDGE_PREFIX  # noqa: E402
 from kicraft.server.config import Settings, parse_contract_ladder  # noqa: E402
 from kicraft.server.stage_pipeline import drive_replay  # noqa: E402
 
@@ -84,9 +86,7 @@ def _run_metrics(stage_result: dict, events: list[dict], trace: list[dict]) -> d
         previous, current = set(identities[index - 1]), set(identities[index])
         text = _rejection_text(retries[index])
         lost = sorted(
-            _identity_name(item)
-            for item in previous - current
-            if _identity_name(item) not in text
+            _identity_name(item) for item in previous - current if _identity_name(item) not in text
         )
         if lost:
             dropped.append({"rung": index + 1, "items": lost})
@@ -95,8 +95,11 @@ def _run_metrics(stage_result: dict, events: list[dict], trace: list[dict]) -> d
         "failure_kind": (stage_result or {}).get("failure_kind"),
         "attempts": (stage_result or {}).get("attempts"),
         "rungs": [
-            {"attempt": row.get("provider_attempt"), "mode": row.get("call_mode"),
-             "outcome": row.get("outcome")}
+            {
+                "attempt": row.get("provider_attempt"),
+                "mode": row.get("call_mode"),
+                "outcome": row.get("outcome"),
+            }
             for row in trace
         ],
         "defects": [
@@ -196,15 +199,11 @@ def run_arm(args) -> int:
                     client=client,
                 )
                 events_path.write_text(
-                    "".join(
-                        json.dumps(event, separators=(",", ":")) + "\n" for event in events
-                    ),
+                    "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
                     encoding="utf-8",
                 )
                 trace_path.write_text(
-                    "".join(
-                        json.dumps(row, separators=(",", ":")) + "\n" for row in trace
-                    ),
+                    "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in trace),
                     encoding="utf-8",
                 )
                 record.update(_run_metrics(result.get("stage"), events, trace))
@@ -216,8 +215,11 @@ def run_arm(args) -> int:
                         "aborted": True,
                         "error": f"{type(exc).__name__}: {exc}",
                         "rungs": [
-                            {"attempt": row.get("provider_attempt"), "mode": row.get("call_mode"),
-                             "outcome": row.get("outcome")}
+                            {
+                                "attempt": row.get("provider_attempt"),
+                                "mode": row.get("call_mode"),
+                                "outcome": row.get("outcome"),
+                            }
                             for row in trace
                         ],
                     }
@@ -251,7 +253,9 @@ def summarise(out: Path) -> int:
     arms: dict[str, dict] = {}
     for row in rows:
         key = str(row.get("label") or row["arm"])
-        bucket = arms.setdefault(key, {"runs": 0, "commits": 0, "aborted": 0, "cost": 0.0, "boards": {}})
+        bucket = arms.setdefault(
+            key, {"runs": 0, "commits": 0, "aborted": 0, "cost": 0.0, "boards": {}}
+        )
         bucket["runs"] += 1
         bucket["commits"] += 1 if row.get("commit") else 0
         bucket["aborted"] += 1 if row.get("aborted") else 0
@@ -345,9 +349,7 @@ def run_full(args) -> int:
             "workspace": str(workspace),
             "all_committed": result["all_committed"],
             "build_rc": result["build_rc"],
-            "cost_usd": sum(
-                float(stage.get("cost_usd") or 0.0) for stage in result["stages"]
-            ),
+            "cost_usd": sum(float(stage.get("cost_usd") or 0.0) for stage in result["stages"]),
             "stages": [
                 {
                     "stage": stage.get("stage"),
@@ -365,6 +367,436 @@ def run_full(args) -> int:
             f"  full r{index}: all_committed={record['all_committed']} "
             f"build_rc={record['build_rc']} cost=${record['cost_usd']:.4f}"
         )
+    return 0
+
+
+def _draft_payloads(path: Path) -> list[dict]:
+    """Every provider draft in one run's event stream, in order.
+
+    The stream holds the model's raw answer as `answer_delta` chunks and a
+    `retry` event per rejection, so the drafts are the answers between retries.
+    Chunks that never completed a JSON object (an aborted loop, a truncated
+    stream) are dropped — they were never a draft the reader saw.
+    """
+    drafts: list[dict] = []
+    chunks: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("kind") == "answer_delta":
+            chunks.append(str(event.get("text") or ""))
+        elif event.get("kind") == "retry" and chunks:
+            drafts.append(_parse_draft("".join(chunks)))
+            chunks = []
+    if chunks:
+        drafts.append(_parse_draft("".join(chunks)))
+    return [draft for draft in drafts if draft is not None]
+
+
+def _parse_draft(text: str) -> dict | None:
+    from kicraft.server.stage_contracts import _extract_json
+
+    try:
+        payload = _extract_json(text)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _project_to_intent(architecture: dict) -> tuple[dict, list[str]]:
+    """Reverse-project a committed/explicit draft onto the intent-shaped slot.
+
+    The corpus predates the intent slot, so the offline replay has to state the
+    same design in the new shape: sheets and parts with their supply rails,
+    signals with a source port and peer ports, and the rails with the port that
+    generates them. It is deliberately lossy in one direction only — information
+    the draft never had cannot be projected — so a draft the projection cannot
+    express is reported as such, never counted as a pass.
+    """
+    from kicraft.design.lowering import registered_lowerers
+    from kicraft.design.recipes.registry import registered_recipes
+    from kicraft.design.recipes.resolver import _PORT_ALIASES, _net_identity
+
+    recipes = {}
+    for registered in registered_recipes():
+        definition = registered.definition
+        if definition.family:
+            recipes.setdefault(definition.family, definition)
+        if definition.exact_part:
+            recipes.setdefault(definition.exact_part.casefold(), definition)
+    lowerer_families = {family for row in registered_lowerers() for family in row.families}
+
+    def definition_of(row: dict):
+        return recipes.get(row.get("family") or "") or recipes.get(
+            str(row.get("exact_part") or "").casefold()
+        )
+
+    def ports_of(row: dict) -> dict[str, str]:
+        definition = definition_of(row)
+        return {port.name: port.direction for port in definition.ports} if definition else {}
+
+    sheets = architecture.get("sheets") or []
+    requirements = [row for row in architecture.get("requirements") or [] if isinstance(row, dict)]
+    nets = [row for row in architecture.get("inter_sheet_nets") or [] if isinstance(row, dict)]
+    rail_voltages = {
+        str(name): float(value) for name, value in (architecture.get("rail_voltages") or {}).items()
+    }
+    rails = {
+        name: volts
+        for name, volts in rail_voltages.items()
+        if name != "GND" and name in set(architecture.get("power_nets") or [])
+    }
+    by_sheet: dict[str, list[dict]] = {}
+    for row in requirements:
+        by_sheet.setdefault(str(row.get("sheet")), []).append(row)
+    endpoints_by_net = {
+        str(net.get("name")): [row for row in net.get("endpoints") or [] if isinstance(row, dict)]
+        for net in nets
+    }
+
+    def _key(raw: object) -> str:
+        """A port key the intent slot accepts (the drafts predate the key pattern)."""
+        return re.sub(r"[^a-z0-9_]", "_", str(raw).lower()).strip("_") or "pin"
+
+    def _port_key(row: dict, port: str) -> str | None:
+        """The intent-slot key for one draft port, or None when the draft has none.
+
+        A recipe-advertised key (or any lowerer key) travels verbatim. A draft that
+        named an MCU application pin bare (`r0`, `led`) — the older explicit-slot
+        style — becomes the capability-prefixed key the allocator expects, chosen
+        from the direction the bound net leaves that sheet. A port the selected
+        recipe does not have and no capability spelling covers is NOT expressible
+        in the intent slot, and the projection reports it instead of inventing one.
+        """
+        family = str(row.get("family") or "")
+        directions = ports_of(row)
+        if port in directions or family in lowerer_families or not directions:
+            return _key(port)
+        for canonical, aliases in _PORT_ALIASES.items():
+            if canonical in directions and _net_identity(port) in {
+                _net_identity(alias) for alias in (canonical, *aliases)
+            }:
+                return canonical
+        definition = definition_of(row)
+        if not (definition and definition.allocatable_pins):
+            return None  # no allocatable pin can carry this key: it is not expressible
+        if re.match(r"^(?:input|output|touch|parallel|pwm|adc|gpio\d)", port):
+            return _key(port)  # already a capability-shaped application key
+        net = (row.get("ports") or {}).get(port)
+        direction = next(
+            (
+                str(endpoint.get("direction"))
+                for endpoint in endpoints_by_net.get(str(net), [])
+                if endpoint.get("sheet") == row.get("sheet")
+            ),
+            "output",
+        )
+        return _key(f"{'input' if direction == 'input' else 'output'}_{port}")
+
+    def binding(row: dict, net: str, *, want: str | None = None) -> str | None:
+        directions = ports_of(row)
+        for port, value in (row.get("ports") or {}).items():
+            if value != net:
+                continue
+            if want is None or directions.get(port) == want:
+                return port
+        return None
+
+    def owner(sheet: str, net: str, *, want: str | None = None) -> dict | None:
+        for row in by_sheet.get(sheet, []):
+            if binding(row, net, want=want):
+                return row
+        return None
+
+    power_rails: dict[str, dict] = {}
+    for net in {net for row in requirements for net in (row.get("ports") or {}).values()}:
+        if net not in rails:
+            continue
+        source = None
+        for endpoint in endpoints_by_net.get(net, []):
+            if endpoint.get("direction") != "output":
+                continue
+            row = owner(str(endpoint.get("sheet")), net)
+            port = binding(row, net) if row else None
+            key = _port_key(row, port) if row is not None and port else None
+            if key:
+                source = f"{row.get('id')}.{key}"
+                break
+        power_rails[net] = {"voltage": rails[net], "from": source}
+
+    projected_requirements = []
+    for row in requirements:
+        directions = ports_of(row)
+        known = bool(directions) or str(row.get("family") or "") in lowerer_families
+        supply_port = next(
+            (
+                port
+                for port in ("vdd", "vm", "vin", "input", "vdd_5v")
+                if (row.get("ports") or {}).get(port) in power_rails
+            ),
+            None,
+        )
+        ties = {
+            key: net
+            for port, net in (row.get("ports") or {}).items()
+            if ((net == "GND" and port != "gnd") or net in power_rails)
+            and (key := _port_key(row, port)) is not None
+        }
+        if supply_port:
+            ties.pop(_port_key(row, supply_port), None)
+        projected = {
+            "id": row.get("id"),
+            "sheet": row.get("sheet"),
+            "role": row.get("role"),
+            "family": row.get("family"),
+            "exact_part": row.get("exact_part"),
+            "parameters": dict(row.get("parameters") or {}),
+            "supply": (row.get("ports") or {}).get(supply_port) if supply_port else None,
+            "interfaces": list(row.get("interfaces") or []),
+            "functional_blocks": list(row.get("functional_blocks") or []),
+            "ties": ties,
+            "declared_ports": [],
+        }
+        if not known:
+            # An uncurated part: the draft's own port bindings are the only interface
+            # statement it carries, so they become the declared interface.
+            projected["declared_ports"] = [
+                {
+                    "key": _port_key(row, port) or _key(port),
+                    "direction": (
+                        directions.get(port)
+                        or next(
+                            (
+                                str(endpoint.get("direction"))
+                                for endpoint in endpoints_by_net.get(net, [])
+                                if endpoint.get("sheet") == row.get("sheet")
+                            ),
+                            "bidirectional",
+                        )
+                        or "bidirectional"
+                    ),
+                    "function": f"projected from the draft's {port!r} binding",
+                }
+                for port, net in (row.get("ports") or {}).items()
+            ]
+        projected_requirements.append(projected)
+
+    signals: list[dict] = []
+    dropped_ports: list[str] = []
+    known_sheet_stems = {str(row.get("stem")) for row in sheets}
+
+    def _label(net: str) -> str:
+        label = re.sub(r"[^A-Z0-9_]", "_", net.upper()).strip("_") or "EDGE"
+        return f"{label}_EDGE" if label in known_sheet_stems else label
+
+    def _ref(row: dict, port: str) -> str | None:
+        key = _port_key(row, port)
+        if key is None:
+            dropped_ports.append(f"{row.get('id')}.{port}")
+        return f"{row.get('id')}.{key}" if key else None
+
+    for net, endpoints in endpoints_by_net.items():
+        if net in power_rails or net == "GND":
+            continue
+        owners_by_sheet = {}
+        for endpoint in endpoints:
+            sheet = str(endpoint.get("sheet"))
+            row = owner(sheet, net)
+            port = binding(row, net) if row else None
+            owners_by_sheet[sheet] = (endpoint, row, port)
+        source_sheet = next(
+            (
+                sheet
+                for sheet, (endpoint, row, port) in owners_by_sheet.items()
+                if row is not None and port and endpoint.get("direction") == "output"
+            ),
+            None,
+        )
+        if source_sheet is None:
+            # A bidirectional or peer-typed net (USB, a bus) has no output endpoint:
+            # the first sheet that owns a binding on it is the source, the rest peers.
+            source_sheet = next(
+                (
+                    sheet
+                    for sheet, (_endpoint, row, port) in owners_by_sheet.items()
+                    if row is not None and port
+                ),
+                None,
+            )
+        if source_sheet is None:
+            continue
+        _endpoint, source_row, source_port = owners_by_sheet[source_sheet]
+        source_ref = _ref(source_row, source_port)
+        if source_ref is None:
+            continue
+        peer_refs = [
+            ref
+            for sheet, (_endpoint, row, port) in owners_by_sheet.items()
+            if sheet != source_sheet
+            for ref in [
+                _ref(row, port) if row is not None and port else f"{EDGE_PREFIX}{_label(sheet)}"
+            ]
+            if ref is not None
+        ]
+        if not peer_refs:
+            continue
+        signals.append({"name": net, "from": source_ref, "to": peer_refs})
+
+    # A net only one sheet binds is a signal that leaves the board: the draft's
+    # dangling output (the class the O9 completion rescued) is stated as an edge.
+    for row in requirements:
+        for port, net in (row.get("ports") or {}).items():
+            if net in endpoints_by_net or net == "GND" or net in power_rails:
+                continue
+            source_ref = _ref(row, port)
+            if source_ref is None:
+                continue
+            signals.append({"name": net, "from": source_ref, "to": [f"{EDGE_PREFIX}{_label(net)}"]})
+
+    known_sheets = {str(row.get("name")) for row in sheets}
+    return {
+        "topologies": dict(architecture.get("topologies") or {}),
+        "comms_protocols": list(architecture.get("comms_protocols") or []),
+        "mcu_present": bool(architecture.get("mcu_present")),
+        "power": {"rails": power_rails},
+        "sheets": [
+            {
+                "name": row.get("name"),
+                "stem": row.get("stem"),
+                "role": "interface",
+                "function": row.get("function"),
+            }
+            for row in sheets
+            if str(row.get("name")) in known_sheets
+        ],
+        "requirements": projected_requirements,
+        "signals": signals,
+        "assumptions": list(architecture.get("assumptions") or []),
+    }, sorted(dropped_ports)
+
+
+def _draft_codes(
+    payload: dict, prompt_state: dict, slot: str = "explicit"
+) -> tuple[list[str], str | None]:
+    """The blocking codes one draft is rejected for, or the refusal that stopped it."""
+    from kicraft.server.stage_contracts import StageSchemaError, _normalize_stage_response
+
+    try:
+        _normalize_stage_response(
+            "architecture", json.loads(json.dumps(payload)), prompt_state, slot=slot
+        )
+    except StageSchemaError as exc:
+        diagnostic = getattr(exc, "diagnostic", None) or {}
+        if isinstance(diagnostic, dict) and diagnostic.get("code"):
+            codes = [str(diagnostic["code"])]
+            codes.extend(
+                str(item["code"])
+                for item in diagnostic.get("evidence") or []
+                if isinstance(item, dict) and item.get("code")
+            )
+            return sorted(set(codes)), None
+        return ["unclassified"], str(exc)[:200]
+    except Exception as exc:  # noqa: BLE001 - a projection failure is reported, never a pass
+        return [], f"{type(exc).__name__}: {exc}"[:200]
+    return [], None
+
+
+def replay_corpus(root: Path, *, limit: int | None, state_root: Path) -> int:
+    """Replay every saved first draft through the reader, before and after derivation.
+
+    The offline half of the plan's §6 measurement: for every architecture run whose
+    raw drafts are still on disk, count the blocking classes the FIRST draft hit
+    under the explicit reader, project that draft onto the intent slot, derive it,
+    and count the classes that remain. Classes the derivation owns disappear; a
+    draft the derivation cannot rebuild is reported as skipped, never as a pass.
+    """
+    from kicraft.design.architecture_intent import ArchitectureIntentError, derive_architecture
+
+    streams = sorted(root.glob("*.events.jsonl"))
+    if limit is not None:
+        streams = streams[:limit]
+    before: dict[str, int] = {}
+    after: dict[str, int] = {}
+    states: dict[str, dict] = {}
+    rows: list[dict] = []
+    for stream in streams:
+        board = stream.name.split("-")[-2]
+        state_path = state_root / board / ".kicraft" / "state.json"
+        if not state_path.is_file():
+            continue
+        state = states.setdefault(board, json.loads(state_path.read_text(encoding="utf-8")))
+        prompt_state = {
+            "intent": state.get("intent"),
+            "functional_spec": state.get("functional_spec"),
+        }
+        drafts = _draft_payloads(stream)
+        if not drafts:
+            continue
+        first = drafts[0]
+        draft_codes, unclassified = _draft_codes(first, prompt_state)
+        for code in draft_codes:
+            before[code] = before.get(code, 0) + 1
+        skipped = None
+        derived_codes: list[str] = []
+        dropped: list[str] = []
+        try:
+            intent, dropped = _project_to_intent(first)
+            derived = derive_architecture(intent).model_dump(exclude_none=True)
+            derived_codes, unclassified = _draft_codes(derived, prompt_state)
+        except ArchitectureIntentError as exc:
+            skipped = f"refused: {sorted({row.code for row in exc.diagnostics})}"
+            derived_codes = sorted({row.code for row in exc.diagnostics})
+        except Exception as exc:  # noqa: BLE001 - one bad draft must not stop the replay
+            skipped = f"{type(exc).__name__}: {exc}"[:200]
+        for code in derived_codes:
+            after[code] = after.get(code, 0) + 1
+        rows.append(
+            {
+                "stream": stream.name,
+                "drafts": len(drafts),
+                "draft_codes": draft_codes,
+                "derived_codes": derived_codes,
+                "skipped": skipped,
+                "unclassified": unclassified,
+                "inexpressible_ports": dropped,
+            }
+        )
+
+    def _expressible(row: dict) -> bool:
+        return not row["skipped"] and not row["inexpressible_ports"]
+
+    known = [row for row in rows if _expressible(row)]
+    accepted_before = sum(1 for row in known if not row["draft_codes"] and not row["unclassified"])
+    accepted_after = sum(1 for row in known if not row["derived_codes"])
+    print(f"replayed {len(rows)} first drafts from {len(streams)} event streams")
+    print(
+        f"first drafts accepted: explicit reader {accepted_before}/{len(known)}; "
+        f"after projection+derivation {accepted_after}/{len(known)} "
+        f"({len(rows) - len(known)} draft(s) the projection could not express are excluded)"
+    )
+    print(f"{'blocking class':<42} {'explicit':>9} {'derived':>8}")
+    for code in sorted(
+        {*before, *after}, key=lambda name: -(before.get(name, 0) + after.get(name, 0))
+    ):
+        print(f"{code:<42} {before.get(code, 0):>9} {after.get(code, 0):>8}")
+    inexpressible = sum(len(row["inexpressible_ports"]) for row in rows)
+    if inexpressible:
+        print(
+            f"projection could not express {inexpressible} draft port(s) "
+            "(reported per row in replay.jsonl)"
+        )
+    skipped = sum(1 for row in rows if row["skipped"])
+    if skipped:
+        print(f"{skipped} draft(s) the projection could not rebuild:")
+        for row in rows:
+            if row["skipped"]:
+                print(f"  {row['stream']}: {row['skipped']}")
+    (root / "replay.jsonl").write_text(
+        "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )
     return 0
 
 
@@ -402,11 +834,29 @@ def main(argv=None) -> int:
         metavar="PROJECTS_DIR",
         help="count terminal-by-policy stage deaths across local event streams and exit",
     )
+    parser.add_argument(
+        "--replay-corpus",
+        nargs="?",
+        const="/tmp/ladder-exp",
+        metavar="EVENTS_DIR",
+        help="replay every saved architecture draft through the reader, before and after the "
+        "intent-slot derivation, and print the per-class counts",
+    )
+    parser.add_argument("--limit", type=int, help="--replay-corpus: only the first N streams")
+    parser.add_argument(
+        "--state-root",
+        default=str(Path.home() / ".kicraft" / "projects" / "1"),
+        help="--replay-corpus: where the frozen <board>/state.json files live",
+    )
     args = parser.parse_args(argv)
-    if args.scan is not None:
-        since = (
-            datetime.fromisoformat(args.since).timestamp() if args.since else None
+    if args.replay_corpus is not None:
+        return replay_corpus(
+            Path(args.replay_corpus).expanduser(),
+            limit=args.limit,
+            state_root=Path(args.state_root).expanduser(),
         )
+    if args.scan is not None:
+        since = datetime.fromisoformat(args.since).timestamp() if args.since else None
         return scan_corpus([Path(item).expanduser() for item in args.scan], since)
     if args.summary:
         return summarise(Path(args.out).expanduser())

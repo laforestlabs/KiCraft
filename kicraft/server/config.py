@@ -152,6 +152,10 @@ STAGE_COLLECTION_BOUNDS: dict[str, tuple[CollectionBound, ...]] = {
             total=ARCHITECTURE_NET_LIMIT,
             unique_keys=("name",),
         ),
+        # The intent-shaped slot's signal list: ranges keep this small, so the
+        # cap is on declared entries, not on the nets they expand to. Inert for
+        # the explicit slot, whose schema has no `signals` property.
+        CollectionBound(field="signals", total=ARCHITECTURE_NET_LIMIT),
         CollectionBound(field="assumptions", total=DESIGN_NOTE_LIMIT),
         CollectionBound(field="recipe_selections", total=32),
     ),
@@ -356,6 +360,19 @@ def parse_contract_ladder(value: str) -> frozenset[str]:
     return modes
 
 
+ARCHITECTURE_SLOTS = ("explicit", "intent")
+
+
+def parse_architecture_slot(value: str) -> str:
+    """Validate a ``KICRAFT_ARCHITECTURE_SLOT`` value."""
+    slot = str(value or "explicit").strip().lower()
+    if slot not in ARCHITECTURE_SLOTS:
+        raise SystemExit(
+            f"KICRAFT_ARCHITECTURE_SLOT must be one of {list(ARCHITECTURE_SLOTS)}, got {slot!r}"
+        )
+    return slot
+
+
 @dataclass(frozen=True)
 class StageResponsePolicy:
     """Immutable response policy for one design-stage drive.
@@ -442,6 +459,11 @@ class Settings:
     # Correction-ladder arm(s) for the schema/contract path; see
     # CONTRACT_LADDER_MODES. KICRAFT_CONTRACT_LADDER.
     contract_ladder: str = "stock"
+    # Which architecture slot the provider is asked for:
+    #   explicit  the historical slot: the model writes net names, port bindings, endpoints
+    #   intent    the intent-shaped slot, whose derived bookkeeping `derive_architecture` writes
+    # See docs/plans/architecture-constructive-slot-2026-09-14.md. KICRAFT_ARCHITECTURE_SLOT.
+    architecture_slot: Literal["explicit", "intent"] = "explicit"
     # --- Design-stage reasoning budget + in-stream loop breaker ---------------
     # Structured design stages default to reasoning disabled. Operators may
     # opt in for architecture/BOM experiments, but recovery does not pay for a
@@ -666,6 +688,9 @@ class Settings:
                         os.environ.get("KICRAFT_CONTRACT_LADDER", cls.contract_ladder)
                     )
                 )
+            ),
+            architecture_slot=parse_architecture_slot(
+                os.environ.get("KICRAFT_ARCHITECTURE_SLOT", cls.architecture_slot)
             ),
             design_reasoning_tokens=int(
                 os.environ.get("KICRAFT_DESIGN_REASONING_TOKENS", cls.design_reasoning_tokens)
@@ -932,6 +957,7 @@ class Settings:
             "enable_core_defaults": self.enable_core_defaults,
             "eval_judge_model": self.eval_judge_model,
             "contract_ladder": self.contract_ladder,
+            "architecture_slot": self.architecture_slot,
             "design_reasoning_tokens": self.design_reasoning_tokens,
             "design_temperature": self.design_temperature,
             "review_model": self.review_model,

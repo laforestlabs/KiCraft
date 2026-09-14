@@ -10,6 +10,7 @@ import pytest
 
 from kicraft.server.client import _StreamingCollectionGuard
 from kicraft.design import models
+from kicraft.design.architecture_intent import derive_architecture
 from kicraft.design.stage_state import DESIGN_STAGES
 from kicraft.server.config import STAGE_COLLECTION_BOUNDS, CollectionBound
 from kicraft.server.stage_contracts import (
@@ -76,6 +77,17 @@ def test_architecture_example_validates_and_carries_a_requirement():
     architecture = ArchitectureStageResponse.model_validate(slot)
     assert architecture.requirements
     assert architecture.requirements[0].functional_blocks
+
+
+def test_architecture_intent_example_derives_and_normalizes():
+    """The example the model is shown must itself survive derivation and the real reader."""
+    slot = json.loads(_WORKED_EXAMPLES["architecture_intent"])
+    architecture = derive_architecture(slot)
+    assert architecture.requirements
+    normalized, _ = _normalize_stage_response("architecture", slot, {})
+    assert normalized["requirements"]
+    assert normalized["power_nets"] == ["GND", "+3V3", "+5V"]
+    assert normalized["rail_voltages"] == {"+5V": 5.0, "+3V3": 3.3, "GND": 0.0}
 
 
 def test_every_stage_has_a_worked_example_riding_the_system_prompt():
@@ -160,6 +172,11 @@ def test_provider_schema_and_stream_collection_limits_agree(stage, allow_questio
     schema = contract.response_format["json_schema"]["schema"]
     properties = schema["properties"]
     for bound in STAGE_COLLECTION_BOUNDS[stage]:
+        if bound.field not in properties:
+            # A stage's bounds cover more than one slot shape (the intent-shaped
+            # architecture slot has `signals`, the explicit one does not); a field
+            # the contract does not carry has nothing to advertise or enforce.
+            continue
         advertised_limit = properties[bound.field]["maxItems"]
         guard = _StreamingCollectionGuard((bound,))
         at_limit = json.dumps({bound.field: [{}] * advertised_limit})

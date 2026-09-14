@@ -484,6 +484,11 @@ class Architecture(BaseModel):
     recipe_resolution: list[RecipeResolutionRecord] = Field(default_factory=list)
     unresolved_requirement_ids: list[str] = Field(default_factory=list)
     protected_identities: list[str] = Field(default_factory=list)
+    # Requirements whose interface the model declared because no curated recipe covers the part
+    # (`docs/plans/architecture-constructive-slot-2026-09-14.md` §4.2). Compiler-derived, never a
+    # provider claim: it marks a recorded claim, so review and BOM can flag it instead of assuming
+    # the pin functions were verified.
+    declared_interfaces: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _sheets_unique(self):

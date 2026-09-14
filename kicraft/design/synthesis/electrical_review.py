@@ -305,6 +305,15 @@ def build_design_digest(state, *, project_root=None, budget: int = 14000) -> str
             a.append("POWER NETS: " + ", ".join(arch.power_nets))
         if arch.inter_sheet_nets:
             a.append("INTER-SHEET NETS: " + ", ".join(n.name for n in arch.inter_sheet_nets))
+        if arch.declared_interfaces:
+            # These parts have no curated recipe: their pin functions are a model claim
+            # (docs/plans/architecture-constructive-slot-2026-09-14.md §4.2). Say so, so
+            # the review checks them instead of trusting them.
+            a.append(
+                "DECLARED INTERFACES (pin functions claimed by the model, NOT verified against "
+                "a curated recipe — check these against the part's datasheet): "
+                + ", ".join(arch.declared_interfaces)
+            )
         parts.append("ARCHITECTURE:\n" + "\n".join(a))
 
     bom = state.bom

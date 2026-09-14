@@ -318,6 +318,25 @@ _WORKED_EXAMPLES = {
         '"vout": "+3V3", "gnd": "GND"}, "functional_blocks": ["3V3 REGULATOR"]}], '
         '"inter_sheet_net_ranges": []}'
     ),
+    "architecture_intent": (
+        '{"topologies": {"POWER": "Linear regulator"}, "comms_protocols": [], '
+        '"mcu_present": false, "power": {"rails": {"+5V": {"voltage": 5.0, '
+        '"from": "jack.pin1"}, "+3V3": {"voltage": 3.3, "from": "reg.output"}}}, '
+        '"sheets": [{"name": "POWER", "stem": "POWER", "role": "power", '
+        '"function": "Regulate the 5 V input to 3.3 V and distribute both rails", '
+        '"from_library": null, "library_instance": null, "replication_group": null, '
+        '"replication_instance": null}], "requirements": [{"id": "jack", "sheet": '
+        '"POWER", "role": "power_input", "family": "pin-header", "exact_part": '
+        'null, "parameters": {"rows": 1, "gender": "female"}, "supply": null, '
+        '"programming": null, "interfaces": [], "functional_blocks": '
+        '["POWER INPUT"], "ties": {"pin2": "GND"}, "declared_ports": []}, '
+        '{"id": "reg", "sheet": "POWER", "role": "regulator", "family": '
+        '"me6211-3v3", "exact_part": "ME6211C33M5G-N", "parameters": {}, '
+        '"supply": "+5V", "programming": null, "interfaces": [], '
+        '"functional_blocks": ["3V3 REGULATOR"], "ties": {}, "declared_ports": []}], '
+        '"signals": [], "assumptions": ["Linear regulator chosen for the low '
+        'current (defaulted)"]}'
+    ),
     "bom": (
         '{"groups": ['
         '{"id": "regulator", "reference_prefix": "U", "quantity": 1, '
@@ -433,7 +452,8 @@ def build_system(
     work_unit_instructions: str | None = None,
 ) -> str:
     stage = contract.stage
-    spec = _spec_text(stage)
+    spec_key = contract.spec or stage
+    spec = _spec_text(spec_key)
     schema = json.dumps(contract.schema)
     work_unit_block = (
         "\n\n=== WORK UNIT ===\n"
@@ -455,7 +475,7 @@ def build_system(
         f"{_bounded_output_contract(stage, collection_bounds)}\n\n"
         "The JSON MUST validate against this Pydantic JSON schema (enums, required fields, and "
         f"string patterns are strict):\n{schema}\n"
-        f"{_worked_example(stage, work_unit=bool(work_unit_instructions))}\n"
+        f"{_worked_example(spec_key, work_unit=bool(work_unit_instructions))}\n"
         "Rules:\n"
         "- Output only the slot JSON object.\n"
         "- Use only allowed enum values; honor every naming pattern and uniqueness/reference "

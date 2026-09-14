@@ -439,7 +439,9 @@ def _strict_provider_schema(node):
     out: dict = {}
     for key, value in node.items():
         if key in ("properties", "$defs", "definitions") and isinstance(value, dict):
-            out[key] = {name: _strict_provider_schema(subschema) for name, subschema in value.items()}
+            out[key] = {
+                name: _strict_provider_schema(subschema) for name, subschema in value.items()
+            }
         elif key in ("items", "additionalProperties", "not", "contains"):
             out[key] = _strict_provider_schema(value)
         elif key in ("anyOf", "oneOf", "allOf", "prefixItems") and isinstance(value, list):
@@ -466,7 +468,7 @@ def _json_response_format(name: str, schema: dict) -> dict:
     }
 
 
-def _slot_response_schema(stage: str) -> dict:
+def _slot_response_schema(stage: str, slot: str = "explicit") -> dict:
     if stage == "intent":
         return IntentStageResponse.model_json_schema()
     if stage == "bom":
@@ -474,9 +476,25 @@ def _slot_response_schema(stage: str) -> dict:
     if stage == "wiring":
         return WiringStageResponse.model_json_schema()
     if stage == "architecture":
+        if slot == "intent":
+            from kicraft.design.architecture_intent import ArchitectureIntent
+
+            schema = ArchitectureIntent.model_json_schema()
+            properties = schema["properties"]
+            properties["requirements"]["minItems"] = 1
+            schema["required"] = [*schema.get("required", []), "requirements"]
+            requirement = schema["$defs"]["IntentRequirement"]
+            requirement["properties"]["functional_blocks"]["minItems"] = 1
+            requirement["required"] = [*requirement.get("required", []), "functional_blocks"]
+            return schema
         schema = ArchitectureStageResponse.model_json_schema()
         properties = schema["properties"]
-        for field in ("recipe_resolution", "unresolved_requirement_ids", "protected_identities"):
+        for field in (
+            "recipe_resolution",
+            "unresolved_requirement_ids",
+            "protected_identities",
+            "declared_interfaces",
+        ):
             properties.pop(field, None)
         schema["$defs"].pop("RecipeResolutionRecord", None)
         properties["requirements"]["minItems"] = 1
@@ -489,7 +507,7 @@ def _slot_response_schema(stage: str) -> dict:
     return SLOT_MODEL[stage].model_json_schema()
 
 
-def _response_schema(stage: str) -> dict:
+def _response_schema(stage: str, slot: str = "explicit") -> dict:
     """One object holding the slot plus an optional (possibly empty) ``questions``.
 
     OpenAI strict structured outputs reject ``anyOf``/``oneOf``/``allOf`` at the
@@ -500,23 +518,32 @@ def _response_schema(stage: str) -> dict:
     answer and a non-empty array is how the model asks. Slot-answer behavior is
     unchanged: the state contract still accepts the slot shape.
     """
-    slot = dict(_slot_response_schema(stage))
+    slot_schema = dict(_slot_response_schema(stage, slot))
     question = dict(StageQuestionResponse.model_json_schema())
     definitions = {
-        **(slot.pop("$defs", {}) or {}),
+        **(slot_schema.pop("$defs", {}) or {}),
         **(question.pop("$defs", {}) or {}),
     }
-    properties = dict(slot.get("properties") or {})
+    properties = dict(slot_schema.get("properties") or {})
     questions = dict((question.get("properties") or {}).get("questions") or {})
     questions["minItems"] = 0
     properties["questions"] = questions
-    required = [*slot.get("required", [])]
+    required = [*slot_schema.get("required", [])]
     if "questions" not in required:
         required.append("questions")
-    schema = {**slot, "type": "object", "properties": properties, "required": required}
+    schema = {**slot_schema, "type": "object", "properties": properties, "required": required}
     if definitions:
         schema["$defs"] = definitions
     return schema
+
+
+# Slot name -> the spec text and worked example the provider is shown. Only the
+# architecture stage has two shapes; every other stage keeps its own.
+SPEC_FOR_SLOT = {("architecture", "intent"): "architecture_intent"}
+
+
+def spec_name(stage: str, slot: str = "explicit") -> str:
+    return SPEC_FOR_SLOT.get((stage, slot), stage)
 
 
 @dataclass(frozen=True)
@@ -525,6 +552,8 @@ class StageResponseContract:
     schema: dict
     contract_name: str
     allow_questions: bool = True
+    # Which stage spec (markdown + worked example) teaches this contract.
+    spec: str = ""
 
     @property
     def response_format(self) -> dict:
@@ -574,8 +603,11 @@ def build_stage_response_contract(
     bom_sheet: str | None = None,
     allow_questions: bool = True,
     wiring_refs: tuple[str, ...] | None = None,
+    slot: str = "explicit",
 ) -> StageResponseContract:
-    schema = _response_schema(stage) if allow_questions else _slot_response_schema(stage)
+    schema = (
+        _response_schema(stage, slot) if allow_questions else _slot_response_schema(stage, slot)
+    )
     apply_collection_bounds(schema, STAGE_COLLECTION_BOUNDS.get(stage, ()))
     if stage == "architecture":
         functional_spec = prompt_state.get("functional_spec")
@@ -584,7 +616,8 @@ def build_stage_response_contract(
             names = [block.name for block in spec.blocks]
             if not names:
                 raise ValueError("architecture response contract requires functional block names")
-            ownership = schema["$defs"]["CircuitRequirement"]["properties"]["functional_blocks"]
+            definition = "IntentRequirement" if slot == "intent" else "CircuitRequirement"
+            ownership = schema["$defs"][definition]["properties"]["functional_blocks"]
             ownership["items"]["enum"] = names
     if stage == "bom":
         architecture_names = _architecture_sheet_names(prompt_state)
@@ -664,6 +697,8 @@ def build_stage_response_contract(
             ref["enum"] = list(wiring_refs)
     version = 3 if stage in {"bom", "wiring"} else (2 if stage == "architecture" else 1)
     contract_name = f"kicraft_{stage}_response_v{version}"
+    if stage == "architecture" and slot != "explicit":
+        contract_name = f"kicraft_{stage}_{slot}_response_v{version}"
     if not allow_questions:
         contract_name += "_noninteractive"
     return StageResponseContract(
@@ -671,6 +706,7 @@ def build_stage_response_contract(
         schema=schema,
         contract_name=contract_name,
         allow_questions=allow_questions,
+        spec=spec_name(stage, slot),
     )
 
 
@@ -892,9 +928,7 @@ def _sheet_owns_usb_c_connector(sheet: dict) -> bool:
 _GENERIC_USB_C_SINK_IDENTITIES = frozenset({"usbc5vsink", "usbcpowersink"})
 
 
-def _normalize_usb_c_requirements(
-    payload: dict, *, complete_native_usb: bool = False
-) -> dict:
+def _normalize_usb_c_requirements(payload: dict, *, complete_native_usb: bool = False) -> dict:
     """Complete generic connector contracts without changing their hardware role."""
     from kicraft.design.recipes.registry import get_recipe
 
@@ -1374,12 +1408,34 @@ def _complete_bound_port_nets(payload: dict) -> dict:
     }
 
 
+def _intent_shaped(payload: dict) -> bool:
+    """An intent-shaped architecture answer: it declares signals and no canonical net list."""
+    return "signals" in payload and "inter_sheet_nets" not in payload
+
+
+def _derive_intent_payload(payload: dict) -> dict:
+    """Intent slot -> canonical slot; every refusal is carried as one diagnostic."""
+    from kicraft.design.architecture_intent import ArchitectureIntentError, derive_architecture
+
+    try:
+        return derive_architecture(payload).model_dump(exclude_none=True)
+    except ArchitectureIntentError as exc:
+        rows = [row.model_dump(exclude_none=True) for row in exc.diagnostics]
+        diagnostic = (
+            rows[0]
+            if len(rows) == 1
+            else {"code": "multiple_intent_contracts", "message": str(exc), "evidence": rows}
+        )
+        raise StageSchemaError(str(exc), diagnostic=diagnostic) from exc
+
+
 def _normalize_stage_response(
     stage: str,
     payload: dict,
     prompt_state: dict,
     *,
     ladder: frozenset[str] = frozenset(),
+    slot: str = "explicit",
 ) -> tuple[dict, int]:
     try:
         questions = payload.get("questions")
@@ -1397,10 +1453,25 @@ def _normalize_stage_response(
         if stage == "intent":
             return IntentStageResponse.model_validate(payload).model_dump(exclude_none=True), 0
         if stage == "architecture":
+            # These are server-derived persisted fields, not provider claims. Rebuild
+            # the mapping instead of popping: a caller that re-normalizes its own
+            # previous result must not see it mutated out from under it.
+            server_derived = (
+                "recipe_resolution",
+                "unresolved_requirement_ids",
+                "protected_identities",
+                "declared_interfaces",
+            )
+            payload = {key: value for key, value in payload.items() if key not in server_derived}
+            derived = slot == "intent" or _intent_shaped(payload)
+            if derived:
+                # The intent slot states the design; the canonical slot (net names,
+                # port bindings, endpoints, connector exposure) is derived here.
+                payload = _derive_intent_payload(payload)
             payload = _normalize_architecture_sheet_aliases(payload)
             payload = _complete_connector_requirements(payload)
             payload = _normalize_usb_c_requirements(
-                payload, complete_native_usb="completing" in ladder
+                payload, complete_native_usb=derived or "completing" in ladder
             )
             named_parts = (prompt_state.get("intent") or {}).get("named_parts") or []
             for requirement in payload.get("requirements") or []:
@@ -1418,13 +1489,6 @@ def _normalize_stage_response(
                     if named_identity and named_identity in requirement_identity:
                         requirement["exact_part"] = str(named_part)
                         break
-            # These are server-derived persisted fields, not provider claims.
-            for field in (
-                "recipe_resolution",
-                "unresolved_requirement_ids",
-                "protected_identities",
-            ):
-                payload.pop(field, None)
             if "addr_d_optional" in ladder:
                 payload = _complete_hub75_optional_address(payload)
             if "bound_nets" in ladder:

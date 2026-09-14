@@ -22,6 +22,7 @@ from kicraft.design.stage_semantics import (
     remove_mislabeled_functional_defaults,
 )
 from .config import (
+    ARCHITECTURE_SLOTS,
     CONTRACT_LADDER_MODES,
     STAGE_COLLECTION_BOUNDS,
     STAGE_SERIALIZATION_MAX_TOKENS,
@@ -481,6 +482,15 @@ def _contract_ladder_modes(client) -> frozenset[str]:
     return (modes & CONTRACT_LADDER_MODES) or frozenset({"stock"})
 
 
+# --------------------------------------------------------------------------- #
+# Architecture slot (docs/plans/architecture-constructive-slot-2026-09-14.md)
+# --------------------------------------------------------------------------- #
+def architecture_slot(client) -> str:
+    """Which architecture slot the provider is asked for (default: ``explicit``)."""
+    raw = str(getattr(getattr(client, "s", None), "architecture_slot", "explicit") or "explicit")
+    return raw.strip().lower() if raw.strip().lower() in ARCHITECTURE_SLOTS else "explicit"
+
+
 def _declared_identities(payload: dict) -> set[str]:
     """The declared content a revision must preserve (O5).
 
@@ -506,6 +516,53 @@ def _declared_identities(payload: dict) -> set[str]:
 
 def _identity_name(identity: str) -> str:
     return identity.split(":", 1)[1]
+
+
+def _diagnostic_codes(row: dict | None) -> list[str]:
+    """Every blocking code one rejection named, directly or in its evidence rows.
+
+    The aggregate `multiple_*` diagnostic carries its member diagnostics in
+    `evidence`, so a per-class count has to read both levels (same rule the
+    ladder harness uses for its defect trajectory).
+    """
+    if not isinstance(row, dict):
+        return []
+    codes = [str(row["code"])] if row.get("code") else []
+    codes.extend(
+        str(item["code"])
+        for item in row.get("evidence") or []
+        if isinstance(item, dict) and item.get("code")
+    )
+    return codes
+
+
+def stage_telemetry(
+    *,
+    ok: bool,
+    attempts: int,
+    defect_codes: tuple[str, ...],
+    outcome: dict,
+) -> dict:
+    """The acceptance counters published on ``stage_done``.
+
+    See `docs/plans/architecture-constructive-slot-2026-09-14.md` §6: the primary
+    endpoint is the share of runs accepted with ZERO corrections, so `drafts` is
+    the number of provider calls that drafted a slot and `first_draft_accepted`
+    is true only when the first one already committed. `defect_codes` counts the
+    blocking classes that draft was rejected for, and the two architecture
+    counters keep an unsupported part (`unknown_part_refused`) and a declared
+    interface (`declared_interfaces`) distinguishable from instability.
+    """
+    codes = sorted({str(code) for code in defect_codes if code})
+    slot = outcome.get("slot") if isinstance(outcome, dict) else None
+    declared = slot.get("declared_interfaces") if isinstance(slot, dict) else None
+    return {
+        "drafts": attempts,
+        "first_draft_accepted": bool(ok and attempts == 1),
+        "defect_codes": codes,
+        "declared_interfaces": len(declared or []),
+        "unknown_part_refused": codes.count("unknown_part_refused"),
+    }
 
 
 def _raw_declared_identities(raw: str) -> set[str] | None:
@@ -1124,6 +1181,9 @@ class PreparedStage:
     # stage contracts read them to complete what they can complete
     # deterministically (O6 native-USB companion, O8 HUB75 addr_d).
     ladder: frozenset[str] = frozenset()
+    # Which architecture slot this drive asked for (KICRAFT_ARCHITECTURE_SLOT):
+    # the reader accepts either shape, this only records what was requested.
+    slot: str = "explicit"
 
 
 @dataclass(frozen=True)
@@ -1292,9 +1352,7 @@ def decode_stage_response(
             return AttemptOutcome(
                 "questions",
                 {
-                    "candidate": {
-                        "questions": _normalize_questions(asked, prepared.stage)
-                    },
+                    "candidate": {"questions": _normalize_questions(asked, prepared.stage)},
                     "expanded_component_count": 0,
                 },
             )
@@ -1303,6 +1361,7 @@ def decode_stage_response(
             parsed,
             prepared.prompt_state,
             ladder=getattr(prepared, "ladder", frozenset()),
+            slot=getattr(prepared, "slot", "explicit"),
         )
         kind = "questions" if isinstance(candidate.get("questions"), list) else "candidate"
         return AttemptOutcome(
@@ -1379,6 +1438,7 @@ def finalize_stage(
     emitted_collection_count: int,
     expanded_component_count: int,
     outcome: dict,
+    defect_codes: tuple[str, ...] = (),
 ) -> dict:
     """Persist status and ledger once, then build the caller-visible result."""
     wall_s = round(time.monotonic() - t0, 3)
@@ -1450,6 +1510,12 @@ def finalize_stage(
                     "retry_stage"
                     if outcome.get("failure_kind") == "provider_rate_limited"
                     else None
+                ),
+                **stage_telemetry(
+                    ok=ok,
+                    attempts=attempts,
+                    defect_codes=defect_codes,
+                    outcome=outcome,
                 ),
             }
         )
@@ -1575,6 +1641,10 @@ def _work_unit_instructions(
             for sheet in architecture_sheets
             if isinstance(sheet, dict) and sheet.get("name") != unit.sheet
         ]
+        declared = set((prompt_state.get("architecture") or {}).get("declared_interfaces") or [])
+        owned_declared = [
+            requirement_id for requirement_id in unit.requirement_ids if requirement_id in declared
+        ]
         boundary["owned_output"] = (
             "Only components physically installed in target_sheet to implement "
             "the owned_requirements, or target_function and target_topology when "
@@ -1584,6 +1654,15 @@ def _work_unit_instructions(
             "this sheet. Never recreate the whole-board BOM, another requirement's "
             "parts, read_only_exclusions, or PRIOR ACCEPTED WORK UNITS."
         )
+        if owned_declared:
+            # `docs/plans/architecture-constructive-slot-2026-09-14.md` §4.2: this part has
+            # no curated recipe, so its pin functions are a model claim, not verified data.
+            boundary["declared_interfaces"] = owned_declared
+            boundary["owned_output"] += (
+                " DECLARED INTERFACES: " + ", ".join(owned_declared) + " have no curated "
+                "recipe — their pin functions are a claim. Source a real orderable part, and "
+                "check each claimed function against it rather than assuming the assignment."
+            )
     else:
         boundary["owned_refs"] = list(unit.refs)
         boundary["owned_pins"] = [{"ref": ref, "pin": pin} for ref, pin in unit.expected_pins]
@@ -3387,6 +3466,7 @@ def drive_stage(
         )
     user += f"\n\nProduce the {stage} slot JSON now."
 
+    slot = architecture_slot(active_client) if stage == "architecture" else "explicit"
     try:
         contract = build_stage_response_contract(
             stage,
@@ -3394,6 +3474,7 @@ def drive_stage(
             allow_questions=not (
                 stage == "architecture" and instruction == NONINTERACTIVE_DEFAULTS_INSTRUCTION
             ),
+            slot=slot,
         )
     except ValueError as exc:
         return operational_failure(
@@ -3433,6 +3514,7 @@ def drive_stage(
         tools=tools,
         executor=executor,
         ladder=ladder_modes,
+        slot=slot,
     )
 
     def _debug_context(raw_response: str) -> dict:
@@ -3570,6 +3652,8 @@ def drive_stage(
     clean_slate_armed_signature: tuple | None = None
     serialization_calls = 0
     attempts = 0
+    # Blocking defect classes this drive's drafts were rejected for (plan §6).
+    defect_codes: list[str] = []
     rounds = None
     tool_calls_ct = None
     expanded_component_count = 0
@@ -3900,6 +3984,7 @@ def drive_stage(
                 "schema_error": schema_error_detail,
                 "diagnostic": outcome.payload.get("diagnostic"),
             }
+            defect_codes.extend(_diagnostic_codes(last.get("diagnostic")))
             _record_attempt_facts(
                 active_client,
                 run_id=run_id,
@@ -3935,9 +4020,7 @@ def drive_stage(
                 # corrections (never a second escape: clean_slate_spent stays).
                 # A rejection with no identity to compare (a parse failure)
                 # keeps the stock terminal behaviour.
-                rejection_identity = _schema_rejection_signature(
-                    kind, last.get("diagnostic")
-                )
+                rejection_identity = _schema_rejection_signature(kind, last.get("diagnostic"))
                 if (
                     "signature" not in ladder_modes
                     or clean_slate_armed_signature is None
@@ -4063,8 +4146,7 @@ def drive_stage(
                 clean_slate=was_clean_slate,
             )
             schema_error = (
-                serialization_outcome.payload.get("failure_kind")
-                in _SCHEMA_REJECTION_KINDS
+                serialization_outcome.payload.get("failure_kind") in _SCHEMA_REJECTION_KINDS
             )
             schema_error_detail = serialization_outcome.payload.get("schema_error")
             skind = serialization_outcome.payload.get("failure_kind")
@@ -4240,6 +4322,7 @@ def drive_stage(
             stage, brief=brief, upstream_state=semantic_state, candidate=obj
         )
         provider_diagnostic_codes = [diagnostic.code for diagnostic in diagnostics]
+        defect_codes.extend(provider_diagnostic_codes)
         if progress:
             for diagnostic in diagnostics:
                 progress(
@@ -4518,6 +4601,7 @@ def drive_stage(
                 tool_calls=tool_calls_ct,
                 emitted_collection_count=emitted_collection_count,
                 expanded_component_count=expanded_component_count,
+                defect_codes=tuple(defect_codes),
                 outcome={
                     "commit": out,
                     "slot": obj,
@@ -4642,5 +4726,6 @@ def drive_stage(
         tool_calls=tool_calls_ct,
         emitted_collection_count=emitted_collection_count,
         expanded_component_count=expanded_component_count,
+        defect_codes=tuple(defect_codes),
         outcome=last,
     )
