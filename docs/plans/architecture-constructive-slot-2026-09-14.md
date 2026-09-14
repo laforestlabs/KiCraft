@@ -398,7 +398,9 @@ Attribution, from the same event streams — the classes that matter are not the
 | 5 | intent | 10 | 10 | **8** | 10 |
 
 Pooled: **0/60** stock first drafts were contract-clean; **26/60** intent first drafts were. Every
-stock run and every intent run spent at least one semantic repair round in blocks 2–5.
+stock run and every intent run spent at least one semantic repair round in blocks 2–5. (This table
+was hand-derived from the retry events; §10.8 re-derives it from the instrument's own counters and
+reproduces every row, adding the first-draft vs committed split.)
 
 Each block's leading class was read off its drafts and answered by a *derivation* change, never by a
 new rule (the §8 discipline):
