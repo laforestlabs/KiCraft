@@ -469,3 +469,31 @@ evidence supports them:
 | stage 2 (legacy slot and its validators removed in one release) | not started |
 | stage 3 (single name-mapping source) | not started; the derivation does own one canonical alias table for signal→port resolution, which the collapse would move to |
 | 34-brief canary, deploy gate, correction budget, prompt examples | untouched |
+
+### 10.7 Enabling it on the production box (2026-09-14, after the record above)
+
+The operator asked to test the slot live on kicraft.io. Two things came out of that, and both are
+now in the repo:
+
+1. **A live hole in the BOM stage, found on the first real board and fixed.** With the slot on, the
+   reference brief committed intent → functional_spec → architecture (2 attempts, $0.009) and then
+   died in BOM with **0 provider attempts**: every sheet was recipe- or lowerer-covered, so the BOM
+   was assembled entirely deterministically, and §9.33 then failed it outright because the
+   architecture names the recipe's identity (`HUB75-SN74HCT245`) while the recipe ships
+   `SN74HCT245PWR-JSM`. There was no call left in which to write the substitution ledger the gate
+   asks for. Stock survived this only by accident: a model-owned requirement (a speaker amplifier on
+   the 2026-09-13 boards) kept one LLM unit alive to paper over it. The fix is in
+   `stage_contracts._recipe_parts_with_identity` — each recipe expansion's parts now carry the
+   curated identity the design named, as a `sourcing_note` on the part that embodies it, which is
+   the honest ledger and not a silenced failure. Regression test:
+   `tests/test_stage_driver_prompt_examples.py::test_recipe_covered_bom_records_the_curated_identity`.
+2. **The same brief now runs the whole chain with the slot on**: all five stages committed in 86 s
+   for $0.013, with BOM and wiring fully deterministic (0 provider calls each). The architecture's
+   only first-draft findings were the two design statements §10.5 identifies
+   (`architecture_external_load_current_unspecified`, `architecture_mcu_regulator_incomplete`).
+
+Deployment for the live test: `./deploy/deploy-production.sh` (no canary) with
+`KICRAFT_ARCHITECTURE_SLOT=intent` in `.env`, which is read once per process
+(`Settings.from_env()` → `load_dotenv`, `os.environ.setdefault`), so a restart is required both to
+enable and to revert. The switch is global to the web process, not per board: it applies to every
+board built while it is set.

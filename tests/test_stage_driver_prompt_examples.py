@@ -12,6 +12,7 @@ from kicraft.server.client import _StreamingCollectionGuard
 from kicraft.design import models
 from kicraft.design.architecture_intent import derive_architecture
 from kicraft.design.stage_state import DESIGN_STAGES
+from kicraft.design.synthesis.validation import check_spec_named_mpn_substitutions
 from kicraft.server.config import STAGE_COLLECTION_BOUNDS, CollectionBound
 from kicraft.server.stage_contracts import (
     ArchitectureStageResponse,
@@ -88,6 +89,67 @@ def test_architecture_intent_example_derives_and_normalizes():
     assert normalized["requirements"]
     assert normalized["power_nets"] == ["GND", "+3V3", "+5V"]
     assert normalized["rail_voltages"] == {"+5V": 5.0, "+3V3": 3.3, "GND": 0.0}
+
+
+def test_recipe_covered_bom_records_the_curated_identity():
+    """A curated recipe's identity is not always the part it ships; §9.33 must see the pairing.
+
+    Live 2026-09-14: a board whose sheets are all recipe- or lowerer-covered has no provider
+    call in which to write a substitution ledger, so a recipe identity its shipped part does
+    not spell out failed §9.33 outright with zero attempts and no way to recover.
+    """
+    from kicraft.design.recipes.registry import get_recipe
+
+    definition = get_recipe("hub75-sn74hct245-interface@1")
+    bindings = {
+        port.name: (
+            "+5V"
+            if port.name == "vdd_5v"
+            else "GND"
+            if port.name in {"gnd", "addr_d"}
+            else f"HUB75_{port.name.upper()}"
+        )
+        for port in definition.ports
+        if port.required
+    }
+    architecture = {
+        "topologies": {},
+        "rail_voltages": {"+5V": 5.0},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [{"name": "HUB75", "stem": "HUB75", "function": "HUB75 level-shift interface"}],
+        "power_nets": ["+5V", "GND"],
+        "inter_sheet_nets": [],
+        "requirements": [
+            {
+                "id": "hub75",
+                "sheet": "HUB75",
+                "role": "bus_interface",
+                "family": "hub75-level-shift-interface",
+                "exact_part": "HUB75-SN74HCT245",
+                "ports": bindings,
+                "functional_blocks": ["DISPLAY"],
+            }
+        ],
+        "recipe_selections": [
+            {
+                "recipe": "hub75-sn74hct245-interface@1",
+                "instance": "hub75",
+                "sheets": {"interface": "HUB75"},
+                "requirement_ids": ["hub75"],
+                "port_bindings": bindings,
+            }
+        ],
+    }
+    bom, _ = _normalize_bom_stage_response({"groups": []}, {"architecture": architecture})
+    carrier = next(part for part in bom["parts"] if part["value"].startswith("SN74HCT245"))
+    assert "HUB75-SN74HCT245" in carrier["sourcing_note"]
+    result = check_spec_named_mpn_substitutions(
+        None,
+        models.Architecture.model_validate(architecture),
+        models.BOM.model_validate(bom),
+    )
+    assert result.ok, result.offenders
 
 
 def test_every_stage_has_a_worked_example_riding_the_system_prompt():

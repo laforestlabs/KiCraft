@@ -252,6 +252,54 @@ class BomStageResponse(BaseModel):
         return self
 
 
+def _recipe_parts_with_identity(expansions, get_recipe) -> list[models.BomPart]:
+    """Every recipe's parts, each carrying the curated identity the design named.
+
+    §9.33 requires each ``Requirement.exact_part`` to appear in the BOM's own text or in
+    its substitution/assumption ledger. A recipe's identity is not always the orderable
+    part it ships (``HUB75-SN74HCT245`` ships ``SN74HCT245PWR-JSM``) and nothing was
+    substituted — the recipe *is* the part — so the pairing is recorded on the part that
+    carries the identity. Without it a BOM whose sheets are all recipe- or
+    lowerer-covered has no provider call in which to write that ledger, and the gate
+    fails a board that is in fact exactly what the architecture named.
+    """
+    parts: list[models.BomPart] = []
+    for expansion in expansions:
+        own = list(expansion.parts)
+        parts.extend(own)
+        try:
+            definition = get_recipe(expansion.selection.recipe)
+        except (KeyError, ValueError):
+            continue
+        identity = definition.exact_part
+        if not identity or not own:
+            continue
+        if any(
+            identity.lower() in f"{part.value} {part.mpn or ''} {part.sourcing_note or ''}".lower()
+            for part in own
+        ):
+            continue
+        tail = identity.lower().rsplit("-", 1)[-1]
+        index = next(
+            (
+                position
+                for position, part in enumerate(own)
+                if tail and tail in f"{part.value} {part.mpn or ''}".lower()
+            ),
+            0,
+        )
+        carrier = own[index]
+        parts[len(parts) - len(own) + index] = carrier.model_copy(
+            update={
+                "sourcing_note": (
+                    f"curated recipe {expansion.selection.recipe} ships "
+                    f"{carrier.value or carrier.mpn} for identity {identity}"
+                )
+            }
+        )
+    return parts
+
+
 def _expand_bom_groups(
     payload: dict, prompt_state: dict | None = None
 ) -> tuple[
@@ -271,12 +319,12 @@ def _expand_bom_groups(
         expand_selections,
         protected_identity_matches,
     )
-    from kicraft.design.recipes.registry import next_reference_numbers
+    from kicraft.design.recipes.registry import get_recipe, next_reference_numbers
 
     architecture = (prompt_state or {}).get("architecture") or {}
     trusted_lowering_groups = set((prompt_state or {}).get("_trusted_lowering_group_ids") or ())
     expansions = expand_selections(architecture.get("recipe_selections") or [])
-    recipe_parts = [part for expansion in expansions for part in expansion.parts]
+    recipe_parts = _recipe_parts_with_identity(expansions, get_recipe)
     if not response.groups and not recipe_parts:
         raise ValueError("BOM must contain at least one component group or circuit-recipe part")
     recipe_identities = {

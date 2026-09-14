@@ -49,6 +49,30 @@ assertions but **no current rating**, and the load current is a fact only the br
 the model has. The measurement therefore cannot distinguish "the slot is wrong" from "the design
 statement is missing" — which is Task A.
 
+**One live finding, already fixed (see §1.1).** Enabling the slot on the production
+box surfaced a *pre-existing* hole the constructive slot made reachable: a BOM whose every sheet is
+recipe- or lowerer-covered has no provider call, and §9.33 then failed outright (0 attempts) when a
+recipe's identity (`HUB75-SN74HCT245`) is not the part it ships (`SN74HCT245PWR-JSM`). The BOM now
+records the recipe→part pairing on the part itself, and the same brief runs all five stages in 86 s
+for $0.013 with BOM and wiring fully deterministic. Read §1.1 before touching the BOM stage.
+
+### 1.1 The BOM hole the live test found (and its fix)
+
+Reproduce: any architecture whose sheets are all covered by recipe selections or lowerers. Before
+the fix, `stage_contracts._expand_bom_groups` assembled the BOM from recipe expansions and the §9.33
+gate (`check_spec_named_mpn_substitutions`) reported *"spec/architecture names 'HUB75-SN74HCT245'
+but the BOM neither ships it nor records a substitution"*. With zero work units there was no
+provider call to write the ledger, so the stage died at `attempts=0` with no recovery. The old
+behaviour survived only because a model-owned requirement (a speaker amplifier, in the 2026-09-13
+boards) kept an LLM unit alive to paper over it.
+
+Fix, in `stage_contracts._recipe_parts_with_identity`: each recipe expansion's parts carry the
+curated identity the design named, as a `sourcing_note` on the part that embodies it
+(`curated recipe hub75-sn74hct245-interface@1 ships SN74HCT245PWR-JSM for identity
+HUB75-SN74HCT245`). Nothing is substituted — the recipe *is* the part — so this is the honest
+ledger §9.33 asks for, not a silenced failure. Regression test:
+`tests/test_stage_driver_prompt_examples.py::test_recipe_covered_bom_records_the_curated_identity`.
+
 ---
 
 ## 2. Ground rules (do not break these)
