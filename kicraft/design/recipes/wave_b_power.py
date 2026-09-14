@@ -62,6 +62,7 @@ def _power_recipe(
     parameters: dict | None = None,
     allowed: dict | None = None,
     protected: tuple[str, ...] = (),
+    rated_output_current_a: float | None = None,
 ) -> RecipeDefinition:
     return RecipeDefinition(
         recipe=recipe,
@@ -70,6 +71,7 @@ def _power_recipe(
         maturity="production",
         protected_aliases=(family, exact_part, *protected),
         identity_aliases=(exact_part,),
+        rated_output_current_a=rated_output_current_a,
         required_sheet_roles=("power",),
         parameter_defaults=parameters or {},
         allowed_parameters=allowed or {},
@@ -433,6 +435,7 @@ TP4056_1S_CHARGER = _power_recipe(
     recipe="tp4056-1s-charger@1",
     family="single-cell-liion-charger",
     exact_part="TP4056",
+    rated_output_current_a=1.0,
     ports=(
         Port(name="input", direction="power"),
         Port(name="gnd", direction="power"),
@@ -499,8 +502,10 @@ def _three_pin_ldo(
     vout: str,
     cin: str,
     cout: str,
+    rated_output_current_a: float,
     extra_nc: str | None = None,
     enable_pin: str | None = None,
+    extra_assertions: tuple[Assertion, ...] = (),
 ) -> RecipeDefinition:
     no_connects = (NoConnect(role="regulator", pin=extra_nc),) if extra_nc else ()
     enable = (Pin(role="regulator", pin=enable_pin, net="input"),) if enable_pin else ()
@@ -508,6 +513,7 @@ def _three_pin_ldo(
         recipe=recipe,
         family=family,
         exact_part=part,
+        rated_output_current_a=rated_output_current_a,
         ports=(
             Port(name="input", direction="power"),
             Port(name="gnd", direction="power"),
@@ -536,6 +542,7 @@ def _three_pin_ldo(
                 code="ldo_stability_caps",
                 message=f"Input {cin} and output {cout} capacitors satisfy the exact regulator stability requirements",
             ),
+            *extra_assertions,
         ),
     )
 
@@ -552,6 +559,7 @@ ME6211_3V3 = _three_pin_ldo(
     vout="5",
     cin="1uF",
     cout="1uF",
+    rated_output_current_a=0.5,
     extra_nc="4",
     enable_pin="3",
 )
@@ -567,6 +575,7 @@ MCP1700_3V3 = _three_pin_ldo(
     vout="2",
     cin="1uF",
     cout="1uF",
+    rated_output_current_a=0.25,
 )
 AMS1117_3V3 = _three_pin_ldo(
     recipe="ams1117-3v3@1",
@@ -580,6 +589,13 @@ AMS1117_3V3 = _three_pin_ldo(
     vout="2",
     cin="10uF",
     cout="22uF",
+    rated_output_current_a=1.0,
+    extra_assertions=(
+        Assertion(
+            code="ldo_thermal_derating",
+            message="The 1 A rating holds only with an adequate copper/thermal area on the SOT-223 tab; derate for the assembled board",
+        ),
+    ),
 )
 
 MCP6001_FOLLOWER = _power_recipe(
@@ -633,6 +649,7 @@ def _buck(
     datasheet: str,
     pins_map: dict[str, str],
     output_voltage: float,
+    rated_output_current_a: float,
     inductor: str = "4.7uH",
     feedback_top: str = "100k",
     feedback_bottom: str = "22k",
@@ -734,6 +751,7 @@ def _buck(
         recipe=recipe,
         family=family,
         exact_part=part,
+        rated_output_current_a=rated_output_current_a,
         ports=(
             Port(name="input", direction="power"),
             Port(name="gnd", direction="power"),
@@ -763,6 +781,7 @@ TLV62569_3V3 = _buck(
     datasheet="https://www.ti.com/lit/ds/symlink/tlv62569.pdf",
     pins_map={"vin": "4", "gnd": "2", "sw": "3", "fb": "5", "en": "1"},
     output_voltage=3.3,
+    rated_output_current_a=2.0,
 )
 AP63203_3V3 = _buck(
     recipe="ap63203-3v3@1",
@@ -773,6 +792,7 @@ AP63203_3V3 = _buck(
     datasheet="https://www.diodes.com/assets/Datasheets/AP63200-AP63201-AP63203-AP63205.pdf",
     pins_map={"vin": "3", "gnd": "4", "sw": "5", "fb": "1", "en": "2", "boot": "6"},
     output_voltage=3.3,
+    rated_output_current_a=2.0,
     fixed_output=True,
 )
 AP63205_5V = _buck(
@@ -784,6 +804,7 @@ AP63205_5V = _buck(
     datasheet="https://www.diodes.com/assets/Datasheets/AP63200-AP63201-AP63203-AP63205.pdf",
     pins_map={"vin": "3", "gnd": "4", "sw": "5", "fb": "1", "en": "2", "boot": "6"},
     output_voltage=5.0,
+    rated_output_current_a=2.0,
     fixed_output=True,
 )
 TPS54331_ADJUSTABLE = _buck(
@@ -805,6 +826,7 @@ TPS54331_ADJUSTABLE = _buck(
         "ep": "9",
     },
     output_voltage=3.3,
+    rated_output_current_a=3.0,
     inductor="15uH",
     feedback_top="68.1k",
     feedback_bottom="22k",

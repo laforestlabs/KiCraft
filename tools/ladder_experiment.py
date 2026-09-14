@@ -40,6 +40,7 @@ sys.path.insert(0, str(REPO))
 from kicraft.design.architecture_intent import EDGE_PREFIX  # noqa: E402
 from kicraft.server.config import Settings, parse_contract_ladder  # noqa: E402
 from kicraft.server.stage_pipeline import drive_replay  # noqa: E402
+from kicraft.server.stage_runtime import NONINTERACTIVE_DEFAULTS_INSTRUCTION  # noqa: E402
 
 
 def _git(*args: str) -> str:
@@ -93,6 +94,10 @@ def _run_metrics(stage_result: dict, events: list[dict], trace: list[dict]) -> d
     return {
         "commit": bool(stage_result and stage_result.get("commit_ok")),
         "failure_kind": (stage_result or {}).get("failure_kind"),
+        # A parked stage asked the user instead of committing: the row has to say
+        # so, or a park reads like an ordinary failure (next-steps plan §4 B2).
+        "needs_input": bool((stage_result or {}).get("needs_input")),
+        "questions": len((stage_result or {}).get("questions") or []),
         "attempts": (stage_result or {}).get("attempts"),
         "rungs": [
             {
@@ -197,6 +202,9 @@ def run_arm(args) -> int:
                     progress=events.append,
                     attempt_observer=trace.append,
                     client=client,
+                    instruction=(
+                        NONINTERACTIVE_DEFAULTS_INSTRUCTION if args.unattended else None
+                    ),
                 )
                 events_path.write_text(
                     "".join(json.dumps(event, separators=(",", ":")) + "\n" for event in events),
@@ -812,6 +820,12 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--budget", type=float, default=0.25, help="per-run USD cap")
+    parser.add_argument(
+        "--unattended",
+        action="store_true",
+        help="declare the drive non-interactive (the caller's defaults instruction): a stage may "
+        "not park for a user answer, so a brief with no user to ask measures the stage itself",
+    )
     parser.add_argument("--max-retries", type=int, default=3, help="the production caller value")
     parser.add_argument(
         "--ceiling", type=float, default=10.0, help="hard stop on the arm's cumulative spend"

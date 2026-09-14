@@ -14,9 +14,11 @@ import requests
 
 from kicraft.design import models
 from kicraft.design.stage_semantics import (
+    EXTERNAL_LOAD_CURRENT_CODE,
     complete_intent_classification,
     complete_unsourced_external_rails,
     diagnose_stage,
+    external_load_budget_stated,
     normalize_project_stem,
     remove_mislabeled_architecture_defaults,
     remove_mislabeled_functional_defaults,
@@ -542,6 +544,8 @@ def stage_telemetry(
     attempts: int,
     defect_codes: tuple[str, ...],
     outcome: dict,
+    contract_rejections: int | None = None,
+    semantic_repair_rounds: int | None = None,
 ) -> dict:
     """The acceptance counters published on ``stage_done``.
 
@@ -552,17 +556,35 @@ def stage_telemetry(
     blocking classes that draft was rejected for, and the two architecture
     counters keep an unsupported part (`unknown_part_refused`) and a declared
     interface (`declared_interfaces`) distinguishable from instability.
+
+    `first_draft_accepted` counts a semantic repair round as a correction, and
+    `docs/plans/architecture-slot-next-steps-2026-09-14.md` §3 splits that: the
+    caller that knows the two correction kinds passes `contract_rejections`
+    (reader refusals) and `semantic_repair_rounds` (repair calls the driver
+    spent), and the endpoint then also reports `first_draft_contract_clean` —
+    the first draft reached the commit gates without a reader refusal, whether
+    or not a semantic round followed. A caller that does not know the kinds
+    (the work-unit stages) omits both and publishes no such counter, so its
+    `stage_done` keeps its shape instead of reporting a false zero.
     """
     codes = sorted({str(code) for code in defect_codes if code})
     slot = outcome.get("slot") if isinstance(outcome, dict) else None
     declared = slot.get("declared_interfaces") if isinstance(slot, dict) else None
-    return {
+    telemetry = {
         "drafts": attempts,
         "first_draft_accepted": bool(ok and attempts == 1),
         "defect_codes": codes,
         "declared_interfaces": len(declared or []),
         "unknown_part_refused": codes.count("unknown_part_refused"),
     }
+    if contract_rejections is not None:
+        telemetry["contract_rejections"] = contract_rejections
+        telemetry["first_draft_contract_clean"] = bool(
+            ok and contract_rejections == 0 and attempts >= 1
+        )
+    if semantic_repair_rounds is not None:
+        telemetry["semantic_repair_rounds"] = semantic_repair_rounds
+    return telemetry
 
 
 def _raw_declared_identities(raw: str) -> set[str] | None:
@@ -671,6 +693,18 @@ def _reasoning_failure_kind(facts) -> str | None:
 
 
 _AUTO_DEFAULT_QUESTION_STAGES = frozenset({"intent", "functional_spec", "architecture", "bom"})
+
+# The one question the driver asks on the user's behalf: the external 5 V load
+# current is a fact only the brief or the user holds (next-steps plan §4 B2), so
+# it is asked instead of repaired. Options are current ranges, not decisions.
+EXTERNAL_LOAD_CURRENT_QUESTION = {
+    "text": (
+        "How much current must the board supply to the external 5 V loads "
+        "(the display and the LED string, for example)?"
+    ),
+    "blocking": True,
+    "options": ["Up to 1 A", "Up to 2 A", "Up to 4 A", "More than 4 A"],
+}
 _SAFE_DEFAULT_QUESTION_MARKERS = (
     "default:",
     "(default",
@@ -1439,6 +1473,8 @@ def finalize_stage(
     expanded_component_count: int,
     outcome: dict,
     defect_codes: tuple[str, ...] = (),
+    contract_rejections: int | None = None,
+    semantic_repair_rounds: int | None = None,
 ) -> dict:
     """Persist status and ledger once, then build the caller-visible result."""
     wall_s = round(time.monotonic() - t0, 3)
@@ -1516,6 +1552,8 @@ def finalize_stage(
                     attempts=attempts,
                     defect_codes=defect_codes,
                     outcome=outcome,
+                    contract_rejections=contract_rejections,
+                    semantic_repair_rounds=semantic_repair_rounds,
                 ),
             }
         )
@@ -3467,13 +3505,16 @@ def drive_stage(
     user += f"\n\nProduce the {stage} slot JSON now."
 
     slot = architecture_slot(active_client) if stage == "architecture" else "explicit"
+    # A non-interactive drive (the self-eval corpus, a CLI batch) asks no
+    # questions and takes today's defaults; everything else may ask the user.
+    questions_allowed = not (
+        stage == "architecture" and instruction == NONINTERACTIVE_DEFAULTS_INSTRUCTION
+    )
     try:
         contract = build_stage_response_contract(
             stage,
             prompt_state,
-            allow_questions=not (
-                stage == "architecture" and instruction == NONINTERACTIVE_DEFAULTS_INSTRUCTION
-            ),
+            allow_questions=questions_allowed,
             slot=slot,
         )
     except ValueError as exc:
@@ -3654,6 +3695,10 @@ def drive_stage(
     attempts = 0
     # Blocking defect classes this drive's drafts were rejected for (plan §6).
     defect_codes: list[str] = []
+    # Reader refusals, counted once per rejected ATTEMPT (not per code), so
+    # `first_draft_contract_clean` can tell a reader refusal apart from a
+    # semantic repair round (next-steps plan §3).
+    contract_rejections = 0
     rounds = None
     tool_calls_ct = None
     expanded_component_count = 0
@@ -3984,7 +4029,13 @@ def drive_stage(
                 "schema_error": schema_error_detail,
                 "diagnostic": outcome.payload.get("diagnostic"),
             }
-            defect_codes.extend(_diagnostic_codes(last.get("diagnostic")))
+            rejection_codes = _diagnostic_codes(last.get("diagnostic"))
+            defect_codes.extend(rejection_codes)
+            if rejection_codes:
+                # A `retry` carrying a diagnostic is the reader refusing the
+                # draft; a parse failure carries none and is not a contract
+                # rejection.
+                contract_rejections += 1
             _record_attempt_facts(
                 active_client,
                 run_id=run_id,
@@ -4344,6 +4395,46 @@ def drive_stage(
                     candidate=obj,
                 )
         severe = [d for d in diagnostics if d.severity in {"repair_required", "fab_gate"}]
+        # The external-load current is the user's fact: the brief or their answers
+        # carry it, or nobody does. Ask once instead of spending a repair call on
+        # a number the model cannot source (next-steps plan §4 B2); the repair
+        # stays the fallback when questions are disabled, and a drive that
+        # already has the user's answers never asks twice.
+        if (
+            severe
+            and stage == "architecture"
+            and semantic_mode in {"repair", "enforce"}
+            and questions_allowed
+            and not answers
+            and not external_load_budget_stated(brief)
+            and any(d.code == EXTERNAL_LOAD_CURRENT_CODE for d in severe)
+        ):
+            questions = _normalize_questions([EXTERNAL_LOAD_CURRENT_QUESTION], stage)
+            if not review_before_commit:
+                attach_questions(state_path, stage, questions)
+            if progress:
+                progress({"kind": "question", "stage": stage, "questions": questions})
+            parked = {
+                "stage": stage,
+                "commit_ok": False,
+                "needs_input": True,
+                "questions": questions,
+                "cost_usd": total_cost,
+                "attempts": attempts,
+            }
+            if review_before_commit:
+                parked.update(
+                    {
+                        "rounds": rounds,
+                        "tool_calls": tool_calls_ct,
+                        "wall_s": round(time.monotonic() - t0, 3),
+                        "cpu_s": round(_child_cpu_s() - cpu0, 3),
+                        "provider_ok": provider_ok,
+                        "schema_ok": schema_ok,
+                        "debug_context": _debug_context(raw),
+                    }
+                )
+            return parked
         repair_source_raw = raw
         while (
             severe
@@ -4602,6 +4693,8 @@ def drive_stage(
                 emitted_collection_count=emitted_collection_count,
                 expanded_component_count=expanded_component_count,
                 defect_codes=tuple(defect_codes),
+                contract_rejections=contract_rejections,
+                semantic_repair_rounds=semantic_repair_rounds,
                 outcome={
                     "commit": out,
                     "slot": obj,
@@ -4727,5 +4820,7 @@ def drive_stage(
         emitted_collection_count=emitted_collection_count,
         expanded_component_count=expanded_component_count,
         defect_codes=tuple(defect_codes),
+        contract_rejections=contract_rejections,
+        semantic_repair_rounds=semantic_repair_rounds,
         outcome=last,
     )

@@ -529,7 +529,29 @@ def test_architecture_rejects_false_pd_dac_provenance_and_missing_load_budget():
     }
     assert "architecture_unsupported_esp32s3_dac" in analog_codes
 
-    complete_regulator = {
+    # The check reads the registry, not the model's prose: a topology line that
+    # says "rated 1A" proves nothing, a reviewed 2A recipe does.
+    upstream = {
+        "intent": {
+            "goal": "USB-C PD 5V ESP32-S3 HUB75 controller",
+            "named_parts": ["ESP32-S3-WROOM-1-N16R8"],
+        },
+        "_stage_answers": [{"answer": "5A"}],
+        "_stage_extras": {},
+    }
+
+    def _regulator_codes(candidate: dict) -> set[str]:
+        return {
+            item.code
+            for item in diagnose_stage(
+                "architecture",
+                brief="USB-C PD 5V ESP32-S3 HUB75 controller",
+                upstream_state=upstream,
+                candidate=candidate,
+            )
+        }
+
+    prose_only = {
         **candidate,
         "topologies": {
             **candidate["topologies"],
@@ -544,22 +566,33 @@ def test_architecture_rejects_false_pd_dac_provenance_and_missing_load_budget():
             },
         ],
     }
-    complete_codes = {
-        item.code
-        for item in diagnose_stage(
-            "architecture",
-            brief="USB-C PD 5V ESP32-S3 HUB75 controller",
-            upstream_state={
-                "intent": {
-                    "goal": "USB-C PD 5V ESP32-S3 HUB75 controller",
-                    "named_parts": ["ESP32-S3-WROOM-1-N16R8"],
-                },
-                "_stage_answers": [{"answer": "5A"}],
-                "_stage_extras": {},
-            },
-            candidate=complete_regulator,
-        )
+    assert "architecture_mcu_regulator_incomplete" in _regulator_codes(prose_only)
+
+    def _with_3v3_producer(recipe: str) -> dict:
+        return {
+            **prose_only,
+            "requirements": [
+                {
+                    "id": "buck",
+                    "sheet": "REGULATOR 3V3",
+                    "role": "regulator",
+                    "family": recipe.split("@")[0],
+                    "ports": {"input": "VBUS", "output": "+3V3", "gnd": "GND"},
+                }
+            ],
+            "recipe_resolution": [{"requirement_id": "buck", "recipe": recipe}],
+        }
+
+    # A 0.5A LDO cannot be the MCU's 3.3V source, however the prose is phrased.
+    weak = _with_3v3_producer("me6211-3v3@1")
+    assert "architecture_mcu_regulator_incomplete" in _regulator_codes(weak)
+
+    # A 2A reviewed buck is enough, even with the topology prose removed.
+    complete_regulator = {
+        **_with_3v3_producer("tlv62569-3v3@1"),
+        "topologies": {"MCU": "ESP32-S3-WROOM-1 with native USB"},
     }
+    complete_codes = _regulator_codes(complete_regulator)
     assert "architecture_mcu_regulator_incomplete" not in complete_codes
     assert "architecture_power_block_as_sheet" not in complete_codes
 
@@ -778,6 +811,16 @@ def test_architecture_rejects_source_without_headroom_and_unrelated_equal_rails(
             "5V_BUCK": "Synchronous buck converter from a 20V PD rail to regulated 5V/6A",
         },
         "rail_voltages": {"VBUS": 20.0, "+5V": 5.0, "+3V3": 3.3},
+        "requirements": [
+            {
+                "id": "buck",
+                "sheet": "REGULATOR 3V3",
+                "role": "regulator",
+                "family": "tlv62569-3v3",
+                "ports": {"input": "VBUS", "output": "+3V3", "gnd": "GND"},
+            }
+        ],
+        "recipe_resolution": [{"requirement_id": "buck", "recipe": "tlv62569-3v3@1"}],
         "inter_sheet_nets": [
             {
                 "name": "VBUS",

@@ -185,12 +185,17 @@ def drive_replay(
     core_defaults=None,
     client=None,
     attempt_observer=None,
+    instruction=None,
 ) -> dict:
     """Re-run ONE design stage from a frozen, already-committed state.json — the
     LLM-side repro harness for prompt/guardrail changes (mirrors ``cli_app
     replay`` for the deterministic place/route stages). Copies the state into a
     temp workspace (the source is never mutated), reads the brief from it, and
-    drives ``stage`` with a budget-capped client."""
+    drives ``stage`` with a budget-capped client.
+
+    ``instruction`` is the caller's instruction for the driven stage; the
+    non-interactive defaults instruction is how an unattended driver states that
+    no user is present to answer a question."""
     src = Path(state_path).expanduser().resolve()
     if not src.is_file():
         return {"error": f"state.json not found: {src}"}
@@ -222,6 +227,7 @@ def drive_replay(
         progress=progress,
         core_defaults=core_defaults,
         attempt_observer=attempt_observer,
+        instruction=instruction,
     )
     return {
         "brief": brief,

@@ -118,6 +118,11 @@ class RecipeDefinition(BaseModel):
     maturity: RecipeMaturity = "experimental"
     protected_aliases: tuple[str, ...] = ()
     identity_aliases: tuple[str, ...] = ()
+    # Continuous output current this part is rated for, in amperes, from the
+    # datasheet in `source_documents`. Set only for recipes that generate a rail
+    # (a converter, LDO or charger); None means "this part is not rated here",
+    # which the design checks treat as unproven rather than as a number.
+    rated_output_current_a: float | None = Field(default=None, gt=0)
     required_sheet_roles: tuple[str, ...]
     parameter_defaults: dict[str, JsonScalar] = Field(default_factory=dict)
     allowed_parameters: dict[str, tuple[str | int | float | bool, ...]] = Field(

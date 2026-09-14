@@ -48,6 +48,26 @@ _PHYSICAL_COMPONENT_RE = re.compile(
     re.I,
 )
 _POWER_RE = re.compile(r"\b(power|vbus|vcc|vdd|3v3|5v|1v1|ldo|regulat)\b", re.I)
+# The one code that asks for a fact only the user has (next-steps plan §4 B2).
+EXTERNAL_LOAD_CURRENT_CODE = "architecture_external_load_current_unspecified"
+
+
+def external_load_budget_stated(text) -> bool:
+    """Does this text state how much current the external 5 V loads draw?
+
+    One definition, read twice: the semantic check fires when the *slot* does not
+    state it, and the driver asks the user only when the brief does not state it
+    either. Asking for a number the user already gave would be a question nobody
+    can answer better.
+    """
+    return bool(
+        re.search(
+            r"(?:5v|vbus|hub75|led string|external load)[^.;]{0,80}"
+            r"\d+(?:\.\d+)?\s*(?:a|ma)\b",
+            _text(text),
+            re.I,
+        )
+    )
 
 
 def _diag(code: str, severity: str, message: str, evidence: Iterable[str] = (), *, attempt=None):
@@ -607,6 +627,48 @@ def _typed_rail_sources(
     return sources
 
 
+def _rail_producers(candidate: dict, rails: dict) -> list[dict]:
+    """Every requirement that generates a declared rail, with the recipe's reviewed rating.
+
+    The fact the ESP32-S3 3.3V check needs is the *part's*, not the model's prose:
+    the requirement's recipe port named ``output``/``vout`` bound to a declared
+    rail means that part drives it, and the current is the datasheet figure the
+    recipe reviews (`RecipeDefinition.rated_output_current_a`). ``None`` there
+    means the registry holds no rating for that part, and the caller treats it as
+    unproven rather than as a number. This reads no topology text: how the model
+    phrased the converter no longer decides the check.
+    """
+    from kicraft.design.recipes import get_recipe
+
+    resolutions = {
+        str(row.get("requirement_id")): str(row.get("recipe"))
+        for row in candidate.get("recipe_resolution") or []
+        if isinstance(row, dict) and row.get("requirement_id") and row.get("recipe")
+    }
+    rows = []
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        ports = {
+            _norm_token(key): net for key, net in (requirement.get("ports") or {}).items()
+        }
+        rail = ports.get("output") or ports.get("vout")
+        if not isinstance(rail, str) or rail not in rails:
+            continue
+        recipe = resolutions.get(str(requirement.get("id")))
+        rows.append(
+            {
+                "rail": rail,
+                "sheet": str(requirement.get("sheet") or ""),
+                "requirement_id": str(requirement.get("id") or ""),
+                "rated_output_current_a": (
+                    get_recipe(recipe).rated_output_current_a if recipe else None
+                ),
+            }
+        )
+    return rows
+
+
 def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     diagnostics = architecture_power_requirement_diagnostics(upstream, candidate)
     sheets = candidate.get("sheets") or []
@@ -717,16 +779,11 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
         )
     )
     current_context = _text([candidate, upstream.get("_stage_answers", [])])
-    has_5v_load_budget = re.search(
-        r"(?:5v|vbus|hub75|led string|external load)[^.;]{0,80}"
-        r"\d+(?:\.\d+)?\s*(?:a|ma)\b",
-        current_context,
-        re.I,
-    )
+    has_5v_load_budget = external_load_budget_stated(current_context)
     if board_powers_external and not has_5v_load_budget:
         diagnostics.append(
             _diag(
-                "architecture_external_load_current_unspecified",
+                EXTERNAL_LOAD_CURRENT_CODE,
                 "repair_required",
                 "Board-powered external loads have no maximum 5V current budget.",
                 ["hub75", "led string", "5v"],
@@ -949,45 +1006,43 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                 )
             )
     if re.search(r"esp32[- ]?s3", intent_text, re.I) and has_3v3_rail:
-        regulator_terms = re.compile(r"\b(?:ldo|regulat|buck|convert)", re.I)
-        regulator_topology_text = " ".join(
-            f"{name} {description}"
-            for name, description in (candidate.get("topologies") or {}).items()
-            if re.search(r"(?:3v3|3\.3v|3 v3)", f"{name} {description}", re.I)
+        declared_sheets = {
+            str(sheet.get("name")) for sheet in sheets if isinstance(sheet, dict)
+        }
+        producers = _rail_producers(
+            candidate,
+            {
+                rail: voltage
+                for rail, voltage in rail_voltages.items()
+                if abs(float(voltage) - 3.3) <= 0.05
+            },
         )
-        regulator_sheets = [
-            sheet
-            for sheet in sheets
-            if isinstance(sheet, dict)
-            and regulator_terms.search(f"{sheet.get('name', '')} {sheet.get('function', '')}")
-            and re.search(
-                r"(?:3v3|3\.3v|3 v3)",
-                f"{sheet.get('name', '')} {sheet.get('function', '')}",
-                re.I,
-            )
-            and not re.search(
-                r"\b(?:mcu|esp32)\b",
-                f"{sheet.get('name', '')} {sheet.get('stem', '')}",
-                re.I,
-            )
+        sized = [
+            producer
+            for producer in producers
+            if producer["rated_output_current_a"] is not None
+            and producer["rated_output_current_a"] >= 1.0
+            and producer["sheet"] in declared_sheets
+            and not re.search(r"\b(?:mcu|esp32)\b", producer["sheet"], re.I)
         ]
-        has_sized_source = bool(
-            regulator_terms.search(regulator_topology_text)
-            and re.search(
-                r"\b(?:1(?:\.0+)?|[2-9](?:\.\d+)?)\s*a\b",
-                regulator_topology_text,
-                re.I,
-            )
-            and regulator_sheets
-        )
-
-        if not has_sized_source:
+        if not sized:
             diagnostics.append(
                 _diag(
                     "architecture_mcu_regulator_incomplete",
                     "repair_required",
-                    "ESP32-S3 needs an explicit >=1A 3.3V regulator topology in its own IC sheet.",
-                    ["esp32-s3", "+3v3", ">=1a", "separate regulator sheet"],
+                    "ESP32-S3 needs its 3.3V rail generated by a regulator the recipe rates for >=1A "
+                    "on a sheet of its own.",
+                    [
+                        "esp32-s3",
+                        *(
+                            f"{producer['rail']}: {producer['sheet']} "
+                            f"{producer['requirement_id']} rated "
+                            f"{producer['rated_output_current_a']}"
+                            for producer in producers
+                        ),
+                        ">=1a",
+                        "separate regulator sheet",
+                    ],
                 )
             )
 

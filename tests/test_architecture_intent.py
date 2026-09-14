@@ -20,6 +20,7 @@ from kicraft.design.architecture_intent import (
     derive_architecture,
 )
 from kicraft.server.stage_contracts import _normalize_stage_response
+from kicraft.server import stage_runtime as stage_driver_mod
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -610,6 +611,139 @@ def test_rejected_first_draft_publishes_its_defect_class(tmp_path):
     assert done["defect_codes"] == ["incomplete_usb_edge"]
     assert done["unknown_part_refused"] == 0
     assert done["declared_interfaces"] == 0
+    # The reader refused the first draft: one contract rejection, no semantic
+    # repair, and the first draft never reached the commit gates.
+    assert done["contract_rejections"] == 1
+    assert done["first_draft_contract_clean"] is False
+    assert done["semantic_repair_rounds"] == 0
+
+
+def test_semantic_repair_round_is_counted_apart_from_contract_rejections(tmp_path):
+    """A reader-clean first draft repaired for a design statement (next-steps plan §3).
+
+    The endpoint split exists for this run: the first draft was accepted by the
+    contract, so it is `first_draft_contract_clean`, but a repair round followed
+    and `first_draft_accepted` (zero corrections) stays false.
+    """
+    from test_stage_driver_retry import _ScriptedClient
+
+    from kicraft.server.config import Settings
+    from kicraft.server.session import run_session
+
+    def _reply(payload: dict) -> dict:
+        return {
+            "text": json.dumps(payload),
+            "reasoning": "",
+            "finish_reason": "stop",
+            "cost_usd": 0.0,
+        }
+
+    intent = {
+        "goal": "a USB-C ESP32-S3 HUB75 controller",
+        "constraints": [],
+        "named_parts": [],
+        "inferred_expertise": "intermediate",
+        "assumptions": [],
+        "project_stem": "USB_HUB75",
+    }
+    # 0.25 A cannot be the ESP32-S3's 3.3V source; the reviewed 2 A buck can.
+    weak = _hub75_intent()
+    for row in weak["requirements"]:
+        if row["id"] == "buck":
+            row["family"] = "mcp1700-3v3"
+    events: list[dict] = []
+    client = _ScriptedClient([_reply(intent), _reply(weak), _reply(_hub75_intent())])
+    client.s = Settings(api_key="test", architecture_slot="intent")
+    result = run_session(
+        tmp_path,
+        "a USB-C ESP32-S3 HUB75 controller",
+        ["intent", "architecture"],
+        client=client,
+        progress=events.append,
+        # The non-interactive drive keeps today's repair instead of asking the
+        # user, which is the path this instrument has to measure.
+        instruction=stage_driver_mod.NONINTERACTIVE_DEFAULTS_INSTRUCTION,
+    )
+    done = next(
+        event
+        for event in events
+        if event.get("kind") == "stage_done" and event.get("stage") == "architecture"
+    )
+    assert result["status"] == "ok"
+    assert done["drafts"] == 2
+    assert done["contract_rejections"] == 0
+    assert done["first_draft_contract_clean"] is True
+    assert done["first_draft_accepted"] is False
+    assert done["semantic_repair_rounds"] == 1
+    assert "architecture_mcu_regulator_incomplete" in done["defect_codes"]
+
+
+def test_missing_external_load_current_parks_with_one_question(tmp_path):
+    """The load current is the user's fact: ask once, never repair or invent (§4 B2)."""
+    from test_stage_driver_retry import _ScriptedClient
+
+    from kicraft.server.config import Settings
+    from kicraft.server.stage_runtime import drive_stage
+
+    state = _frozen_prompt_state()
+    workspace = tmp_path / "ws"
+    state_path = workspace / ".kicraft" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    def _reply(payload: dict) -> dict:
+        return {
+            "text": json.dumps(payload),
+            "reasoning": "",
+            "finish_reason": "stop",
+            "cost_usd": 0.0,
+        }
+
+    def _drive(brief: str) -> tuple[dict, list[dict], _ScriptedClient]:
+        events: list[dict] = []
+        client = _ScriptedClient(
+            [_reply(_hub75_intent()), _reply(_hub75_intent()), _reply(_hub75_intent())]
+        )
+        client.s = Settings(api_key="test", architecture_slot="intent")
+        result = drive_stage(
+            client,
+            "architecture",
+            brief,
+            state_path,
+            workspace,
+            progress=events.append,
+        )
+        return result, events, client
+
+    # The brief states no current: park with exactly one question, one provider
+    # call, no repair round, and no commit.
+    parked, events, client = _drive("a USB-C ESP32-S3 HUB75 controller and LED string")
+    assert parked["needs_input"] is True
+    assert parked["commit_ok"] is False
+    assert len(client.calls) == 1
+    assert len(parked["questions"]) == 1
+    assert parked["questions"][0]["blocking"] is True
+    assert not [event for event in events if event.get("kind") == "retry"]
+    assert [event["kind"] for event in events if event.get("kind") == "question"] == ["question"]
+    # Durable: a reopened project shows the question.
+    open_questions = json.loads(state_path.read_text(encoding="utf-8"))["open_questions"]
+    assert [row["text"] for row in open_questions] == [parked["questions"][0]["text"]]
+
+    # The brief already carries the number: the model is told to state it
+    # (today's repair), and nobody asks the user. The finding itself is
+    # diagnosed either way — the brief decides only whether the user is asked.
+    repaired, events, client = _drive(
+        "a USB-C ESP32-S3 HUB75 controller and LED string drawing 2 A at 5 V"
+    )
+    assert not repaired.get("needs_input")
+    assert not [event for event in events if event.get("kind") == "question"]
+    assert [
+        event["code"]
+        for event in events
+        if event.get("kind") == "stage_diagnostic"
+        and event.get("code") == "architecture_external_load_current_unspecified"
+    ]
+    assert len(client.calls) >= 2  # a repair call, not the user's answer
 
 
 def test_intent_slot_rejects_unknown_fields_and_partial_ranges():
