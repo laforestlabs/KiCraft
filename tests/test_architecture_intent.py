@@ -699,7 +699,9 @@ def test_missing_external_load_current_parks_with_one_question(tmp_path):
             "cost_usd": 0.0,
         }
 
-    def _drive(brief: str) -> tuple[dict, list[dict], _ScriptedClient]:
+    def _drive(
+        brief: str, answers: list[dict] | None = None
+    ) -> tuple[dict, list[dict], _ScriptedClient]:
         events: list[dict] = []
         client = _ScriptedClient(
             [_reply(_hub75_intent()), _reply(_hub75_intent()), _reply(_hub75_intent())]
@@ -712,6 +714,7 @@ def test_missing_external_load_current_parks_with_one_question(tmp_path):
             state_path,
             workspace,
             progress=events.append,
+            answers=answers,
         )
         return result, events, client
 
@@ -744,6 +747,20 @@ def test_missing_external_load_current_parks_with_one_question(tmp_path):
         and event.get("code") == "architecture_external_load_current_unspecified"
     ]
     assert len(client.calls) >= 2  # a repair call, not the user's answer
+
+    # The user answered the parked question: the same board is never asked twice
+    # for a number it now holds.
+    resumed, events, client = _drive(
+        "a USB-C ESP32-S3 HUB75 controller and LED string",
+        answers=[
+            {
+                "text": parked["questions"][0]["text"],
+                "answer": "Up to 2 A",
+            }
+        ],
+    )
+    assert not resumed.get("needs_input")
+    assert not [event for event in events if event.get("kind") == "question"]
 
 
 def test_intent_slot_rejects_unknown_fields_and_partial_ranges():

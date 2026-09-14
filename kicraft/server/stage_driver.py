@@ -173,6 +173,15 @@ def _cmd_replay(args) -> int:
         return 2
     # drive_chain already printed the per-stage [ok/FAIL] line; only add the
     # replay-specific footer here.
+    stage_result = out.get("stage") or {}
+    if stage_result.get("needs_input"):
+        # The rehearsal's job is to show what the stage would ask: a park with no
+        # visible question reads like a failure (next-steps plan §4 B2).
+        print("\nparked on a question for the user:")
+        for question in stage_result.get("questions") or []:
+            print(f"  Q: {question.get('text')}")
+            for option in question.get("options") or []:
+                print(f"     - {option}")
     print(f"\nworkspace: {out['workspace']}  (source state untouched)")
     print(f"state: {out['state_path']}")
     if trace is not None:

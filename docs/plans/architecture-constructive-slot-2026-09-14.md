@@ -12,6 +12,14 @@ flat, and that file's §8 records why. The measurement infrastructure that file 
 (`tools/ladder_experiment.py`, the interleaved driver discipline, the saved draft corpus) is what
 this plan needs; no new harness is proposed.
 
+**Update (§10.8–§10.9, same day, next-steps plan Tasks A–C):** `first_draft_accepted` conflated a
+reader refusal with a semantic repair, so the kill verdict above was unreadable. With the endpoint
+split, the typed regulator rating, the user-fact question and a fresh N=20-per-board-per-arm block,
+the intent arm's first drafts are contract-clean **22/38 (58 %)** against stock's **0/40**, and it
+commits **35/40** against stock's **14/40** — the next-steps plan's pre-registered rule therefore
+**unlocks stage 2**. The §5 deletions are the next increment and are not started here. Live spend
+now $2.60 of the $3 ceiling.
+
 **One-line summary:** the architecture stage has a **0/100 first-draft acceptance rate** because the
 model is asked to hand-write wiring that the compiler can derive, and every rejected class has so
 far been answered by adding another rule — which lowers the acceptance rate further. The fix is to
@@ -497,3 +505,195 @@ Deployment for the live test: `./deploy/deploy-production.sh` (no canary) with
 (`Settings.from_env()` → `load_dotenv`, `os.environ.setdefault`), so a restart is required both to
 enable and to revert. The switch is global to the web process, not per board: it applies to every
 board built while it is set.
+
+### 10.8 The endpoint split, the typed rating and the user question
+
+`docs/plans/architecture-slot-next-steps-2026-09-14.md` is the follow-up this section implements:
+its Task A (measurement) and Task B (the two design statements) are landed at commit `b667c6e`,
+and its Task C is the re-measurement in §10.9. The §5 deletions are still untouched and stage 2 is
+still not unlocked.
+
+**Task A — the endpoint separates the two correction kinds.** `stage_done` now carries, next to the
+pre-registered `first_draft_accepted`:
+
+| field | meaning |
+|---|---|
+| `contract_rejections` | reader refusals, counted once per rejected attempt (a `retry` carrying a `diagnostic`), not per code |
+| `semantic_repair_rounds` | repair calls the driver spent on a `repair_required`/`fab_gate` finding |
+| `first_draft_contract_clean` | `ok and contract_rejections == 0 and attempts >= 1`: the first draft reached the commit gates without a reader refusal, whether or not a semantic round followed |
+
+`first_draft_accepted`, `drafts`, `defect_codes[]`, `declared_interfaces` and `unknown_part_refused`
+are unchanged, and the work-unit stages publish none of the three new counters (their driver does
+not know the kinds, so they keep their shape instead of reporting a false zero). Re-deriving the
+saved evidence from each run's own `artifacts.events` reproduces §10.4's hand-derived attribution
+and moves the verdict from "every run spends a correction" to two distinct numbers:
+
+| block | source | arm | runs | commits | contract rejections (attempts) | first drafts contract-clean | runs with a semantic round |
+|---|---|---|---|---|---|---|---|
+| 1 | `468a178` | stock | 20 | 6/20 | 26 | 0/20 | 16 |
+| 1 | `468a178` | intent | 20 | 7/20 | 26 | 7/20 | 7 |
+| 2 | `59622bc` | stock | 10 | 4/10 | 10 | 0/10 | 10 |
+| 2 | `59622bc` | intent | 10 | 10/10 | 6 | 4/10 | 10 |
+| 3 | `a795ff3` | stock | 10 | 5/10 | 12 | 0/10 | 8 |
+| 3 | `a795ff3` | intent | 10 | 10/10 | 5 | 5/10 | 10 |
+| 4 | `6462cf2` | stock | 10 | 4/10 | 13 | 0/10 | 8 |
+| 4 | `6462cf2` | intent | 10 | 10/10 | 8 | 2/10 | 10 |
+| 5 | `4b24977` | stock | 10 | 2/10 | 12 | 0/10 | 8 |
+| 5 | `4b24977` | intent | 10 | 10/10 | 2 | 8/10 | 10 |
+
+Pooled: **0/60 stock** first drafts were contract-clean, **26/60 intent** were (blocks 2–5:
+**0/40** vs **19/40**); stock spent 73 reader refusals to intent's 47.
+
+The new split also says what the *repair round* bought, which the old endpoints conflated. Counting
+the same code in the first draft's diagnostics and in the committed draft's:
+
+| class | first drafts | committed drafts |
+|---|---|---|
+| `architecture_external_load_current_unspecified` | 39 | **39** |
+| `architecture_power_block_as_sheet` | 16 | **16** |
+| `architecture_mcu_regulator_incomplete` | 47 | 42 |
+
+Two of the three classes survived the repair call unchanged in every run: the stage paid for a
+round and committed the same statement it was told to fix. (These counts also reproduce the plan's
+hand-derived emission totals from the event stream itself: over blocks 2–5 the load class is
+68 = 34+34, the power-block class 22 = 11+11, and the regulator class 75 against the plan's 76.)
+
+**Task B1 — the 3.3 V rating is typed data.** `RecipeDefinition` gains
+`rated_output_current_a: float | None`, filled from each regulating recipe's own cited datasheet:
+
+| recipe | rating | source |
+|---|---|---|
+| `tlv62569-3v3@1` | 2 A | TI TLV62569 datasheet |
+| `ap63203-3v3@1`, `ap63205-5v@1` | 2 A | Diodes AP63200/01/03/05 datasheet |
+| `tps54331-adjustable@1` | 3 A | TI TPS54331 datasheet (the recipe's existing `buck_component_bounds` assertion records the inductor/thermal conditionality) |
+| `ams1117-3v3@1` | 1 A | AMS DS1117 datasheet, with a new `ldo_thermal_derating` assertion |
+| `me6211-3v3@1` | 0.5 A | ME6211 datasheet |
+| `mcp1700-3v3@1` | 0.25 A | MCP1700 datasheet |
+| `tp4056-1s-charger@1` | 1 A | TP4056 datasheet (charge current) |
+
+`architecture_mcu_regulator_incomplete` no longer reads the model's `topologies` prose: it resolves
+the requirement whose recipe port `output`/`vout` is bound to a 3.3 V rail, reads that recipe's
+reviewed rating, and requires ≥1 A from a declared, non-MCU sheet. Evidence, offline and free
+(`/tmp/ladder-exp`, the throwaway probe): on the 214 derived drafts of the corpus the *old* prose
+check fired on **213** of them — it was near-constant, which is why the report read 0 % — while the
+typed check fires on **2**, and both are honest (a producer bound to `+5V`/`+3V3_POWER` while the
+declared 3.3 V rail has no producer). The spec text, the recipe summaries the model sees and the
+schema are untouched: nothing new is asked of the model.
+
+**Task B2 — the load current is the user's fact.** When `architecture_external_load_current_unspecified`
+fires and neither the brief (`external_load_budget_stated`) nor the recorded answers state the
+number, the stage parks through the same `needs_input` path a model-authored question uses: the
+question is attached to the stage in `state.json`, a `question` progress event reaches the UI, and
+the stage returns without a commit or a repair call. A brief or an answer that carries the number
+keeps today's repair behaviour, as does a non-interactive drive (`allow_questions=False`, the
+self-eval/canary instruction) and a run that already has the user's answers (so the same board
+cannot be asked twice in a row). This is a deliberate behaviour change on the *default* path, not
+flag-gated: a board whose functional spec powers a display and an LED string and whose brief never
+says how much current they draw now asks instead of committing a guess. Revert is the commit.
+
+**Task B3 — `architecture_power_block_as_sheet` is bookkeeping, not a statement.** The 16 intent-arm
+first drafts that trigger it (and the 16 committed drafts that still carry it) declare a sheet named
+`USB POWER` / `POWER` with a `power_input` requirement whose family resolves to
+`usb-c-5v-sink@1` — a real connector and its CC pull-downs — and a function line that happens not to
+contain one of the check's keywords (`sink`, `input`, `supply`, …). The model's own repair was to
+re-title the sheet. The class is therefore a prose test over a model-owned sheet *name*: it does not
+name a missing design statement, so per the plan it is left alone here and recorded for stage 2's
+derivation work (a typed form would ask "does any requirement on this sheet own a physical power
+part", which `architecture_unowned_power_support` already answers at requirement level).
+
+Tests: `tests/test_architecture_intent.py::test_rejected_first_draft_publishes_its_defect_class`
+(reader refusal → `contract_rejections == 1`, not contract-clean), `…::test_semantic_repair_round_is_counted_apart_from_contract_rejections`
+(reader-clean draft repaired for a 0.25 A regulator → clean but not accepted, one semantic round),
+`…::test_missing_external_load_current_parks_with_one_question` (park with one question, one
+provider call, no commit, durable `open_questions`; and no park when the brief carries the number),
+and the typed regulator cases in
+`tests/test_stage_semantics.py::test_architecture_rejects_false_pd_dac_provenance_and_missing_load_budget`
+(nonsense prose with a reviewed 2 A recipe passes; a 0.5 A LDO or no producer still fires).
+
+### 10.9 Re-measurement (next-steps plan Task C)
+
+Frozen source: commit `b667c6e` (`repo_head` in every manifest). The surviving manifests also read
+`repo_dirty: true`, because the endpoint/CLI/summary/documentation edits below landed while the
+blocks ran; the *measured* path was frozen — `git diff b667c6e -- kicraft/design
+kicraft/server/stage_runtime.py kicraft/server/stage_contracts.py` is empty. Offline first, then
+live.
+
+**Offline replay** (`--replay-corpus /tmp/ladder-exp`, free): the same 263 first drafts of §10.3,
+re-read with every landed derivation fix. **0/256 accepted by the explicit reader → 214/256** after
+projection + derivation (up from 165/256 when §10.3 was measured, before `59622bc`…`4b24977`):
+
+| blocking class | explicit | after derivation |
+|---|---|---|
+| `unknown_recipe_port_net` | 165 | **0** |
+| `multiple_recipe_contracts` | 51 | **0** |
+| `missing_recipe_port` | 50 | 1 |
+| `unrealizable_power_requirement` | 41 | 40 |
+| `architecture_unowned_power_support` | 37 | 36 |
+| `missing_interface_port` | 31 | **0** |
+| `native_usb_connector_required` | 13 | 1 |
+| `unclassified` | 7 | 1 |
+| `architecture_unowned_power_conversion` | 4 | 4 |
+| `unsupported_recipe_endpoint` | 5 | **0** |
+| `missing_mcu_application_contract` | 5 | **0** |
+| `usb_connector_supply_unknown` | 0 | 4 |
+| `conflicting_port_binding` / `incomplete_usb_edge` | 0 | 1 / 1 |
+| `unsatisfied_pin_capability` | 1 | **0** |
+
+**The pre-registered block, run exactly as §5 writes it** (`/tmp/slot-ab-next`, `KICRAFT_ARCHITECTURE_SLOT`
+flipping per arm, `stock` contract ladder, one run per invocation, both boards interleaved). It was
+stopped after 6 iterations (12 runs per arm) because the endpoint it is meant to move does not exist
+in it: **17 of 24 runs parked**, and the two arms' commits were 2 (intent) and 0 (stock).
+
+| arm | runs | commits | parks | runs reaching the commit gates | first drafts contract-clean | contract rejections | semantic repair rounds | cost/run |
+|---|---|---|---|---|---|---|---|---|
+| stock | 12 | 0/12 | 7 | 5 | 0/5 | 10 | 0 | $0.0109 |
+| intent | 12 | 2/12 | 10 | 2 | 2/2 | 0 | 1 | $0.0029 |
+
+Read this as the product consequence of §4 B2, not as a slot measurement: with questions enabled —
+the production posture — a brief that never states the external load current parks *both* arms, and
+the stock arm still loses its other runs to the contract path (10 reader refusals, 0 contract-clean
+first drafts). The 10 intent parks all diagnosed `architecture_external_load_current_unspecified`
+and nothing else before parking; the 7 stock parks had the same finding among a larger set
+(`unknown_recipe_port_net` 9, `architecture_missing_power_endpoint` 6, `architecture_duplicate_voltage_rails_unrelated` 6).
+
+**The same protocol, driven unattended** — the command of §5 plus one flag
+(`tools/ladder_experiment.py --unattended`), which passes the caller's non-interactive defaults
+instruction so a batch with no user attached measures the stage instead of the question.
+`/tmp/slot-ab-next-unattended`, N=20 per frozen board per arm, 80 runs, **$0.8913**, every run at
+`repo_head b667c6e`:
+
+| arm | runs | commits | runs reaching the commit gates | first drafts contract-clean | `first_draft_accepted` | contract rejections | semantic repair rounds | cost/run |
+|---|---|---|---|---|---|---|---|---|
+| stock | 40 | 14 (35 %) | 40 | **0/40** | 0/40 | 53 | 27 | $0.0159 |
+| intent | 40 | **35 (88 %)** | 38 | **22/38 (58 %)** | 3/38 (8 %) | 19 | 31 | $0.0063 |
+
+**Pre-registered rule, applied as written:** the intent arm's `first_draft_contract_clean` is
+**58 % ≥ 50 %** and its commit rate **88 % ≥ stock's 35 %** in the same interleaved block. **Stage 2
+is unlocked.** Two things the verdict does *not* say, and they matter for stage 2's own plan:
+
+- The strict zero-correction endpoint is still low (3/38, 8 %) — because the two statements §4
+  decides are still diagnosed on nearly every intent draft (the load current 30, the power-sheet
+  title 13), and in an unattended drive they are repaired, not asked. That split is exactly what
+  Task A made visible; it is not a slot defect.
+- The intent arm's *residual* refusals are now a different family: `conflicting_port_binding` 15
+  (`rail '+5V': port 'vbus' of 'usb_input' is already bound to 'VBUS'` — the model names one
+  producer port for two rails), `multiple_intent_contracts` 15 (the same, aggregated),
+  `usb_connector_supply_unknown` 12 (a native-USB edge with no declared ~5 V rail), plus five
+  singletons. Those are the class to read from the drafts next, per §2's method.
+
+First-draft classes per arm in the block (the committed-draft counts are identical for every class
+except where noted):
+
+| arm | classes |
+|---|---|
+| stock | `unknown_recipe_port_net` 26, `architecture_missing_power_endpoint` 25, `architecture_duplicate_voltage_rails_unrelated` 23, `architecture_external_load_current_unspecified` 22, `multiple_recipe_contracts` 13, `missing_recipe_port` 12, `missing_interface_port` 9, `native_usb_connector_required` 5, `unrealizable_power_requirement` 5, `unsupported_recipe_endpoint` 4, `architecture_unowned_power_support` 4, `architecture_unavailable_core_default` 3, `missing_mcu_application_contract` 2, `architecture_unowned_power_conversion` 1 |
+| intent | `architecture_external_load_current_unspecified` 30, `conflicting_port_binding` 15, `multiple_intent_contracts` 15, `architecture_power_block_as_sheet` 13, `usb_connector_supply_unknown` 12, `architecture_duplicate_voltage_rails_unrelated` 1, `architecture_missing_power_endpoint` 1, `incomplete_usb_edge` 1, `unknown_interface_port` 1, `unsupported_supply_port` 1 |
+
+`architecture_mcu_regulator_incomplete` — the class that fired on 76 drafts of the saved corpus —
+does not appear in either arm at all: the typed rating removed it (Task B1). The load-current class
+is diagnosed on 30 first drafts of 38 and is still present in the committed draft all 30 times: the
+repair round buys nothing for it, which is the measured case for asking the user instead (Task B2).
+
+Live spend for this plan: $0.166 (the pre-registered block) + $0.891 (the unattended block) =
+**$1.06**, against the next-steps plan's $1.50 allowance and the parent plan's $3 ceiling
+($2.60 total).

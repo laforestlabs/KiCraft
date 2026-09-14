@@ -14,6 +14,27 @@ provider contract is untouched). The parent plan's kill criterion — *first-dra
 bookkeeping validators, collapsing the alias tables) are **not** landed and must not be started
 until this plan's Task C says so. Live spend so far: $1.54 of the parent plan's $3 ceiling.
 
+**Implemented (commit `b667c6e`), and where its record is.** Tasks A (the endpoint split), B1 (the
+typed regulator rating) and B2 (the load current is a question) are landed; Task B3's evidence is
+recorded and no code changed for it; Task C's measurement and the stage-2 verdict are written up in
+the parent plan **§10.8** (what landed, with the re-derived attribution and the class-by-class
+evidence) and **§10.9** (the offline replay, the pre-registered live block, and the verdict). The
+two operational consequences of B2 — a board can now park on the load-current question, and the
+`stage_driver replay` rehearsal prints that question — are folded into §6.4/§6.5 below.
+
+**Task C verdict: stage 2 is unlocked.** Ran as written, the §5 block parks both arms (17 of 24 runs
+in 6 iterations, commits 2 stock-less), so it was stopped early and the block re-run with
+`tools/ladder_experiment.py --unattended` — the same protocol for a driver with no user attached,
+N=20 per frozen board per arm, 80 runs, $0.8913, all at `repo_head b667c6e`. There, the intent arm's
+first drafts are contract-clean **22/38 (58 %)** against stock's **0/40** and it commits **35/40
+(88 %)** against stock's **14/40 (35 %)** — both halves of the pre-registered rule pass. The strict
+zero-correction endpoint stays low (3/38) because the two statements §4 decides are still diagnosed
+on nearly every draft; that is the split Task A exists to show, and both are now decided (B1 typed,
+B2 asked). The leading *residual* class in the intent arm is `conflicting_port_binding` (15, the
+model naming one producer port for two rails) with `usb_connector_supply_unknown` (12) — §2's method
+reads those from the drafts next. Stage 2 itself (the §5 deletions) is **not** started here: this
+plan's Task C decides, the parent plan's stage 2 is its own measured increment.
+
 ---
 
 ## 1. What the measurement actually showed (this is your starting evidence)
@@ -358,9 +379,13 @@ KICRAFT_ARCHITECTURE_SLOT=intent .venv/bin/python -m kicraft.server.stage_driver
   --trace-jsonl /tmp/slot-rehearsal.trace.jsonl
 ```
 
-Expect: the stage commits (attempts 2–4). The first attempt is usually redrafted for one design
-statement (Task B is what removes that), and the committed slot has the same shape as before, so
-BOM/wiring/layout run unchanged.
+Expect: **either** the stage commits (attempts 1–3 with the typed 3.3 V rating landed) **or** it
+parks with one question — the external 5 V load current, which neither this brief nor the recorded
+answers state. The CLI prints the question and exits nonzero; the park is the intended answer for a
+fact only the user has, and the rehearsal is a probe, not the answering path: answer it on the live
+board, where the UI renders the question and re-drives the stage. A brief that already states the
+current never parks. The first attempt is no longer redrafted for the two design statements §10.5
+lists; the committed slot has the same shape as before, so BOM/wiring/layout run unchanged.
 
 ### 6.5 What to watch on a live board
 
@@ -370,10 +395,18 @@ Per run directory (`~/.kicraft/projects/<account>/<board>/events.jsonl`), the ar
 | field | meaning |
 |---|---|
 | `drafts` | provider calls that drafted a slot |
-| `first_draft_accepted` | the first draft committed with **zero** corrections (today: almost always false — see Task A) |
+| `first_draft_accepted` | the first draft committed with **zero** corrections (the pre-registered endpoint) |
+| `first_draft_contract_clean` | the first draft reached the commit gates **without a reader refusal** — true even when a semantic repair followed |
+| `contract_rejections` | reader refusals, counted once per rejected attempt |
+| `semantic_repair_rounds` | repair calls spent on a design statement |
 | `defect_codes[]` | the blocking classes the drafts were rejected for |
 | `declared_interfaces` | parts whose pin functions the model declared instead of a curated recipe (a claim — the review says so) |
 | `unknown_part_refused` | the §4.3 refusal count (an unsupported part, counted apart from instability) |
+
+A **park** publishes no `stage_done`: the run's status is `awaiting_input`, the question is in
+`state.json`'s `open_questions`, and the answering UI re-drives the stage. The three new counters
+appear only for the stages whose driver knows the two correction kinds (architecture, intent,
+functional_spec), never as a false zero on a work-unit stage.
 
 ```bash
 # the counters for the newest board, and what caused each redraft
@@ -384,10 +417,14 @@ print(run)
 for line in open(run):
     e = json.loads(line)
     if e.get("kind") == "stage_done" and e.get("stage") == "architecture":
-        print({k: e.get(k) for k in ("attempts", "first_draft_accepted", "defect_codes",
-                                     "declared_interfaces", "unknown_part_refused")})
+        print({k: e.get(k) for k in (
+            "attempts", "first_draft_accepted", "first_draft_contract_clean",
+            "contract_rejections", "semantic_repair_rounds", "defect_codes",
+            "declared_interfaces", "unknown_part_refused")})
     elif e.get("kind") == "retry":
         print("  redraft:", (e.get("diagnostic") or {}).get("code"), (e.get("diagnostic") or {}).get("message", "")[:120])
+    elif e.get("kind") == "question":
+        print("  parked:", [q.get("text") for q in e.get("questions") or []])
 PY
 ```
 

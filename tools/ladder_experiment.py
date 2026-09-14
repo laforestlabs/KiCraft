@@ -252,6 +252,22 @@ def run_arm(args) -> int:
     return 0
 
 
+def _stage_done(row: dict, stage: str = "architecture") -> dict:
+    """The stage's `stage_done` event from this run's own artifact, or {}."""
+    events_path = (row.get("artifacts") or {}).get("events")
+    if not events_path:
+        return {}
+    try:
+        lines = Path(events_path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        event = json.loads(line)
+        if event.get("kind") == "stage_done" and event.get("stage") == stage:
+            return event
+    return {}
+
+
 def summarise(out: Path) -> int:
     runs_path = out / "runs.jsonl"
     if not runs_path.is_file():
@@ -262,12 +278,33 @@ def summarise(out: Path) -> int:
     for row in rows:
         key = str(row.get("label") or row["arm"])
         bucket = arms.setdefault(
-            key, {"runs": 0, "commits": 0, "aborted": 0, "cost": 0.0, "boards": {}}
+            key,
+            {
+                "runs": 0,
+                "commits": 0,
+                "aborted": 0,
+                "parks": 0,
+                "cost": 0.0,
+                "done": 0,
+                "contract_clean": 0,
+                "first_draft_accepted": 0,
+                "rejections": 0,
+                "semantic_rounds": 0,
+                "boards": {},
+            },
         )
         bucket["runs"] += 1
         bucket["commits"] += 1 if row.get("commit") else 0
         bucket["aborted"] += 1 if row.get("aborted") else 0
+        bucket["parks"] += 1 if row.get("needs_input") else 0
         bucket["cost"] += float(row.get("cost_usd") or 0.0)
+        done = _stage_done(row)
+        if done:
+            bucket["done"] += 1
+            bucket["contract_clean"] += 1 if done.get("first_draft_contract_clean") else 0
+            bucket["first_draft_accepted"] += 1 if done.get("first_draft_accepted") else 0
+            bucket["rejections"] += int(done.get("contract_rejections") or 0)
+            bucket["semantic_rounds"] += int(done.get("semantic_repair_rounds") or 0)
         board = bucket["boards"].setdefault(row["board"], {"runs": 0, "commits": 0})
         board["runs"] += 1
         board["commits"] += 1 if row.get("commit") else 0
@@ -281,6 +318,20 @@ def summarise(out: Path) -> int:
         print(
             f"{arm:<18} {bucket['commits']:>5}/{bucket['runs']:<6} {pooled:>8.2f} "
             f"${bucket['cost']:>8.4f}  {per_board}"
+        )
+    # The endpoint split (next-steps plan §3): a run that parked asked the user,
+    # so it has no stage_done and is counted apart from one that reached the gates.
+    print(
+        f"\n{'arm':<18} {'gates':>6} {'contract-clean':>15} {'zero-correction':>16} "
+        f"{'rejections':>11} {'semantic rounds':>16} {'parks':>6}"
+    )
+    for arm, bucket in sorted(arms.items()):
+        gates = bucket["done"]
+        ratio = f"{bucket['contract_clean']}/{gates}" if gates else "n/a"
+        accepted = f"{bucket['first_draft_accepted']}/{gates}" if gates else "n/a"
+        print(
+            f"{arm:<18} {gates:>6} {ratio:>15} {accepted:>16} "
+            f"{bucket['rejections']:>11} {bucket['semantic_rounds']:>16} {bucket['parks']:>6}"
         )
     return 0
 
