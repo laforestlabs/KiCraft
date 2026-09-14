@@ -1,10 +1,16 @@
 # Architecture first-draft root cause, and the constructive slot (2026-09-14)
 
-**Status: diagnosis complete (measured); plan only, nothing implemented.** This supersedes the
-option catalogue in `architecture-contract-correction-ladder.md` §4: those eight options are
-implemented and measured flat, and that file's §8 records why. The measurement infrastructure
-that file produced (`tools/ladder_experiment.py`, the interleaved driver discipline, the saved
-draft corpus) is what this plan needs; no new harness is proposed.
+**Status: stages 0 and 1 implemented and measured; stages 2 and 3 NOT landed, because the
+pre-registered kill criterion (§6) did not pass.** The intent-shaped slot exists and is
+flag-gated (`KICRAFT_ARCHITECTURE_SLOT=intent`, default `explicit`, so the provider contract is
+unchanged unless an operator asks for the new slot); the telemetry of §6 and the offline replay are
+live; the §5 deletions are untouched. Live spend for the whole exercise: **$<AB-TOTAL>** of the $3
+ceiling. See **§10** for the implementation record, the three interleaved live blocks and the
+class-by-class evidence. This supersedes the option catalogue in
+`architecture-contract-correction-ladder.md` §4: those eight options are implemented and measured
+flat, and that file's §8 records why. The measurement infrastructure that file produced
+(`tools/ladder_experiment.py`, the interleaved driver discipline, the saved draft corpus) is what
+this plan needs; no new harness is proposed.
 
 **One-line summary:** the architecture stage has a **0/100 first-draft acceptance rate** because the
 model is asked to hand-write wiring that the compiler can derive, and every rejected class has so
@@ -252,3 +258,148 @@ offline work is $0.
 | the new slot shape loses information the lowerers need | the committed `Architecture` is unchanged — the derivation emits the same fields, so a stage-1 A/B can diff the two committed slots offline |
 | accepting intent-shaped slots breaks strict-schema enforcement | the schema is regenerated from the new model; the provider still gets `response_format: json_schema` |
 | an uncurated part's functional pin assignment is a claim, and a swapped pin is self-consistent and wrong (§4.2) | the claim is marked (`resolution_source: declared`), shown in review and flagged in the BOM; the fetched pin list still bounds which pins exist; the electrical review and the build gates still run — and the trade versus today's hard refusal is stated in §4, not hidden |
+
+---
+
+## 10. Implementation record (2026-09-14)
+
+Commits `468a178` (intent slot, telemetry, offline replay), `59622bc` (interfaces derived from the
+bound ports), `a795ff3` (abbreviated references, connector rail exposure). Everything is behind one
+setting, `KICRAFT_ARCHITECTURE_SLOT` (`explicit` by default — the provider contract, schema, spec
+text and reader are unchanged for it; `intent` asks for the new slot).
+
+### 10.1 What stage 0 shipped
+
+- `stage_done` now carries the primary endpoint and its attribution, in production and in every
+  experiment: `drafts`, `first_draft_accepted`, `defect_codes[]`, `declared_interfaces`,
+  `unknown_part_refused` (`stage_runtime.stage_telemetry`, populated from the rejections the drive
+  was shown and the committed slot).
+- `tools/ladder_experiment.py --replay-corpus` replays every saved architecture draft — the raw
+  `answer_delta` stream, so the draft, not a summary — through the real reader before and after the
+  derivation, and publishes the per-class counts. No provider call, no new harness.
+
+### 10.2 What stage 1 shipped
+
+`kicraft/design/architecture_intent.py` defines the intent-shaped slot (`ArchitectureIntent`) and
+`derive_architecture`, which writes the bookkeeping the model used to hand-write:
+
+- canonical net names, one per declared signal, and `requirements[].ports` bindings on **both**
+  ends (aliases like `HUB75_R0` for port `r0` resolve to the recipe's own key);
+- `inter_sheet_nets` with the endpoint sheets and directions the parts imply (source direction from
+  its own port, sink from its own port), multiplicities preserved, one record per net;
+- `power_nets`/`rail_voltages` from `power.rails`, with each rail's producer, consumers and any
+  connector that exposes it;
+- the physical connector an `edge:` signal needs — a `usb-c-usb2-device` socket for a native-USB
+  data pair, otherwise a pin header on the edge's own sheet (or on a sheet the model already
+  declared for it), with the rails the peer named;
+- the ground tie for a required recipe port the design leaves unused (`allow_ground`, e.g. HUB75's
+  spare address channel) — the O8 rule as the normal path;
+- the requirement's `interfaces` from the ports it bound (a bus member requests its interface, a
+  declared interface with no member is not a request, `parallel_output` takes its count from the
+  `parallel_<i>` ports);
+- an unambiguous abbreviation of a requirement id in a signal reference;
+- a connector's `supply` as a rail it *exposes* (a pin), not one it draws from.
+
+Refusals are one answer per cause, all of them reported together:
+`unknown_part_refused` (§4.2's single refusal, naming the part and the missing interface),
+`unknown_interface_port` (naming the ports that exist), `unknown_supply_rail`, `unknown_edge_rail`,
+`incomplete_usb_edge`, `usb_connector_supply_unknown`, `unknown_signal_requirement`,
+`malformed_signal_ref`, `conflicting_port_binding`, `signal_conflicts_with_rail`,
+`unknown_requirement_sheet`. The design-level validators (`unrealizable_power_requirement`, rail
+source, programming path, block ownership, external-load budget) are untouched and still run.
+
+The declared-interface path of §4.2 is end to end: the requirement keeps its model-stated port map,
+`Architecture.declared_interfaces` marks it, `assumptions` says the pin functions are a claim, its
+BOM work unit carries `declared_interfaces` and is told to check each function against the sourced
+part, and the electrical review names it as a claim to check. Nothing pretends it was verified.
+
+The reader takes either shape (`_intent_shaped`), so a legacy explicit answer during cutover still
+commits; the flag only chooses the schema, the spec text and the worked example
+(`.agents/skills/kicraft/stages/architecture_intent.md`, `_WORKED_EXAMPLES["architecture_intent"]`).
+
+### 10.3 Offline replay (free, before any spend)
+
+263 saved first drafts (266 event streams, both frozen boards, every experiment round), projected
+onto the intent slot and re-derived: **0/254 accepted by the explicit reader → 165/256 after
+projection + derivation** (the drafts the projection could not express are excluded and reported
+in `replay.jsonl`, never counted as passes).
+
+| blocking class | explicit | after derivation |
+|---|---|---|
+| `unknown_recipe_port_net` | 165 | **0** |
+| `multiple_recipe_contracts` | 51 | 1 |
+| `missing_interface_port` | 31 | **0** |
+| `native_usb_connector_required` | 13 | 1 |
+| `unclassified` (schema-shape) | 7 | **0** |
+| `unsupported_recipe_endpoint` | 5 | **0** |
+| `missing_mcu_application_contract` | 5 | **0** |
+| `unsatisfied_pin_capability` | 1 | **0** |
+| `missing_recipe_port` | 50 | 51 |
+| `unrealizable_power_requirement` | 41 | 40 |
+| `architecture_unowned_power_support` | 37 | 36 |
+| residual projection artefacts | 0 | 8 |
+
+Read this as a lower bound: the projection states a draft's design in the new shape, so a class it
+cannot express is charged to the derivation. The classes that vanish are exactly the bookkeeping
+ones; the classes that stay are the design-level rules §5 keeps.
+
+### 10.4 Live measurement (§6 protocol: frozen source, interleaved, both boards)
+
+`.venv/bin/python tools/ladder_experiment.py --arm stock --label ab_<arm> --runs 1` per run,
+alternating arm and board, `KICRAFT_ARCHITECTURE_SLOT` selecting the arm, per-run cap $0.25.
+
+| block | source | arm | commits | first-draft accepted | leading first-draft classes |
+|---|---|---|---|---|---|
+| 1 (N=10×2) | `468a178` | explicit (stock) | 6/20 | **0/20** | `unknown_recipe_port_net` 10, `missing_recipe_port` 6, `unrealizable_power_requirement` 4 |
+| 1 (N=10×2) | `468a178` | intent | 7/20 | **0/20** | `invalid_parallel_output_count` 11, `multiple_recipe_contracts` 4, `missing_recipe_port` 4 |
+| 2 (N=5×2) | `59622bc` | explicit (stock) | 4/10 | **0/10** | `missing_recipe_port` 8, `unrealizable_power_requirement` 1 |
+| 2 (N=5×2) | `59622bc` | intent | **10/10** | **0/10** | `unknown_signal_requirement` 13, `unsupported_supply_port` 2, `usb_connector_supply_unknown` 2 |
+| 3 (N=5×2) | `a795ff3` | explicit (stock) | <AB3-STOCK> | <AB3-STOCK-FIRST> | <AB3-STOCK-CODES> |
+| 3 (N=5×2) | `a795ff3` | intent | <AB3-INTENT> | <AB3-INTENT-FIRST> | <AB3-INTENT-CODES> |
+
+### 10.5 The kill criterion fired, and what that says about the diagnosis
+
+§6 pre-registered: *if stage 1 does not raise first-draft acceptance above 50 %, the diagnosis is
+wrong; stop, do not proceed to stages 2–3.* Measured: **0 % in every block, both arms** — the
+criterion fails, so stages 2 and 3 are not landed and the §5 deletions stay unspent.
+
+What the numbers do support:
+
+- **The bookkeeping half of the diagnosis is confirmed.** `unknown_recipe_port_net` — the dominant
+  class in the corpus (165 drafts) and the leading stock class in block 1 (10/20) — goes to zero
+  offline and disappears from the intent arm's live first drafts. `multiple_recipe_contracts`,
+  `missing_interface_port`, `native_usb_connector_required`, `unsupported_recipe_endpoint` and
+  `unsatisfied_pin_capability` behave the same way. The model is no longer asked to hand-write
+  wiring that the compiler can derive, and it no longer fails on it.
+- **The remaining rejections are design-level statements, not bookkeeping.** Every live first draft
+  still broke 1–2 of: a required recipe port the design never connected (`led.data_out` — where the
+  LED string's continuation output goes is a design decision, and the derivation must not invent a
+  net name for it), a rail named on a connector that the design never declared, a converter whose
+  rated topology text is missing, an external-load current budget. Those are the rules §5
+  deliberately keeps.
+- **The per-draft defect count did not move.** Block 1's stock drafts carried 1–2 classes per draft
+  and the intent drafts carried 1–2. That is §1's measurement again, now inside the constructive
+  slot: the number of ways to be rejected fell, the probability of a clean first draft did not.
+- **What did move is the recovery tail**, which is what costs a user a board: block 2's intent arm
+  committed **10/10** against stock's 4/10 in the same block, and the intent drafts are cheaper
+  (~$0.008 vs ~$0.017 per run). N=10 on one block is not the pre-registered endpoint, so this is
+  evidence, not a verdict.
+
+Re-derivation, per the kill criterion: the diagnosis was right about *what* the compiler should own
+and wrong that owning it raises first-draft acceptance. The residual rejections are themselves
+mostly derivable consequences of what the model *did* say — a recipe's required output with no peer
+is by the recipe's own contract an off-board output; a connector exposing a rail the design named
+anywhere is the same connector; an interface is a consequence of its ports (that one shipped). The
+plan's own rule ("no new validator, no new completion per defect") is what makes the *next* step a
+derivation change rather than another rule: measure which residual class each draft hits, derive
+that class if the model already said what it needs, and re-measure — with the §6 kill criterion
+still the gate on stages 2–3.
+
+### 10.6 Not done
+
+| item | status |
+|---|---|
+| §5 deletions (`stage_contracts.py`, `resolver.py`, `stage_semantics.py`, alias tables) | untouched: gated by stage 1 becoming the default, which the measurement does not justify |
+| stage 2 (legacy slot and its validators removed in one release) | not started |
+| stage 3 (single name-mapping source) | not started; the derivation does own one canonical alias table for signal→port resolution, which the collapse would move to |
+| 34-brief canary, deploy gate, correction budget, prompt examples | untouched |

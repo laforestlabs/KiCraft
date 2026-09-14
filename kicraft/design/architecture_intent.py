@@ -718,34 +718,46 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
         source = _lookup(signal.from_ref, context=f"signal {signal.name!r}")
         if source is None:
             continue
-        # A signal out of a port that already carries a declared rail IS that rail: the design
-        # said the same thing twice (a rail producer plus a named wire), and one pin cannot be
-        # on two nets. The rail owns the net, the peers join it, and the naming is recorded —
-        # nothing is invented. Two *different* rails on one pin stay a refusal.
-        source_rail = bindings.get(source.requirement.id, {}).get(source.port)
-        if source_rail in rail_names:
-            if signal.name in rail_names and signal.name != source_rail:
+        # A signal out of a port that already carries ground or a declared rail IS that net: the
+        # design said the same thing twice (the implicit binding plus a named wire), and one pin
+        # cannot be on two nets. The existing net owns the connection, the peers join it, and a
+        # rail rename is recorded — nothing is invented. Two *different* rails on one pin, or a
+        # ground signal out of a rail port, stay refusals.
+        source_net = bindings.get(source.requirement.id, {}).get(source.port)
+        if source_net in rail_names or source_net == GND_NET:
+            if signal.name in rail_names and signal.name != source_net:
                 _fail(
                     "signal_conflicts_with_rail",
                     (
                         f"signal {signal.name!r} leaves {signal.from_ref}, which the design already "
-                        f"ties to rail {source_rail!r}; one port cannot carry two rails"
+                        f"ties to rail {source_net!r}; one port cannot carry two rails"
                     ),
                     requirement_id=source.requirement.id,
                     sheet=source.requirement.sheet,
                 )
                 continue
-            if signal.name != source_rail:
+            if source_net in rail_names and signal.name == GND_NET:
+                _fail(
+                    "signal_conflicts_with_rail",
+                    (
+                        f"signal {signal.name!r} leaves {signal.from_ref}, which the design already "
+                        f"ties to rail {source_net!r}; a rail port is not a ground connection"
+                    ),
+                    requirement_id=source.requirement.id,
+                    sheet=source.requirement.sheet,
+                )
+                continue
+            if signal.name != source_net and source_net in rail_names:
                 renamed.append(
-                    f"{signal.name}: peers of {signal.from_ref} join rail {source_rail} "
+                    f"{signal.name}: peers of {signal.from_ref} join rail {source_net} "
                     "(declared rail owns the net) (derived)"
                 )
             for peer in signal.peers():
                 label = _edge_label(peer)
                 if label is not None:
                     opened = _open_edge(label, source)
-                    if opened is not None:
-                        edge_connectors[label][2].append(source_rail)
+                    if opened is not None and source_net in rail_names:
+                        edge_connectors[label][2].append(source_net)
                     continue
                 target = _lookup(peer, context=f"signal {signal.name!r}")
                 if target is None:
@@ -753,8 +765,8 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 _bind(
                     target.requirement.id,
                     target.port,
-                    source_rail,
-                    "input",
+                    source_net,
+                    "bidirectional" if source_net == GND_NET else "input",
                     context=f"signal {signal.name!r}",
                 )
             continue

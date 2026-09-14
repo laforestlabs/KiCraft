@@ -418,6 +418,18 @@ def test_abbreviated_requirement_reference_resolves_when_unambiguous():
     assert [row.code for row in excinfo.value.diagnostics] == ["unknown_signal_requirement"]
 
 
+def test_signal_restating_a_ground_connection_joins_ground():
+    """Wiring ground explicitly is redundant, not a contradiction."""
+    intent = _hub75_intent()
+    intent["signals"] = [
+        *intent["signals"],
+        {"name": "MCU_GND", "from": "esp32.gnd", "to": ["hub75.gnd", "edge:SPEAKER"]},
+    ]
+    architecture = derive_architecture(intent)
+    assert _requirement(architecture, "hub75").ports["gnd"] == "GND"
+    assert not any(row.name == "MCU_GND" for row in architecture.inter_sheet_nets)
+
+
 def test_half_a_usb_pair_is_refused_by_name():
     intent = _hub75_intent()
     intent["signals"] = [row for row in intent["signals"] if row["name"] != "USB_D_N"]
