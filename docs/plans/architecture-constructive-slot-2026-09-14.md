@@ -9,7 +9,8 @@ draft corpus) is what this plan needs; no new harness is proposed.
 **One-line summary:** the architecture stage has a **0/100 first-draft acceptance rate** because the
 model is asked to hand-write wiring that the compiler can derive, and every rejected class has so
 far been answered by adding another rule — which lowers the acceptance rate further. The fix is to
-stop asking for derived data, derive it, and delete the validators that existed to check it.
+stop asking for derived data, derive it, and delete the validators that existed to check it. Parts
+the code has never seen are covered by §4, not deferred.
 
 ---
 
@@ -112,7 +113,8 @@ New slot shape (sketch — the point is the *size*, not the exact field names):
 requirement (this is exactly the O9 completion, but as the normal path rather than a rescue).
 
 **Derivation** is one pass, `derive_architecture(intent) -> Architecture`, which:
-1. resolves family/exact part → recipe (existing registry);
+1. resolves family/exact part → recipe (existing registry), or to a `declared` interface when
+   the part is real but uncurated (§4.2);
 2. maps each `signals[]` entry onto the two requirements' recipe port names (using the alias
    tables that already exist) and emits the `ports` bindings;
 3. emits one canonical `inter_sheet_nets` entry per signal, with the endpoints the peer sheets
@@ -123,13 +125,61 @@ requirement (this is exactly the O9 completion, but as the normal path rather th
    ones.
 
 **Feasibility, evidenced:** the committed slot after derivation is byte-compatible with today's
-valid slot, so **no downstream consumer changes** (`synthesis/validation.py` §9.x gates, wiring
+valid slot, so **no downstream consumer changes** (`synthesis/validation.py`, whose build-gate codes are the `9.x` family; wiring
 work units, lowerers, form-factor reconcile all keep reading the same fields). And it already
 works for the real case: with two completion rules applied to the actual first reply of the board
 that died (KC-WGJ6XE), the reply **commits** (`tests/fixtures/ladder/kc-wgj6xe_architecture_rung1.json`);
 derivation generalises exactly those rules instead of rescuing their instances one at a time.
 
-## 4. Delete (this is the point of the exercise)
+## 4. Parts the code has never seen
+
+The derivation needs to know a part's connections before it can write wiring for it. For a curated
+recipe that knowledge is in the repo. For anything else, three cases, handled differently:
+
+**4.1 A curated recipe exists.** Unchanged: the code owns the part's connections and pins.
+
+**4.2 A real part with no recipe (the new-IC case).** Split the knowledge in two, because the two
+halves have different sources and different assurance:
+
+| question | source | assurance |
+|---|---|---|
+| which pins does this package have | the fetched part data (the pipeline already fetches a real part by order code into the local library, and already exposes a machine-readable pin inventory to the wiring stage, which enforces coverage with exact pin numbers) | checkable against vendor data |
+| what is each pin *for* (supply, ground, serial data, enable…) | the model states it, at architecture time, as an explicit named interface — the same shape a recipe uses | a **claim**, recorded as such, reviewed, not verified against our table |
+
+With that interface in hand the derivation treats the part exactly like a curated one: name each
+wire once, emit its declarations, add the board-edge connector when the function leaves the board,
+allocate the host pin, add the support passives the function's rules call for, and register the
+part in the BOM. The only difference is provenance, and it is carried explicitly: the requirement
+is marked `resolution_source: declared` (vs `recipe`), the interface appears in the review as a
+claim, and the part is flagged in the BOM. Nothing about it pretends to have been verified.
+
+What still guards this path, unchanged: the BOM stage refuses anything that does not resolve to a
+real symbol, footprint and orderable part number (it already tells the model never to invent a
+library prefix or package name); the wiring stage enforces net coverage against the fetched pin
+list; the design-level checks (supply, domains, programming path) still run; and the board-edge and
+electrical gates still run on the built board.
+
+**4.3 Real part, unsupported function.** Fetchable pin data but no support-circuitry rules for
+what it does, or nothing fetchable at all: **refuse, once**, naming the part and what is missing.
+That is a capability boundary, not a bookkeeping failure — the point is that it produces one clear
+answer instead of one of forty rejection reasons reached three retries in. The refusal is counted
+separately in telemetry (§6) so a board that legitimately needs a chip we do not support is not
+misread as instability.
+
+**The honest residual risk.** For an uncurated part, a wrong *functional* assignment (two serial
+lines swapped, say) is self-consistent and wrong: no amount of derivation or consistency checking
+catches it. It is caught by the electrical review if it has something to check for that part, or by
+a human looking at the flagged claim. The alternative today is refusing to build the board at all,
+which is safe and useless; the trade is a small, visible, reviewable claim instead of a hard
+refusal, and it is stated rather than hidden.
+
+**The promotion loop.** When a declared interface is used and the board builds, that part is a
+candidate to become a curated recipe: capture the fetched pin list plus the reviewed function
+assignment, and every later board using it gets full assurance. The library then grows from the
+boards people actually build — the opposite of adding a validator per failure. This promotion step
+is human-reviewed work, not automatic, and it is the only place new curated knowledge comes from.
+
+## 5. Delete (this is the point of the exercise)
 
 The derivation subsumes these; each is a validator or a rescue for data that will no longer be hand
 written. Measured spans:
@@ -146,7 +196,7 @@ written. Measured spans:
 200 lines of validation, and it must show first-draft acceptance up or defects-per-draft down.
 That single rule is what stops the loop that produced +37k lines and 0/100.
 
-## 5. Measurement (pre-registered, before any code)
+## 6. Measurement (pre-registered, before any code)
 
 Primary endpoint — **first-draft acceptance rate**: share of runs accepted with zero corrections,
 N=20 per frozen state, **interleaved** with stock (round 1 of the previous plan proved blocked arm
@@ -154,8 +204,9 @@ ordering is invalid under session drift: stock measured 0.60 then 0.20 on identi
 
 Secondary (all from the same runs): defects per rejected first draft; corrections per committed
 run; cost per run; terminal failure kinds. Telemetry to add (cheap, additive): `drafts`,
-`first_draft_accepted`, `defect_codes[]` on `stage_done`, and the same on the events stream, so the
-number is visible in production, not only in an experiment.
+`first_draft_accepted`, `defect_codes[]` on `stage_done`, plus `declared_interfaces` and
+`unknown_part_refused` (§4) so an unsupported part and an unstable stage are never conflated — and
+the same on the events stream, so the number is visible in production, not only in an experiment.
 
 Offline (free, before spending): replay every saved draft in `/tmp/ladder-exp` plus the reconstructed
 historical rungs through the new derivation and report the classes that disappear — the same method
@@ -168,20 +219,21 @@ guideline by relaxing it.
 **Budget:** ≤ $3 of live spend for the whole plan (the arms plus one confirmation block). The
 offline work is $0.
 
-## 6. Stages (each independently shippable, each reversible)
+## 7. Stages (each independently shippable, each reversible)
 
 0. **Telemetry + corpus measurement** — add the acceptance counters; run the offline replay to
    publish the current per-class distribution. No prompt, slot or validator change. *(hours, $0)*
 1. **Derivation becomes the primary path** for the derivable subset (signals → nets → bindings →
-   connector exposure), with the new prompt/contract text, while the reader accepts both the new
-   intent-shaped slot and the legacy explicit slot. Measure with §5. *(the only stage with real
-   risk; flag-gated, default off until measured)*
-2. **Delete the bookkeeping layer** — the §4 list, once stage 1 is default. The old slot and its
+   connector exposure), including the `declared` interface path for real-but-uncurated parts and
+   its single refusal for unsupported ones (§4), with the new prompt/contract text, while the reader
+   accepts both the new intent-shaped slot and the legacy explicit slot. Measure with §6. *(the only
+   stage with real risk; flag-gated, default off until measured)*
+2. **Delete the bookkeeping layer** — the §5 list, once stage 1 is default. The old slot and its
    validators go in one release; no shims.
 3. **Single name-mapping source** — collapse the recipe/lowerer alias tables into the derivation's
    one table, so "which recipe port does this signal mean" is answered once.
 
-## 7. Non-goals / the pattern to stop
+## 8. Non-goals / the pattern to stop
 
 - No new validator, no new completion, no new prompt paragraph per corpus defect. That is the loop.
 - No second ladder, no extra stage, no new agent, no prompt-example tuning.
@@ -190,7 +242,7 @@ offline work is $0.
 - Do not "make the messages better" (measured: more prose in corrections moved nothing; the
   full-feedback arm measured 0.15).
 
-## 8. Risks and their checks
+## 9. Risks and their checks
 
 | risk | check |
 |---|---|
@@ -199,3 +251,4 @@ offline work is $0.
 | two slot shapes during cutover | one release, flag-gated, legacy reader deleted in stage 2 (no aliases kept) |
 | the new slot shape loses information the lowerers need | the committed `Architecture` is unchanged — the derivation emits the same fields, so a stage-1 A/B can diff the two committed slots offline |
 | accepting intent-shaped slots breaks strict-schema enforcement | the schema is regenerated from the new model; the provider still gets `response_format: json_schema` |
+| an uncurated part's functional pin assignment is a claim, and a swapped pin is self-consistent and wrong (§4.2) | the claim is marked (`resolution_source: declared`), shown in review and flagged in the BOM; the fetched pin list still bounds which pins exist; the electrical review and the build gates still run — and the trade versus today's hard refusal is stated in §4, not hidden |
