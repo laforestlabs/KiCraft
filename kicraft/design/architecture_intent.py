@@ -328,9 +328,7 @@ def _derived_interfaces(
         if any(any(port in bound for port in keys) for keys, _capability in members)
     ]
     parallel = sorted(
-        int(match.group(1))
-        for key in bound
-        if (match := re.fullmatch(r"parallel_(\d+)", key))
+        int(match.group(1)) for key in bound if (match := re.fullmatch(r"parallel_(\d+)", key))
     )
     if parallel:
         derived.append("parallel_output")
@@ -340,7 +338,11 @@ def _derived_interfaces(
         if any(key == prefix or key.startswith(f"{prefix}_") for key in bound):
             derived.append(name)
     for name in declared:
-        if name not in derived and name not in FIXED_INTERFACES and name not in _CAPABILITY_INTERFACES:
+        if (
+            name not in derived
+            and name not in FIXED_INTERFACES
+            and name not in _CAPABILITY_INTERFACES
+        ):
             derived.append(name)  # an interface this compiler does not model: keep the claim
     return list(dict.fromkeys(derived))
 
@@ -555,6 +557,12 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 ),
             )
             return None
+        if requirement_id not in models_by_id:
+            # A reference may abbreviate the requirement it means (`hub` for `hub75`). Exactly
+            # one declared id may match; an ambiguous or absent one stays a refusal.
+            matches = [row.id for row in intent.requirements if row.id.startswith(requirement_id)]
+            if len(matches) == 1:
+                requirement_id = matches[0]
         requirement = requirements.get(requirement_id)
         if requirement is None:
             if requirement_id not in models_by_id:
@@ -583,6 +591,8 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
         return _SheetRef(models_by_id[requirement_id], port, direction)
 
     rail_names = set(intent.power.rails)
+    # Connectors that expose a rail rather than draw from it (`supply` on a connector family).
+    connector_rails: dict[str, str] = {}
     for net, rail in intent.power.rails.items():
         if rail.from_ref is None:
             continue
@@ -612,6 +622,11 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
             continue
         port = next((name for name in _SUPPLY_PORTS if name in catalog.directions), None)
         if port is None:
+            if requirement.role == "connector":
+                # A connector's `supply` is not a port it draws from: it is the rail the
+                # connector exposes to the peer. Add the pin (GND joins in `_close_connectors`).
+                connector_rails[requirement_id] = row.supply
+                continue
             _fail(
                 "unsupported_supply_port",
                 (
@@ -896,6 +911,26 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 continue
             _bind(requirement_id, port, GND_NET, "bidirectional", context="unused port tie")
             tied.append(f"{requirement_id}: unused {port} tied to {GND_NET} (derived)")
+
+    # A connector closes its pin order with ground and the rails it exposes: the signals the
+    # design bound first, then GND, then any rail the connector declares as its supply.
+    def _next_pin(requirement_id: str) -> str:
+        taken = bindings.setdefault(requirement_id, {})
+        index = 1
+        while f"pin{index}" in taken:
+            index += 1
+        return f"pin{index}"
+
+    for requirement_id, rail in connector_rails.items():
+        if not any(bound == GND_NET for bound in bindings.get(requirement_id, {}).values()):
+            _bind(
+                requirement_id,
+                _next_pin(requirement_id),
+                GND_NET,
+                "bidirectional",
+                context="connector ground",
+            )
+        _bind(requirement_id, _next_pin(requirement_id), rail, "input", context="connector supply")
 
     if diagnostics:
         raise ArchitectureIntentError(diagnostics)

@@ -347,6 +347,77 @@ def test_parallel_output_count_comes_from_the_bound_ports():
     assert mcu.interfaces == ["parallel_output"]
 
 
+def test_connector_supply_exposes_the_rail_on_a_pin():
+    """A connector does not draw from a rail, it exposes one — the pin is derived, not refused."""
+    intent = _hub75_intent()
+    intent["sheets"].append(
+        {
+            "name": "LED STRING",
+            "stem": "LED_STRING",
+            "role": "connector",
+            "function": "Addressable LED string output connector.",
+        }
+    )
+    intent["requirements"].append(
+        {
+            "id": "led_string",
+            "sheet": "LED STRING",
+            "role": "connector",
+            "family": "pin-header",
+            "parameters": {"rows": 1, "gender": "male"},
+            "supply": "VBUS",
+            "functional_blocks": ["ADDRESSABLE_LED_OUTPUT"],
+        }
+    )
+    intent["signals"] = [
+        row if row["name"] != "LED_DATA" else {**row, "to": "led_string.pin1"}
+        for row in intent["signals"]
+    ]
+    architecture = derive_architecture(intent)
+    assert _requirement(architecture, "led_string").ports == {
+        "pin1": "LED_DATA",
+        "pin2": "GND",
+        "pin3": "VBUS",
+    }
+
+
+def test_abbreviated_requirement_reference_resolves_when_unambiguous():
+    intent = _hub75_intent()
+    intent["signals"] = [
+        {**row, "to": ["hub.addr_b"]} if row["name"] == "HUB75_ADDR_B" else row
+        for row in intent["signals"]
+    ]
+    architecture = derive_architecture(intent)
+    assert _requirement(architecture, "hub75").ports["addr_b"] == "HUB75_ADDR_B"
+
+    ambiguous = _hub75_intent()
+    ambiguous["sheets"].append(
+        {
+            "name": "LED STRING",
+            "stem": "LED_STRING",
+            "role": "connector",
+            "function": "Addressable LED string output connector.",
+        }
+    )
+    ambiguous["requirements"].append(
+        {
+            "id": "led_string",
+            "sheet": "LED STRING",
+            "role": "connector",
+            "family": "pin-header",
+            "parameters": {"rows": 1, "gender": "male"},
+            "functional_blocks": ["ADDRESSABLE_LED_OUTPUT"],
+        }
+    )
+    ambiguous["signals"] = [
+        {**row, "to": ["le.pin1"]} if row["name"] == "HUB75_ADDR_B" else row
+        for row in ambiguous["signals"]
+    ]
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(ambiguous)
+    assert [row.code for row in excinfo.value.diagnostics] == ["unknown_signal_requirement"]
+
+
 def test_half_a_usb_pair_is_refused_by_name():
     intent = _hub75_intent()
     intent["signals"] = [row for row in intent["signals"] if row["name"] != "USB_D_N"]
