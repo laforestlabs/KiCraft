@@ -4,9 +4,9 @@
 pre-registered kill criterion (§6) did not pass.** The intent-shaped slot exists and is
 flag-gated (`KICRAFT_ARCHITECTURE_SLOT=intent`, default `explicit`, so the provider contract is
 unchanged unless an operator asks for the new slot); the telemetry of §6 and the offline replay are
-live; the §5 deletions are untouched. Live spend for the whole exercise: **$<AB-TOTAL>** of the $3
-ceiling. See **§10** for the implementation record, the three interleaved live blocks and the
-class-by-class evidence. This supersedes the option catalogue in
+live; the §5 deletions are untouched. Live spend for the whole exercise: **$1.54 of the $3 ceiling**
+(120 measured runs plus the pilot). See **§10** for the implementation record, the five interleaved
+live blocks and the class-by-class evidence. This supersedes the option catalogue in
 `architecture-contract-correction-ladder.md` §4: those eight options are implemented and measured
 flat, and that file's §8 records why. The measurement infrastructure that file produced
 (`tools/ladder_experiment.py`, the interleaved driver discipline, the saved draft corpus) is what
@@ -345,8 +345,18 @@ ones; the classes that stay are the design-level rules §5 keeps.
 
 ### 10.4 Live measurement (§6 protocol: frozen source, interleaved, both boards)
 
-`.venv/bin/python tools/ladder_experiment.py --arm stock --label ab_<arm> --runs 1` per run,
-alternating arm and board, `KICRAFT_ARCHITECTURE_SLOT` selecting the arm, per-run cap $0.25.
+One run per invocation, alternating arm and board so session drift is shared, with the slot chosen
+by environment and a hard spend guard (`--runs 1` because the harness names its artifacts with a
+timestamp, so an interleaved driver never overwrites a previous run's events):
+
+```bash
+for i in $(seq 1 10); do for board in 825 824; do for arm in stock intent; do
+  KICRAFT_ARCHITECTURE_SLOT=$([ "$arm" = intent ] && echo intent || echo explicit) \
+  .venv/bin/python tools/ladder_experiment.py --arm stock --label "ab_${arm}" \
+    --state "$HOME/.kicraft/projects/1/$board/.kicraft/state.json" \
+    --runs 1 --budget 0.25 --out /tmp/slot-ab
+done; done; done
+```
 
 | block | source | arm | commits | first-draft accepted | leading first-draft classes |
 |---|---|---|---|---|---|
@@ -356,8 +366,31 @@ alternating arm and board, `KICRAFT_ARCHITECTURE_SLOT` selecting the arm, per-ru
 | 2 (N=5×2) | `59622bc` | intent | **10/10** | **0/10** | `unknown_signal_requirement` 13, `unsupported_supply_port` 2, `usb_connector_supply_unknown` 2 |
 | 3 (N=5×2) | `a795ff3` | explicit (stock) | 5/10 | **0/10** | `missing_recipe_port` 7, `unknown_recipe_port_net` 2 |
 | 3 (N=5×2) | `a795ff3` | intent | **10/10** | **0/10** | `conflicting_port_binding` 6, `missing_recipe_port` 4 |
-| 4 (N=5×2) | `6462cf2` | explicit (stock) | <AB4-STOCK> | <AB4-STOCK-FIRST> | <AB4-STOCK-CODES> |
-| 4 (N=5×2) | `6462cf2` | intent | <AB4-INTENT> | <AB4-INTENT-FIRST> | <AB4-INTENT-CODES> |
+| 4 (N=5×2) | `6462cf2` | explicit (stock) | 4/10 | **0/10** | `unknown_recipe_port_net` 7, `unrealizable_power_requirement` 2, `native_usb_connector_required` 2 |
+| 4 (N=5×2) | `6462cf2` | intent | **10/10** | **0/10** | `missing_recipe_port` 8 (the driver's unbound continuation output) |
+| 5 (N=5×2) | `4b24977` | explicit (stock) | 2/10 | **0/10** | `unknown_recipe_port_net` 5, `missing_recipe_port` 3, `unsupported_recipe_endpoint` 3 |
+| 5 (N=5×2) | `4b24977` | intent | **10/10** | **0/10** | `unknown_edge_rail` 1, `conflicting_port_binding` 1 |
+
+Pooled over blocks 2–5 (N=50 runs per arm): intent commits **47/50**, stock **21/50**; intent
+`$0.0073`/run against stock `$0.0161`/run.
+
+Attribution, from the same event streams — the classes that matter are not the same kind:
+
+| block | arm | runs | commits | first drafts with **no contract refusal at all** | runs with a semantic repair round |
+|---|---|---|---|---|---|
+| 1 | stock | 20 | 6 | 0 | 16 |
+| 1 | intent | 20 | 7 | 7 | 7 |
+| 2 | stock | 10 | 4 | 0 | 10 |
+| 2 | intent | 10 | 10 | 4 | 10 |
+| 3 | stock | 10 | 5 | 0 | 8 |
+| 3 | intent | 10 | 10 | 5 | 10 |
+| 4 | stock | 10 | 4 | 0 | 8 |
+| 4 | intent | 10 | 10 | 2 | 10 |
+| 5 | stock | 10 | 2 | 0 | 8 |
+| 5 | intent | 10 | 10 | **8** | 10 |
+
+Pooled: **0/60** stock first drafts were contract-clean; **26/60** intent first drafts were. Every
+stock run and every intent run spent at least one semantic repair round in blocks 2–5.
 
 Each block's leading class was read off its drafts and answered by a *derivation* change, never by a
 new rule (the §8 discipline):
@@ -373,40 +406,60 @@ new rule (the §8 discipline):
 ### 10.5 The kill criterion fired, and what that says about the diagnosis
 
 §6 pre-registered: *if stage 1 does not raise first-draft acceptance above 50 %, the diagnosis is
-wrong; stop, do not proceed to stages 2–3.* Measured: **0 % in every block, both arms** — the
-criterion fails, so stages 2 and 3 are not landed and the §5 deletions stay unspent.
+wrong; stop, do not proceed to stages 2–3.* Measured: **`first_draft_accepted` is 0 % in every
+block, both arms** — the criterion fails, stages 2 and 3 are not landed, and the §5 deletions stay
+unspent. That is the literal verdict and it stands.
 
-What the numbers do support:
+The attribution makes the verdict more useful than "no":
 
-- **The bookkeeping half of the diagnosis is confirmed.** `unknown_recipe_port_net` — the dominant
-  class in the corpus (165 drafts) and the leading stock class in block 1 (10/20) — goes to zero
-  offline and disappears from the intent arm's live first drafts. `multiple_recipe_contracts`,
-  `missing_interface_port`, `native_usb_connector_required`, `unsupported_recipe_endpoint` and
-  `unsatisfied_pin_capability` behave the same way. The model is no longer asked to hand-write
-  wiring that the compiler can derive, and it no longer fails on it.
-- **The remaining rejections are design-level statements, not bookkeeping.** Every live first draft
-  still broke 1–2 of: a required recipe port the design never connected (`led.data_out` — where the
-  LED string's continuation output goes is a design decision, and the derivation must not invent a
-  net name for it), a rail named on a connector that the design never declared, a converter whose
-  rated topology text is missing, an external-load current budget. Those are the rules §5
-  deliberately keeps.
-- **The per-draft defect count did not move.** Block 1's stock drafts carried 1–2 classes per draft
-  and the intent drafts carried 1–2. That is §1's measurement again, now inside the constructive
-  slot: the number of ways to be rejected fell, the probability of a clean first draft did not.
-- **What did move is the recovery tail**, which is what costs a user a board: block 2's intent arm
-  committed **10/10** against stock's 4/10 in the same block, and the intent drafts are cheaper
-  (~$0.008 vs ~$0.017 per run). N=10 on one block is not the pre-registered endpoint, so this is
-  evidence, not a verdict.
+- **The contract half of the diagnosis is confirmed, and it is the half that moved.** Stock never
+  once produced a first draft without a contract refusal (0/60); the intent slot's first drafts were
+  contract-clean in 26/60, and 8/10 in the last block. `unknown_recipe_port_net` — the dominant
+  class in the corpus (165 drafts) and stock's leading class in blocks 1 and 5 — is zero offline and
+  absent from the intent arm's live drafts. Same for `multiple_recipe_contracts`,
+  `missing_interface_port`, `native_usb_connector_required`, `unsupported_recipe_endpoint`,
+  `unsatisfied_pin_capability`, and after the last fix `missing_recipe_port`. The model is no longer
+  asked to hand-write wiring the compiler can derive, and it no longer fails on it.
+- **Every remaining first-draft *correction* is a semantic repair round, not a contract refusal.**
+  In blocks 2–5 every intent run spent one repair round, on the intent-level codes §5 deliberately
+  keeps: `architecture_mcu_regulator_incomplete` (76 emissions), which reads the slot's `topologies`
+  for a converter term plus the `3.3V` token plus an ampere figure ≥ 1 A, and
+  `architecture_external_load_current_unspecified` (68), which wants the load current the board
+  supplies to the HUB75 display and the LED string — a number the brief does not give and only the
+  user or the model can supply (`architecture_power_block_as_sheet` 22 is the same family: where a
+  distribution block lands). Neither is derivable: the recipe registry states parts and stability
+  assertions and no current rating, and the load current is a question, not a computation. The
+  endpoint as instrumented therefore measures *that policy* as much as the slot:
+  `first_draft_accepted` should be split into "first draft, no contract refusal" (measurable, and it
+  moved from 0/60 to 26/60) and "first draft, no semantic repair" (dominated by two design
+  statements).
+- **The recovery tail — the thing that loses a user's board — improved.** Over blocks 2–5 (N=50 per
+  arm, interleaved, same boards): intent commits **47/50** against stock's **21/50**, at
+  `$0.0073`/run against `$0.0161`/run. The plan's §1 framing was that the pipeline is a guaranteed
+  rejection plus a recovery loop whose death rate is the tail; the constructive slot removes most of
+  the loop, and the intent arm's deaths (3/50) are the two derivation refusals and one schema
+  shape failure, not bookkeeping churn.
+- **The per-draft defect count did not move until the derivation owned more of it.** Block 1's
+  intent drafts carried 1–2 classes like stock's; each block's leading class was read off its drafts
+  and answered by a derivation change (table above), and the count fell with it.
 
-Re-derivation, per the kill criterion: the diagnosis was right about *what* the compiler should own
-and wrong that owning it raises first-draft acceptance. The residual rejections are themselves
-mostly derivable consequences of what the model *did* say — a recipe's required output with no peer
-is by the recipe's own contract an off-board output; a connector exposing a rail the design named
-anywhere is the same connector; an interface is a consequence of its ports (that one shipped). The
-plan's own rule ("no new validator, no new completion per defect") is what makes the *next* step a
-derivation change rather than another rule: measure which residual class each draft hits, derive
-that class if the model already said what it needs, and re-measure — with the §6 kill criterion
-still the gate on stages 2–3.
+Re-derivation, per the kill criterion. The diagnosis was right that the compiler should own derived
+data and wrong that owning it lifts first-draft acceptance on its own: the residual causes are
+statements no derivation may invent (a converter's current rating; a signal whose net name only the
+design knows) and one prose check that reads them. Three concrete next steps, in the order the
+evidence supports them:
+
+1. **Split the endpoint** in `stage_telemetry` (`first_draft_accepted` /
+   `first_draft_contract_clean` / `semantic_repair_rounds`) so the §6 primary endpoint measures the
+   slot instead of the semantic policy. The data is already on the events; this is a counter change.
+2. **Decide `architecture_mcu_regulator_incomplete` on its merits**: either the registry gains a
+   reviewed current rating per regulator recipe (then the derivation can state the topology line and
+   the check keeps its meaning), or the check is replaced by the intent-level question it really is
+   ("what is the converter rated for?") in the external-load budget family. Do not have the
+   derivation assert a floor it cannot source.
+3. **Then re-measure at N=20 per board per arm** (the §6 sample size) with the endpoint split. Only
+   a first-draft contract-clean rate above 50 % should unlock stage 2, because stage 2 deletes the
+   validators that currently catch the 34/60 contract-dirty drafts.
 
 ### 10.6 Not done
 
