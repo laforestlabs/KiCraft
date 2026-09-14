@@ -430,6 +430,23 @@ def test_signal_restating_a_ground_connection_joins_ground():
     assert not any(row.name == "MCU_GND" for row in architecture.inter_sheet_nets)
 
 
+def test_required_output_with_no_peer_is_exposed_with_its_rails():
+    """The recipe requires the driver's continuation output: it leaves the board, with a name."""
+    intent = _hub75_intent()
+    intent["signals"] = [row for row in intent["signals"] if row["name"] != "LED_OUT"]
+    architecture = derive_architecture(intent)
+    led = _requirement(architecture, "led")
+    assert led.ports["data_out"] == "LED_DATA_OUT"
+    connector = _requirement(architecture, "led_data_out")
+    assert connector.role == "connector"
+    assert connector.ports == {"pin1": "LED_DATA_OUT", "pin2": "GND", "pin3": "VBUS"}
+    assert [(row.sheet, row.direction) for row in _net(architecture, "LED_DATA_OUT").endpoints] == [
+        ("LED", "output"),
+        ("LED DATA OUT", "input"),
+    ]
+    assert any("exposed as LED_DATA_OUT" in row for row in architecture.assumptions)
+
+
 def test_half_a_usb_pair_is_refused_by_name():
     intent = _hub75_intent()
     intent["signals"] = [row for row in intent["signals"] if row["name"] != "USB_D_N"]

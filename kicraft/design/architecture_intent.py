@@ -643,8 +643,12 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
     # Off-board peers: one connector per `edge:` label, carrying only what named it.
     edge_connectors: dict[str, tuple[str, str, list[str]]] = {}  # label -> (id, mode, rails)
     renamed: list[str] = []
+    # Derived statements the review should see (a tied spare port, an exposed output).
+    derived_notes: list[str] = []
 
-    def _open_edge(label: str, source: _SheetRef) -> tuple[str, str] | None:
+    def _open_edge(
+        label: str, source: _SheetRef, requirement_id: str | None = None
+    ) -> tuple[str, str] | None:
         existing = edge_connectors.get(label)
         if existing is not None:
             return existing[0], existing[1]
@@ -659,7 +663,7 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
             sheet_by_stem[label] = sheet
         # An edge label that names a sheet the model already declared puts the connector
         # there (the sheet owns that interface); a fresh label gets its own sheet.
-        requirement_id = f"{source.requirement.id}_{label.lower()}"
+        requirement_id = requirement_id or f"{source.requirement.id}_{label.lower()}"
         if requirement_id in requirements:
             _fail(
                 "duplicate_edge_connector",
@@ -825,6 +829,61 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 context=f"signal {signal.name!r}",
             )
 
+    def _next_pin(requirement_id: str) -> str:
+        taken = bindings.setdefault(requirement_id, {})
+        index = 1
+        while f"pin{index}" in taken:
+            index += 1
+        return f"pin{index}"
+
+    # A required recipe output nobody bound is, by the recipe's own contract, an output that
+    # leaves the board (a WS2812 driver's `data_out` feeding the next LED). Name it after its own
+    # requirement and port, expose it with the part's supply rail and ground, and say so: the net
+    # is one the recipe requires, and its name is reported rather than silently chosen.
+    for requirement_id, catalog in sorted(catalogs.items()):
+        if catalog.source != "recipe" or catalog.recipe is None:
+            continue
+        supply = bindings.get(requirement_id, {}).get(
+            next((name for name in _SUPPLY_PORTS if name in catalog.directions), "")
+        )
+        for port in sorted(catalog.required):
+            if catalog.directions.get(port) != "output" or bindings.get(requirement_id, {}).get(
+                port
+            ):
+                continue
+            net = f"{requirement_id}_{port}".upper()
+            if net in endpoints:
+                _fail(
+                    "derived_output_name_collision",
+                    (
+                        f"requirement {requirement_id!r} port {port!r} needs a net, but {net!r} is "
+                        "already declared by the design; bind the port with a signal instead"
+                    ),
+                    requirement_id=requirement_id,
+                    sheet=requirements[requirement_id].sheet,
+                )
+                continue
+            source = _SheetRef(models_by_id[requirement_id], port, "output")
+            label = f"{requirement_id}_{port}".upper()
+            opened = _open_edge(label, source, f"{requirement_id}_{port}")
+            if opened is None:
+                continue
+            connector_id, _mode = opened
+            _bind(requirement_id, port, net, "output", context="derived output")
+            _bind(
+                connector_id,
+                _next_pin(connector_id),
+                net,
+                "input",
+                context=f"derived output {requirement_id}.{port}",
+            )
+            if supply:
+                edge_connectors[label][2].append(supply)
+            derived_notes.append(
+                f"{requirement_id}.{port}: required output with no peer exposed as {net} on its own "
+                "board-edge connector (derived)"
+            )
+
     # Header connectors close their pin order with GND and the rails the peer asked for.
     for label, (connector_id, mode, rails) in edge_connectors.items():
         unknown_rails = sorted({rail for rail in rails if rail not in rail_names})
@@ -914,7 +973,6 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
     # A required port the reviewed recipe allows grounding and the design does not use (HUB75's
     # spare address channel, a connector shell) is tied low here, once, instead of being asked for
     # and then validated: an unbound spare input floats, which is the defect, not the fix.
-    tied: list[str] = []
     for requirement_id, catalog in catalogs.items():
         if catalog.source != "recipe":
             continue
@@ -922,17 +980,10 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
             if bindings.get(requirement_id, {}).get(port):
                 continue
             _bind(requirement_id, port, GND_NET, "bidirectional", context="unused port tie")
-            tied.append(f"{requirement_id}: unused {port} tied to {GND_NET} (derived)")
+            derived_notes.append(f"{requirement_id}: unused {port} tied to {GND_NET} (derived)")
 
     # A connector closes its pin order with ground and the rails it exposes: the signals the
     # design bound first, then GND, then any rail the connector declares as its supply.
-    def _next_pin(requirement_id: str) -> str:
-        taken = bindings.setdefault(requirement_id, {})
-        index = 1
-        while f"pin{index}" in taken:
-            index += 1
-        return f"pin{index}"
-
     for requirement_id, rail in connector_rails.items():
         if not any(bound == GND_NET for bound in bindings.get(requirement_id, {}).values()):
             _bind(
@@ -1001,7 +1052,7 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
         sheets=sheets,
         power_nets=[GND_NET, *sorted(rail_names)],
         inter_sheet_nets=_inter_sheet_nets(final_requirements, endpoints, rail_names),
-        assumptions=[*intent.assumptions, *tied, *renamed, *notes],
+        assumptions=[*intent.assumptions, *derived_notes, *renamed, *notes],
         requirements=final_requirements,
         declared_interfaces=declared,
     )

@@ -354,8 +354,21 @@ alternating arm and board, `KICRAFT_ARCHITECTURE_SLOT` selecting the arm, per-ru
 | 1 (N=10×2) | `468a178` | intent | 7/20 | **0/20** | `invalid_parallel_output_count` 11, `multiple_recipe_contracts` 4, `missing_recipe_port` 4 |
 | 2 (N=5×2) | `59622bc` | explicit (stock) | 4/10 | **0/10** | `missing_recipe_port` 8, `unrealizable_power_requirement` 1 |
 | 2 (N=5×2) | `59622bc` | intent | **10/10** | **0/10** | `unknown_signal_requirement` 13, `unsupported_supply_port` 2, `usb_connector_supply_unknown` 2 |
-| 3 (N=5×2) | `a795ff3` | explicit (stock) | <AB3-STOCK> | <AB3-STOCK-FIRST> | <AB3-STOCK-CODES> |
-| 3 (N=5×2) | `a795ff3` | intent | <AB3-INTENT> | <AB3-INTENT-FIRST> | <AB3-INTENT-CODES> |
+| 3 (N=5×2) | `a795ff3` | explicit (stock) | 5/10 | **0/10** | `missing_recipe_port` 7, `unknown_recipe_port_net` 2 |
+| 3 (N=5×2) | `a795ff3` | intent | **10/10** | **0/10** | `conflicting_port_binding` 6, `missing_recipe_port` 4 |
+| 4 (N=5×2) | `6462cf2` | explicit (stock) | <AB4-STOCK> | <AB4-STOCK-FIRST> | <AB4-STOCK-CODES> |
+| 4 (N=5×2) | `6462cf2` | intent | <AB4-INTENT> | <AB4-INTENT-FIRST> | <AB4-INTENT-CODES> |
+
+Each block's leading class was read off its drafts and answered by a *derivation* change, never by a
+new rule (the §8 discipline):
+
+| block | leading class | what the model had actually said | change |
+|---|---|---|---|
+| 1 | `invalid_parallel_output_count` | declared `interfaces: ["parallel_output","pwm"]` while binding `output_*` pins | interfaces are derived from the bound ports (`59622bc`) |
+| 2 | `unknown_signal_requirement` | referenced `hub.r0` for its own `hub75` requirement | an unambiguous id abbreviation resolves (`a795ff3`) |
+| 2 | `unsupported_supply_port` | set `supply` on a connector, i.e. "expose this rail" | a connector's supply becomes a pin (`a795ff3`) |
+| 3 | `conflicting_port_binding` | wired ground explicitly (`MCU_GND` to peers' `gnd`) | a signal out of a ground-carrying port joins ground (`6462cf2`) |
+| 3 | `missing_recipe_port` | never said where the driver's `data_out` goes | **no change**: the continuation output's net name is a design statement, and inventing one is exactly what §9 forbids |
 
 ### 10.5 The kill criterion fired, and what that says about the diagnosis
 
