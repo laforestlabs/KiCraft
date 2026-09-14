@@ -33,7 +33,8 @@ on nearly every draft; that is the split Task A exists to show, and both are now
 B2 asked). The leading *residual* class in the intent arm is `conflicting_port_binding` (15, the
 model naming one producer port for two rails) with `usb_connector_supply_unknown` (12) — §2's method
 reads those from the drafts next. Stage 2 itself (the §5 deletions) is **not** started here: this
-plan's Task C decides, the parent plan's stage 2 is its own measured increment.
+plan's Task C decides, the parent plan's stage 2 is its own measured increment, and
+`docs/plans/architecture-stage-2-handoff-2026-09-14.md` is the handoff for it.
 
 ---
 

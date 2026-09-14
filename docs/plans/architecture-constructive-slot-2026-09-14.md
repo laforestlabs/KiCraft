@@ -699,3 +699,8 @@ repair round buys nothing for it, which is the measured case for asking the user
 Live spend for this plan: $0.166 (the pre-registered block) + $0.891 (the unattended block) =
 **$1.06**, against the next-steps plan's $1.50 allowance and the parent plan's $3 ceiling
 ($2.60 total).
+
+**Next:** stage 2 (the §5 deletions, and the legacy explicit shape dropped) is unlocked and not
+started; `docs/plans/architecture-stage-2-handoff-2026-09-14.md` is the self-contained handoff —
+the deletion list, the pre-registered gate for the change, the class to read after it, and the
+landmines.
