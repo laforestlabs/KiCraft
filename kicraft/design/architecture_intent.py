@@ -297,11 +297,52 @@ def _allows_application_port(catalog: _Catalog, requirement: IntentRequirement, 
         return True
     if re.fullmatch(r"gpio\d+", name):
         return True
+    # A bus member key is a request for that bus: the interface list is derived from the
+    # ports the design binds, so the key itself is what has to be checked here.
     return any(
-        name in keys
-        for interface in requirement.interfaces
-        for keys, _capability in FIXED_INTERFACES.get(interface, ())
+        name in keys for members in FIXED_INTERFACES.values() for keys, _capability in members
     )
+
+
+# Interfaces whose whole contract is "this many pins of this capability": the bound ports state
+# them, so a declaration with no matching port is not a request.
+_CAPABILITY_INTERFACES = frozenset({"parallel_output", "pwm", "adc"})
+
+
+def _derived_interfaces(
+    declared: list[str],
+    bound: set[str],
+    parameters: dict,
+) -> list[str]:
+    """The interface list a requirement's own bound ports imply.
+
+    An interface is a *consequence* of the ports the design binds, the same way a net name is a
+    consequence of a signal: an interface declared with no member port bound is not a request
+    (the allocator would refuse the requirement for a binding the model never meant to make), and
+    a bound member port needs its interface declared. `parallel_output` additionally carries the
+    count its own `parallel_<i>` ports state.
+    """
+    derived = [
+        name
+        for name, members in FIXED_INTERFACES.items()
+        if any(any(port in bound for port in keys) for keys, _capability in members)
+    ]
+    parallel = sorted(
+        int(match.group(1))
+        for key in bound
+        if (match := re.fullmatch(r"parallel_(\d+)", key))
+    )
+    if parallel:
+        derived.append("parallel_output")
+        if not isinstance(parameters.get("parallel_output_count"), int):
+            parameters["parallel_output_count"] = parallel[-1] + 1
+    for name, prefix in (("pwm", "pwm"), ("adc", "adc")):
+        if any(key == prefix or key.startswith(f"{prefix}_") for key in bound):
+            derived.append(name)
+    for name in declared:
+        if name not in derived and name not in FIXED_INTERFACES and name not in _CAPABILITY_INTERFACES:
+            derived.append(name)  # an interface this compiler does not model: keep the claim
+    return list(dict.fromkeys(derived))
 
 
 def _direction(catalog: _Catalog, requirement: IntentRequirement, name: str) -> str | None:
@@ -858,6 +899,20 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
 
     if diagnostics:
         raise ArchitectureIntentError(diagnostics)
+
+    # `interfaces` follows the ports the design bound (see `_derived_interfaces`), so the
+    # allocator is asked for exactly the interfaces this design actually uses.
+    for requirement_id, requirement in requirements.items():
+        model = models_by_id.get(requirement_id)
+        if model is None or catalogs[requirement_id].source != "recipe":
+            continue
+        parameters = dict(requirement.parameters)
+        interfaces = _derived_interfaces(
+            list(requirement.interfaces), set(bindings.get(requirement_id, {})), parameters
+        )
+        requirements[requirement_id] = requirement.model_copy(
+            update={"interfaces": interfaces, "parameters": parameters}
+        )
 
     final_requirements = [
         requirements[requirement_id].model_copy(update={"ports": bindings[requirement_id]})

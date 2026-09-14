@@ -285,6 +285,68 @@ def test_edge_label_naming_a_declared_sheet_puts_the_connector_there():
     ]
 
 
+def test_interfaces_follow_the_ports_the_design_bound():
+    """A declared interface with no bound member is not a request, and a bound member implies one."""
+    intent = _hub75_intent()
+    intent["requirements"] = [
+        {**row, "interfaces": ["parallel_output", "pwm", "i2c_controller"]}
+        if row["id"] == "esp32"
+        else row
+        for row in intent["requirements"]
+    ]
+    architecture = derive_architecture(intent)
+    mcu = _requirement(architecture, "esp32")
+    # The MCU bound `output_*` pins only: no bus was requested, so no bus is asked of the allocator.
+    assert mcu.interfaces == []
+    assert "parallel_output_count" not in mcu.parameters
+
+    intent["requirements"] = [
+        {**row, "interfaces": ["i2c_controller"]} if row["id"] == "esp32" else row
+        for row in intent["requirements"]
+    ]
+    intent["signals"] = [
+        *intent["signals"],
+        {"name": "I2C_SDA", "from": "esp32.sda", "to": "esp32.scl"},
+    ]
+    # `sda`/`scl` bound on an allocatable recipe are an I2C request even before the bus is
+    # complete; the interface follows the ports, and the resolver still reports an idle bus.
+    architecture = derive_architecture(intent)
+    assert _requirement(architecture, "esp32").interfaces == ["i2c_controller"]
+
+
+def test_parallel_output_count_comes_from_the_bound_ports():
+    intent = _hub75_intent()
+    intent["sheets"].append(
+        {
+            "name": "LED BANK",
+            "stem": "LED_BANK",
+            "role": "connector",
+            "function": "Three-channel LED output bank.",
+        }
+    )
+    intent["requirements"] = [
+        {**row, "interfaces": ["parallel_output"]} if row["id"] == "esp32" else row
+        for row in intent["requirements"]
+    ] + [
+        {
+            "id": "led_bank",
+            "sheet": "LED BANK",
+            "role": "connector",
+            "family": "pin-header",
+            "parameters": {"rows": 1, "gender": "male"},
+            "functional_blocks": ["ADDRESSABLE_LED_OUTPUT"],
+        }
+    ]
+    intent["signals"] = [
+        {"name": f"LED_{n}", "from": f"esp32.parallel_{n}", "to": f"led_bank.pin{n + 1}"}
+        for n in range(3)
+    ] + [row for row in intent["signals"] if not row["name"].startswith("HUB75_R")]
+    architecture = derive_architecture(intent)
+    mcu = _requirement(architecture, "esp32")
+    assert mcu.parameters["parallel_output_count"] == 3
+    assert mcu.interfaces == ["parallel_output"]
+
+
 def test_half_a_usb_pair_is_refused_by_name():
     intent = _hub75_intent()
     intent["signals"] = [row for row in intent["signals"] if row["name"] != "USB_D_N"]

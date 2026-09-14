@@ -54,8 +54,11 @@ Slot shape:
   - `programming`: how a programmable part is flashed — `native_usb`, `usb_uart_bridge`, `swd`,
     `updi`, `bootsel`, `none`. See *Programming*.
   - `interfaces`: the recipe's interface names you use (`i2c_controller`, `spi_controller`,
-    `uart`, `can_controller`, `pwm`, `adc`, `parallel_output`). Required to use that interface's
-    port keys.
+    `uart`, `can_controller`, `pwm`, `adc`, `parallel_output`). The compiler derives this list from
+    the ports you bind: a bus member (`sda`/`scl`, `sclk`/`mosi`/`miso`/`cs`, `tx`/`rx`,
+    `can_tx`/`can_rx`, `pwm_*`, `adc_*`, `parallel_<i>`) requests its interface, an interface you
+    name with no such port bound is not a request, and `parallel_output` takes its count from the
+    `parallel_<i>` ports you bind. You do not have to get the list exactly right; the ports decide.
   - `functional_blocks`: the exact committed Functional Spec block names this part implements.
     Every block needs an owner; several requirements may implement one block.
   - `ties`: port key → declared net for a direct tie no signal names: a connector shell to `GND`,
