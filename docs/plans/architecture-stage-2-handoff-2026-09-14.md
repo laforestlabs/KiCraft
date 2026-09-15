@@ -213,6 +213,12 @@ refusals against 19, $0.0055/run, no parks. Deviations from §2, all measured an
   arm (40 runs, 20 per board, `--unattended`, `repo_dirty: false`, $0.2190).
 
 Operational note for the operator: `.env` still sets `KICRAFT_ARCHITECTURE_SLOT=intent`; the variable
-is now inert (there is one shape), and the line should be dropped when convenient. The
-`deploy/verify-design-canary.sh` gate was **not** run — the operator chose to skip it for this
-release.
+is now inert (there is one shape), and the line should be dropped when convenient.
+
+`deploy/verify-design-canary.sh` **was** run after the deploy (§10.11): 34 briefs, **13 committed all
+five stages**, 0 errored, $0.599, 16 min, against 7/34 for the last pre-intent run. It found and
+confirmed the fix for a pre-existing crash on a signal that restates a rail at the board edge
+(`154fa79`), and the leading over-refusal behind the rest (`unsupported_supply_port`, 15 briefs),
+whose name-shape and lowerer-vocabulary halves are fixed at `8a330a0`. The remaining sub-case — a
+lowerer family ignoring the model's own `declared_ports` — is diagnosed in §10.11 and needs its own
+measured increment.

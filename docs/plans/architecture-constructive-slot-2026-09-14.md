@@ -818,7 +818,45 @@ change; the cascade is the next thing to fix in the suite, not in the pipeline.
 Live spend for the whole exercise: $2.60 (§10.9) + **$0.219** = **$2.82 of the $3 ceiling** (the
 operator raised it to $4.50 for this block).
 
-**Not run:** `deploy/verify-design-canary.sh` (34 briefs, live provider). The operator chose to
-skip it for this release; the honest end-to-end gate for a change this size is still open, and the
-next increment should run it before the park behaviour meets a real user on a brief that never
-states its external load current.
+### 10.11 The 34-brief canary, and the two defects it found
+
+`deploy/verify-design-canary.sh` (§3 of the handoff's "ask the operator" note) was run after the
+deploy, `--design-only --no-judge --lean-events`, `--parallel 3`, the production profile
+(`KICRAFT_DESIGN_PROFILE=luna`, `openai/gpt-5.6-luna`). Its criterion — *every* selected brief
+commits all five stages — has never passed: the last full run (2026-09-11, `deepseek-v4-pro`,
+before the intent slot) committed **7/34** with 3 errors for $2.34 in 18 min. Two runs today:
+
+| run | source | briefs | committed all five | errored | cost | wall |
+|---|---|---|---|---|---|---|
+| 1 | `2d5a95d` (stage 2) | 32 reached (SIGKILL at 32/34) | 9 | 1 (`KeyError`) | $0.601 | ~32 min |
+| 2 | `154fa79` (stage 2 + crash fix) | 34 | **13** | **0** | $0.599 | 16 min |
+
+**It found a crash.** `r2r-dac` died with `KeyError: 'logic_power_power_input'`: a signal whose
+source port already carries a declared rail and whose peer is `edge:LABEL` opens the edge connector
+without binding a signal to it (that is the point — the rail owns the net), and the close-out loop
+indexed `bindings[connector_id]` directly. Pre-existing since `468a178`; the shape had no coverage.
+Fixed at `154fa79` (+ a regression test); that brief now commits all five stages, which is the
+canary verifying its own finding.
+
+**It found an over-refusal, and it is the leading class:** `unsupported_supply_port` fired on 15 of
+34 briefs (37 requirement-cases). The rail lookup only knew `vdd`/`vm`/`vin`/`input`/`vdd_5v`, so
+the compiler refused a declared supply it *could* place: a part whose pin is `vcc` (5 cases),
+`vbus` (2), a qualified `vdd_logic` (1), and every lowerer family, whose published `port_keys` were
+treated as an empty vocabulary (23 cases). `8a330a0` binds the pin the design names (exact name
+first, then a qualified one, with the rail's own name breaking a tie) and takes a lowerer's
+*concrete* published keys as directions; a connector still *exposes* a rail on its own documented
+pin rather than drawing it, which is what kept a socket's own VBUS statement authoritative.
+Verified: replay held at 215/254, 4007 tests green, three new cases in the derivation suite.
+
+**Still open (diagnosed, not changed):** for a lowerer family, `_catalog` returns the open
+vocabulary before reading the model's own `declared_ports`, so a requirement that needs its own
+keys (a `status-led` whose `drive` pin takes the rail) cannot bind them, cannot satisfy
+`_require_ports`, and is refused with `ports=(none)`. That is a design decision with a measurable
+effect — it belongs to the next increment, measured the way stage 2 was, not slipped in here.
+
+**The canary's other refusals** are the family §10.10 and the handoff §4 already name:
+`multiple_intent_contracts` 12 briefs, `conflicting_port_binding` 8, `unknown_interface_port` 5,
+`missing_recipe_requirement` 3 — the read-the-draft class.
+
+Live spend for the whole exercise: $2.82 + $0.601 (the killed run) + $0.599 = **$4.02 of the
+operator's $4.50 ceiling**.
