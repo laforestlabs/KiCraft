@@ -1750,23 +1750,6 @@ def test_collection_limit_uses_one_escape_serialization_call(tmp_path):
     assert "82000 content characters" in retry
 
 
-def test_architecture_collection_retry_requires_compact_numbered_ranges():
-    retry = stage_driver_mod._stage_recovery_message(
-        "collection_limit",
-        '{"inter_sheet_nets":[',
-        "Keep inter_sheet_nets at or below 128 items.",
-        collection_limit={
-            "field": "inter_sheet_nets",
-            "observed_count": 129,
-            "configured_total": 128,
-            "emitted_content_chars": 16000,
-        },
-    )
-
-    assert "inter_sheet_net_ranges" in retry
-    assert "never invent signal indices beyond the physical component's pins" in retry
-
-
 def test_repeated_collection_limit_uses_the_full_bounded_budget(tmp_path):
     overflow = {
         "text": '{"goal":',

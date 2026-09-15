@@ -737,14 +737,14 @@ def _project_to_intent(architecture: dict) -> tuple[dict, list[str]]:
 
 
 def _draft_codes(
-    payload: dict, prompt_state: dict, slot: str = "explicit"
+    payload: dict, prompt_state: dict
 ) -> tuple[list[str], str | None]:
     """The blocking codes one draft is rejected for, or the refusal that stopped it."""
     from kicraft.server.stage_contracts import StageSchemaError, _normalize_stage_response
 
     try:
         _normalize_stage_response(
-            "architecture", json.loads(json.dumps(payload)), prompt_state, slot=slot
+            "architecture", json.loads(json.dumps(payload)), prompt_state
         )
     except StageSchemaError as exc:
         diagnostic = getattr(exc, "diagnostic", None) or {}
@@ -767,9 +767,13 @@ def replay_corpus(root: Path, *, limit: int | None, state_root: Path) -> int:
 
     The offline half of the plan's §6 measurement: for every architecture run whose
     raw drafts are still on disk, count the blocking classes the FIRST draft hit
-    under the explicit reader, project that draft onto the intent slot, derive it,
-    and count the classes that remain. Classes the derivation owns disappear; a
-    draft the derivation cannot rebuild is reported as skipped, never as a pass.
+    read as written, project that draft onto the intent slot, derive it, and count
+    the classes that remain. Classes the derivation owns disappear; a draft the
+    derivation cannot rebuild is reported as skipped, never as a pass.
+
+    Since stage 2 the intent shape is the only one, so the "as written" column
+    reads the legacy canonical drafts through the surviving reader: it is the
+    historical baseline, not a supported answer shape.
     """
     from kicraft.design.architecture_intent import ArchitectureIntentError, derive_architecture
 
@@ -831,11 +835,11 @@ def replay_corpus(root: Path, *, limit: int | None, state_root: Path) -> int:
     accepted_after = sum(1 for row in known if not row["derived_codes"])
     print(f"replayed {len(rows)} first drafts from {len(streams)} event streams")
     print(
-        f"first drafts accepted: explicit reader {accepted_before}/{len(known)}; "
+        f"first drafts accepted: as written {accepted_before}/{len(known)}; "
         f"after projection+derivation {accepted_after}/{len(known)} "
         f"({len(rows) - len(known)} draft(s) the projection could not express are excluded)"
     )
-    print(f"{'blocking class':<42} {'explicit':>9} {'derived':>8}")
+    print(f"{'blocking class':<42} {'as-written':>10} {'derived':>8}")
     for code in sorted(
         {*before, *after}, key=lambda name: -(before.get(name, 0) + after.get(name, 0))
     ):

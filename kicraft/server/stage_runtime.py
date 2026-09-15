@@ -24,7 +24,6 @@ from kicraft.design.stage_semantics import (
     remove_mislabeled_functional_defaults,
 )
 from .config import (
-    ARCHITECTURE_SLOTS,
     CONTRACT_LADDER_MODES,
     STAGE_COLLECTION_BOUNDS,
     STAGE_SERIALIZATION_MAX_TOKENS,
@@ -484,15 +483,6 @@ def _contract_ladder_modes(client) -> frozenset[str]:
     return (modes & CONTRACT_LADDER_MODES) or frozenset({"stock"})
 
 
-# --------------------------------------------------------------------------- #
-# Architecture slot (docs/plans/architecture-constructive-slot-2026-09-14.md)
-# --------------------------------------------------------------------------- #
-def architecture_slot(client) -> str:
-    """Which architecture slot the provider is asked for (default: ``explicit``)."""
-    raw = str(getattr(getattr(client, "s", None), "architecture_slot", "explicit") or "explicit")
-    return raw.strip().lower() if raw.strip().lower() in ARCHITECTURE_SLOTS else "explicit"
-
-
 def _declared_identities(payload: dict) -> set[str]:
     """The declared content a revision must preserve (O5).
 
@@ -504,9 +494,6 @@ def _declared_identities(payload: dict) -> set[str]:
     for net in payload.get("inter_sheet_nets") or []:
         if isinstance(net, dict) and net.get("name"):
             identities.add(f"net:{net['name']}")
-    for net_range in payload.get("inter_sheet_net_ranges") or []:
-        if isinstance(net_range, dict) and net_range.get("name_pattern"):
-            identities.add(f"range:{net_range['name_pattern']}")
     for requirement in payload.get("requirements") or []:
         if not isinstance(requirement, dict):
             continue
@@ -1029,14 +1016,7 @@ def _stage_recovery_message(
         template = _SCHEMA_RETRY_MSG
     else:
         template = _SERIALIZATION_RETRY_MSG
-    collection_hint = (
-        "For sequential numbered signal families, emit one "
-        "`inter_sheet_net_ranges` entry instead of enumerating "
-        "`inter_sheet_nets`; never invent signal indices beyond the physical "
-        "component's pins. "
-        if limit.get("field") == "inter_sheet_nets"
-        else ""
-    )
+    collection_hint = ""
     if limit.get("field") == "inter_sheet_nets" and limit.get("limit_scope") == "duplicate":
         collection_hint = (
             "A net shared by several sheets is ONE net record containing all of "
@@ -1145,13 +1125,6 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
             '"5 V is only the USB-PD input contract"].'
         )
 
-    if any(d.code == "architecture_duplicate_voltage_rails_unrelated" for d in diagnostics):
-        message += (
-            " Use one canonical net for a direct same-voltage connection. Keep "
-            "two same-voltage rail names only when a named fuse, switch, filter, "
-            "net tie, or converter explicitly connects them."
-        )
-
     if any(
         d.code
         in {
@@ -1211,13 +1184,6 @@ class PreparedStage:
     policy: StageResponsePolicy
     tools: list[dict] | None
     executor: object | None
-    # Correction-ladder arms this drive runs (KICRAFT_CONTRACT_LADDER): the
-    # stage contracts read them to complete what they can complete
-    # deterministically (O6 native-USB companion, O8 HUB75 addr_d).
-    ladder: frozenset[str] = frozenset()
-    # Which architecture slot this drive asked for (KICRAFT_ARCHITECTURE_SLOT):
-    # the reader accepts either shape, this only records what was requested.
-    slot: str = "explicit"
 
 
 @dataclass(frozen=True)
@@ -1394,8 +1360,6 @@ def decode_stage_response(
             prepared.stage,
             parsed,
             prepared.prompt_state,
-            ladder=getattr(prepared, "ladder", frozenset()),
-            slot=getattr(prepared, "slot", "explicit"),
         )
         kind = "questions" if isinstance(candidate.get("questions"), list) else "candidate"
         return AttemptOutcome(
@@ -3504,7 +3468,6 @@ def drive_stage(
         )
     user += f"\n\nProduce the {stage} slot JSON now."
 
-    slot = architecture_slot(active_client) if stage == "architecture" else "explicit"
     # A non-interactive drive (the self-eval corpus, a CLI batch) asks no
     # questions and takes today's defaults; everything else may ask the user.
     questions_allowed = not (
@@ -3515,7 +3478,6 @@ def drive_stage(
             stage,
             prompt_state,
             allow_questions=questions_allowed,
-            slot=slot,
         )
     except ValueError as exc:
         return operational_failure(
@@ -3554,8 +3516,6 @@ def drive_stage(
         policy=policy,
         tools=tools,
         executor=executor,
-        ladder=ladder_modes,
-        slot=slot,
     )
 
     def _debug_context(raw_response: str) -> dict:

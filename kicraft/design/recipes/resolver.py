@@ -13,18 +13,15 @@ from kicraft.design.lowering import lower_requirement, registered_lowerers
 from kicraft.design.models import (
     Architecture,
     CircuitRequirement,
-    InterSheetNet,
     RecipeResolutionRecord,
     RecipeSelection,
-    Sheet,
-    SheetPin,
 )
 from kicraft.design.part_identity import is_part_family, matches_part_identity
 from kicraft.design.synthesis.validation import _net_voltage, named_part_tokens
 
 from .models import RecipeDefinition, RegisteredRecipe
 from .pin_allocator import PinAllocationError, allocate_requirement_pins
-from .registry import get_recipe, protected_identities, registered_recipes
+from .registry import protected_identities, registered_recipes
 
 _PROGRAMMING_PEER_PORTS = {
     "uart_tx": "rx",
@@ -59,7 +56,6 @@ class ResolutionResult(BaseModel):
     blocking: list[ResolutionDiagnostic] = Field(default_factory=list)
     protected_identities: list[str] = Field(default_factory=list)
     records: list[RecipeResolutionRecord] = Field(default_factory=list)
-    completed_nets: list[InterSheetNet] = Field(default_factory=list)
     requirements: list[CircuitRequirement] = Field(default_factory=list)
 
 
@@ -275,28 +271,6 @@ _HUB75_PORT_ALIASES = {
 }
 _PORT_ALIASES = {**_USB_PORT_ALIASES, **_HUB75_PORT_ALIASES}
 
-# Reviewed factory-native-programmable families: a new architecture must route
-# their USB pair to one physical data connector, never to a UART header.
-_NATIVE_USB_MCU_RECIPES = frozenset(
-    {
-        "esp32-s3-mini-1-minimal@1",
-        "esp32-s3-wroom-1-minimal@1",
-        "esp32-c3-mini-1-minimal@1",
-        "rp2040-minimal@2",
-    }
-)
-# Recipes whose expansion already carries the 22R MCU-side series pair, so a
-# companion connector must not add a second one.
-_MCU_OWNED_USB_SERIES_RECIPES = frozenset(
-    {
-        "esp32-s3-mini-1-minimal@1",
-        "esp32-s3-wroom-1-minimal@1",
-        "esp32-c3-mini-1-minimal@1",
-    }
-)
-# Reviewed USB data-connector recipes: expose both D-/D+ and a physical socket.
-_USB_DATA_CONNECTOR_RECIPES = frozenset({"usb-c-usb2-device@1"})
-
 
 def _net_identity(value: str) -> str:
     """Ignore naming separators without erasing electrical polarity."""
@@ -499,11 +473,6 @@ def _port_bindings(
     architecture: Architecture,
 ) -> tuple[dict[str, str], list[ResolutionDiagnostic]]:
     declared = {port.name: port for port in definition.ports}
-    known_nets = {
-        "GND",
-        *architecture.power_nets,
-        *(net.name for net in architecture.inter_sheet_nets),
-    }
     bindings = {name: net for name, net in requirement.ports.items() if name in declared}
     if "gnd" in declared:
         bindings.setdefault("gnd", "GND")
@@ -556,10 +525,6 @@ def _port_bindings(
     context = (
         f"requirement {requirement.id!r}, recipe {definition.recipe}, sheet {requirement.sheet!r}"
     )
-    evidence = [
-        "required_ports=" + ",".join(port.name for port in definition.ports if port.required),
-        "available_nets=" + ",".join(sorted(known_nets)),
-    ]
     power_bindings = {
         name
         for name, net in bindings.items()
@@ -581,54 +546,7 @@ def _port_bindings(
                 recipe=definition.recipe,
                 sheet=requirement.sheet,
                 message=f"{context}: signal nets {signal_power_nets} belong in explicit inter-sheet contracts, not power_nets",
-                evidence=[*signal_power_nets, *evidence],
-            )
-        )
-    missing = [name for name, port in declared.items() if port.required and not bindings.get(name)]
-    if missing:
-        diagnostics.append(
-            ResolutionDiagnostic(
-                code="missing_recipe_port",
-                requirement_id=requirement.id,
-                recipe=definition.recipe,
-                sheet=requirement.sheet,
-                message=f"{context}: requires ports {sorted(missing)}; declare their typed peer contracts",
-                evidence=[*sorted(missing), *evidence],
-            )
-        )
-    unknown = sorted({net for net in bindings.values() if net not in known_nets})
-    if unknown:
-        diagnostics.append(
-            ResolutionDiagnostic(
-                code="unknown_recipe_port_net",
-                requirement_id=requirement.id,
-                recipe=definition.recipe,
-                sheet=requirement.sheet,
-                message=f"{context}: bindings reference undeclared architecture nets {unknown}",
-                evidence=[*unknown, *evidence],
-            )
-        )
-    missing_contracts = sorted(
-        net
-        for name, net in bindings.items()
-        if name not in power_bindings
-        and net in known_nets
-        and net not in signal_power_nets
-        and not any(
-            row.name == net
-            and any(endpoint.sheet == requirement.sheet for endpoint in row.endpoints)
-            for row in architecture.inter_sheet_nets
-        )
-    )
-    if missing_contracts:
-        diagnostics.append(
-            ResolutionDiagnostic(
-                code="missing_recipe_port_contract",
-                requirement_id=requirement.id,
-                recipe=definition.recipe,
-                sheet=requirement.sheet,
-                message=f"{context}: signal bindings lack an owning inter-sheet endpoint: {missing_contracts}",
-                evidence=[*missing_contracts, *evidence],
+                evidence=signal_power_nets,
             )
         )
     return dict(sorted(bindings.items())), diagnostics
@@ -784,84 +702,6 @@ def _ch340c_esp32_domain_diagnostics(
             )
         )
     return diagnostics
-
-
-def _complete_typed_connector_peers(
-    definition: RecipeDefinition,
-    requirement: CircuitRequirement,
-    architecture: Architecture,
-) -> tuple[CircuitRequirement, list[InterSheetNet]]:
-    """Complete only nets named by typed connector peers, never connector prose."""
-    ports = dict(requirement.ports)
-    completed: dict[str, InterSheetNet] = {}
-    existing = {net.name: net for net in architecture.inter_sheet_nets}
-    for port in definition.ports:
-        if port.direction == "power":
-            continue
-        if "auto_reset" in definition.parameter_defaults and port.name in _PROGRAMMING_PEER_PORTS:
-            continue  # Fixed programming pins are completed from typed UART peers below.
-        port_identities = {
-            _net_identity(alias) for alias in _USB_PORT_ALIASES.get(port.name, (port.name,))
-        }
-        peers: dict[str, set[str]] = defaultdict(set)
-        for peer in architecture.requirements:
-            if peer.role != "connector" or peer.sheet == requirement.sheet:
-                continue
-            for logical, net in peer.ports.items():
-                previous = existing.get(net)
-                local_endpoints = (
-                    [
-                        endpoint
-                        for endpoint in previous.endpoints
-                        if endpoint.sheet == requirement.sheet
-                    ]
-                    if previous is not None
-                    else []
-                )
-                # A typed port cannot overwrite an existing remote-only contract.
-                if previous is not None and not local_endpoints:
-                    continue
-                if port.name not in ports:
-                    if (
-                        not port.required
-                        and not local_endpoints
-                        and not (
-                            port.name in _USB_PORT_ALIASES
-                            and (
-                                "usb_device" in requirement.interfaces
-                                or requirement.parameters.get("native_usb") is True
-                            )
-                        )
-                    ):
-                        continue
-                    if port.direction in {"input", "output"} and any(
-                        endpoint.direction == ("output" if port.direction == "input" else "input")
-                        for endpoint in local_endpoints
-                    ):
-                        continue
-                matches = (
-                    net == ports[port.name]
-                    if port.name in ports
-                    else bool(port_identities & {_net_identity(logical), _net_identity(net)})
-                )
-                if matches:
-                    peers[net].add(peer.sheet)
-        if len(peers) != 1:
-            continue
-        net_name, peer_sheets = next(iter(peers.items()))
-        ports.setdefault(port.name, net_name)
-        if net_name in architecture.power_nets:
-            continue  # The owning signal/power diagnostic must reject this.
-        previous = completed.get(net_name) or existing.get(net_name)
-        endpoints = list(previous.endpoints) if previous else []
-        known_sheets = {endpoint.sheet for endpoint in endpoints}
-        if requirement.sheet not in known_sheets:
-            endpoints.append(SheetPin(sheet=requirement.sheet, direction=port.direction))
-        for sheet in sorted(peer_sheets - known_sheets):
-            endpoints.append(SheetPin(sheet=sheet, direction="passive"))
-        if previous is None or endpoints != previous.endpoints:
-            completed[net_name] = InterSheetNet(name=net_name, endpoints=endpoints)
-    return requirement.model_copy(update={"ports": ports}), list(completed.values())
 
 
 def _complete_typed_programming_peer(
@@ -1151,217 +991,6 @@ def _unowned_endpoint_diagnostics(
     ]
 
 
-def _complete_native_usb_companions(result: ResolutionResult) -> None:
-    """Require one USB data connector per native-USB MCU, with matching polarity.
-
-    Matching is by EQUALITY of both polarity-specific port bindings (and two
-    distinct nets), never by intersection of arbitrary bindings or shared GND.
-    One connector pair cannot serve two MCU USB peripherals.
-    """
-    native = [row for row in result.selections if row.recipe in _NATIVE_USB_MCU_RECIPES]
-    if not native:
-        return
-    connectors = [
-        row for row in result.selections if row.recipe in _USB_DATA_CONNECTOR_RECIPES
-    ]
-    used: dict[str, list[tuple]] = defaultdict(list)
-    for mcu in native:
-        requirement_id = mcu.requirement_ids[0] if mcu.requirement_ids else None
-        dm = mcu.port_bindings.get("usb_dm")
-        dp = mcu.port_bindings.get("usb_dp")
-        matches = [
-            connector
-            for connector in connectors
-            if dm
-            and dp
-            and dm != dp
-            and connector.port_bindings.get("usb_dm") == dm
-            and connector.port_bindings.get("usb_dp") == dp
-        ]
-        if len(matches) != 1:
-            result.blocking.append(
-                ResolutionDiagnostic(
-                    code="native_usb_connector_required",
-                    requirement_id=requirement_id,
-                    recipe=mcu.recipe,
-                    sheet=mcu.sheets.get("mcu"),
-                    message=(
-                        f"requirement {requirement_id!r}, recipe {mcu.recipe}, "
-                        f"sheet {mcu.sheets.get('mcu')!r}: native USB programming "
-                        "requires one physical USB data connector bound to the same "
-                        "usb_dm and usb_dp nets; a header, UART bridge, power-only "
-                        "USB-C sink or unrelated connector cannot satisfy it"
-                    ),
-                    evidence=[
-                        f"usb_dm={dm!r}",
-                        f"usb_dp={dp!r}",
-                        # Name what CAN satisfy this: with no data connector
-                        # declared, a model that read the message had only the two
-                        # net names to work from and had to guess the recipe.
-                        *(
-                            _recipe_requirement_choice(get_recipe(recipe))
-                            for recipe in sorted(_USB_DATA_CONNECTOR_RECIPES)
-                        ),
-                        *(
-                            f"{row.recipe}.ports usb_dm={row.port_bindings.get('usb_dm')!r}, "
-                            f"usb_dp={row.port_bindings.get('usb_dp')!r}"
-                            for row in connectors
-                        ),
-                    ],
-                )
-            )
-            continue
-        used[matches[0].instance].append((mcu, matches[0], requirement_id))
-    for instance, users in used.items():
-        if len(users) > 1:
-            for mcu, _connector, requirement_id in users:
-                result.blocking.append(
-                    ResolutionDiagnostic(
-                        code="native_usb_bus_conflict",
-                        requirement_id=requirement_id,
-                        recipe=mcu.recipe,
-                        sheet=mcu.sheets.get("mcu"),
-                        message=(
-                            f"requirement {requirement_id!r}, recipe {mcu.recipe}, "
-                            f"sheet {mcu.sheets.get('mcu')!r}: one USB data "
-                            f"connector pair ({instance}) cannot serve two MCU "
-                            "native USB peripherals; give each MCU its own connector"
-                        ),
-                        evidence=[row.recipe for row, _c, _r in users],
-                    )
-                )
-            continue
-        mcu, connector, _requirement_id = users[0]
-        if mcu.recipe not in _MCU_OWNED_USB_SERIES_RECIPES:
-            continue
-        if connector.parameters.get("series_resistors") is False:
-            continue
-        connector.parameters["series_resistors"] = False
-        connector_requirement = (
-            connector.requirement_ids[0] if connector.requirement_ids else None
-        )
-        note = (
-            f"{connector_requirement}: series_resistors=False because {mcu.recipe} "
-            "owns the USB series pair"
-        )
-        result.assumptions.append(note)
-        for record in result.records:
-            if record.requirement_id == connector_requirement:
-                record.assumptions.append(note)
-
-
-def _native_usb_recipes_for(
-    requirement: CircuitRequirement,
-    recipes: tuple[RegisteredRecipe, ...],
-) -> list[RegisteredRecipe]:
-    """Every registered recipe one requirement's family/exact part can select."""
-    matches = list(_family_recipes(requirement.family, recipes))
-    exact = _recipe_for_exact(requirement.exact_part, recipes)
-    if exact is not None and exact not in matches:
-        matches.append(exact)
-    return matches
-
-
-def _native_usb_completion_sheet(architecture: Architecture, mcu_sheet: str) -> Sheet | None:
-    """The connector's own sheet (an existing USB sheet, else a new `USB` one)."""
-    for row in architecture.sheets:
-        if row.name == mcu_sheet:
-            continue
-        if "usb" in _identity(f"{row.name} {row.stem} {row.function}"):
-            return row
-    if any(row.name.upper() == "USB" or row.stem.upper() == "USB" for row in architecture.sheets):
-        return None
-    return Sheet(name="USB", stem="USB", function="USB data connector")
-
-
-def _complete_native_usb_data_connector(
-    architecture: Architecture,
-    requirements: list[CircuitRequirement],
-    recipes: tuple[RegisteredRecipe, ...],
-) -> tuple[list[CircuitRequirement], list[Sheet], list[InterSheetNet]] | None:
-    """O6: add the USB data connector a native-USB MCU makes mandatory.
-
-    The architecture contract already requires one physical USB data connector
-    bound to a native-USB MCU's own ``usb_dm``/``usb_dp`` nets. Completing the
-    requirement deterministically removes a defect the model can only ever fix
-    by spending another round, exactly as the resolver completes other
-    contracts. Returns None — leaving ``native_usb_connector_required`` to own
-    the defect — whenever the completion cannot be derived without inventing a
-    net, a sheet name, or polarity.
-    """
-    native = [
-        requirement
-        for requirement in requirements
-        if any(
-            row.definition.recipe in _NATIVE_USB_MCU_RECIPES
-            for row in _native_usb_recipes_for(requirement, recipes)
-        )
-    ]
-    if len(native) != 1:
-        return None
-    mcu = native[0]
-    dm, dp = mcu.ports.get("usb_dm"), mcu.ports.get("usb_dp")
-    if not dm or not dp or dm == dp:
-        return None
-    if any(
-        requirement.id != mcu.id
-        and requirement.ports.get("usb_dm") == dm
-        and requirement.ports.get("usb_dp") == dp
-        for requirement in requirements
-    ):
-        # An existing requirement already owns this pair; whether it resolves to
-        # a data-connector recipe is the companion matcher's judgement. Adding a
-        # second socket here would put an extra connector on the board.
-        return None
-    nets = {net.name: net for net in architecture.inter_sheet_nets}
-    if dm not in nets or dp not in nets:
-        return None  # Never invent a net the architecture did not declare.
-    sheet = _native_usb_completion_sheet(architecture, mcu.sheet)
-    if sheet is None:
-        return None
-    requirement_id = f"{mcu.id}_usb_connector"
-    if len(requirement_id) > 64:
-        return None
-    declared = {"GND", *architecture.power_nets, *nets}
-    vbus = mcu.ports.get("vbus") or next(
-        (candidate for candidate in ("VBUS", "+5V") if candidate in declared), None
-    )
-    if not vbus or vbus not in declared:
-        return None
-    requirements = [
-        *requirements,
-        CircuitRequirement(
-            id=requirement_id,
-            sheet=sheet.name,
-            role="connector",
-            family="usb-c-usb2-device",
-            exact_part="USB-C-USB2-DEVICE",
-            ports={
-                "vbus": vbus,
-                "gnd": mcu.ports.get("gnd", "GND"),
-                "usb_dm": dm,
-                "usb_dp": dp,
-            },
-        ),
-    ]
-    sheets = list(architecture.sheets)
-    if sheet not in sheets:
-        sheets.append(sheet)
-    completed_nets = [
-        net.model_copy(
-            update={
-                "endpoints": [
-                    *net.endpoints,
-                    SheetPin(sheet=sheet.name, direction="bidirectional"),
-                ]
-            }
-        )
-        if net.name in {dm, dp} and not any(e.sheet == sheet.name for e in net.endpoints)
-        else net
-        for net in architecture.inter_sheet_nets
-    ]
-    return requirements, sheets, completed_nets
-
 
 def resolve_architecture_recipes(
     architecture: Architecture | dict,
@@ -1369,7 +998,6 @@ def resolve_architecture_recipes(
     registry: Iterable[RegisteredRecipe] | None = None,
     *,
     allowed_maturities: frozenset[str] = frozenset({"production"}),
-    complete_native_usb: bool = False,
 ) -> ResolutionResult:
     """Resolve supported requirements stably; protected misses are blocking."""
     architecture_model = Architecture.model_validate(architecture)
@@ -1433,13 +1061,6 @@ def resolve_architecture_recipes(
                 evidence=[sheet.name for sheet in architecture_model.sheets],
             )
         )
-    if complete_native_usb:
-        completion = _complete_native_usb_data_connector(architecture_model, requirements, recipes)
-        if completion is not None:
-            requirements, completed_sheets, completed_nets = completion
-            architecture_model = architecture_model.model_copy(
-                update={"sheets": completed_sheets, "inter_sheet_nets": completed_nets}
-            )
     architecture_model = architecture_model.model_copy(update={"requirements": requirements})
     primitive_families = {
         family for lowerer in registered_lowerers() for family in lowerer.families
@@ -1735,18 +1356,6 @@ def resolve_architecture_recipes(
             result.unresolved_requirements.append(requirement.id)
             continue
         definition = selected.definition
-        declared_ports = {port.name for port in definition.ports}
-        supported_nets = {net for name, net in requirement.ports.items() if name in declared_ports}
-        unsupported_ports = sorted(
-            name
-            for name, net in requirement.ports.items()
-            if name not in declared_ports and net not in supported_nets
-        )
-        if requirement.role in {"connector", "power_input"} and unsupported_ports:
-            # Circuit recipes own semantic external ports, not arbitrary exposed
-            # connector signals. Keep wider breakout interfaces model-owned.
-            result.unresolved_requirements.append(requirement.id)
-            continue
         if definition.maturity not in allowed_maturities:
             result.blocking.append(
                 ResolutionDiagnostic(
@@ -1769,16 +1378,6 @@ def resolve_architecture_recipes(
         if programming_diagnostics or domain_diagnostics:
             result.blocking.extend([*programming_diagnostics, *domain_diagnostics])
             continue
-        requirement, completed_nets = _complete_typed_connector_peers(
-            definition, requirement, architecture_model
-        )
-        if completed_nets:
-            by_name = {net.name: net for net in architecture_model.inter_sheet_nets}
-            by_name.update((net.name, net) for net in completed_nets)
-            architecture_model = architecture_model.model_copy(
-                update={"inter_sheet_nets": list(by_name.values())}
-            )
-            result.completed_nets.extend(completed_nets)
         requirement, supply_diagnostics = _complete_ch340c_supply_mode(
             definition, requirement, architecture_model
         )
@@ -1910,29 +1509,6 @@ def resolve_architecture_recipes(
                 continue
         if "native_usb" in definition.parameter_defaults and {"usb_dm", "usb_dp"} <= set(bindings):
             parameters["native_usb"] = True
-        if parameters.get("native_usb") and not {
-            "usb_dm",
-            "usb_dp",
-        } <= set(bindings):
-            result.blocking.append(
-                ResolutionDiagnostic(
-                    code="missing_recipe_port",
-                    requirement_id=requirement.id,
-                    recipe=definition.recipe,
-                    sheet=requirement.sheet,
-                    message=(
-                        f"requirement {requirement.id!r}, recipe {definition.recipe}, "
-                        f"sheet {requirement.sheet!r}: native USB requires usb_dm and usb_dp architecture bindings"
-                    ),
-                    evidence=[
-                        "usb_dm",
-                        "usb_dp",
-                        *(net.name for net in architecture_model.inter_sheet_nets),
-                    ],
-                )
-            )
-            result.blocking.extend(port_diagnostics)
-            continue
         if port_diagnostics:
             result.blocking.extend(port_diagnostics)
             continue
@@ -2037,7 +1613,6 @@ def resolve_architecture_recipes(
                 update={"exact_part": exact_part, "ports": {**requirement.ports, **bindings}}
             )
         )
-    _complete_native_usb_companions(result)
     for net, owners in sorted(output_nets.items()):
         if len(owners) > 1:
             result.blocking.append(
@@ -2058,7 +1633,6 @@ def resolve_architecture_recipes(
     result.blocking.sort(
         key=lambda diagnostic: (
             diagnostic.code != "recipe_signal_in_power_nets",
-            diagnostic.code != "missing_recipe_port",
             diagnostic.code,
             diagnostic.requirement_id or "",
         )
@@ -2071,25 +1645,20 @@ def apply_architecture_recipe_resolution(
     intent: dict | BaseModel | None = None,
     *,
     allowed_maturities: frozenset[str] = frozenset({"production"}),
-    complete_native_usb: bool = False,
 ) -> Architecture:
     architecture_model = Architecture.model_validate(architecture)
     result = resolve_architecture_recipes(
         architecture_model,
         intent,
         allowed_maturities=allowed_maturities,
-        complete_native_usb=complete_native_usb,
     )
     if result.blocking:
         raise RecipeResolutionError(result.blocking)
     requirements = result.requirements
-    inter_sheet_nets = {net.name: net for net in architecture_model.inter_sheet_nets}
-    inter_sheet_nets.update((net.name, net) for net in result.completed_nets)
     return architecture_model.model_copy(
         update={
             "mcu_present": architecture_model.mcu_present
             or any(row.role == "mcu_core" for row in requirements),
-            "inter_sheet_nets": list(inter_sheet_nets.values()),
             "requirements": requirements,
             "recipe_selections": result.selections,
             "recipe_resolution": result.records,

@@ -307,18 +307,6 @@ _WORKED_EXAMPLES = {
         '(defaulted)"]}'
     ),
     "architecture": (
-        '{"topologies": {"power": "linear regulator"}, "rail_voltages": {"+5V": '
-        '5.0, "+3V3": 3.3}, "comms_protocols": [], "mcu_present": false, '
-        '"sheets": [{"name": "POWER", "stem": "POWER", "function": "Regulate the '
-        '5V input to 3.3V and distribute both rails"}], "power_nets": ["+5V", '
-        '"+3V3", "GND"], "inter_sheet_nets": [], '
-        '"assumptions": ["Linear regulator chosen for the low current '
-        '(defaulted)"], "requirements": [{"id": "reg_3v3", "sheet": "POWER", '
-        '"role": "regulator", "family": "ldo-3v3", "ports": {"vin": "+5V", '
-        '"vout": "+3V3", "gnd": "GND"}, "functional_blocks": ["3V3 REGULATOR"]}], '
-        '"inter_sheet_net_ranges": []}'
-    ),
-    "architecture_intent": (
         '{"topologies": {"POWER": "Linear regulator"}, "comms_protocols": [], '
         '"mcu_present": false, "power": {"rails": {"+5V": {"voltage": 5.0, '
         '"from": "jack.pin1"}, "+3V3": {"voltage": 3.3, "from": "reg.output"}}}, '
@@ -452,8 +440,7 @@ def build_system(
     work_unit_instructions: str | None = None,
 ) -> str:
     stage = contract.stage
-    spec_key = contract.spec or stage
-    spec = _spec_text(spec_key)
+    spec = _spec_text(stage)
     schema = json.dumps(contract.schema)
     work_unit_block = (
         "\n\n=== WORK UNIT ===\n"
@@ -475,7 +462,7 @@ def build_system(
         f"{_bounded_output_contract(stage, collection_bounds)}\n\n"
         "The JSON MUST validate against this Pydantic JSON schema (enums, required fields, and "
         f"string patterns are strict):\n{schema}\n"
-        f"{_worked_example(spec_key, work_unit=bool(work_unit_instructions))}\n"
+        f"{_worked_example(stage, work_unit=bool(work_unit_instructions))}\n"
         "Rules:\n"
         "- Output only the slot JSON object.\n"
         "- Use only allowed enum values; honor every naming pattern and uniqueness/reference "

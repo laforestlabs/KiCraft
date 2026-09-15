@@ -11,14 +11,12 @@ from kicraft.autoplacer.brain.types import BoardState, Component, Layer, Pad, Po
 
 from kicraft.design.lowering import lower_requirement
 from kicraft.design.models import BOM, RecipeSelection
-from kicraft.design import models
 from kicraft.design.recipes import expand_recipe, expand_selections
 from kicraft.design.recipes.pin_allocator import PinAllocationError, allocate_pins
 from kicraft.design.recipes.registry import get_recipe, locked_pin_assignments
 from kicraft.design.synthesis.validation import check_mcu_programming_access, check_net_coverage
 from kicraft.server.stage_contracts import (
     StageSchemaError,
-    _normalize_architecture_sheet_aliases,
     _normalize_stage_response,
 )
 
@@ -264,385 +262,6 @@ def test_allocator_owned_wiring_pin_rejects_model_overwrite():
         )
 
 
-def test_compact_architecture_range_expands_without_downstream_shape():
-    payload = {
-        "topologies": {},
-        "rail_voltages": {},
-        "comms_protocols": [],
-        "mcu_present": False,
-        "sheets": [
-            {"name": "MCU", "stem": "MCU", "function": "controller"},
-            {"name": "CASTELLATED IO", "stem": "CASTELLATED_IO", "function": "edge IO"},
-        ],
-        "power_nets": [],
-        "inter_sheet_nets": [],
-        "inter_sheet_net_ranges": [
-            {
-                "name_pattern": "GPIO{n}",
-                "start": 0,
-                "end": 29,
-                "endpoints": [
-                    {"sheet": "MCU", "direction": "bidirectional"},
-                    {"sheet": "CASTELLATED IO", "direction": "bidirectional"},
-                ],
-            }
-        ],
-    }
-    canonical, expanded = _normalize_stage_response("architecture", payload, {})
-    assert expanded == 30
-    assert [net["name"] for net in canonical["inter_sheet_nets"]] == [f"GPIO{i}" for i in range(30)]
-    assert "inter_sheet_net_ranges" not in canonical
-
-
-def test_architecture_normalizes_sheet_stems_used_as_endpoint_names():
-    payload = {
-        "topologies": {},
-        "rail_voltages": {},
-        "comms_protocols": [],
-        "mcu_present": False,
-        "sheets": [
-            {
-                "name": "DIGITAL_INPUT_HEADER",
-                "stem": "DIGITAL_INPUT_HEADER",
-                "function": "logic input",
-            },
-            {"name": "R2R LADDER", "stem": "R2R_LADDER", "function": "DAC ladder"},
-        ],
-        "power_nets": [],
-        "inter_sheet_nets": [
-            {
-                "name": "D0",
-                "endpoints": [
-                    {"sheet": "DIGITAL_INPUT_HEADER", "direction": "output"},
-                    {"sheet": "R2R_LADDER", "direction": "input"},
-                ],
-            }
-        ],
-    }
-
-    canonical, expanded = _normalize_stage_response("architecture", payload, {})
-
-    assert expanded == 0
-    assert [sheet["name"] for sheet in canonical["sheets"]] == [
-        "DIGITAL INPUT HEADER",
-        "R2R LADDER",
-    ]
-    assert [endpoint["sheet"] for endpoint in canonical["inter_sheet_nets"][0]["endpoints"]] == [
-        "DIGITAL INPUT HEADER",
-        "R2R LADDER",
-    ]
-
-
-def test_architecture_normalizes_sheet_identifier_case_and_spacing():
-    payload = {
-        "topologies": {},
-        "rail_voltages": {},
-        "comms_protocols": [],
-        "mcu_present": False,
-        "sheets": [
-            {
-                "name": "power_input_sheet",
-                "stem": "power input sheet",
-                "function": "power input",
-            },
-            {
-                "name": "Sensor-Sheet",
-                "stem": "sensor-sheet",
-                "function": "sensor",
-            },
-        ],
-        "power_nets": [],
-        "inter_sheet_nets": [
-            {
-                "name": "POWER_OK",
-                "endpoints": [
-                    {"sheet": "POWER_INPUT_SHEET", "direction": "output"},
-                    {"sheet": "sensor-sheet", "direction": "input"},
-                ],
-            }
-        ],
-    }
-
-    canonical, expanded = _normalize_stage_response("architecture", payload, {})
-
-    assert expanded == 0
-    assert [(sheet["name"], sheet["stem"]) for sheet in canonical["sheets"]] == [
-        ("POWER INPUT SHEET", "POWER_INPUT_SHEET"),
-        ("SENSOR SHEET", "SENSOR_SHEET"),
-    ]
-    assert [endpoint["sheet"] for endpoint in canonical["inter_sheet_nets"][0]["endpoints"]] == [
-        "POWER INPUT SHEET",
-        "SENSOR SHEET",
-    ]
-
-
-def test_architecture_rejects_colliding_lossless_sheet_aliases():
-    with pytest.raises(ValueError, match="duplicate canonical sheet name"):
-        _normalize_architecture_sheet_aliases(
-            {
-                "sheets": [
-                    {"name": "Power Input", "stem": "POWER_INPUT"},
-                    {"name": "POWER_INPUT", "stem": "POWER_INPUT_2"},
-                ]
-            }
-        )
-
-    with pytest.raises(ValueError, match="ambiguously names"):
-        _normalize_architecture_sheet_aliases(
-            {
-                "sheets": [
-                    {"name": "POWER", "stem": "CONTROL"},
-                    {"name": "CONTROL", "stem": "CONTROL_2"},
-                ]
-            }
-        )
-
-
-def test_architecture_normalizes_requirement_sheet_aliases():
-    payload = {
-        "topologies": {"crossover": "passive two-way crossover"},
-        "rail_voltages": {},
-        "comms_protocols": [],
-        "mcu_present": False,
-        "sheets": [{"name": "crossover", "stem": "crossover", "function": "passive crossover"}],
-        "power_nets": [],
-        "inter_sheet_nets": [],
-        "requirements": [
-            {
-                "id": "inductor_lowpass",
-                "sheet": "crossover",
-                "role": "analog_block",
-                "family": "passive-crossover",
-            }
-        ],
-    }
-
-    canonical, _expanded = _normalize_stage_response("architecture", payload, {})
-
-    assert canonical["sheets"][0]["name"] == "CROSSOVER"
-    assert canonical["requirements"][0]["sheet"] == "CROSSOVER"
-
-
-def test_architecture_auto_binds_connector_ports_from_sheet_interface():
-    payload = {
-        "topologies": {},
-        "rail_voltages": {},
-        "comms_protocols": [],
-        "mcu_present": False,
-        "sheets": [
-            {"name": "SPI HEADER", "stem": "SPI_HEADER", "function": "spi header"},
-            {"name": "AMPLIFIER", "stem": "AMPLIFIER", "function": "amp"},
-            {"name": "TC INPUT", "stem": "TC_INPUT", "function": "screw terminal"},
-        ],
-        "power_nets": ["GND"],
-        "inter_sheet_nets": [
-            {
-                "name": "SPI_MISO",
-                "endpoints": [
-                    {"sheet": "AMPLIFIER", "direction": "output"},
-                    {"sheet": "SPI HEADER", "direction": "input"},
-                ],
-            },
-            {
-                "name": "SPI_SCK",
-                "endpoints": [
-                    {"sheet": "AMPLIFIER", "direction": "input"},
-                    {"sheet": "SPI HEADER", "direction": "output"},
-                ],
-            },
-            {
-                "name": "SPI_CS",
-                "endpoints": [
-                    {"sheet": "AMPLIFIER", "direction": "input"},
-                    {"sheet": "SPI HEADER", "direction": "output"},
-                ],
-            },
-            {
-                "name": "TC_P",
-                "endpoints": [
-                    {"sheet": "TC INPUT", "direction": "output"},
-                    {"sheet": "AMPLIFIER", "direction": "input"},
-                ],
-            },
-            {
-                "name": "TC_N",
-                "endpoints": [
-                    {"sheet": "TC INPUT", "direction": "output"},
-                    {"sheet": "AMPLIFIER", "direction": "input"},
-                ],
-            },
-        ],
-        "requirements": [
-            {
-                "id": "req_spi_header",
-                "sheet": "SPI HEADER",
-                "role": "connector",
-                "family": "spi_header",
-            },
-            {
-                "id": "req_screw",
-                "sheet": "TC INPUT",
-                "role": "connector",
-                "family": "screw_terminal",
-            },
-            {
-                "id": "req_amp",
-                "sheet": "AMPLIFIER",
-                "role": "sensor",
-                "family": "thermocouple_converter",
-                "exact_part": "MAX31855",
-            },
-        ],
-    }
-
-    canonical, _expanded = _normalize_stage_response("architecture", payload, {})
-
-    by_id = {req["id"]: req for req in canonical["requirements"]}
-    assert list(by_id["req_spi_header"]["ports"].values()) == [
-        "SPI_MISO",
-        "SPI_SCK",
-        "SPI_CS",
-        "GND",
-    ]
-    assert list(by_id["req_screw"]["ports"].values()) == ["TC_P", "TC_N"]
-
-
-def test_architecture_normalizes_recipe_selection_sheet_aliases():
-    normalized = _normalize_architecture_sheet_aliases(
-        {
-            "sheets": [{"name": "controller", "stem": "controller", "function": "controller"}],
-            "recipe_selections": [
-                {
-                    "recipe": "example@1",
-                    "instance": "main",
-                    "sheets": {"mcu": "Controller"},
-                }
-            ],
-        }
-    )
-
-    assert normalized["recipe_selections"][0]["sheets"] == {"mcu": "CONTROLLER"}
-
-
-def test_architecture_derives_missing_or_empty_sheet_stems():
-    for raw_stem in (None, ""):
-        sheet = {"name": "sensor interface", "function": "sensor"}
-        if raw_stem is not None:
-            sheet["stem"] = raw_stem
-        normalized = _normalize_architecture_sheet_aliases({"sheets": [sheet]})
-        assert normalized["sheets"][0] == {
-            "name": "SENSOR INTERFACE",
-            "stem": "SENSOR_INTERFACE",
-            "function": "sensor",
-        }
-
-
-def _range_architecture_payload(explicit_nets, ranges):
-    return {
-        "topologies": {},
-        "rail_voltages": {},
-        "comms_protocols": [],
-        "mcu_present": False,
-        "sheets": [
-            {"name": "MOTOR 1", "stem": "MOTOR1", "function": "motor stage"},
-            {"name": "MOTOR 2", "stem": "MOTOR2", "function": "motor stage"},
-            {"name": "MCU", "stem": "MCU", "function": "controller"},
-        ],
-        "power_nets": [],
-        "inter_sheet_nets": explicit_nets,
-        "inter_sheet_net_ranges": ranges,
-    }
-
-
-_MOTOR1_MCU = [
-    {"sheet": "MOTOR 1", "direction": "bidirectional"},
-    {"sheet": "MCU", "direction": "bidirectional"},
-]
-
-
-def test_compact_architecture_range_deduplicates_identical_explicit_net():
-    # MOTOR1_A is declared explicitly and again through MOTOR{n}_A 1..2 with the
-    # same endpoints in reversed order: endpoint order is not semantically
-    # meaningful, so the redundant range expansion is dropped losslessly.
-    payload = _range_architecture_payload(
-        explicit_nets=[{"name": "MOTOR1_A", "endpoints": _MOTOR1_MCU}],
-        ranges=[
-            {
-                "name_pattern": "MOTOR{n}_A",
-                "start": 1,
-                "end": 2,
-                "endpoints": list(reversed(_MOTOR1_MCU)),
-            }
-        ],
-    )
-    canonical, expanded = _normalize_stage_response("architecture", payload, {})
-    names = [net["name"] for net in canonical["inter_sheet_nets"]]
-    assert names.count("MOTOR1_A") == 1
-    assert names == ["MOTOR1_A", "MOTOR2_A"]
-    assert expanded == 1
-    assert "inter_sheet_net_ranges" not in canonical
-
-
-def test_compact_architecture_range_rejects_conflicting_explicit_net():
-    # Same generated name exists explicitly with different endpoint semantics.
-    payload = _range_architecture_payload(
-        explicit_nets=[
-            {
-                "name": "MOTOR1_A",
-                "endpoints": [
-                    {"sheet": "MOTOR 1", "direction": "output"},
-                    {"sheet": "MCU", "direction": "input"},
-                ],
-            }
-        ],
-        ranges=[
-            {
-                "name_pattern": "MOTOR{n}_A",
-                "start": 1,
-                "end": 2,
-                "endpoints": _MOTOR1_MCU,
-            }
-        ],
-    )
-    with pytest.raises(StageSchemaError, match="duplicate/overlapping inter-sheet net 'MOTOR1_A'"):
-        _normalize_stage_response("architecture", payload, {})
-
-    # Same generated name exists explicitly over a different sheet set.
-    payload = _range_architecture_payload(
-        explicit_nets=[
-            {
-                "name": "MOTOR1_A",
-                "endpoints": [
-                    {"sheet": "MOTOR 2", "direction": "bidirectional"},
-                    {"sheet": "MCU", "direction": "bidirectional"},
-                ],
-            }
-        ],
-        ranges=[
-            {
-                "name_pattern": "MOTOR{n}_A",
-                "start": 1,
-                "end": 2,
-                "endpoints": _MOTOR1_MCU,
-            }
-        ],
-    )
-    with pytest.raises(StageSchemaError, match="duplicate/overlapping inter-sheet net 'MOTOR1_A'"):
-        _normalize_stage_response("architecture", payload, {})
-
-    # A second range covering an already generated name stays rejected even
-    # when both ranges carry identical endpoints.
-    payload = _range_architecture_payload(
-        explicit_nets=[],
-        ranges=[
-            {"name_pattern": "GPIO{n}", "start": 0, "end": 4, "endpoints": _MOTOR1_MCU},
-            {"name_pattern": "GPIO{n}", "start": 3, "end": 9, "endpoints": _MOTOR1_MCU},
-        ],
-    )
-    with pytest.raises(StageSchemaError, match="duplicate/overlapping inter-sheet net 'GPIO3'"):
-        _normalize_stage_response("architecture", payload, {})
-
-
 def _esp32_architecture_payload():
     return {
         "topologies": {"MCU": "ESP32-S3 controller with native USB recovery"},
@@ -781,37 +400,6 @@ def test_usb_c_breakout_pin_ports_stay_model_owned():
 
     assert canonical["recipe_selections"] == []
     assert canonical["unresolved_requirement_ids"] == ["usb_receptacle"]
-
-
-def test_usb_c_sheet_with_exposed_cc_signal_avoids_sink_recipe():
-    payload = {
-        "topologies": {"USB C": "USB-C receptacle breakout", "HEADER": "pin header"},
-        "rail_voltages": {"VBUS": 5.0},
-        "comms_protocols": ["USB"],
-        "mcu_present": False,
-        "sheets": [
-            {"name": "USB C", "stem": "USB_C", "function": "USB-C receptacle breakout"},
-            {"name": "HEADER", "stem": "HEADER", "function": "pin header"},
-        ],
-        "power_nets": ["VBUS", "GND"],
-        "inter_sheet_nets": [
-            {
-                "name": "CC1",
-                "endpoints": [
-                    {"sheet": "USB C", "direction": "output"},
-                    {"sheet": "HEADER", "direction": "input"},
-                ],
-            }
-        ],
-        "assumptions": [],
-    }
-
-    canonical, _expanded = _normalize_stage_response("architecture", payload, {})
-
-    assert canonical["recipe_selections"] == []
-    requirement = canonical["requirements"][0]
-    assert requirement["family"] == "usb-c-breakout"
-    assert requirement["ports"]["cc1"] == "CC1"
 
 
 def test_named_peripheral_cannot_disappear_when_mcu_requirement_exists():
@@ -978,151 +566,6 @@ def _add_native_usb(payload, *, dm="USB_D_N", dp="USB_D_P", vbus="VBUS"):
     return payload
 
 
-def test_bound_nets_arm_declares_the_net_a_port_binding_names():
-    """KC-WGJ6XE's dominant rung-1 rejection is a declaration the model omitted.
-
-    The WS2812 string driver binds `data_out` to `LED_DATA_OUT` and never declares
-    that net, so the stage dies on `unknown_recipe_port_net` — and the model's own
-    repair is usually to delete the binding instead. The `bound_nets` arm declares
-    what the binding already asserts, and gives the net the off-board output
-    connector it needs to have a pin (the brief asks for "an output for driving
-    addressable LED string"). The fixture is the real rung-1 reply of the board
-    that died; it also carries the native-USB defect, which this arm does not own.
-    """
-    fixture = json.loads(
-        (Path(__file__).parent / "fixtures" / "ladder" / "kc-wgj6xe_architecture_rung1.json")
-        .read_text(encoding="utf-8")
-    )
-    with pytest.raises(StageSchemaError, match="unknown_recipe_port_net"):
-        _normalize_stage_response("architecture", json.loads(json.dumps(fixture)), {})
-
-    with pytest.raises(StageSchemaError, match="native_usb_connector_required") as uncleared:
-        _normalize_stage_response(
-            "architecture", json.loads(json.dumps(fixture)), {}, ladder=frozenset({"bound_nets"})
-        )
-    assert "LED_DATA_OUT" not in str(uncleared.value)
-
-    canonical, _expanded = _normalize_stage_response(
-        "architecture",
-        json.loads(json.dumps(fixture)),
-        {},
-        ladder=frozenset({"bound_nets", "completing"}),
-    )
-    net = next(row for row in canonical["inter_sheet_nets"] if row["name"] == "LED_DATA_OUT")
-    assert {endpoint["sheet"] for endpoint in net["endpoints"]} == {"LED OUTPUT"}
-    connector = next(
-        row
-        for row in canonical["requirements"]
-        if row["id"] == "addressable_led_output_data_out_connector"
-    )
-    assert connector["family"] == "pin-header"
-    assert connector["ports"]["pin1"] == "LED_DATA_OUT"
-    assert {connector["ports"].get("pin2"), connector["ports"].get("pin3")} == {"GND", "+5V"}
-    # The net now has two physical pins: the driver's own output and the socket.
-    header = lower_requirement(models.CircuitRequirement.model_validate(connector))
-    assert [pin.net for pin in header.pins] == ["LED_DATA_OUT", "GND", "+5V"]
-
-
-def test_bound_nets_arm_leaves_an_input_with_no_peer_to_its_diagnostic():
-    """An undeclared net with no peer and no board-external output is not invented."""
-    payload = _esp32_architecture_payload()
-    payload["power_nets"] = ["+3V3", "GND"]
-    payload["requirements"] = [
-        {
-            "id": "io_header",
-            "sheet": "MCU",
-            "role": "connector",
-            "family": "pin-header",
-            "ports": {"pin1": "MYSTERY_IN"},
-        },
-    ]
-    with pytest.raises(StageSchemaError):
-        _normalize_stage_response(
-            "architecture",
-            json.loads(json.dumps(payload)),
-            {},
-            ladder=frozenset({"bound_nets"}),
-        )
-
-
-def test_bound_nets_arm_is_inert_for_a_fully_declared_architecture():
-    payload = _add_native_usb(_esp32_architecture_payload())
-    stock, _expanded = _normalize_stage_response(
-        "architecture", json.loads(json.dumps(payload)), {}
-    )
-    armed, _expanded = _normalize_stage_response(
-        "architecture", json.loads(json.dumps(payload)), {}, ladder=frozenset({"bound_nets"})
-    )
-    assert armed == stock
-
-
-def _power_sink_usb_architecture():
-    """The board whose only USB socket is a power sink wired to the MCU's D+/D-.
-
-    This is the contradiction that hard-blocked board KC-WGJ6XE at architecture:
-    the connector's sheet carries the MCU's USB data pair, so the sheet's
-    connector is the native-USB data connector — but a generic 5 V sink identity
-    cannot carry `usb_dm`/`usb_dp`, so the recipe went unresolved and the MCU's
-    mandatory companion reported `native_usb_connector_required`.
-    """
-    payload = _esp32_architecture_payload()
-    payload["power_nets"] = ["+3V3", "VBUS", "GND"]
-    payload["rail_voltages"] = {"+3V3": 3.3, "VBUS": 5.0}
-    payload["sheets"].append(
-        {"name": "USB", "stem": "USB", "function": "USB-C PD 5 V power input"}
-    )
-    payload["inter_sheet_nets"] = [
-        {
-            "name": net,
-            "endpoints": [
-                {"sheet": "MCU", "direction": "bidirectional"},
-                {"sheet": "USB", "direction": "bidirectional"},
-            ],
-        }
-        for net in ("USB_D_N", "USB_D_P")
-    ]
-    payload["requirements"] = [
-        {
-            "id": "mcu_core",
-            "sheet": "MCU",
-            "role": "mcu_core",
-            "family": "esp32-s3-module",
-            "exact_part": "ESP32-S3-MINI-1-N8",
-            "ports": {"vdd": "+3V3", "gnd": "GND", "usb_dm": "USB_D_N", "usb_dp": "USB_D_P"},
-        },
-        {
-            "id": "usb_power_input",
-            "sheet": "USB",
-            "role": "power_input",
-            "family": "usb-c-power-sink",
-            "exact_part": "USB-C-5V-SINK",
-            "ports": {"vbus": "VBUS", "gnd": "GND"},
-        },
-    ]
-    return payload
-
-
-def test_completing_arm_uses_the_boards_own_usb_socket_as_the_data_connector():
-    payload = _power_sink_usb_architecture()
-    with pytest.raises(StageSchemaError, match="native_usb_connector_required"):
-        _normalize_stage_response("architecture", json.loads(json.dumps(payload)), {"intent": {}})
-
-    canonical, _expanded = _normalize_stage_response(
-        "architecture",
-        json.loads(json.dumps(payload)),
-        {"intent": {}},
-        ladder=frozenset({"completing"}),
-    )
-    selection = next(
-        row for row in canonical["recipe_selections"] if row["requirement_ids"] == ["usb_power_input"]
-    )
-    assert selection["recipe"] == "usb-c-usb2-device@1"
-    assert selection["port_bindings"]["usb_dm"] == "USB_D_N"
-    assert selection["port_bindings"]["usb_dp"] == "USB_D_P"
-    # One socket, one series pair: the MCU recipe already owns it.
-    assert selection["parameters"]["series_resistors"] is False
-
-
 def _typed_esp32_architecture(**requirement_overrides):
     payload = _esp32_architecture_payload()
     include_usb = requirement_overrides.pop("usb", None)
@@ -1167,44 +610,42 @@ def test_recipe_usb_aliases_preserve_polarity_and_supply_sign(dm, dp):
     }
 
 
-def test_native_usb_connector_peer_completes_distinct_polarity_contracts():
+def test_native_usb_pair_preserves_distinct_polarity_contracts():
+    from kicraft.design.architecture_intent import derive_architecture
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
-    payload = _typed_esp32_architecture(interfaces=["usb_device"], usb=False)
-    payload["power_nets"] = ["+3V3", "VBUS", "GND"]
-    payload["rail_voltages"] = {"+3V3": 3.3, "VBUS": 5.0}
-    payload["sheets"].append({"name": "USB", "stem": "USB", "function": "USB connector"})
-    payload["requirements"].append(
+    architecture = derive_architecture(
         {
-            "id": "connector",
-            "sheet": "USB",
-            "role": "connector",
-            "family": "usb-c-usb2-device",
-            "exact_part": "USB-C-USB2-DEVICE",
-            "ports": {
-                "vbus": "VBUS",
-                "gnd": "GND",
-                "usb_dp": "HOST_POSITIVE",
-                "usb_dm": "HOST_NEGATIVE",
-            },
-        }
-    )
-    payload["inter_sheet_nets"] = [
-        {
-            "name": net,
-            "endpoints": [
-                {"sheet": "USB", "direction": "bidirectional"},
-                {"sheet": "MCU", "direction": "bidirectional"},
+            "mcu_present": True,
+            "sheets": [
+                {"name": "MCU", "stem": "MCU", "role": "mcu", "function": "ESP32-S3 controller"}
+            ],
+            "requirements": [
+                {
+                    "id": "mcu_core",
+                    "sheet": "MCU",
+                    "role": "mcu_core",
+                    "family": "esp32-s3-module",
+                    "exact_part": "ESP32-S3-MINI-1-N8",
+                    "supply": "+3V3",
+                    "programming": "native_usb",
+                }
+            ],
+            "power": {"rails": {"+3V3": {"voltage": 3.3}, "VBUS": {"voltage": 5.0}}},
+            "signals": [
+                {"name": "HOST_NEGATIVE", "from": "mcu_core.usb_dm", "to": "edge:USB_DATA"},
+                {"name": "HOST_POSITIVE", "from": "mcu_core.usb_dp", "to": "edge:USB_DATA"},
             ],
         }
-        for net in ("HOST_POSITIVE", "HOST_NEGATIVE")
-    ]
+    )
 
-    result = resolve_architecture_recipes(payload)
+    result = resolve_architecture_recipes(architecture)
 
     assert not result.blocking
     core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
-    connector = next(row for row in result.selections if row.requirement_ids == ["connector"])
+    connector = next(row for row in result.selections if row.recipe == "usb-c-usb2-device@1")
+    # The socket is the connector the native-USB pair opens; the two conductors keep the
+    # polarity the signals named on both ends, never one shared label.
     assert core.port_bindings["usb_dp"] == "HOST_POSITIVE"
     assert core.port_bindings["usb_dm"] == "HOST_NEGATIVE"
     assert connector.port_bindings["usb_dp"] == "HOST_POSITIVE"
@@ -1303,8 +744,14 @@ def test_explicit_unknown_usb_binding_is_not_replaced_by_owned_alias():
     ]
     result = resolve_architecture_recipes(payload)
 
-    codes = {row.code for row in result.blocking if row.requirement_id == "mcu_core"}
-    assert codes & {"unknown_recipe_port_net", "missing_mcu_application_contract"}
+    # The explicit (wrong) bindings stand: the MCU never picks up the owned `usb_dm`/
+    # `usb_dp` nets, and the socket is left with conductors no recipe port owns.
+    diagnostic = next(row for row in result.blocking if row.requirement_id == "mcu_core")
+    assert diagnostic.code == "missing_mcu_application_contract"
+    assert {"USB_D_N", "USB_D_P"} <= set(diagnostic.evidence)
+    orphaned = next(row for row in result.blocking if row.requirement_id == "connector")
+    assert orphaned.code == "unsupported_recipe_endpoint"
+    assert {"MISSPELLED_DP", "MISSPELLED_DM"} <= set(orphaned.evidence)
     assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
 
 
@@ -1419,8 +866,6 @@ def test_shared_connector_mpn_requires_one_explicit_reviewed_family(ambiguous_fa
     [
         ("usb_dp", "GND", "recipe_signal_in_power_nets"),
         ("shield", "VBUS", "recipe_signal_in_power_nets"),
-        ("shield", "UNDECLARED_SHIELD", "unknown_recipe_port_net"),
-        ("shield", "REMOTE_SHIELD", "missing_recipe_port_contract"),
     ],
 )
 def test_groundable_shield_preserves_signal_power_and_ownership_errors(port, net, code):
@@ -1428,17 +873,6 @@ def test_groundable_shield_preserves_signal_power_and_ownership_errors(port, net
 
     payload = _grounded_usb_shield_architecture()
     payload["requirements"][1]["ports"][port] = net
-    if net == "REMOTE_SHIELD":
-        payload["sheets"].append({"name": "CASE", "stem": "CASE", "function": "case"})
-        payload["inter_sheet_nets"].append(
-            {
-                "name": net,
-                "endpoints": [
-                    {"sheet": "MCU", "direction": "passive"},
-                    {"sheet": "CASE", "direction": "passive"},
-                ],
-            }
-        )
     result = resolve_architecture_recipes(payload)
 
     assert any(
@@ -1495,30 +929,65 @@ def test_legacy_named_peripheral_cannot_reassign_later_mcu_sheet():
 
 
 def test_coin_cell_mcu_requires_explicit_supply_binding_without_inventing_rail():
+    from kicraft.design.architecture_intent import ArchitectureIntentError, derive_architecture
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
-    payload = _typed_esp32_architecture(
-        family="attiny1614",
-        exact_part="ATTINY1614-SSNR",
-        ports={},
+    intent = {
+        "mcu_present": True,
+        "sheets": [
+            {"name": "MCU", "stem": "MCU", "role": "mcu", "function": "ATtiny1614 microcontroller"},
+            {
+                "name": "BATTERY INPUT",
+                "stem": "BATTERY_INPUT",
+                "role": "power_input",
+                "function": "Direct CR2032 supply",
+            },
+        ],
+        "requirements": [
+            {
+                "id": "mcu_core",
+                "sheet": "MCU",
+                "role": "mcu_core",
+                "family": "attiny1614",
+                "exact_part": "ATTINY1614-SSNR",
+                "programming": "updi",
+            },
+            {
+                "id": "battery_holder",
+                "sheet": "BATTERY INPUT",
+                "role": "power_input",
+                "family": "coin-cell-holder",
+                "parameters": {"cell_format": "CR2032"},
+            },
+        ],
+        "power": {"rails": {"VBAT": {"voltage": 3.0, "from": "battery_holder.positive"}}},
+        "comms_protocols": ["UPDI"],
+    }
+
+    # A 3.0 V coin cell is not the 3.3 V logic rail: nothing may complete `vdd` for the
+    # MCU, and a supply the design never stated is a refusal, never a guessed rail.
+    with pytest.raises(ArchitectureIntentError) as rejected:
+        derive_architecture(intent)
+    diagnostic = next(
+        row for row in rejected.value.diagnostics if row.code == "unbound_required_port"
     )
-    payload["topologies"] = {"MCU": "ATtiny1614", "POWER": "Direct CR2032 supply"}
-    payload["sheets"][0]["function"] = "ATtiny1614 microcontroller"
-    payload["rail_voltages"] = {"VBAT": 3.0}
-    payload["power_nets"] = ["VBAT", "GND"]
-    payload["comms_protocols"] = ["UPDI"]
-
-    rejected = resolve_architecture_recipes(payload)
-    diagnostic = next(row for row in rejected.blocking if row.code == "missing_recipe_port")
     assert diagnostic.requirement_id == "mcu_core"
-    assert diagnostic.recipe == "attiny1614-updi-minimal@1"
-    assert "vdd" in diagnostic.evidence
-    assert not rejected.selections
+    assert "vdd" in diagnostic.message
 
-    payload["requirements"][0]["ports"] = {"vdd": "VBAT", "gnd": "GND"}
-    resolved = resolve_architecture_recipes(payload)
+    intent["requirements"][0]["supply"] = "VBAT"
+    architecture = derive_architecture(intent)
+    mcu = next(row for row in architecture.requirements if row.id == "mcu_core")
+    assert mcu.ports == {"gnd": "GND", "vdd": "VBAT"}
+    net = next(row for row in architecture.inter_sheet_nets if row.name == "VBAT")
+    assert [(endpoint.sheet, endpoint.direction) for endpoint in net.endpoints] == [
+        ("BATTERY INPUT", "output"),
+        ("MCU", "input"),
+    ]
+    resolved = resolve_architecture_recipes(architecture)
     assert not resolved.blocking
-    assert resolved.selections[0].port_bindings == {"vdd": "VBAT", "gnd": "GND"}
+    assert next(
+        row for row in resolved.selections if row.requirement_ids == ["mcu_core"]
+    ).port_bindings == {"gnd": "GND", "vdd": "VBAT"}
 
 
 def _round2_architecture_failure(name):
@@ -1541,9 +1010,9 @@ def test_frozen_badge_false_mcu_flag_cannot_bypass_named_ownership():
     requirement = next(row for row in result.requirements if row.role == "mcu_core")
     assert requirement.sheet == "MCU"
     assert requirement.exact_part == "ATTINY1614-SSNR"
-    diagnostic = next(row for row in result.blocking if row.code == "missing_recipe_port")
-    assert diagnostic.requirement_id == requirement.id
-    assert "vdd" in diagnostic.evidence
+    # The coin-cell rail is 3.0 V, not the completed 3.3 V logic rail: without the design
+    # stating its supply, the owned MCU keeps no `vdd` at all. Nothing is invented.
+    assert "vdd" not in requirement.ports
     assert not result.selections
 
     # Supplying the actual coin-cell rail exposes, rather than hides, the next
@@ -1661,9 +1130,11 @@ def test_owned_port_inference_respects_local_signal_direction(typed_peer, revers
     result = resolve_architecture_recipes(payload)
 
     if reversed_direction:
+        # A mis-directed endpoint funds no port of the peer either: the conductor stays
+        # unowned and the transceiver is refused, never wired by label.
         diagnostic = next(row for row in result.blocking if row.requirement_id == "phy")
-        assert diagnostic.code == "missing_recipe_port"
-        assert {"tx", "rx"} <= set(diagnostic.evidence)
+        assert diagnostic.code == "unsupported_recipe_endpoint"
+        assert {"CAN_TX", "CAN_RX"} <= set(diagnostic.evidence)
         assert not any(row.requirement_ids == ["phy"] for row in result.selections)
     else:
         selection = next(row for row in result.selections if row.requirement_ids == ["phy"])
@@ -1688,8 +1159,10 @@ def test_explicit_unknown_signal_is_not_replaced_by_owned_suffix():
     result = resolve_architecture_recipes(payload)
 
     diagnostic = next(row for row in result.blocking if row.requirement_id == "phy")
-    assert diagnostic.code == "unknown_recipe_port_net"
-    assert "STBY" in diagnostic.evidence
+    # The explicitly bound net is not the conductor the sheet carries: the transceiver's
+    # `stby` is never silently rebound to the owned CAN_STBY label.
+    assert diagnostic.code == "unsupported_recipe_endpoint"
+    assert "CAN_STBY" in diagnostic.evidence
     assert not any(row.requirement_ids == ["phy"] for row in result.selections)
 
 
@@ -2207,65 +1680,6 @@ def _frozen_architecture_recovery():
     )
 
 
-def test_frozen_can_missing_connector_ports_fails_at_owning_requirement():
-    frozen = _frozen_architecture_recovery()["can"]
-    candidate = frozen["candidates"][0]
-    with pytest.raises(StageSchemaError, match="missing_recipe_port") as rejected:
-        _normalize_stage_response("architecture", candidate, {"intent": frozen["intent"]})
-    assert rejected.value.diagnostic["requirement_id"] == "can_transceiver"
-    assert rejected.value.diagnostic["recipe"] == "sn65hvd230-can-node@1"
-    assert rejected.value.diagnostic["sheet"] == "CAN TRANSCEIVER"
-    assert {"canh", "canl"} <= set(rejected.value.diagnostic["evidence"])
-    assert not {"CANH", "CANL"} & {net["name"] for net in candidate["inter_sheet_nets"]}
-
-
-def test_typed_can_connector_does_not_hide_other_unowned_endpoints():
-    frozen = _frozen_architecture_recovery()["can"]
-    candidate = frozen["candidates"][0]
-    connector = next(row for row in candidate["requirements"] if row["id"] == "can_connector")
-    connector["ports"] = {"canh": "TRUNK_HIGH", "canl": "TRUNK_LOW"}
-    with pytest.raises(StageSchemaError, match="unsupported_recipe_endpoint") as rejected:
-        _normalize_stage_response("architecture", candidate, {"intent": frozen["intent"]})
-    assert rejected.value.diagnostic["sheet"] == "CAN TRANSCEIVER"
-    assert {"CAN_TX_0", "CAN_TX_1", "CAN_RX_0", "CAN_RX_1"} <= set(
-        rejected.value.diagnostic["evidence"]
-    )
-
-
-def test_typed_peer_conflict_does_not_choose_a_connector_bus():
-    frozen = _frozen_architecture_recovery()["can"]
-    candidate = frozen["candidates"][0]
-    connector = next(row for row in candidate["requirements"] if row["id"] == "can_connector")
-    connector["ports"] = {"canh": "BUS_A", "canl": "BUS_LOW"}
-    candidate["requirements"].append(
-        {
-            "id": "second_bus",
-            "sheet": "CAN TERMINATION",
-            "role": "connector",
-            "family": "db9",
-            "ports": {"canh": "BUS_B"},
-        }
-    )
-    with pytest.raises(StageSchemaError, match="missing_recipe_port"):
-        _normalize_stage_response("architecture", candidate, {"intent": frozen["intent"]})
-    assert not {"BUS_A", "BUS_B"} & {net["name"] for net in candidate["inter_sheet_nets"]}
-
-
-def test_frozen_can_power_misclassification_is_not_an_mcu_recipe():
-    from kicraft.design.recipes.resolver import resolve_architecture_recipes
-
-    frozen = _frozen_architecture_recovery()["can"]
-    result = resolve_architecture_recipes(frozen["candidates"][1], frozen["intent"])
-    diagnostic = next(
-        row
-        for row in result.blocking
-        if row.sheet == "CAN TRANSCEIVER" and row.code == "missing_recipe_port"
-    )
-    assert diagnostic.recipe == "sn65hvd230-can-node@1"
-    assert {"canh", "canl"} <= set(diagnostic.evidence)
-    assert not result.selections
-
-
 def test_frozen_c3_connector_requirement_cannot_hide_missing_mcu_ownership():
     frozen = _frozen_architecture_recovery()["c3"]
     with pytest.raises(StageSchemaError, match="unavailable_recipe_gpio") as rejected:
@@ -2371,29 +1785,6 @@ def test_recipe_resolver_blocks_explicit_parameter_and_identity_conflicts():
             "architecture",
             _typed_esp32_architecture(),
             {"intent": {"named_parts": ["RP2040"]}},
-        )
-
-
-def test_recipe_resolver_requires_conditional_usb_ports_and_declared_nets():
-    with pytest.raises(StageSchemaError, match="missing_recipe_port"):
-        _normalize_stage_response(
-            "architecture",
-            _typed_esp32_architecture(usb=False),
-            {},
-        )
-    with pytest.raises(StageSchemaError, match="unknown_recipe_port_net"):
-        _normalize_stage_response(
-            "architecture",
-            _typed_esp32_architecture(
-                usb=False,
-                ports={
-                    "vdd": "+3V3",
-                    "gnd": "GND",
-                    "usb_dm": "UNDECLARED_DM",
-                    "usb_dp": "UNDECLARED_DP",
-                },
-            ),
-            {},
         )
 
 
@@ -2558,28 +1949,51 @@ def test_pin_allocator_allocates_controller_buses_atomically(
 
 
 def test_s3_prefixed_i2c_bindings_own_real_intersheet_nets():
+    from kicraft.design.architecture_intent import derive_architecture
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
-    payload = _typed_esp32_architecture(
-        interfaces=["i2c_controller"],
-        ports={"vdd": "+3V3", "gnd": "GND", "i2c_sda": "I2C_SDA", "i2c_scl": "I2C_SCL"},
-    )
-    payload["sheets"].append({"name": "DAQ", "stem": "DAQ", "function": "I2C acquisition"})
-    payload["inter_sheet_nets"] = [
-        {
-            "name": name,
-            "endpoints": [
-                {"sheet": "MCU", "direction": "bidirectional"},
-                {"sheet": "DAQ", "direction": "bidirectional"},
-            ],
-        }
-        for name in ("I2C_SDA", "I2C_SCL")
-    ]
-    payload["requirements"].append({
-        "id": "daq", "sheet": "DAQ", "role": "sensor", "family": "custom-acquisition",
-        "ports": {"sda": "I2C_SDA", "scl": "I2C_SCL"},
-    })
-    result = resolve_architecture_recipes(payload)
+    intent = {
+        "mcu_present": True,
+        "sheets": [
+            {"name": "MCU", "stem": "MCU", "role": "mcu", "function": "ESP32-S3 controller"},
+            {"name": "DAQ", "stem": "DAQ", "role": "sensor", "function": "I2C acquisition"},
+        ],
+        "requirements": [
+            {
+                "id": "mcu_core",
+                "sheet": "MCU",
+                "role": "mcu_core",
+                "family": "esp32-s3-module",
+                "exact_part": "ESP32-S3-MINI-1-N8",
+                "supply": "+3V3",
+                "programming": "native_usb",
+            },
+            {
+                "id": "daq",
+                "sheet": "DAQ",
+                "role": "sensor",
+                "family": "custom-acquisition",
+                "declared_ports": [
+                    {"key": "sda", "direction": "bidirectional", "function": "I2C data"},
+                    {"key": "scl", "direction": "bidirectional", "function": "I2C clock"},
+                ],
+            },
+        ],
+        "power": {"rails": {"+3V3": {"voltage": 3.3}, "VBUS": {"voltage": 5.0}}},
+        "signals": [
+            {"name": "I2C_SDA", "from": "mcu_core.i2c_sda", "to": "daq.sda"},
+            {"name": "I2C_SCL", "from": "mcu_core.i2c_scl", "to": "daq.scl"},
+            {"name": "USB_D_N", "from": "mcu_core.usb_dm", "to": "edge:USB_DATA"},
+            {"name": "USB_D_P", "from": "mcu_core.usb_dp", "to": "edge:USB_DATA"},
+        ],
+    }
+    architecture = derive_architecture(intent)
+    core_requirement = next(row for row in architecture.requirements if row.id == "mcu_core")
+    assert core_requirement.ports["i2c_sda"] == "I2C_SDA"
+    assert core_requirement.ports["i2c_scl"] == "I2C_SCL"
+    assert core_requirement.interfaces == ["i2c_controller"]
+
+    result = resolve_architecture_recipes(architecture)
     assert not result.blocking
     core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
     expansion = expand_recipe(core)
@@ -3000,10 +2414,12 @@ def test_old_intent_classification_cannot_hide_badge_phantom_endpoint():
 
     core = next(row for row in result.requirements if row.role == "mcu_core")
     assert core.exact_part == "ATTINY1614-SSNR"
-    assert any(
-        row.code == "missing_recipe_port" and row.requirement_id == core.id
-        for row in result.blocking
-    )
+    # The generic classification invents neither the MCU's supply nor an owner for the
+    # conductor the design left dangling: the phantom endpoint is reported on the MCU.
+    assert "vdd" not in core.ports
+    assert "LED_CTRL" in next(
+        row for row in result.blocking if row.code == "missing_mcu_application_contract"
+    ).evidence
     assert not result.selections
     payload["requirements"] = [core.model_copy(update={"ports": {"vdd": "VCC_3V0"}}).model_dump()]
     bound = resolve_architecture_recipes(payload, intent)
@@ -3068,10 +2484,10 @@ def test_supply_completion_rejects_ambiguous_or_incompatible_rails(rails):
     payload["rail_voltages"] = rails
     payload["power_nets"] = [*rails, "GND"]
     result = resolve_architecture_recipes(payload)
-    assert any(
-        row.code == "missing_recipe_port" and "vdd" in row.evidence for row in result.blocking
-    )
-    assert not result.selections
+    # Two equal-voltage rails, a 5 V rail, or a name that only reads like 3V3 complete
+    # nothing: the MCU is left with no supply binding rather than a guessed rail.
+    selection = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
+    assert "vdd" not in selection.port_bindings
 
 
 def test_supply_completion_does_not_harvest_voltage_substrings_from_signals():
@@ -3081,10 +2497,9 @@ def test_supply_completion_does_not_harvest_voltage_substrings_from_signals():
     payload["rail_voltages"] = {}
     payload["power_nets"] = ["ENABLE_VDD", "SENSE_3V3", "GND"]
     result = resolve_architecture_recipes(payload)
-    assert any(
-        row.code == "missing_recipe_port" and "vdd" in row.evidence for row in result.blocking
-    )
-    assert not result.selections
+    # A signal whose label merely contains a rail name is not a supply: no vdd binding.
+    selection = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
+    assert "vdd" not in selection.port_bindings
 
 
 @pytest.mark.parametrize("exact_part", [None, "CH224K"])
@@ -3152,14 +2567,15 @@ def test_c3_supply_endpoint_disambiguates_equal_voltage_rails_without_guessing()
     payload["topologies"] = {"MCU": "ESP32-C3"}
     payload["rail_voltages"] = {"CORE_RAIL": 3.3, "OTHER_RAIL": 3.3}
     payload["power_nets"] = ["CORE_RAIL", "OTHER_RAIL", "GND"]
+    _add_native_usb(payload)
     ambiguous = resolve_architecture_recipes(payload)
-    assert any(
-        row.code == "missing_recipe_port" and "vdd" in row.evidence for row in ambiguous.blocking
-    )
-    assert not any(row.requirement_ids == ["mcu_core"] for row in ambiguous.selections)
+    # Two equal 3.3 V rails name no supply: the MCU keeps no vdd binding.
+    core = next(row for row in ambiguous.selections if row.requirement_ids == ["mcu_core"])
+    assert "vdd" not in core.port_bindings
 
+    # The sheet endpoint the design wired disambiguates them, without guessing.
     payload["sheets"].append({"name": "POWER", "stem": "POWER", "function": "power supply"})
-    payload["inter_sheet_nets"] = [
+    payload["inter_sheet_nets"].append(
         {
             "name": "CORE_RAIL",
             "endpoints": [
@@ -3167,18 +2583,16 @@ def test_c3_supply_endpoint_disambiguates_equal_voltage_rails_without_guessing()
                 {"sheet": "MCU", "direction": "input"},
             ],
         }
-    ]
-    _add_native_usb(payload)
+    )
     bound = resolve_architecture_recipes(payload)
     assert not bound.blocking
     assert bound.requirements[0].ports["vdd"] == "CORE_RAIL"
 
+    # A 5 V rail is not a 3.3 V logic supply, endpoint or not.
     payload["rail_voltages"] = {"CORE_RAIL": 5.0, "OTHER_RAIL": 5.0}
     incompatible = resolve_architecture_recipes(payload)
-    assert any(
-        row.code == "missing_recipe_port" and "vdd" in row.evidence for row in incompatible.blocking
-    )
-    assert not any(row.requirement_ids == ["mcu_core"] for row in incompatible.selections)
+    core = next(row for row in incompatible.selections if row.requirement_ids == ["mcu_core"])
+    assert "vdd" not in core.port_bindings
 
 
 def _c3_typed_programming_architecture(*, handshakes=True):
@@ -3649,34 +3063,6 @@ def test_programming_conflict_reports_current_peer_and_required_nets_without_swa
     }
 
 
-def test_c3_uart_recovery_still_rejects_gpio_range_including_fixed_boot_pin():
-    from kicraft.server.stage_contracts import StageSchemaError
-
-    payload = _c3_typed_programming_architecture()
-    for requirement in (payload["requirements"][0], payload["requirements"][2]):
-        requirement["interfaces"] = ["uart"]
-    payload["inter_sheet_nets"] = [
-        net for net in payload["inter_sheet_nets"] if not net["name"].startswith("GPIO")
-    ]
-    payload["inter_sheet_net_ranges"] = [
-        {
-            "name_pattern": "GPIO{n}",
-            "start": 0,
-            "end": 10,
-            "endpoints": [
-                {"sheet": "MCU", "direction": "bidirectional"},
-                {"sheet": "APP", "direction": "passive"},
-            ],
-        }
-    ]
-    with pytest.raises(StageSchemaError) as rejected:
-        _normalize_stage_response("architecture", payload, {})
-    assert rejected.value.diagnostic["code"] == "unavailable_recipe_gpio"
-    assert "GPIO9" in rejected.value.diagnostic["evidence"]
-    assert "allocatable_gpios=0,1,2,3,4,5,6,7,8,10" in rejected.value.diagnostic["evidence"]
-    assert payload["inter_sheet_net_ranges"][0]["end"] == 10
-
-
 def test_programming_peer_cannot_claim_remote_only_nets_even_with_matching_labels():
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
@@ -3721,54 +3107,38 @@ def test_direct_expansion_rejects_incomplete_disabled_or_aliased_auto_reset(enab
 
 
 def _native_usb_selections():
-    payload = _esp32_architecture_payload()
-    payload["rail_voltages"] = {"+3V3": 3.3, "VBUS": 5.0}
-    payload["power_nets"] = ["+3V3", "VBUS", "GND"]
-    payload["sheets"].append({"name": "USB", "stem": "USB", "function": "USB connector"})
-    payload["inter_sheet_nets"] = [
-        {
-            "name": net,
-            "endpoints": [
-                {"sheet": "MCU", "direction": "bidirectional"},
-                {"sheet": "USB", "direction": "bidirectional"},
-            ],
-        }
-        for net in ("USB_D_N", "USB_D_P")
-    ]
-    payload["requirements"] = [
-        {
-            "id": "mcu_core",
-            "sheet": "MCU",
-            "role": "mcu_core",
-            "family": "esp32-s3-module",
-            "exact_part": "ESP32-S3-MINI-1-N8",
-            "ports": {
-                "vdd": "+3V3",
-                "gnd": "GND",
-                "usb_dm": "USB_D_N",
-                "usb_dp": "USB_D_P",
-            },
-        },
-        {
-            "id": "usb_connector",
-            "sheet": "USB",
-            "role": "connector",
-            "family": "usb-c-usb2-device",
-            "exact_part": "USB-C-USB2-DEVICE",
-            "ports": {
-                "vbus": "VBUS",
-                "gnd": "GND",
-                "usb_dm": "USB_D_N",
-                "usb_dp": "USB_D_P",
-            },
-        },
-    ]
+    from kicraft.design.architecture_intent import derive_architecture
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
-    result = resolve_architecture_recipes(payload)
+    architecture = derive_architecture(
+        {
+            "mcu_present": True,
+            "sheets": [
+                {"name": "MCU", "stem": "MCU", "role": "mcu", "function": "ESP32-S3 controller"}
+            ],
+            "requirements": [
+                {
+                    "id": "mcu_core",
+                    "sheet": "MCU",
+                    "role": "mcu_core",
+                    "family": "esp32-s3-module",
+                    "exact_part": "ESP32-S3-MINI-1-N8",
+                    "supply": "+3V3",
+                    "programming": "native_usb",
+                }
+            ],
+            "power": {"rails": {"+3V3": {"voltage": 3.3}, "VBUS": {"voltage": 5.0}}},
+            "signals": [
+                {"name": "USB_D_N", "from": "mcu_core.usb_dm", "to": "edge:USB_DATA"},
+                {"name": "USB_D_P", "from": "mcu_core.usb_dp", "to": "edge:USB_DATA"},
+            ],
+        }
+    )
+    result = resolve_architecture_recipes(architecture)
     assert not result.blocking
-    selections = {row.requirement_ids[0]: row for row in result.selections}
-    return selections["mcu_core"], selections["usb_connector"]
+    core = next(row for row in result.selections if row.recipe == "esp32-s3-mini-1-minimal@1")
+    connector = next(row for row in result.selections if row.recipe == "usb-c-usb2-device@1")
+    return core, connector
 
 
 def test_native_usb_pair_uses_connector_owned_names_and_one_series_pair():
@@ -4000,55 +3370,73 @@ def test_hub75_channels_bind_by_signal_name():
     } == {port: f"HUB75_{signal}" for signal, port in signals.items()}
 
 
-def test_addr_d_optional_arm_ties_the_unused_hub75_channel_low():
+def test_unused_groundable_hub75_addr_d_is_tied_low_not_demanded():
     """A board whose panel does not need HUB75's D line must not be blocked.
 
     `addr_d` is the 13th channel: a 1/32-scan panel uses it, a 1/8 or 1/16 panel
-    does not. The `addr_d_optional` arm ties the spare '245 input low (never
-    floating, connector position still driven) instead of demanding an undeclared
-    HUB75_D net.
+    does not. The derivation ties the spare '245 input low (never floating, the
+    connector position still driven) instead of demanding an undeclared HUB75_D net.
     """
-    signals = {
+    from kicraft.design.architecture_intent import derive_architecture
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    channels = {
         "R0": "r0", "G0": "g0", "B0": "b0", "R1": "r1", "G1": "g1", "B1": "b1",
         "A": "addr_a", "B": "addr_b", "C": "addr_c",
         "CLK": "clk", "LAT": "lat", "OE": "oe",
     }
-    payload = {
-        "sheets": [
-            {"name": "MCU", "stem": "MCU", "function": "microcontroller"},
-            {"name": "HUB75", "stem": "HUB75", "function": "HUB75 display connector"},
-        ],
-        "requirements": [
-            {"id": "display", "sheet": "HUB75", "role": "connector",
-             "family": "hub75-level-shift-interface", "exact_part": "HUB75-SN74HCT245",
-             "ports": {"gnd": "GND", "vdd_5v": "+5V"}},
-        ],
-        "power_nets": ["GND", "+5V"],
-        "inter_sheet_nets": [
-            {"name": f"HUB75_{signal}", "endpoints": [
-                {"sheet": "HUB75", "direction": "input"},
-                {"sheet": "MCU", "direction": "output"}]}
-            for signal in signals
-        ],
-        "mcu_present": False,
-        "topologies": {},
-    }
-    with pytest.raises(StageSchemaError, match="addr_d"):
-        _normalize_stage_response("architecture", json.loads(json.dumps(payload)), {})
+    architecture = derive_architecture(
+        {
+            "mcu_present": True,
+            "sheets": [
+                {"name": "MCU", "stem": "MCU", "role": "mcu", "function": "microcontroller"},
+                {
+                    "name": "HUB75",
+                    "stem": "HUB75",
+                    "role": "display",
+                    "function": "HUB75 display connector",
+                },
+            ],
+            "requirements": [
+                {
+                    "id": "mcu_core",
+                    "sheet": "MCU",
+                    "role": "mcu_core",
+                    "family": "stm32f103c8",
+                    "exact_part": "STM32F103C8T6",
+                    "supply": "+3V3",
+                },
+                {
+                    "id": "display",
+                    "sheet": "HUB75",
+                    "role": "connector",
+                    "family": "hub75-level-shift-interface",
+                    "exact_part": "HUB75-SN74HCT245",
+                    "supply": "+5V",
+                },
+            ],
+            "power": {"rails": {"+3V3": {"voltage": 3.3}, "+5V": {"voltage": 5.0}}},
+            "signals": [
+                {
+                    "name": f"HUB75_{signal}",
+                    "from": f"mcu_core.output_hub75_{port}",
+                    "to": f"display.{port}",
+                }
+                for signal, port in channels.items()
+            ],
+        }
+    )
+    display_requirement = next(row for row in architecture.requirements if row.id == "display")
+    assert display_requirement.ports["addr_d"] == "GND"
+    assert any("addr_d tied to GND" in row for row in architecture.assumptions)
 
-    canonical, _expanded = _normalize_stage_response(
-        "architecture",
-        json.loads(json.dumps(payload)),
-        {},
-        ladder=frozenset({"addr_d_optional"}),
-    )
-    display = next(
-        row for row in canonical["recipe_selections"] if row["requirement_ids"] == ["display"]
-    )
-    assert display["port_bindings"]["addr_d"] == "GND"
+    result = resolve_architecture_recipes(architecture)
+    assert not result.blocking
+    display = next(row for row in result.selections if row.requirement_ids == ["display"])
+    assert display.port_bindings["addr_d"] == "GND"
     # The spare '245 A-side input sits on GND and the connector position is still
     # driven by the buffered channel: no floating input, no one-pin net.
-    expansion = expand_recipe(RecipeSelection.model_validate(display))
+    expansion = expand_recipe(display)
     shifted9 = [
         endpoint
         for connection in expansion.connections
@@ -4065,31 +3453,45 @@ def test_addr_d_optional_arm_ties_the_unused_hub75_channel_low():
     assert any(endpoint.ref == "U2" and endpoint.pin == "3" for endpoint in grounded)
 
 
-def test_native_usb_failure_names_the_connector_recipe_that_satisfies_it():
+def test_native_usb_edge_without_a_five_volt_rail_names_what_the_socket_needs():
     """KC-WGJ6XE burned a correction round guessing the fix.
 
-    The diagnostic listed only the two nets, so a model that declared a
-    power-only USB-C (the brief's "USB C PD power input") had nothing to bind:
-    it has to be told a USB data connector recipe exists and what it expects.
+    The board declared a native-USB module but only a 3.3 V rail. The socket the module
+    needs cannot be opened without the rail it exposes, so the refusal names the edge and
+    the rails the design *did* declare: the next draft states the 5 V rail instead of
+    guessing at a connector.
     """
-    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+    from kicraft.design.architecture_intent import ArchitectureIntentError, derive_architecture
 
-    payload = _typed_esp32_architecture(
-        family="esp32-s3-wroom-1-module", exact_part="ESP32-S3-WROOM-1-N8R8"
-    )
-    # The brief asked for a "USB C PD power input": the model declares a
-    # power-only sink, which cannot program the module's native USB.
-    connector = next(row for row in payload["requirements"] if row["id"] == "usb_connector")
-    connector.update(
-        family="usb-c-power-sink",
-        exact_part="USB-C-5V-SINK",
-        ports={"vbus": "VBUS", "gnd": "GND"},
-    )
-    result = resolve_architecture_recipes(payload)
+    intent = {
+        "mcu_present": True,
+        "sheets": [
+            {"name": "MCU", "stem": "MCU", "role": "mcu", "function": "ESP32-S3 controller"}
+        ],
+        "requirements": [
+            {
+                "id": "mcu_core",
+                "sheet": "MCU",
+                "role": "mcu_core",
+                "family": "esp32-s3-module",
+                "exact_part": "ESP32-S3-MINI-1-N8",
+                "supply": "+3V3",
+                "programming": "native_usb",
+            }
+        ],
+        "power": {"rails": {"+3V3": {"voltage": 3.3}}},
+        "signals": [
+            {"name": "USB_D_N", "from": "mcu_core.usb_dm", "to": "edge:USB_DATA"},
+            {"name": "USB_D_P", "from": "mcu_core.usb_dp", "to": "edge:USB_DATA"},
+        ],
+    }
 
-    diagnostic = next(
-        row for row in result.blocking if row.code == "native_usb_connector_required"
-    )
-    assert any(row.startswith("canonical choice:") for row in diagnostic.evidence)
-    assert any("usb-c-usb2-device@1" in row for row in diagnostic.evidence)
-    assert "usb_dm='USB_D_N'" in diagnostic.evidence
+    with pytest.raises(ArchitectureIntentError) as rejected:
+        derive_architecture(intent)
+
+    assert {row.code for row in rejected.value.diagnostics} == {"usb_connector_supply_unknown"}
+    diagnostic = rejected.value.diagnostics[0]
+    assert diagnostic.requirement_id == "mcu_core"
+    assert "USB_DATA" in diagnostic.message
+    assert set(diagnostic.evidence) == {"+3V3"}
+

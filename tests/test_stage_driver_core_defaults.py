@@ -178,9 +178,12 @@ def test_bom_system_prompt_mentions_core_defaults():
 
 
 def test_architecture_system_prompt_mentions_core_defaults():
-    low = build_system("architecture").lower()
+    # The spec wraps its prose, so compare on normalized whitespace.
+    low = " ".join(build_system("architecture").lower().split())
     assert "core_defaults_block" in low
-    assert "per core defaults" in low  # the assumptions-naming example
+    # The assumptions-naming convention the BOM stage reads back (the intent spec's
+    # own wording; the legacy explicit spec's example sentence is gone with it).
+    assert "name the default family in `assumptions`" in low
 
 
 # ---- drive_stage injection ------------------------------------------------------

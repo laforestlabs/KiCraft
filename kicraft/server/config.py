@@ -318,15 +318,8 @@ def _stage_semantics_mode(value: str) -> Literal["observe", "repair", "enforce"]
 #                    current diagnostics instead of a from-scratch slot (O4)
 #   dropped_gate     a correction names declared nets/ports the revision dropped
 #                    without a diagnostic asking for it (O5)
-#   completing       add the contract-mandated native-USB data connector instead
-#                    of blocking on `native_usb_connector_required` (O6)
 #   full_feedback    every correction carries every blocking diagnostic seen in
 #                    the drive, not only the current one (O7)
-#   addr_d_optional  HUB75 `addr_d` is an optional channel, tied off when unused
-#                    (O8)
-#   bound_nets       declare the net a recipe port binding already names, plus the
-#                    off-board output connector a single-sheet output needs to
-#                    have a pin (O9)
 #
 # Multiple arms may be combined (comma-separated) for the combination round.
 CONTRACT_LADDER_MODES = frozenset(
@@ -336,10 +329,7 @@ CONTRACT_LADDER_MODES = frozenset(
         "signature",
         "preserving",
         "dropped_gate",
-        "completing",
         "full_feedback",
-        "addr_d_optional",
-        "bound_nets",
     }
 )
 
@@ -358,19 +348,6 @@ def parse_contract_ladder(value: str) -> frozenset[str]:
     if "stock" in modes and len(modes) > 1:
         raise SystemExit("KICRAFT_CONTRACT_LADDER=stock cannot be combined with another arm")
     return modes
-
-
-ARCHITECTURE_SLOTS = ("explicit", "intent")
-
-
-def parse_architecture_slot(value: str) -> str:
-    """Validate a ``KICRAFT_ARCHITECTURE_SLOT`` value."""
-    slot = str(value or "explicit").strip().lower()
-    if slot not in ARCHITECTURE_SLOTS:
-        raise SystemExit(
-            f"KICRAFT_ARCHITECTURE_SLOT must be one of {list(ARCHITECTURE_SLOTS)}, got {slot!r}"
-        )
-    return slot
 
 
 @dataclass(frozen=True)
@@ -459,11 +436,6 @@ class Settings:
     # Correction-ladder arm(s) for the schema/contract path; see
     # CONTRACT_LADDER_MODES. KICRAFT_CONTRACT_LADDER.
     contract_ladder: str = "stock"
-    # Which architecture slot the provider is asked for:
-    #   explicit  the historical slot: the model writes net names, port bindings, endpoints
-    #   intent    the intent-shaped slot, whose derived bookkeeping `derive_architecture` writes
-    # See docs/plans/architecture-constructive-slot-2026-09-14.md. KICRAFT_ARCHITECTURE_SLOT.
-    architecture_slot: Literal["explicit", "intent"] = "explicit"
     # --- Design-stage reasoning budget + in-stream loop breaker ---------------
     # Structured design stages default to reasoning disabled. Operators may
     # opt in for architecture/BOM experiments, but recovery does not pay for a
@@ -688,9 +660,6 @@ class Settings:
                         os.environ.get("KICRAFT_CONTRACT_LADDER", cls.contract_ladder)
                     )
                 )
-            ),
-            architecture_slot=parse_architecture_slot(
-                os.environ.get("KICRAFT_ARCHITECTURE_SLOT", cls.architecture_slot)
             ),
             design_reasoning_tokens=int(
                 os.environ.get("KICRAFT_DESIGN_REASONING_TOKENS", cls.design_reasoning_tokens)
@@ -957,7 +926,6 @@ class Settings:
             "enable_core_defaults": self.enable_core_defaults,
             "eval_judge_model": self.eval_judge_model,
             "contract_ladder": self.contract_ladder,
-            "architecture_slot": self.architecture_slot,
             "design_reasoning_tokens": self.design_reasoning_tokens,
             "design_temperature": self.design_temperature,
             "review_model": self.review_model,

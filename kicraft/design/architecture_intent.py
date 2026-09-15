@@ -43,7 +43,6 @@ from .recipes.models import RegisteredRecipe
 from .recipes.pin_allocator import FIXED_INTERFACES
 from .recipes.registry import registered_recipes
 from .recipes.resolver import (
-    _NATIVE_USB_MCU_RECIPES,
     _PORT_ALIASES,
     _family_recipes,
     _net_identity,
@@ -57,6 +56,25 @@ GND_NET = "GND"
 _USB_DATA_PORTS = frozenset({"usb_dm", "usb_dp"})
 _USB_DEVICE_CONNECTOR_FAMILY = "usb-c-usb2-device"
 _USB_DEVICE_CONNECTOR_PART = "USB-C-USB2-DEVICE"
+# Reviewed factory-native-programmable families: their USB pair must reach one physical
+# data connector, never a UART header.
+_NATIVE_USB_MCU_RECIPES = frozenset(
+    {
+        "esp32-s3-mini-1-minimal@1",
+        "esp32-s3-wroom-1-minimal@1",
+        "esp32-c3-mini-1-minimal@1",
+        "rp2040-minimal@2",
+    }
+)
+# Recipes whose own expansion already carries the 22R MCU-side series pair, so the
+# data connector must not add a second one.
+_MCU_OWNED_USB_SERIES_RECIPES = frozenset(
+    {
+        "esp32-s3-mini-1-minimal@1",
+        "esp32-s3-wroom-1-minimal@1",
+        "esp32-c3-mini-1-minimal@1",
+    }
+)
 _HEADER_FAMILY = "pin-header"
 # Port a requirement's `supply` rail feeds, in preference order: a logic part its vdd, a motor
 # driver its vm, a regulator its input.
@@ -642,6 +660,9 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
 
     # Off-board peers: one connector per `edge:` label, carrying only what named it.
     edge_connectors: dict[str, tuple[str, str, list[str]]] = {}  # label -> (id, mode, rails)
+    # A label that cannot be opened says so once: two signals asking for the same
+    # impossible edge must not each repeat the same refusal.
+    failed_edges: set[str] = set()
     renamed: list[str] = []
     # Derived statements the review should see (a tied spare port, an exposed output).
     derived_notes: list[str] = []
@@ -652,6 +673,8 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
         existing = edge_connectors.get(label)
         if existing is not None:
             return existing[0], existing[1]
+        if label in failed_edges:
+            return None
         sheet = sheet_by_stem.get(label)
         if sheet is None:
             sheet = Sheet(
@@ -669,14 +692,17 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 "duplicate_edge_connector",
                 f"edge {label!r} would need connector {requirement_id!r}, which already exists",
             )
+            failed_edges.add(label)
             return None
-        mode = "usb" if source.port in _USB_DATA_PORTS else "header"
-        if mode == "usb" and (
-            catalogs[source.requirement.id].recipe is None
-            or catalogs[source.requirement.id].recipe.definition.recipe
-            not in _NATIVE_USB_MCU_RECIPES
-        ):
-            mode = "header"
+        source_recipe = catalogs[source.requirement.id].recipe
+        source_recipe_name = (
+            source_recipe.definition.recipe if source_recipe is not None else None
+        )
+        mode = (
+            "usb"
+            if source.port in _USB_DATA_PORTS and source_recipe_name in _NATIVE_USB_MCU_RECIPES
+            else "header"
+        )
         if mode == "usb":
             vbus = _usb_vbus_rail(intent)
             if vbus is None:
@@ -690,6 +716,7 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                     requirement_id=source.requirement.id,
                     evidence=sorted(rail_names),
                 )
+                failed_edges.add(label)
                 return None
             catalogs[requirement_id] = _Catalog(
                 directions=dict.fromkeys(("vbus", "gnd", "usb_dm", "usb_dp"), "bidirectional"),
@@ -702,6 +729,13 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 family=_USB_DEVICE_CONNECTOR_FAMILY,
                 exact_part=_USB_DEVICE_CONNECTOR_PART,
                 functional_blocks=list(source.requirement.functional_blocks),
+                # A recipe that already expands the 22R MCU-side pair owns it; the
+                # socket must not add a second pair in series with the same lines.
+                parameters=(
+                    {"series_resistors": False}
+                    if source_recipe_name in _MCU_OWNED_USB_SERIES_RECIPES
+                    else {}
+                ),
             )
             _bind(requirement_id, "vbus", vbus, "input", context=f"edge {label!r}")
             _bind(requirement_id, "gnd", GND_NET, "bidirectional", context=f"edge {label!r}")
@@ -994,6 +1028,29 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 context="connector ground",
             )
         _bind(requirement_id, _next_pin(requirement_id), rail, "input", context="connector supply")
+
+    # A port the reviewed recipe requires and nothing wired is a missing design statement, not
+    # a bookkeeping slip: the part cannot work without it. Name it here, once, instead of
+    # letting the part reach BOM expansion and fail on a port binding mismatch.
+    for requirement_id, catalog in sorted(catalogs.items()):
+        if catalog.source != "recipe":
+            continue
+        bound = bindings.get(requirement_id, {})
+        for port in sorted(catalog.required):
+            if bound.get(port) or catalog.directions.get(port) == "output":
+                continue  # a required output is exposed on its own edge connector above
+            recipe = catalog.recipe.definition.recipe if catalog.recipe is not None else "recipe"
+            _fail(
+                "unbound_required_port",
+                (
+                    f"requirement {requirement_id!r} port {port!r} is required by {recipe} and "
+                    "nothing wires it; state a signal that uses the port, or tie it to a declared "
+                    "net"
+                ),
+                requirement_id=requirement_id,
+                sheet=requirements[requirement_id].sheet,
+                evidence=[f"ports={catalog.choices}"],
+            )
 
     if diagnostics:
         raise ArchitectureIntentError(diagnostics)

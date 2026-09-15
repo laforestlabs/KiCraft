@@ -243,145 +243,10 @@ def test_live_functional_spec_reports_premature_topology():
     assert "functional_spec_premature_topology" in codes
 
 
-def test_live_architecture_reports_graph_and_domain_defects():
+def test_live_architecture_reports_power_block_as_sheet():
     upstream = {"functional_spec": _load("rp2040_functional_spec_candidate.json")}
     codes = _codes("architecture", _load("rp2040_architecture_candidate.json"), upstream)
     assert "architecture_power_block_as_sheet" in codes
-    assert "architecture_fragmented_physical_domain" in codes
-    assert "architecture_wrong_signal_direction" in codes
-
-
-def _stm32_physical_domains():
-    # Domain declarations from the round9 STM32 architecture repair response.
-    return {
-        "sheets": [
-            {
-                "name": "MCU",
-                "stem": "MCU",
-                "function": (
-                    "STM32F103C8T6 MCU with 8 MHz HSE crystal, decoupling, and programming support."
-                ),
-            },
-            {
-                "name": "RESET CONTROL",
-                "stem": "RESET_CONTROL",
-                "function": "Manual reset button with pullup resistor.",
-            },
-        ],
-        "requirements": [
-            {
-                "id": "mcu_core",
-                "sheet": "MCU",
-                "role": "mcu_core",
-                "family": "stm32f103c8",
-                "exact_part": "STM32F103C8T6",
-                "functional_blocks": ["MCU", "CLOCK_SOURCE"],
-                "interfaces": ["usb_device", "swd"],
-                "parameters": {"can_remap": "pb8-pb9"},
-                "ports": {
-                    "boot0": "BOOT0",
-                    "gnd": "GND",
-                    "nrst": "NRST",
-                    "swclk": "SWCLK",
-                    "swdio": "SWDIO",
-                    "usb_dm": "USB_D_N",
-                    "usb_dp": "USB_D_P",
-                    "vdd": "+3V3",
-                },
-            },
-            {
-                "id": "reset_control",
-                "sheet": "RESET CONTROL",
-                "role": "user_io",
-                "family": "switch-input",
-                "functional_blocks": ["RESET_CONTROL"],
-                "parameters": {
-                    "active_level": "low",
-                    "pull_policy": "pull_up",
-                    "resistance": 10000,
-                },
-                "ports": {"gnd": "GND", "signal": "NRST", "vdd": "+3V3"},
-            },
-        ],
-        "inter_sheet_nets": [
-            {
-                "name": "NRST",
-                "endpoints": [
-                    {"sheet": "MCU", "direction": "bidirectional"},
-                    {"sheet": "RESET CONTROL", "direction": "bidirectional"},
-                ],
-            },
-        ],
-    }
-
-
-def test_architecture_keeps_integrated_ic_support_and_manual_control_domains():
-    candidate = _stm32_physical_domains()
-    assert "architecture_fragmented_physical_domain" not in _codes("architecture", candidate)
-
-    # Before typed ownership was available, the physical function still
-    # distinguished an owning IC and a real button from their support parts.
-    del candidate["requirements"]
-    assert "architecture_fragmented_physical_domain" not in _codes("architecture", candidate)
-
-
-@pytest.mark.parametrize(
-    ("name", "function", "family", "ports"),
-    [
-        (
-            "HSE SUPPORT",
-            "8 MHz HSE crystal with load capacitors for the MCU.",
-            "crystal",
-            {"in": "OSC_IN", "out": "OSC_OUT"},
-        ),
-        (
-            "MCU DECOUPLING",
-            "Decoupling capacitors for the STM32F103C8T6 MCU.",
-            "capacitor",
-            {"a": "+3V3", "b": "GND"},
-        ),
-        (
-            "RESET BIAS",
-            "NRST pullup resistor for the MCU.",
-            "resistor",
-            {"a": "+3V3", "b": "NRST"},
-        ),
-    ],
-)
-def test_architecture_rejects_support_only_sheets_separated_from_ic(name, function, family, ports):
-    candidate = _stm32_physical_domains()
-    candidate["sheets"].append({"name": name, "stem": name.replace(" ", "_"), "function": function})
-    candidate["requirements"].append(
-        {
-            "id": "separated_support",
-            "sheet": name,
-            "role": "analog_block",
-            "family": family,
-            "functional_blocks": ["CLOCK_SOURCE" if family == "crystal" else "MCU"],
-            "ports": ports,
-        }
-    )
-    candidate["requirements"][0]["ports"].update(ports)
-    candidate["inter_sheet_nets"].extend(
-        {
-            "name": net,
-            "endpoints": [
-                {"sheet": "MCU", "direction": "passive"},
-                {"sheet": name, "direction": "passive"},
-            ],
-        }
-        for net in ports.values()
-    )
-    diagnostics = diagnose_stage(
-        "architecture", brief="STM32F103C8T6 board", upstream_state={}, candidate=candidate
-    )
-    fragments = [
-        diagnostic
-        for diagnostic in diagnostics
-        if diagnostic.code == "architecture_fragmented_physical_domain"
-    ]
-    assert [diagnostic.evidence for diagnostic in fragments] == [[name.lower()]]
-    assert all(diagnostic.severity == "repair_required" for diagnostic in fragments)
 
 
 def test_power_category_keeps_physical_connectors_and_holders_not_bare_rails():
@@ -498,9 +363,7 @@ def test_architecture_rejects_false_pd_dac_provenance_and_missing_load_budget():
     assert "architecture_unavailable_core_default" in codes
     assert "architecture_external_load_current_unspecified" in codes
     assert "architecture_programming_decision_incomplete" not in codes
-    assert "architecture_fragmented_physical_domain" not in codes
     assert "architecture_power_block_as_sheet" not in codes
-    assert "architecture_missing_power_endpoint" not in codes
     assert "architecture_rail_source_unspecified" not in codes
     assert "architecture_mcu_regulator_incomplete" in codes
 
@@ -699,7 +562,7 @@ def test_architecture_defaults_unsourced_rail_to_external_power_input():
     )
 
 
-def test_architecture_rejects_source_without_headroom_and_unrelated_equal_rails():
+def test_architecture_rejects_source_without_headroom_for_external_loads():
     candidate = {
         "topologies": {
             "USB_PD_INPUT": "USB-C PD sink controller requesting 5V/5A",
@@ -783,7 +646,6 @@ def test_architecture_rejects_source_without_headroom_and_unrelated_equal_rails(
     }
 
     assert "architecture_external_load_source_has_no_headroom" in codes
-    assert "architecture_duplicate_voltage_rails_unrelated" in codes
 
     overcurrent_candidate = {
         **candidate,
@@ -850,7 +712,6 @@ def test_architecture_rejects_source_without_headroom_and_unrelated_equal_rails(
     }
 
     assert "architecture_external_load_source_has_no_headroom" not in corrected_codes
-    assert "architecture_duplicate_voltage_rails_unrelated" not in corrected_codes
     assert "architecture_usb_pd_current_exceeds_standard" not in corrected_codes
     assert "architecture_5v_converter_capacity_unspecified" not in corrected_codes
     assert "architecture_5v_converter_has_no_headroom" not in corrected_codes
@@ -876,115 +737,6 @@ def test_architecture_rejects_source_without_headroom_and_unrelated_equal_rails(
         )
     }
     assert "architecture_mcu_regulator_incomplete" in merged_3v3_codes
-
-
-def _switched_rail_architecture():
-    return {
-        "rail_voltages": {"VBUS": 5.0, "PORT1_5V": 5.0, "PORT2_5V": 5.0},
-        "topologies": {
-            "CURRENT_LIMIT": "Independent high-side current-limited power switch"
-        },
-        "sheets": [
-            {"name": f"CHANNEL {index}", "function": "Independent current limiting"}
-            for index in (1, 2)
-        ],
-        "requirements": [
-            {
-                "id": f"limit_{index}",
-                "sheet": f"CHANNEL {index}",
-                "role": "power_input",
-                "family": "usb-current-limiter",
-                "ports": {"input": "VBUS", "output": f"PORT{index}_5V"},
-                "functional_blocks": ["CURRENT_LIMIT"],
-            }
-            for index in (1, 2)
-        ],
-        "inter_sheet_nets": [
-            {
-                "name": "VBUS",
-                "endpoints": [
-                    {"sheet": f"CHANNEL {index}", "direction": "input"}
-                    for index in (1, 2)
-                ],
-            },
-            *(
-                {
-                    "name": f"PORT{index}_5V",
-                    "endpoints": [{"sheet": f"CHANNEL {index}", "direction": "output"}],
-                }
-                for index in (1, 2)
-            ),
-        ],
-    }
-
-
-def test_architecture_accepts_typed_switched_fanout_without_rail_names_in_prose():
-    candidate = _switched_rail_architecture()
-
-    assert "architecture_duplicate_voltage_rails_unrelated" not in _codes(
-        "architecture", candidate
-    )
-    assert candidate["rail_voltages"] == {"VBUS": 5.0, "PORT1_5V": 5.0, "PORT2_5V": 5.0}
-    assert [row["ports"]["output"] for row in candidate["requirements"]] == [
-        "PORT1_5V",
-        "PORT2_5V",
-    ]
-
-
-@pytest.mark.parametrize(
-    "missing_proof",
-    ["component_ports", "output_direction", "circuit_meaning", "owned_topology"],
-)
-def test_architecture_rejects_equal_rails_without_owned_directional_component(missing_proof):
-    candidate = _switched_rail_architecture()
-    first = candidate["requirements"][0]
-    if missing_proof == "component_ports":
-        first["ports"] = {}
-    elif missing_proof == "output_direction":
-        candidate["inter_sheet_nets"][1]["endpoints"][0]["direction"] = "input"
-    elif missing_proof == "circuit_meaning":
-        first["family"] = "power-monitor"
-        first["functional_blocks"] = []
-    else:
-        first["family"] = "power-monitor"
-        first["functional_blocks"] = ["MONITOR"]
-        candidate["topologies"]["MONITOR"] = "Voltage measurement"
-    # A same-sheet endpoint or arbitrary prose co-mention cannot replace proof.
-    candidate["sheets"][0]["function"] = "VBUS and PORT1_5V switch/filter connections"
-    diagnostics = diagnose_stage(
-        "architecture", brief="", upstream_state={}, candidate=candidate
-    )
-    unrelated = [
-        item
-        for item in diagnostics
-        if item.code == "architecture_duplicate_voltage_rails_unrelated"
-    ]
-    evidence = {entry for item in unrelated for entry in item.evidence}
-    assert "vbus/port1_5v: 5v" in evidence
-    assert "port1_5v/port2_5v: 5v" in evidence
-    assert "vbus/port2_5v: 5v" not in evidence
-
-
-def test_architecture_rejects_independent_equal_rails_without_common_upstream():
-    candidate = _switched_rail_architecture()
-    candidate["rail_voltages"]["OTHER_SUPPLY"] = 12.0
-    candidate["requirements"][1]["ports"]["input"] = "OTHER_SUPPLY"
-    candidate["inter_sheet_nets"][0]["endpoints"].pop()
-    candidate["inter_sheet_nets"].append(
-        {
-            "name": "OTHER_SUPPLY",
-            "endpoints": [{"sheet": "CHANNEL 2", "direction": "input"}],
-        }
-    )
-
-    diagnostics = diagnose_stage(
-        "architecture", brief="", upstream_state={}, candidate=candidate
-    )
-    assert any(
-        item.code == "architecture_duplicate_voltage_rails_unrelated"
-        and "port1_5v/port2_5v: 5v" in item.evidence
-        for item in diagnostics
-    )
 
 
 def test_live_bom_and_wiring_report_fabrication_gates():
@@ -1037,7 +789,6 @@ def test_architecture_power_contract_fixtures_preserve_dual_buck_and_right_size(
         "architecture_external_load_source_has_no_headroom",
         "architecture_5v_converter_capacity_unspecified",
         "architecture_5v_converter_has_no_headroom",
-        "architecture_duplicate_voltage_rails_unrelated",
         "architecture_usb_pd_current_exceeds_standard",
     }.isdisjoint(corrected_codes)
     assert {"5V_BUCK", "3V3_BUCK"} <= right_sized["topologies"].keys()

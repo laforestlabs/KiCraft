@@ -30,23 +30,6 @@ _NONFUNCTIONAL_RE = re.compile(
     r"crystal|castellated pads?)\b",
     re.I,
 )
-_BIDIRECTIONAL_RE = re.compile(r"(?:^|[_\s-])(usb|gpio|i2c|qspi)(?:$|[_\s-])", re.I)
-_SUPPORT_RE = re.compile(
-    r"\b(?:crystal|decoupl\w*|pull[- ]?(?:up|down)|passive support)\b|"
-    r"\bclock (?:source|generator|oscillator)\b",
-    re.I,
-)
-_SUPPORT_FAMILY_RE = re.compile(
-    r"^(?:resistor|capacitor|crystal|decoupling|pull[-_]?(?:up|down)|passive)"
-    r"(?:$|[-_])",
-    re.I,
-)
-_PHYSICAL_COMPONENT_RE = re.compile(
-    r"\b(?:mcu|microcontroller|ic|qfn|lqfp|tqfp|soic|bga|regulator|"
-    r"transceiver|amplifier|sensor|flash|controller|"
-    r"pushbutton|button|switch|receptacle|connector|header|terminal|holder)\b",
-    re.I,
-)
 _POWER_RE = re.compile(r"\b(power|vbus|vcc|vdd|3v3|5v|1v1|ldo|regulat)\b", re.I)
 # The one code that asks for a fact only the user has (next-steps plan §4 B2).
 EXTERNAL_LOAD_CURRENT_CODE = "architecture_external_load_current_unspecified"
@@ -447,33 +430,6 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
     return diagnostics
 
 
-def _support_only_sheet(sheet: dict, requirements: list[dict]) -> bool:
-    """Distinguish a support-only sheet from a domain containing its own support."""
-    function = str(sheet.get("function") or "")
-    if not _SUPPORT_RE.search(f"{sheet.get('name', '')} {function}"):
-        return False
-    # Typed ownership is stronger than prose mentioning crystals or pull-ups.
-    # Passive requirements alone do not establish an owning IC or interface.
-    if any(
-        not _SUPPORT_FAMILY_RE.search(str(requirement.get("family") or ""))
-        for requirement in requirements
-    ):
-        return False
-
-    # Where typed ownership does not establish a substantive domain, inspect
-    # the physical subject, not a downstream owner in "decoupling for the MCU"
-    # or "crystal connected to the MCU".
-    subject = re.split(
-        r"\b(?:with|including|for|of|connected to|supporting)\b",
-        function,
-        maxsplit=1,
-        flags=re.I,
-    )[0]
-    owns_component = _PHYSICAL_COMPONENT_RE.search(subject) and (
-        not _SUPPORT_RE.search(subject) or re.search(r"\bic\b", subject, re.I)
-    )
-    return not owns_component
-
 
 def architecture_power_requirement_diagnostics(
     upstream: dict, candidate: dict
@@ -574,59 +530,6 @@ def architecture_power_requirement_diagnostics(
     return diagnostics
 
 
-def _typed_rail_sources(
-    candidate: dict, requirements_by_sheet: dict[str, list[dict]]
-) -> dict[str, set[str]]:
-    """Return component-owned input rails for each explicitly driven output rail."""
-    rails = candidate.get("rail_voltages") or {}
-    endpoints = {
-        (str(net.get("name") or ""), str(endpoint.get("sheet") or ""), endpoint.get("direction"))
-        for net in candidate.get("inter_sheet_nets") or []
-        if isinstance(net, dict)
-        for endpoint in net.get("endpoints") or []
-        if isinstance(endpoint, dict)
-    }
-    topologies = candidate.get("topologies") or {}
-    relation_terms = re.compile(
-        r"\b(?:fuse|switch|net tie|filter|ideal diode|converter|regulator|"
-        r"buck|boost|power path|current limit(?:er|ing|ed)?)\b",
-        re.I,
-    )
-    sources: dict[str, set[str]] = {}
-    for sheet, requirements in requirements_by_sheet.items():
-        for requirement in requirements:
-            if requirement.get("role") == "connector":
-                continue
-            ports = requirement.get("ports") or {}
-            port_aliases = {_norm_token(key): net for key, net in ports.items()}
-            input_net = port_aliases.get("input") or port_aliases.get("vin")
-            output_net = port_aliases.get("output") or port_aliases.get("vout")
-            if (
-                not isinstance(input_net, str)
-                or not isinstance(output_net, str)
-                or input_net == output_net
-                or input_net not in rails
-                or output_net not in rails
-                or (input_net, sheet, "input") not in endpoints
-                or (output_net, sheet, "output") not in endpoints
-            ):
-                continue
-            # Only this component's family and owned functional topology establish
-            # circuit meaning. Unrelated sheet prose and rail-name mentions do not.
-            meaning = " ".join(
-                [
-                    str(requirement.get("family") or ""),
-                    *(
-                        str(topologies.get(block) or "")
-                        for block in requirement.get("functional_blocks") or []
-                    ),
-                ]
-            )
-            if relation_terms.search(re.sub(r"[-_]", " ", meaning)):
-                sources.setdefault(output_net, set()).add(input_net)
-    return sources
-
-
 def _rail_producers(candidate: dict, rails: dict) -> list[dict]:
     """Every requirement that generates a declared rail, with the recipe's reviewed rating.
 
@@ -672,12 +575,6 @@ def _rail_producers(candidate: dict, rails: dict) -> list[dict]:
 def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     diagnostics = architecture_power_requirement_diagnostics(upstream, candidate)
     sheets = candidate.get("sheets") or []
-    requirements_by_sheet: dict[str, list[dict]] = {}
-    for requirement in candidate.get("requirements") or []:
-        if isinstance(requirement, dict):
-            requirements_by_sheet.setdefault(str(requirement.get("sheet") or ""), []).append(
-                requirement
-            )
     for sheet in sheets:
         if not isinstance(sheet, dict):
             continue
@@ -695,15 +592,6 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                     "architecture_power_block_as_sheet",
                     "repair_required",
                     "A power net or distribution-only block was emitted as a physical sheet.",
-                    [name],
-                )
-            )
-        if len(sheets) > 1 and _support_only_sheet(sheet, requirements_by_sheet.get(name, [])):
-            diagnostics.append(
-                _diag(
-                    "architecture_fragmented_physical_domain",
-                    "repair_required",
-                    "A trivial support or board feature was split from the IC domain it supports.",
                     [name],
                 )
             )
@@ -931,53 +819,6 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                             )
                         )
 
-    inter_sheet_nets = [
-        net for net in candidate.get("inter_sheet_nets") or [] if isinstance(net, dict)
-    ]
-    rail_sources = _typed_rail_sources(candidate, requirements_by_sheet)
-    voltage_groups: dict[float, list[str]] = {}
-    for rail_name, voltage in rail_voltages.items():
-        voltage_groups.setdefault(round(float(voltage), 3), []).append(str(rail_name))
-    for voltage, rail_names in voltage_groups.items():
-        for index, left_name in enumerate(rail_names):
-            for right_name in rail_names[index + 1 :]:
-                left_endpoints = {
-                    str(endpoint.get("sheet") or "")
-                    for net in inter_sheet_nets
-                    if str(net.get("name") or "") == left_name
-                    for endpoint in net.get("endpoints") or []
-                    if isinstance(endpoint, dict)
-                }
-                right_endpoints = {
-                    str(endpoint.get("sheet") or "")
-                    for net in inter_sheet_nets
-                    if str(net.get("name") or "") == right_name
-                    for endpoint in net.get("endpoints") or []
-                    if isinstance(endpoint, dict)
-                }
-                common_endpoints = left_endpoints & right_endpoints
-                left_sources = rail_sources.get(left_name, set())
-                right_sources = rail_sources.get(right_name, set())
-                # Separate post-component outputs may share an upstream supply;
-                # they remain distinct nets, including independent current limits.
-                relationship_defined = (
-                    left_name in right_sources
-                    or right_name in left_sources
-                    or bool(left_sources & right_sources)
-                )
-                if not relationship_defined:
-                    diagnostics.append(
-                        _diag(
-                            "architecture_duplicate_voltage_rails_unrelated",
-                            "repair_required",
-                            "Same-voltage rails need one canonical net or an explicit component relationship.",
-                            [
-                                f"{left_name}/{right_name}: {voltage:g}v",
-                                *common_endpoints,
-                            ],
-                        )
-                    )
-
     for rail, voltage in (candidate.get("rail_voltages") or {}).items():
         if abs(float(voltage) - 3.3) > 0.05:
             continue
@@ -1046,43 +887,6 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                 )
             )
 
-    for net in candidate.get("inter_sheet_nets") or []:
-        if not isinstance(net, dict):
-            continue
-        name = str(net.get("name") or "")
-        endpoints = net.get("endpoints") or []
-        directions = {str(ep.get("direction") or "") for ep in endpoints if isinstance(ep, dict)}
-        if _BIDIRECTIONAL_RE.search(name) and directions - {"bidirectional", "passive"}:
-            diagnostics.append(
-                _diag(
-                    "architecture_wrong_signal_direction",
-                    "repair_required",
-                    "A known bidirectional protocol or GPIO net was declared one-way.",
-                    [name],
-                )
-            )
-        if _POWER_RE.search(name):
-            endpoint_names = {
-                str(ep.get("sheet") or "") for ep in endpoints if isinstance(ep, dict)
-            }
-            net_token = _norm_token(name)
-            expected = {
-                str(sheet.get("name"))
-                for sheet in sheets
-                if isinstance(sheet, dict)
-                and net_token
-                and net_token in _norm_token(f"{sheet.get('name', '')} {sheet.get('function', '')}")
-            }
-            missing = sorted(expected - endpoint_names)
-            if missing:
-                diagnostics.append(
-                    _diag(
-                        "architecture_missing_power_endpoint",
-                        "repair_required",
-                        "A sheet that explicitly names this rail is absent from its endpoints.",
-                        [name, *missing],
-                    )
-                )
     if candidate.get("mcu_present") and not re.search(
         r"\b(?:swd|jtag|updi|icsp|bootsel|boot|flash|program|debug|reset|native usb)\b",
         _text(candidate),

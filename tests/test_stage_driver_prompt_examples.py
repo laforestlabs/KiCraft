@@ -15,13 +15,10 @@ from kicraft.design.stage_state import DESIGN_STAGES
 from kicraft.design.synthesis.validation import check_spec_named_mpn_substitutions
 from kicraft.server.config import STAGE_COLLECTION_BOUNDS, CollectionBound
 from kicraft.server.stage_contracts import (
-    ArchitectureStageResponse,
     IntentStageResponse,
     _is_free_form_object,
     _normalize_bom_stage_response,
     _strict_provider_schema,
-    _fold_recipe_covered_sheets,
-    _normalize_usb_c_requirements,
     _normalize_stage_response,
     _normalize_wiring_stage_response,
     apply_collection_bounds,
@@ -74,19 +71,23 @@ def test_functional_spec_example_validates_against_the_model_contract():
 
 
 def test_architecture_example_validates_and_carries_a_requirement():
+    """The intent example the model is shown must derive into the real slot model."""
     slot = json.loads(_WORKED_EXAMPLES["architecture"])
-    architecture = ArchitectureStageResponse.model_validate(slot)
+    architecture = derive_architecture(slot)
+    models.Architecture.model_validate(architecture.model_dump(exclude_none=True))
     assert architecture.requirements
     assert architecture.requirements[0].functional_blocks
 
 
-def test_architecture_intent_example_derives_and_normalizes():
+def test_architecture_example_derives_and_normalizes():
     """The example the model is shown must itself survive derivation and the real reader."""
-    slot = json.loads(_WORKED_EXAMPLES["architecture_intent"])
+    slot = json.loads(_WORKED_EXAMPLES["architecture"])
     architecture = derive_architecture(slot)
-    assert architecture.requirements
     normalized, _ = _normalize_stage_response("architecture", slot, {})
     assert normalized["requirements"]
+    assert [row["id"] for row in normalized["requirements"]] == [
+        requirement.id for requirement in architecture.requirements
+    ]
     assert normalized["power_nets"] == ["GND", "+3V3", "+5V"]
     assert normalized["rail_voltages"] == {"+5V": 5.0, "+3V3": 3.3, "GND": 0.0}
 
@@ -169,6 +170,7 @@ def test_deepseek_json_object_prompts_name_json(stage):
 
 def test_strict_provider_schema_is_openai_compatible():
     schema = build_stage_response_contract("architecture", {}).schema
+    canonical = json.loads(json.dumps(schema))
     strict = _strict_provider_schema(schema)
 
     assert strict is not schema
@@ -181,13 +183,13 @@ def test_strict_provider_schema_is_openai_compatible():
         if not _is_free_form_object(subschema)
     }
     assert set(strict["required"]) == fixed
-    assert "rail_voltages" in strict["properties"]
-    assert "rail_voltages" not in strict["required"]
-    nested = strict["$defs"]["Sheet"]
+    assert "topologies" in strict["properties"]
+    assert "topologies" not in strict["required"]
+    nested = strict["$defs"]["IntentSheet"]
     assert nested["additionalProperties"] is False
     assert set(nested["required"]) == set(nested["properties"])
     # The canonical schema is untouched.
-    assert "additionalProperties" not in schema["$defs"]["Sheet"]
+    assert schema == canonical
 
 
 def test_interactive_contract_merges_questions_and_empty_list_is_a_slot():
@@ -235,9 +237,10 @@ def test_provider_schema_and_stream_collection_limits_agree(stage, allow_questio
     properties = schema["properties"]
     for bound in STAGE_COLLECTION_BOUNDS[stage]:
         if bound.field not in properties:
-            # A stage's bounds cover more than one slot shape (the intent-shaped
-            # architecture slot has `signals`, the explicit one does not); a field
-            # the contract does not carry has nothing to advertise or enforce.
+            # A stage's bounds may cover canonical fields the answer contract does
+            # not ask the model for (the architecture intent carries `signals`, not
+            # the derived net names or recipe selections); a field the contract does
+            # not carry has nothing to advertise or enforce.
             continue
         advertised_limit = properties[bound.field]["maxItems"]
         guard = _StreamingCollectionGuard((bound,))
@@ -300,155 +303,6 @@ def test_bom_contract_closes_group_sheet_and_reuses_schema_object():
     encoded = prompt.split("string patterns are strict):\n", 1)[1].split("\nWorked example", 1)[0]
     assert json.loads(encoded) == contract.schema
     assert "SHEET NAMES ARE CLOSED" in prompt
-
-
-def test_generic_usb_c_requirements_select_verified_recipe_families():
-    base = {
-        "power_nets": ["VBUS", "GND"],
-        "inter_sheet_nets": [
-            {"name": "usb_dp", "endpoints": [{"sheet": "USB", "direction": "bidirectional"}]},
-            {"name": "usb_dm", "endpoints": [{"sheet": "USB", "direction": "bidirectional"}]},
-        ],
-    }
-    data = {
-        **base,
-        "requirements": [{"id": "usb", "sheet": "USB", "role": "connector", "family": "usb-c"}],
-    }
-    device = _normalize_usb_c_requirements(data)["requirements"][0]
-    sink = _normalize_usb_c_requirements(
-        {
-            "power_nets": ["VBUS", "GND"],
-            "requirements": [
-                {
-                    "id": "input",
-                    "sheet": "POWER",
-                    "role": "power_input",
-                    "family": "usb-c-receptacle",
-                }
-            ],
-        }
-    )["requirements"][0]
-
-    assert device["family"] == "usb-c-usb2-device"
-    assert device["ports"] == {
-        "gnd": "GND",
-        "vbus": "VBUS",
-        "usb_dp": "usb_dp",
-        "usb_dm": "usb_dm",
-    }
-    assert sink["family"] == "usb-c-power-sink"
-    assert sink["ports"] == {"gnd": "GND", "vbus": "VBUS"}
-    synthesized = _normalize_usb_c_requirements(
-        {
-            "power_nets": ["VBUS", "GND"],
-            "inter_sheet_nets": [],
-            "sheets": [
-                {
-                    "name": "USB C INPUT",
-                    "function": "USB-C receptacle with CC pull-downs",
-                }
-            ],
-            "requirements": [],
-        }
-    )["requirements"][0]
-    assert synthesized["family"] == "usb-c-power-sink"
-    assert synthesized["sheet"] == "USB C INPUT"
-
-
-def test_rounded_c3_connector_binding_survives_downstream_five_volt_rail():
-    # Connector/power projection of round10's final rounded-c3-devboard candidate.
-    ports = {
-        "gnd": "GND",
-        "usb_dm": "USB_D_N",
-        "usb_dp": "USB_D_P",
-        "vbus": "VBUS",
-    }
-    connector = {
-        "family": "usb-c-usb2-device",
-        "functional_blocks": ["USB_C_CONNECTOR"],
-        "id": "usb_c_connector",
-        "parameters": {},
-        "ports": ports,
-        "role": "connector",
-        "sheet": "USB C CONNECTOR",
-    }
-    payload = {
-        "power_nets": ["VBUS", "+5V", "+3V3", "GND"],
-        "rail_voltages": {"+3V3": 3.3, "+5V": 5.0, "VBUS": 5.0},
-        "requirements": [connector],
-        "inter_sheet_nets": [
-            {
-                "name": name,
-                "endpoints": [{"sheet": sheet, "direction": "bidirectional"} for sheet in sheets],
-            }
-            for name, sheets in [
-                ("USB_D_P", ["USB C CONNECTOR", "USB SERIAL BRIDGE"]),
-                ("USB_D_N", ["USB C CONNECTOR", "USB SERIAL BRIDGE"]),
-                ("VBUS", ["USB C CONNECTOR", "POWER INPUT"]),
-                (
-                    "GND",
-                    [
-                        "USB C CONNECTOR",
-                        "POWER INPUT",
-                        "USB SERIAL BRIDGE",
-                        "VOLTAGE REGULATION",
-                        "ESP32 C3 MODULE",
-                        "GPIO HEADER",
-                    ],
-                ),
-                ("+5V", ["POWER INPUT", "VOLTAGE REGULATION"]),
-                ("+3V3", ["VOLTAGE REGULATION", "ESP32 C3 MODULE", "GPIO HEADER"]),
-            ]
-        ],
-    }
-
-    normalized = _normalize_usb_c_requirements(payload)
-
-    assert normalized["requirements"] == [connector]
-    assert normalized["power_nets"] == ["VBUS", "+5V", "+3V3", "GND"]
-    assert normalized["inter_sheet_nets"] == payload["inter_sheet_nets"]
-    assert normalized["rail_voltages"] == payload["rail_voltages"]
-
-
-def test_usb_connector_inference_scopes_rails_and_auxiliary_signals_to_owner():
-    payload = {
-        "power_nets": ["VBUS", "+5V", "GND"],
-        "sheets": [
-            {"name": "USB C BREAKOUT", "function": "USB-C receptacle exposing all pins"},
-            {"name": "USB C INPUT", "function": "USB-C receptacle with CC pull-downs"},
-            {"name": "HEADER", "function": "Header for USB-C breakout signals"},
-        ],
-        "requirements": [
-            {"id": "input", "sheet": "USB C INPUT", "role": "connector", "family": "usb-c"}
-        ],
-        "inter_sheet_nets": [
-            {
-                "name": net,
-                "endpoints": [{"sheet": "USB C BREAKOUT"}, {"sheet": "HEADER"}],
-            }
-            for net in ("VBUS", "D+", "D-", "CC1", "CC2", "SBU1", "SBU2")
-        ]
-        + [{"name": "+5V", "endpoints": [{"sheet": "USB C INPUT"}, {"sheet": "POWER"}]}],
-    }
-
-    requirements = {
-        row["sheet"]: row for row in _normalize_usb_c_requirements(payload)["requirements"]
-    }
-
-    assert set(requirements) == {"USB C BREAKOUT", "USB C INPUT"}
-    assert requirements["USB C BREAKOUT"]["family"] == "usb-c-breakout"
-    assert requirements["USB C BREAKOUT"]["ports"] == {
-        "gnd": "GND",
-        "vbus": "VBUS",
-        "usb_dp": "D+",
-        "usb_dm": "D-",
-        "cc1": "CC1",
-        "cc2": "CC2",
-        "sbu1": "SBU1",
-        "sbu2": "SBU2",
-    }
-    assert requirements["USB C INPUT"]["family"] == "usb-c-power-sink"
-    assert requirements["USB C INPUT"]["ports"] == {"gnd": "GND", "vbus": "+5V"}
 
 
 @pytest.fixture
@@ -906,50 +760,6 @@ def test_parameter_validation_preserves_unknown_families_and_unproven_exact_part
     assert lower_requirement(by_id["req_reset_button"]) is None
 
 
-def test_saved_breakout_requires_both_explicit_data_boundaries(round10_breakout_contract):
-    from kicraft.server.stage_contracts import StageSchemaError
-
-    payload, state = round10_breakout_contract
-    # Repair the independent invalid rows=16 contract before testing net ownership.
-    payload["requirements"][1]["parameters"]["rows"] = 2
-    original_ports = {row["id"]: dict(row["ports"]) for row in payload["requirements"]}
-    with pytest.raises(StageSchemaError) as rejected:
-        _normalize_stage_response("architecture", payload, state)
-
-    diagnostic = rejected.value.diagnostic
-    assert diagnostic["code"] == "missing_typed_inter_sheet_contract"
-    for net in ("D_P", "D_N"):
-        evidence = next(row for row in diagnostic["evidence"] if f"net {net!r}:" in row)
-        for owner in (
-            "usb_c_receptacle_breakout",
-            "breakout_header",
-            "USB C RECEPTACLE",
-            "BREAKOUT HEADER",
-        ):
-            assert owner in evidence
-
-    # Architecture must reject, not guess a wire or delete a binding. Explicit
-    # provider repair supplies the actual boundary and permits normalization.
-    assert {row["name"] for row in payload["inter_sheet_nets"]}.isdisjoint({"D_P", "D_N"})
-    for net in ("D_P", "D_N"):
-        payload["inter_sheet_nets"].append(
-            {
-                "name": net,
-                "endpoints": [
-                    {"sheet": name, "direction": "bidirectional"}
-                    for name in ("USB C RECEPTACLE", "BREAKOUT HEADER")
-                ],
-            }
-        )
-    normalized, _ = _normalize_stage_response("architecture", payload, state)
-    assert {row["id"]: row["ports"] for row in normalized["requirements"]} == original_ports
-    assert {
-        row["name"]: {endpoint["sheet"] for endpoint in row["endpoints"]}
-        for row in normalized["inter_sheet_nets"]
-        if row["name"] in {"D_P", "D_N"}
-    } == {net: {"USB C RECEPTACLE", "BREAKOUT HEADER"} for net in ("D_P", "D_N")}
-
-
 def test_saved_breakout_same_sheet_data_bindings_remain_local(round10_breakout_contract):
     payload, state = round10_breakout_contract
     payload["requirements"][1]["parameters"]["rows"] = 2
@@ -962,143 +772,6 @@ def test_saved_breakout_same_sheet_data_bindings_remain_local(round10_breakout_c
 
     assert normalized["inter_sheet_nets"] == []
     assert {row["id"]: row["ports"] for row in normalized["requirements"]} == original_ports
-
-
-@pytest.mark.parametrize("linked", [False, True])
-def test_existing_boundary_requires_only_signal_linked_typed_owners(linked):
-    from kicraft.server.stage_contracts import StageSchemaError
-
-    names = ("SOURCE", "SINK", "LOCAL")
-    payload = {
-        "sheets": [{"name": name, "stem": name, "function": name} for name in names],
-        "power_nets": [],
-        "inter_sheet_nets": [
-            {
-                "name": "DATA",
-                "endpoints": [
-                    {"sheet": name, "direction": "passive"} for name in ("SOURCE", "SINK")
-                ],
-            }
-        ],
-        "requirements": [
-            {
-                "id": name.lower(),
-                "sheet": name,
-                "role": "connector",
-                "family": "pin-header",
-                "functional_blocks": [name],
-                "ports": {"pin1": "DATA", "pin2": "GND"},
-            }
-            for name in names
-        ],
-    }
-    state = {
-        "functional_spec": {
-            "blocks": [{"name": name, "category": "interface", "purpose": name} for name in names],
-            "connections": [
-                {"from_block": "SOURCE", "to_block": "SINK", "signal_type": "digital"},
-                {
-                    "from_block": "SOURCE",
-                    "to_block": "LOCAL",
-                    "signal_type": "digital" if linked else "ground",
-                },
-            ],
-        }
-    }
-    if linked:
-        with pytest.raises(StageSchemaError) as rejected:
-            _normalize_stage_response("architecture", payload, state)
-        diagnostic = rejected.value.diagnostic
-        assert diagnostic["code"] == "missing_typed_inter_sheet_contract"
-        evidence = diagnostic["evidence"]
-        assert len(evidence) == 1
-        assert all(identity in evidence[0] for identity in ("DATA", "source", "local", "LOCAL"))
-    else:
-        normalized, _ = _normalize_stage_response("architecture", payload, state)
-        assert normalized["requirements"][2]["ports"] == {"pin1": "DATA", "pin2": "GND"}
-        assert normalized["inter_sheet_nets"] == payload["inter_sheet_nets"]
-
-
-def test_typed_signal_boundary_check_runs_after_existing_peer_completion():
-    payload = {
-        "sheets": [
-            {"name": "MCU", "stem": "MCU", "function": "ESP32-S3 controller"},
-            {"name": "USB", "stem": "USB", "function": "USB-C device connector"},
-        ],
-        "rail_voltages": {"+3V3": 3.3, "VBUS": 5.0},
-        "power_nets": ["+3V3", "VBUS", "GND"],
-        "inter_sheet_nets": [],
-        "requirements": [
-            {
-                "id": "mcu_core",
-                "sheet": "MCU",
-                "role": "mcu_core",
-                "family": "esp32-s3-module",
-                "exact_part": "ESP32-S3-MINI-1-N8",
-                "functional_blocks": ["CONTROLLER"],
-                "ports": {"vdd": "+3V3", "gnd": "GND", "usb_dp": "D_P", "usb_dm": "D_N"},
-                "interfaces": ["usb_device"],
-            },
-            {
-                # A native-family MCU's USB pair must reach a physical USB data
-                # connector: a bare header no longer satisfies the contract.
-                "id": "usb_connector",
-                "sheet": "USB",
-                "role": "connector",
-                "family": "usb-c-usb2-device",
-                "exact_part": "USB-C-USB2-DEVICE",
-                "functional_blocks": ["USB"],
-                "ports": {"vbus": "VBUS", "gnd": "GND", "usb_dp": "D_P", "usb_dm": "D_N"},
-            },
-        ],
-    }
-    state = {
-        "functional_spec": {
-            "blocks": [
-                {"name": "CONTROLLER", "category": "process", "purpose": "Native USB device"},
-                {"name": "USB", "category": "interface", "purpose": "Expose native USB"},
-            ],
-            "connections": [{"from_block": "CONTROLLER", "to_block": "USB", "signal_type": "bus"}],
-        }
-    }
-
-    normalized, _ = _normalize_stage_response("architecture", payload, state)
-
-    assert {
-        row["name"]: {endpoint["sheet"] for endpoint in row["endpoints"]}
-        for row in normalized["inter_sheet_nets"]
-        if row["name"] in ("D_P", "D_N")
-    } == {net: {"MCU", "USB"} for net in ("D_P", "D_N")}
-    assert normalized["recipe_selections"][0]["port_bindings"]["usb_dp"] == "D_P"
-    assert normalized["recipe_selections"][0]["port_bindings"]["usb_dm"] == "D_N"
-
-
-@pytest.mark.parametrize("local_rails", [[], ["VBUS", "+5V"]])
-def test_usb_connector_requires_explicit_binding_for_ambiguous_supply(local_rails):
-    from kicraft.server.stage_contracts import StageSchemaError
-
-    connector = {
-        "id": "usb",
-        "sheet": "USB",
-        "role": "connector",
-        "family": "usb-c",
-    }
-    payload = {
-        "power_nets": ["VBUS", "+5V", "GND"],
-        "requirements": [connector],
-        "inter_sheet_nets": [
-            {"name": net, "endpoints": [{"sheet": "USB"}, {"sheet": "POWER"}]}
-            for net in local_rails
-        ],
-    }
-
-    with pytest.raises(StageSchemaError, match="ambiguous connector net aliases"):
-        _normalize_usb_c_requirements(payload)
-
-    connector["ports"] = {"vbus": "VBUS"}
-    requirement = _normalize_usb_c_requirements(payload)["requirements"][0]
-    assert requirement["ports"] == {"vbus": "VBUS", "gnd": "GND"}
-    assert payload["power_nets"] == ["VBUS", "+5V", "GND"]
 
 
 def test_typed_mcp6001_requirement_resolves_to_verified_follower_recipe():
@@ -1151,169 +824,6 @@ def test_typed_mcp6001_requirement_resolves_to_verified_follower_recipe():
 
     assert canonical["recipe_selections"][0]["recipe"] == "mcp6001-follower@1"
     assert canonical["requirements"][0]["functional_blocks"] == ["BUFFER"]
-
-
-def test_usb_connector_completion_preserves_polarity_and_header_hardware():
-    payload = {
-        "power_nets": ["VBUS", "GND"],
-        "sheets": [
-            {"name": "USB C RECEPTACLE", "function": "USB-C receptacle exposing CC and SBU"},
-            {
-                "name": "HEADER BREAKOUT",
-                "function": "Header breakout for all exposed USB-C signals",
-            },
-        ],
-        "requirements": [],
-        "inter_sheet_nets": [
-            {
-                "name": name,
-                "endpoints": [
-                    {"sheet": sheet} for sheet in ("USB C RECEPTACLE", "HEADER BREAKOUT")
-                ],
-            }
-            for name in (
-                "D+",
-                "D-",
-                "CC1",
-                "CC2",
-                "SBU1",
-                "SBU2",
-                "TX1+",
-                "TX1-",
-                "TX2+",
-                "TX2-",
-                "RX1+",
-                "RX1-",
-                "RX2+",
-                "RX2-",
-            )
-        ],
-    }
-    requirements = _normalize_usb_c_requirements(payload)["requirements"]
-    assert [row["sheet"] for row in requirements] == ["USB C RECEPTACLE"]
-    assert requirements[0]["family"] == "usb-c-breakout"
-    assert requirements[0]["ports"]["usb_dp"] == "D+"
-    assert requirements[0]["ports"]["usb_dm"] == "D-"
-    assert set(requirements[0]["ports"].values()) == {
-        "VBUS",
-        "GND",
-        "D+",
-        "D-",
-        "CC1",
-        "CC2",
-        "SBU1",
-        "SBU2",
-        "TX1+",
-        "TX1-",
-        "TX2+",
-        "TX2-",
-        "RX1+",
-        "RX1-",
-        "RX2+",
-        "RX2-",
-    }
-
-
-def test_external_pd_cc_contract_never_lowers_to_parallel_sink_resistors():
-    from kicraft.design.lowering import lower_requirement
-    from kicraft.server.stage_contracts import StageSchemaError
-
-    connector = {
-        "id": "usb",
-        "sheet": "USB",
-        "role": "connector",
-        "family": "usb-c-connector",
-        "ports": {"vbus": "VBUS", "gnd": "GND"},
-    }
-    payload = {
-        "power_nets": ["VBUS", "+5V", "GND"],
-        "requirements": [connector],
-        "inter_sheet_nets": [
-            {"name": net, "endpoints": [{"sheet": "USB"}, {"sheet": "PD"}]}
-            for net in ("CC1", "CC2")
-        ],
-    }
-    normalized = _normalize_usb_c_requirements(payload)["requirements"][0]
-    artifact = lower_requirement(normalized)
-    assert artifact is not None
-    assert {group.reference_prefix for group in artifact.groups} == {"J"}
-    assignments = {pin.pin: pin.net for pin in artifact.pins}
-    assert assignments["A5"] == "CC1"
-    assert assignments["B5"] == "CC2"
-
-    connector["exact_part"] = "USB-C-5V-SINK"
-    with pytest.raises(StageSchemaError, match="active sink"):
-        _normalize_usb_c_requirements(payload)
-
-
-@pytest.mark.parametrize(
-    ("recipe_id", "explicit_requirement"),
-    [("usb-c-usb2-device@1", True), ("usb-c-5v-sink@1", False)],
-)
-def test_usb_shield_preserves_active_sink_hardware(recipe_id, explicit_requirement):
-    from kicraft.design.recipes import expand_recipe, get_recipe
-
-    definition = get_recipe(recipe_id)
-    ports = {"vbus": "VBUS", "gnd": "GND", "shield": "SHIELD"}
-    if explicit_requirement:
-        ports.update(usb_dp="USB_DP", usb_dm="USB_DM")
-    payload = {
-        "power_nets": ["VBUS", "GND"],
-        "sheets": [{"name": "USB", "function": "USB-C connector"}],
-        "requirements": [
-            {
-                "id": "usb",
-                "sheet": "USB",
-                "role": "connector",
-                "family": definition.family,
-                "exact_part": definition.exact_part,
-                "ports": ports,
-            }
-        ]
-        if explicit_requirement
-        else [],
-        "inter_sheet_nets": [
-            {"name": "SHIELD", "endpoints": [{"sheet": "USB"}, {"sheet": "CHASSIS"}]}
-        ],
-    }
-    requirement = _normalize_usb_c_requirements(payload)["requirements"][0]
-    assert requirement["family"] == definition.family
-    assert requirement["ports"] == ports
-    expansion = expand_recipe(
-        models.RecipeSelection(
-            recipe=recipe_id,
-            instance="usb",
-            sheets={"power": "USB"},
-            port_bindings=requirement["ports"],
-        )
-    )
-    connector = next(part for part in expansion.parts if part.recipe_role == "connector")
-    pull_refs = {part.ref for part in expansion.parts if part.recipe_role == "cc_pulldown"}
-    assert len(pull_refs) == 2
-    shield = next(net for net in expansion.connections if net.net_name == "SHIELD")
-    assert {(pin.ref, pin.pin) for pin in shield.endpoints} == {
-        (connector.ref, str(pin)) for pin in range(1, 5)
-    }
-    ground = next(net for net in expansion.connections if net.net_name == "GND")
-    assert {(ref, "2") for ref in pull_refs} <= {(pin.ref, pin.pin) for pin in ground.endpoints}
-
-
-def test_usb_pd_requirement_is_not_downgraded_to_fixed_sink():
-    requirement = {
-        "id": "pd",
-        "sheet": "INPUT",
-        "role": "power_input",
-        "family": "usb-c-pd-trigger",
-        "parameters": {"selectable": True},
-        "ports": {"vbus": "VBUS", "gnd": "GND"},
-    }
-    result = _normalize_usb_c_requirements(
-        {
-            "power_nets": ["VBUS", "GND"],
-            "requirements": [requirement],
-        }
-    )
-    assert result["requirements"] == [requirement]
 
 
 def test_model_owned_pd_controller_matches_typed_family_by_real_identity():
@@ -1462,7 +972,7 @@ def test_architecture_provider_requires_explicit_nonempty_implementation_contrac
     architecture = contract.schema
     assert "requirements" in architecture["required"]
     assert architecture["properties"]["requirements"]["minItems"] == 1
-    requirement = contract.schema["$defs"]["CircuitRequirement"]
+    requirement = contract.schema["$defs"]["IntentRequirement"]
     assert "functional_blocks" in requirement["required"]
     assert requirement["properties"]["functional_blocks"]["minItems"] == 1
     for field in ("recipe_resolution", "unresolved_requirement_ids", "protected_identities"):
@@ -1481,7 +991,7 @@ def test_architecture_ownership_schema_uses_committed_block_names(allow_question
         }
     }
     contract = build_stage_response_contract("architecture", state, allow_questions=allow_questions)
-    requirement = contract.schema["$defs"]["CircuitRequirement"]
+    requirement = contract.schema["$defs"]["IntentRequirement"]
     ownership = requirement["properties"]["functional_blocks"]
     assert ownership["items"]["enum"] == ["USB_PD_CONTROL", "OUTPUT"]
     assert "PD controller" not in ownership["items"]["enum"]
@@ -1489,7 +999,7 @@ def test_architecture_ownership_schema_uses_committed_block_names(allow_question
     assert "functional_blocks" in requirement["required"]
     state["functional_spec"]["blocks"][0]["name"] = "OTHER_CONTROL"
     other = build_stage_response_contract("architecture", state, allow_questions=allow_questions)
-    assert other.schema["$defs"]["CircuitRequirement"]["properties"]["functional_blocks"]["items"][
+    assert other.schema["$defs"]["IntentRequirement"]["properties"]["functional_blocks"]["items"][
         "enum"
     ] == ["OTHER_CONTROL", "OUTPUT"]
     assert ownership["items"]["enum"] == ["USB_PD_CONTROL", "OUTPUT"]
@@ -1515,65 +1025,6 @@ def test_scoped_recipe_sheet_cannot_excuse_unresolved_typed_work(selection_sheet
     contract = build_stage_response_contract("bom", state, bom_sheet="MAIN", allow_questions=False)
     assert contract.schema["properties"]["groups"]["minItems"] == 1
     assert "groups" in contract.schema["required"]
-
-
-def test_folding_preserves_explicit_membership_and_unimplemented_sheets():
-    architecture = models.Architecture(
-        sheets=[
-            models.Sheet(name=name, stem=name, function=name) for name in ("POWER", "USB", "HEADER")
-        ],
-        power_nets=["VBUS", "GND"],
-        inter_sheet_nets=[
-            models.InterSheetNet(
-                name="DATA",
-                endpoints=[
-                    models.SheetPin(sheet="USB", direction="passive"),
-                    models.SheetPin(sheet="HEADER", direction="passive"),
-                ],
-            )
-        ],
-        requirements=[
-            models.CircuitRequirement(
-                id="usb",
-                sheet="USB",
-                role="power_input",
-                family="usb-c-power-sink",
-                functional_blocks=["USB_INPUT"],
-            ),
-            models.CircuitRequirement(
-                id="header",
-                sheet="HEADER",
-                role="connector",
-                family="header",
-                functional_blocks=["BREAKOUT"],
-            ),
-        ],
-        recipe_selections=[
-            models.RecipeSelection(
-                recipe="usb-c-5v-sink@1",
-                instance="usb",
-                sheets={"power": "POWER"},
-                requirement_ids=["usb"],
-            )
-        ],
-        unresolved_requirement_ids=["header"],
-    )
-    folded = _fold_recipe_covered_sheets(architecture)
-    assert {sheet.name for sheet in folded.sheets} == {"POWER", "HEADER"}
-    assert [(row.sheet, row.functional_blocks) for row in folded.requirements] == [
-        ("POWER", ["USB_INPUT"]),
-        ("HEADER", ["BREAKOUT"]),
-    ]
-    assert {endpoint.sheet for endpoint in folded.inter_sheet_nets[0].endpoints} == {
-        "POWER",
-        "HEADER",
-    }
-    assert folded.unresolved_requirement_ids == ["header"]
-    assert folded.recipe_selections[0].requirement_ids == ["usb"]
-
-    architecture.unresolved_requirement_ids.append("usb")
-    unfolded = _fold_recipe_covered_sheets(architecture)
-    assert {sheet.name for sheet in unfolded.sheets} == {"POWER", "USB", "HEADER"}
 
 
 def test_passive_led_headroom_is_required_before_model_owned_array_bom():

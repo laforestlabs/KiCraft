@@ -164,6 +164,40 @@ def _hub75_intent() -> dict:
     }
 
 
+def _half_usb_pair_intent() -> dict:
+    """The reference intent with the USB_D_N line landing on a test header, not the socket.
+
+    The USB socket therefore receives only `usb_dp`: the one defect is an incomplete data
+    connector. `esp32.usb_dm` is still wired (to the header), so the draft trips exactly
+    that one refusal rather than the required-port gate reporting the same missing signal
+    a second time.
+    """
+    intent = _hub75_intent()
+    intent["sheets"].append(
+        {
+            "name": "USB TEST",
+            "stem": "USB_TEST",
+            "role": "connector",
+            "function": "USB data test points.",
+        }
+    )
+    intent["requirements"].append(
+        {
+            "id": "usb_test",
+            "sheet": "USB TEST",
+            "role": "connector",
+            "family": "pin-header",
+            "parameters": {"rows": 1, "gender": "male"},
+            "functional_blocks": ["USB_C_PD_INPUT"],
+        }
+    )
+    intent["signals"] = [
+        {**row, "to": "usb_test.pin1"} if row["name"] == "USB_D_N" else row
+        for row in intent["signals"]
+    ]
+    return intent
+
+
 def _requirement(architecture, requirement_id: str):
     return next(row for row in architecture.requirements if row.id == requirement_id)
 
@@ -229,6 +263,8 @@ def test_native_usb_pair_gets_a_real_data_connector():
     architecture = derive_architecture(_hub75_intent())
     connector = _requirement(architecture, "esp32_usb_data")
     assert connector.family == "usb-c-usb2-device"
+    # The MCU recipe already expands the 22R MCU-side pair: the socket must not add a second.
+    assert connector.parameters == {"series_resistors": False}
     assert connector.ports == {
         "vbus": "VBUS",
         "gnd": "GND",
@@ -341,7 +377,7 @@ def test_parallel_output_count_comes_from_the_bound_ports():
     intent["signals"] = [
         {"name": f"LED_{n}", "from": f"esp32.parallel_{n}", "to": f"led_bank.pin{n + 1}"}
         for n in range(3)
-    ] + [row for row in intent["signals"] if not row["name"].startswith("HUB75_R")]
+    ] + intent["signals"]
     architecture = derive_architecture(intent)
     mcu = _requirement(architecture, "esp32")
     assert mcu.parameters["parallel_output_count"] == 3
@@ -371,7 +407,7 @@ def test_connector_supply_exposes_the_rail_on_a_pin():
         }
     )
     intent["signals"] = [
-        row if row["name"] != "LED_DATA" else {**row, "to": "led_string.pin1"}
+        row if row["name"] != "LED_DATA" else {**row, "to": ["led.data_in", "led_string.pin1"]}
         for row in intent["signals"]
     ]
     architecture = derive_architecture(intent)
@@ -411,7 +447,7 @@ def test_abbreviated_requirement_reference_resolves_when_unambiguous():
         }
     )
     ambiguous["signals"] = [
-        {**row, "to": ["le.pin1"]} if row["name"] == "HUB75_ADDR_B" else row
+        {**row, "to": ["le.pin1"]} if row["name"] == "SPEAKER_PWM" else row
         for row in ambiguous["signals"]
     ]
     with pytest.raises(ArchitectureIntentError) as excinfo:
@@ -453,7 +489,13 @@ def test_half_a_usb_pair_is_refused_by_name():
     intent["signals"] = [row for row in intent["signals"] if row["name"] != "USB_D_N"]
     with pytest.raises(ArchitectureIntentError) as excinfo:
         derive_architecture(intent)
-    assert [row.code for row in excinfo.value.diagnostics] == ["incomplete_usb_edge"]
+    # One missing line, two refusals: the socket reports the half pair, and the required-port
+    # gate names the MCU pin nothing wires. Both point at the same `usb_dm`.
+    assert [row.code for row in excinfo.value.diagnostics] == [
+        "incomplete_usb_edge",
+        "unbound_required_port",
+    ]
+    assert all("usb_dm" in row.message for row in excinfo.value.diagnostics)
 
 
 def test_port_that_does_not_exist_is_refused_with_the_valid_ones():
@@ -541,7 +583,7 @@ def test_intent_slot_commits_on_the_first_draft_through_the_real_driver(tmp_path
     """The plan's primary endpoint, at unit level: zero corrections, no provider spend.
 
     Drives the real `architecture` stage (contract, prompt, decode, normalize, commit) with the
-    intent-shaped slot the flag asks for, and requires a first-attempt commit.
+    intent-shaped slot, and requires a first-attempt commit.
     """
     from test_stage_driver_retry import _OK_INTENT, _ScriptedClient
 
@@ -557,16 +599,17 @@ def test_intent_slot_commits_on_the_first_draft_through_the_real_driver(tmp_path
         }
 
     client = _ScriptedClient([_reply(json.loads(_OK_INTENT)), _reply(_hub75_intent())])
-    client.s = Settings(api_key="test", architecture_slot="intent")
+    client.s = Settings(api_key="test")
     result = run_session(
         tmp_path, "a USB-C ESP32-S3 HUB75 controller", ["intent", "architecture"], client=client
     )
     architecture = next(row for row in result["results"] if row["stage"] == "architecture")
     assert architecture["commit_ok"] is True, architecture
     assert architecture["attempts"] == 1, architecture
-    # The provider was asked for the intent slot, not the explicit one.
-    assert client.calls[-1]["response_format"]["json_schema"]["name"].startswith(
-        "kicraft_architecture_intent_response"
+    # The provider is asked for the intent-shaped architecture contract.
+    assert (
+        client.calls[-1]["response_format"]["json_schema"]["name"]
+        == "kicraft_architecture_response_v2"
     )
     system_prompt = client.calls[-1]["messages"][0]["content"]
     assert "compiler writes" in system_prompt
@@ -587,13 +630,12 @@ def test_rejected_first_draft_publishes_its_defect_class(tmp_path):
             "cost_usd": 0.0,
         }
 
-    half = _hub75_intent()
-    half["signals"] = [row for row in half["signals"] if row["name"] != "USB_D_N"]
+    half = _half_usb_pair_intent()
     events: list[dict] = []
     client = _ScriptedClient(
         [_reply(json.loads(_OK_INTENT)), _reply(half), _reply(_hub75_intent())]
     )
-    client.s = Settings(api_key="test", architecture_slot="intent")
+    client.s = Settings(api_key="test")
     run_session(
         tmp_path,
         "a USB-C ESP32-S3 HUB75 controller",
@@ -653,7 +695,7 @@ def test_semantic_repair_round_is_counted_apart_from_contract_rejections(tmp_pat
             row["family"] = "mcp1700-3v3"
     events: list[dict] = []
     client = _ScriptedClient([_reply(intent), _reply(weak), _reply(_hub75_intent())])
-    client.s = Settings(api_key="test", architecture_slot="intent")
+    client.s = Settings(api_key="test")
     result = run_session(
         tmp_path,
         "a USB-C ESP32-S3 HUB75 controller",
@@ -706,7 +748,7 @@ def test_missing_external_load_current_parks_with_one_question(tmp_path):
         client = _ScriptedClient(
             [_reply(_hub75_intent()), _reply(_hub75_intent()), _reply(_hub75_intent())]
         )
-        client.s = Settings(api_key="test", architecture_slot="intent")
+        client.s = Settings(api_key="test")
         result = drive_stage(
             client,
             "architecture",

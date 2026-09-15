@@ -72,7 +72,8 @@ _STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
 # still labels it ``failure_kind=invalid_schema`` (both paths raise
 # StageSchemaError), so the diagnostic code is the only trustworthy taxonomy.
 _CONTRACT_CODES = frozenset({
-    "missing_recipe_port", "missing_recipe_port_contract", "unknown_recipe_port_net",
+    "unbound_required_port", "unknown_interface_port", "unsupported_supply_port",
+    "conflicting_port_binding", "multiple_intent_contracts",
     "missing_recipe_requirement", "missing_interface_port", "missing_mcu_requirement",
     "missing_mcu_application_contract", "multiple_recipe_contracts",
     "unsupported_recipe_endpoint", "unsupported_protected_variant",
