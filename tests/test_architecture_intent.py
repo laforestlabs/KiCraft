@@ -295,6 +295,31 @@ def test_signal_restating_a_rail_connection_joins_the_rail():
     assert any("join rail VBUS" in row for row in architecture.assumptions)
 
 
+def test_signal_restating_a_rail_at_the_edge_exposes_the_rail():
+    """The same statement pointed off-board gets a connector carrying that rail, not a crash.
+
+    The canary (`r2r-dac`, 2026-09-15) hit `KeyError: 'logic_power_power_input'` here: this
+    branch opens the edge connector without binding a signal to it, and the close-out loop
+    indexed `bindings[connector_id]` directly.
+    """
+    intent = _hub75_intent()
+    intent["signals"] = [
+        *intent["signals"],
+        {"name": "VBUS_IN", "from": "usb_power.vbus", "to": "edge:POWER_INPUT"},
+    ]
+    architecture = derive_architecture(intent)
+    connector = _requirement(architecture, "usb_power_power_input")
+    assert connector.sheet == "POWER INPUT"
+    assert sorted(connector.ports) == ["pin1", "pin2"]
+    assert connector.ports["pin1"] == "GND"
+    assert connector.ports["pin2"] == "VBUS"
+    # The rail the connector exposes gains this sheet as an endpoint (direction input:
+    # a header that carries the rail out is fed by it).
+    assert ("POWER INPUT", "input") in [
+        (row.sheet, row.direction) for row in _net(architecture, "VBUS").endpoints
+    ]
+
+
 def test_edge_label_naming_a_declared_sheet_puts_the_connector_there():
     intent = _hub75_intent()
     intent["sheets"].append(

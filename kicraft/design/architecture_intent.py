@@ -932,16 +932,18 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 evidence=sorted(rail_names),
             )
             continue
-        if not bindings[connector_id]:
+        # A connector the design named can carry signals, rails, or both: a signal whose source
+        # port already carries a declared rail names the edge for that rail, so "no signal pins"
+        # is not "empty" while there is a rail to expose. Only a connector with neither is empty.
+        pinned = bindings.get(connector_id) or {}
+        if not pinned and not rails:
             _fail(
                 "empty_edge_connector",
                 f"edge {label!r} was named by a signal that could not be resolved to a source port",
             )
             continue
         if mode == "usb":
-            missing = sorted(
-                port for port in _USB_DATA_PORTS if not bindings[connector_id].get(port)
-            )
+            missing = sorted(port for port in _USB_DATA_PORTS if not pinned.get(port))
             if missing:
                 _fail(
                     "incomplete_usb_edge",
@@ -950,7 +952,7 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                         "USB socket needs both usb_dm and usb_dp"
                     ),
                     requirement_id=connector_id,
-                    evidence=sorted(bindings[connector_id]),
+                    evidence=sorted(pinned),
                 )
             continue
         for net in [GND_NET, *dict.fromkeys(rails)]:
