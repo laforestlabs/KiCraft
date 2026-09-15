@@ -77,8 +77,11 @@ _MCU_OWNED_USB_SERIES_RECIPES = frozenset(
 )
 _HEADER_FAMILY = "pin-header"
 # Port a requirement's `supply` rail feeds, in preference order: a logic part its vdd, a motor
-# driver its vm, a regulator its input.
-_SUPPLY_PORTS = ("vdd", "vm", "vin", "input", "vdd_5v")
+# driver its vm, a regulator its input, a socket its vbus.
+_SUPPLY_PORTS = ("vdd", "vm", "vin", "input", "vdd_5v", "vcc", "vbus", "supply")
+# Supply/ground tokens a *qualified* pin name is built from (`vdd_logic`, `vbus_5v`, `gnd_field`).
+_SUPPLY_TOKENS = ("vdd", "vcc", "vbus", "vin", "vm", "supply", "positive")
+_GROUND_TOKENS = ("gnd", "vss", "ground", "negative")
 _USB_VBUS_RAIL_NAMES = ("VBUS", "+5V")
 _APPLICATION_PREFIXES = ("input", "output", "touch", "parallel", "pwm", "adc", "gpio")
 # Capability-prefixed application pins: the recipe does not enumerate them, the allocator does.
@@ -375,6 +378,36 @@ def _direction(catalog: _Catalog, requirement: IntentRequirement, name: str) -> 
     return None
 
 
+def _name_tokens(value: str) -> set[str]:
+    return {token for token in re.split(r"[^a-z0-9]+", value.lower()) if token}
+
+
+def _supply_port(catalog: _Catalog, rail: str) -> str | None:
+    """The port a requirement's declared `supply` rail feeds, or None.
+
+    Exact conventional names first (`vdd`, `vcc`, `vbus`, ...). A design that qualifies the pin
+    (`vdd_logic`, `vbus_5v`) is still naming its supply: take the single qualified candidate, and
+    when several exist let the rail's own name pick (`+5V_LOGIC` -> `vdd_logic`). Anything else
+    stays a refusal — the compiler does not guess which pin takes the rail.
+    """
+    for name in _SUPPLY_PORTS:
+        if name in catalog.directions:
+            return name
+    qualified = sorted(
+        name
+        for name in catalog.directions
+        if any(name == token or name.startswith(f"{token}_") for token in _SUPPLY_TOKENS)
+    )
+    if len(qualified) == 1:
+        return qualified[0]
+    if qualified:
+        rail_tokens = _name_tokens(rail)
+        scored = [name for name in qualified if _name_tokens(name) & rail_tokens]
+        if len(scored) == 1:
+            return scored[0]
+    return None
+
+
 def _catalog(
     requirement: IntentRequirement,
     recipes: tuple[RegisteredRecipe, ...],
@@ -401,8 +434,21 @@ def _catalog(
         )
     if requirement.family in lowerers:
         # A lowerer's `port_keys` are prose placeholders for keyed families (`pin1..pinN`), so its
-        # vocabulary is open: the model names the keys, the lowerer validates them at BOM.
-        return _Catalog(directions={}, source="lowerer", open_ports=True)
+        # vocabulary stays open: the model names the keys, the lowerer validates them at BOM. The
+        # keys a family publishes *concretely* are known though, and a rail or ground binding needs
+        # exactly those (`led-current-resistor` publishes drive/gnd, `switch-input` signal/gnd/vdd),
+        # so take the supply and ground pins from the family instead of refusing a declared supply
+        # the derivation could not place.
+        directions: dict[str, str] = {}
+        for key in lowerers[requirement.family].port_keys:
+            name = key.strip().lower()
+            if not name.isidentifier():
+                continue  # a placeholder vocabulary, not a pin name
+            if name in _GROUND_TOKENS:
+                directions[name] = "bidirectional"
+            elif any(name == token or name.startswith(f"{token}_") for token in _SUPPLY_TOKENS):
+                directions[name] = "input"
+        return _Catalog(directions=directions, source="lowerer", open_ports=True)
     if requirement.declared_ports:
         return _Catalog(
             directions={port.key: port.direction for port in requirement.declared_ports},
@@ -638,13 +684,15 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 evidence=sorted(rail_names),
             )
             continue
-        port = next((name for name in _SUPPLY_PORTS if name in catalog.directions), None)
+        if requirement.role == "connector":
+            # A connector's `supply` is not a port it draws from: it is the rail the connector
+            # exposes to the peer. The pin is chosen at close-out (`pinN`, or the family's own
+            # documented supply pin when the design has not claimed it), never bound here: a
+            # socket's `vbus` is the model's statement about VBUS, not about the supply rail.
+            connector_rails[requirement_id] = row.supply
+            continue
+        port = _supply_port(catalog, row.supply)
         if port is None:
-            if requirement.role == "connector":
-                # A connector's `supply` is not a port it draws from: it is the rail the
-                # connector exposes to the peer. Add the pin (GND joins in `_close_connectors`).
-                connector_rails[requirement_id] = row.supply
-                continue
             _fail(
                 "unsupported_supply_port",
                 (
@@ -1019,7 +1067,9 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
             derived_notes.append(f"{requirement_id}: unused {port} tied to {GND_NET} (derived)")
 
     # A connector closes its pin order with ground and the rails it exposes: the signals the
-    # design bound first, then GND, then any rail the connector declares as its supply.
+    # design bound first, then GND, then the rail the connector declares as its supply — on the
+    # pin the family (or the model's declared interface) documents for it, when the design has
+    # not already claimed that pin for something else.
     for requirement_id, rail in connector_rails.items():
         if not any(bound == GND_NET for bound in bindings.get(requirement_id, {}).values()):
             _bind(
@@ -1029,7 +1079,16 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 "bidirectional",
                 context="connector ground",
             )
-        _bind(requirement_id, _next_pin(requirement_id), rail, "input", context="connector supply")
+        pinned = bindings.get(requirement_id) or {}
+        documented = _supply_port(catalogs[requirement_id], rail)
+        port = documented if documented is not None and documented not in pinned else None
+        _bind(
+            requirement_id,
+            port or _next_pin(requirement_id),
+            rail,
+            "input",
+            context="connector supply",
+        )
 
     # A port the reviewed recipe requires and nothing wired is a missing design statement, not
     # a bookkeeping slip: the part cannot work without it. Name it here, once, instead of

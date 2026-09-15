@@ -840,3 +840,105 @@ def test_intent_slot_rejects_unknown_fields_and_partial_ranges():
     ]
     with pytest.raises(ValueError):
         ArchitectureIntent.model_validate(intent)
+
+
+def test_declared_interface_supply_binds_the_pin_it_names():
+    """A declared interface that names its supply pin `vcc` (not `vdd`) still takes the rail.
+
+    The canary (2026-09-15, `rs485-terminal`, `thermocouple-amp`, `lora-node`) refused four
+    briefs whose interfaces name `vcc`; the rail lookup only knew `vdd`/`vm`/`vin`/`input`.
+    """
+    intent = _hub75_intent()
+    intent["requirements"] = [
+        (
+            {
+                **row,
+                "declared_ports": [
+                    {"key": "vcc", "direction": "power", "function": "5 V input"},
+                    {"key": "gnd", "direction": "power", "function": "ground"},
+                ],
+            }
+            if row["id"] == "usb_power"
+            else row
+        )
+        for row in intent["requirements"]
+    ]
+    intent["requirements"].append(
+        {
+            "id": "xcvr",
+            "sheet": "MCU",
+            "role": "bus_interface",
+            "family": "transceiver",
+            "supply": "VBUS",
+            "declared_ports": [
+                {"key": "vcc", "direction": "power", "function": "logic supply"},
+                {"key": "gnd", "direction": "power", "function": "ground"},
+                {"key": "a", "direction": "bidirectional", "function": "bus A"},
+            ],
+            "functional_blocks": ["ESP32_S3_CONTROLLER"],
+        }
+    )
+    architecture = derive_architecture(intent)
+    assert _requirement(architecture, "xcvr").ports == {"vcc": "VBUS", "gnd": "GND"}
+
+
+def test_lowerer_family_supply_uses_the_keys_the_family_publishes():
+    """A lowerer family publishes its own port keys; a rail binds to the supply one.
+
+    The canary (2026-09-15, `esp32-s3-sensor` and eight more) refused requirements whose family
+    is a lowerer, because the derivation treated every lowerer as an empty open vocabulary.
+    """
+    intent = _hub75_intent()
+    intent["requirements"].append(
+        {
+            "id": "servo_power",
+            "sheet": "HUB75",
+            "role": "connector",
+            "family": "connector-bank",
+            "supply": "VBUS",
+            "functional_blocks": ["HUB75_DISPLAY_INTERFACE"],
+        }
+    )
+    architecture = derive_architecture(intent)
+    ports = _requirement(architecture, "servo_power").ports
+    assert ports["vdd"] == "VBUS"
+    assert ports["gnd"] == "GND"
+
+
+def test_qualified_supply_pin_is_picked_by_the_rail_name():
+    """Two qualified supply pins on one interface: the rail's own name decides.
+
+    The canary (2026-09-15, `rs485-terminal`) refused an isolator declaring `+5V_LOGIC` whose
+    interface names `vdd_logic` and `vdd_field` — neither is a bare `vdd`.
+    """
+    intent = _hub75_intent()
+    intent["requirements"].append(
+        {
+            "id": "logic_reg",
+            "sheet": "POWER",
+            "role": "regulator",
+            "family": "tlv62569-3v3",
+            "supply": "VBUS",
+            "functional_blocks": ["POWER_DISTRIBUTION"],
+        }
+    )
+    intent["power"]["rails"]["+5V_LOGIC"] = {"voltage": 3.3, "from": "logic_reg.output"}
+    intent["requirements"].append(
+        {
+            "id": "isolator",
+            "sheet": "MCU",
+            "role": "bus_interface",
+            "family": "isolator",
+            "supply": "+5V_LOGIC",
+            "declared_ports": [
+                {"key": "vdd_logic", "direction": "power", "function": "logic-side supply"},
+                {"key": "vdd_field", "direction": "power", "function": "field-side supply"},
+                {"key": "logic_tx", "direction": "output", "function": "logic-side transmit"},
+            ],
+            "functional_blocks": ["ESP32_S3_CONTROLLER"],
+        }
+    )
+    architecture = derive_architecture(intent)
+    ports = _requirement(architecture, "isolator").ports
+    assert ports["vdd_logic"] == "+5V_LOGIC"
+    assert "vdd_field" not in ports
