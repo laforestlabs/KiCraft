@@ -1,24 +1,30 @@
 # Architecture first-draft root cause, and the constructive slot (2026-09-14)
 
-**Status: stages 0 and 1 implemented and measured; stages 2 and 3 NOT landed, because the
-pre-registered kill criterion (§6) did not pass.** The intent-shaped slot exists and is
-flag-gated (`KICRAFT_ARCHITECTURE_SLOT=intent`, default `explicit`, so the provider contract is
-unchanged unless an operator asks for the new slot); the telemetry of §6 and the offline replay are
-live; the §5 deletions are untouched. Live spend for the whole exercise: **$1.54 of the $3 ceiling**
-(120 measured runs plus the pilot). See **§10** for the implementation record, the five interleaved
-live blocks and the class-by-class evidence. This supersedes the option catalogue in
-`architecture-contract-correction-ladder.md` §4: those eight options are implemented and measured
-flat, and that file's §8 records why. The measurement infrastructure that file produced
-(`tools/ladder_experiment.py`, the interleaved driver discipline, the saved draft corpus) is what
-this plan needs; no new harness is proposed.
+**Status: stages 0, 1 and 2 implemented and measured; stage 3 (a single name-mapping source) is the
+remaining increment, and §10.10 measured that it has nothing left to collapse.** Stage 2 — the §5
+deletions and the legacy explicit shape — landed at commit `2d5a95d`: −3,076 lines net, ten checks
+deleted against one relocation, and the intent shape is now the only one (the
+`KICRAFT_ARCHITECTURE_SLOT` flag and the `completing`/`addr_d_optional`/`bound_nets` ladder arms are
+gone with it). Live spend for the whole exercise: **$2.82 of the $3 ceiling** (the operator raised
+the ceiling to $4.50 for stage 2's block). See **§10** for the implementation record, the interleaved
+live blocks and the class-by-class evidence, and §10.10 for stage 2's gate. This supersedes the
+option catalogue in `architecture-contract-correction-ladder.md` §4: those eight options are
+implemented and measured flat, and that file's §8 records why. The measurement infrastructure that
+file produced (`tools/ladder_experiment.py`, the interleaved driver discipline, the saved draft
+corpus) is what this plan needs; no new harness is proposed.
 
 **Update (§10.8–§10.9, same day, next-steps plan Tasks A–C):** `first_draft_accepted` conflated a
 reader refusal with a semantic repair, so the kill verdict above was unreadable. With the endpoint
 split, the typed regulator rating, the user-fact question and a fresh N=20-per-board-per-arm block,
 the intent arm's first drafts are contract-clean **22/38 (58 %)** against stock's **0/40**, and it
 commits **35/40** against stock's **14/40** — the next-steps plan's pre-registered rule therefore
-**unlocks stage 2**. The §5 deletions are the next increment and are not started here. Live spend
-now $2.60 of the $3 ceiling.
+**unlocks stage 2**. Live spend then $2.60 of the $3 ceiling.
+
+**Update (§10.10, same day, stage 2):** the §5 deletions are **landed** (`2d5a95d`), the legacy
+explicit shape is gone, and the same protocol — one arm now, because the arm it compared against no
+longer exists — measures the surviving intent shape at **39/40 commits and 35/40 contract-clean
+first drafts** against §1's 35/40 and 22/38, at $0.0055/run. The gate of
+`architecture-stage-2-handoff-2026-09-14.md` §3.3 passes on all three counts.
 
 **One-line summary:** the architecture stage has a **0/100 first-draft acceptance rate** because the
 model is asked to hand-write wiring that the compiler can derive, and every rejected class has so
@@ -700,7 +706,119 @@ Live spend for this plan: $0.166 (the pre-registered block) + $0.891 (the unatte
 **$1.06**, against the next-steps plan's $1.50 allowance and the parent plan's $3 ceiling
 ($2.60 total).
 
-**Next:** stage 2 (the §5 deletions, and the legacy explicit shape dropped) is unlocked and not
-started; `docs/plans/architecture-stage-2-handoff-2026-09-14.md` is the self-contained handoff —
-the deletion list, the pre-registered gate for the change, the class to read after it, and the
-landmines.
+**Next:** stage 2 (§5's deletions and the legacy explicit shape dropped) is unlocked. It is
+implemented and measured in §10.10.
+
+### 10.10 Stage 2: the bookkeeping layer is gone, and intent is the only shape
+
+`docs/plans/architecture-stage-2-handoff-2026-09-14.md` is the plan this section reports:
+its §2 is the work, its §3 is the pre-registered gate. One commit, `2d5a95d` ("Delete the
+architecture bookkeeping layer, and make intent the only shape"), 17 files, **+638 / −3,714 =
+−3,076 lines net**. No shims, no aliases: the explicit reader, schema, spec text and worked
+example are gone with the validators that checked their data.
+
+**What went, and what replaced it.** Ten checks were deleted and one was added:
+
+| deleted check / completion | where it lived | what owns it now |
+|---|---|---|
+| `unknown_recipe_port_net` | `_port_bindings` | the derivation names every net it binds |
+| `missing_recipe_port` (2 sites: `_port_bindings`, the native-USB guard) | `_port_bindings`, `resolve_architecture_recipes` | `unbound_required_port`, raised by `derive_architecture` (see below) |
+| `missing_recipe_port_contract` | `_port_bindings` | derived endpoints |
+| `recipe_signal_in_power_nets` | `_port_bindings` | **kept** — electrical meaning |
+| `native_usb_connector_required`, `native_usb_bus_conflict` | `_complete_native_usb_companions` | `_open_edge` builds the socket per MCU |
+| `architecture_missing_power_endpoint`, `architecture_wrong_signal_direction` | `_architecture` | endpoint bookkeeping the compiler writes |
+| `architecture_duplicate_voltage_rails_unrelated`, `architecture_fragmented_physical_domain` | `_architecture` + `_power_requirement_diagnostics` helpers | nothing: they were prose/shape tests over compiler-owned nets and sheets |
+| sheet aliasing, connector auto-bind, USB-C completion, bound-net completion, hub75 `addr_d`, sheet folding, typed inter-sheet contracts, the net-range representation + dedup, the named-part `exact_part` backfill | `stage_contracts` | `derive_architecture` |
+| the `completing` / `addr_d_optional` / `bound_nets` ladder arms, `KICRAFT_ARCHITECTURE_SLOT`, `ARCHITECTURE_SLOTS`, the `slot`/`ladder` reader parameters, `ResolutionResult.completed_nets`, `complete_native_usb` | config / runtime / resolver | one shape, one set of rules |
+
+**The one check added, stated plainly.** `derive_architecture` now refuses a required recipe port
+that nothing wires (`unbound_required_port`). This is the *moved* `missing_recipe_port`, and the
+move is what keeps the failure at the architecture stage: the deleted diagnostic ran after the
+resolver's bindings, and the same defect otherwise surfaced at BOM expansion as a bare
+`ValueError` from `registry._validated_parameters` ("recipe … port bindings mismatch"), i.e. a
+stage the model cannot answer. Measured on the derived corpus: it fires on 3 of 254 drafts, two of
+which the deleted diagnostic also refused and one of which label matching used to patch silently.
+Net checks: **−9**.
+
+Two moves the deletion made necessary, both verified as behaviour-preserving:
+
+- **The USB series-resistor decision.** `_complete_native_usb_companions` was the only producer of
+  `series_resistors: False` for a socket whose MCU recipe already expands the 22R pair. The
+  derivation sets it now. Verified by expanding the same board on both trees: identical
+  parameters (`{"series_resistors": false}`) and identical parts (J2/R7/R8/U3, no second pair).
+- **The named-part `exact_part` backfill.** Not on §5's list, but provably harmful once the reader
+  no longer rescues its output: it stamped compiler-built edge connectors with the brief's own
+  named parts, so `hub75_interface_power_edge` acquired `exact_part: "HUB75"` and resolved to the
+  HUB75 shift-register recipe. Deleting it is what restored the corpus draft the completions had
+  been papering over (214 → 215 accepted, below).
+
+**Part 2d did not exist as the plan estimated it.** §5 budgeted ~300 lines of duplicated
+port-name/alias tables in `wave_*.py` / `lowering.py`. Measured: those tables are physical
+pinout facts (`_NATIVE_USB_PINS`, `_HUB75_SIGNALS`, `_GPIO_TO_PIN`) and lowerer port vocabularies,
+not signal aliases (deleting one breaks recipe construction for every consumer), and the single
+signal-alias table, `_PORT_ALIASES`, already lives in exactly one place (`resolver.py`) and is
+imported by the derivation. There was nothing to collapse; the dead *consumers* of that table went
+with 2b. Reported rather than replaced with invented deletions.
+
+**Offline replay (free, before any spend).** `tools/ladder_experiment.py --replay-corpus
+/tmp/ladder-exp`, the same 263 first drafts of §10.9, run again at `2d5a95d` and compared
+row-by-row against the baseline replay (produced from `git archive HEAD` in a scratch tree):
+
+| | baseline (`b667c6e`) | stage 2 (`2d5a95d`) |
+|---|---|---|
+| accepted after projection + derivation | 214/256 | **215/254** |
+| drafts the derivation refuses outright | 7 | 9 |
+| residual derived classes | `unrealizable_power_requirement` 40, `architecture_unowned_power_support` 36, `missing_recipe_port` 1, `native_usb_connector_required` 1, `unclassified` 1, `usb_connector_supply_unknown` 4, `incomplete_usb_edge` 1, `conflicting_port_binding` 1 | same families, `missing_recipe_port` / `native_usb_connector_required` / `unclassified` **all 0**, `unrealizable_power_requirement` 39, `architecture_unowned_power_support` 35 |
+
+Four rows changed verdict, all in the intended direction: `b_both-824-…` (a bare `ValueError`
+refusal, now accepted), and three drafts whose refusal moved from a later layer
+(`native_usb_connector_required`, `missing_recipe_port`) or from "the projection cannot express it"
+into the derivation's `unbound_required_port` — the same defect, named once, earlier. No row
+acquired a new defect, and the "as written" column (the legacy canonical drafts read by the
+surviving reader) is reported by the harness as `as-written`, not as an explicit-reader result.
+
+**The pre-registered block (§3.2, adapted: one arm, because 2e deleted the arm it compared
+against).** `repo_head 2d5a95d`, `repo_dirty: false`, `KICRAFT_CONTRACT_LADDER=stock`, 20 runs per
+frozen board interleaved, one run per invocation, `--unattended`, stop if cumulative spend passed
+$1.50. 40 runs, **$0.2190** ($0.0055/run), `2d5a95d` throughout:
+
+| arm | runs | commits | runs reaching the gates | first drafts contract-clean | `first_draft_accepted` | contract rejections | semantic rounds | parks | cost/run |
+|---|---|---|---|---|---|---|---|---|---|
+| intent (stage 2, §1 protocol) | 40 | **39 (97.5 %)** | 40 | **35/40 (87.5 %)** | 6/40 | 6 | 31 | 0 | $0.0055 |
+| intent (§1 baseline, `b667c6e`) | 40 | 35 (88 %) | 38 | 22/38 (58 %) | 3/38 | 19 | 31 | 0 | $0.0063 |
+
+**The gate, applied as written:**
+
+- the intent arm still commits ≥ 33/40 → **39/40** ✓
+- its first-draft contract-clean rate does not fall below 22/38 → **35/40 (87.5 %)** ✓
+- the deleted line count is real, ≥ −1,500 with 0 new validators → **−3,076 net**, 10 checks
+  deleted against 1 relocation (−9 net) ✓
+
+**Stage 2 lands.** The reader refusals that remain are the family §4 named, and they are now
+almost all one class: `conflicting_port_binding` 12 of 22 refusal instances
+(`multiple_intent_contracts` 5, `usb_connector_supply_unknown` 5), and the single non-committing
+run (824's twin, board 825, three attempts: normal → serialization → clean_slate) died on it. The
+semantic rounds are unchanged at 31 and are the two prose statements §10.9 already identified —
+`architecture_external_load_current_unspecified` 30 and `architecture_power_block_as_sheet` 21 —
+repaired in an unattended drive and *asked* in an interactive one (B2), so they remain the
+product-level work, not a slot defect.
+
+**Unit suite.** Every file the change touches is green (the four rewritten files:
+`test_design_recipes.py` 164, `test_stage_driver_prompt_examples.py` 58,
+`test_stage_semantics.py` + `test_stage_driver_retry.py` 154, `test_architecture_intent.py` +
+`test_part_identity.py` 50, plus `test_stage_driver_core_defaults.py`). Tests that pinned the
+deleted layer are deleted; tests whose behaviour survives were rewritten to the intent contract;
+`test_architecture_intent.py` keeps every assertion of the surviving derivation, plus a new one
+for the `series_resistors` invariant and one for `unbound_required_port`. In the full run, 18
+tests fail — the same 18 at the inherited commit (`test_spend_guard` 1, `test_web_*` 17), an
+order/interference cascade in the web/billing simulations; all of those files pass in isolation on
+both trees, and the suite stalls at 97 % on both. They are pre-existing and untouched by this
+change; the cascade is the next thing to fix in the suite, not in the pipeline.
+
+Live spend for the whole exercise: $2.60 (§10.9) + **$0.219** = **$2.82 of the $3 ceiling** (the
+operator raised it to $4.50 for this block).
+
+**Not run:** `deploy/verify-design-canary.sh` (34 briefs, live provider). The operator chose to
+skip it for this release; the honest end-to-end gate for a change this size is still open, and the
+next increment should run it before the park behaviour meets a real user on a brief that never
+states its external load current.

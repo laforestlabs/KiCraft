@@ -191,7 +191,28 @@ that asserts a fact nobody sourced.
    §10.9; update this file's status line; commit; deploy with the operator's approval; report the
    verdict with the numbers.
 
-## 7. Status line to update
+## 7. Status line
 
-**Stage 2: not started.** Unlocked by the §1 measurement; the work is §2, the proof is §3, the
-verdict goes in the parent plan §10.10.
+**Stage 2: landed (2026-09-14/15), commit `2d5a95d`.** The work is §2, the proof is §3, the verdict
+is the parent plan's §10.10. Result: the §5 deletions are done (−3,076 lines net, ten checks deleted
+against one relocated), the intent shape is the only shape, and the pre-registered gate passed on all
+three counts — 39/40 commits, 35/40 contract-clean first drafts (baseline 35/40 and 22/38), 6 reader
+refusals against 19, $0.0055/run, no parks. Deviations from §2, all measured and stated in §10.10:
+
+- **2d had nothing to delete.** There is no duplicated port-name/alias table to collapse: the
+  `wave_*.py` tables are physical pinout facts and `lowering.py` holds lowerer port vocabularies,
+  while the one signal-alias table (`_PORT_ALIASES`) already lives in a single place and is imported
+  by the derivation. The dead consumers went with 2b.
+- **One check was added where ten were deleted** (`unbound_required_port`, the *moved*
+  `missing_recipe_port`): without it the same defect surfaced at BOM expansion as a bare
+  `ValueError`, in a stage the model cannot answer. Net −9 checks.
+- **The named-part `exact_part` backfill** (not on §2a's list) was deleted with the layer: it stamped
+  compiler-built edge connectors with the brief's named parts, and deleting it is what recovered the
+  one corpus draft the completions had been rescuing (214 → 215 accepted offline).
+- The explicit arm that §3.2's loop compared against is gone by construction, so the block ran one
+  arm (40 runs, 20 per board, `--unattended`, `repo_dirty: false`, $0.2190).
+
+Operational note for the operator: `.env` still sets `KICRAFT_ARCHITECTURE_SLOT=intent`; the variable
+is now inert (there is one shape), and the line should be dropped when convenient. The
+`deploy/verify-design-canary.sh` gate was **not** run — the operator chose to skip it for this
+release.
