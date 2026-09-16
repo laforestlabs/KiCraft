@@ -6,6 +6,50 @@ and the exact commands to continue. It does not replace
 `docs/plans/self-eval-2026-09-15-remediation-plan.md`, which remains the authoritative plan
 (milestones 1–5, ranked GAP list, frozen campaign reference).
 
+## 0. Continuation (2026-09-16 evening)
+
+**The worktree is now committed and pushed.** The uncommitted tail described in §1 became:
+
+- `adb7597` — design-acceptance replay wiring, the provider-envelope `oneOf`→`anyOf` rewrite,
+  the pipeline-authored-bank guard, the B_S-1WR3/AMS1117 operating windows, the refreshed
+  fixtures, and six new tests.
+- `a1df360` — `nicegui>=3.17,<4` (the sporadic prune-time HTTP 500 fix plus
+  GHSA-p92q-2755-mhgh). All of it is on `origin/simplify/bom-wiring-pipeline`.
+
+**Corpus status.** `--reference-replay` (mock transcript, no provider spend) now reproduces
+**31/34 rows** (was 20/34 when §4 was written), and exits 0:
+
+- 30 rows committed at the 20:21 worktree state, plus `rs485-terminal` after the fix below.
+- `buck-3a` refuses — the recorded 5 V/TPS5430 `specification_conflict` requires it to refuse;
+  that is acceptance, not a defect.
+- `speaker-crossover` and `usb-pd-trigger` remain the two recorded supply blocks.
+- `--references` now reports **only those two blocks** and nothing else (previously
+  `speaker-crossover` also carried four structural diagnostics).
+
+**Two repairs in this continuation.**
+
+1. `speaker-crossover` was out of contract shape: no `deferred_obligations`, and it carried
+   five deferred board-only obligations inside `obligations`. Trimmed `obligations` to the five
+   reference obligations, added the seven contract-declared deferred ids, and declared the
+   `crossover_hz` range the now-unbounded response check demands (`[2250, 2750]` Hz, the
+   ±10 % first-order window around the recorded 2.50 kHz target, documented in the row's
+   assumptions).
+2. `rs485-terminal` refused at BOM with `missing-requirement-implementation=['field_regulator']`.
+   The cause was an identity mismatch, not row data: `_curated_part_indexes` resolves MPN
+   `AMS1117-5.0` to the easyeda bundle `ams1117-5v0-fixed` (the user-wide fetch cache), so
+   `_normalize_curated_group_identities` rewrites the group to that bundle's symbol/footprint —
+   which no longer equalled the reviewed record's `Regulator_Linear:AMS1117-5.0` /
+   `Package_TO_SOT_SMD:SOT-223-3_TabPin2` (kicad-standard) pair, and `physical_inventory_record`
+   classifies only an exact `(mpn, symbol, footprint)` match. Fixed by vendoring the bundle to
+   `kicraft/parts_library/ams1117-5v0-fixed/` (vendored tier 2 outranks the user-wide cache, so
+   the identity is portable across machines) and naming that same pair in the reviewed record.
+
+**Still open — unchanged from §4–§6.** The two supply blocks remain policy blocks; milestone 4
+(routing / fine-pitch escape / copper custody) still needs the operator's (a)/(b) decision, and
+milestone 5 (three paid campaigns + release) still needs approval and spend. §5 item 2
+("wire replay into reference acceptance") is done — `verify_reference_replay` and the
+`--reference-rows` / `--reference-replay` CLI modes are the landing described there.
+
 ## 1. Deployment state (changed this session)
 
 The production box now runs the improved code:
@@ -23,6 +67,9 @@ documented command remains `./deploy/verify-design-canary.sh` when a real-provid
 **The worktree is NOT committed.** `git status` shows ~97 changed/added paths. The running
 services load this worktree (editable install), so a future `git pull` on this box would
 conflict with or discard it — commit or review before any pull.
+
+> Superseded by §0: that tail is now committed and pushed as `adb7597` and `a1df360`, so a
+> `git pull` is safe again.
 
 ## 2. Why the restart was justified (measurable improvements)
 

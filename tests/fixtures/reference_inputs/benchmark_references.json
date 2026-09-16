@@ -2533,8 +2533,15 @@
                 "Woofer and tweeter are modeled as nominal 8 ohm resistive loads.",
                 "The target is a passive first-order electrical crossover at 2.50 kHz.",
                 "Low-pass uses one 0.50 mH air-core inductor in series; high-pass uses directly parallel 6.8 uF KYET MKP20685J2G362230 and 1.0 uF Vishay MKP1848510924K2 film capacitors (7.8 uF total).",
-                "The three two-wire ports use two Keystone 8734 wire-clamping binding posts each; AMP_RETURN, WOOFER_RETURN, and TWEETER_RETURN are directly common."
-              ]
+                "The three two-wire ports use two Keystone 8734 wire-clamping binding posts each; AMP_RETURN, WOOFER_RETURN, and TWEETER_RETURN are directly common.",
+                "The response obligation is checked against the 2.50 kHz target the assumptions record; the stored components (0.50 mH series inductor into the 8 ohm woofer, 7.8 uF into the 8 ohm tweeter) realize a first-order crossover at 2546 Hz and 2551 Hz, inside the +/-10 % acoustic window [2250, 2750] Hz a first-order loudspeaker crossover is held to."
+              ],
+              "declared_ranges": {
+                "crossover_hz": [
+                  2250.0,
+                  2750.0
+                ]
+              }
             },
             "evidence": [
               {
@@ -2578,44 +2585,17 @@
                 "path": "kicraft/parts_library/dayton-lw18-50/manifest.json"
               }
             ]
-          },
-          "speaker-crossover.pin-footprint-mapping": {
-            "status": "unverified",
-            "facts": {},
-            "evidence": []
-          },
-          "speaker-crossover.complete-required-connections": {
-            "status": "pass",
-            "facts": {
-              "net_paths": {
-                "low_pass": true,
-                "high_pass": true,
-                "common_returns": true
-              }
-            },
-            "evidence": [
-              {
-                "kind": "tool-report",
-                "path": "kicraft/server/stage_contracts.py"
-              }
-            ]
-          },
-          "speaker-crossover.exported-artifacts": {
-            "status": "unverified",
-            "facts": {},
-            "evidence": []
-          },
-          "speaker-crossover.erc": {
-            "status": "unverified",
-            "facts": {},
-            "evidence": []
-          },
-          "speaker-crossover.drc": {
-            "status": "unverified",
-            "facts": {},
-            "evidence": []
           }
-        }
+        },
+        "deferred_obligations": [
+          "speaker-crossover.pin-footprint-mapping",
+          "speaker-crossover.complete-required-connections",
+          "speaker-crossover.exported-artifacts",
+          "speaker-crossover.erc",
+          "speaker-crossover.drc",
+          "speaker-crossover.programming-when-applicable",
+          "speaker-crossover.geometry-when-applicable"
+        ]
       },
       "compiler_input": {
         "bom_candidate": {

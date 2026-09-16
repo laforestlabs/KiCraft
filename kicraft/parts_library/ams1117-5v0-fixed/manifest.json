@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:b9bba83982af44dd8fcc9d785eca4365a06558a9996dade9094b474dd17e25aa",
+  "datasheet_url": "https://lcsc.com/product-detail/Low-Dropout-Regulators-LDO_AMS_AMS1117-5-0_AMS1117-5-0_C6187.html",
+  "description": "Advanced Monolithic Systems AMS1117-5.0",
+  "footprint_name": "SOT-223_L6.5-W3.5-P2.30-LS7.0-BR",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "AMS1117-5.0",
+  "name": "ams1117-5v0-fixed",
+  "provenance": {
+    "added_at": "2026-06-25T03:18:49Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C6187"
+  },
+  "symbol_name": "AMS1117-5.0",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

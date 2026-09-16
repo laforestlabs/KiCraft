@@ -1651,13 +1651,18 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
     ),
     # Advanced Monolithic AMS1117-5.0: the isolated RS-485 node's field-side
     # 5 V regulator.  It is a 5 V part, so it MUST NOT carry the 3.3 V class.
+    # The vendored easyeda bundle is the identity the parts loader resolves for
+    # MPN AMS1117-5.0 (_curated_part_indexes indexes the vendored copy and the
+    # user-wide fetch cache by MPN), so the reviewed record must name that same
+    # symbol/footprint pair: physical_inventory_record only classifies a part
+    # whose (mpn, symbol, footprint) all match the reviewed record exactly.
     ReviewedPart(
         identity="ams1117-5.0",
         family="linear-regulator",
         package="Advanced Monolithic Systems AMS1117-5.0 SOT-223, 3.5 x 6.5 mm, tab is pin 2",
-        bundle="kicad-standard",
-        symbol="Regulator_Linear:AMS1117-5.0",
-        footprint="Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+        bundle="ams1117-5v0-fixed",
+        symbol="ams1117-5v0-fixed:AMS1117-5.0",
+        footprint="ams1117-5v0-fixed:SOT-223_L6.5-W3.5-P2.30-LS7.0-BR",
         physical_features=frozenset(
             {"voltage-regulator", "linear-regulator", "ldo-regulator"}
         ),
