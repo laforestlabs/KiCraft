@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from kicraft.design.lowering import lower_requirement
+from kicraft.design.lowering import lower_requirement, lowerer_contract_diagnostic
 from kicraft.design.models import CircuitRequirement
 from kicraft.server.stage_work_units import (
     StageWorkUnit,
@@ -1106,3 +1106,19 @@ def test_capacitive_touch_lowerer_refuses_unsupported_geometry_or_underlay(
 ):
     with pytest.raises(ValueError):
         lower_requirement(_requirement("capacitive-touch-pad", parameters=parameters, ports=ports))
+
+
+def test_lowerer_refusal_names_missing_ports():
+    """A lowerer-owned family with no declared contacts must say so.
+
+    `screw-terminal@1` owns the family, so a model-authored fallback is refused; the
+    requirement here simply declared no ports. The refusal must name that, not the
+    generic "cannot realize this port/parameter combination", which a draft cannot
+    act on.
+    """
+    diagnostic = lowerer_contract_diagnostic(_requirement("screw-terminal"))
+    assert diagnostic is not None
+    assert "needs this requirement's ports declared" in diagnostic.message
+    # With its contacts bound, the lowerer realizes it and there is no refusal.
+    realized = _requirement("screw-terminal", ports={"pin1": "+3V3", "pin2": "GND"})
+    assert lowerer_contract_diagnostic(realized) is None

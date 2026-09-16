@@ -307,7 +307,16 @@ def lowerer_contract_diagnostic(
     ]
     if failure:
         evidence.append(failure)
-    if unknown_ports:
+    if not requirement.ports and (lowerer.port_directions or lowerer.port_patterns):
+        # The lowerer owns this family, so a model-authored fallback is refused; the
+        # requirement has simply declared no contacts. Say that, rather than the generic
+        # "cannot realize this port/parameter combination" a model cannot act on.
+        message = (
+            f"known lowerer {lowerer_id} needs this requirement's ports declared, but it declares "
+            "none; bind every contact using its published port contract (see evidence) so the "
+            "lowerer can build the part"
+        )
+    elif unknown_ports:
         message = (
             f"known lowerer {lowerer_id} does not support ports {unknown_ports}; "
             "use its published port contract or choose a genuinely model-owned family"
