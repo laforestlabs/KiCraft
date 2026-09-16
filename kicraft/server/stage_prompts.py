@@ -75,8 +75,12 @@ def _stage_extra(stage: str) -> str:
         )
     if stage == "architecture":
         return (
-            "\n- Retain all original typed obligations unchanged, assigning each to "
-            "exactly one implementing requirement through its original_obligation_id. "
+            "\n- Retain all original typed obligations unchanged. The architecture's top-level "
+            "`obligations` list and the requirements' own `obligations` lists must be the SAME "
+            "set: every obligation id appears once at the top level AND on exactly one "
+            "implementing requirement through its `original_obligation_id`. Copying "
+            "intent.obligations to the top level without also attaching each row to the part that "
+            "implements it leaves an unowned obligation and refuses the whole draft. "
             "Use the published finite lowerer interfaces and supported parameters; "
             "a failed supported lowerer is a contract defect, not permission to invent "
             "an alternate interface. For uncurated hardware, declare actual numbered "

@@ -1204,3 +1204,29 @@ def test_declared_port_tie_on_supply_ground_and_strap_pins_is_legal():
         codes = {row.code for row in exc.value.diagnostics}
         assert "declared_port_double_bound" not in codes
         assert "declared_signal_port_tied" not in codes
+
+
+def test_obligation_ownership_refusal_names_the_fix():
+    """An obligation listed only at the top level must be refused with an actionable message.
+
+    The draft has to be repairable from the error alone: name the obligation and the
+    invariant (the top-level `obligations` list is the union of the requirements' own
+    rows), not just "ownership mismatch", which the model cannot act on.
+    """
+    from pydantic import ValidationError
+
+    intent = _hub75_intent()
+    intent["obligations"] = [
+        {
+            "kind": "quantity",
+            "original_obligation_id": "single-sensor-input",
+            "subject": "single-sensor-input",
+            "minimum": 1,
+        }
+    ]
+    with pytest.raises(ValidationError) as excinfo:
+        derive_architecture(intent)
+    message = str(excinfo.value)
+    assert "single-sensor-input" in message
+    assert "listed_at_top_level_only" in message
+    assert "union of the requirements" in message

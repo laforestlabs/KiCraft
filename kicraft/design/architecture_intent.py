@@ -330,12 +330,22 @@ class ArchitectureIntent(BaseModel):
             for requirement in self.requirements
             for row in requirement.obligations
         ]
-        if len(owned) != len(set(owned)):
-            raise ValueError("ArchitectureIntent obligation is owned by more than one requirement")
-        if set(owned) != expected:
+        duplicates = sorted({item for item in owned if owned.count(item) > 1})
+        if duplicates:
             raise ValueError(
-                "ArchitectureIntent obligation ownership mismatch; "
-                f"missing={sorted(expected - set(owned))}, unknown={sorted(set(owned) - expected)}"
+                "ArchitectureIntent obligation is owned by more than one requirement: "
+                f"{duplicates} — keep each obligation on exactly one implementing requirement"
+            )
+        unowned = sorted(expected - set(owned))
+        undeclared = sorted(set(owned) - expected)
+        if unowned or undeclared:
+            raise ValueError(
+                "ArchitectureIntent obligations must be owned exactly once: the top-level "
+                "`obligations` list is the union of the requirements' own `obligations` rows, so "
+                "every row appears in BOTH places. "
+                f"listed_at_top_level_only={unowned} (attach each to the one requirement that "
+                f"implements it), owned_by_a_requirement_only={undeclared} (also add each to the "
+                "top-level `obligations` list)"
             )
         return self
 
