@@ -860,6 +860,43 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 requirement_id=requirement_id,
                 sheet=requirement.sheet,
             )
+        # supply_rail / reference_domain on a declared port name the net this PIN IS TIED
+        # TO (the supply input, the ground pin, or a strap held at that net) — never "the
+        # domain this signal belongs to". A model commonly writes reference_domain='GND' on
+        # every port; that ties each pin to GND, so the pin's own supply/signal binding then
+        # conflicts with a diagnostic that never names the misuse. Refuse it where it is
+        # written so the refusal points at the field.
+        signal_ports = {
+            resolved[0]
+            for item in signals
+            for peer in (item.from_ref, *item.peers())
+            if peer.partition(".")[0] == requirement_id
+            and (resolved := _resolve_port(row, catalog, peer.partition(".")[2])) is not None
+        }
+        for port in row.declared_ports:
+            if port.supply_rail and port.reference_domain:
+                _fail(
+                    "declared_port_double_bound",
+                    f"declared port {port.key!r} of {requirement_id!r} sets both supply_rail "
+                    f"({port.supply_rail!r}) and reference_domain ({port.reference_domain!r}), but a pin "
+                    "is tied to ONE net: keep only the net this pin is actually tied to, and leave "
+                    "reference_domain null on a signal port",
+                    requirement_id=requirement_id,
+                    sheet=requirement.sheet,
+                )
+                continue
+            if port.key in signal_ports and (port.supply_rail or port.reference_domain):
+                _fail(
+                    "declared_signal_port_tied",
+                    f"declared port {port.key!r} of {requirement_id!r} carries a signal but sets "
+                    f"supply_rail={port.supply_rail!r} / reference_domain={port.reference_domain!r}; "
+                    "these name the net this PIN IS TIED TO (a supply input or a ground pin), not the "
+                    "domain a signal is referenced to — leave both null on a signal port, or record a "
+                    "genuinely strapped pin in `ties`",
+                    requirement_id=requirement_id,
+                    sheet=requirement.sheet,
+                )
+                continue
         for port_name, net in sorted(reference_bindings.items()):
             resolved = _resolve_port(row, catalog, port_name)
             if resolved is None:

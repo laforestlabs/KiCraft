@@ -1138,3 +1138,69 @@ def test_approved_uno_template_requires_and_constructs_each_explicit_stacking_ow
     assert set(owned) == {connector.role for connector in template.fixed_connectors}
     assert owned["power"].ports["pin6"] == "GND"
     assert owned["power"].ports["pin1"] == "NC"
+
+
+def _declared_port_misuse_intent(*, vdd_both: bool, sig_reference: bool) -> dict:
+    """The reference intent plus one uncurated part carrying declared ports."""
+    intent = _hub75_intent()
+    intent["sheets"].append(
+        {
+            "name": "SENSOR",
+            "stem": "SENSOR",
+            "role": "analog_block",
+            "function": "Condition a sensor signal.",
+        }
+    )
+    vdd = {"key": "vdd", "direction": "power", "function": "3.3 V supply", "supply_rail": "+3V3"}
+    if vdd_both:
+        vdd["reference_domain"] = "GND"
+    sig = {"key": "sig", "direction": "output", "function": "conditioned output"}
+    if sig_reference:
+        sig["reference_domain"] = "GND"
+    intent["requirements"].append(
+        {
+            "id": "sensor_af",
+            "sheet": "SENSOR",
+            "role": "analog_block",
+            "family": "uncurated-sensor-frontend",
+            "declared_ports": [
+                vdd,
+                {"key": "gnd", "direction": "power", "function": "ground", "reference_domain": "GND"},
+                {"key": "csb", "direction": "input", "function": "chip select, tied high", "supply_rail": "+3V3"},
+                sig,
+            ],
+        }
+    )
+    intent["signals"].append({"name": "SENSOR_SIG", "from": "sensor_af.sig", "to": "edge:SENSOR"})
+    return intent
+
+
+def test_declared_port_tie_misuse_is_refused_by_name():
+    """A pin cannot both carry a signal and be tied to its reference.
+
+    A model commonly writes reference_domain='GND' on every declared port meaning
+    "ground-referenced"; that ties each pin to GND, so the pin's own supply and signal
+    bindings then conflict with a diagnostic that never names the field. The refusal
+    must point at the misuse rather than surface as conflicting_port_binding.
+    """
+    intent = _declared_port_misuse_intent(vdd_both=True, sig_reference=True)
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(intent)
+    codes = {row.code for row in excinfo.value.diagnostics}
+    assert "declared_port_double_bound" in codes
+    assert "declared_signal_port_tied" in codes
+
+
+def test_declared_port_tie_on_supply_ground_and_strap_pins_is_legal():
+    """The field's real meaning: the supply pin, the ground pin, and a strapped pin.
+
+    `vdd` carries its rail, `gnd` is tied to its reference, and `csb` is a signal pin
+    held at the rail — none of these is the misuse, so the guard must not fire.
+    """
+    intent = _declared_port_misuse_intent(vdd_both=False, sig_reference=False)
+    try:
+        derive_architecture(intent)
+    except ArchitectureIntentError as exc:
+        codes = {row.code for row in exc.value.diagnostics}
+        assert "declared_port_double_bound" not in codes
+        assert "declared_signal_port_tied" not in codes

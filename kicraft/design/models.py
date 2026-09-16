@@ -384,10 +384,28 @@ class DeclaredInterfacePort(BaseModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
     direction: InterfacePortDirection
     function: str = Field(min_length=1)
-    # The named rail/reference is a claim about this exact port, never inferred
-    # from a port name. The architecture compiler verifies the binding exists.
-    supply_rail: str | None = None
-    reference_domain: str | None = None
+    # These two name a NET THIS PIN IS TIED TO — the pin that IS the part's supply
+    # input or its reference/ground pin (or a strap pin held at that net). They are a
+    # claim about this exact port, never inferred from a port name, and the compiler
+    # verifies the binding exists. A SIGNAL port carries neither: leaving
+    # `reference_domain` on a signal port ties the pin to the reference, and the
+    # signal's own binding then conflicts.
+    supply_rail: str | None = Field(
+        default=None,
+        description=(
+            "Only on a port that IS this part's supply input for that rail (a 'vdd' "
+            "pin, or a strap pin held at the rail). Leave null on signal ports."
+        ),
+    )
+    reference_domain: str | None = Field(
+        default=None,
+        description=(
+            "Only on a port that IS this part's reference/ground pin tied to that "
+            "zero-volt domain (a 'gnd' pin, or a strap pin held low). Do NOT set it "
+            "on signal ports to mean 'this signal is ground-referenced' — leave signal "
+            "ports null."
+        ),
+    )
 
     # Pin selector as published by the claimed part's symbol/datasheet. It is
     # intentionally separate from the logical key so BOM/wiring can verify a
