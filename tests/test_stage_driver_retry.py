@@ -518,6 +518,55 @@ def test_normalize_questions_carries_and_whitelists_reconcile_target():
         Question.model_validate(q)
 
 
+def test_debug_harness_keeps_production_question_auto_default():
+    """A debug draft must reach the same stage outcome a live run reaches.
+
+    Production auto-defaults a blocking question at intent/functional_spec/
+    architecture/bom: the driver re-prompts the model to apply defaults instead
+    of parking (stage_runtime._AUTO_DEFAULT_QUESTION_STAGES). The debug harness
+    pauses before COMMIT, but if that also disabled auto-default a walkthrough
+    would park on a question kicraft.io never asks — so debug must mirror
+    production while still parking where production genuinely parks (wiring, and
+    any reconcile escalation).
+    """
+    from kicraft.server.stage_runtime import (
+        _auto_default_questions_enabled as auto_enabled,
+        _questions_need_input as parks,
+    )
+    blocking = [{"text": "Which LoRa band?", "blocking": True}]
+
+    def needs_input(stage, *, review_before_commit, auto_default_questions):
+        return parks(
+            blocking,
+            stage,
+            auto_default=auto_enabled(
+                stage,
+                review_before_commit=review_before_commit,
+                auto_default_questions=auto_default_questions,
+            ),
+            answers=None,
+            instruction=None,
+        )
+
+    # Production never parks at architecture.
+    assert not needs_input("architecture", review_before_commit=False, auto_default_questions=None)
+    # A debug draft that mirrors production does not park either, despite pausing
+    # before commit. (Before the fix this returned True and diverged from live.)
+    assert not needs_input("architecture", review_before_commit=True, auto_default_questions=True)
+    # The old review-only behaviour still parks, so the difference stays explicit.
+    assert needs_input("architecture", review_before_commit=True, auto_default_questions=None)
+    # Wiring parks in both paths; a reconcile escalation always stays visible.
+    assert needs_input("wiring", review_before_commit=False, auto_default_questions=None)
+    assert needs_input("wiring", review_before_commit=True, auto_default_questions=True)
+    assert parks(
+        [{"text": "add caps", "blocking": True, "reconcile_target": "bom"}],
+        "architecture",
+        auto_default=True,
+        answers=None,
+        instruction=None,
+    )
+
+
 def test_wiring_prompt_tells_model_to_self_repair_a_bom_shortfall():
     sysmsg = build_system("wiring")
     # wiring must be told to tag a BOM parts shortfall for automatic repair

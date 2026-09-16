@@ -120,6 +120,54 @@ def test_debug_draft_writes_complete_artifact_without_state(tmp_path, monkeypatc
     assert not (tmp_path / ".kicraft" / "state.json").exists()
 
 
+def test_debug_draft_requests_production_question_behaviour(tmp_path, monkeypatch):
+    """debug-draft must keep production's auto-default while pausing before commit.
+
+    Regression guard for the divergence where a debug walkthrough parked on a
+    blocking question that a live kicraft.io run answers itself.
+    """
+    brief = tmp_path / "brief.txt"
+    brief.write_text("A LoRa node.\n", encoding="utf-8")
+    captured: dict = {}
+
+    monkeypatch.setattr(stage_driver, "make_budget_client", lambda budget: object())
+
+    def fake_drive(*args, progress, **kwargs):
+        captured.update(kwargs)
+        return {
+            "stage": "intent",
+            "needs_review": True,
+            "commit_ok": False,
+            "slot": _intent_candidate(),
+            "diagnostics": [],
+            "cost_usd": 0.0,
+            "attempts": 1,
+            "rounds": None,
+            "tool_calls": None,
+            "wall_s": 0.0,
+            "cpu_s": 0.0,
+            "provider_ok": True,
+            "schema_ok": True,
+        }
+
+    monkeypatch.setattr(stage_driver, "drive_stage", fake_drive)
+    rc = stage_driver.main(
+        [
+            "debug-draft",
+            "--workspace",
+            str(tmp_path),
+            "--stage",
+            "intent",
+            "--brief-file",
+            str(brief),
+        ]
+    )
+
+    assert rc == 0
+    assert captured["review_before_commit"] is True  # still pauses before commit
+    assert captured["auto_default_questions"] is True  # but mirrors a live run
+
+
 def test_debug_commit_rejects_stale_basis_without_writes(tmp_path, capsys):
     artifact_path = _pending_artifact(tmp_path, _intent_candidate())
     artifact_before = artifact_path.read_bytes()

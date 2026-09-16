@@ -270,6 +270,11 @@ def _cmd_debug_draft(args) -> int:
             answers=answers or None,
             instruction=instruction,
             review_before_commit=True,
+            # Pause before commit, but keep production's question behaviour: a live
+            # run auto-defaults blocking questions at intent/functional_spec/
+            # architecture/bom instead of parking, and the debug harness must show
+            # the same stage outcome. Wiring (and reconcile escalations) still park.
+            auto_default_questions=True,
         )
     except Exception as exc:  # provider/config/runtime failures become durable evidence
         result = {

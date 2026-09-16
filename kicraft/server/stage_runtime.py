@@ -747,18 +747,39 @@ def _normalize_questions(raw_list, stage: str) -> list[dict]:
     return out[:3]
 
 
+def _auto_default_questions_enabled(
+    stage: str,
+    *,
+    review_before_commit: bool,
+    auto_default_questions: bool | None,
+) -> bool:
+    """Whether the driver may answer a blocking question itself instead of parking.
+
+    Auto-defaulting is the production behaviour: a blocking question at
+    intent/functional_spec/architecture/bom does not stop the run — the driver
+    re-prompts the model to apply sensible defaults and continue. Parking is
+    reserved for wiring (and any ``reconcile_target`` escalation).
+
+    ``review_before_commit`` alone would force ``False``, which is why the debug
+    harness used to diverge from a live run. Callers that must mirror production
+    while still pausing before commit pass ``auto_default_questions=True``.
+    """
+    if auto_default_questions is None:
+        auto_default_questions = not review_before_commit
+    return bool(auto_default_questions) and stage in _AUTO_DEFAULT_QUESTION_STAGES
+
+
 def _questions_need_input(
     questions: list[dict],
     stage: str,
     *,
-    review_before_commit: bool,
+    auto_default: bool,
     answers,
     instruction,
 ) -> bool:
     # BOM reconciliation is a pipeline escalation, not a user decision. It must
     # remain visible even after answers or a noninteractive defaults instruction.
     reconcile = any(question.get("reconcile_target") for question in questions)
-    auto_default = stage in _AUTO_DEFAULT_QUESTION_STAGES and not review_before_commit
     return any(question["blocking"] for question in questions) and (
         reconcile or (not auto_default and not answers and not instruction)
     )
@@ -1905,6 +1926,7 @@ def _drive_work_unit_stage(
     meta_ctx: dict | None,
     review_before_commit: bool,
     attempt_observer: Callable[[dict], None] | None,
+    auto_default: bool,
     t0: float,
     cpu0: float,
 ) -> dict:
@@ -2630,7 +2652,7 @@ def _drive_work_unit_stage(
                 if _questions_need_input(
                     questions,
                     stage,
-                    review_before_commit=review_before_commit,
+                    auto_default=auto_default,
                     answers=answers,
                     instruction=instruction,
                 ):
@@ -3306,12 +3328,21 @@ def drive_stage(
     core_defaults=None,
     *,
     review_before_commit: bool = False,
+    auto_default_questions: bool | None = None,
     attempt_observer: Callable[[dict], None] | None = None,
 ) -> dict:
     run_id = (meta_ctx or {}).get("run_id")
     active_client = client
     t0 = time.monotonic()
     cpu0 = _child_cpu_s()
+    # Production never parks on an intent/functional_spec/architecture/bom question;
+    # it re-prompts the model to default. A debug harness that wants to pause before
+    # commit must pass auto_default_questions=True to keep that behaviour.
+    auto_default = _auto_default_questions_enabled(
+        stage,
+        review_before_commit=review_before_commit,
+        auto_default_questions=auto_default_questions,
+    )
     if progress:
         progress({"kind": "stage_start", "stage": stage, "model": _client_model(client)})
 
@@ -3440,6 +3471,7 @@ def drive_stage(
                 meta_ctx=meta_ctx,
                 review_before_commit=review_before_commit,
                 attempt_observer=attempt_observer,
+                auto_default=auto_default,
                 t0=t0,
                 cpu0=cpu0,
             )
@@ -4291,7 +4323,7 @@ def drive_stage(
             if _questions_need_input(
                 qs,
                 stage,
-                review_before_commit=review_before_commit,
+                auto_default=auto_default,
                 answers=answers,
                 instruction=instruction,
             ):
@@ -4485,7 +4517,7 @@ def drive_stage(
                     if _questions_need_input(
                         qs,
                         stage,
-                        review_before_commit=review_before_commit,
+                        auto_default=auto_default,
                         answers=answers,
                         instruction=instruction,
                     ):
