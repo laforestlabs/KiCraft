@@ -32,7 +32,12 @@ tuning = [
 ]
 server = [
     "requests>=2.31",
-    "nicegui>=1.4",
+    # >=3.17: 3.15.0 fixed prune_user_storage() deleting a session's user storage
+    # mid-request (sporadic HTTP 500 on page loads; nicegui #6145/#6146). 3.17.0 is
+    # also the only release patched for GHSA-p92q-2755-mhgh: ui.download()'s
+    # single-use routes were derived from the server-side file path, which the
+    # project-zip buttons hand out from predictable paths.
+    "nicegui>=3.17,<4",
     "stripe>=7",
     # PCB-to-PNG previews (kicraft/render/pcb_renderer.py): cairosvg is the
     # SVG rasterizer fallback when ImageMagick 7 (`magick`) is not installed
