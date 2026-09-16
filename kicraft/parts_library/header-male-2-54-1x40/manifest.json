@@ -4,7 +4,7 @@
   "description": "BOOMELE 2.54mm 1x40P male pin header, straight, through-hole. Standard breadboard/perfboard interconnect. Cut to desired length.",
   "footprint_name": "HDR-TH_40P-P2.54-V-M-1",
   "kicad_version_min": "9.0.0",
-  "maturity": "production",
+  "maturity": "reviewed",
   "mpn": "2.54-1*40P\u76f4\u9488",
   "name": "header-male-2-54-1x40",
   "provenance": {
@@ -24,7 +24,9 @@
     "2.54mm",
     "male",
     "1x40",
-    "tht"
+    "tht",
+    "portable",
+    "reviewed"
   ],
   "version": "0.1.0",
   "watch_out_for": "Breakaway type \u2014 cut to desired pin count. 40 pins total. Mates with 2.54mm female header/socket. Gold flash plating. Rated 3A per pin."

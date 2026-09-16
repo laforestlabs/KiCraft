@@ -1,0 +1,27 @@
+{
+  "content_hash": "sha256:7da072a1a56ef8279631fccf0c9bdbf646aa0e728ba01c5195da7016e69b0b4e",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C3008369.pdf",
+  "description": "UMW(\u53cb\u53f0\u534a\u5bfc\u4f53) PC817C-S",
+  "footprint_name": "SOP-4_L6.5-W4.6-P2.54-LS10.3-TL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "PC817C-S",
+  "name": "pc817c-s",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored-from-home-after-pin-mapping-review",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C3008369"
+  },
+  "symbol_name": "PC817C-S",
+  "tags": [
+    "portable",
+    "reviewed"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": null
+}

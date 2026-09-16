@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:46ab73daff7e379153f77cc3d9f68863ad24b4e842bdc135d12cea66f6bdb8d8",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C6916225.pdf",
+  "description": "EKINGLUX E6C0805WWAY1UDA(1.1T M) — warm-white 0805 SMD indicator LED, 2800–3200 K, 3.0 V at 20 mA, 120° viewing angle.",
+  "footprint_name": "LED0805-RD_WHITE",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "E6C0805WWAY1UDA(1.1T M)",
+  "name": "e6c0805wway1uda-1-1t-m",
+  "provenance": {
+    "added_at": "2026-09-16T03:46:31Z",
+    "kicad_version": "9.0.0",
+    "source": "EasyEDA import from LCSC C6916225; package, pin 1 cathode/pin 2 anode, 2800–3200 K temperature, 3 V/20 mA ratings reviewed against the LCSC product page and attached datasheet.",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C6916225"
+  },
+  "symbol_name": "E6C0805WWAY1UDA",
+  "tags": [
+    "warm-white",
+    "led",
+    "0805",
+    "indicator"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "This is a polarity-sensitive LED: footprint pad 1 is cathode and pad 2 is anode. The reviewed color-temperature bin is 2800–3200 K; do not substitute a generic white LED when warm white is required."
+}

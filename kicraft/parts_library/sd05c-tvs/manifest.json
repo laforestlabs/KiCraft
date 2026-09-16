@@ -1,0 +1,27 @@
+{
+  "content_hash": "sha256:7e2b2d185814af7c92ad97ed49979f917ad68eaa992d8b048579fc0e1de73e8a",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C1884584.pdf",
+  "description": "DOWO(\u4e1c\u6c83) SD05C",
+  "footprint_name": "SOD-323_L1.7-W1.3-LS2.5-BI",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "SD05C",
+  "name": "sd05c-tvs",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored-from-home-after-pin-mapping-review",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C1884584"
+  },
+  "symbol_name": "SD05C_C1884584",
+  "tags": [
+    "portable",
+    "reviewed"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": null
+}

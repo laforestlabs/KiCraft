@@ -1,0 +1,33 @@
+{
+  "content_hash": "sha256:590fb1a14f997c74fd33a60bb321e7744ac8af9b8c61b3f0c6e1696212e64bc4",
+  "datasheet_url": "https://search.kemet.com/download/specsheet/C0805C103J5GACTU",
+  "description": "KEMET C0805C103J5GACTU: 10 nF, \u00b15%, 50 V C0G/NP0 MLCC in 0805 (2012 metric).",
+  "footprint_name": "C_0805_2012Metric",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "C0805C103J5GACTU",
+  "name": "c0805c103j5gactu",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "reviewed-kemet-datasheet-and-kicad-ipc-footprint",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2167597"
+  },
+  "symbol_name": "C0805C103J5GACTU",
+  "tags": [
+    "capacitor",
+    "mlcc",
+    "c0g",
+    "np0",
+    "10nf",
+    "50v",
+    "0805",
+    "timing"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": "C0G/NP0 dielectric is selected for stable RC timing; use the exact 10 nF \u00b15% 50 V part, not a generic X7R replacement."
+}

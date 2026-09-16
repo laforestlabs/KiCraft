@@ -73,6 +73,12 @@ class PartManifest(BaseModel):
     footprint_name: str  # footprint name inside <name>.pretty/ (without .kicad_mod)
     kicad_version_min: str
     provenance: Provenance
+    # Set to "unavailable" only when a bundle's real 3D body cannot be sourced
+    # anywhere (no bundle-local model, no equivalent installed KiCad model).  The
+    # 3D-reference guard then expects NO model stanza rather than a fake path, so
+    # the gap stays visible instead of rendering a wrong body.  Never changes
+    # content_hash (which excludes manifest.json).
+    three_d_model: str | None = None
 
     @field_validator("name")
     @classmethod

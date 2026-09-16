@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-09-16",
+  "selected_module": {
+    "manufacturer": "Guangdong Ruixin Electronics Technology Co., Ltd. (ReSine PS)",
+    "mpn": "WRA2412S-3WR2",
+    "lcsc_part": "C20617261",
+    "manufacturer_datasheet_url": "https://www.lcsc.com/datasheet/C20617261.pdf",
+    "jlc_product_url": "https://jlcpcb.com/partdetail/ReSinePS-WRA2412S3WR2/C20617261",
+    "lcsc_product_url": "https://www.lcsc.com/product-detail/Isolated-Power-Modules_ReSine-PS-WRA2412S-3WR2_C20617261.html",
+    "library": {
+      "symbol": "WRA2412S-3WR2",
+      "footprint": "Converter_DCDC_ReSine_WRAxxxxS-3WR2_THT",
+      "asset_path": "kicraft/parts_library/wra2412s-3wr2"
+    },
+    "pinout": {
+      "1": "GND (input return)",
+      "2": "VIN (18-36 VDC)",
+      "3": "CTRL (leave open/high impedance for normal enabled operation)",
+      "5": "NC (must not connect to any external circuit)",
+      "6": "+VO (+12 V output)",
+      "7": "0V (isolated output common)",
+      "8": "-VO (-12 V output)"
+    },
+    "limits": {
+      "input_vdc": {"minimum": 18, "nominal": 24, "maximum": 36, "one_second_surge_maximum": 50},
+      "output_vdc_per_rail": {"positive": 12, "negative": -12},
+      "output_current_a_per_rail": {"minimum": 0.0125, "maximum": 0.125},
+      "output_power_w_maximum": 3,
+      "max_capacitance_uf_per_output": 470,
+      "typical_efficiency_percent_full_load": 83,
+      "input_output_isolation_test_vdc": 1500,
+      "switching_frequency_khz_typical": 250,
+      "package_mm": {"length": 22, "width": 9.5, "height": 12},
+      "temperature_c": {"minimum": -40, "maximum": 105}
+    },
+    "source_notes": "The ReSine datasheet is the manufacturer document linked by the C20617261 JLC product listing and identifies Guangdong Ruixin Electronics Technology Co., Ltd. / resineps.com. WRA2412S-3WR2 is a vendor-colliding MPN: do not substitute a MORNSUN or other vendor's same-named module. The JLC attribute card advertises 3 kV isolation while the exact ReSine datasheet specifies 1.5 kVDC; all design evidence uses the datasheet's conservative 1.5 kVDC value."
+  },
+  "approved_design_assumption": {
+    "continuous_load_a_per_rail": 0.1,
+    "load_is_balanced": true,
+    "rationale": "The brief specifies rails but no load. An equal 100 mA on each rail is explicit, exceeds the 12.5 mA minimum-load requirement, and remains below the 125 mA rating. Equal loading avoids relying on undocumented asymmetric dual-output behavior.",
+    "calculation": {
+      "positive_rail_w": "12 V * 0.100 A = 1.20 W",
+      "negative_rail_w": "12 V * 0.100 A = 1.20 W",
+      "total_output_w": "1.20 W + 1.20 W = 2.40 W",
+      "power_utilization": "2.40 W / 3.00 W = 80%",
+      "power_margin_w": "3.00 W - 2.40 W = 0.60 W",
+      "current_margin_per_rail": "125 mA - 100 mA = 25 mA"
+    }
+  },
+  "constructive_circuit": {
+    "isolation_policy": "VIN_RET (pin 1) and ISO_COM (pin 7) are distinct nets. No input/output bond is fitted; a system bond, if required, is a separate reviewed requirement.",
+    "input_path": [
+      "24V_IN -> F1 slow-blow input fuse -> L_IN 10 uH -> U1 pin 2 (VIN)",
+      "U1 pin 1 (GND) -> VIN_RET",
+      "CIN1 10 uF / 100 V and CIN2 1 uF / 100 V connect directly from the post-L_IN VIN node to VIN_RET."
+    ],
+    "output_paths": [
+      "U1 pin 6 (+VO) -> CS_POS 22 uF / 50 V to ISO_COM -> L_POS 10 uH -> +12V_OUT. COUT_POS 100 uF / 50 V connects +12V_OUT to ISO_COM.",
+      "U1 pin 8 (-VO) -> CS_NEG 22 uF / 50 V to ISO_COM -> L_NEG 10 uH -> -12V_OUT. COUT_NEG 100 uF / 50 V connects -12V_OUT to ISO_COM.",
+      "U1 pin 7 (0V) -> ISO_COM -> J_OUT pin 2; +12V_OUT -> J_OUT pin 1; -12V_OUT -> J_OUT pin 3."
+    ],
+    "unconnected_pins": {
+      "3": "CTRL: open/high impedance enables the converter",
+      "5": "NC: manufacturer explicitly prohibits an external connection"
+    },
+    "manufacturer_value_check": {
+      "source": "ReSine WRA/BXXS-3WR2 datasheet, design reference Fig. 2",
+      "input_24v": "Cin1 10 uF, Cin2 1 uF, Lin 4.7-12 uH",
+      "dual_output": "Cs 10-22 uF, Lout 2.2-10 uH, Cout 100 uF typical",
+      "selected": "Cin1 10 uF, Cin2 1 uF, Lin 10 uH, Cs 22 uF each rail, Lout 10 uH each rail, Cout 100 uF each rail",
+      "per_rail_capacitance_uf": "22 + 100 = 122 uF < 470 uF maximum"
+    },
+    "supporting_parts": [
+      {
+        "refs": ["F1"],
+        "mpn": "37205000001",
+        "manufacturer": "Littelfuse",
+        "lcsc_part": "C142835",
+        "function": "500 mA, 250 V slow-blow input fuse",
+        "symbol": "Device:Fuse",
+        "footprint": "Fuse:Fuse_Littelfuse_372_D8.50mm",
+        "jlc_stock_at_review": 1415,
+        "lcsc_retail_stock_at_review": 1555
+      },
+      {
+        "refs": ["L_IN", "L_POS", "L_NEG"],
+        "mpn": "CD54-100M 10UH",
+        "manufacturer": "DMBJ",
+        "lcsc_part": "C2826662",
+        "function": "10 uH, 1.44 A, 100 mOhm power inductor; within both manufacturer Lin and Lout ranges",
+        "symbol": "cd54-100m-inductor:CD54-100M",
+        "footprint": "cd54-100m-inductor:IND-SMD_L5.8-W5.2",
+        "jlc_stock_at_review": 5090,
+        "lcsc_retail_stock_at_review": 4500
+      },
+      {
+        "refs": ["CIN1"],
+        "mpn": "RVT2A100M0607 10UF 100V",
+        "manufacturer": "DMBJ",
+        "lcsc_part": "C970659",
+        "function": "10 uF, 100 V input bulk capacitor",
+        "symbol": "Device:C_Polarized",
+        "footprint": "Capacitor_SMD:CP_Elec_6.3x7.7",
+        "jlc_stock_at_review": 391,
+        "lcsc_retail_stock_at_review": 390
+      },
+      {
+        "refs": ["CIN2"],
+        "mpn": "CC0805KKX7R0BB105",
+        "manufacturer": "YAGEO",
+        "lcsc_part": "C5370002",
+        "function": "1 uF, 100 V X7R input bypass capacitor",
+        "symbol": "Device:C",
+        "footprint": "Capacitor_SMD:C_0805_2012Metric",
+        "jlc_stock_at_review": 508436,
+        "lcsc_retail_stock_at_review": 466980
+      },
+      {
+        "refs": ["CS_POS", "CS_NEG"],
+        "mpn": "RVT1H220M0605 22UF 50V",
+        "manufacturer": "DMBJ",
+        "lcsc_part": "C970664",
+        "function": "22 uF, 50 V output-side ripple capacitor",
+        "symbol": "Device:C_Polarized",
+        "footprint": "Capacitor_SMD:CP_Elec_6.3x5.4",
+        "jlc_stock_at_review": 9830,
+        "lcsc_retail_stock_at_review": 13740
+      },
+      {
+        "refs": ["COUT_POS", "COUT_NEG"],
+        "mpn": "JBLH2101M050C120RLM 100UF 50V",
+        "manufacturer": "DMBJ",
+        "lcsc_part": "C19270686",
+        "function": "100 uF, 50 V output bulk capacitor",
+        "symbol": "Device:C_Polarized",
+        "footprint": "Capacitor_THT:CP_Radial_D6.3mm_P2.50mm",
+        "jlc_stock_at_review": 3802,
+        "lcsc_retail_stock_at_review": 3170
+      }
+    ],
+    "output_connector": {
+      "mpn": "WJ126V-5.0-3P-14-00A",
+      "library_asset": "screw-terminal-5mm-3p",
+      "symbol": "WJ126V-5.0-3P",
+      "footprint": "CONN-TH_3P-P5.00_WJ126V-5.0-3P",
+      "lcsc_part": "C8401",
+      "ratings": {"voltage_v": 300, "current_a": 16},
+      "assignment": {"1": "+12V_OUT", "2": "ISO_COM", "3": "-12V_OUT"}
+    }
+  },
+  "fabrication_sourcing_status": {
+    "status": "qualified-at-review-time",
+    "checked_at": "2026-09-16T01:52:13Z",
+    "jlc_assembly": {"part": "C20617261", "stock": 332, "minimum_order": 1, "source": "https://jlcpcb.com/partdetail/ReSinePS-WRA2412S3WR2/C20617261"},
+    "lcsc_retail": {"part": "C20617261", "stock": 327, "minimum_buy": 1, "checked_at": "2026-09-16T01:45:28Z", "source": "https://www.lcsc.com/product-detail/Isolated-Power-Modules_ReSine-PS-WRA2412S-3WR2_C20617261.html"},
+    "policy": "The assembly and retail inventories both exceed the 100-unit production stock floor. Recheck dynamic stock at stage-commit time."
+  },
+  "deterministic_verification": [
+    "python -m pytest tests/test_part_identity.py -q",
+    "python -m pytest tests/test_design_lowering.py -q",
+    "python -m pytest tests/test_electrical_invariants.py -q",
+    "python -m pytest tests/test_architecture_intent.py -q",
+    "python -m kicraft.design.cli_app validate-part kicraft/parts_library/wra2412s-3wr2",
+    "Run the #18 reference input through architecture, recipe/lowering, BOM/wiring, and stage-commit. Inspect its net graph for U1.1->U1.2 input path, U1.6 -> CS_POS -> L_POS -> +12V_OUT -> J_OUT.1, U1.8 -> CS_NEG -> L_NEG -> -12V_OUT -> J_OUT.3, and U1.7 -> ISO_COM -> J_OUT.2. Assert U1.1/VIN_RET has no direct path to U1.7/ISO_COM, pins 3 and 5 are explicit no-connects, each rail has 122 uF < 470 uF output capacitance, and the exact ReSine C20617261 module and WJ126V-5.0-3P terminal are in the BOM. Then run normal ERC, DRC, synthesis, and artifact checks."
+  ]
+}

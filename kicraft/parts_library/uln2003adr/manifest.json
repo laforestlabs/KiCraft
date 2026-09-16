@@ -1,0 +1,27 @@
+{
+  "content_hash": "sha256:2fdd60b2e0804854781fb93f1464dcf3b65495a3a4beddf836624712f137d165",
+  "datasheet_url": "https://lcsc.com/product-detail/High-CurrentDrivers_TI_ULN2003ADR_ULN2003ADR_C7512.html",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) ULN2003ADR",
+  "footprint_name": "SOIC-16_L9.9-W3.9-P1.27-LS6.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "ULN2003ADR",
+  "name": "uln2003adr",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored-from-home-after-pin-mapping-review",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C7512"
+  },
+  "symbol_name": "ULN2003ADR",
+  "tags": [
+    "portable",
+    "reviewed"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": null
+}

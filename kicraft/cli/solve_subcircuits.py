@@ -173,7 +173,10 @@ from kicraft.autoplacer.brain.types import (
 )
 from kicraft.autoplacer.config import DEFAULT_CONFIG, load_project_config
 from kicraft.autoplacer.hardware.adapter import KiCadAdapter, StampSubprocessError
-from kicraft.autoplacer.kicad_routing_tools import KicadRoutingToolsUnavailableError
+from kicraft.autoplacer.kicad_routing_tools import (
+    KicadRoutingToolsTimeoutError,
+    KicadRoutingToolsUnavailableError,
+)
 from kicraft.cli._leaf_replication import materialize_sibling, plan_leaf_replication
 
 
@@ -753,6 +756,36 @@ def _solve_one_round(
             # Missing KRT is a host misconfiguration, not a per-leaf failure.
             # Surface one clear hard failure instead of masking every leaf.
             raise
+        except KicadRoutingToolsTimeoutError as exc:
+            # The router was killed at its wall-clock deadline. That is a
+            # budget statement, not a verdict on the board: keep it loud and
+            # distinct so the round record names the real cause and the outer
+            # search does not read a slow leaf as structurally unroutable.
+            print(f"  WARNING: router deadline in round {round_index}: {exc}")
+            routing = {
+                "enabled": True,
+                "skipped": True,
+                "reason": "routing_timeout",
+                "router": "kicad-routing-tools",
+                "traces": 0,
+                "vias": 0,
+                "total_length_mm": 0.0,
+                "round_board_illegal_pre_stamp": "",
+                "round_board_pre_route": "",
+                "round_board_routed": "",
+                "routed_internal_nets": [],
+                "failed_internal_nets": list(sorted(extraction.internal_net_names)),
+                "_trace_segments": [],
+                "_via_objects": [],
+                "validation": {
+                    "accepted": False,
+                    "rejected": True,
+                    "rejection_stage": "routing_timeout",
+                    "rejection_reasons": [str(exc)],
+                },
+                "failed": True,
+            }
+            round_timing["route_local_subcircuit_total_s"] = 0.0
         except Exception as exc:
             print(f"  WARNING: unexpected routing error in round {round_index}: {exc}")
             routing = {

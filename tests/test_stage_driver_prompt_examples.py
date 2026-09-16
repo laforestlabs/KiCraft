@@ -70,6 +70,35 @@ def test_functional_spec_example_validates_against_the_model_contract():
     models.FunctionalSpec.model_validate(json.loads(_WORKED_EXAMPLES["functional_spec"]))
 
 
+@pytest.mark.parametrize("replacement", [None, "header"])
+def test_original_physical_obligation_cannot_be_dropped_or_substituted(replacement):
+    from kicraft.design.cli_app import _apply_slot
+    from kicraft.server.stage_contracts import StageSchemaError
+
+    original = {
+        "kind": "physical",
+        "original_obligation_id": "input_bnc",
+        "component_class": "bnc-connector",
+    }
+    intent = models.IntentSlot(goal="A BNC input", obligations=[original])
+    state = models.ConversationState(intent=intent)
+    before = state.model_dump()
+    spec = json.loads(_WORKED_EXAMPLES["functional_spec"])
+    spec["obligations"] = (
+        [] if replacement is None else [{**original, "component_class": replacement}]
+    )
+    with pytest.raises(StageSchemaError) as rejected:
+        _normalize_stage_response("functional_spec", spec, {"intent": intent.model_dump()})
+    assert rejected.value.diagnostic["code"] == "source_obligation_not_retained"
+    assert rejected.value.diagnostic["evidence"] == [original]
+    with pytest.raises(StageSchemaError):
+        _apply_slot(state, "functional_spec", spec, project_stem=None)
+    assert state.model_dump() == before
+    spec["obligations"] = [original]
+    _apply_slot(state, "functional_spec", spec, project_stem=None)
+    assert state.functional_spec.obligations[0].component_class == "bnc-connector"
+
+
 def test_architecture_example_validates_and_carries_a_requirement():
     """The intent example the model is shown must derive into the real slot model."""
     slot = json.loads(_WORKED_EXAMPLES["architecture"])
@@ -742,22 +771,34 @@ def test_architecture_requires_switch_implementation_and_finite_actuation(
     assert evidence["missing"] is missing
 
 
-def test_parameter_validation_preserves_unknown_families_and_unproven_exact_parts(
+def test_unknown_family_remains_model_owned_but_unproven_known_lowerer_is_rejected(
     round11_switch_contract,
 ):
-    from kicraft.design.lowering import lower_requirement
+    from kicraft.server.stage_contracts import StageSchemaError
 
     payload = round11_switch_contract
     unknown, exact = payload["requirements"]
     unknown["family"] = "custom-switch"
     exact["parameters"]["pull_policy"] = "external"
     exact["exact_part"] = "PTS645SL50SMTR92 LFS"
+    with pytest.raises(StageSchemaError) as rejected:
+        _normalize_stage_response("architecture", payload, {})
+    diagnostic = rejected.value.diagnostic
+    rows = (
+        diagnostic["evidence"]
+        if diagnostic["code"] == "multiple_recipe_contracts"
+        else [diagnostic]
+    )
+    assert any(
+        row["code"] == "unsupported_lowerer_contract"
+        and row["requirement_id"] == "req_reset_button"
+        for row in rows
+    )
+    payload["requirements"] = [unknown]
     canonical, _ = _normalize_stage_response("architecture", payload, {})
-    assert set(canonical["unresolved_requirement_ids"]) == {"req_boot_button", "req_reset_button"}
+    assert set(canonical["unresolved_requirement_ids"]) == {"req_boot_button"}
     by_id = {row["id"]: row for row in canonical["requirements"]}
     assert by_id["req_boot_button"]["parameters"]["pull_policy"] == "pull_down"
-    assert by_id["req_reset_button"]["exact_part"] == "PTS645SL50SMTR92 LFS"
-    assert lower_requirement(by_id["req_reset_button"]) is None
 
 
 def test_saved_breakout_same_sheet_data_bindings_remain_local(round10_breakout_contract):
@@ -858,6 +899,19 @@ def test_model_owned_pd_controller_matches_typed_family_by_real_identity():
                 "role": "user_io",
             }
         ],
+    )
+    requirement = {"id": "negotiation", "family": "usb-pd-trigger", "role": "power_input"}
+    assert not _requirement_owns_protected_group(
+        group.model_copy(update={"mpn": "LM358"}), [requirement]
+    )
+    assert not _requirement_owns_protected_group(
+        group.model_copy(update={
+            "id": "usb_pd_trigger_negotiation",
+            "mpn": "LM358",
+            "value": "LM358",
+            "symbol": "Amplifier_Operational:LM358",
+        }),
+        [requirement],
     )
 
 
@@ -1041,13 +1095,10 @@ def test_passive_led_headroom_is_required_before_model_owned_array_bom():
                 "role": "driver",
                 "family": "led-current-resistor",
                 "parameters": {"rail_voltage": 3.0, "led_vf": 3.0, "target_current_ma": 1},
-                "ports": {
-                    "drive": "LED1",
-                    "led1": "LED1",
-                    "led2": "LED2",
-                    "gnd": "GND",
-                    "vdd": "VBAT",
-                },
+                # The published led-current-resistor contract owns exactly
+                # `drive` and `gnd`; an example that invents per-LED or rail
+                # ports is refused by the boundary, so it declares only these.
+                "ports": {"drive": "LED1", "gnd": "GND"},
             }
         ],
     }

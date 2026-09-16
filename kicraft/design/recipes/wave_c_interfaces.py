@@ -27,6 +27,7 @@ def _part(
     *,
     quantity: int = 1,
     mpn: str | None = None,
+    datasheet: str | None = None,
 ) -> Group:
     return Group(
         role=role,
@@ -37,6 +38,7 @@ def _part(
         sheet_role="interface",
         quantity=quantity,
         mpn=mpn,
+        datasheet=datasheet,
     )
 
 
@@ -307,6 +309,7 @@ A4988_STEPPER = _recipe(
         Port(name="gnd", direction="power"),
         Port(name="step", direction="input"),
         Port(name="dir", direction="input"),
+        *(Port(name=name, direction="input", allow_ground=True) for name in ("ms1", "ms2", "ms3")),
         *(Port(name=name, direction="output") for name in ("out1a", "out1b", "out2a", "out2b")),
     ),
     internal=("cp1", "cp2", "vcp", "vreg", "sense1", "sense2", "ref", "reset_sleep"),
@@ -320,9 +323,19 @@ A4988_STEPPER = _recipe(
             mpn="A4988SETTR-T",
         ),
         _passive("charge_pump", "C", "100nF", 2),
-        _passive("vreg_cap", "C", "1uF"),
-        _passive("vm_bulk", "C", "100uF"),
-        _passive("sense", "R", "0.1R", 2),
+        _passive("vreg_cap", "C", "220nF"),
+        _passive("vdd_cap", "C", "220nF"),
+        _part(
+            "vm_bulk", "C", "100uF 50V", "Device:C_Polarized",
+            "Capacitor_THT:CP_Radial_D6.3mm_P2.50mm",
+            mpn="JBLH2101M050C120RLM 100UF 50V",
+            datasheet="https://www.lcsc.com/datasheet/C19270686.pdf",
+        ),
+        _part(
+            "sense", "R", "0.1R", "Device:R",
+            "Resistor_SMD:R_2512_6332Metric", quantity=2, mpn="RLP25FEER100",
+            datasheet="https://www.lcsc.com/datasheet/C160587.pdf",
+        ),
         _passive("ref_top", "R", "33k"),
         _passive("ref_bottom", "R", "10k"),
         _passive("reset_pullup", "R", "10k"),
@@ -335,9 +348,9 @@ A4988_STEPPER = _recipe(
         Pin(role="driver", pin="5", net="cp2"),
         Pin(role="driver", pin="6", net="vcp"),
         Pin(role="driver", pin="8", net="vreg"),
-        Pin(role="driver", pin="9", net="gnd"),
-        Pin(role="driver", pin="10", net="gnd"),
-        Pin(role="driver", pin="11", net="gnd"),
+        Pin(role="driver", pin="9", net="ms1"),
+        Pin(role="driver", pin="10", net="ms2"),
+        Pin(role="driver", pin="11", net="ms3"),
         Pin(role="driver", pin="12", net="reset_sleep"),
         Pin(role="driver", pin="13", net="gnd"),
         Pin(role="driver", pin="14", net="reset_sleep"),
@@ -360,6 +373,8 @@ A4988_STEPPER = _recipe(
         Pin(role="charge_pump", index=1, pin="2", net="vm"),
         Pin(role="vreg_cap", pin="1", net="vreg"),
         Pin(role="vreg_cap", pin="2", net="gnd"),
+        Pin(role="vdd_cap", pin="1", net="vdd"),
+        Pin(role="vdd_cap", pin="2", net="gnd"),
         Pin(role="vm_bulk", pin="1", net="vm"),
         Pin(role="vm_bulk", pin="2", net="gnd"),
         *(Pin(role="sense", index=i, pin="1", net=f"sense{i + 1}") for i in range(2)),
@@ -376,7 +391,7 @@ A4988_STEPPER = _recipe(
     assertions=(
         Assertion(
             code="stepper_current_limit",
-            message="33 kOhm/10 kOhm reference divider with 0.1 Ohm sense resistors sets about 0.96 A full-scale; motor and thermal limits require review",
+            message="Itrip = VDD * 10/(33+10) / (8 * 0.1 ohm): 0.959 A at 3.3 V logic, 1.453 A at 5 V; motor and thermal limits require review",
         ),
     ),
 )
@@ -397,6 +412,7 @@ def _i2c_device(
     io_pins: tuple[str, ...],
     address_pins: tuple[str, ...],
     interrupt_pin: str | None = None,
+    address_strap_parameter: str | None = None,
 ) -> RecipeDefinition:
     ports = [
         Port(name="vdd", direction="power"),
@@ -416,10 +432,22 @@ def _i2c_device(
         ports.append(Port(name=f"io{i}", direction="bidirectional"))
         pins.append(Pin(role="device", pin=pin, net=f"io{i}"))
     for pin in address_pins:
-        pins.append(Pin(role="device", pin=pin, net="gnd"))
+        # A strap that can be moved off ground is parameter-controlled; the pin's
+        # net then resolves to the chosen declared rail/port, which is what makes
+        # two instances of the same device answer at distinct addresses.
+        net = f"@parameter:{address_strap_parameter}" if address_strap_parameter else "gnd"
+        pins.append(Pin(role="device", pin=pin, net=net))
     if interrupt_pin:
         ports.append(Port(name="interrupt", direction="output", required=False))
         pins.append(Pin(role="device", pin=interrupt_pin, net="interrupt"))
+    address_strap = (
+        {
+            "parameters": {address_strap_parameter: "gnd"},
+            "allowed": {address_strap_parameter: ("gnd", "vdd", "sda", "scl")},
+        }
+        if address_strap_parameter
+        else {}
+    )
     return _recipe(
         recipe=recipe,
         family=family,
@@ -438,6 +466,7 @@ def _i2c_device(
                 message="Address straps and pull-up ownership are explicit",
             ),
         ),
+        **address_strap,
     )
 
 
@@ -517,6 +546,7 @@ ADS1115_I2C_ADC = _i2c_device(
     scl_pin="10",
     io_pins=("4", "5", "6", "7"),
     address_pins=("1",),
+    address_strap_parameter="address_strap",
     interrupt_pin="2",
 )
 
@@ -618,9 +648,11 @@ WS2812_OUTPUT = _recipe(
         Port(name="vdd", direction="power"),
         Port(name="gnd", direction="power"),
         Port(name="data_in", direction="input"),
-        Port(name="data_out", direction="output"),
+        Port(name="data_out", direction="output", required=False),
     ),
     internal=("data_series",),
+    parameters={"quantity": 1},
+    allowed={"quantity": tuple(range(1, 501))},
     parts=(
         _part(
             "led",
@@ -646,7 +678,13 @@ WS2812_OUTPUT = _recipe(
         Pin(role="bulk", pin="1", net="vdd"),
         Pin(role="bulk", pin="2", net="gnd"),
     ),
-    source="https://www.world-semi.com/ws2812-family/239.html",
+    source=Source(
+        url="https://datasheet.lcsc.com/datasheet/pdf/bc8264a6d62c958a89e25ec8cc82b690.pdf?productCode=C2761795",
+        title="Worldsemi WS2812B V5",
+        revision="V5",
+        reviewed_date="2026-09-16",
+        sections=("PIN Function", "Cascade Method", "Typical Application Circuit"),
+    ),
     assertions=(
         Assertion(
             code="ws2812_logic_level",
@@ -750,6 +788,57 @@ def expand_ch340c_usb_uart(resolved):
     elif supply_voltage != 3.3:
         raise ValueError(f"recipe {definition.recipe} supply_voltage must be 3.3 or 5.0")
     return expand_static_definition(definition, resolved)
+
+
+def expand_ws2812_output(resolved):
+    """Realize every pixel and leave only an unbound final DOUT unconnected."""
+    from .registry import expand_static_definition
+
+    quantity = resolved.parameters["quantity"]
+    if type(quantity) is not int or not 1 <= quantity <= 500:
+        raise ValueError("ws2812-output quantity must be an integer from 1 to 500")
+    definition = WS2812_OUTPUT
+    cascade = tuple(f"pixel_{index}_data" for index in range(1, quantity))
+    pins = [
+        pin for pin in definition.pins if pin.role not in {"led", "decoupling"}
+    ]
+    for index in range(quantity):
+        pins.extend(
+            (
+                Pin(role="led", index=index, pin="1", net="vdd"),
+                Pin(role="led", index=index, pin="3", net="gnd"),
+                Pin(
+                    role="led", index=index, pin="4",
+                    net="data_series" if index == 0 else cascade[index - 1],
+                ),
+                Pin(role="decoupling", index=index, pin="1", net="vdd"),
+                Pin(role="decoupling", index=index, pin="2", net="gnd"),
+            )
+        )
+        if index < quantity - 1:
+            pins.append(Pin(role="led", index=index, pin="2", net=cascade[index]))
+        elif "data_out" in resolved.selection.port_bindings:
+            pins.append(Pin(role="led", index=index, pin="2", net="data_out"))
+    no_connects = (
+        ()
+        if "data_out" in resolved.selection.port_bindings
+        else (NoConnect(role="led", index=quantity - 1, pin="2"),)
+    )
+    return expand_static_definition(
+        definition.model_copy(
+            update={
+                "parts": tuple(
+                    group.model_copy(update={"quantity": quantity})
+                    if group.role in {"led", "decoupling"} else group
+                    for group in definition.parts
+                ),
+                "pins": tuple(pins),
+                "internal_nets": (*definition.internal_nets, *cascade),
+                "no_connects": no_connects,
+            }
+        ),
+        resolved,
+    )
 
 
 WAVE_C_INTERFACE_RECIPES = (

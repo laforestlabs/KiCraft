@@ -18,7 +18,7 @@ from kicraft.loadtest.mockllm import load_transcript
 from kicraft.loadtest.store import LoadResultStore
 
 _FIXTURE = (Path(__file__).resolve().parents[2] / "kicraft" / "loadtest"
-            / "fixtures" / "transcript_usb_pd_trigger.json")
+            / "fixtures" / "transcript_rc_lowpass.json")
 
 
 def test_orchestration_respects_build_slot_cap(tmp_path):
@@ -89,6 +89,6 @@ def test_real_mock_pipeline_runs_concurrently_at_zero_cost(tmp_path, monkeypatch
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     transcript = load_transcript(_FIXTURE)
     summary = pipeline_load.run_pipeline_load(
-        ["a usb-c pd trigger"] * 2, parallel=2, build_slots=1, transcript=transcript,
+        ["a passive RC low-pass filter breakout"] * 2, parallel=2, build_slots=1, transcript=transcript,
         work_root=tmp_path / "w", do_build=False)
     assert summary["design_ok"] == 2 and summary["errors"] == 0

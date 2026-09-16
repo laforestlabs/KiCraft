@@ -1,0 +1,31 @@
+{
+  "content_hash": "sha256:26c1d83b0bc1a37533b7178fa65978dce073ea3b5051b58ee4ebed3f250c0b51",
+  "datasheet_url": "https://ww1.microchip.com/downloads/aemDocuments/documents/MCU08/ProductDocuments/DataSheets/ATtiny202-204-402-404-406-DataSheet-DS40002318A.pdf",
+  "description": "MICROCHIP(\u7f8e\u56fd\u5fae\u82af) ATTINY402-SSN",
+  "footprint_name": "SOIC-8_L5.0-W4.0-P1.27-LS6.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "ATTINY402-SSN",
+  "name": "attiny402-ssn",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored-from-home footprint after pin-mapping correction against Microchip DS40002318A \u00a74.1",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C1339884"
+  },
+  "symbol_name": "ATTINY402-SSN",
+  "tags": [
+    "mcu",
+    "attiny402",
+    "updi",
+    "soic-8",
+    "portable",
+    "reviewed"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": "Pin 6 is PA3/EXTCLK; pin 7 is PA0/RESET/UPDI, corrected against Microchip DS40002318A \u00a74.1. 2026-09-16 direct JLCPCB listing for C1339884 reported Economic/Standard SMT assembly, retail stock 19, available order quantity 5, and minimum buy 1. ATTINY402-SSNR/C616056 is the same SOIC-8, -40..105 C, 1.8-5.5 V grade on tape and reel; it has its own exact library record. Do not substitute the -SSFR grade without reviewed operating-range consent."
+}

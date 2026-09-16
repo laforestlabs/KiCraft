@@ -11,7 +11,7 @@ from kicraft.cli._round_scheduler import (
     Finalize,
     RoundPlan,
     RoundScheduler,
-    _RC_LEAF_UNROUTABLE,
+    _RC_LEAF_FAILURE,
 )
 
 
@@ -111,28 +111,28 @@ def test_wall_budget_rescue_skipped_when_disabled_starved_or_all_pinned():
 def test_unroutable_streak_aborts_with_exit_code_and_resets_on_recovery():
     s = RoundScheduler(rounds=10, unroutable_abort_rounds=2)
     fail = {"/mcu": ["router_throw"]}
-    assert s.observe_solve(struct_fail=fail, quality_fail={}) is None
+    assert s.observe_solve(terminal_fail=fail, quality_fail={}) is None
     # Recovery resets the streak...
-    assert s.observe_solve(struct_fail={}, quality_fail={}) is None
-    assert s.observe_solve(struct_fail=fail, quality_fail={}) is None
+    assert s.observe_solve(terminal_fail={}, quality_fail={}) is None
+    assert s.observe_solve(terminal_fail=fail, quality_fail={}) is None
     # ...two consecutive failures abort with the route-failure exit code.
-    d = s.observe_solve(struct_fail=fail, quality_fail={})
+    d = s.observe_solve(terminal_fail=fail, quality_fail={})
     assert isinstance(d, Finalize)
-    assert d.rc_hint == _RC_LEAF_UNROUTABLE
+    assert d.rc_hint == _RC_LEAF_FAILURE
     assert "[abort] leaf /mcu" in d.reason and "router_throw" in d.reason
 
 
 def test_quality_streak_finalizes_on_same_signature_only():
     s = RoundScheduler(rounds=10, quality_abort_rounds=2)
     assert s.observe_solve(
-        struct_fail={}, quality_fail={"/led": ["unconnected"]}
+        terminal_fail={}, quality_fail={"/led": ["unconnected"]}
     ) is None
     # A DIFFERENT rejection signature resets the streak.
     assert s.observe_solve(
-        struct_fail={}, quality_fail={"/led": ["illegal_routed_geometry"]}
+        terminal_fail={}, quality_fail={"/led": ["illegal_routed_geometry"]}
     ) is None
     d = s.observe_solve(
-        struct_fail={}, quality_fail={"/led": ["illegal_routed_geometry"]}
+        terminal_fail={}, quality_fail={"/led": ["illegal_routed_geometry"]}
     )
     assert isinstance(d, Finalize) and d.rc_hint is None
     assert "[quality-stop] leaf /led" in d.reason

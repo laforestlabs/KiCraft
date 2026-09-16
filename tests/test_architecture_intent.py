@@ -466,8 +466,10 @@ def test_abbreviated_requirement_reference_resolves_when_unambiguous():
             "id": "led_string",
             "sheet": "LED STRING",
             "role": "connector",
-            "family": "pin-header",
-            "parameters": {"rows": 1, "gender": "male"},
+            # A genuinely model-owned family: this test is about the abbreviated
+            # reference, and a known lowerer here would add its own (real)
+            # contract diagnostic, so the assertion would name two causes at once.
+            "family": "led-string-output",
             "functional_blocks": ["ADDRESSABLE_LED_OUTPUT"],
         }
     )
@@ -492,21 +494,31 @@ def test_signal_restating_a_ground_connection_joins_ground():
     assert not any(row.name == "MCU_GND" for row in architecture.inter_sheet_nets)
 
 
-def test_required_output_with_no_peer_is_exposed_with_its_rails():
-    """The recipe requires the driver's continuation output: it leaves the board, with a name."""
-    intent = _hub75_intent()
-    intent["signals"] = [row for row in intent["signals"] if row["name"] != "LED_OUT"]
-    architecture = derive_architecture(intent)
-    led = _requirement(architecture, "led")
-    assert led.ports["data_out"] == "LED_DATA_OUT"
-    connector = _requirement(architecture, "led_data_out")
-    assert connector.role == "connector"
-    assert connector.ports == {"pin1": "LED_DATA_OUT", "pin2": "GND", "pin3": "VBUS"}
-    assert [(row.sheet, row.direction) for row in _net(architecture, "LED_DATA_OUT").endpoints] == [
+def test_optional_continuation_output_is_exposed_only_when_a_peer_exists():
+    """A chain driver's continuation output is optional, not invented.
+
+    The WS2812 recipe marks `data_out` optional because a chain's last pixel
+    legitimately leaves DOUT unconnected (the round-ring reference relies on it).
+    The architecture must therefore expose it only when the intent declares a
+    peer — and then bind it to that peer's net, never to a made-up connector.
+    """
+    base = _hub75_intent()
+    with_peer = derive_architecture(base)
+    led = _requirement(with_peer, "led")
+    assert led.ports["data_out"] == "LED_OUT"
+    assert [(row.sheet, row.direction) for row in _net(with_peer, "LED_OUT").endpoints] == [
         ("LED", "output"),
-        ("LED DATA OUT", "input"),
+        ("LED STRING", "input"),
     ]
-    assert any("exposed as LED_DATA_OUT" in row for row in architecture.assumptions)
+
+    without_peer = _hub75_intent()
+    without_peer["signals"] = [
+        row for row in without_peer["signals"] if row["name"] != "LED_OUT"
+    ]
+    architecture = derive_architecture(without_peer)
+    assert set(_requirement(architecture, "led").ports) == {"vdd", "gnd", "data_in"}
+    # No connector is invented for an output the intent never declared.
+    assert not any(row.id == "led_data_out" for row in architecture.requirements)
 
 
 def test_half_a_usb_pair_is_refused_by_name():
@@ -895,9 +907,13 @@ def test_lowerer_family_supply_uses_the_keys_the_family_publishes():
             "sheet": "HUB75",
             "role": "connector",
             "family": "connector-bank",
+            "parameters": {"channels": 1},
             "supply": "VBUS",
             "functional_blocks": ["HUB75_DISPLAY_INTERFACE"],
         }
+    )
+    intent["signals"].append(
+        {"name": "SERVO", "from": "esp32.output_servo", "to": "servo_power.signal0"}
     )
     architecture = derive_architecture(intent)
     ports = _requirement(architecture, "servo_power").ports
@@ -942,3 +958,183 @@ def test_qualified_supply_pin_is_picked_by_the_rail_name():
     ports = _requirement(architecture, "isolator").ports
     assert ports["vdd_logic"] == "+5V_LOGIC"
     assert "vdd_field" not in ports
+
+
+def test_declared_interface_persists_explicit_isolated_supply_and_reference_domains():
+    intent = _hub75_intent()
+    intent["power"]["rails"].update(
+        {
+            "GND_LOGIC": {"voltage": 0.0},
+            "GND_FIELD": {"voltage": 0.0},
+        }
+    )
+    intent["requirements"].append(
+        {
+            "id": "max31855",
+            "sheet": "MCU",
+            "role": "sensor",
+            "family": "max31855",
+            "exact_part": "MAX31855KASA+",
+            "supply_bindings": {"vdd": "+3V3"},
+            "reference_bindings": {"gnd_logic": "GND_LOGIC", "gnd_field": "GND_FIELD"},
+            "declared_ports": [
+                {
+                    "key": "vdd",
+                    "pin": "4",
+                    "direction": "power",
+                    "function": "logic supply",
+                    "supply_rail": "+3V3",
+                },
+                {
+                    "key": "gnd_logic",
+                    "pin": "2",
+                    "direction": "power",
+                    "function": "logic reference",
+                    "reference_domain": "GND_LOGIC",
+                },
+                {
+                    "key": "gnd_field",
+                    "pin": "1",
+                    "direction": "power",
+                    "function": "thermocouple reference",
+                    "reference_domain": "GND_FIELD",
+                },
+                {"key": "sck", "pin": "5", "direction": "input", "function": "SPI clock"},
+            ],
+            "functional_blocks": ["ESP32_S3_CONTROLLER"],
+        }
+    )
+
+    requirement = _requirement(derive_architecture(intent), "max31855")
+
+    assert requirement.ports == {
+        "vdd": "+3V3",
+        "gnd_logic": "GND_LOGIC",
+        "gnd_field": "GND_FIELD",
+    }
+    assert requirement.declared_interface is not None
+    assert {port.key: port.pin for port in requirement.declared_interface.ports}["sck"] == "5"
+
+
+def test_declared_interface_refuses_conflicting_per_port_supply_domains():
+    intent = _hub75_intent()
+    intent["requirements"].append(
+        {
+            "id": "isolator",
+            "sheet": "MCU",
+            "role": "bus_interface",
+            "family": "isolator",
+            "supply_bindings": {"vdd_logic": "+3V3"},
+            "declared_ports": [
+                {
+                    "key": "vdd_logic",
+                    "pin": "1",
+                    "direction": "power",
+                    "function": "logic supply",
+                    "supply_rail": "VBUS",
+                }
+            ],
+            "functional_blocks": ["ESP32_S3_CONTROLLER"],
+        }
+    )
+
+    with pytest.raises(ArchitectureIntentError) as rejected:
+        derive_architecture(intent)
+
+    assert "conflicting_supply_binding" in {row.code for row in rejected.value.diagnostics}
+
+
+def test_valid_status_led_uses_only_its_published_drive_and_reference_ports():
+    intent = _hub75_intent()
+    intent["requirements"].append(
+        {
+            "id": "status",
+            "sheet": "MCU",
+            "role": "driver",
+            "family": "status-led",
+            "parameters": {"rail_voltage": 3.3, "led_vf": 2.0, "target_current_ma": 2},
+            "functional_blocks": ["ESP32_S3_CONTROLLER"],
+        }
+    )
+    intent["signals"].append(
+        {"name": "STATUS", "from": "esp32.output_status", "to": "status.drive"}
+    )
+
+    requirement = _requirement(derive_architecture(intent), "status")
+
+    assert requirement.ports == {"drive": "STATUS", "gnd": "GND"}
+
+
+def test_typed_original_obligation_must_be_owned_and_persists_on_requirement():
+    intent = _hub75_intent()
+    obligation = {
+        "kind": "physical",
+        "original_obligation_id": "status_led",
+        "component_class": "status-led",
+    }
+    intent["obligations"] = [obligation]
+    next(row for row in intent["requirements"] if row["id"] == "led")["obligations"] = [obligation]
+
+    architecture = derive_architecture(intent)
+    requirement = _requirement(architecture, "led")
+
+    assert architecture.obligations[0].model_dump() == obligation
+    assert requirement.obligations[0].model_dump() == obligation
+
+
+def test_quantitative_obligations_reject_nonfinite_values():
+    from kicraft.design.models import QuantitativeObligation
+
+    with pytest.raises(ValueError):
+        QuantitativeObligation(
+            kind="quantitative",
+            original_obligation_id="supply_current",
+            quantity="output current",
+            relation="minimum",
+            value=float("nan"),
+            unit="A",
+        )
+
+
+def test_approved_uno_template_requires_and_constructs_each_explicit_stacking_owner():
+    from kicraft.form_factors import get_template
+
+    template = get_template("arduino_uno_shield")
+    assert template is not None and template.validated
+    intent = _hub75_intent()
+    intent["standard_form_factor"] = template.key
+    intent["sheets"].append(
+        {
+            "name": "UNO HEADERS",
+            "stem": "UNO_HEADERS",
+            "role": "connector",
+            "function": "Arduino Uno shield stacking interface.",
+        }
+    )
+    for connector in template.fixed_connectors:
+        intent["requirements"].append(
+            {
+                "id": f"uno_{connector.role}",
+                "sheet": "UNO HEADERS",
+                "role": "connector",
+                "family": "pin-header",
+                "parameters": {"rows": 1, "gender": "female"},
+                "standard_stacking_role": connector.role,
+                "ties": {
+                    f"pin{index}": net
+                    for index, net in enumerate(connector.net_by_pin, start=1)
+                },
+                "functional_blocks": ["UNO_HOST_INTERFACE"],
+            }
+        )
+
+    architecture = derive_architecture(intent)
+
+    owned = {
+        requirement.standard_stacking_role: requirement
+        for requirement in architecture.requirements
+        if requirement.standard_stacking_role
+    }
+    assert set(owned) == {connector.role for connector in template.fixed_connectors}
+    assert owned["power"].ports["pin6"] == "GND"
+    assert owned["power"].ports["pin1"] == "NC"

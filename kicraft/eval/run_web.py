@@ -24,6 +24,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from kicraft.evidence_digest import EvidenceSection, render_bounded_evidence
+
 from .artifacts import _find_one, _load_json
 from .judge import grade_class_j
 from .metrics_web import collect_web_metrics
@@ -35,125 +37,193 @@ def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
-    """A compact, evidence-only text digest for the judge: the brief, the whole
-    committed design state (minus the noisy history log), and the pipeline result.
-    Dumping the state wholesale (rather than cherry-picking fields) keeps the judge
-    from missing a constraint the design recorded somewhere unexpected."""
-    pd = Path(project_dir)
-    parts: list[str] = []
-
-    brief = pd / "brief.txt"
-    if brief.is_file():
-        text = brief.read_text(errors="replace").strip()
-        if text:
-            parts.append("BRIEF (what the user asked for):\n" + text[:2000])
-
-    state = _load_json(_find_one(pd, "state.json"))
-    if isinstance(state, dict):
-        trimmed = {k: v for k, v in state.items() if k != "history"}
-        parts.append(
-            "COMMITTED DESIGN STATE (intent, spec, architecture, bom, wiring, "
-            "assumptions, open_questions):\n" + json.dumps(trimmed, indent=2, default=str)[:budget]
+def _compact_bom_parts(parts: list[object]) -> str:
+    """Complete electrically relevant identity for every committed BOM part."""
+    rows = []
+    for part in parts:
+        if not isinstance(part, dict):
+            rows.append(f"  {part!r}")
+            continue
+        identity = part.get("mpn") or part.get("lcsc") or ""
+        rows.append(
+            f"  {part.get('ref', '?')}: value={part.get('value', '')!r}; "
+            f"symbol={part.get('symbol', '')!r}; footprint={part.get('footprint', '')!r}"
+            + (f"; identity={identity!r}" if identity else "")
+            + (f"; sheet={part['sheet']!r}" if part.get("sheet") else "")
         )
+    return "\n".join(rows) or "No committed parts."
 
-    synth, erc, tr, gen = m["synth"], m["erc"], m["transcript"], m["generated"]
-    # Silk-legend evidence rides as a deterministic line: the state dump above
-    # is budget-truncated and ``artifacts`` (serialized last) is routinely cut,
-    # which zeroed board_self_description on 21/34 runs of the 2026-07-17
-    # batch for "no evidence" the state actually held (fix-plan T6).
-    silk_line = ""
-    if isinstance(state, dict) and isinstance(state.get("artifacts"), dict):
-        arts = state["artifacts"]
-        placed = arts.get("silk_placed")
-        dropped = arts.get("silk_dropped")
-        if placed is not None or dropped is not None:
-            silk_line = f"\n  silk legend: placed={placed or []} dropped={dropped or []}"
-    # Regulator feedback math, computed (not judged): the judge model
-    # hallucinated a TPS5430 Vref of 0.8 V (real: 1.221 V) and failed a
-    # correct 3.3 V design in the 2026-07-17 batch. Handing it the
-    # deterministic number pre-empts the guess (fix-plan T8).
-    reg_line = ""
-    try:
-        from kicraft.design.synthesis.validation import regulator_vout_facts
 
-        bom = state.get("bom") if isinstance(state, dict) else None
-        if isinstance(bom, dict):
-            facts = regulator_vout_facts(bom.get("parts") or [], bom.get("connections") or [])
-            if facts:
-                reg_line = "\n  regulator feedback (computed, authoritative): " + "; ".join(
-                    f"{f['ref']} {f['mpn']} Vref={f['vref']}V divider "
-                    f"{f['r_top_ref']}/{f['r_bot_ref']} -> Vout={f['vout']}V "
-                    f"on net {f['rail_net']!r}"
-                    + (
-                        ""
-                        if f["ok"] is None
-                        else (
-                            " (matches rail)" if f["ok"] else f" (MISMATCH vs {f['rail_v']}V rail)"
-                        )
-                    )
-                    for f in facts
-                )
-    except Exception:
-        reg_line = ""
-    # Substitution ledger, surfaced deterministically (2026-07-27 fix-plan
-    # P2.5): the silent_substitution gate fires on UNSURFACED swaps, so the
-    # judge must see what IS on the record even when the state dump above is
-    # budget-truncated.
-    sub_line = ""
-    try:
-        bom = state.get("bom") if isinstance(state, dict) else None
-        subs = (bom or {}).get("substitutions") or []
-        if subs:
-            sub_line = "\n  substitutions (recorded by the design, NOT silent): " + "; ".join(
-                f"wanted {s.get('wanted')!r} -> shipped {s.get('got')!r}"
-                + (f" ({s.get('reason')})" if s.get("reason") else "")
-                for s in subs
-                if isinstance(s, dict)
+def _compact_bom_nets(connections: list[object], no_connect_pins: list[object]) -> str:
+    """Complete pin-to-net evidence, without serializing unrelated state history."""
+    rows = []
+    for connection in connections:
+        if not isinstance(connection, dict):
+            rows.append(f"  {connection!r}")
+            continue
+        endpoints = connection.get("endpoints")
+        if isinstance(endpoints, list):
+            pins = ", ".join(
+                f"{endpoint.get('ref', '?')}.{endpoint.get('pin', '?')}"
+                if isinstance(endpoint, dict)
+                else repr(endpoint)
+                for endpoint in endpoints
             )
-        elif isinstance(bom, dict):
-            sub_line = "\n  substitutions ledger: empty (no recorded deviations)"
-    except Exception:
-        sub_line = ""
-    # MCU programming path, computed (not judged): the judge over-fired
-    # unprogrammable_mcu on boards §9.29 deliberately accepts (BOOTSEL+USB is
-    # the RP2040 ROM UF2 path; a UPDI TP pad satisfies a no-connectors brief)
-    # because the digest never carried the deterministic verdict (2026-07-27
-    # runs 10/31).
-    prog_line = ""
+            sheet = f" [sheet={connection['sheet']!r}]" if connection.get("sheet") else ""
+            rows.append(f"  {connection.get('net_name', '?')}{sheet}: {pins}")
+        else:
+            # Older persisted states use a/b connection records.  Keep every
+            # field instead of pretending they are absent from the netlist.
+            rows.append("  legacy connection: " + json.dumps(connection, sort_keys=True, default=str))
+    if no_connect_pins:
+        pins = ", ".join(
+            f"{pin.get('ref', '?')}.{pin.get('pin', '?')}" if isinstance(pin, dict) else repr(pin)
+            for pin in no_connect_pins
+        )
+        rows.append(f"  no-connect: {pins}")
+    return "\n".join(rows) or "No committed nets."
+
+
+def _programming_evidence(state: dict, bom: dict | None) -> str:
+    """Emit only evidence-supported MCU conclusions."""
+    if bom is None:
+        return (
+            "No committed BOM is available. MCU programming and delivered-MCU status are "
+            "unverified; do not claim a missing or unprogrammable delivered MCU."
+        )
     try:
         from kicraft.design.models import BOM as _BOM
         from kicraft.design.synthesis.validation import mcu_programming_facts
 
-        bom = state.get("bom") if isinstance(state, dict) else None
-        if isinstance(bom, dict):
-            facts = mcu_programming_facts(_BOM.model_validate(bom))
-            if facts:
-                verdict = (
-                    "PASS -- a workable first-flash path exists"
-                    if facts["access_ok"] and facts["path_ok"]
-                    else "GAPS: " + "; ".join(facts["access_problems"] + facts["path_problems"])
-                )
-                prog_line = (
-                    "\n  MCU programming path (computed, authoritative): "
-                    f"{verdict}; MCU(s): {', '.join(facts['mcus'])}; "
-                    "programming-access parts: " + (", ".join(facts["access_parts"]) or "NONE")
-                )
-    except Exception:
-        prog_line = ""
-    parts.append(
-        "PIPELINE RESULT (deterministic facts):\n"
-        f"  synthesized: {gen['synthesized']} (pcb={gen['pcb']} sch={gen['sch']})\n"
-        f"  synthesis_check.status: {synth.get('status')}; failed_checks: {synth.get('failed_checks')}\n"
-        f"  ERC: {erc.get('errors')} error(s) / {erc.get('warnings')} warning(s)\n"
-        f"  run-trace: {tr.get('failed_commits')} error-driven re-commit(s), "
-        f"{tr.get('ask_questions')} clarifying question(s), crashes={tr.get('crashes')}"
-        + silk_line
-        + reg_line
-        + sub_line
-        + prog_line
+        facts = mcu_programming_facts(_BOM.model_validate(bom))
+    except Exception as exc:
+        return f"Programming analysis unavailable ({type(exc).__name__}); no absence conclusion is supported."
+    if facts is None:
+        return "No MCU is identified in the COMPLETE committed BOM."
+    verdict = (
+        "PASS -- a workable first-flash path exists"
+        if facts["access_ok"] and facts["path_ok"]
+        else "GAPS: " + "; ".join(facts["access_problems"] + facts["path_problems"])
     )
-    return "\n\n".join(parts)
+    return (
+        f"{verdict}; MCU(s): {', '.join(facts['mcus'])}; "
+        "programming-access parts: " + (", ".join(facts["access_parts"]) or "NONE")
+    )
+
+
+def build_run_digest(project_dir, m, *, budget: int = 16000) -> str:
+    """Render bounded, structured judge evidence without slicing source records."""
+    pd = Path(project_dir)
+    state = _load_json(_find_one(pd, "state.json"))
+    state = state if isinstance(state, dict) else {}
+    bom = state.get("bom") if isinstance(state.get("bom"), dict) else None
+
+    brief_path = pd / "brief.txt"
+    brief = brief_path.read_text(errors="replace").strip() if brief_path.is_file() else ""
+    requirements = {
+        key: state[key]
+        for key in ("intent", "functional_spec", "architecture", "assumptions", "open_questions")
+        if key in state
+    }
+
+    synth, erc, tr, gen = m["synth"], m["erc"], m["transcript"], m["generated"]
+    terminal = {
+        "pipeline": {
+            "synthesized": gen["synthesized"],
+            "pcb": gen["pcb"],
+            "sch": gen["sch"],
+            "synthesis_check": {
+                "status": synth.get("status"),
+                "failed_checks": synth.get("failed_checks"),
+            },
+            "erc": {"errors": erc.get("errors"), "warnings": erc.get("warnings")},
+            "run_trace": {
+                "failed_commits": tr.get("failed_commits"),
+                "ask_questions": tr.get("ask_questions"),
+                "crashes": tr.get("crashes"),
+            },
+        },
+        "state_terminal": {
+            "artifact_status": (state.get("artifacts") or {}).get("status")
+            if isinstance(state.get("artifacts"), dict)
+            else None,
+            "stage_status": state.get("stage_status"),
+        },
+    }
+
+    deterministic: list[str] = [_programming_evidence(state, bom)]
+    if isinstance(state.get("artifacts"), dict):
+        artifacts = state["artifacts"]
+        if artifacts.get("silk_placed") is not None or artifacts.get("silk_dropped") is not None:
+            deterministic.append(
+                f"Silk legend: placed={artifacts.get('silk_placed') or []!r}; "
+                f"dropped={artifacts.get('silk_dropped') or []!r}"
+            )
+    if bom is not None:
+        try:
+            from kicraft.design.synthesis.validation import regulator_vout_facts
+
+            facts = regulator_vout_facts(bom.get("parts") or [], bom.get("connections") or [])
+            deterministic.extend(
+                f"Regulator {fact['ref']} {fact['mpn']}: Vref={fact['vref']}V; "
+                f"{fact['r_top_ref']}/{fact['r_bot_ref']} -> Vout={fact['vout']}V "
+                f"on {fact['rail_net']!r}; rail match={fact['ok']!r}"
+                for fact in facts
+            )
+        except Exception:
+            deterministic.append("Regulator analysis unavailable; no regulator conclusion is supported.")
+
+    # Put the complete electrical evidence before broad serialized requirements:
+    # a large architecture record may be omitted honestly, but must never crowd
+    # out the BOM/net facts the judge needs for circuit claims.
+    sections = [
+        EvidenceSection(
+            "BRIEF (what the user asked for)",
+            brief or "Brief file is unavailable.",
+            complete=bool(brief),
+        ),
+    ]
+    if bom is None:
+        sections.append(
+            EvidenceSection(
+                "BOM / PINS / NETS",
+                "No committed BOM. Part, pin, and net absence is unverified.",
+                complete=False,
+            )
+        )
+    else:
+        sections.extend(
+            [
+                EvidenceSection(
+                    f"BOM PARTS ({len(bom.get('parts') or [])})",
+                    _compact_bom_parts(bom.get("parts") or []),
+                ),
+                EvidenceSection(
+                    f"NETS AND PINS ({len(bom.get('connections') or [])})",
+                    _compact_bom_nets(
+                        bom.get("connections") or [], bom.get("no_connect_pins") or []
+                    ),
+                ),
+                EvidenceSection(
+                    "RECORDED SUBSTITUTIONS",
+                    json.dumps(bom.get("substitutions") or [], indent=2, sort_keys=True, default=str),
+                ),
+            ]
+        )
+    sections.append(
+        EvidenceSection(
+            "REQUIREMENTS AND OPEN QUESTIONS",
+            json.dumps(requirements, indent=2, sort_keys=True, default=str)
+            if requirements
+            else "No committed requirements are available.",
+            complete=bool(requirements),
+        )
+    )
+    sections.append(
+        EvidenceSection("TERMINAL PIPELINE FACTS", json.dumps(terminal, indent=2, sort_keys=True))
+    )
+    sections.append(EvidenceSection("DETERMINISTIC ANALYSES", "\n".join(deterministic)))
+    return render_bounded_evidence("STRUCTURED RUN EVIDENCE", sections, budget=budget)
 
 
 def evaluate_project(

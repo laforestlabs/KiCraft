@@ -55,11 +55,11 @@ def test_vendored_3d_paths_all_resolve():
 def test_vendored_bundles_all_reference_a_model():
     """A footprint without any (model ...) stanza renders as a bare board
     spot; every vendored bundle must reference some model (bundle-local
-    or stock)."""
+    or stock) unless it explicitly declares its 3D body unavailable."""
     missing = [
         part_dir.name
-        for part_dir, _manifest, fp_text in _vendored_footprints()
-        if not _model_stanza_paths(fp_text)
+        for part_dir, manifest, fp_text in _vendored_footprints()
+        if not _model_stanza_paths(fp_text) and manifest.three_d_model != "unavailable"
     ]
     assert not missing, (
         f"vendored bundles without any (model ...) stanza: {missing}"

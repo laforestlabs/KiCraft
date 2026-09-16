@@ -1,0 +1,24 @@
+(kicad_symbol_lib
+  (version 20231120)
+  (generator kicraft)
+  (symbol "KYET_MKP20685J2G362230"
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "C" (at 0 3.81 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "KYET_MKP20685J2G362230" (at 0 -3.81 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "kyet-mkp20685j2g362230:KYET_MKP20685J2G362230_P48.0mm" (at 0 -6.35 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Datasheet" "https://datasheet.lcsc.com/datasheet/pdf/988445a2fd1023836a8a59546d7ba7fe.pdf?productCode=C521054" (at 0 -8.89 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Manufacturer" "KYET" (at 0 -11.43 0) (effects (font (size 1.27 1.27)) hide))
+    (property "MPN" "MKP20685J2G362230" (at 0 -13.97 0) (effects (font (size 1.27 1.27)) hide))
+    (property "LCSC Part" "C521054" (at 0 -16.51 0) (effects (font (size 1.27 1.27)) hide))
+    (property "ki_keywords" "film capacitor polypropylene crossover 6.8uF" (at 0 -19.05 0) (effects (font (size 1.27 1.27)) hide))
+    (symbol "KYET_MKP20685J2G362230_0_1"
+      (polyline (pts (xy -0.51 -2.03) (xy -0.51 2.03)) (stroke (width 0) (type default)) (fill (type none)))
+      (polyline (pts (xy 0.51 -2.03) (xy 0.51 2.03)) (stroke (width 0) (type default)) (fill (type none)))
+    )
+    (symbol "KYET_MKP20685J2G362230_1_1"
+      (pin passive line (at -5.08 0 0) (length 4.57) (name "1" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+      (pin passive line (at 5.08 0 180) (length 4.57) (name "2" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+    )
+  )
+)

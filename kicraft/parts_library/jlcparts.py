@@ -75,9 +75,10 @@ _KW_QUALIFIER_RE = re.compile(
 
 
 def is_unsourceable_hardware(footprint: str) -> bool:
-    """True for board features with no orderable part behind them (test
-    points, mounting holes, net ties, fiducials, solder jumpers)."""
+    """True for reviewed bare-board features with no orderable part."""
     fp = footprint or ""
+    if fp == "capacitive-touch-pad:TouchPad_12mm_Front_NoUnderlay":
+        return True
     lib, _, leaf = fp.partition(":")
     return bool(_UNSOURCEABLE_FP_RE.match(leaf or lib)
                 or _UNSOURCEABLE_FP_RE.match(lib))

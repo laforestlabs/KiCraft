@@ -33,7 +33,9 @@ from .wave_b_power import (
 from .wave_c_interfaces import (
     CH340C_USB_UART,
     WAVE_C_INTERFACE_RECIPES,
+    WS2812_OUTPUT,
     expand_ch340c_usb_uart,
+    expand_ws2812_output,
 )
 
 register_recipe(RP2040_MINIMAL)
@@ -51,7 +53,11 @@ for definition in WAVE_B_POWER_RECIPES:
 for definition in WAVE_C_INTERFACE_RECIPES:
     register_recipe(
         definition,
-        expand_ch340c_usb_uart if definition.recipe == CH340C_USB_UART.recipe else None,
+        expand_ch340c_usb_uart
+        if definition.recipe == CH340C_USB_UART.recipe
+        else expand_ws2812_output
+        if definition.recipe == WS2812_OUTPUT.recipe
+        else None,
     )
 
 __all__ = [

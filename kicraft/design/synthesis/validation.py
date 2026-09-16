@@ -2151,6 +2151,1155 @@ def check_family_wiring_contracts(bom) -> CheckResult:
         offenders=bad,
     )
 
+# ---------- §9.37 reviewed electrical realization ----------
+#
+# These checks intentionally consume only typed architecture claims, direct
+# component terminals, and manufacturer-reviewed device facts.  A net name,
+# a capacitor on a nearby net, or graph reachability through a control pin is
+# not evidence that energy can reach a load.
+
+_CAP_VALUE_RE = re.compile(
+    r"^(\d+(?:\.\d+)?)\s*(p|n|u|µ|m)?(?:f|farad(?:s)?)?$", re.I
+)
+_INDUCTANCE_VALUE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(n|u|µ|m)?h$", re.I)
+_CAP_SCALE = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3, "": 1.0}
+_INDUCTANCE_SCALE = {"n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3, "": 1.0}
+
+
+def _capacitance_farads(value: str) -> float | None:
+    """Parse an explicitly unit-bearing capacitor value, never guessing units."""
+    match = _CAP_VALUE_RE.match((value or "").strip())
+    if match is None:
+        return None
+    magnitude, prefix = match.groups()
+    return float(magnitude) * _CAP_SCALE[prefix.lower()]
+
+
+def _inductance_henries(value: str) -> float | None:
+    """Parse a typed inductance value; bare ``510`` is intentionally unknown."""
+    match = _INDUCTANCE_VALUE_RE.match((value or "").strip())
+    if match is None:
+        return None
+    magnitude, prefix = match.groups()
+    return float(magnitude) * _INDUCTANCE_SCALE[prefix.lower()]
+
+
+def _reviewed_fact_for_part(part) -> dict | None:
+    """Return one exact reviewed identity; never infer one from a substring."""
+    from kicraft.design.part_identity import reviewed_part
+
+    identity = str(getattr(part, "mpn", None) or part.value or "").strip()
+    if not identity:
+        return None
+    record = reviewed_part(identity)
+    return vars(record) if record is not None else None
+
+
+def _fact_number(fact: dict, *keys: str) -> float | None:
+    for key in keys:
+        value = fact.get(key)
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed == parsed and parsed not in (float("inf"), float("-inf")):
+            return parsed
+    return None
+
+
+def _fact_pin_name(fact: dict, key: str) -> str | None:
+    pins = fact.get("pins") or fact.get("port_pins") or {}
+    value = pins.get(key) if isinstance(pins, dict) else None
+    if value is None:
+        aliases = {"vin": "input", "ph": "switch"}
+        value = pins.get(aliases[key]) if isinstance(pins, dict) and key in aliases else None
+    if value is None:
+        value = fact.get(f"{key}_pin")
+    return str(value).upper() if value is not None else None
+
+
+# A reviewed record names its voltage input consistently, not identically: the
+# port key may be `vin`/`input`, and a converter's return-referenced input is
+# `input_positive`. The limits carry the same three spellings.
+_INPUT_PORT_KEYS = ("vin", "input", "input_positive")
+_INPUT_MIN_KEYS = ("vin_min_v", "input_min_v", "input_voltage_min_v")
+_INPUT_MAX_KEYS = ("vin_max_v", "input_max_v", "input_voltage_max_v")
+
+
+def _fact_input_pin_name(fact: dict) -> str | None:
+    """The reviewed record's voltage-input pin, under any published spelling."""
+    for key in _INPUT_PORT_KEYS:
+        name = _fact_pin_name(fact, key)
+        if name:
+            return name
+    return None
+
+
+def _reviewed_name(fact: dict) -> str | None:
+    """The reviewed record's own identity, for stage feedback that names the device."""
+    return fact.get("identity") or fact.get("mpn")
+
+
+def _pin_number_named(info: dict, ref: str, pin_name: str) -> str | None:
+    pins = info.get(ref) or {}
+    if pin_name in pins:
+        return pin_name
+    hits = [number for number, pin in pins.items() if pin["name"].upper() == pin_name]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _two_terminal_part_nets(part, nets) -> tuple[str, str] | None:
+    wired = list((nets.get(part.ref) or {}).values())
+    return (wired[0], wired[1]) if len(wired) == 2 and wired[0] != wired[1] else None
+
+
+def check_reviewed_device_support_networks(bom) -> CheckResult:
+    """§9.37 — prove direct mandatory support networks for reviewed devices.
+
+    At present this covers a reviewed bootstrap specification.  The capacitor
+    must directly span the actual BOOT and PH pin nets and meet the reviewed
+    value; a capacitor to ground, a same-net BOOT/PH short, or a merely
+    adjacent control network cannot establish bootstrap support.
+    """
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    bad: list[str] = []
+    for part in bom.parts:
+        fact = _reviewed_fact_for_part(part)
+        if fact is None:
+            continue
+        bootstrap = fact.get("bootstrap") or {}
+        boot = _fact_pin_name(fact, "boot") or str(bootstrap.get("positive_pin") or "").upper() or None
+        phase = _fact_pin_name(fact, "ph") or str(bootstrap.get("negative_pin") or "").upper() or None
+        required_cap = _fact_number(fact, "bootstrap_capacitance_f")
+        if required_cap is None:
+            capacitance_uf = _fact_number(bootstrap, "capacitance_uf")
+            required_cap = capacitance_uf * 1e-6 if capacitance_uf is not None else None
+        if not (boot and phase and required_cap is not None):
+            continue
+        boot_number = _pin_number_named(info, part.ref, boot)
+        phase_number = _pin_number_named(info, part.ref, phase)
+        if boot_number is None or phase_number is None:
+            bad.append(
+                f"E_BOOTSTRAP_SUPPORT {part.ref}: reviewed {fact.get('mpn')!r} requires "
+                f"distinct {boot}/ {phase} pin evidence, but the loaded symbol does not expose it"
+            )
+            continue
+        boot_net = (nets.get(part.ref) or {}).get(boot_number)
+        phase_net = (nets.get(part.ref) or {}).get(phase_number)
+        if not boot_net or not phase_net:
+            bad.append(
+                f"E_BOOTSTRAP_SUPPORT {part.ref}.{boot_number}/{part.ref}.{phase_number}: "
+                "BOOT and PH must both be wired to prove the required bootstrap loop"
+            )
+            continue
+        if boot_net == phase_net:
+            bad.append(
+                f"E_BOOTSTRAP_SUPPORT {part.ref}: {boot} and {phase} share {boot_net!r}; "
+                "they must be distinct nets bridged only by the bootstrap capacitor"
+            )
+            continue
+        capacitors = []
+        for candidate in bom.parts:
+            if _ref_prefix(candidate.ref) != "C":
+                continue
+            pair = _two_terminal_part_nets(candidate, nets)
+            if pair is not None and set(pair) == {boot_net, phase_net}:
+                capacitors.append(candidate)
+        if not capacitors:
+            bad.append(
+                f"E_BOOTSTRAP_SUPPORT {part.ref}: no capacitor directly spans "
+                f"{boot} net {boot_net!r} and {phase} net {phase_net!r}"
+            )
+            continue
+        tolerance = (
+            _fact_number(fact, "bootstrap_capacitance_tolerance")
+            or _fact_number(bootstrap, "capacitance_tolerance")
+            or 0.20
+        )
+        if not any(
+            (value := _capacitance_farads(candidate.value)) is not None
+            and abs(value - required_cap) <= required_cap * tolerance
+            for candidate in capacitors
+        ):
+            values = ", ".join(f"{candidate.ref}={candidate.value!r}" for candidate in capacitors)
+            bad.append(
+                f"E_BOOTSTRAP_SUPPORT {part.ref}: {values} span {boot}/{phase}, but "
+                f"reviewed support requires {required_cap * 1e9:g}nF ±{tolerance * 100:g}%"
+            )
+    return CheckResult(
+        "9.37 reviewed device support networks",
+        not bad,
+        "reviewed device support networks are directly realized" if not bad else
+        f"{len(bad)} reviewed device support network(s) unproven",
+        bad,
+    )
+
+
+def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
+    """§9.38 — compare actual typed VIN rails with reviewed device ranges."""
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    bad: list[str] = []
+    for part in bom.parts:
+        fact = _reviewed_fact_for_part(part)
+        if fact is None:
+            continue
+        limits = fact.get("operating_limits") or {}
+        vin = _fact_input_pin_name(fact)
+        vin_min = _fact_number(fact, *_INPUT_MIN_KEYS)
+        vin_max = _fact_number(fact, *_INPUT_MAX_KEYS)
+        if vin_min is None:
+            vin_min = _fact_number(limits, *_INPUT_MIN_KEYS)
+        if vin_max is None:
+            vin_max = _fact_number(limits, *_INPUT_MAX_KEYS)
+        if vin is None and vin_min is None and vin_max is None:
+            # The reviewed record declares no voltage-input character at all (a
+            # MOSFET's drain/source, a bare pass element, a holder's terminals):
+            # there is no input rail to compare, so no range is missing.
+            continue
+        if not (vin and vin_min is not None and vin_max is not None):
+            bad.append(
+                f"E_INPUT_OPERATING_RANGE {part.ref}: reviewed {_reviewed_name(fact)!r} "
+                "declares a voltage input but lacks a complete input pin/minimum/maximum "
+                "operating-range record"
+            )
+            continue
+        number = _pin_number_named(info, part.ref, vin)
+        actual_net = (nets.get(part.ref) or {}).get(number or "")
+        if actual_net is None:
+            bad.append(
+                f"E_INPUT_OPERATING_RANGE {part.ref}: reviewed {_reviewed_name(fact)!r} "
+                f"has no wired {vin} pin; actual input voltage is unproven"
+            )
+            continue
+        raw_voltage = architecture.rail_voltages.get(actual_net)
+        try:
+            voltage = float(raw_voltage)
+        except (TypeError, ValueError):
+            voltage = None
+        if voltage is None:
+            bad.append(
+                f"E_INPUT_OPERATING_RANGE {part.ref}.{number}: actual VIN net {actual_net!r} "
+                "has no typed architecture rail_voltages value"
+            )
+        elif not vin_min <= voltage <= vin_max:
+            bad.append(
+                f"E_INPUT_OPERATING_RANGE {part.ref}.{number}: {actual_net!r} is typed "
+                f"{voltage:g}V, outside reviewed {_reviewed_name(fact)!r} VIN range "
+                f"{vin_min:g}–{vin_max:g}V"
+            )
+    return CheckResult(
+        "9.38 reviewed input operating ranges",
+        not bad,
+        "typed input rails are within reviewed operating ranges" if not bad else
+        f"{len(bad)} reviewed operating-range violation(s)",
+        bad,
+    )
+
+
+# The reference domain belongs to the port that *is* the return: a supply port
+# already carries its rail, and the derivation refuses two nets on one port
+# (`conflicting_port_binding`), so a rail-bound port can never also declare its
+# domain. These are the published return ports of each side.
+_INPUT_RETURN_PORT_KEYS = ("input_return", "input_negative", "gnd", "ground")
+_OUTPUT_RETURN_PORT_KEYS = ("output_common", "output_return", "gnd_out")
+
+
+def _requirement_reference_domain(
+    requirement, port: str, *, returns: tuple[str, ...] = ()
+) -> str | None:
+    """The declared reference domain of one side of a requirement.
+
+    An explicit domain on the checked port wins; otherwise the side's own return
+    port carries it; otherwise the design's single ground is the reference. A
+    design with no separate return port therefore keeps the common-return
+    behaviour, and an isolated conversion must declare both sides explicitly.
+    """
+    claim = getattr(requirement, "declared_interface", None)
+    if claim is not None:
+        for key in (port, *returns):
+            matches = [
+                row.reference_domain
+                for row in claim.ports
+                if row.key == key and row.reference_domain
+            ]
+            if len(matches) == 1:
+                return matches[0]
+    gnd = requirement.ports.get("gnd")
+    return gnd if gnd else None
+
+
+def _reviewed_transfer_edges(bom, info, nets) -> dict[str, set[str]]:
+    """Direct energy-transfer edges, excluding C/R/control connectivity."""
+    graph: dict[str, set[str]] = defaultdict(set)
+    for part in bom.parts:
+        # A series inductor is an explicitly conductive power element.  A
+        # capacitor and a resistor (including a PD VDD feed) are never accepted
+        # as a source-to-load transfer witness.
+        if _ref_prefix(part.ref) == "L":
+            pair = _two_terminal_part_nets(part, nets)
+            if pair is not None:
+                graph[pair[0]].add(pair[1])
+                graph[pair[1]].add(pair[0])
+        fact = _reviewed_fact_for_part(part)
+        if fact is None:
+            continue
+        transfer = fact.get("power_transfer") or {}
+        if not isinstance(transfer, dict):
+            continue
+        paths = transfer.get("paths")
+        if not isinstance(paths, (list, tuple)):
+            paths = (transfer,)
+        for path in paths:
+            if not isinstance(path, dict):
+                continue
+            source_name = str(path.get("from_pin") or "").upper() or _fact_pin_name(fact, "vin")
+            dest_name = str(path.get("to_pin") or "").upper() or _fact_pin_name(fact, "ph")
+            source_number = _pin_number_named(info, part.ref, source_name) if source_name else None
+            dest_number = _pin_number_named(info, part.ref, dest_name) if dest_name else None
+            source_net = (nets.get(part.ref) or {}).get(source_number or "")
+            dest_net = (nets.get(part.ref) or {}).get(dest_number or "")
+            if source_net and dest_net and source_net != dest_net:
+                graph[source_net].add(dest_net)
+                graph[dest_net].add(source_net)
+    return graph
+
+
+def _transfer_reaches(graph: dict[str, set[str]], source: str, load: str) -> bool:
+    pending, seen = [source], {source}
+    while pending:
+        node = pending.pop()
+        if node == load:
+            return True
+        for neighbor in graph.get(node, ()):
+            if neighbor not in seen:
+                seen.add(neighbor)
+                pending.append(neighbor)
+    return False
+
+
+def _requirement_input_key(requirement, bom) -> str | None:
+    """The requirement's input port key, under the reviewer's own spelling.
+
+    Conventional keys first.  A reviewed device may name its input differently
+    (`input_positive` for a return-referenced converter), so that published key is
+    accepted when the requirement binds it.
+    """
+    ports = requirement.ports
+    canonical = next((key for key in ("input", "vin", "vbus") if ports.get(key)), None)
+    if canonical:
+        return canonical
+    published = {
+        key
+        for part in bom.parts
+        if getattr(part, "sheet", None) == requirement.sheet
+        if (fact := _reviewed_fact_for_part(part)) is not None
+        for key in _INPUT_PORT_KEYS
+        if key in (fact.get("pins") or fact.get("port_pins") or {})
+    }
+    return next(
+        (key for key in _INPUT_PORT_KEYS if key in published and ports.get(key)),
+        None,
+    )
+
+
+def check_reviewed_power_transfer(architecture, bom) -> CheckResult:
+    """§9.39 — conversion obligations require a reviewed input-to-output path."""
+    info, _ = _pin_info_by_ref(bom)
+    graph = _reviewed_transfer_edges(bom, info, _nets_by_ref(bom))
+    bad: list[str] = []
+    for requirement in architecture.requirements:
+        family = requirement.family.casefold()
+        has_power_conversion = any(
+            obligation.kind == "conversion"
+            and str(getattr(obligation, "input_kind", "")).casefold() in {"power", "voltage"}
+            and str(getattr(obligation, "output_kind", "")).casefold() in {"power", "voltage"}
+            for obligation in requirement.obligations
+        )
+        is_reviewed_pd = family in {"usb-pd-fixed-trigger", "usb-pd-selectable-trigger"}
+        if not (has_power_conversion or getattr(requirement, "role", None) == "regulator" or is_reviewed_pd):
+            continue
+        if _claims_constant_current_led(architecture, requirement) and _constant_current_led_ports(
+            architecture, requirement
+        ):
+            # §9.41 owns this loop. Its regulated LED node is reached through the
+            # load's own series elements - the sense resistor, the return
+            # inductor, and the LED itself - which are deliberately not generic
+            # source-to-load transfer witnesses.
+            continue
+        input_key = _requirement_input_key(requirement, bom)
+        input_net = requirement.ports.get(input_key) if input_key else None
+        outputs = [
+            (key, net)
+            for key, net in requirement.ports.items()
+            if net
+            and key not in _OUTPUT_RETURN_PORT_KEYS
+            and (
+                key in {"output", "vout", "positive", "negative", "positive_output", "negative_output"}
+                or "output" in key
+            )
+        ]
+        if is_reviewed_pd:
+            outputs.extend(
+                (f"{peer.id}:{key}", net)
+                for peer in architecture.requirements
+                if peer is not requirement
+                for key, net in peer.ports.items()
+                if net and (_net_looks_power(net) or net == input_net)
+            )
+            # A PD controller negotiates a source; it does not create a second
+            # supply.  Every separately declared VBUS/VOUT-like power rail must
+            # therefore have conductor/transfer evidence from its raw VBUS.
+            outputs.extend(
+                ("declared_power_rail", net)
+                for net in architecture.power_nets
+                if net != input_net
+                and not _net_is_ground(net)
+                and re.search(r"vbus|vout|power", net, re.I)
+            )
+        if not input_net or not outputs:
+            bad.append(
+                f"E_POWER_TRANSFER {requirement.id!r}: power conversion/PD claim needs "
+                "an actual input/vin/vbus binding and one or more explicit output bindings"
+            )
+            continue
+        isolated_transfer = any(
+            isinstance((fact := _reviewed_fact_for_part(part)), dict)
+            and isinstance((transfer := fact.get("power_transfer")), dict)
+            and (
+                bool(transfer.get("isolated"))
+                or any(
+                    isinstance(path, dict) and path.get("isolated")
+                    for path in (transfer.get("paths") or ())
+                )
+            )
+            for part in bom.parts
+            if part.sheet == requirement.sheet
+        )
+        input_domain = _requirement_reference_domain(
+            requirement, input_key, returns=_INPUT_RETURN_PORT_KEYS
+        )
+        for output_key, output_net in outputs:
+            output_domain = _requirement_reference_domain(
+                requirement, output_key, returns=_OUTPUT_RETURN_PORT_KEYS
+            )
+            if isolated_transfer:
+                if (
+                    input_domain is None
+                    or output_domain is None
+                    or input_domain == output_domain
+                ):
+                    bad.append(
+                        f"E_REFERENCE_DOMAIN {requirement.id!r}: reviewed isolated "
+                        "conversion requires distinct explicit input/output reference domains"
+                    )
+                    continue
+            elif (
+                input_domain is not None
+                and output_domain is not None
+                and input_domain != output_domain
+            ):
+                bad.append(
+                    f"E_REFERENCE_DOMAIN {requirement.id!r}: input reference {input_domain!r} "
+                    f"and output reference {output_domain!r} are distinct; a conversion cannot "
+                    "claim a common return without a reviewed isolated-domain model"
+                )
+                continue
+            if not _transfer_reaches(graph, input_net, output_net):
+                bad.append(
+                    f"E_POWER_TRANSFER {requirement.id!r}: no reviewed source-to-load transfer "
+                    f"from {input_net!r} to {output_net!r}; capacitors, control pins, and "
+                    "unreviewed placeholders are not power paths"
+                )
+    return CheckResult(
+        "9.39 reviewed source-to-load power transfer",
+        not bad,
+        "every typed conversion has a reviewed source-to-load path" if not bad else
+        f"{len(bad)} conversion path/domain contract(s) unproven",
+        bad,
+    )
+
+def _quantitative_obligation(requirement, *names: str):
+    wanted = tuple(name.lower() for name in names)
+    matches = [
+        obligation
+        for obligation in requirement.obligations
+        if obligation.kind == "quantitative"
+        and any(name in obligation.quantity.lower() for name in wanted)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _quantity_in(value, unit: str, scales: dict[str, float]) -> float | None:
+    if value is None:
+        return None
+    scale = scales.get((unit or "").strip().lower())
+    if scale is None:
+        return None
+    return value * scale
+
+
+def check_typed_passive_crossover_values(architecture, bom) -> CheckResult:
+    """§9.40 — prove typed first-order passive crossover branches.
+
+    A low-pass inductor must directly join the declared input and low output.
+    A high-pass branch, when declared, may use direct parallel capacitors or a
+    two-capacitor series chain between its declared endpoints.
+    """
+    bad: list[str] = []
+    for requirement in architecture.requirements:
+        if "crossover" not in requirement.family:
+            continue
+        frequency = _quantitative_obligation(requirement, "cutoff", "frequency")
+        impedance = _quantitative_obligation(requirement, "impedance", "load")
+        cutoff_hz = (
+            _quantity_in(frequency.value, frequency.unit, {"hz": 1.0, "khz": 1e3})
+            if frequency is not None and frequency.relation == "equal"
+            else None
+        )
+        load_ohm = (
+            _quantity_in(impedance.value, impedance.unit, {"ohm": 1.0, "ω": 1.0, "Ω": 1.0})
+            if impedance is not None and impedance.relation == "equal"
+            else None
+        )
+        if cutoff_hz is None or load_ohm is None or cutoff_hz <= 0 or load_ohm <= 0:
+            bad.append(
+                f"E_PASSIVE_CROSSOVER {requirement.id!r}: require typed equal cutoff "
+                "frequency (Hz/kHz) and load impedance (ohm) obligations"
+            )
+            continue
+        input_net = requirement.ports.get("input")
+        low_net = (
+            requirement.ports.get("low")
+            or requirement.ports.get("low_out")
+            or requirement.ports.get("lowpass_output")
+            or requirement.ports.get("woofer")
+        )
+        if not input_net or not low_net:
+            bad.append(
+                f"E_PASSIVE_CROSSOVER {requirement.id!r}: supported low-pass topology "
+                "needs explicit input and low/low_out/lowpass_output/woofer ports"
+            )
+            continue
+        candidates = [
+            part
+            for part in bom.parts
+            if part.sheet == requirement.sheet
+            and _ref_prefix(part.ref) == "L"
+            and (_two_terminal_part_nets(part, _nets_by_ref(bom)) is not None)
+            and set(_two_terminal_part_nets(part, _nets_by_ref(bom)) or ()) == {input_net, low_net}
+        ]
+        expected = load_ohm / (2.0 * 3.141592653589793 * cutoff_hz)
+        values = [(part, _inductance_henries(part.value)) for part in candidates]
+        if not any(
+            inductance is not None and abs(inductance - expected) <= expected * 0.20
+            for _, inductance in values
+        ):
+            rendered = ", ".join(f"{part.ref}={part.value!r}" for part, _ in values) or "none"
+            bad.append(
+                f"E_PASSIVE_CROSSOVER {requirement.id!r}: low-pass L between "
+                f"{input_net!r}/{low_net!r} is {rendered}; {load_ohm:g}ohm at "
+                f"{cutoff_hz:g}Hz requires {expected * 1e6:.0f}uH"
+            )
+        high_net = (
+            requirement.ports.get("high")
+            or requirement.ports.get("high_out")
+            or requirement.ports.get("highpass_output")
+            or requirement.ports.get("tweeter")
+        )
+        if high_net:
+            capacitors = [
+                (part, pair, _capacitance_farads(part.value))
+                for part in bom.parts
+                if part.sheet == requirement.sheet
+                and _ref_prefix(part.ref) == "C"
+                and (pair := _two_terminal_part_nets(part, _nets_by_ref(bom))) is not None
+            ]
+            expected_cap = 1.0 / (2.0 * 3.141592653589793 * load_ohm * cutoff_hz)
+            direct_parallel = [
+                (part, value)
+                for part, pair, value in capacitors
+                if value is not None and set(pair) == {input_net, high_net}
+            ]
+            equivalent_caps = [
+                (
+                    tuple(part for part, _ in direct_parallel),
+                    sum(value for _, value in direct_parallel),
+                )
+            ] if direct_parallel else []
+            for first, first_pair, first_value in capacitors:
+                if first_value is None or input_net not in first_pair:
+                    continue
+                middle = first_pair[1] if first_pair[0] == input_net else first_pair[0]
+                for second, second_pair, second_value in capacitors:
+                    if second is first or second_value is None or middle not in second_pair:
+                        continue
+                    other = second_pair[1] if second_pair[0] == middle else second_pair[0]
+                    if other == high_net:
+                        equivalent_caps.append(
+                            ((first, second), 1.0 / (1.0 / first_value + 1.0 / second_value))
+                        )
+            if not any(
+                abs(equivalent - expected_cap) <= expected_cap * 0.20
+                for _, equivalent in equivalent_caps
+            ):
+                rendered = (
+                    ", ".join(
+                        "+".join(f"{part.ref}={part.value!r}" for part in parts)
+                        for parts, _ in equivalent_caps
+                    )
+                    or "none"
+                )
+                bad.append(
+                    f"E_PASSIVE_CROSSOVER {requirement.id!r}: high-pass capacitors "
+                    f"from {input_net!r} to {high_net!r} are {rendered}; {load_ohm:g}ohm "
+                    f"at {cutoff_hz:g}Hz requires {expected_cap * 1e6:.3g}uF equivalent"
+                )
+    return CheckResult(
+        "9.40 typed passive crossover values",
+        not bad,
+        "typed passive crossover low-pass values match their topology" if not bad else
+        f"{len(bad)} passive crossover value/topology violation(s)",
+        bad,
+    )
+
+
+def _reviewed_high_side_led_loop_contract(fact: dict) -> dict | None:
+    """Normalize the complete source-backed high-side LED-current loop contract.
+
+    This is deliberately a narrow, fail-closed bridge from reviewed part
+    metadata to both schematic and artifact checks.  A controller which merely
+    advertises a sense resistor is not a loop model.
+    """
+    feedback = fact.get("current_feedback")
+    transfer = fact.get("power_transfer")
+    support = fact.get("support_network")
+    limits = fact.get("operating_limits")
+    if not all(isinstance(item, dict) for item in (feedback, transfer, support, limits)):
+        return None
+    if feedback.get("topology") != "high_side_sense_low_side_switch":
+        return None
+    sense_pin = _fact_pin_name(feedback, "sense")
+    reference_pin = _fact_pin_name(feedback, "reference")
+    switch_pin = _fact_pin_name(fact, "switch")
+    ground_pin = _fact_pin_name(fact, "ground")
+    sense_voltage = _fact_number(feedback, "sense_voltage_v")
+    tolerance = _fact_number(feedback, "sense_tolerance")
+    continuous_current = _fact_number(limits, "continuous_output_a", "continuous_current_a")
+    decoupling = support.get("input_decoupling")
+    catch_diode = support.get("catch_diode")
+    if not isinstance(decoupling, dict) or not isinstance(catch_diode, dict):
+        return None
+    decoupling_positive = str(decoupling.get("positive_pin") or "").upper() or None
+    decoupling_negative = str(decoupling.get("negative_pin") or "").upper() or None
+    decoupling_uf = _fact_number(decoupling, "capacitance_min_uf")
+    diode_anode = str(catch_diode.get("anode_pin") or "").upper() or None
+    diode_cathode = str(catch_diode.get("cathode_pin") or "").upper() or None
+    if (
+        not all(
+            (
+                sense_pin,
+                reference_pin,
+                switch_pin,
+                ground_pin,
+                decoupling_positive,
+                decoupling_negative,
+                diode_anode,
+                diode_cathode,
+            )
+        )
+        or sense_voltage is None
+        or sense_voltage <= 0
+        or tolerance is None
+        or not 0 < tolerance < 1
+        or continuous_current is None
+        or continuous_current <= 0
+        or decoupling_uf is None
+        or decoupling_uf <= 0
+        or str(transfer.get("from_pin") or "").upper() != switch_pin
+        or str(transfer.get("to_pin") or "").upper() != ground_pin
+        or decoupling_positive != reference_pin
+        or decoupling_negative != ground_pin
+        or diode_anode != switch_pin
+        or diode_cathode != reference_pin
+    ):
+        return None
+    return {
+        "topology": feedback["topology"],
+        "sense_pin": sense_pin,
+        "reference_pin": reference_pin,
+        "switch_pin": switch_pin,
+        "ground_pin": ground_pin,
+        "sense_voltage_v": sense_voltage,
+        "sense_tolerance": tolerance,
+        "continuous_current_a": continuous_current,
+        "input_decoupling": {
+            "positive_pin": decoupling_positive,
+            "negative_pin": decoupling_negative,
+            "capacitance_min_f": decoupling_uf * 1e-6,
+        },
+        "catch_diode": {"anode_pin": diode_anode, "cathode_pin": diode_cathode},
+    }
+
+
+def _pins_named(info: dict, ref: str, name: str) -> list[str]:
+    """Return every physical pin with one reviewed logical name."""
+    wanted = name.upper()
+    return [
+        number
+        for number, data in (info.get(ref) or {}).items()
+        if str(data.get("name") or "").upper() == wanted
+    ]
+
+
+def _constant_current_led_ports(architecture, requirement) -> dict[str, str] | None:
+    """Bind the driver and explicit LED-output requirement ports, never a symbol."""
+    input_net = requirement.ports.get("input") or requirement.ports.get("vin")
+    gnd_net = requirement.ports.get("gnd") or requirement.ports.get("ground")
+    anode_net = requirement.ports.get("led_anode") or requirement.ports.get("set")
+    cathode_net = requirement.ports.get("led_cathode")
+    if cathode_net is None and anode_net is not None:
+        outputs = [
+            peer
+            for peer in architecture.requirements
+            if peer is not requirement
+            and peer.sheet == requirement.sheet
+            and str(getattr(peer, "role", "")).casefold() == "connector"
+            and peer.ports.get("positive") == anode_net
+            and peer.ports.get("negative")
+        ]
+        if len(outputs) == 1:
+            cathode_net = outputs[0].ports["negative"]
+    if not all((input_net, gnd_net, anode_net, cathode_net)):
+        return None
+    return {
+        "input": input_net,
+        "gnd": gnd_net,
+        "led_anode": anode_net,
+        "led_cathode": cathode_net,
+    }
+
+
+def _has_reviewed_local_led(part) -> bool:
+    """Only exact physical LED evidence may make an on-board load an LED."""
+    record = _reviewed_identity_for_bom_part(part)
+    return record is not None and any(
+        "led" in feature.casefold()
+        for feature in getattr(record, "physical_features", ())
+    )
+
+
+def _reviewed_constant_current_led_loop_errors(
+    requirement, bom, info, nets, *, ports: dict[str, str] | None = None
+) -> list[str]:
+    """Return all unproven predicates for one typed LED-current requirement."""
+    target = _quantitative_obligation(requirement, "current")
+    target_a = (
+        _quantity_in(target.value, target.unit, {"a": 1.0, "ma": 1e-3})
+        if target is not None and target.relation == "equal"
+        else None
+    )
+    has_conversion = any(obligation.kind == "conversion" for obligation in requirement.obligations)
+    if ports is None:
+        from types import SimpleNamespace
+        ports = _constant_current_led_ports(
+            SimpleNamespace(requirements=[requirement]), requirement
+        )
+    if target_a is None or target_a <= 0 or not has_conversion or ports is None:
+        needs = []
+        if target_a is None or target_a <= 0:
+            needs.append("a positive equal current obligation in A or mA")
+        if not has_conversion:
+            needs.append("a conversion obligation")
+        if ports is None:
+            needs.append("explicit input/gnd/led_anode/led_cathode requirement ports")
+        return [f"E_LED_CURRENT_FEEDBACK {requirement.id!r}: needs {', '.join(needs)}"]
+    supported = [
+        (part, fact)
+        for part in bom.parts
+        if part.sheet == requirement.sheet
+        if isinstance((fact := _reviewed_fact_for_part(part)), dict)
+        if isinstance(fact.get("current_feedback"), dict)
+        # Every reviewed record carries a (possibly empty) `current_feedback`
+        # mapping; only one that declares its sense element models the loop. A
+        # screw terminal or holder is not a current-feedback controller.
+        and fact["current_feedback"].get("sense_pin")
+    ]
+    if len(supported) != 1:
+        return [
+            f"E_LED_CURRENT_FEEDBACK {requirement.id!r}: typed {target_a:g}A "
+            "constant-current delivery needs exactly one reviewed controller feedback model"
+        ]
+    controller, fact = supported[0]
+    contract = _reviewed_high_side_led_loop_contract(fact)
+    if contract is None:
+        return [
+            f"E_LED_CURRENT_FEEDBACK {controller.ref}: reviewed feedback metadata must "
+            "completely define the high_side_sense_low_side_switch loop"
+        ]
+    bad: list[str] = []
+    if target_a > contract["continuous_current_a"]:
+        bad.append(
+            f"E_LED_CURRENT_FEEDBACK {controller.ref}: requested {target_a:g}A exceeds "
+            f"reviewed continuous output {contract['continuous_current_a']:g}A"
+        )
+    if len({ports["input"], ports["gnd"], ports["led_anode"], ports["led_cathode"]}) != 4:
+        bad.append(
+            f"E_LED_CURRENT_FEEDBACK {requirement.id!r}: input, ground, and distinct "
+            "LED anode/cathode requirement ports must be different nets"
+        )
+        return bad
+    pin_nets = nets.get(controller.ref) or {}
+    for label, pin_name, expected_net in (
+        ("sense", contract["sense_pin"], ports["led_anode"]),
+        ("source", contract["reference_pin"], ports["input"]),
+    ):
+        pins = _pins_named(info, controller.ref, pin_name)
+        if len(pins) != 1 or pin_nets.get(pins[0]) != expected_net:
+            bad.append(
+                f"E_LED_CURRENT_FEEDBACK {controller.ref}: reviewed {label} pin {pin_name} "
+                f"must be wired to {expected_net!r}"
+            )
+    switch_pins = _pins_named(info, controller.ref, contract["switch_pin"])
+    ground_pins = _pins_named(info, controller.ref, contract["ground_pin"]) + _pins_named(
+        info, controller.ref, "EP"
+    )
+    if not switch_pins:
+        bad.append(
+            f"E_LED_CURRENT_FEEDBACK {controller.ref}: reviewed switch pin inventory is absent"
+        )
+    switch_net = pin_nets.get(switch_pins[0]) if switch_pins else None
+    if switch_pins and (not switch_net or any(pin_nets.get(pin) != switch_net for pin in switch_pins)):
+        bad.append(
+            f"E_LED_CURRENT_FEEDBACK {controller.ref}: all parallel {contract['switch_pin']} "
+            "pins must share one wired switch net"
+        )
+    if not ground_pins or any(pin_nets.get(pin) != ports["gnd"] for pin in ground_pins):
+        bad.append(
+            f"E_LED_CURRENT_FEEDBACK {controller.ref}: all reviewed GND/EP return pins "
+            f"must be wired to {ports['gnd']!r}"
+        )
+    expected_r = contract["sense_voltage_v"] / target_a
+    sense_resistors = [
+        part
+        for part in bom.parts
+        if _ref_prefix(part.ref) == "R"
+        and _two_terminal_part_nets(part, nets) is not None
+        and set(_two_terminal_part_nets(part, nets) or ()) == {ports["led_anode"], ports["input"]}
+    ]
+    if not any(
+        (value := _resistance_ohms(part.value)) is not None
+        and abs(value - expected_r) <= expected_r * contract["sense_tolerance"]
+        for part in sense_resistors
+    ):
+        values = ", ".join(f"{part.ref}={part.value!r}" for part in sense_resistors) or "none"
+        bad.append(
+            f"E_LED_CURRENT_FEEDBACK {controller.ref}: direct {contract['sense_pin']}/"
+            f"{contract['reference_pin']} sense resistor is {values}; {target_a:g}A "
+            f"requires {expected_r:g}ohm"
+        )
+    inductors = [
+        part
+        for part in bom.parts
+        if _ref_prefix(part.ref) == "L"
+        and _two_terminal_part_nets(part, nets) is not None
+        and set(_two_terminal_part_nets(part, nets) or ()) == {ports["led_cathode"], switch_net}
+    ]
+    if not any(
+        (value := _inductance_henries(part.value)) is not None and value > 0
+        for part in inductors
+    ):
+        bad.append(
+            f"E_LED_CURRENT_FEEDBACK {requirement.id!r}: LED cathode {ports['led_cathode']!r} "
+            f"needs a positive-valued return inductor to reviewed switch net {switch_net!r}"
+        )
+    if not any(
+        _ref_prefix(part.ref) == "D"
+        and (anode := _pin_number_named(info, part.ref, "A")) is not None
+        and (cathode := _pin_number_named(info, part.ref, "K")) is not None
+        and (part_nets := nets.get(part.ref) or {}).get(anode) == switch_net
+        and part_nets.get(cathode) == ports["input"]
+        for part in bom.parts
+    ):
+        bad.append(
+            f"E_LED_CURRENT_FEEDBACK {controller.ref}: reviewed catch diode must be anode "
+            f"at {switch_net!r} and cathode at {ports['input']!r}"
+        )
+    decoupling = contract["input_decoupling"]
+    if not any(
+        _ref_prefix(part.ref) == "C"
+        and (pair := _two_terminal_part_nets(part, nets)) is not None
+        and set(pair) == {ports["input"], ports["gnd"]}
+        and (value := _capacitance_farads(part.value)) is not None
+        and value >= decoupling["capacitance_min_f"]
+        for part in bom.parts
+    ):
+        bad.append(
+            f"E_LED_CURRENT_FEEDBACK {controller.ref}: VIN/GND input decoupling needs at "
+            f"least {decoupling['capacitance_min_f'] * 1e6:g}uF"
+        )
+    local_loads = [
+        part
+        for part in bom.parts
+        if part.sheet == requirement.sheet
+        and (anode := _pin_number_named(info, part.ref, "A")) is not None
+        and (cathode := _pin_number_named(info, part.ref, "K")) is not None
+        and (part_nets := nets.get(part.ref) or {}).get(anode) == ports["led_anode"]
+        and part_nets.get(cathode) == ports["led_cathode"]
+    ]
+    if local_loads and not all(_has_reviewed_local_led(part) for part in local_loads):
+        refs = ", ".join(part.ref for part in local_loads)
+        bad.append(
+            f"E_LED_CURRENT_FEEDBACK {requirement.id!r}: {refs} bridge the requested "
+            "LED terminals but lack exact reviewed LED physical identity"
+        )
+    return bad
+
+
+def _claims_constant_current_led(architecture, requirement) -> bool:
+    """Whether this requirement claims the reviewed constant-current LED loop.
+
+    A named constant-current family is the claim itself.  Mild sheet prose
+    ("LED driver, constant current") only counts when the requirement also states
+    a typed current or conversion obligation, so a peer connector on the same
+    sheet is never read as a driver.
+    """
+    if "constant-current" in requirement.family:
+        return True
+    topology = (getattr(architecture, "topologies", None) or {}).get(requirement.sheet, "")
+    if "constant" not in topology.lower() or "current" not in topology.lower():
+        return False
+    return any(
+        obligation.kind == "conversion"
+        or (obligation.kind == "quantitative" and "current" in obligation.quantity.lower())
+        for obligation in requirement.obligations
+    )
+
+
+def check_reviewed_constant_current_led_feedback(architecture, bom) -> CheckResult:
+    """§9.41 — prove the complete reviewed constant-current LED power loop."""
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    bad: list[str] = []
+    for requirement in architecture.requirements:
+        if not _claims_constant_current_led(architecture, requirement):
+            continue
+        # Resolve external LED terminals from their explicit peer requirement
+        # before invoking the reusable electrical predicate.
+        ports = _constant_current_led_ports(architecture, requirement)
+        if ports is None:
+            bad.append(
+                f"E_LED_CURRENT_FEEDBACK {requirement.id!r}: needs explicit input/gnd/"
+                "led_anode/led_cathode requirement ports"
+            )
+            continue
+        bad.extend(
+            _reviewed_constant_current_led_loop_errors(
+                requirement, bom, info, nets, ports=ports
+            )
+        )
+    return CheckResult(
+        "9.41 reviewed constant-current LED feedback",
+        not bad,
+        "typed constant-current LED power loops are completely realized" if not bad else
+        f"{len(bad)} constant-current LED feedback contract(s) unproven",
+        bad,
+    )
+
+def _reviewed_identity_for_bom_part(part):
+    """Resolve physical evidence through the canonical fail-closed inventory."""
+    from kicraft.design.part_identity import physical_inventory_record
+
+    return physical_inventory_record(
+        mpn=getattr(part, "mpn", None),
+        symbol=getattr(part, "symbol", None),
+        footprint=getattr(part, "footprint", None),
+        datasheet=getattr(part, "datasheet", None),
+        sourcing_note=getattr(part, "sourcing_note", None),
+    )
+
+
+def _declared_port_pin(info, ref: str, port) -> str | None:
+    """Resolve an explicit declared-interface selector, never port-name guessing."""
+    selector = (
+        getattr(port, "pin_selector", None)
+        or getattr(port, "pin", None)
+        or getattr(port, "pin_name", None)
+    )
+    if selector is None:
+        return None
+    selector = str(selector)
+    pins = info.get(ref) or {}
+    if selector in pins:
+        return selector
+    hits = [number for number, data in pins.items() if data["name"] == selector]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _part_is_deterministic_owned(bom, ref: str) -> bool:
+    """Whether a recipe/lowerer expansion, not the model's group, owns ``ref``.
+
+    Only those expansions contribute ``bom.connections`` (see
+    ``_normalize_bom_stage_response``), so a declared interface can be proven
+    from a pin/net comparison exactly when its implementing component is owned
+    that way; the model-owned remainder is provable only once the wiring stage
+    commits its own connections.
+    """
+    for manifest in bom.recipe_ownership or []:
+        if ref in (getattr(manifest, "refs", None) or ()):
+            return True
+    for part in bom.parts:
+        if part.ref == ref:
+            return bool(getattr(part, "recipe_id", None)) or str(
+                getattr(part, "resolution_source", "") or ""
+            ) in {"recipe", "lowerer"}
+    return False
+
+
+def check_requirement_physical_realization(
+    architecture, bom, *, declared_interface_scope: str = "all"
+) -> CheckResult:
+    """§9.42 — physical obligations and declared interfaces must be real BOM pins.
+
+    A BOM group label or family-like value has no fulfillment authority.  Only
+    an exact reviewed identity with its reviewed symbol/footprint pair can
+    satisfy a physical class or provide the component whose declared interface
+    is checked against the committed net graph.
+
+    ``declared_interface_scope`` splits the declared-interface half across the
+    two stages that can prove it, because only recipe/lowerer expansions create
+    BOM-stage connections: ``"recipe_owned"`` at BOM commit, ``"model_owned"``
+    at wiring commit, ``"all"`` for build-time validation where both graphs are
+    complete. A declared interface is never silently unchecked: each stage
+    evaluates the half it can prove, with the same offenders.
+    """
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    reviewed = {
+        part.ref: record
+        for part in bom.parts
+        if (record := _reviewed_identity_for_bom_part(part)) is not None
+    }
+    bad: list[str] = []
+    aggregate_demands: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
+    for requirement in architecture.requirements:
+        requirement_parts = [
+            part
+            for part in bom.parts
+            if part.sheet == requirement.sheet
+            and part.ref in reviewed
+            and (
+                requirement.exact_part is None
+                or reviewed[part.ref].identity == requirement.exact_part.casefold()
+            )
+        ]
+        physical_classes = {
+            obligation.component_class.casefold()
+            for obligation in requirement.obligations
+            if obligation.kind == "physical"
+        }
+        local_demands = {component_class: 1 for component_class in physical_classes}
+        for obligation in requirement.obligations:
+            if obligation.kind != "quantity":
+                continue
+            component_class = obligation.subject.casefold()
+            if component_class in physical_classes:
+                local_demands[component_class] = max(
+                    local_demands[component_class], obligation.minimum
+                )
+        for component_class, minimum in local_demands.items():
+            matching = [
+                part
+                for part in requirement_parts
+                if component_class == reviewed[part.ref].family
+                or component_class in reviewed[part.ref].physical_features
+            ]
+            if len(matching) < minimum:
+                bad.append(
+                    f"E_PHYSICAL_REALIZATION {requirement.id!r}: requires {minimum} reviewed "
+                    f"{component_class!r} physical part(s), found {len(matching)} with exact "
+                    "MPN/symbol/footprint evidence"
+                )
+            aggregate_demands[(requirement.sheet, component_class)].append(
+                (requirement.id, minimum)
+            )
+        claim = requirement.declared_interface
+        if claim is None or not bom.connections:
+            continue  # BOM commit proves identity; wiring owns pin/net evidence.
+        interface_parts = [
+            part
+            for part in bom.parts
+            if part.sheet == requirement.sheet
+            and part.ref in info
+            and bool(getattr(part, "mpn", None))
+            and bool(part.symbol)
+            and bool(part.footprint)
+            and (
+                requirement.exact_part is None
+                or str(part.mpn).casefold() == requirement.exact_part.casefold()
+            )
+        ]
+        deterministic_owned = any(
+            _part_is_deterministic_owned(bom, part.ref) for part in interface_parts
+        )
+        if declared_interface_scope == "recipe_owned" and not deterministic_owned:
+            continue  # the wiring stage proves the model-owned half
+        if declared_interface_scope == "model_owned" and deterministic_owned:
+            continue  # the BOM stage already proved the expansion-owned half
+        if len(interface_parts) != 1:
+            bad.append(
+                f"E_DECLARED_INTERFACE {requirement.id!r}: needs exactly one "
+                "identity-matched BOM component with resolved pin inventory"
+            )
+            continue
+        part = interface_parts[0]
+        for port in claim.ports:
+            expected_net = requirement.ports.get(port.key)
+            if expected_net is None:
+                # A declared port with no bound net is a pin-inventory claim (a
+                # converter's switch/boot/feedback pin), not a wiring claim: the
+                # design never bound that port to a top-level net, so a
+                # net-graph comparison has nothing to compare against. Only the
+                # ports the requirement actually binds are checked.
+                continue
+            pin = _declared_port_pin(info, part.ref, port)
+            actual_net = (nets.get(part.ref) or {}).get(pin or "")
+            if pin is None or actual_net != expected_net:
+                bad.append(
+                    f"E_DECLARED_INTERFACE {requirement.id!r}.{port.key}: expected "
+                    f"{expected_net!r} on declared pin selector "
+                    f"{getattr(port, 'pin_selector', None) or getattr(port, 'pin', None) or getattr(port, 'pin_name', None)!r} "
+                    f"of {part.ref}, found {actual_net!r}"
+                )
+    for (sheet, component_class), demand_rows in sorted(aggregate_demands.items()):
+        demanded = sum(minimum for _, minimum in demand_rows)
+        available = [
+            part
+            for part in bom.parts
+            if part.sheet == sheet
+            and part.ref in reviewed
+            and (
+                component_class == reviewed[part.ref].family
+                or component_class in reviewed[part.ref].physical_features
+            )
+        ]
+        if len(available) < demanded:
+            owners = ", ".join(f"{requirement_id}×{minimum}" for requirement_id, minimum in demand_rows)
+            bad.append(
+                f"E_PHYSICAL_REALIZATION {sheet!r}/{component_class!r}: {owners} demand "
+                f"{demanded} distinct part(s), but only {len(available)} exact reviewed "
+                "MPN/symbol/footprint realization(s) exist"
+            )
+    return CheckResult(
+        "9.42 requirement physical/interface realization",
+        not bad,
+        "physical obligations and declared interfaces have exact realized evidence" if not bad else
+        f"{len(bad)} physical/interface realization contract(s) unproven",
+        bad,
+    )
 
 # ---------- §9.21 MCU first-flash / programming path (advisory) ----------
 #

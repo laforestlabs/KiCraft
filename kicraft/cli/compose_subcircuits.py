@@ -4243,6 +4243,15 @@ def main(argv: list[str] | None = None) -> int:
                             return 1
                 else:
                     error_msg = routing_result.get("error", "unknown error")
+                    if routing_result.get("deadline_exceeded"):
+                        # Machine-readable, so the run's failure summary (and the
+                        # rc6 message in design/cli_app.py) names the deadline
+                        # instead of claiming the placement is unroutable.
+                        print(
+                            "router_deadline: parent routing was killed at the "
+                            f"KiCadRoutingTools deadline ({error_msg})",
+                            file=sys.stderr,
+                        )
                     print(
                         f"error: parent routing failed: {error_msg}",
                         file=sys.stderr,

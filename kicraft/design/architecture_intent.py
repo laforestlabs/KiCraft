@@ -28,19 +28,28 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .lowering import RegisteredLowerer, registered_lowerers
+from .lowering import (
+    RegisteredLowerer,
+    lowerer_contract_diagnostic,
+    lowerer_port_direction,
+    registered_lowerers,
+)
 from .models import (
     SHEET_NAME_RE,
     SHEET_STEM_RE,
     Architecture,
     CircuitRequirement,
     CircuitRole,
+    DeclaredInterfaceClaim,
+    DeclaredInterfacePort,
+    RequirementObligation,
     InterSheetNet,
     Sheet,
     SheetPin,
 )
 from .recipes.models import RegisteredRecipe
 from .recipes.pin_allocator import FIXED_INTERFACES
+from kicraft.form_factors import get_template
 from .recipes.registry import registered_recipes
 from .recipes.resolver import (
     _PORT_ALIASES,
@@ -53,6 +62,41 @@ EDGE_PREFIX = "edge:"
 """Signals whose peer is off the board: `"to": "edge:LED_STRING"`."""
 
 GND_NET = "GND"
+
+
+def apply_authoritative_standard_form_factor(
+    architecture_payload: dict,
+    original_intent: object | None,
+) -> dict:
+    """Carry the user-owned standard into an architecture candidate.
+
+    This boundary is shared by provider normalization and direct commits: a
+    provider may omit a server-owned mechanical fact, but may not replace it.
+    """
+
+    form_factor = (
+        original_intent.get("form_factor")
+        if isinstance(original_intent, dict)
+        else getattr(original_intent, "form_factor", None)
+    )
+    standard = (
+        form_factor.get("standard")
+        if isinstance(form_factor, dict)
+        else getattr(form_factor, "standard", None)
+    )
+    if not isinstance(standard, str) or not standard.strip():
+        return architecture_payload
+    standard = standard.strip()
+    candidate = architecture_payload.get("standard_form_factor")
+    if candidate is not None and (
+        not isinstance(candidate, str) or candidate.strip().casefold() != standard.casefold()
+    ):
+        raise ValueError(
+            "architecture standard_form_factor contradicts the "
+            "user-approved intent.form_factor.standard"
+        )
+    return {**architecture_payload, "standard_form_factor": standard}
+
 _USB_DATA_PORTS = frozenset({"usb_dm", "usb_dp"})
 _USB_DEVICE_CONNECTOR_FAMILY = "usb-c-usb2-device"
 _USB_DEVICE_CONNECTOR_PART = "USB-C-USB2-DEVICE"
@@ -111,14 +155,10 @@ _SINK_DIRECTION = {
 }
 
 
-class IntentDeclaredPort(BaseModel):
-    """One pin of an uncurated part as the model claims it: a recorded claim, not a verified pin."""
+class IntentDeclaredPort(DeclaredInterfacePort):
+    """One claimed pin of an uncurated part, retained as a canonical claim."""
 
     model_config = ConfigDict(extra="forbid")
-
-    key: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
-    direction: Literal["input", "output", "bidirectional", "passive", "power"]
-    function: str
 
 
 class IntentSheet(BaseModel):
@@ -166,6 +206,15 @@ class IntentRequirement(BaseModel):
     # Rail this part is powered from: the compiler binds it to the recipe's supply port and makes
     # this sheet an endpoint of that rail.
     supply: str | None = None
+    # Explicit port-to-rail bindings for multi-supply devices. Unlike `supply`,
+    # these do not select a pin by name and therefore cannot cross-bind domains.
+    supply_bindings: dict[str, str] = Field(default_factory=dict)
+    # Explicit port-to-reference-domain bindings. A domain is a declared
+    # zero-volt rail such as GND_LOGIC or GND_FIELD; names never merge domains.
+    reference_bindings: dict[str, str] = Field(default_factory=dict)
+    # Role from an approved form-factor template. This is not a freeform
+    # connector label: derivation checks its exact pin inventory and nets.
+    standard_stacking_role: str | None = None
     # How the part is programmed when it is programmable (`native_usb`, `usb_uart_bridge`, `swd`,
     # `updi`, `bootsel`, `none`). Declared intent the design-level checks read back.
     programming: str | None = None
@@ -177,6 +226,16 @@ class IntentRequirement(BaseModel):
     ties: dict[str, str] = Field(default_factory=dict)
     # Only for a part with no curated recipe: the interface the model claims. Recorded as a claim.
     declared_ports: list[IntentDeclaredPort] = Field(default_factory=list)
+    obligations: list[RequirementObligation] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _explicit_bindings_do_not_overlap(self):
+        overlap = set(self.supply_bindings) & set(self.reference_bindings)
+        if overlap:
+            raise ValueError(
+                f"IntentRequirement port(s) cannot be supply and reference bindings: {sorted(overlap)}"
+            )
+        return self
 
 
 class IntentSignal(BaseModel):
@@ -255,6 +314,30 @@ class ArchitectureIntent(BaseModel):
     signals: list[IntentSignal] = Field(default_factory=list)
     power: IntentPower = Field(default_factory=IntentPower)
     assumptions: list[str] = Field(default_factory=list)
+    # Standard template selected from the user-approved form-factor contract.
+    # Only declared fixed connector roles of this template may use
+    # `standard_stacking_role`.
+    standard_form_factor: str | None = None
+    # The architecture receives the original typed facts, not only prose
+    # constraints; each one must have a requirement-local owner below.
+    obligations: "list[RequirementObligation]" = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _obligations_are_owned_once(self):
+        expected = {(row.kind, row.original_obligation_id) for row in self.obligations}
+        owned = [
+            (row.kind, row.original_obligation_id)
+            for requirement in self.requirements
+            for row in requirement.obligations
+        ]
+        if len(owned) != len(set(owned)):
+            raise ValueError("ArchitectureIntent obligation is owned by more than one requirement")
+        if set(owned) != expected:
+            raise ValueError(
+                "ArchitectureIntent obligation ownership mismatch; "
+                f"missing={sorted(expected - set(owned))}, unknown={sorted(set(owned) - expected)}"
+            )
+        return self
 
 
 class IntentDiagnostic(BaseModel):
@@ -282,6 +365,7 @@ class _Catalog:
     directions: dict[str, str]
     source: Literal["recipe", "lowerer", "declared"]
     recipe: RegisteredRecipe | None = None
+    lowerer: RegisteredLowerer | None = None
     open_ports: bool = False
     # Recipe ports the part cannot work without, and the ones a reviewed recipe allows tying to
     # ground when the design does not use them (a spare bus or address channel, a shell).
@@ -364,17 +448,17 @@ def _derived_interfaces(
             and name not in FIXED_INTERFACES
             and name not in _CAPABILITY_INTERFACES
         ):
-            derived.append(name)  # an interface this compiler does not model: keep the claim
+            derived.append(name)
     return list(dict.fromkeys(derived))
 
 
 def _direction(catalog: _Catalog, requirement: IntentRequirement, name: str) -> str | None:
     if name in catalog.directions:
         return catalog.directions[name]
+    if catalog.lowerer is not None:
+        return lowerer_port_direction(catalog.lowerer, name)
     if _allows_application_port(catalog, requirement, name):
         return _application_direction(name) or "output"
-    if catalog.open_ports:
-        return "bidirectional"
     return None
 
 
@@ -433,22 +517,21 @@ def _catalog(
             groundable=frozenset(port.name for port in definition.ports if port.allow_ground),
         )
     if requirement.family in lowerers:
-        # A lowerer's `port_keys` are prose placeholders for keyed families (`pin1..pinN`), so its
-        # vocabulary stays open: the model names the keys, the lowerer validates them at BOM. The
-        # keys a family publishes *concretely* are known though, and a rail or ground binding needs
-        # exactly those (`led-current-resistor` publishes drive/gnd, `switch-input` signal/gnd/vdd),
-        # so take the supply and ground pins from the family instead of refusing a declared supply
-        # the derivation could not place.
-        directions: dict[str, str] = {}
-        for key in lowerers[requirement.family].port_keys:
-            name = key.strip().lower()
-            if not name.isidentifier():
-                continue  # a placeholder vocabulary, not a pin name
-            if name in _GROUND_TOKENS:
-                directions[name] = "bidirectional"
-            elif any(name == token or name.startswith(f"{token}_") for token in _SUPPLY_TOKENS):
-                directions[name] = "input"
-        return _Catalog(directions=directions, source="lowerer", open_ports=True)
+        lowerer = lowerers[requirement.family]
+        names = {
+            key.lower()
+            for key in (*lowerer.port_keys, *(key for key, _direction in lowerer.port_directions))
+            if key.isidentifier()
+        }
+        return _Catalog(
+            directions={
+                name: direction
+                for name in names
+                if (direction := lowerer_port_direction(lowerer, name)) is not None
+            },
+            source="lowerer",
+            lowerer=lowerer,
+        )
     if requirement.declared_ports:
         return _Catalog(
             directions={port.key: port.direction for port in requirement.declared_ports},
@@ -540,6 +623,7 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
             id=row.id,
             sheet=row.sheet,
             role=row.role,
+            standard_stacking_role=row.standard_stacking_role,
             family=row.family,
             # The recipe's own exact part is the identity the resolver would settle on anyway;
             # stating it here keeps the resolved payload explicit instead of inferred.
@@ -548,7 +632,75 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
             parameters=dict(row.parameters),
             interfaces=list(row.interfaces),
             functional_blocks=list(row.functional_blocks),
+            declared_interface=(
+                DeclaredInterfaceClaim(ports=row.declared_ports)
+                if catalog.source == "declared"
+                else None
+            ),
+            obligations=list(row.obligations),
         )
+    standard_port_bindings: dict[str, dict[str, str]] = {}
+    stacking_requirements = [
+        row for row in intent.requirements if row.standard_stacking_role is not None
+    ]
+    if intent.standard_form_factor is not None or stacking_requirements:
+        template = get_template(intent.standard_form_factor)
+        if template is None or not template.validated:
+            _fail(
+                "unsupported_standard_stacking_interface",
+                "stacking headers require one approved, validated standard_form_factor template",
+                evidence=[intent.standard_form_factor or "(none)"],
+            )
+        else:
+            expected = {connector.role: connector for connector in template.fixed_connectors}
+            actual = {row.standard_stacking_role: row for row in stacking_requirements}
+            if len(actual) != len(stacking_requirements) or set(actual) != set(expected):
+                _fail(
+                    "incomplete_standard_stacking_interface",
+                    (
+                        f"standard {template.key!r} requires exactly its fixed connector roles; "
+                        "do not replace them with a composite or arbitrary header"
+                    ),
+                    evidence=[*sorted(expected), *sorted(actual)],
+                )
+            for role, connector in expected.items():
+                row = actual.get(role)
+                if row is None:
+                    continue
+                expected_ports = {
+                    f"pin{index}": net
+                    for index, net in enumerate(connector.net_by_pin, start=1)
+                }
+                if (
+                    row.id not in requirements
+                    or row.role != "connector"
+                    or row.family != "pin-header"
+                    or row.exact_part is not None
+                    or row.parameters != {"rows": 1, "gender": "female"}
+                    or not row.functional_blocks
+                ):
+                    _fail(
+                        "invalid_standard_stacking_owner",
+                        (
+                            f"stacking role {role!r} must be a generic female one-row pin-header "
+                            "owned by an explicit stacking functional block"
+                        ),
+                        requirement_id=row.id,
+                        sheet=row.sheet,
+                    )
+                    continue
+                if row.ties != expected_ports:
+                    _fail(
+                        "invalid_standard_stacking_pinmap",
+                        f"stacking role {role!r} must use the template's exact pin/net map",
+                        requirement_id=row.id,
+                        sheet=row.sheet,
+                        evidence=[
+                            f"{pin}={net}" for pin, net in expected_ports.items()
+                        ],
+                    )
+                    continue
+                standard_port_bindings[row.id] = expected_ports
 
     signals = [row for item in intent.signals for row in item.expanded()]
     referenced = {row.from_ref.partition(".")[0] for row in signals}
@@ -609,6 +761,18 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
         if (sheet, direction) not in rows:
             rows.append((sheet, direction))
 
+    for requirement_id, ports in standard_port_bindings.items():
+        for port, net in ports.items():
+            if net == "NC":
+                bindings[requirement_id][port] = net
+            else:
+                _bind(
+                    requirement_id,
+                    port,
+                    net,
+                    "bidirectional",
+                    context="standard stacking interface",
+                )
     def _lookup(reference: str, *, context: str) -> _SheetRef | None:
         """`<requirement_id>.<port>`, any accepted alias -> the canonical endpoint."""
         requirement_id, separator, port_name = reference.partition(".")
@@ -668,8 +832,84 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
     for requirement_id, requirement in requirements.items():
         row = models_by_id[requirement_id]
         catalog = catalogs[requirement_id]
-        if "gnd" in catalog.directions:
-            _bind(requirement_id, "gnd", GND_NET, "bidirectional", context="ground")
+        declared_supply = {
+            port.key: port.supply_rail for port in row.declared_ports if port.supply_rail
+        }
+        declared_references = {
+            port.key: port.reference_domain for port in row.declared_ports if port.reference_domain
+        }
+        supply_bindings = {**declared_supply, **row.supply_bindings}
+        reference_bindings = {**declared_references, **row.reference_bindings}
+        if set(declared_supply) & set(row.supply_bindings) and any(
+            declared_supply[port] != row.supply_bindings[port]
+            for port in set(declared_supply) & set(row.supply_bindings)
+        ):
+            _fail(
+                "conflicting_supply_binding",
+                f"requirement {requirement_id!r} gives a declared port two supply rails",
+                requirement_id=requirement_id,
+                sheet=requirement.sheet,
+            )
+        if set(declared_references) & set(row.reference_bindings) and any(
+            declared_references[port] != row.reference_bindings[port]
+            for port in set(declared_references) & set(row.reference_bindings)
+        ):
+            _fail(
+                "conflicting_reference_binding",
+                f"requirement {requirement_id!r} gives a declared port two reference domains",
+                requirement_id=requirement_id,
+                sheet=requirement.sheet,
+            )
+        for port_name, net in sorted(reference_bindings.items()):
+            resolved = _resolve_port(row, catalog, port_name)
+            if resolved is None:
+                _fail(
+                    "unknown_reference_port",
+                    f"requirement {requirement_id!r} has no reference port {port_name!r}",
+                    requirement_id=requirement_id,
+                    sheet=requirement.sheet,
+                )
+                continue
+            if net != GND_NET and net not in rail_names:
+                _fail(
+                    "unknown_reference_domain",
+                    f"reference port {port_name!r} of {requirement_id!r} names undeclared domain {net!r}",
+                    requirement_id=requirement_id,
+                    sheet=requirement.sheet,
+                    evidence=[GND_NET, *sorted(rail_names)],
+                )
+                continue
+            if net != GND_NET and intent.power.rails[net].voltage != 0:
+                _fail(
+                    "reference_domain_not_zero_volt",
+                    f"reference port {port_name!r} of {requirement_id!r} names non-zero rail {net!r}",
+                    requirement_id=requirement_id,
+                    sheet=requirement.sheet,
+                )
+                continue
+            _bind(requirement_id, resolved[0], net, resolved[1], context="reference domain")
+        if "gnd" in catalog.directions and "gnd" not in reference_bindings:
+            _bind(requirement_id, "gnd", GND_NET, "bidirectional", context="legacy ground")
+        for port_name, rail in sorted(supply_bindings.items()):
+            resolved = _resolve_port(row, catalog, port_name)
+            if resolved is None:
+                _fail(
+                    "unknown_supply_port",
+                    f"requirement {requirement_id!r} has no supply port {port_name!r}",
+                    requirement_id=requirement_id,
+                    sheet=requirement.sheet,
+                )
+                continue
+            if rail not in rail_names:
+                _fail(
+                    "unknown_supply_rail",
+                    f"supply port {port_name!r} of {requirement_id!r} names undeclared rail {rail!r}",
+                    requirement_id=requirement_id,
+                    sheet=requirement.sheet,
+                    evidence=sorted(rail_names),
+                )
+                continue
+            _bind(requirement_id, resolved[0], rail, "input", context="explicit supply")
         if row.supply is None:
             continue
         if row.supply not in rail_names:
@@ -685,10 +925,6 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
             )
             continue
         if requirement.role == "connector":
-            # A connector's `supply` is not a port it draws from: it is the rail the connector
-            # exposes to the peer. The pin is chosen at close-out (`pinN`, or the family's own
-            # documented supply pin when the design has not claimed it), never bound here: a
-            # socket's `vbus` is the model's statement about VBUS, not about the supply rail.
             connector_rails[requirement_id] = row.supply
             continue
         port = _supply_port(catalog, row.supply)
@@ -697,14 +933,15 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                 "unsupported_supply_port",
                 (
                     f"requirement {requirement_id!r} declares supply {row.supply!r}, but its "
-                    f"{catalog.source} interface has no supply port; bind the rail with a signal"
+                    f"{catalog.source} interface has no supply port; use supply_bindings to name "
+                    "a published port"
                 ),
                 requirement_id=requirement_id,
                 sheet=requirement.sheet,
                 evidence=[f"ports={catalog.choices}"],
             )
             continue
-        _bind(requirement_id, port, row.supply, "input", context="supply")
+        _bind(requirement_id, port, row.supply, "input", context="legacy supply")
 
     # Off-board peers: one connector per `edge:` label, carrying only what named it.
     edge_connectors: dict[str, tuple[str, str, list[str]]] = {}  # label -> (id, mode, rails)
@@ -1019,6 +1256,8 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
         model = models_by_id.get(requirement_id)
         if model is None:
             continue  # a connector the compiler built has no intent of its own
+        if requirement_id in standard_port_bindings:
+            continue  # exact template map was validated and bound above
         for port_name, net in model.ties.items():
             catalog = catalogs[requirement_id]
             resolved = _resolve_port(model, catalog, port_name.lower().strip())
@@ -1093,6 +1332,25 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
     # A port the reviewed recipe requires and nothing wired is a missing design statement, not
     # a bookkeeping slip: the part cannot work without it. Name it here, once, instead of
     # letting the part reach BOM expansion and fail on a port binding mismatch.
+    # Registered lowerers own a finite published contract. Once all architecture
+    # bindings exist, reject an invalid known contract here rather than treating
+    # its deterministic coverage miss as model-owned BOM work.
+    for requirement_id, catalog in sorted(catalogs.items()):
+        if catalog.source != "lowerer":
+            continue
+        candidate = requirements[requirement_id].model_copy(
+            update={"ports": bindings.get(requirement_id, {})}
+        )
+        diagnostic = lowerer_contract_diagnostic(candidate)
+        if diagnostic is not None:
+            _fail(
+                "unsupported_lowerer_contract",
+                diagnostic.message,
+                requirement_id=requirement_id,
+                sheet=candidate.sheet,
+                evidence=diagnostic.evidence,
+            )
+
     for requirement_id, catalog in sorted(catalogs.items()):
         if catalog.source != "recipe":
             continue
@@ -1166,17 +1424,21 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
             GND_NET: 0.0,
         },
         comms_protocols=list(intent.comms_protocols),
+        standard_form_factor=intent.standard_form_factor,
         mcu_present=intent.mcu_present,
         sheets=sheets,
         power_nets=[GND_NET, *sorted(rail_names)],
         inter_sheet_nets=_inter_sheet_nets(final_requirements, endpoints, rail_names),
         assumptions=[*intent.assumptions, *derived_notes, *renamed, *notes],
         requirements=final_requirements,
+        obligations=list(intent.obligations),
         declared_interfaces=declared,
     )
 
 
 def _usb_vbus_rail(intent: ArchitectureIntent) -> str | None:
+
+
     """The 5 V rail a USB socket exposes, never a guess.
 
     Preference: the rail the board's own input requirement generates (that is the
@@ -1216,3 +1478,6 @@ def _inter_sheet_nets(
         for name in order
         if len(rows := endpoints.get(name, [])) >= 2
     ]
+
+
+ArchitectureIntent.model_rebuild()

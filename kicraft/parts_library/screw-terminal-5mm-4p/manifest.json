@@ -1,0 +1,24 @@
+{
+  "content_hash": "sha256:3669a824c5058ec61222f133d641f63c76fc6c7cd7005b7b891d0fc37973f843",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2931152.pdf",
+  "description": "KANGNEX(\u5eb7\u5948\u514b\u65af\u7535\u6c14) WJ126V-5.0-04P-14-00A",
+  "footprint_name": "CONN-TH_4P-P5.00_WJ126V-5.0-4P-1",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "WJ126V-5.0-04P-14-00A",
+  "name": "screw-terminal-5mm-4p",
+  "provenance": {
+    "added_at": "2026-06-29T02:46:26Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored-from-home-bundle",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2931152"
+  },
+  "symbol_name": "WJ126V-5.0-4P",
+  "tags": [],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

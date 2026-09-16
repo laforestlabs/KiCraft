@@ -1,0 +1,29 @@
+{
+  "content_hash": "sha256:f6b12f4cebe68ebdf196ac25b93b205e4110876351e77c9eff82bc8b5a47761c",
+  "datasheet_url": "https://lcsc.com/product-detail/Others_ALPS-Electric-EC11E15244G1_C370970.html",
+  "description": "ALPSALPINE EC11E15244G1 vertical through-hole incremental rotary encoder with push switch (vendored from the home bundle for the encoder-oled-panel reference)",
+  "footprint_name": "SW-TH_EC11E15244G1",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "EC11E15244G1",
+  "name": "ec11e15244g1",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored-from-home-bundle",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C370970"
+  },
+  "symbol_name": "EC11E15244G1",
+  "tags": [
+    "rotary-encoder",
+    "through-hole",
+    "encoder",
+    "push-switch"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": null
+}

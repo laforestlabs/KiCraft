@@ -17,7 +17,7 @@ _FIXTURE = (
     / "kicraft"
     / "loadtest"
     / "fixtures"
-    / "transcript_usb_pd_trigger.json"
+    / "transcript_rc_lowpass.json"
 )
 
 
@@ -181,7 +181,7 @@ def test_replay_drives_full_chain_at_zero_cost(monkeypatch):
 
     ws = Path(tempfile.mkdtemp(prefix="mocktest_"))
     try:
-        results, guard, _ = drive_chain(list(DESIGN_STAGES), "a usb-c pd trigger", ws)
+        results, guard, _ = drive_chain(list(DESIGN_STAGES), "a passive RC low-pass filter breakout", ws)
         assert [r["stage"] for r in results] == list(DESIGN_STAGES)
         assert all(r["commit_ok"] for r in results), [
             (r["stage"], r.get("error") or r.get("commit")) for r in results

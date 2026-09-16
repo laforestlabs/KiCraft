@@ -8,11 +8,12 @@ and the admin tier gate.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from kicraft.eval import load_rubric
 from kicraft.eval.judge import grade_class_j
 from kicraft.eval.metrics_web import collect_web_metrics
-from kicraft.eval.run_web import evaluate_project
+from kicraft.eval.run_web import build_run_digest, evaluate_project
 from kicraft.eval.scoring import eval_script_gates, score_class_c_dims
 
 
@@ -67,6 +68,36 @@ def _make_project(root, *, retries=0, questions=0, erc_errors=0, erc_warnings=0,
     return base
 
 
+def _digest_metrics():
+    return {
+        "synth": {"status": "ok", "failed_checks": []},
+        "erc": {"errors": 0, "warnings": 0},
+        "transcript": {"failed_commits": 0, "ask_questions": 0, "crashes": 0},
+        "generated": {"synthesized": True, "pcb": 1, "sch": 1},
+    }
+
+
+def test_frozen_r2r_dac_digest_retains_c1_supply_nets():
+    run_dir = (
+        Path(__file__).resolve().parents[1]
+        / "logs/self_eval/20260915T132650Z/run_02_r2r-dac"
+    )
+    digest = build_run_digest(run_dir, _digest_metrics())
+    assert "C1: value='100nF'" in digest
+    assert "+5V [sheet='BUFFER']: U1.5, C1.1" in digest
+    assert "GND [sheet='BUFFER']: U1.2, C1.2" in digest
+
+
+def test_run_digest_no_bom_is_incomplete_not_an_mcu_claim(tmp_path):
+    project = tmp_path / "no-bom"
+    project.mkdir()
+    (project / "brief.txt").write_text("Controller board")
+    (project / "state.json").write_text(json.dumps({"intent": {"goal": "Controller board"}}))
+    digest = build_run_digest(project, _digest_metrics())
+    assert "BOM / PINS / NETS — INCOMPLETE" in digest
+    assert "do not claim a missing or unprogrammable delivered MCU" in digest
+
+
 class FakeClient:
     """Returns scripted replies; records the meta_ctx of the last call."""
 
@@ -105,6 +136,31 @@ def test_collect_web_metrics_clean_run(tmp_path):
     assert dims["convergence_efficiency"]["level"] == 4
     assert dims["convergence_efficiency"]["partial"] is False
     assert eval_script_gates(m, rub) == []
+
+
+def test_collect_web_metrics_distinguishes_stage_subprocess_crash(tmp_path):
+    from kicraft.eval.metrics_web import analyze_events
+
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                {"kind": "stage_start", "stage": "wiring"},
+                {
+                    "kind": "stage_done",
+                    "stage": "wiring",
+                    "ok": False,
+                    "failure_kind": "commit_process_failed",
+                },
+                {"kind": "build_log", "text": "Traceback (most recent call last)"},
+            ]
+        )
+    )
+    transcript = analyze_events(events)
+    assert transcript["stage_subprocess_crashes"] == 1
+    assert transcript["build_crashes"] == 1
+    assert transcript["crashes"] == 2
 
 
 def test_token_metrics_distinguish_exact_run_from_project_aggregation(tmp_path):

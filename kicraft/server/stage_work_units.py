@@ -295,21 +295,9 @@ def plan_stage_work_units(
             # exhausted the stage. Plain requirements roll up into ONE
             # sheet-scoped unit per sheet, where the model sees the sheet's
             # function text and can emit a coherent part set.
-            combined_connector_sheets = {
-                str(sheet.get("name"))
-                for sheet in architecture.get("sheets") or []
-                if isinstance(sheet, dict)
-                and (
-                    "fpc" in str(sheet.get("function") or "").lower()
-                    or "ffc" in str(sheet.get("function") or "").lower()
-                )
-                and "header" in str(sheet.get("function") or "").lower()
-            }
             determinable_ids: set[str] = set()
             for requirement in requirements:
                 if str(requirement.get("id")) in selected:
-                    continue
-                if str(requirement.get("sheet")) in combined_connector_sheets:
                     continue
                 try:
                     if (
@@ -318,6 +306,10 @@ def plan_stage_work_units(
                     ):
                         determinable_ids.add(str(requirement["id"]))
                 except (TypeError, ValueError):
+                    # A known lowerer's refusal is reported at architecture
+                    # ownership, where the requirement is claimed. Planning is a
+                    # filter, not a gate: an unrealizable requirement stays
+                    # model-owned work rather than crashing the unit plan.
                     continue
 
             units: list[StageWorkUnit] = []
@@ -575,7 +567,7 @@ _HIROSE_FH12_05_PIN_COUNTS = {
 
 def _requirement_needs_controller(requirement: dict) -> bool:
     return (
-        str(requirement.get("role")) == "mcu_core"
+        str(requirement.get("role")) in {"mcu_core", "regulator"}
         or _identity_token(requirement.get("family"))
         in {"usbpdtrigger", "usbpdfixedtrigger", "usbpdselectabletrigger"}
         or "controller"
@@ -588,6 +580,11 @@ def _requirement_needs_controller(requirement: dict) -> bool:
 
 def _required_physical_feature(requirement: dict) -> str | None:
     """Use typed families, never a sheet name or component-group label."""
+    from kicraft.design.part_identity import reviewed_parts_for_feature
+
+    declared_family = str(requirement.get("family") or "")
+    if reviewed_parts_for_feature(declared_family):
+        return declared_family
     family = _identity_token(requirement.get("family"))
     if family in {
         "pinheader",
@@ -597,7 +594,7 @@ def _required_physical_feature(requirement: dict) -> str | None:
         "gpioheader",
     }:
         return "header"
-    if family == "fpcheaderbreakout":
+    if family == "fpcconnector":
         return "fpc"
     if family in {"switchinput", "button", "pushbutton", "bootbutton", "resetbutton"}:
         return "button"
@@ -609,31 +606,19 @@ def _required_physical_feature(requirement: dict) -> str | None:
 
 
 def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
-    if feature == "header":
-        return group.symbol.startswith(
-            ("Connector_Generic:Conn_", "Connector:Conn_", "Connector_Generic_MountingPin:Conn_")
-        ) and group.footprint.startswith(
-            ("Connector_PinHeader_", "Connector_PinSocket_", "Connector_IDC:")
-        )
-    if feature == "fpc":
-        return group.symbol.startswith(
-            ("Connector_Generic:Conn_", "Connector:Conn_", "Connector_Generic_MountingPin:Conn_")
-        ) and group.footprint.startswith("Connector_FFC-FPC:")
-    if feature == "coin-cell-holder":
-        return group.symbol == "Device:Battery_Cell" and group.footprint.startswith(
-            "Battery:BatteryHolder_"
-        )
-    if feature == "selector" and (
-        group.symbol == "sp3t-switch-msk13c02:MSK13C02-SZ"
-        and group.footprint == "sp3t-switch-msk13c02:SW-SMD_MSK13C02-SZ"
-    ):
-        return True
-    if not group.footprint.startswith(("Button_Switch_SMD:", "Button_Switch_THT:")):
-        return False
-    if feature == "button":
-        return group.symbol.startswith("Switch:SW_Push")
-    return group.symbol.startswith(
-        ("Switch:SW_SPDT", "Switch:SW_DPDT", "Switch:SW_Rotary", "Switch:SW_DIP")
+    from kicraft.design.part_identity import physical_inventory_record
+
+    reviewed = physical_inventory_record(
+        mpn=group.mpn, symbol=group.symbol, footprint=group.footprint,
+    )
+    canonical_features = {
+        "fpc": {"fpc-connector"},
+        "header": {"pin-header", "pin-socket"},
+        "button": {"momentary-button"},
+        "selector": {"three-position-selector", "sp3t-selector"},
+    }.get(feature, {feature})
+    return reviewed is not None and bool(
+        canonical_features.intersection(reviewed.physical_features)
     )
 
 
@@ -656,7 +641,20 @@ def _group_implements_controller(group: BomComponentGroup, requirement: dict) ->
     if _identity_token(requirement.get("family")) == "pdtriggercontroller":
         requirement = {**requirement, "family": "usb-pd-trigger"}
     # A label or substitution rationale is not evidence of controller identity.
-    return _requirement_owns_protected_group(group.model_copy(update={"id": ""}), (requirement,))
+    if _requirement_owns_protected_group(group.model_copy(update={"id": ""}), (requirement,)):
+        return True
+    if requirement.get("exact_part"):
+        return False
+    from kicraft.design.part_identity import reviewed_part
+
+    reviewed = reviewed_part(group.mpn or group.value)
+    return bool(
+        reviewed is not None
+        and reviewed.family == str(requirement.get("family") or "").casefold()
+        and reviewed.symbol == group.symbol
+        and reviewed.footprint == group.footprint
+        and (reviewed.power_transfer or reviewed.current_feedback)
+    )
 
 
 def _standard_connector_sheet_candidate(
@@ -1054,6 +1052,11 @@ def deterministic_bom_candidate(
 
     requirement = _unit_requirement(unit, prompt_state)
     if requirement is not None:
+        if not requirement.ports:
+            # A known-lowerer family with no declared ports publishes nothing for
+            # the lowerer to refuse: the requirement is simply unfinished work
+            # for this unit, not a contract claim the lowerer must reject.
+            return None
         artifact = lower_requirement(requirement)
         if artifact is not None:
             return {
@@ -1066,6 +1069,7 @@ def deterministic_bom_candidate(
                         "symbol": group.symbol,
                         "footprint": group.footprint,
                         "sheet": requirement.sheet,
+                        **({"assembly": False} if not group.assembly else {}),
                         **({"mpn": group.mpn} if group.mpn else {}),
                         **({"datasheet": group.datasheet} if group.datasheet else {}),
                         **({"sourcing_note": group.sourcing_note} if group.sourcing_note else {}),
@@ -1120,7 +1124,9 @@ def _normalize_curated_group_identities(
         original_symbol = group.symbol
         group = group.model_copy(update={"symbol": canonical_symbol_id(original_symbol)})
         selected_identities = {
-            _identity_token(value) for value in (group.mpn, group.value) if value
+            _identity_token(value)
+            for value in ((group.mpn,) if group.mpn else (group.value,))
+            if value
         }
         library = group.symbol.partition(":")[0]
         loaded = by_name.get(library)
@@ -1135,7 +1141,7 @@ def _normalize_curated_group_identities(
                 (by_mpn[identity] for identity in selected_identities if identity in by_mpn),
                 None,
             )
-        if loaded is None:
+        if loaded is None and not group.mpn:
             loaded = next(
                 (
                     part
@@ -1145,14 +1151,14 @@ def _normalize_curated_group_identities(
                 ),
                 None,
             )
-        if loaded is None and original_symbol.lower().startswith("potentiometer:"):
+        if loaded is None and not group.mpn and original_symbol.lower().startswith("potentiometer:"):
             loaded = by_name.get("trim-pot-3296w-10k")
         identity_text = " ".join(
             str(value or "") for value in (group.id, group.value, group.symbol, group.footprint)
         ).lower()
-        if loaded is None and "bnc" in identity_text:
+        if loaded is None and not group.mpn and "bnc" in identity_text:
             loaded = by_name.get("bnc-pcb-jack")
-        if loaded is None and group.reference_prefix in {"J", "P"}:
+        if loaded is None and not group.mpn and group.reference_prefix in {"J", "P"}:
             # Models often invent a library namespace for mechanically standard
             # connectors instead of using KiCad's stock generic symbol plus a
             # concrete stock footprint. Canonicalize only obvious invented
@@ -1354,6 +1360,72 @@ def _validate_bom_unit_sourcing(
             group.model_copy(update={"sourcing_note": part.sourcing_note or group.sourcing_note})
         )
     return validated, defects
+
+
+def _requirement_obligation_defects(requirements, groups: list[BomComponentGroup]) -> dict:
+    """Check physical obligations and claimed pins against implementing hardware."""
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    defects = {"physical-obligation-unfulfilled": [], "declared-interface-unrealized": []}
+    consumed: dict[str, int] = {}
+    for requirement in requirements:
+        obligations = requirement.get("obligations") or []
+        checked_features: set[str] = set()
+        for obligation in obligations:
+            if obligation.get("kind") != "physical":
+                continue
+            feature = obligation["component_class"]
+            if feature in checked_features:
+                continue
+            checked_features.add(feature)
+            minimum = max(
+                (
+                    row["minimum"]
+                    for row in obligations
+                    if row.get("kind") == "quantity" and row.get("subject") == feature
+                ),
+                default=1,
+            )
+            actual = sum(
+                group.quantity for group in groups if _group_has_physical_feature(group, feature)
+            ) - consumed.get(feature, 0)
+            if actual < minimum:
+                defects["physical-obligation-unfulfilled"].append(
+                    f"{requirement['id']}:{obligation['original_obligation_id']}: "
+                    f"requires {minimum} real {feature}, found {actual}"
+                )
+            consumed[feature] = consumed.get(feature, 0) + minimum
+        claim = requirement.get("declared_interface")
+        if not claim:
+            continue
+        owners = [
+            group for group in groups
+            if _requirement_owns_protected_group(group.model_copy(update={"id": ""}), (requirement,))
+        ]
+        # One owning hardware family per declared interface.  A bank of identical
+        # instances (four relays, sixteen servo headers) is a single owned family:
+        # every instance carries the same symbol, so the claimed port-to-pin map
+        # holds per instance.  Split ownership across several groups is still
+        # refused, as is an owner with no physical instance at all.
+        if len(owners) != 1 or owners[0].quantity < 1:
+            defects["declared-interface-unrealized"].append(
+                f"{requirement['id']}: declared interface needs one identified hardware owner"
+            )
+            continue
+        try:
+            pins = set(_pin_numbers(lookup_pins(owners[0].symbol)))
+        except (OSError, ValueError, KeyError) as exc:
+            defects["declared-interface-unrealized"].append(
+                f"{requirement['id']}:{owners[0].id}: pin inventory unavailable: {exc}"
+            )
+            continue
+        for port in claim["ports"]:
+            if not port.get("pin") or port["pin"] not in pins:
+                defects["declared-interface-unrealized"].append(
+                    f"{requirement['id']}:{port['key']}: claimed pin {port.get('pin')!r} "
+                    f"is not in {owners[0].symbol}; available pins={sorted(pins)}"
+                )
+    return defects
 
 
 def _validate_bom_unit(
@@ -1588,6 +1660,7 @@ def _validate_bom_unit(
             else []
         ),
     }
+    defects.update(_requirement_obligation_defects(unit_requirements, groups))
     project_root = extras.get("_validation_project_root")
     if project_root:
         root = Path(str(project_root))

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import signal
@@ -22,6 +23,19 @@ _KRT_PREFLIGHT_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 
 class KicadRoutingToolsUnavailableError(RuntimeError):
     """The pinned KiCad Routing Tools runtime is not installed or usable."""
+
+
+class KicadRoutingToolsTimeoutError(RuntimeError):
+    """The router hit this invocation's wall-clock deadline and was killed.
+
+    Deliberately distinct from a router *failure*. A deadline says the search
+    did not finish inside the slice it was given; it says nothing about whether
+    the board can be routed. Callers must keep it visible (the evidence paths
+    ride along in the message) but must NOT read it as geometric infeasibility
+    -- that turned "slow" into "structurally unroutable" and aborted whole runs
+    (self-eval 2026-09-15, run_10 r1: twelve consecutive 120 s deadlines
+    classified as a terminal ``routing_exception``).
+    """
 
 
 class RoutingCopperPreservationError(RuntimeError):
@@ -166,8 +180,62 @@ def preflight_kicad_routing_tools(config: dict[str, Any] | None = None) -> dict[
     return dict(result)
 
 
+def _project_routing_floors(project: Path, config: dict[str, Any]) -> dict[str, float]:
+    """Bind every adaptive router escape to the project's actual DRC contract."""
+    from kicraft.autoplacer.fab_profile import fab_floors, fanout_via
+
+    body = json.loads(project.read_text(encoding="utf-8"))
+    rules = body.get("board", {}).get("design_settings", {}).get("rules", {})
+    classes = body.get("net_settings", {}).get("classes", [])
+    default = next((item for item in classes if item.get("name") == "Default"), None)
+    if default is None:
+        raise ValueError(f"Routing project has no Default net class: {project}")
+
+    def number(value: Any) -> float:
+        result = float(value)
+        if isinstance(value, bool) or not math.isfinite(result) or result < 0:
+            raise ValueError(f"Routing project has invalid fabrication constraints: {project}")
+        return result
+
+    capability = fab_floors(config)
+    via_diameter, via_drill = fanout_via(config)
+    via_diameter, via_drill = number(via_diameter), number(via_drill)
+    default_clearance = number(default["clearance"])
+    class_clearances = [
+        default_clearance if item.get("clearance") is None else number(item["clearance"])
+        for item in classes
+    ]
+    requested_ceiling = config.get("kicad_routing_tools_clearance_mm")
+    if requested_ceiling is not None and number(requested_ceiling) < max(class_clearances):
+        raise ValueError("Router clearance override would weaken a declared net-class clearance")
+    clearance = max(
+        number(rules.get("min_clearance", 0)),
+        *class_clearances,
+        number(capability["clearance_mm"]),
+    )
+    drill = max(number(rules.get("min_through_hole_diameter", 0)), via_drill)
+    annular = max(
+        number(rules.get("min_via_annular_width", 0)),
+        number(rules.get("min_hole_clearance", 0)) - clearance,
+        (via_diameter - via_drill) / 2,
+    )
+    floors = {
+        "clearance": clearance,
+        "track_width": max(number(rules.get("min_track_width", 0)), number(capability["track_mm"])),
+        "via_diameter": max(number(rules.get("min_via_diameter", 0)), via_diameter,
+                            drill + 2 * annular),
+        "via_drill": drill,
+        "annular": annular,
+        # These dimensions do not have a reviewed finer escape class: retain
+        # the pinned router's 0.2 mm floor even when the project allows less.
+        "hole_to_hole": max(number(rules.get("min_hole_to_hole", 0)), 0.2),
+        "board_edge": max(number(rules.get("min_copper_edge_clearance", 0)), 0.2),
+    }
+    return floors
+
+
 def _krt_command(
-    input_path: str, output_path: str, config: dict[str, Any]
+    input_path: str, output_path: str, config: dict[str, Any], fab_overrides: Path
 ) -> list[str]:
     root = _krt_root(config)
     python = (
@@ -185,6 +253,7 @@ def _krt_command(
         "--nets", "*",
         "--no-fix-drc-settings",
         "--keep-input-copper",
+        "--fab-overrides", str(fab_overrides),
         "--max-iterations", str(config.get("kicad_routing_tools_max_iterations", 200000)),
         "--max-ripup", str(config.get("kicad_routing_tools_max_ripup", 3)),
         "--ordering", str(config.get("kicad_routing_tools_ordering", "mps")),
@@ -249,11 +318,8 @@ def _propagate_sibling_project_rules(src_pcb_path: str, dst_pcb_path: str) -> No
     for suffix in (".kicad_pro", ".kicad_dru"):
         src_rules = src_stem + suffix
         dst_rules = dst_stem + suffix
-        try:
-            if os.path.isfile(src_rules) and os.path.abspath(src_rules) != os.path.abspath(dst_rules):
-                shutil.copy2(src_rules, dst_rules)
-        except OSError:
-            pass
+        if os.path.isfile(src_rules) and os.path.abspath(src_rules) != os.path.abspath(dst_rules):
+            shutil.copy2(src_rules, dst_rules)
 
 def route_with_kicad_routing_tools(
     kicad_pcb_path: str,
@@ -300,28 +366,34 @@ def route_with_kicad_routing_tools(
             f"{input_board}"
         )
 
-    temporary_sidecars: list[Path] = []
-    for suffix in (".kicad_pro", ".kicad_dru"):
-        destination = input_board.with_suffix(suffix)
-        if not destination.exists():
-            temporary_sidecars.append(destination)
-    _propagate_sibling_project_rules(
-        str(source_project.with_suffix(".kicad_pcb")), str(input_board)
+    floors = _project_routing_floors(source_project, config)
+    fab_overrides = output_board.with_suffix(".fab-overrides.txt")
+    fab_overrides.write_text(
+        "".join(f"{key} = {value:.9g}\n" for key, value in floors.items()),
+        encoding="utf-8",
     )
-    if not expected_project.is_file():
-        raise KicadRoutingToolsUnavailableError(
-            "KiCadRoutingTools requires a sibling .kicad_pro; "
-            f"could not stage {source_project} beside {input_board}"
-        )
-
-    command = _krt_command(str(input_board), str(output_board), config)
+    command = _krt_command(str(input_board), str(output_board), config, fab_overrides)
     timeout_s = int(config.get("kicad_routing_tools_timeout_s", 120))
     environment = os.environ.copy()
     environment["KICAD_RIP_PREEXISTING"] = "0"
     environment["KICAD_PLANE_FINALIZE"] = "0"
+    environment["PYTHONUNBUFFERED"] = "1"
     started = time.monotonic()
     timed_out = False
+    temporary_sidecars: list[Path] = []
     try:
+        for suffix in (".kicad_pro", ".kicad_dru"):
+            destination = input_board.with_suffix(suffix)
+            if not destination.exists():
+                temporary_sidecars.append(destination)
+        _propagate_sibling_project_rules(
+            str(source_project.with_suffix(".kicad_pcb")), str(input_board)
+        )
+        if not expected_project.is_file():
+            raise KicadRoutingToolsUnavailableError(
+                "KiCadRoutingTools requires a sibling .kicad_pro; "
+                f"could not stage {source_project} beside {input_board}"
+            )
         proc = subprocess.Popen(
             command,
             cwd=root,
@@ -348,11 +420,18 @@ def route_with_kicad_routing_tools(
             sidecar.unlink(missing_ok=True)
 
     elapsed = time.monotonic() - started
+    stdout_path = output_board.with_suffix(".router.stdout.log")
+    stderr_path = output_board.with_suffix(".router.stderr.log")
+    stdout_path.write_text(stdout, encoding="utf-8")
+    stderr_path.write_text(stderr, encoding="utf-8")
+    evidence = f"stdout={stdout_path}; stderr={stderr_path}; rules={fab_overrides}"
     if timed_out:
-        raise RuntimeError(f"KiCadRoutingTools timed out after {timeout_s}s")
+        raise KicadRoutingToolsTimeoutError(
+            f"KiCadRoutingTools timed out after {timeout_s}s; {evidence}"
+        )
     if proc.returncode != 0 or not output_board.is_file():
         detail = (stderr or stdout or "no output").strip()[-4000:]
-        raise RuntimeError(f"KiCadRoutingTools failed (rc={proc.returncode}): {detail}")
+        raise RuntimeError(f"KiCadRoutingTools failed (rc={proc.returncode}): {detail}; {evidence}")
     if not output_board.with_suffix(".kicad_pro").is_file():
         raise KicadRoutingToolsUnavailableError(
             "KiCadRoutingTools requires a sibling .kicad_pro on its routed output; "
@@ -395,6 +474,9 @@ def route_with_kicad_routing_tools(
         "input_copper_preservation": preservation,
         "preserved_existing_copper": preserved,
         "command": command,
+        "fabrication_floors": floors,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
         "_raw_stdout": stdout,
         "_raw_stderr": stderr,
     }

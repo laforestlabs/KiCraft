@@ -22,6 +22,11 @@ experiment is paused.
 """
 from __future__ import annotations
 
+# The prompts below are the immutable original corpus.  Evaluation may attach a
+# separately versioned corrected acceptance contract, but it MUST NOT rewrite
+# these identities or their text.
+ORIGINAL_BENCHMARK_CORPUS_VERSION = "benchmark-original-v1"
+
 # archetype -> the placement/routing trait it exercises (for coverage reporting)
 ARCHETYPE_TRAITS = {
     "single_passive": "tiny, no-MCU, few nets, analog/THT connectors",

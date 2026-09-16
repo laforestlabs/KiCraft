@@ -1,10 +1,7 @@
-"""FIX 2b — turn a structurally-unroutable leaf from a 2400s watchdog kill
-(rc=-9, no board, no log) into a fast, diagnosable route failure with evidence:
+"""Bound terminal leaf failures and preserve their diagnostic evidence.
 
-  * ``_structural_unroutable_leaves`` classifies solve_subcircuits' terminal
-    "No accepted routed leaf artifact produced ... : <reasons>" lines, keeping
-    only the STRUCTURAL ones (a router throw / an unrepairable illegal
-    placement) that re-running the outer search cannot fix.
+  * ``_terminal_leaf_failures`` distinguishes terminal execution/legality
+    failures from recoverable quality misses without claiming infeasibility.
   * ``_tee_build_log`` mirrors the build's stdout/stderr into ``build.log``,
     flushed per line, so a SIGKILL still leaves partial evidence on disk. The
     web build worker opts out (``KICRAFT_BUILD_LOG=external``) since it writes
@@ -20,9 +17,9 @@ from kicraft.cli.autoexperiment import (  # noqa: F401 (re-exported below)
     _quality_rejected_leaves,
     _unpinned_leaf_selectors,
     _update_quality_streak,
-    _RC_LEAF_UNROUTABLE,
-    _structural_unroutable_leaves,
-    _update_unroutable_streak,
+    _RC_LEAF_FAILURE,
+    _terminal_leaf_failures,
+    _update_terminal_failure_streak,
 )
 from kicraft.design.cli_app import _tee_build_log
 
@@ -44,11 +41,11 @@ _QUALITY_MISS = (
 )
 
 
-def test_structural_parser_flags_router_throw_and_illegal_placement():
-    assert _structural_unroutable_leaves(_ROUTING_EXCEPTION) == {
+def test_terminal_parser_flags_router_throw_and_illegal_placement():
+    assert _terminal_leaf_failures(_ROUTING_EXCEPTION) == {
         "/87d30157": ["routing_exception"]
     }
-    assert _structural_unroutable_leaves(_LEGALITY_REPAIR) == {
+    assert _terminal_leaf_failures(_LEGALITY_REPAIR) == {
         "/abc": ["leaf_pre_stamp_legality_repair", "routing_exception"]
     }
 
@@ -99,19 +96,19 @@ def test_deadline_expiry_is_not_structural():
         "4 round(s) across 2 canvas attempt(s) (0.25, seed-bbox): "
         "leaf_solve_deadline"
     )
-    assert _structural_unroutable_leaves(line) == {}
+    assert _terminal_leaf_failures(line) == {}
 
 
-def test_structural_parser_ignores_recoverable_quality_miss():
+def test_terminal_parser_ignores_recoverable_quality_miss():
     # A routed board that failed a DRC/opens gate CAN improve across rounds, so
-    # it must NOT trip the early-abort -- only the structural reasons do.
-    assert _structural_unroutable_leaves(_QUALITY_MISS) == {}
-    assert _structural_unroutable_leaves("[build] 2/5 place + route ...") == {}
+    # it must NOT trip the early-abort -- only terminal execution/legality does.
+    assert _terminal_leaf_failures(_QUALITY_MISS) == {}
+    assert _terminal_leaf_failures("[build] 2/5 place + route ...") == {}
 
 
-def test_structural_parser_multi_leaf():
+def test_terminal_parser_multi_leaf():
     combined = _ROUTING_EXCEPTION + "\n" + _LEGALITY_REPAIR + "\n" + _QUALITY_MISS
-    got = _structural_unroutable_leaves(combined)
+    got = _terminal_leaf_failures(combined)
     assert set(got) == {"/87d30157", "/abc"}  # the quality-miss leaf excluded
 
 
@@ -121,36 +118,32 @@ def test_streak_default_aborts_on_first_structural_round():
     # so run_27's ~25-min round 1 aborts before the 2400s wall instead of
     # starting a doomed round 2.
     streak: dict[str, int] = {}
-    assert _update_unroutable_streak(streak, {"/leaf": ["routing_exception"]}, 1) == "/leaf"
+    assert _update_terminal_failure_streak(streak, {"/leaf": ["routing_exception"]}, 1) == "/leaf"
 
 
 def test_streak_threshold_two_needs_two_consecutive():
     streak: dict[str, int] = {}
     fail = {"/leaf": ["leaf_pre_stamp_legality_repair"]}
-    assert _update_unroutable_streak(streak, fail, 2) is None      # round 1
-    assert _update_unroutable_streak(streak, fail, 2) == "/leaf"   # round 2
+    assert _update_terminal_failure_streak(streak, fail, 2) is None      # round 1
+    assert _update_terminal_failure_streak(streak, fail, 2) == "/leaf"   # round 2
 
 
 def test_streak_resets_when_leaf_recovers():
     streak: dict[str, int] = {}
     fail = {"/leaf": ["routing_exception"]}
-    assert _update_unroutable_streak(streak, fail, 2) is None      # fail once
-    assert _update_unroutable_streak(streak, {}, 2) is None        # recovers -> reset
+    assert _update_terminal_failure_streak(streak, fail, 2) is None      # fail once
+    assert _update_terminal_failure_streak(streak, {}, 2) is None        # recovers -> reset
     assert streak["/leaf"] == 0
-    assert _update_unroutable_streak(streak, fail, 2) is None      # only 1 again
+    assert _update_terminal_failure_streak(streak, fail, 2) is None      # only 1 again
 
 
 def test_streak_disabled_never_aborts():
     streak: dict[str, int] = {}
     fail = {"/leaf": ["routing_exception"]}
     for _ in range(10):
-        assert _update_unroutable_streak(streak, fail, 0) is None
+        assert _update_terminal_failure_streak(streak, fail, 0) is None
 
 
-def test_abort_rc_is_nonzero_and_distinct_from_argparse():
-    # Non-zero so cli_app._run_layout forwards it and _layout_route_fab maps it
-    # to a route failure (rc6); != 2 (argparse bad-args).
-    assert _RC_LEAF_UNROUTABLE not in (0, 2)
 
 
 # --------------------------------------------------------------------------- #

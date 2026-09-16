@@ -496,6 +496,8 @@ def _tinyavr_recipe(
     pins: dict[str, str],
     datasheet: str,
     touch_pins: tuple[str, ...] = (),
+    footprint: str | None = None,
+    default_for_family: bool = False,
 ) -> RecipeDefinition:
     updi_pin = pins["PA0"]
     gpio_rows = [
@@ -505,6 +507,7 @@ def _tinyavr_recipe(
         recipe=recipe,
         family=part.lower().split("-")[0],
         exact_part=part,
+        default_for_family=default_for_family,
         maturity="production",
         protected_aliases=("tinyAVR", part.split("-")[0]),
         identity_aliases=(part, symbol),
@@ -521,9 +524,11 @@ def _tinyavr_recipe(
                 reference_prefix="U",
                 value=part,
                 symbol=symbol,
-                footprint="Package_SO:SOIC-14_3.9x8.7mm_P1.27mm"
-                if len(pins) > 8
-                else "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+                footprint=footprint or (
+                    "Package_SO:SOIC-14_3.9x8.7mm_P1.27mm"
+                    if len(pins) > 8
+                    else "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+                ),
                 sheet_role="mcu",
                 mpn=part,
                 datasheet=datasheet,
@@ -588,21 +593,32 @@ def _tinyavr_recipe(
     )
 
 
+_ATTINY402_PINS = {
+    "VDD": "1",
+    "PA6": "2",
+    "PA7": "3",
+    "PA1": "4",
+    "PA2": "5",
+    "PA3": "6",
+    "PA0": "7",
+    "GND": "8",
+}
+
 ATTINY402_UPDI_MINIMAL = _tinyavr_recipe(
     part="ATTINY402-SSN",
     recipe="attiny402-updi-minimal@1",
     symbol="MCU_Microchip_ATtiny:ATtiny402-SS",
-    pins={
-        "VDD": "1",
-        "PA6": "2",
-        "PA7": "3",
-        "PA1": "4",
-        "PA2": "5",
-        "PA3": "6",
-        "PA0": "7",
-        "GND": "8",
-    },
+    pins=_ATTINY402_PINS,
     datasheet="https://ww1.microchip.com/downloads/aemDocuments/documents/MCU08/ProductDocuments/DataSheets/ATtiny202-204-402-404-406-DataSheet-DS40002318A.pdf",
+)
+ATTINY402_SSNR_UPDI_MINIMAL = _tinyavr_recipe(
+    part="ATTINY402-SSNR",
+    recipe="attiny402-ssnr-updi-minimal@1",
+    symbol="attiny402-ssnr:ATTINY402-SSNR",
+    footprint="attiny402-ssnr:SOIC-8_L5.0-W4.0-P1.27-LS6.0-BL",
+    pins=_ATTINY402_PINS,
+    datasheet="https://ww1.microchip.com/downloads/aemDocuments/documents/MCU08/ProductDocuments/DataSheets/ATtiny202-204-402-404-406-DataSheet-DS40002318A.pdf",
+    default_for_family=True,
 )
 ATTINY412_UPDI_MINIMAL = _tinyavr_recipe(
     part="ATTINY412-SSN",
@@ -906,6 +922,7 @@ WAVE_A_MCU_RECIPES = (
     ESP32_C3_MINI_1_MINIMAL,
     STM32F103C8T6_MINIMAL,
     ATTINY402_UPDI_MINIMAL,
+    ATTINY402_SSNR_UPDI_MINIMAL,
     ATTINY412_UPDI_MINIMAL,
     ATTINY1614_UPDI_MINIMAL,
     CH32V003J4M6_MINIMAL,

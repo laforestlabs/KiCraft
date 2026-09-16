@@ -52,9 +52,9 @@ from kicraft.cli._round_scheduler import (  # noqa: F401 (streaks re-exported fo
     Finalize,
     RoundPlan,
     RoundScheduler,
-    _RC_LEAF_UNROUTABLE,
+    _RC_LEAF_FAILURE,
     _update_quality_streak,
-    _update_unroutable_streak,
+    _update_terminal_failure_streak,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -177,14 +177,18 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         f.write(json.dumps(payload) + "\n")
 
 
-# A leaf solve that already exhausted its full internal ladder (12 rounds x 4
-# canvas fills) and gave up with a STRUCTURAL reason -- the router threw, or the
-# placement could not be made DRC-legal before routing -- will not be rescued by
-# re-running the outer round with mutated placement params. Distinguished from a
-# quality miss (a routed board that failed a DRC/opens gate), which CAN improve
-# across rounds and is left to keep retrying.
-_STRUCTURAL_UNROUTABLE_REASONS = frozenset({
+# Preserve the bounded abort policy for genuine router exceptions and failed
+# pre-route legality repair. Neither an exception nor an exhausted deadline
+# establishes geometric infeasibility; retain the actual cause rather than
+# claiming it.
+_TERMINAL_LEAF_FAILURE_REASONS = frozenset({
     "routing_exception", "leaf_pre_stamp_legality_repair",
+    # NOT here: "routing_timeout". A router KILLED AT ITS DEADLINE is the same
+    # "merely SLOW" signal as "leaf_solve_deadline" (solve_subcircuits raises
+    # the two apart since self-eval 2026-09-15): twelve consecutive 120 s
+    # deadlines used to arrive as "routing_exception", match this set, and
+    # abort the run as an engine failure (rc6) before the verify gate could
+    # report what the board actually was (run_10 r1).
     # NOT here: "leaf_solve_deadline". A deadline expiry means the leaf was
     # merely SLOW, never that it is structurally unroutable -- the ladder jumps
     # to the reserved seed-bbox fallback on deadline (N1) and a later outer
@@ -196,13 +200,13 @@ _LEAF_UNROUTABLE_RE = re.compile(
     r"No accepted routed leaf artifact produced for (\S+) after .*?: "
     r"([a-z_,]+)\s*$"
 )
-def _structural_unroutable_leaves(solve_stderr: str) -> dict[str, list[str]]:
-    """Leaves the solve gave up on for a STRUCTURAL reason, {leaf_path: reasons}.
+def _terminal_leaf_failures(solve_stderr: str) -> dict[str, list[str]]:
+    """Terminal execution/legality failures, {leaf_path: observed reasons}.
 
     Parses solve_subcircuits' terminal "No accepted routed leaf artifact
     produced for <path> after N round(s) across M canvas attempt(s) (...):
     <reasons>" lines and keeps only those whose reason set intersects
-    :data:`_STRUCTURAL_UNROUTABLE_REASONS`.
+    :data:`_TERMINAL_LEAF_FAILURE_REASONS`.
     """
     out: dict[str, list[str]] = {}
     for line in solve_stderr.splitlines():
@@ -210,16 +214,17 @@ def _structural_unroutable_leaves(solve_stderr: str) -> dict[str, list[str]]:
         if not m:
             continue
         reasons = [r for r in m.group(2).split(",") if r]
-        if any(r in _STRUCTURAL_UNROUTABLE_REASONS for r in reasons):
+        if any(r in _TERMINAL_LEAF_FAILURE_REASONS for r in reasons):
             out[m.group(1)] = reasons
     return out
 
 
 def _quality_rejected_leaves(solve_stderr: str) -> dict[str, list[str]]:
-    """Leaves that failed this round for a NON-structural (quality) reason --
-    routed but rejected (illegal_routed_geometry, routed_drc_rejection,
-    unconnected>0). ``{leaf_path: sorted_reasons}``. Distinct from structural
-    failures (router throw / illegal placement), which abort separately; these
+    """Leaves whose routed result failed a bounded-retry gate --
+    illegal_routed_geometry, routed_drc_rejection, unconnected>0, or a router
+    deadline (``routing_timeout``: a deadline is retried, never aborted --
+    see :data:`_TERMINAL_LEAF_FAILURE_REASONS`).
+    ``{leaf_path: sorted_reasons}``. Execution/legality failures abort separately;
     CAN improve across rounds, so they only stop after a non-improving streak.
     """
     out: dict[str, list[str]] = {}
@@ -228,7 +233,7 @@ def _quality_rejected_leaves(solve_stderr: str) -> dict[str, list[str]]:
         if not m:
             continue
         reasons = sorted(r for r in m.group(2).split(",") if r)
-        if reasons and not any(r in _STRUCTURAL_UNROUTABLE_REASONS for r in reasons):
+        if reasons and not any(r in _TERMINAL_LEAF_FAILURE_REASONS for r in reasons):
             out[m.group(1)] = reasons
     return out
 
@@ -2816,6 +2821,17 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=project_dir,
                 env=solve_env,
             )
+            terminal_failures = _terminal_leaf_failures(solve_stderr)
+            solve_evidence_path = round_dir / "solve_execution.json"
+            _write_json(solve_evidence_path, {
+                "schema_version": 1,
+                "stage": "leaf_solve",
+                "exit_code": solve_rc,
+                "command": solve_cmd,
+                "terminal_failures": terminal_failures,
+                "stdout": solve_stdout,
+                "stderr": solve_stderr,
+            })
             solve_elapsed_s = _record_timing(
                 round_timing_breakdown,
                 "solve_subcircuits_total",
@@ -2825,26 +2841,22 @@ def main(argv: list[str] | None = None) -> int:
                 f"[timing] round {round_num} solve_subcircuits_total={solve_elapsed_s:.3f}s"
             )
             if solve_rc != 0:
-                # Per-leaf failures live on the solve subprocess's stderr; until
-                # KC-V8YWN8 they only survived inside rounds/round_NNNN.json
-                # (logs.solve_stderr_tail) while the build log showed a clean
-                # leaf phase right up to the auto-pin safety net. Echo them so
-                # the build log names the failing leaves and their errors.
+                # Save both complete streams before any early-abort path.
+                # The actual router exception is often on stdout, while stderr
+                # contains only the terminal leaf summary.
                 failure_lines = [
-                    line for line in solve_stderr.splitlines()
-                    if line.startswith(("warning: leaf", "error:", "WARNING:"))
+                    line for stream in (solve_stdout, solve_stderr)
+                    for line in stream.splitlines()
+                    if line.lstrip().startswith(("warning:", "error:", "WARNING:"))
                 ]
                 print(f"[round {round_num}] solve_subcircuits rc={solve_rc}:")
+                print(f"  [solve] complete execution evidence: {solve_evidence_path}")
                 for line in failure_lines[-20:] or solve_stderr.splitlines()[-5:]:
                     print(f"  [solve] {line}")
 
-            # Streak policies over the solve outcome: a structural router
-            # throw / illegal placement aborts with an exit code (placement
-            # mutation cannot fix it -- the spiral that used to run to the
-            # 2400s watchdog); a repeated identical quality rejection breaks
-            # to the finalize path with its best-effort board kept (WS2).
+            # Keep the existing bounded abort and quality-streak policies.
             solve_verdict = scheduler.observe_solve(
-                struct_fail=_structural_unroutable_leaves(solve_stderr),
+                terminal_fail=terminal_failures,
                 quality_fail=_quality_rejected_leaves(solve_stderr),
             )
             if solve_verdict is not None:

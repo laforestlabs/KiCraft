@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:03014dacce1da0abf689a93710a4057539f918a2931a70839aeefa19011e9401",
+  "datasheet_url": "https://lcsc.com/product-detail/Others_Nordic-Semicon_NRF52840-QIAA-R_Nordic-Semicon-NRF52840-QIAA-R_C190794.html",
+  "description": "Nordic Semiconductor NRF52840-QIAA-R — 2.4 GHz Bluetooth LE SoC in a 73-contact 7.0 × 7.0 mm AQFN with a 4.85 mm exposed pad.",
+  "footprint_name": "AQFN-73_L7.0-W7.0-P0.50-BL-EP4.8",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "NRF52840-QIAA-R",
+  "name": "nrf52840-qiaa-r",
+  "provenance": {
+    "added_at": "2026-09-16T03:46:15Z",
+    "kicad_version": "9.0.0",
+    "source": "EasyEDA import from LCSC C190794; complete symbol-to-footprint contact set, exposed pad, antenna, SWD, reset, USB, supply, and ground contacts reviewed from the imported package data.",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C190794"
+  },
+  "symbol_name": "NRF52840-QIAA-R",
+  "tags": [
+    "nrf52840",
+    "bluetooth-le",
+    "2.4ghz",
+    "aqfn-73",
+    "microcontroller"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Pad 0 is the exposed pad; do not treat it as an ordinary signal pin. The RF ANT contact is H23 and requires the Nordic-recommended matching network, antenna keep-out, and RF layout. The vendored MPN is NRF52840-QIAA-R; NRF52840-QIAA-R7 is the reel order code and shares this package."
+}

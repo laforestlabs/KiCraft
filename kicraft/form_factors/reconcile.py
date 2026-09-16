@@ -80,19 +80,29 @@ def _interface_parts(state, bom, arch):
             # Never fall back to replacing every connector on its sheet.
             if requirement is None or requirement.role != "connector":
                 continue
-            if requirement.functional_blocks:
-                descriptions = [
-                    f"{name} {getattr(blocks.get(name), 'purpose', '')}"
-                    for name in requirement.functional_blocks
-                ]
+            stacking_role = getattr(requirement, "standard_stacking_role", None)
+            if stacking_role:
+                template = get_template(
+                    getattr(getattr(getattr(state, "intent", None), "form_factor", None), "standard", None)
+                )
+                if template is None or stacking_role not in {
+                    connector.role for connector in template.fixed_connectors
+                }:
+                    raise ValueError(f"standard header {part.ref} has an unsupported stacking role")
             else:
-                sheet = sheets.get(part.sheet)
-                descriptions = [f"{part.sheet} {getattr(sheet, 'function', '')}"]
-            if not any(
-                re.search(r"\bstacking\b|\bpass[- ]through\b", text.replace("_", " "), re.I)
-                for text in descriptions
-            ):
-                continue
+                if requirement.functional_blocks:
+                    descriptions = [
+                        f"{name} {getattr(blocks.get(name), 'purpose', '')}"
+                        for name in requirement.functional_blocks
+                    ]
+                else:
+                    sheet = sheets.get(part.sheet)
+                    descriptions = [f"{part.sheet} {getattr(sheet, 'function', '')}"]
+                if not any(
+                    re.search(r"\bstacking\b|\bpass[- ]through\b", text.replace("_", " "), re.I)
+                    for text in descriptions
+                ):
+                    continue
             if requirement.exact_part:
                 raise ValueError(f"cannot replace exact-part standard header {part.ref}")
             if (

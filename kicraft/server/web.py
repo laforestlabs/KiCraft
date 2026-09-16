@@ -2226,34 +2226,23 @@ def _run_design(state: dict, stages, answers=None) -> None:
             state["retry_action"] = res.get("retry_action")
             state["ok"] = False
             return
-        # R3: LLM electrical review post-wiring, BEFORE the build. The review
-        # needs only intent+bom+netlist (all present at wiring commit). It
-        # deliberately ignores routed geometry. A corroborated blocker gets
-        # ONE wiring re-drive (mirroring the ERC-recovery pattern below),
-        # then proceeds; a second blocker surfaces in the persisted findings.
-        # run_post_wiring_review owns the lifecycle: stage events + build_log
-        # lines for the GUI tab, durable persistence for reopen.
+        # Advisory post-wiring review/repair and silkscreen authoring run through
+        # the same lifecycle as batch self-evaluation. They intentionally remain
+        # fail-soft: neither a review nor a cosmetic plan can fulfill a delivery.
         try:
-            from kicraft.design.cli_app import run_post_wiring_review
+            from kicraft.design.cli_app import run_post_wiring_lifecycle
 
             def _rewire(instr: str) -> None:
-                rr = run_session(ws, state.get("brief", ""), ["wiring"],
-                                 instruction=instr, progress=progress,
-                                 run_id=run_id)
+                rr = run_session(
+                    ws,
+                    state.get("brief", ""),
+                    ["wiring"],
+                    instruction=instr,
+                    progress=progress,
+                    run_id=run_id,
+                )
                 if rr.get("guard"):
                     state["spend"] = _project_spend_usd(state.get("project_id"))
-
-            run_post_wiring_review(ws / ".kicraft" / "state.json", ws,
-                                   progress, _rewire)
-        except Exception:  # noqa: BLE001
-            pass  # fail-soft: review must never block a sound build
-
-        # Author the silkscreen content plan (LLM authors WHAT the board
-        # says; the build tail decides WHERE — or drops it honestly). Runs
-        # here because the build worker is a no-LLM process: the plan is
-        # committed to state.silk_plan and consumed deterministically.
-        try:
-            from kicraft.design.cli_app import run_silk_plan_authoring
 
             board_code = None
             if pid:
@@ -2262,10 +2251,17 @@ def _run_design(state: dict, stages, answers=None) -> None:
                     board_code = getattr(proj, "board_code", None)
                 except Exception:  # noqa: BLE001
                     board_code = None
-            run_silk_plan_authoring(ws / ".kicraft" / "state.json", ws,
-                                    progress, board_code=board_code)
+            state["post_wiring_lifecycle"] = run_post_wiring_lifecycle(
+                ws / ".kicraft" / "state.json",
+                ws,
+                progress,
+                _rewire,
+                board_code=board_code,
+                run_id=run_id,
+                execution_mode="web",
+            )
         except Exception:  # noqa: BLE001
-            pass  # fail-soft: silk is cosmetic, never blocks a build
+            pass  # advisory lifecycle must never block a sound build
 
         # Deterministic (zero-LLM) build: synthesize -> place -> route -> verify ->
         # fab. `build` re-runs synthesize first, so the schematic appears as soon

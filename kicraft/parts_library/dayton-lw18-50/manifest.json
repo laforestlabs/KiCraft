@@ -1,0 +1,32 @@
+{
+  "content_hash": "sha256:74fe7b80a464beb03d67f7da2a7f80c4f97f7645c7cb95f1fa5d0a1423eff49d",
+  "datasheet_url": "https://www.daytonaudio.com/images/resources/257-816-dayton-audio-lw18-50-mechanical-drawing.pdf",
+  "description": "Dayton Audio LW18-50 0.50 mH +/-3% 18 AWG Perfect Layer air-core inductor for passive loudspeaker crossovers; 0.33 ohm DCR +/-10%, 300 W RMS. Manufacturer drawing: 43 mm OD, 26 mm ID, 16 mm high, two 18 AWG terminals on the 43 mm outside diameter.",
+  "footprint_name": "Dayton_LW18-50",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "LW18-50",
+  "name": "dayton-lw18-50",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "manual-from-manufacturer-drawing",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "parts-express": "257-816"
+  },
+  "symbol_name": "Dayton_LW18-50",
+  "tags": [
+    "inductor",
+    "air-core",
+    "speaker-crossover",
+    "through-hole",
+    "0.50mh",
+    "18awg"
+  ],
+  "three_d_model": "unavailable",
+  "version": "1.0.0",
+  "watch_out_for": "Pads 1 and 2 are the two electrically equivalent coil leads, placed 43 mm apart on the manufacturer-drawn OD and drilled 1.5 mm for 18 AWG lead clearance. The 43 mm circular courtyard reserves the coil envelope but not installation hardware. Keep any second inductor orthogonal to reduce magnetic coupling."
+}

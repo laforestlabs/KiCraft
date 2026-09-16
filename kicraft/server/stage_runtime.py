@@ -775,11 +775,32 @@ def _requirement_identity(requirement: dict) -> str:
     The bare id ("relay_driver") does not tell a repair turn what part to emit;
     role / family / exact_part do.
     """
+    from kicraft.design.part_identity import accepted_part_identities, reviewed_parts_for_feature
+
     parts = [str(requirement.get("id"))]
     for field in ("role", "family", "exact_part"):
         value = requirement.get(field)
         if value:
             parts.append(f"{field}={value}")
+    identity = str(requirement.get("exact_part") or requirement.get("family") or "")
+    accepted = accepted_part_identities(identity)
+    if accepted:
+        parts.append(f"accepted_concrete_parts={list(accepted)!r}")
+    physical_candidates = reviewed_parts_for_feature(identity)
+    if physical_candidates:
+        parts.append(
+            "reviewed_physical_candidates="
+            + json.dumps(
+                [
+                    {"mpn": part.identity, "symbol": part.symbol, "footprint": part.footprint}
+                    for part in physical_candidates
+                ],
+                separators=(",", ":"),
+            )
+        )
+    for field in ("obligations", "declared_interface", "ports"):
+        if requirement.get(field):
+            parts.append(f"{field}={json.dumps(requirement[field], separators=(',', ':'))}")
     return " ".join(parts)
 
 
@@ -2745,7 +2766,14 @@ def _drive_work_unit_stage(
                         "never invent a library id, and keep the symbol and footprint drawn for "
                         "the same real part."
                     )
-                if "missing-requirement-implementation" in error_text:
+                if any(
+                    marker in error_text
+                    for marker in (
+                        "missing-requirement-implementation",
+                        "physical-obligation-unfulfilled",
+                        "declared-interface-unrealized",
+                    )
+                ):
                     architecture = prompt_state.get("architecture") or {}
                     owned_ids = set(unit.requirement_ids)
                     identities = [
@@ -2998,7 +3026,6 @@ def _drive_work_unit_stage(
             },
         }
 
-    prior_signature = None
     seen_commit_failures: set[tuple] = set()
     for aggregate_round in range(repair_rounds + 1):
         ok, commit_result = commit_stage(stage, dict(candidate), state_path, brief, None, workspace)
@@ -3113,25 +3140,6 @@ def _drive_work_unit_stage(
         candidate_fingerprint = hashlib.sha256(
             json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        if (
-            stage == "wiring"
-            and "9.15" in gate_codes
-            and prior_signature == signature
-            and any(
-                "neither a power net nor a declared inter-sheet net" in str(offender)
-                for offender in commit_result.get("offenders") or []
-            )
-        ):
-            last = {
-                "failure_kind": "architecture_reconciliation_required",
-                "reconcile_target": "architecture",
-                "commit": commit_result,
-                "error": (
-                    "repeated singleton signal has no unambiguous endpoint in the "
-                    "committed architecture/BOM"
-                ),
-            }
-            break
         rejection_key = (signature, candidate_fingerprint)
         repeated = rejection_key in seen_commit_failures
         if repeated:
@@ -3198,7 +3206,6 @@ def _drive_work_unit_stage(
                     "diagnostic": diagnostic,
                 }
                 break
-            prior_signature = signature
             continue
         candidates = prior_candidates
         break

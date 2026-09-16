@@ -1,0 +1,23 @@
+(kicad_symbol_lib
+  (version 20231120)
+  (generator kicraft)
+  (symbol "Keystone_8734"
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "J" (at 0 5.08 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "Keystone_8734" (at 0 -5.08 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "keystone-8734-binding-post:Keystone_8734" (at 0 -7.62 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Datasheet" "https://www.keyelco.com/product.cfm/product_id/14242" (at 0 -10.16 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Manufacturer" "Keystone Electronics" (at 0 -12.70 0) (effects (font (size 1.27 1.27)) hide))
+    (property "MPN" "8734" (at 0 -15.24 0) (effects (font (size 1.27 1.27)) hide))
+    (property "LCSC Part" "C6107766" (at 0 -17.78 0) (effects (font (size 1.27 1.27)) hide))
+    (property "ki_keywords" "binding post screw clamp bare wire" (at 0 -20.32 0) (effects (font (size 1.27 1.27)) hide))
+    (symbol "Keystone_8734_0_1"
+      (rectangle (start -2.54 2.54) (end 2.54 -2.54) (stroke (width 0) (type default)) (fill (type background)))
+      (polyline (pts (xy -1.27 0) (xy 1.27 0)) (stroke (width 0) (type default)) (fill (type none)))
+    )
+    (symbol "Keystone_8734_1_1"
+      (pin passive line (at 5.08 0 180) (length 2.54) (name "POST" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+    )
+  )
+)

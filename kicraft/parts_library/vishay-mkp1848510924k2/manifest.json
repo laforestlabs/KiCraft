@@ -1,0 +1,34 @@
+{
+  "content_hash": "sha256:b82902a248b888f9bcb84f43cc9fb8b93a77c293a8fb3912e1b85f94748dd799",
+  "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/e1923bec7fca44547afd891a5eadb594.pdf?productCode=C3802212",
+  "description": "Vishay MKP1848510924K2 MKP1848 automotive-grade metallized polypropylene film capacitor, 1.0 uF +/-5%, 1.2 kVDC, two radial through-hole leads. Manufacturer dimensions: 9.0 x 19.0 x 32.0 mm body, 27.5 mm lead pitch.",
+  "footprint_name": "VISHAY_MKP1848510924K2_P27.5mm",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "MKP1848510924K2",
+  "name": "vishay-mkp1848510924k2",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "manual-from-manufacturer-datasheet",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C3802212"
+  },
+  "symbol_name": "VISHAY_MKP1848510924K2",
+  "tags": [
+    "capacitor",
+    "film",
+    "polypropylene",
+    "metallized-pp",
+    "1uf",
+    "1200v",
+    "through-hole",
+    "speaker-crossover"
+  ],
+  "three_d_model": "unavailable",
+  "version": "1.0.0",
+  "watch_out_for": "Non-polarized two-terminal film capacitor. Directly parallel this 1.0 uF part with the reviewed 6.8 uF KYET MKP20685J2G362230 for 7.8 uF in the 8 ohm / 2.5 kHz high-pass branch (2.55 kHz nominal). C3802212 had original-catalog stock 161 and retail stock 134, minimum buy 1, at source check; inventory is time-sensitive."
+}

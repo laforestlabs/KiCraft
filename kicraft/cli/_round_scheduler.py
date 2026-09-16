@@ -24,10 +24,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-# Exit code for an early-abort on a structurally unroutable leaf. Any non-zero
+# Exit code for an early-abort on a terminal leaf failure. Any non-zero
 # leaf-phase rc is forwarded by cli_app._run_layout and mapped to a route
 # failure (rc6) by _layout_route_fab; distinct from argparse's 2.
-_RC_LEAF_UNROUTABLE = 3
+_RC_LEAF_FAILURE = 3
 
 # Below this remaining wall budget there is no point in a rescue round -- the
 # leaf solve needs a meaningful slice (>= the ~60s seed-bbox floor) plus the
@@ -67,20 +67,19 @@ class Finalize:
     announce: bool = True
 
 
-def _update_unroutable_streak(
+def _update_terminal_failure_streak(
     streak: dict[str, int],
-    struct_fail: dict[str, list[str]],
+    terminal_fail: dict[str, list[str]],
     abort_rounds: int,
 ) -> str | None:
-    """Fold this round's structural leaf failures into the per-leaf streak and
-    return the leaf that has now failed ``>= abort_rounds`` consecutive rounds
-    (or ``None``). A leaf that did NOT fail structurally this round resets to 0
-    (it recovered). ``abort_rounds <= 0`` disables the early-abort.
+    """Fold terminal leaf failures into the per-leaf streak and return the leaf
+    that has failed ``>= abort_rounds`` consecutive rounds (or ``None``).
+    A recovered leaf resets to 0; ``abort_rounds <= 0`` disables early-abort.
     """
     for leaf in list(streak):
-        if leaf not in struct_fail:
+        if leaf not in terminal_fail:
             streak[leaf] = 0
-    for leaf in struct_fail:
+    for leaf in terminal_fail:
         streak[leaf] = streak.get(leaf, 0) + 1
     if abort_rounds <= 0:
         return None
@@ -144,7 +143,7 @@ class RoundScheduler:
     kept_count: int = field(default=0, init=False)
     ema_round_s: float | None = field(default=None, init=False)
     _next_round: int = field(default=1, init=False)
-    _unroutable_streak: dict[str, int] = field(default_factory=dict, init=False)
+    _terminal_failure_streak: dict[str, int] = field(default_factory=dict, init=False)
     _quality_streak: dict[str, dict[str, Any]] = field(
         default_factory=dict, init=False
     )
@@ -254,23 +253,22 @@ class RoundScheduler:
     def observe_solve(
         self,
         *,
-        struct_fail: dict[str, list[str]],
+        terminal_fail: dict[str, list[str]],
         quality_fail: dict[str, list[str]],
     ) -> Finalize | None:
-        """Streak policies over the solve outcome. Structural unroutability
-        aborts with an exit code (placement mutation cannot fix a router throw);
-        a repeated identical quality rejection finalizes best-so-far (WS2)."""
-        blown = _update_unroutable_streak(
-            self._unroutable_streak, struct_fail, self.unroutable_abort_rounds
+        """Keep terminal execution/legality failures bounded; quality rejections
+        finalize best-so-far after their existing non-improving streak."""
+        blown = _update_terminal_failure_streak(
+            self._terminal_failure_streak, terminal_fail, self.unroutable_abort_rounds
         )
         if blown is not None:
             return Finalize(
-                f"[abort] leaf {blown} is structurally unroutable "
-                f"({','.join(struct_fail[blown])}) after "
-                f"{self._unroutable_streak[blown]} round(s) -- stopping the "
+                f"[abort] leaf {blown} has a terminal routing failure "
+                f"({','.join(terminal_fail[blown])}) after "
+                f"{self._terminal_failure_streak[blown]} round(s) -- stopping the "
                 f"search instead of retrying to the build watchdog wall. "
                 f"Reported as a route failure with the evidence above.",
-                rc_hint=_RC_LEAF_UNROUTABLE,
+                rc_hint=_RC_LEAF_FAILURE,
             )
         stuck = _update_quality_streak(
             self._quality_streak, quality_fail, self.quality_abort_rounds

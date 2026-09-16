@@ -9,7 +9,11 @@ from collections.abc import Iterable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kicraft.design.lowering import lower_requirement, registered_lowerers
+from kicraft.design.lowering import (
+    lowerer_contract_diagnostic,
+    lower_requirement,
+    registered_lowerers,
+)
 from kicraft.design.models import (
     Architecture,
     CircuitRequirement,
@@ -119,7 +123,17 @@ def _recipe_for_unique_family_prefix(
         for recipe in recipes
         if any(selector.startswith(token) for selector in _protected_selectors(recipe))
     }
-    return next(iter(matches.values())) if len(matches) == 1 else None
+    if len(matches) == 1:
+        return next(iter(matches.values()))
+    # An exact family request may use its explicitly reviewed default ordering
+    # code. A partial prefix or an exact variant never gains this fallback.
+    if matches and all(
+        _identity(recipe.definition.family or "") == token for recipe in matches.values()
+    ):
+        defaults = [recipe for recipe in matches.values() if recipe.definition.default_for_family]
+        if len(defaults) == 1:
+            return defaults[0]
+    return None
 
 
 def _is_mcu_recipe(recipe: RegisteredRecipe) -> bool:
@@ -1065,9 +1079,22 @@ def resolve_architecture_recipes(
     primitive_families = {
         family for lowerer in registered_lowerers() for family in lowerer.families
     }
-    lowered = {
-        row.id: lower_requirement(row) for row in requirements if row.family in primitive_families
-    }
+    lowered = {}
+    for requirement in requirements:
+        diagnostic = lowerer_contract_diagnostic(requirement)
+        if diagnostic is None:
+            if requirement.family in primitive_families:
+                lowered[requirement.id] = lower_requirement(requirement)
+            continue
+        result.blocking.append(
+            ResolutionDiagnostic(
+                code="unsupported_lowerer_contract",
+                requirement_id=requirement.id,
+                sheet=requirement.sheet,
+                message=diagnostic.message,
+                evidence=diagnostic.evidence,
+            )
+        )
     primitive_identities = {
         requirement_id: {
             _identity(identity)

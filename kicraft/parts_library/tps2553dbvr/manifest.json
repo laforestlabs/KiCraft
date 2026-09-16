@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:de9dd5ba5cf89fbb1bff1212dea3dffa6cc3c3818a37e9f01e1981d7b8c6cae5",
+  "datasheet_url": "https://www.ti.com/lit/ds/symlink/tps2553.pdf",
+  "description": "Texas Instruments TPS2553DBVR precision adjustable current-limited power-distribution switch. Active-high EN, open-drain FAULT, programmable constant-current limit, 2.5-6.5 V input, 1.5 A continuous to 105 C, DBV SOT-23-6.",
+  "footprint_name": "SOT-23-6_DBV",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "TPS2553DBVR",
+  "name": "tps2553dbvr",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "TI SLVS841F DBV package drawing and pin-function table",
+    "source_project_stem": "usb-a-power-splitter"
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C55266"
+  },
+  "symbol_name": "TPS2553DBVR",
+  "tags": [
+    "power-distribution-switch",
+    "current-limit",
+    "usb-power",
+    "load-switch",
+    "sot-23-6"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": "TPS2553 is constant-current (not TPS2553-1 latch-off). Pin 3 is active-high EN; pin 4 is open-drain FAULT and needs a pull-up. TI specifies 15-232 kOhm 1% RILIM from pin 5 to GND, 0.1 uF or larger ceramic from IN to GND close to the IC, and output bulk capacitance for transient loads. DBV pinout: 1 IN, 2 GND, 3 EN, 4 FAULT, 5 ILIM, 6 OUT."
+}

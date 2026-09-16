@@ -1,0 +1,34 @@
+{
+  "content_hash": "sha256:98cf08c7a5ef8edcf38e8b8c083121240e8f4f9a7c6a07e010221d07036a03f2",
+  "datasheet_url": "https://www.keyelco.com/product.cfm/product_id/14242",
+  "description": "Keystone Electronics 8734 miniature metric PCB binding post: one electrical contact, 90-degree through-hole mount, M2.5 captive screw clamp for 14-22 AWG bare wire. This is a true screw-clamp binding post, not a banana socket.",
+  "footprint_name": "Keystone_8734",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "8734",
+  "name": "keystone-8734-binding-post",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "manual-from-manufacturer-drawing",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "digikey": "36-8734-ND",
+    "lcsc": "C6107766",
+    "mouser": "534-8734"
+  },
+  "symbol_name": "Keystone_8734",
+  "tags": [
+    "connector",
+    "binding-post",
+    "screw-clamp",
+    "bare-wire",
+    "through-hole",
+    "audio"
+  ],
+  "three_d_model": "unavailable",
+  "version": "1.0.0",
+  "watch_out_for": "Single electrical pad 1 only; the 1.3 mm CAD drill implements Keystone's 1.2 mm nominal PCB hole. Use one post per conductor (six posts for amplifier input plus woofer and tweeter outputs). The horizontal screw needs enclosure-side access and keepout beyond the 5 mm body."
+}

@@ -375,7 +375,13 @@ def test_stm32_recipe_does_not_claim_unowned_crystal_by_value_overlap():
     assert "crystal_8mhz" in canonical["unresolved_requirement_ids"]
 
 
-def test_usb_c_breakout_pin_ports_stay_model_owned():
+def test_usb_c_breakout_pin_ports_are_refused_against_the_published_contract():
+    """A known lowerer's port vocabulary is executable, not advisory.
+
+    Physical pin numbers are not the published `usb-c-breakout` contract, so the
+    claim is refused at architecture ownership with those alternatives named. A
+    genuinely model-owned breakout family remains model-owned work.
+    """
     payload = {
         "topologies": {"USB": "USB-C receptacle breakout"},
         "rail_voltages": {"VBUS": 5.0},
@@ -396,6 +402,14 @@ def test_usb_c_breakout_pin_ports_stay_model_owned():
         ],
     }
 
+    with pytest.raises(StageSchemaError, match="unsupported_lowerer_contract") as rejected:
+        _normalize_stage_response("architecture", payload, {})
+
+    message = str(rejected.value)
+    assert "usb-c-breakout@1" in message
+    assert "PIN1" in message and "published port contract" in message
+
+    payload["requirements"][0]["family"] = "custom-usb-breakout"
     canonical, _expanded = _normalize_stage_response("architecture", payload, {})
 
     assert canonical["recipe_selections"] == []
@@ -958,6 +972,7 @@ def test_coin_cell_mcu_requires_explicit_supply_binding_without_inventing_rail()
                 "role": "power_input",
                 "family": "coin-cell-holder",
                 "parameters": {"cell_format": "CR2032"},
+                "ties": {"negative": "GND"},
             },
         ],
         "power": {"rails": {"VBAT": {"voltage": 3.0, "from": "battery_holder.positive"}}},
@@ -1262,7 +1277,7 @@ def _direct_touch_architecture(*, touch_count=2, output_count=6, family="attiny1
                 "sheet": "PROGRAMMING",
                 "role": "programming",
                 "family": "pin-header",
-                "parameters": {"rows": 3},
+                "parameters": {"rows": 1},
                 "ports": {"pin1": "UPDI", "pin2": "GND", "pin3": "VBAT"},
             },
         ],
@@ -1437,7 +1452,7 @@ def test_touch_labels_and_external_frontend_outputs_do_not_require_mcu_ptc(kind)
     resolved = apply_architecture_recipe_resolution(architecture)
     (selection,) = resolved.recipe_selections
     expansion = expand_recipe(selection)
-    mcu = next(part for part in expansion.parts if part.mpn == "ATTINY402-SSN")
+    mcu = next(part for part in expansion.parts if (part.mpn or "").startswith("ATTINY402-"))
     (allocation,) = selection.pin_allocations
     assert allocation.capability == "input"
     assert (mcu.ref, allocation.pin) in {
@@ -3303,6 +3318,40 @@ def test_named_order_code_offers_its_registered_family_to_the_stage():
     assert len(mcus("ACME-WIDGET-9000")) > 1
 
 
+def test_ads1115_address_strap_is_selectable_per_instance():
+    """Two ADS1115s on one bus need distinct straps, not a hard-wired ground.
+
+    A grounded ADDR pin on every instance silently put both converters at 0x48,
+    so the eight-channel brief was unrealizable even though it committed.
+    """
+    from kicraft.design.recipes.models import RecipeSelection, ResolvedRecipeSelection
+    from kicraft.design.recipes.registry import expand_static_definition
+
+    definition = get_recipe("ads1115-i2c-adc@1")
+    assert definition.parameter_defaults["address_strap"] == "gnd"
+    assert definition.allowed_parameters["address_strap"] == ("gnd", "vdd", "sda", "scl")
+    sheets = {role: "A" for role in definition.required_sheet_roles}
+
+    def adc_address_net(strap):
+        selection = RecipeSelection(
+            recipe=definition.recipe, instance=f"adc_{strap}", sheets=sheets,
+            parameters={"address_strap": strap},
+            port_bindings={"vdd": "+3V3", "gnd": "GND", "sda": "SDA", "scl": "SCL"},
+            requirement_ids=["adc"],
+        )
+        expansion = expand_static_definition(
+            definition, ResolvedRecipeSelection(selection=selection, parameters={"address_strap": strap})
+        )
+        return {own.net for own in expansion.ownership.pins if own.pin == "1" and own.ref.startswith("U")}
+
+    # ADDR (pin 1) follows the declared strap, which is exactly what decides the
+    # part's I2C address; the default keeps the historic grounded behaviour.
+    assert adc_address_net("gnd") == {"GND"}
+    assert adc_address_net("vdd") == {"+3V3"}
+    assert adc_address_net("sda") == {"SDA"}
+    assert adc_address_net("scl") == {"SCL"}
+
+
 def test_hub75_recipe_exposes_named_channels_including_oe_and_d():
     """The HUB75 interface must declare its real signals.
 
@@ -3494,4 +3543,67 @@ def test_native_usb_edge_without_a_five_volt_rail_names_what_the_socket_needs():
     assert diagnostic.requirement_id == "mcu_core"
     assert "USB_DATA" in diagnostic.message
     assert set(diagnostic.evidence) == {"+3V3"}
+
+
+@pytest.mark.parametrize("quantity", [1, 3])
+@pytest.mark.parametrize("export_output", [False, True])
+def test_ws2812_pixels_form_a_complete_cascade_with_optional_final_output(quantity, export_output):
+    bindings = {"vdd": "+5V", "gnd": "GND", "data_in": "PIXEL_DATA"}
+    if export_output:
+        bindings["data_out"] = "NEXT_BANK"
+    selection = RecipeSelection(
+        recipe="ws2812-output@1",
+        instance="pixels",
+        sheets={"interface": "LEDS"},
+        parameters={"quantity": quantity},
+        port_bindings=bindings,
+    )
+    expanded = expand_recipe(selection)
+    leds = [part.ref for part in expanded.parts if part.recipe_role == "led"]
+    capacitors = [part.ref for part in expanded.parts if part.recipe_role == "decoupling"]
+    assert len(leds) == len(capacitors) == quantity
+    nets = {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in expanded.connections
+        for endpoint in connection.endpoints
+    }
+    endpoints = {
+        connection.net_name: {(endpoint.ref, endpoint.pin) for endpoint in connection.endpoints}
+        for connection in expanded.connections
+    }
+    series = next(part.ref for part in expanded.parts if part.recipe_role == "series_resistor")
+    assert nets[series, "1"] == "PIXEL_DATA"
+    assert endpoints[nets[series, "2"]] == {(series, "2"), (leds[0], "4")}
+    for ref in (*leds, *capacitors):
+        assert nets[ref, "1"] == "+5V"
+        assert nets[ref, "3" if ref in leds else "2"] == "GND"
+    for previous, following in zip(leds, leds[1:]):
+        assert endpoints[nets[previous, "2"]] == {(previous, "2"), (following, "4")}
+    no_connects = {(endpoint.ref, endpoint.pin) for endpoint in expanded.no_connect_pins}
+    if export_output:
+        assert nets[leds[-1], "2"] == "NEXT_BANK"
+        assert not no_connects
+    else:
+        assert (leds[-1], "2") not in nets
+        assert no_connects == {(leds[-1], "2")}
+    other = expand_recipe(selection.model_copy(update={"instance": "other"}))
+    assert not (
+        {connection.net_name for connection in expanded.connections} - set(bindings.values())
+    ) & (
+        {connection.net_name for connection in other.connections} - set(bindings.values())
+    )
+
+
+@pytest.mark.parametrize("quantity", [0, 501, True, 1.5])
+def test_ws2812_rejects_unrealizable_pixel_quantities(quantity):
+    with pytest.raises(ValueError):
+        expand_recipe(
+            RecipeSelection(
+                recipe="ws2812-output@1",
+                instance="pixels",
+                sheets={"interface": "LEDS"},
+                parameters={"quantity": quantity},
+                port_bindings={"vdd": "+5V", "gnd": "GND", "data_in": "DATA"},
+            )
+        )
 

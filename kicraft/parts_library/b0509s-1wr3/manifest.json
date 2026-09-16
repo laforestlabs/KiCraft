@@ -1,0 +1,32 @@
+{
+  "content_hash": "sha256:6f05a19a9eda4dc5e18307bfa7df07ad279a74425825b96a443681f3992928a5",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C7500906.pdf",
+  "description": "EVISUN B0509S-1WR3, SIP-4 1 W 5 V input to isolated 9 V non-regulated output DC/DC module, 112 mA maximum output and 1.5 kVDC/min isolation.",
+  "footprint_name": "SIP-4_L11.68-W10.20-P2.54-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "B0509S-1WR3",
+  "name": "b0509s-1wr3",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "EVISUN B_S-1WR3 series datasheet, C7500906: B0509S-1WR3 electrical limits, package drawing, pin functions, recommended capacitors, minimum load, and isolation rating.",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C7500906"
+  },
+  "symbol_name": "B0509S-1WR3",
+  "tags": [
+    "dc-dc-converter",
+    "isolated",
+    "5v-input",
+    "9v-output",
+    "1w",
+    "reviewed"
+  ],
+  "three_d_model": "unavailable",
+  "version": "1.0.0",
+  "watch_out_for": "Pins 1=-VIN and 2=+VIN are the logic-side 5 V input; pins 3=-VOUT and 4=+VOUT are the isolated field-side output. This module is non-regulated: it feeds a field-side 5 V LDO and must not be used as a direct MAX485 supply. Provide 4.7 uF input bypass, the datasheet-recommended output bypass, and at least 10% rated output load; do not bridge input and output returns."
+}

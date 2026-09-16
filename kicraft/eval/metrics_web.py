@@ -32,9 +32,10 @@ from .artifacts import (
 )
 from .scoring import _parse_ts, compute_latency_min
 
-# build-log lines carrying these markers count as a synthesis-blocking crash,
-# matching the harness transcript crash definition (kept in lockstep on purpose).
-_CRASH_MARKERS = ("Traceback (most recent call last)", "ModuleNotFoundError")
+# Build-log tracebacks and failed stage subprocesses are distinct crash sources.
+# Keeping both avoids a commit subprocess death being mislabeled as a failed build.
+_BUILD_CRASH_MARKERS = ("Traceback (most recent call last)", "ModuleNotFoundError")
+_STAGE_PROCESS_FAILURES = frozenset({"commit_process_failed", "stage_process_failed"})
 
 
 def analyze_events(events_path: Path) -> dict:
@@ -44,15 +45,14 @@ def analyze_events(events_path: Path) -> dict:
     Mapping (web event stream -> run-trace signals):
       retry event        -> one error-driven re-commit  (failed_commits)
       question event     -> one clarifying-question turn (ask_questions)
-      stage_done ok:True  -> a committed slot            (stage_commit_calls)
-      build_start present -> synthesis was attempted     (synth_attempts)
-      build_log traceback -> a synthesis-blocking crash  (crashes)
+      build_log traceback -> a build subprocess crash
+      stage_done failure_kind=*process_failed -> a stage subprocess crash
     Event records carry no timestamps, so latency is computed elsewhere.
     """
     events_path = Path(events_path)
     if not events_path.exists():
         return {"present": False}
-    retries = questions = stage_commits = crashes = 0
+    retries = questions = stage_commits = build_crashes = stage_subprocess_crashes = 0
     build_started = False
     for line in events_path.read_text(errors="replace").splitlines():
         line = line.strip()
@@ -67,14 +67,20 @@ def analyze_events(events_path: Path) -> dict:
             retries += 1
         elif kind == "question":
             questions += 1
-        elif kind == "stage_done" and ev.get("ok"):
-            stage_commits += 1
+        elif kind == "stage_done":
+            if ev.get("ok"):
+                stage_commits += 1
+            failure_kind = str(ev.get("failure_kind") or "")
+            if failure_kind in _STAGE_PROCESS_FAILURES or (
+                failure_kind and ("process" in failure_kind or "subprocess" in failure_kind)
+            ):
+                stage_subprocess_crashes += 1
         elif kind == "build_start":
             build_started = True
         elif kind == "build_log":
             text = ev.get("text") or ""
-            if any(mark in text for mark in _CRASH_MARKERS):
-                crashes += 1
+            if any(mark in text for mark in _BUILD_CRASH_MARKERS):
+                build_crashes += 1
     return {
         "present": True,
         "path": str(events_path),
@@ -83,7 +89,9 @@ def analyze_events(events_path: Path) -> dict:
         "failed_commits": retries,
         "ask_questions": questions,
         "synth_attempts": 1 if build_started else 0,
-        "crashes": crashes,
+        "crashes": build_crashes + stage_subprocess_crashes,
+        "build_crashes": build_crashes,
+        "stage_subprocess_crashes": stage_subprocess_crashes,
     }
 
 

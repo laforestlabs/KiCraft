@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:d121a53073d7205ba5a2e7aeefb6a28a06d27e642513c6ce1b3f35828af80729",
+  "datasheet_url": "https://onlinedocs.microchip.com/oxy/GUID-A8A0085D-58D1-4E41-A07D-B93BFDE11AFE-en-US-4/GUID-51E19131-0329-4E41-9FE1-E3905434030B.html",
+  "description": "Board-fabricated 12 mm round capacitive-touch electrode. It is not a purchasable component: pad 1 is F.Cu copper covered by solder mask, and the attached 16 mm B.Cu rule-area prohibits tracks, vias, pads, copper pours, and footprints beneath or within 2 mm of the electrode edge.",
+  "footprint_name": "TouchPad_12mm_Front_NoUnderlay",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "PCB-FABRICATED-TOUCH-ELECTRODE-12MM",
+  "name": "capacitive-touch-pad",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "manual from Microchip AN2934 layout guidance",
+    "source_project_stem": "CHAMFERED_BADGE"
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "manufacturer-reference": "Microchip AN2934 Capacitive Touch Sensor Design Guide, Button Sensor Design and Passive Shield"
+  },
+  "symbol_name": "CapacitiveTouchPad",
+  "tags": [
+    "capacitive-touch",
+    "electrode",
+    "board-fabricated",
+    "ptc"
+  ],
+  "three_d_model": "unavailable",
+  "version": "1.0.0",
+  "watch_out_for": "The 12 mm copper diameter and 2 mm surrounding B.Cu keepout are reviewed AN2934 starting assumptions, not user-specified dimensions. The pad is intentionally solder-mask-covered, not bare copper; do not put silkscreen or another overlay in the active area. Do not fit a passive ground shield or any copper under the pad; tune acquisition and thresholds on the actual stackup, cover, and enclosure."
+}

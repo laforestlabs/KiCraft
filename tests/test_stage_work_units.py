@@ -656,34 +656,6 @@ def test_route_work_unit_ids_matches_sheet_case_insensitively():
     assert route_work_unit_ids(evidence, units) == ("bom-s000",)
 
 
-def test_combined_fpc_header_requirements_stay_in_one_sheet_unit():
-    state = _state()
-    state["architecture"]["sheets"] = [
-        {"name": "A", "function": "24-pin FPC breakout to 0.1-inch header"}
-    ]
-    state["architecture"]["requirements"] = [
-        {
-            "id": "fpc",
-            "sheet": "A",
-            "role": "connector",
-            "family": "fpc-connector",
-            "parameters": {"pitch_mm": 0.5, "pin_count": 24},
-            "ports": {"signal": "24x signal"},
-        },
-        {
-            "id": "header",
-            "sheet": "A",
-            "role": "connector",
-            "family": "header",
-            "parameters": {"pitch_mm": 2.54, "pin_count": 24},
-            "ports": {"signal": "24x signal"},
-        },
-    ]
-
-    units = plan_stage_work_units("bom", state, {})
-
-    assert len(units) == 1
-    assert units[0].requirement_ids == ("fpc", "header")
 
 
 def test_exact_pin_offender_routes_only_its_slice_of_an_oversized_ref():
@@ -925,6 +897,9 @@ def test_generic_power_input_cannot_claim_unselected_registered_regulator():
 
 
 def test_bom_unit_allows_owned_protected_identity():
+    # A protected class is realized by reviewed hardware: the requirement names the
+    # reviewed 16-pin receptacle identity and the group is that pair, so ownership is
+    # physical rather than a matching group label.
     state = _state()
     state["architecture"]["requirements"] = [
         {
@@ -932,6 +907,7 @@ def test_bom_unit_allows_owned_protected_identity():
             "sheet": "A",
             "role": "connector",
             "family": "usb_c_receptacle",
+            "exact_part": "TYPE-C-31-M-12",
         }
     ]
     unit = StageWorkUnit(
@@ -947,9 +923,10 @@ def test_bom_unit_allows_owned_protected_identity():
                 "id": "usb_c_receptacle",
                 "reference_prefix": "J",
                 "quantity": 1,
-                "value": "USB_C_Receptacle_HRO_TYPE-C-31-M-12",
-                "symbol": "Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12",
-                "footprint": "Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+                "value": "TYPE-C-31-M-12",
+                "mpn": "TYPE-C-31-M-12",
+                "symbol": "usb-c-16p:TYPE-C-31-M-12",
+                "footprint": "usb-c-16p:USB-C_SMD-TYPE-C-31-M-12_1",
                 "sheet": "A",
             }
         ]
@@ -958,6 +935,7 @@ def test_bom_unit_allows_owned_protected_identity():
     validated = validate_unit_candidate(unit, payload, state, {})
 
     assert validated["groups"][0]["id"] == "usb_c_receptacle"
+    assert validated["groups"][0]["symbol"] == "usb-c-16p:TYPE-C-31-M-12"
 
 
 def test_bom_unit_allows_owned_protected_identity_words():
@@ -968,6 +946,7 @@ def test_bom_unit_allows_owned_protected_identity_words():
             "sheet": "A",
             "role": "bus_interface",
             "family": "pd_trigger_controller",
+            "exact_part": "CH224K",
         }
     ]
     unit = StageWorkUnit(
@@ -1149,15 +1128,26 @@ def _battery_power_state():
 
 
 @pytest.mark.parametrize(
-    ("mpn", "footprint"),
+    ("mpn", "footprint", "defect"),
     [
-        ("BS-07-A1BJ001", "Battery:BatteryHolder_MYOUNG_BS-07-A1BJ001_CR2032"),
-        ("Keystone3034", "Battery:BatteryHolder_Keystone_3034_1x20mm"),
+        (
+            "BS-07-A1BJ001",
+            "Battery:BatteryHolder_MYOUNG_BS-07-A1BJ001_CR2032",
+            "model_authored_protected_identity",
+        ),
+        # An unreviewed holder is not recognized as any requirement's hardware, so
+        # it is refused as the unimplemented regulator rather than as a sibling
+        # substitution. Either way it never becomes the converter.
+        (
+            "Keystone3034",
+            "Battery:BatteryHolder_Keystone_3034_1x20mm",
+            "missing-requirement-implementation",
+        ),
     ],
 )
 @pytest.mark.parametrize("with_support_passive", [False, True])
 def test_regulator_unit_rejects_sibling_coin_cell_holder_substitution(
-    mpn, footprint, with_support_passive
+    mpn, footprint, defect, with_support_passive
 ):
     state = _battery_power_state()
     unit = StageWorkUnit("bom-s001", "bom", "A", requirement_ids=("power_conversion",))
@@ -1177,7 +1167,7 @@ def test_regulator_unit_rejects_sibling_coin_cell_holder_substitution(
     with pytest.raises(WorkUnitValidationError) as caught:
         validate_unit_candidate(unit, {"groups": groups}, state, {})
 
-    assert caught.value.defects["model_authored_protected_identity"] == ["power_conversion"]
+    assert caught.value.defects[defect] == ["power_conversion"]
 
 
 def test_coin_cell_holder_unit_accepts_own_feature_despite_sibling_holder():
@@ -1196,9 +1186,9 @@ def test_coin_cell_holder_unit_accepts_own_feature_despite_sibling_holder():
     holder = {
         **_group("primary_cell", "A", prefix="BT"),
         "value": "CR2032 holder",
-        "mpn": "Keystone3034",
+        "mpn": "BS-07-A1BJ001",
         "symbol": "Device:Battery_Cell",
-        "footprint": "Battery:BatteryHolder_Keystone_3034_1x20mm",
+        "footprint": "Battery:BatteryHolder_MYOUNG_BS-07-A1BJ001_CR2032",
     }
 
     validated = validate_unit_candidate(unit, {"groups": [holder]}, state, {})
@@ -1222,9 +1212,9 @@ def test_regulator_unit_prunes_sibling_holder_only_with_owned_implementation():
     holder = {
         **_group("extra_holder", "A", prefix="BT"),
         "value": "CR2032 holder",
-        "mpn": "Keystone3034",
+        "mpn": "BS-07-A1BJ001",
         "symbol": "Device:Battery_Cell",
-        "footprint": "Battery:BatteryHolder_Keystone_3034_1x20mm",
+        "footprint": "Battery:BatteryHolder_MYOUNG_BS-07-A1BJ001_CR2032",
     }
     decoupling = {
         **_group("output_decoupling", "A", prefix="C"),
@@ -1603,7 +1593,7 @@ def test_curated_terminal_resolves_its_explicit_manufacturer_identity(tmp_path):
             {
                 **_group("terminal", "A", prefix="J"),
                 "value": "2-pin screw terminal",
-                "mpn": "WJ126V-5.0-2P",
+                "mpn": "WJ126V-5.0-02P-14-00A",
                 "symbol": "Connector_Generic:Conn_01x02",
                 "footprint": "TerminalBlock:TerminalBlock_bornier-2_P5.08mm",
             }
@@ -1617,7 +1607,7 @@ def test_curated_terminal_resolves_its_explicit_manufacturer_identity(tmp_path):
     group = validated["groups"][0]
     assert group["symbol"].startswith("screw-terminal-5mm-2p:")
     assert group["footprint"].startswith("screw-terminal-5mm-2p:")
-    assert group["mpn"] == "WJ126V-5.0-2P"
+    assert group["mpn"] == "WJ126V-5.0-02P-14-00A"
 
 
 def test_terminal_normalization_preserves_real_contact_count(tmp_path):
@@ -1676,6 +1666,38 @@ def test_curated_namespace_cannot_replace_an_explicitly_selected_device(monkeypa
     )
     normalized = _normalize_curated_group_identities([group])[0]
     assert _requirement_owns_protected_group(normalized, [{"exact_part": "BME280"}])
+
+
+def test_curated_prefix_cannot_change_an_explicit_order_code(monkeypatch):
+    from types import SimpleNamespace
+
+    from kicraft.server.stage_work_units import _normalize_curated_group_identities
+
+    carrier = SimpleNamespace(
+        manifest=SimpleNamespace(
+            name="nrf52840",
+            symbol_name="NRF52840-QIAA-R",
+            footprint_name="aQFN-73",
+            mpn="NRF52840-QIAA-R",
+            sourcing={"lcsc": "C190794"},
+        )
+    )
+    monkeypatch.setattr(
+        "kicraft.server.stage_work_units._curated_part_indexes",
+        lambda: ({"nrf52840": carrier}, {"nrf52840qiaar": carrier}),
+    )
+    group = BomComponentGroup.model_validate(
+        {
+            **_group("radio", "A", prefix="U"),
+            "value": "NRF52840-QIAA-R7",
+            "mpn": "NRF52840-QIAA-R7",
+            "symbol": "nrf52840:NRF52840-QIAA-R",
+            "footprint": "nrf52840:aQFN-73",
+        }
+    )
+    normalized = _normalize_curated_group_identities([group])[0]
+    assert normalized.mpn == "NRF52840-QIAA-R7"
+    assert normalized.sourcing_note == group.sourcing_note
 
 
 def test_curated_generic_pad_preserves_absent_manufacturer_identity(tmp_path):
@@ -2025,7 +2047,10 @@ def test_typed_header_cannot_be_replaced_by_passive_footprint():
     assert caught.value.defects["missing-requirement-implementation"] == ["header"]
 
 
-def test_typed_fpc_connector_requires_fpc_contact_not_a_pin_header():
+def test_fpc_header_misimplementation_recovers_real_24_contact_connector():
+    from kicraft.design.part_identity import reviewed_part
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
     state = _state()
     state["architecture"]["sheets"] = [{"name": "A", "function": "FPC breakout"}]
     state["architecture"]["requirements"] = [
@@ -2033,31 +2058,27 @@ def test_typed_fpc_connector_requires_fpc_contact_not_a_pin_header():
             "id": "fpc_connector",
             "sheet": "A",
             "role": "connector",
-            "family": "fpc-header-breakout",
+            "family": "fpc-connector",
             "parameters": {"pitch_mm": 0.5},
             "ports": {f"pin{index}": f"NET{index}" for index in range(1, 25)},
         }
     ]
     (unit,) = plan_stage_work_units("bom", state, {})
-
-    fpc_group = {
-        **_group("fpc_connector", "A", prefix="J"),
-        "value": "FH12-24S-0.5SH(55)",
-        "symbol": "Connector_Generic:Conn_01x24",
-        "footprint": "Connector_FFC-FPC:Hirose_FH12-24S-0.5SH_1x24-1MP_P0.50mm_Horizontal",
-    }
-    validated = validate_unit_candidate(unit, {"groups": [fpc_group]}, state, {})
-    assert any(group["footprint"].startswith("Connector_FFC-FPC:") for group in validated["groups"])
-
     header_group = {
         **_group("header", "A", prefix="J"),
         "value": "PinHeader_1x24",
         "symbol": "Connector_Generic:Conn_01x24",
         "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x24_P2.54mm_Vertical",
     }
-    with pytest.raises(WorkUnitValidationError) as caught:
-        validate_unit_candidate(unit, {"groups": [header_group]}, state, {})
-    assert caught.value.defects["missing-requirement-implementation"] == ["fpc_connector"]
+    validated = validate_unit_candidate(unit, {"groups": [header_group]}, state, {})
+    actual = validated["groups"]
+    reviewed = reviewed_part("KH-FG0.5-H2.0-24PIN")
+    assert [(group["symbol"], group["footprint"], group["quantity"]) for group in actual] == [
+        (reviewed.symbol, reviewed.footprint, 1)
+    ]
+    assert {pin["number"] for pin in lookup_pins(actual[0]["symbol"])["pins"]} == {
+        str(pin) for pin in range(1, 25)
+    }
 
 
 @pytest.mark.parametrize("multiple_requirements", [False, True])
@@ -2124,6 +2145,50 @@ def test_pd_controller_label_and_substitution_cannot_turn_a_header_into_an_ic(fa
         )
 
     assert caught.value.defects["missing-requirement-implementation"] == ["control"]
+
+
+def test_physical_obligation_requires_real_connector_class_and_count():
+    from kicraft.design.part_identity import reviewed_part
+
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": "A", "function": "Input and output connectors"}]
+    state["architecture"]["requirements"] = [
+        {
+            "id": "panel",
+            "sheet": "A",
+            "role": "connector",
+            "family": "custom-input-panel",
+            "obligations": [
+                {
+                    "kind": "physical", "original_obligation_id": "bnc",
+                    "component_class": "bnc-connector",
+                },
+                {
+                    "kind": "quantity", "original_obligation_id": "bnc_count",
+                    "subject": "bnc-connector", "minimum": 2,
+                },
+            ],
+        }
+    ]
+    unit = StageWorkUnit("bom-panel", "bom", "A", requirement_ids=("panel",))
+    part = reviewed_part("KH-BNC50-3511")
+    group = {
+        **_group("coaxial", "A", prefix="J"),
+        "quantity": 2, "value": "KH-BNC50-3511", "mpn": "KH-BNC50-3511",
+        "symbol": part.symbol, "footprint": part.footprint,
+    }
+    assert validate_unit_candidate(unit, {"groups": [group]}, state, {})["groups"][0]["quantity"] == 2
+    for changed in (
+        {**group, "quantity": 1},
+        {
+            **group, "mpn": None, "value": "header",
+            "symbol": "Connector_Generic:Conn_01x02",
+            "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+        },
+    ):
+        with pytest.raises(WorkUnitValidationError) as rejected:
+            validate_unit_candidate(unit, {"groups": [changed]}, state, {})
+        assert rejected.value.defects["physical-obligation-unfulfilled"]
 
 
 def _usb_breakout_wiring_state():

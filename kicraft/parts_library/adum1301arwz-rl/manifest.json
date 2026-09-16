@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:e5a06f00c5fde496c7360ee8c0ebaf0a190b0cddc5ca086c5c68acc54741cb6f",
+  "datasheet_url": "https://www.analog.com/media/en/technical-documentation/data-sheets/ADuM1300_1301.pdf",
+  "description": "Analog Devices ADUM1301ARWZ-RL, wide-body SOIC-16 2/1-direction triple-channel digital isolator; 2.7-5.5 V supplies per side, 2.5 kVrms isolation rating.",
+  "footprint_name": "SOIC-16W_L10.3-W7.5-P1.27-LS10.3-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "ADUM1301ARWZ-RL",
+  "name": "adum1301arwz-rl",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "Analog Devices ADuM1300/ADuM1301 Rev. M datasheet: package drawing, 2/1 channel direction, pin configuration, enable pins, and recommended high-voltage board layout.",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C22261"
+  },
+  "symbol_name": "ADUM1301ARWZ-RL",
+  "tags": [
+    "digital-isolator",
+    "2-forward-1-reverse",
+    "wide-soic",
+    "2-5kv-rms",
+    "reviewed"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": "Pin 3 VIA to pin 14 VOA and pin 4 VIB to pin 13 VOB cross from side 1 to side 2; pin 12 VIC to pin 5 VOC crosses from side 2 to side 1. Tie VE1 (pin 7) to VDD1 and VE2 (pin 10) to VDD2 to enable channels. Connect both GND1 pins (2, 8) only to the logic reference and both GND2 pins (9, 15) only to the field reference; pins 6 and 11 are NC. Keep all copper, planes, vias, and conductive hardware out of the documented isolation-barrier corridor below and between package sides; the manufacturer rated insulation is not a mains-safety certification of this board."
+}

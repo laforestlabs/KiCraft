@@ -255,6 +255,17 @@ def _valid_bom() -> dict:
                 "footprint": "Resistor_SMD:R_0402_1005Metric",
                 "sheet": "MCU",
             },
+            {
+                # The 5 V -> 3.3 V rail needs real converter hardware: §9.39
+                # refuses a substitution ledger entry standing in for it, so the
+                # fixture ships the reviewed AP2112K regulator pair.
+                "ref": "U3",
+                "value": "AP2112K-3.3TRG1",
+                "mpn": "AP2112K-3.3TRG1",
+                "symbol": "ap2112k-3v3:AP2112K-3.3TRG1",
+                "footprint": "ap2112k-3v3:SOT-25-5_L2.9-W1.6-P0.95-LS2.8-BL",
+                "sheet": "LDO",
+            },
         ],
         "ic_groups": {},
         "group_labels": {},
@@ -262,16 +273,9 @@ def _valid_bom() -> dict:
         "signal_flow_order": [],
         "component_zones": {},
         "assumptions": [],
-        # §9.33: the architecture fixture names AP2112K, and this minimal BOM
-        # deliberately ships no LDO IC -- ledger the deviation the same way a
-        # real BOM must, so the accountability gate stays exercised end-to-end.
-        "substitutions": [
-            {
-                "wanted": "AP2112K",
-                "got": "no LDO IC in this minimal fixture",
-                "reason": "test fixture",
-            },
-        ],
+        # §9.33: the architecture names AP2112K and the BOM now ships that exact
+        # reviewed part, so nothing is substituted.
+        "substitutions": [],
     }
 
 
@@ -359,8 +363,12 @@ def test_stage_prep_wiring_batches_pinouts(tmp_path, capsys):
     assert rc == 0
     pinouts = payload["extras"]["symbol_pinouts"]
     # Symbol lookups remain batched, but ownership expands to exact BOM refs.
-    assert list(pinouts) == ["U1", "C1", "J3", "U2"]
-    assert {info["symbol"] for info in pinouts.values()} == {"Device:R", "Device:C"}
+    assert list(pinouts) == ["U1", "C1", "J3", "U2", "U3"]
+    assert {info["symbol"] for info in pinouts.values()} == {
+        "Device:R",
+        "Device:C",
+        "ap2112k-3v3:AP2112K-3.3TRG1",
+    }
     for ref, info in pinouts.items():
         assert "pins" in info, f"{ref}: expected pin list, got {info!r}"
     assert payload["extras"]["locked_pin_assignments"] == []
@@ -414,7 +422,7 @@ def test_stage_prep_wiring_accepts_pinless_mechanical_symbol(tmp_path, capsys):
     # The pin-less reference is skipped, while every wireable BOM ref has its
     # own exact pin inventory even when several refs share one symbol lookup.
     assert "H1" not in pinouts
-    assert list(pinouts) == ["U1", "C1", "J3", "U2"]
+    assert list(pinouts) == ["U1", "C1", "J3", "U2", "U3"]
 
 
 # ---------- stage-commit ----------
@@ -678,6 +686,24 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys):
                     "endpoints": [{"ref": "C1", "pin": "2"}],
                     "sheet": "LDO",
                 },
+                {
+                    "net_name": "VBUS",
+                    "endpoints": [
+                        {"ref": "U3", "pin": "1"},
+                        {"ref": "U3", "pin": "3"},
+                    ],
+                    "sheet": "LDO",
+                },
+                {
+                    "net_name": "GND",
+                    "endpoints": [{"ref": "U3", "pin": "2"}],
+                    "sheet": "LDO",
+                },
+                {
+                    "net_name": "+3V3",
+                    "endpoints": [{"ref": "U3", "pin": "5"}],
+                    "sheet": "LDO",
+                },
             ],
             # J3 (the §9.29 USB programming-access part) is a 2-pin stand-in;
             # net coverage (§9.11) requires every pin accounted for.
@@ -686,6 +712,7 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys):
                 {"ref": "J3", "pin": "2"},
                 {"ref": "U2", "pin": "1"},
                 {"ref": "U2", "pin": "2"},
+                {"ref": "U3", "pin": "4"},
             ],
         },
     )
@@ -702,10 +729,10 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys):
 
     written = json.loads(state_path.read_text())
     # Wiring fields populated...
-    assert len(written["bom"]["connections"]) == 4
+    assert len(written["bom"]["connections"]) == 7
     # ...and the rest of the BOM is intact
-    assert len(written["bom"]["parts"]) == 4
-    assert {p["ref"] for p in written["bom"]["parts"]} == {"U1", "C1", "J3", "U2"}
+    assert len(written["bom"]["parts"]) == 5
+    assert {p["ref"] for p in written["bom"]["parts"]} == {"U1", "C1", "J3", "U2", "U3"}
 
 
 def test_stage_commit_bom_rejects_per_sheet_overflow(tmp_path, capsys, monkeypatch):

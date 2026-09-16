@@ -1,0 +1,33 @@
+{
+  "content_hash": "sha256:0af26b4430bde7c22a2a5c13cbd6f90913459cfe85b7d300932e0116902947b3",
+  "datasheet_url": "https://www.kinghelm.net/fpc-connector-53730/55197.html",
+  "description": "Kinghelm KH-FG0.5-H2.0-24PIN: 24-contact, 0.50 mm-pitch, bottom-contact, flip-lock SMT FFC/FPC connector; the two mechanical hold-down pads are intentionally not schematic contacts.",
+  "footprint_name": "FPC-SMD_KH-FG0.5-H2.0-24PIN",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "KH-FG0.5-H2.0-24PIN",
+  "name": "fpc-24-0-5-kinghelm",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored-from-home-after-pin-mapping-review",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2797213"
+  },
+  "symbol_name": "KH-FG0.5-H2.0-24PIN",
+  "tags": [
+    "connector",
+    "fpc",
+    "ffc",
+    "24-contact",
+    "0.5mm-pitch",
+    "smd",
+    "bottom-contact",
+    "flip-lock"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": "Use contacts 1\u201324 only. Footprint pads 25 and 26 are mounting tabs, deliberately omitted from the corrected symbol; never map them as signals."
+}

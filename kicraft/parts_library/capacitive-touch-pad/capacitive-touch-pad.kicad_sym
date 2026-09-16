@@ -1,0 +1,26 @@
+(kicad_symbol_lib
+  (version 20231120)
+  (generator kicraft)
+  (symbol "CapacitiveTouchPad"
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "PAD" (at 0 5.08 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Value" "Capacitive touch electrode, 12 mm" (at 0 -5.08 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Footprint" "capacitive-touch-pad:TouchPad_12mm_Front_NoUnderlay" (at 0 -7.62 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Datasheet" "https://onlinedocs.microchip.com/oxy/GUID-A8A0085D-58D1-4E41-A07D-B93BFDE11AFE-en-US-4/GUID-51E19131-0329-4E41-9FE1-E3905434030B.html" (at 0 -10.16 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Description" "Board-fabricated 12 mm round capacitive-touch electrode; solder-mask-covered F.Cu, with a 16 mm B.Cu no-underlay keepout." (at 0 -12.7 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (symbol "CapacitiveTouchPad_0_1"
+      (circle (center 0 0) (radius 2.54)
+        (stroke (width 0) (type default))
+        (fill (type background))))
+    (symbol "CapacitiveTouchPad_1_1"
+      (pin passive line (at 5.08 0 180) (length 2.54)
+        (name "ELECTRODE" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))))
+  )
+)

@@ -1,0 +1,27 @@
+{
+  "content_hash": "sha256:4dfa42975396850b9252bf9ec1badba390e08ef86c8c69514ef966e31f85851f",
+  "datasheet_url": "https://lcsc.com/product-detail/Relays_SRD-05VDC-SL-C_C35449.html",
+  "description": "SRD-05VDC-SL-C",
+  "footprint_name": "RELAY-TH_SRD-XXVDC-XL-C",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "SRD-05VDC-SL-C",
+  "name": "srd-05vdc-sl-c",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored-from-home-after-pin-mapping-review",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C35449"
+  },
+  "symbol_name": "SRD-05VDC-SL-C",
+  "tags": [
+    "portable",
+    "reviewed"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": null
+}

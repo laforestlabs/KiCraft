@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 import re
 
+from kicraft.evidence_digest import EvidenceSection, render_bounded_evidence
+
 _SEVERITIES = ("blocker", "warning", "note")
 _REVIEW_RESPONSE_FORMAT = {
     "type": "json_schema",
@@ -217,13 +219,15 @@ _SYSTEM = (
     "exposed inputs, regulator thermal/current headroom, and whether the design "
     "honors the stated intent. Do NOT invent connections that are not in the "
     "digest, and do NOT speculate about physical layout/geometry -- you only have "
-    "the netlist. Where the digest lacks evidence for a checklist item, treat it "
-    "as NOT done. Do NOT compute or assert a specific numeric value (a voltage, "
-    "current, resistance, reference voltage, or temperature) that is not given "
-    "verbatim in the digest -- if a judgment requires a number the digest does "
-    "not supply, say so explicitly in the finding instead of estimating one "
-    "(a judge once failed a correct 3.3V design by guessing a regulator's Vref). "
-    "Report only concrete, defensible findings. Respond with a "
+    "the netlist. A checklist item is absent ONLY when its relevant evidence "
+    "section is labeled COMPLETE and shows it absent. An OMITTED or INCOMPLETE "
+    "section means the item is unverified, not absent: do not report an "
+    "absence-based finding from it. Do NOT compute or assert a specific numeric "
+    "value (a voltage, current, resistance, reference voltage, or temperature) "
+    "that is not given verbatim in the digest -- if a judgment requires a number "
+    "the digest does not supply, say so explicitly in the finding instead of "
+    "estimating one (a judge once failed a correct 3.3V design by guessing a "
+    "regulator's Vref). Report only concrete, defensible findings. Respond with a "
     "single JSON object and no other text."
 )
 
@@ -266,99 +270,112 @@ def _pin_names(symbol, project_root):
     return {p["number"]: (p.get("name") or "") for p in info["pins"]}
 
 
-def build_design_digest(state, *, project_root=None, budget: int = 14000) -> str:
-    """A compact, structured, geometry-free digest for the reviewer.
+def _json_evidence(value) -> str:
+    """Serialize a complete typed evidence category or its explicit null value."""
+    if value is None:
+        return "No committed record."
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
 
-    Renders intent + architecture + BOM + the netlist with pin FUNCTION NAMES so
-    the model reasons about what each pin does, never about pin numbers or
-    coordinates.
-    """
-    parts: list[str] = []
+    def _default(item):
+        return item.model_dump(mode="json") if hasattr(item, "model_dump") else str(item)
+
+    return json.dumps(value, indent=2, sort_keys=True, default=_default)
+
+
+def build_design_digest(state, *, project_root=None, budget: int = 14000) -> str:
+    """Render structured review evidence without slicing BOM or netlist records."""
+    sections: list[EvidenceSection] = []
 
     intent = state.intent
-    if intent is not None:
-        lines = [f"GOAL: {intent.goal}"]
-        if intent.constraints:
-            lines.append("CONSTRAINTS:\n" + "\n".join(f"  - {c}" for c in intent.constraints))
-        if intent.named_parts:
-            lines.append("NAMED PARTS: " + ", ".join(intent.named_parts))
-        if intent.assumptions:
-            lines.append(
-                "INTENT ASSUMPTIONS:\n" + "\n".join(f"  - {a}" for a in intent.assumptions)
-            )
-        parts.append("INTENT (what the user asked for):\n" + "\n".join(lines))
+    if intent is None:
+        sections.append(
+            EvidenceSection("BRIEF AND INTENT", "No committed intent.", complete=False)
+        )
+    else:
+        sections.append(EvidenceSection("BRIEF AND INTENT", _json_evidence(intent)))
 
-    fs = state.functional_spec
-    if fs is not None:
-        try:
-            blocks = ", ".join(b.name for b in fs.blocks)
-        except AttributeError:
-            blocks = ""
-        if blocks:
-            parts.append("FUNCTIONAL BLOCKS: " + blocks)
-
-    arch = state.architecture
-    if arch is not None:
-        a = []
-        a.append("SHEETS: " + ", ".join(s.name for s in arch.sheets))
-        if arch.power_nets:
-            a.append("POWER NETS: " + ", ".join(arch.power_nets))
-        if arch.inter_sheet_nets:
-            a.append("INTER-SHEET NETS: " + ", ".join(n.name for n in arch.inter_sheet_nets))
-        if arch.declared_interfaces:
-            # These parts have no curated recipe: their pin functions are a model claim
-            # (docs/plans/architecture-constructive-slot-2026-09-14.md §4.2). Say so, so
-            # the review checks them instead of trusting them.
-            a.append(
-                "DECLARED INTERFACES (pin functions claimed by the model, NOT verified against "
-                "a curated recipe — check these against the part's datasheet): "
-                + ", ".join(arch.declared_interfaces)
-            )
-        parts.append("ARCHITECTURE:\n" + "\n".join(a))
+    sections.append(
+        EvidenceSection(
+            "FUNCTIONAL REQUIREMENTS",
+            _json_evidence(state.functional_spec),
+            complete=state.functional_spec is not None,
+        )
+    )
+    sections.append(
+        EvidenceSection(
+            "ARCHITECTURE REQUIREMENTS",
+            _json_evidence(state.architecture),
+            complete=state.architecture is not None,
+        )
+    )
 
     bom = state.bom
-    if bom is not None:
-        # parts table
+    if bom is None:
+        sections.append(
+            EvidenceSection(
+                "BOM / PINS / NETS",
+                "No committed BOM. Part, pin, net, and delivered-MCU absence is unverified; "
+                "do not report missing or unprogrammable delivered hardware.",
+                complete=False,
+            )
+        )
+    else:
         rows = []
-        for p in bom.parts:
-            mpn = getattr(p, "mpn", None) or getattr(p, "lcsc", None) or ""
+        for part in bom.parts:
+            mpn = getattr(part, "mpn", None) or getattr(part, "lcsc", None) or ""
             rows.append(
-                f"  {p.ref:<6} {p.value:<16} {p.symbol}"
-                + (f"  [{mpn}]" if mpn else "")
-                + (f"  sheet={p.sheet}" if getattr(p, "sheet", None) else "")
+                f"  {part.ref}: value={part.value!r}; symbol={part.symbol!r}; "
+                f"footprint={part.footprint!r}"
+                + (f"; identity={mpn!r}" if mpn else "")
+                + (f"; sheet={part.sheet!r}" if getattr(part, "sheet", None) else "")
             )
-        parts.append(f"BOM PARTS ({len(bom.parts)}):\n" + "\n".join(rows))
-
-        # netlist with pin function names
-        names_by_ref = {p.ref: _pin_names(p.symbol, project_root) for p in bom.parts}
-        net_lines = []
-        for c in bom.connections:
-            eps = []
-            for ep in c.endpoints:
-                fn = names_by_ref.get(ep.ref, {}).get(ep.pin)
-                eps.append(f"{ep.ref}.{ep.pin}" + (f"({fn})" if fn else ""))
-            net_lines.append(f"  {c.net_name}: " + ", ".join(eps))
-        if bom.no_connect_pins:
-            nc = ", ".join(
-                f"{ep.ref}.{ep.pin}"
-                + (
-                    f"({names_by_ref.get(ep.ref, {}).get(ep.pin)})"
-                    if names_by_ref.get(ep.ref, {}).get(ep.pin)
-                    else ""
-                )
-                for ep in bom.no_connect_pins
+        sections.append(
+            EvidenceSection(
+                f"BOM PARTS ({len(bom.parts)})",
+                "\n".join(rows) or "No committed parts.",
             )
-            net_lines.append(f"  (no-connect: {nc})")
-        parts.append("NETLIST (net: pins, with pin function names):\n" + "\n".join(net_lines))
-
-    if state.open_questions:
-        parts.append(
-            "OPEN QUESTIONS (already surfaced):\n"
-            + "\n".join(f"  - {q.text}" for q in state.open_questions)
         )
 
-    digest = "\n\n".join(parts)
-    return digest[:budget]
+        names_by_ref = {part.ref: _pin_names(part.symbol, project_root) for part in bom.parts}
+        net_lines = []
+        for connection in bom.connections:
+            endpoints = []
+            for endpoint in connection.endpoints:
+                function = names_by_ref.get(endpoint.ref, {}).get(endpoint.pin)
+                endpoints.append(
+                    f"{endpoint.ref}.{endpoint.pin}" + (f"({function})" if function else "")
+                )
+            sheet = f" [sheet={connection.sheet!r}]" if connection.sheet else ""
+            net_lines.append(f"  {connection.net_name}{sheet}: " + ", ".join(endpoints))
+        if bom.no_connect_pins:
+            net_lines.append(
+                "  no-connect: "
+                + ", ".join(
+                    f"{endpoint.ref}.{endpoint.pin}"
+                    + (
+                        f"({names_by_ref.get(endpoint.ref, {}).get(endpoint.pin)})"
+                        if names_by_ref.get(endpoint.ref, {}).get(endpoint.pin)
+                        else ""
+                    )
+                    for endpoint in bom.no_connect_pins
+                )
+            )
+        sections.append(
+            EvidenceSection(
+                f"NETS AND PINS ({len(bom.connections)})",
+                "\n".join(net_lines) or "No committed nets.",
+            )
+        )
+
+    sections.append(EvidenceSection("OPEN QUESTIONS", _json_evidence(state.open_questions)))
+    terminal = {
+        "stage_status": state.stage_status,
+        "artifacts": state.artifacts,
+        "review_findings": state.review_findings,
+    }
+    sections.append(EvidenceSection("TERMINAL STATE", _json_evidence(terminal)))
+    return render_bounded_evidence("STRUCTURED ELECTRICAL-REVIEW EVIDENCE", sections, budget=budget)
 
 
 # --------------------------------------------------------------------------- #

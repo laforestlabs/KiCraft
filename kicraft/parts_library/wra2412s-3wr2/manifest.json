@@ -1,0 +1,33 @@
+{
+  "content_hash": "sha256:694f99eb5bcc1563bb4a9c5c4ec288898cecb7119a52d32ecd0b0c9d9cb4dba2",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C20617261.pdf",
+  "description": "ReSine PS WRA2412S-3WR2 regulated isolated 3 W DC/DC module: 18-36 V input, +12 V/-12 V outputs at 125 mA per rail, 1.5 kVDC isolation.",
+  "footprint_name": "Converter_DCDC_ReSine_WRAxxxxS-3WR2_THT",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "WRA2412S-3WR2",
+  "name": "wra2412s-3wr2",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "ReSine manufacturer datasheet for C20617261 pin mapping, electrical limits, and package; exact 2.54 mm non-contiguous SIP pad layout reviewed against the supplied footprint drawing",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C20617261"
+  },
+  "symbol_name": "WRA2412S-3WR2",
+  "tags": [
+    "dc-dc-converter",
+    "regulated",
+    "isolated",
+    "dual-output",
+    "24v-input",
+    "plus-minus-12v",
+    "3w",
+    "reviewed"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": "This exact ReSine PS C20617261 module must not be substituted with another vendor's same-named WRA2412S-3WR2. Pin 3 enables operation only when open/high impedance and pin 5 is NC: both require no-connects. Pin 7 is isolated output common, not input return; do not short it to pin 1 without an explicit reviewed isolation-bond requirement. Use the documented 100 mA continuous per rail balanced reference load, satisfy the 12.5 mA minimum per rail, and keep each output's total capacitor value below the manufacturer 470 uF maximum. The exact reference circuit, stock evidence, source URLs, and calculations are in engineering_evidence.json."
+}

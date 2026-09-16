@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "purpose": "Read-only reviewed-source and frozen-witness index. It is not campaign fulfillment evidence and contains no passing fulfillment assertion.",
+  "original_corpus_version": "benchmark-original-v1",
+  "approved_corpus_version": "benchmark-approved-5v-device-v1",
+  "frozen_campaign": "logs/self_eval/20260915T132650Z",
+  "manufacturer_sources": {
+    "TPS5430": {"url": "https://www.ti.com/lit/ds/symlink/tps5430.pdf", "evidence": "recommended VIN is 5.5–36 V; original 5 V #15 request is out of range"},
+    "TPS54331DDAR": {"url": "https://www.ti.com/lit/ds/symlink/tps54331.pdf", "evidence": "VIN 3.5–28 V, adjustable output down to 0.8 V, integrated switch supports up to 3 A continuous; it is an engineer-selected candidate under the user-approved 5 V/device-category change, while sourceability and board thermal margin remain unreviewed", "role": "manufacturer-reviewed operating-range candidate, not a user-approved exact MPN"}
+  },
+  "operating_calculation": {
+    "buck-3a": {"candidate": "TPS54331DDAR", "supplier_identifier": "C90761", "vin_v": 5, "vout_v": 3.3, "ideal_duty_ratio": 0.66, "manufacturer_max_controllable_duty_ratio": 0.9, "conclusion": "Nominal duty demand is below the cited maximum, whose datasheet test condition must still be reviewed for this implementation; this does not establish component sourceability, compensation, or board thermal feasibility."}
+  },
+  "consent": {
+    "buck-3a": {"approved_by": "user", "approved_on": "2026-09-16", "approved_change": "retain 5 V input and replace TPS5430 requirement with a reviewed 5 V-capable 3 A buck device", "not_approved": ["a particular MPN", "sourceability", "compensation", "layout", "board thermal design", "delivered-artifact evidence"]}
+  },
+  "sourcing": {
+    "speaker-crossover": {"status": "sourcing_blocked", "requirement": "original air-core inductor", "reason": "No eligible stocked source is recorded under the strict sourcing policy; consigned stock and external policy extensions are not authorized."}
+  },
+  "briefs": {
+    "rc-lowpass-bnc": {"status": "unverified", "frozen_witness": "BNCs and trim pot replaced by pin sockets/fixed resistor"},
+    "r2r-dac": {"status": "unverified", "frozen_witness": "build reached rc0; C1 exists, but full fulfillment was not audited"},
+    "thermocouple-amp": {"status": "unverified", "frozen_witness": "uncurated MAX31855 interface stopped before build"},
+    "speaker-crossover": {"status": "unverified", "frozen_witness": "binding posts replaced; recorded inductor was 0.51 uH rather than approximately 509 uH"},
+    "usb-pd-trigger": {"status": "unverified", "frozen_witness": "USB VBUS was disconnected from controller/output negotiated rail"},
+    "usb-c-full-breakout": {"status": "unverified", "frozen_witness": "route rc6 with TX2N/TX2P opens and legality findings"},
+    "usb-a-power-splitter": {"status": "unverified", "frozen_witness": "architecture interface conflict stopped before build"},
+    "rs485-terminal": {"status": "unverified", "frozen_witness": "isolated-domain/interface conflict stopped before build"},
+    "stm32-min": {"status": "unverified", "frozen_witness": "RESET_BUTTON/NRST conflict stopped before build"},
+    "rp2040-min": {"status": "unverified", "frozen_witness": "route rc6 after leaf deadline/routing exception"},
+    "fpc-breakout": {"status": "unverified", "frozen_witness": "24-contact physical-feature and sourcing coverage stopped before build"},
+    "esp32-s3-sensor": {"status": "unverified", "frozen_witness": "repeated singleton wiring failure stopped before build"},
+    "nrf52-beacon": {"status": "unverified", "frozen_witness": "candidate order code rejected by reviewed identity table"},
+    "lora-node": {"status": "unverified", "frozen_witness": "candidate STM32L0 member rejected by reviewed identity table"},
+    "buck-3a": {"status": "unverified", "frozen_witness": "original TPS5430 specification conflicts with 5 V input; separate approved contract required"},
+    "highside-switch-10a": {"status": "unverified", "frozen_witness": "unowned THERMAL_PAD endpoint stopped before build"},
+    "led-cc-driver": {"status": "unverified", "frozen_witness": "TPS54331 BOOT and PH shared SW_NODE; bootstrap capacitor went to ground"},
+    "dual-rail-supply": {"status": "unverified", "frozen_witness": "connector placeholder impersonated converter; output filters disconnected"},
+    "relay-quad": {"status": "unverified", "frozen_witness": "rc0, but home-fetched dependencies and electrical fulfillment remain unverified"},
+    "encoder-oled-panel": {"status": "unverified", "frozen_witness": "encoder supply/button interface conflict stopped before build"},
+    "proto-shield": {"status": "unverified", "frozen_witness": "missing stacking-interface ownership caused commit subprocess crash"},
+    "esp32-dual-motor": {"status": "unverified", "frozen_witness": "rc0 and programming gate, but complete fulfillment remains unverified"},
+    "can-node": {"status": "unverified", "frozen_witness": "CAN termination control conflict stopped before build"},
+    "daq-8ch": {"status": "unverified", "frozen_witness": "six analog input endpoints missing at wiring"},
+    "gpio-expander": {"status": "unverified", "frozen_witness": "supply/connector interface conflict stopped before build"},
+    "servo-driver-16": {"status": "unverified", "frozen_witness": "unknown supply/unbound port and ownership failure stopped before build"},
+    "stepper-a4988": {"status": "unverified", "frozen_witness": "pin reuse and interface assignments stopped before build"},
+    "audio-jack-buffer": {"status": "unverified", "frozen_witness": "requested 3.5 mm jacks became pin sockets"},
+    "round-led-ring": {"status": "unverified", "frozen_witness": "outline and programming passed but full fulfillment not audited"},
+    "rounded-c3-devboard": {"status": "unverified", "frozen_witness": "header conflict and GPIO capability failure stopped before build"},
+    "chamfered-badge": {"status": "unverified", "frozen_witness": "status-LED/interface conflicts stopped before build"},
+    "hex-env-sensor": {"status": "unverified", "frozen_witness": "outline passed but full fulfillment not audited"},
+    "star-ornament": {"status": "unverified", "frozen_witness": "status-LED/interface conflicts stopped before build"},
+    "snowman-ornament": {"status": "unverified", "frozen_witness": "ATTINY402 sourcing policy rejected candidate"}
+  }
+}

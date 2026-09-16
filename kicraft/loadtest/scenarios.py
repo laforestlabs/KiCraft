@@ -7,7 +7,7 @@ _PKG = Path(__file__).resolve().parent
 _REPO = _PKG.parents[1]
 
 # The committed mock transcript (reconstructed from a frozen usb-pd-trigger run).
-DEFAULT_TRANSCRIPT = _PKG / "fixtures" / "transcript_usb_pd_trigger.json"
+DEFAULT_TRANSCRIPT = _PKG / "fixtures" / "transcript_rc_lowpass.json"
 
 # A generic brief; the mock ignores brief text (it replays the transcript slots),
 # so this is just the label the pipeline load drives.

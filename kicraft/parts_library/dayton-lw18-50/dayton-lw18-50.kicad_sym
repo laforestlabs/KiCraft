@@ -1,0 +1,25 @@
+(kicad_symbol_lib
+  (version 20231120)
+  (generator kicraft)
+  (symbol "Dayton_LW18-50"
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "L" (at 0 3.81 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "Dayton_LW18-50" (at 0 -3.81 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "dayton-lw18-50:Dayton_LW18-50" (at 0 -6.35 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Datasheet" "https://www.daytonaudio.com/images/resources/257-816-dayton-audio-lw18-50-mechanical-drawing.pdf" (at 0 -8.89 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Manufacturer" "Dayton Audio" (at 0 -11.43 0) (effects (font (size 1.27 1.27)) hide))
+    (property "MPN" "LW18-50" (at 0 -13.97 0) (effects (font (size 1.27 1.27)) hide))
+    (property "ki_keywords" "air core inductor speaker crossover 0.50mH" (at 0 -16.51 0) (effects (font (size 1.27 1.27)) hide))
+    (symbol "Dayton_LW18-50_0_1"
+      (arc (start -2.54 0) (mid -1.905 1.27) (end -1.27 0) (stroke (width 0) (type default)) (fill (type none)))
+      (arc (start -1.27 0) (mid -0.635 1.27) (end 0 0) (stroke (width 0) (type default)) (fill (type none)))
+      (arc (start 0 0) (mid 0.635 1.27) (end 1.27 0) (stroke (width 0) (type default)) (fill (type none)))
+      (arc (start 1.27 0) (mid 1.905 1.27) (end 2.54 0) (stroke (width 0) (type default)) (fill (type none)))
+    )
+    (symbol "Dayton_LW18-50_1_1"
+      (pin passive line (at -5.08 0 0) (length 2.54) (name "1" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+      (pin passive line (at 5.08 0 180) (length 2.54) (name "2" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+    )
+  )
+)

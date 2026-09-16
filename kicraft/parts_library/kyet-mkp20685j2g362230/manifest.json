@@ -1,0 +1,34 @@
+{
+  "content_hash": "sha256:9741cd4d56d521dd1985cd770e858a9710f32ee1757a1472f5b20b39a0ce751e",
+  "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/988445a2fd1023836a8a59546d7ba7fe.pdf?productCode=C521054",
+  "description": "KYET MKP20685J2G362230 metallized polypropylene film capacitor, 6.8 uF +/-5%, 400 VDC, radial through-hole. Manufacturer data gives a 36 x 30 mm body and 1.0 mm lead wire; the exact LCSC/EasyEDA model specifies 48.0 mm lead pitch and 1.2 mm finished holes.",
+  "footprint_name": "KYET_MKP20685J2G362230_P48.0mm",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "MKP20685J2G362230",
+  "name": "kyet-mkp20685j2g362230",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "manufacturer-datasheet-and-exact-lcsc-eda-model",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C521054"
+  },
+  "symbol_name": "KYET_MKP20685J2G362230",
+  "tags": [
+    "capacitor",
+    "film",
+    "polypropylene",
+    "metallized-pp",
+    "6.8uf",
+    "400v",
+    "through-hole",
+    "speaker-crossover"
+  ],
+  "three_d_model": "unavailable",
+  "version": "1.0.0",
+  "watch_out_for": "Non-polarized two-terminal film capacitor. The physical body is 36 x 30 mm and the exact LCSC model calls for 48.0 mm pitch; retain that large radial envelope. Directly parallel this 6.8 uF part with the reviewed 1.0 uF Vishay MKP1848510924K2 for 7.8 uF in the 8 ohm / 2.5 kHz high-pass branch (2.55 kHz nominal). C521054 had original-catalog stock 270 and retail stock 300, minimum buy 1, at source check; inventory is time-sensitive."
+}

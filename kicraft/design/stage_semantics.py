@@ -1010,6 +1010,7 @@ def _shared_wiring_gate_diagnostics(
         check_mcu_programming_access,
         check_net_coverage,
         check_no_dangling_signal_nets,
+        check_requirement_physical_realization,
     )
 
     checks = (
@@ -1017,6 +1018,16 @@ def _shared_wiring_gate_diagnostics(
         ("wiring_gate_9_14", check_inter_sheet_nets_realized(architecture, bom)),
         ("wiring_gate_9_15", check_no_dangling_signal_nets(architecture, bom)),
         ("wiring_gate_9_29", check_mcu_programming_access(bom)),
+        # §9.42's model-owned half: only the wiring graph can prove a declared
+        # interface whose implementing component came from the model's BOM
+        # groups. Recipe/lowerer-owned declared interfaces are proven at BOM
+        # commit, where their expansions supply the connections.
+        (
+            "wiring_gate_9_42",
+            check_requirement_physical_realization(
+                architecture, bom, declared_interface_scope="model_owned"
+            ),
+        ),
     )
     return [
         _diag(code, "fab_gate", result.message, list(result.offenders))

@@ -2767,14 +2767,19 @@ def test_endpoint_assertion_ignores_power_nets():
 def test_missing_requirement_defect_names_the_required_identity():
     from kicraft.server.stage_runtime import _requirement_identity
 
-    assert _requirement_identity(
+    identity = _requirement_identity(
         {
             "id": "relay_driver",
             "role": "driver",
             "family": "uln2003-smt",
             "exact_part": "ULN2003",
         }
-    ) == "relay_driver role=driver family=uln2003-smt exact_part=ULN2003"
+    )
+    assert identity.startswith("relay_driver role=driver family=uln2003-smt exact_part=ULN2003")
+    # A requirement that names a device without an order code must be told the
+    # reviewed concrete parts it could name instead (the boundary's own
+    # alternatives), otherwise the defect names a problem with no remedy.
+    assert "accepted_concrete_parts=['uln2003a', 'uln2003adr']" in identity
     assert _requirement_identity({"id": "x"}) == "x"
 
 
@@ -2862,7 +2867,10 @@ def test_bom_unit_collection_overflow_gets_one_focused_recovery(tmp_path, monkey
         assert result["failure_kind"] == "collection_limit"
         assert len(client.calls) == 4
         saved = json.loads((tmp_path / "drafts" / "bom-units.json").read_text())
-        assert saved["candidates"]["bom-s000"]["groups"] == [_group_payload(sheet="A")]
+        # The normalized group carries the contract's explicit assembly default.
+        assert saved["candidates"]["bom-s000"]["groups"] == [
+            {"assembly": True, **_group_payload(sheet="A")}
+        ]
 
 
 def test_work_unit_nonconsecutive_failure_retains_accepted_sibling(tmp_path, monkeypatch):
@@ -2986,6 +2994,9 @@ def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monk
                     "sheet": "PD TRIGGER",
                     "role": "connector",
                     "family": "usb_c_receptacle",
+                    # A protected class is owned by naming reviewed hardware, so the
+                    # typed requirement carries the reviewed order code.
+                    "exact_part": "TYPE-C-31-M-12",
                     "ports": {"VBUS": "VBUS", "GND": "GND"},
                 },
             ],
@@ -3046,13 +3057,17 @@ def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monk
                 **json.loads(candidate["text"]),
                 "groups": [
                     *json.loads(candidate["text"])["groups"],
+                    # A protected class must be realized by its reviewed part, so
+                    # this group names the reviewed USB-C bundle's own pair instead
+                    # of an unreviewed stock symbol (which the boundary refuses).
                     _group_payload(
                         id="usb_c_receptacle",
                         reference_prefix="J",
                         quantity=1,
-                        value="USB_C_Receptacle_HRO_TYPE-C-31-M-12",
-                        symbol="Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12",
-                        footprint=("Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12"),
+                        value="TYPE-C-31-M-12",
+                        symbol="usb-c-16p:TYPE-C-31-M-12",
+                        footprint="usb-c-16p:USB-C_SMD-TYPE-C-31-M-12_1",
+                        mpn="TYPE-C-31-M-12",
                         sheet="PD TRIGGER",
                     ),
                 ],
@@ -3084,7 +3099,7 @@ def test_bom_work_unit_provider_question_defaults_without_parking(tmp_path, monk
     assert result.get("needs_input") is not True
     assert {part["value"] for part in committed[0]["parts"]} == {
         "HUSB238",
-        "USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+        "TYPE-C-31-M-12",
     }
 
 
@@ -3241,7 +3256,7 @@ def test_work_unit_nonconsecutive_commit_failure_stops_before_another_redraft(
     assert committed[0] != committed[1]
 
 
-def test_repeated_singleton_signal_escalates_to_architecture_reconciliation(
+def test_repeated_model_singleton_repairs_locally_and_retains_sibling(
     tmp_path,
     monkeypatch,
 ):
@@ -3251,9 +3266,10 @@ def test_repeated_singleton_signal_escalates_to_architecture_reconciliation(
             _unit_reply("U1"),
             _unit_reply("R1"),
             _unit_reply("U1", "PRESERVED"),
+            _unit_reply("U1", "REPAIRED"),
         ]
     )
-    commits = {"count": 0}
+    commits = []
     rejection = {
         "ok": False,
         "errors": ["9.15 no dangling signal nets"],
@@ -3263,9 +3279,9 @@ def test_repeated_singleton_signal_escalates_to_architecture_reconciliation(
         ],
     }
 
-    def reject(*args, **kwargs):
-        commits["count"] += 1
-        return False, rejection
+    def reject(_stage, slot, *args, **kwargs):
+        commits.append(slot)
+        return (False, rejection) if len(commits) < 3 else (True, {"ok": True})
 
     monkeypatch.setattr(stage_driver_mod, "commit_stage", reject)
     result = stage_driver_mod.drive_stage(
@@ -3277,10 +3293,15 @@ def test_repeated_singleton_signal_escalates_to_architecture_reconciliation(
         max_retries=99,
     )
 
-    assert result["failure_kind"] == "architecture_reconciliation_required"
-    assert result["aggregate_repair_rounds"] == 1
-    assert len(client.calls) == 3
-    assert commits["count"] == 2
+    assert result["commit_ok"] is True
+    assert result["aggregate_repair_rounds"] == 2
+    assert len(client.calls) == 4
+    assert len(commits) == 3
+    sibling = lambda slot: [
+        row for row in slot["connections"]
+        if any(endpoint["ref"] == "R1" for endpoint in row["endpoints"])
+    ]
+    assert sibling(commits[0]) == sibling(commits[1]) == sibling(commits[2])
 
 
 @pytest.mark.parametrize("offender_ref", ["U1", "R1"])
@@ -3297,7 +3318,7 @@ def test_singleton_reconciliation_respects_exact_immutable_pin_owner(
             {"pins": [{"ref": "U1", "pin": "1", "net": "CTRL"}]} if unit.refs == ("U1",) else None
         ),
     )
-    client = _unit_client([_unit_reply("R1"), _unit_reply("R1", "OTHER")])
+    client = _unit_client([_unit_reply("R1"), _unit_reply("R1", "OTHER"), _unit_reply("R1", "OTHER")])
     rejection = {
         "ok": False,
         "errors": ["9.15 no dangling signal nets"],
@@ -3314,9 +3335,11 @@ def test_singleton_reconciliation_respects_exact_immutable_pin_owner(
         client, "wiring", "test", state_path, tmp_path, max_retries=99
     )
 
-    assert result["failure_kind"] == "architecture_reconciliation_required"
-    assert result["aggregate_repair_rounds"] == (0 if offender_ref == "U1" else 1)
-    assert len(client.calls) == (1 if offender_ref == "U1" else 2)
+    assert result["failure_kind"] == (
+        "architecture_reconciliation_required" if offender_ref == "U1" else "commit_rejected"
+    )
+    assert result["aggregate_repair_rounds"] == (0 if offender_ref == "U1" else 2)
+    assert len(client.calls) == (1 if offender_ref == "U1" else 3)
 
 
 def test_work_unit_bom_reconcile_question_keeps_pipeline_park_shape(tmp_path, monkeypatch):

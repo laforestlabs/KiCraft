@@ -73,13 +73,44 @@ def test_digest_uses_pin_function_names(monkeypatch):
     monkeypatch.setattr(_sp, "lookup_pins", _fake_lookup({"Fake:MAX31855": [
         ("1", "VCC"), ("2", "GND"), ("5", "SCK")]}))
     digest = build_design_digest(_state())
-    assert "GOAL: A K-type thermocouple amp" in digest
+    assert '"goal": "A K-type thermocouple amp"' in digest
     assert "MAX31855" in digest          # named part surfaced
-    assert "NETLIST" in digest
+    assert "NETS AND PINS" in digest
     assert "U1.1(VCC)" in digest         # pin FUNCTION name, not just the number
     assert "U1.5(SCK)" in digest
     # geometry must never leak in
     assert "position" not in digest.lower()
+
+
+def test_digest_marks_missing_bom_incomplete_not_absent():
+    digest = build_design_digest(
+        ConversationState(intent=IntentSlot(goal="board with a controller"))
+    )
+    assert "BOM / PINS / NETS — INCOMPLETE" in digest
+    assert "delivered-MCU absence is unverified" in digest
+
+
+def test_digest_omits_overflowing_section_without_partial_source():
+    # A budget big enough to name every category but not to hold the brief: the
+    # overflowing section must be labelled OMITTED, never sliced.
+    goal = "overflow-" * 300
+    digest = build_design_digest(
+        ConversationState(intent=IntentSlot(goal=goal)), budget=700
+    )
+    assert "BRIEF AND INTENT — OMITTED" in digest
+    assert goal not in digest
+    assert "Absence is unverified." in digest
+
+
+def test_digest_refuses_to_render_evidence_when_the_notice_cannot_fit():
+    # Below the cost of naming every category the digest must emit no evidence at
+    # all: a partial record could otherwise be read as a negative fact.
+    goal = "overflow-" * 300
+    digest = build_design_digest(
+        ConversationState(intent=IntentSlot(goal=goal)), budget=200
+    )
+    assert digest == "ALL EVIDENCE OMITTED: absence is unverified."
+    assert goal not in digest
 
 
 def test_review_parses_valid_findings():

@@ -214,6 +214,15 @@ def expand_static_definition(
             )
 
     def bound_net(logical: str) -> str:
+        # A pin may name a parameter-controlled strap (e.g. an I2C address pin
+        # tied to the supply instead of ground); resolve it through the same
+        # binding rules so the chosen value must be a declared port or rail.
+        if logical.startswith("@parameter:"):
+            name = logical.split(":", 1)[1]
+            value = selection.parameters.get(name, definition.parameter_defaults.get(name))
+            if value is not None:
+                return bound_net(str(value))
+            return logical
         if logical in selection.port_bindings:
             return selection.port_bindings[logical]
         if logical in definition.internal_nets:

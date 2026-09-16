@@ -1,0 +1,21 @@
+(kicad_symbol_lib
+  (version 20211014)
+  (generator kicraft)
+  (symbol "C0805C103J5GACTU"
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "C" (id 0) (at 0 2.54 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "C0805C103J5GACTU" (id 1) (at 0 -2.54 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "c0805c103j5gactu:C_0805_2012Metric" (id 2) (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Datasheet" "https://search.kemet.com/download/specsheet/C0805C103J5GACTU" (id 3) (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
+    (property "MPN" "C0805C103J5GACTU" (id 5) (at 0 0 0) (effects (font (size 1.27 1.27)) hide))
+    (symbol "C0805C103J5GACTU_0_1"
+      (polyline (pts (xy -1.27 0) (xy -0.51 0)) (stroke (width 0) (type default)) (fill (type none)))
+      (polyline (pts (xy 0.51 0) (xy 1.27 0)) (stroke (width 0) (type default)) (fill (type none)))
+      (polyline (pts (xy -0.51 -1.27) (xy -0.51 1.27)) (stroke (width 0) (type default)) (fill (type none)))
+      (polyline (pts (xy 0.51 -1.27) (xy 0.51 1.27)) (stroke (width 0) (type default)) (fill (type none)))
+      (pin passive line (at -3.81 0 0) (length 2.54) (name "1" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+      (pin passive line (at 3.81 0 180) (length 2.54) (name "2" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+    )
+  )
+)

@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as _dt
+import hashlib
 import json
 import os
 import re
@@ -113,6 +114,12 @@ from .synthesis.validation import (
     check_spec_named_mpn_substitutions,
     check_two_terminal_self_short,
     check_typed_led_current_paths,
+    check_reviewed_device_support_networks,
+    check_reviewed_input_operating_ranges,
+    check_reviewed_power_transfer,
+    check_typed_passive_crossover_values,
+    check_reviewed_constant_current_led_feedback,
+    check_requirement_physical_realization,
     reconcile_inter_sheet_nets,
     split_cross_sheet_connections,
 )
@@ -670,7 +677,7 @@ def _lcsc_identity_conflict(part, hit: dict) -> str | None:
     return None
 
 
-def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[str]]:
+def _resolve_bom_mpn_sourcing(bom, project_root: Path, receipt: list[dict] | None = None) -> tuple[list[str], list[str]]:
     """§9.26 — every BOM part must be a real, orderable part, in stock BOTH
     for JLCPCB assembly (the offline jlcparts dump) AND at the lcsc.com
     retail storefront (live check via ``lcsc_retail``). The two inventories
@@ -756,6 +763,18 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
             return "unverified", None
         need = max(info["min_buy"], lcsc_retail.retail_floor() if picky else 1)
         return ("ok" if info["stock"] >= need else "dry"), info
+    def _receipt(part, cid: str, hit: dict | None, verdict: str, info: dict | None, picky: bool) -> None:
+        if receipt is None:
+            return
+        receipt.append({
+            "ref": part.ref, "exact_lcsc": cid, "catalog_mpn": (hit or {}).get("model"),
+            "manufacturer": (hit or {}).get("manufacturer") or (hit or {}).get("mfr"),
+            "package": (hit or {}).get("package"), "description": (hit or {}).get("description"),
+            "assembly_stock": (hit or {}).get("stock"), "retail_stock": (info or {}).get("stock"),
+            "retail_min_buy": (info or {}).get("min_buy"), "retail_status": verdict,
+            "picky_selection": picky,
+            "verdict": "pass" if verdict == "ok" else "unverified",
+        })
 
     def _alternates_note(part, cid: str, floor: int) -> str:
         """In-stock alternates for a retail-dry pick, embedded in the gate
@@ -814,6 +833,15 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
     for part in bom.parts or []:
         mpn = (part.mpn or "").strip()
         note = part.sourcing_note or ""
+        # A reviewed bare-board feature (a capacitive electrode, test point,
+        # mounting hole, net tie) is copper, not an orderable part: it must never
+        # be searched, pinned or reported as a sourcing offender, whatever marker
+        # MPN its reviewed bundle carries.  The set is an exact reviewed list, so
+        # this cannot waive sourcing for a real component.
+        if jlcparts.is_unsourceable_hardware(part.footprint or ""):
+            if receipt is not None:
+                receipt.append({"ref": part.ref, "verdict": "excluded_not_orderable"})
+            continue
         cid = extract_lcsc_pin(note)
         if cid:
             label = mpn or (part.value or "").strip() or part.symbol
@@ -875,6 +903,8 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                     )
                 elif verdict == "unverified":
                     unverified.append(f"{part.ref} ({cid})")
+                elif verdict == "ok":
+                    _receipt(part, cid, hit, verdict, info, False)
             continue
         lib = _lib_prefix(part.symbol) or _lib_prefix(part.footprint or "")
         man = manifest_by_name.get(lib) if lib else None
@@ -904,11 +934,12 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
                     )
                 elif verdict == "unverified":
                     unverified.append(f"{part.ref} ({cid})")
+                elif verdict == "ok":
+                    _receipt(part, cid, hit, verdict, info, False)
             continue
         if not mpn:
-            # Tier 4: generic part sourced by value/package keyword.
-            if jlcparts.is_unsourceable_hardware(part.footprint or ""):
-                continue
+            # Tier 4: generic part sourced by value/package keyword.  Reviewed
+            # bare-board features were already excluded above.
             kw = jlcparts.bom_keyword(part.value or "", part.footprint or "")
             if not kw:
                 bad.append(
@@ -966,6 +997,8 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
             best, unv, had_cands = best_by_kw[(kw, single)]
             if best is not None:
                 part.sourcing_note = (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
+                verdict, info = _retail_verdict(best["lcsc"], picky=True)
+                _receipt(part, str(best["lcsc"]), best, verdict, info, True)
                 if unv:
                     unverified.append(f"{part.ref} ({best['lcsc']})")
             elif had_cands:
@@ -1051,6 +1084,8 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path) -> tuple[list[str], list[
             )
         else:
             part.sourcing_note = (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
+            verdict, info = _retail_verdict(best["lcsc"], picky=True)
+            _receipt(part, str(best["lcsc"]), best, verdict, info, True)
             if unv:
                 unverified.append(f"{part.ref} ({best['lcsc']})")
     if unverified:
@@ -1274,10 +1309,20 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             # them here keeps the build-time pass as the safety net.
             check_repeated_block_coverage(state.bom),
             check_regulator_feedback_vout(state.bom),
+            check_reviewed_device_support_networks(state.bom),
         ]
         if state.architecture is not None:
             checks.append(check_inter_sheet_nets_realized(state.architecture, state.bom))
             checks.append(check_typed_led_current_paths(state.architecture, state.bom))
+            checks.extend(
+                [
+                    check_reviewed_input_operating_ranges(state.architecture, state.bom),
+                    check_reviewed_power_transfer(state.architecture, state.bom),
+                    check_typed_passive_crossover_values(state.architecture, state.bom),
+                    check_reviewed_constant_current_led_feedback(state.architecture, state.bom),
+                    check_requirement_physical_realization(state.architecture, state.bom),
+                ]
+            )
             # §9.15 inverse: a signal net wired to a single pin that was never
             # declared inter-sheet connects to nothing (the SOIL_MOISTURE_BLE
             # USB D+/D- dangle).
@@ -3266,6 +3311,18 @@ def _apply_slot(
                          (connections / no_connect_pins are owned by wiring)
       wiring          -> state.bom.connections + state.bom.no_connect_pins
     """
+    if stage in {"functional_spec", "architecture"}:
+        from kicraft.server.stage_contracts import validate_obligation_retention
+
+        validate_obligation_retention(
+            stage,
+            slot_data,
+            {
+                slot: value.model_dump(exclude_none=True) if value is not None else None
+                for slot in ("intent", "functional_spec")
+                if (value := getattr(state, slot, None)) is not None
+            },
+        )
     if stage == "intent":
         state.intent = IntentSlot.model_validate(slot_data)
         if project_stem is not None:
@@ -3273,7 +3330,11 @@ def _apply_slot(
     elif stage == "functional_spec":
         state.functional_spec = FunctionalSpec.model_validate(slot_data)
     elif stage == "architecture":
-        state.architecture = Architecture.model_validate(slot_data)
+        from kicraft.design.architecture_intent import apply_authoritative_standard_form_factor
+
+        state.architecture = Architecture.model_validate(
+            apply_authoritative_standard_form_factor(slot_data, state.intent)
+        )
     elif stage == "bom":
         merged = dict(slot_data)
         if state.bom is not None:
@@ -3519,7 +3580,15 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     except (ValueError, ValidationError) as e:
         print(
             json.dumps(
-                {"ok": False, "errors": [f"slot validation failed: {e}"]},
+                {
+                    "ok": False,
+                    "errors": [f"slot validation failed: {e}"],
+                    **(
+                        {"diagnostics": [e.diagnostic]}
+                        if getattr(e, "diagnostic", None) is not None
+                        else {}
+                    ),
+                },
                 indent=2,
                 default=str,
             )
@@ -3592,22 +3661,40 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                 f"inter_sheet {c}"
                 for c in reconcile_inter_sheet_nets(state.architecture, state.bom)
             ]
-        # Standard form-factor "replace & rewire" (default ON;
-        # KICRAFT_FORM_FACTOR_ENFORCE is a kill switch -- set 0/false/off to
-        # disable without a redeploy): when the brief named a
-        # validated standard (e.g. Arduino shield), replace the LLM's generic
-        # stacking connectors with the standard's headers as real BOM parts, bind
-        # their power/ground pins, and mark signal pins no-connect -- so the
-        # committed schematic/BOM/netlist carries the standard's edge interface.
-        # Gated so it can never touch a normal build; ERC-correctness of the
-        # emitted schematic needs validation on a real dogfood run.
+        # Reconcile only explicitly owned stacking hardware. Unsupported
+        # migrations are contract failures, never permission to omit headers.
         from kicraft.form_factors.reconcile import (
             enforce_enabled as _ff_enforce_enabled,
             reconcile_standard_form_factor as _ff_reconcile,
         )
 
         if _ff_enforce_enabled():
-            wiring_normalizations += [f"form_factor {n}" for n in _ff_reconcile(state)]
+            try:
+                wiring_normalizations += [f"form_factor {n}" for n in _ff_reconcile(state)]
+            except ValueError as exc:
+                print(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "errors": [f"standard form-factor reconciliation failed: {exc}"],
+                            "diagnostics": [
+                                {
+                                    "code": "standard_form_factor_ownership",
+                                    "stage": "wiring",
+                                    "severity": "error",
+                                    "message": str(exc),
+                                    "evidence": [
+                                        "Each fixed stacking connector requires explicit "
+                                        "architecture ownership and a realizable pin mapping."
+                                    ],
+                                }
+                            ],
+                            "reconcile_target": "architecture",
+                        },
+                        indent=2,
+                    )
+                )
+                return 3
 
     new_questions: list[Question] = []
     if args.questions_file:
@@ -3908,6 +3995,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             # (self-eval 2026-07-19 run_28).
             check_repeated_block_coverage(state.bom),
             check_regulator_feedback_vout(state.bom),
+            check_reviewed_device_support_networks(state.bom),
         ]
         if state.architecture is not None:
             # Architecture declared these inter-sheet nets; the wiring stage
@@ -3916,6 +4004,19 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             # synthesis time otherwise).
             checks.append(check_inter_sheet_nets_realized(state.architecture, state.bom))
             checks.append(check_typed_led_current_paths(state.architecture, state.bom))
+            checks.extend(
+                [
+                    check_reviewed_input_operating_ranges(state.architecture, state.bom),
+                    check_reviewed_power_transfer(state.architecture, state.bom),
+                    check_typed_passive_crossover_values(state.architecture, state.bom),
+                    check_reviewed_constant_current_led_feedback(state.architecture, state.bom),
+                    check_requirement_physical_realization(
+                        state.architecture,
+                        state.bom,
+                        declared_interface_scope="model_owned",
+                    ),
+                ]
+            )
             # The inverse failure: a signal net wired to a single pin that was
             # never declared inter-sheet dangles ("Label not connected to
             # anything") -- the SOIL_MOISTURE_BLE USB D+/D- build failure.
@@ -4014,6 +4115,13 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             identity_checks.append(
                 check_bom_parts_reference_architecture_sheets(state.architecture, state.bom)
             )
+            identity_checks.append(
+                check_requirement_physical_realization(
+                    state.architecture,
+                    state.bom,
+                    declared_interface_scope="recipe_owned",
+                )
+            )
         failures: list[tuple[str, list[str]]] = [
             (f"{c.name}: {c.message}", list(c.offenders)) for c in identity_checks if not c.ok
         ]
@@ -4069,9 +4177,10 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     # BOM carries the C#, and the commit below persists the pins. A miss goes
     # back to the model while its lookup tools are still in reach.
     bom_warnings: list[str] = []
+    sourcing_receipt: list[dict] = []
     if stage == "bom" and state.bom is not None:
         bad_mpn, bom_warnings = _resolve_bom_mpn_sourcing(
-            state.bom, state_path.resolve().parent.parent
+            state.bom, state_path.resolve().parent.parent, sourcing_receipt
         )
         if bad_mpn:
             print(
@@ -4123,6 +4232,27 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
 
     state_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
+    if stage == "bom" and state.bom is not None and sourcing_receipt:
+        parts_payload = [part.model_dump() for part in state.bom.parts]
+        parts_digest = hashlib.sha256(
+            json.dumps(parts_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        atomic_write_text(
+            state_path.parent / "sourcing_validation.json",
+            json.dumps({
+                "schema_version": 1,
+                "checked_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "parts_digest": parts_digest,
+                "policy": {
+                    "jlc_floor": _bom_stock_floor(),
+                    "retail_automatic_floor": lcsc_retail.retail_floor(),
+                    "min_buy_rule": "max(retail_min_buy, retail_floor) for automatic picks",
+                },
+                "catalog_age_days": jlcparts.dump_age_days(),
+                "parts": sourcing_receipt,
+                "warnings": bom_warnings,
+            }, indent=2, sort_keys=True) + "\n",
+        )
 
     archive_warning: str | None = None
     if not args.no_archive:
@@ -4184,6 +4314,23 @@ def _persist_artifacts(state, state_path: Path | None, artifacts) -> None:
         return
     state_path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(state_path, state.model_dump_json(indent=2) + "\n")
+
+
+def _write_build_gate(state_path: Path | None, gate: dict) -> None:
+    """Persist the routed-board verification gate next to the build state.
+
+    The gate (shorts, unconnected, courtyard, keepout, fab acceptability, form
+    factor, outline shape, reasons) is the only structured manufacturing verdict
+    the build produces; writing it lets independent acceptance read a fabrication
+    verdict instead of parsing the build log's prose.
+    """
+    if state_path is None:
+        return
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(
+        state_path.parent / "build_gate.json",
+        json.dumps(gate, indent=2, sort_keys=True, default=str) + "\n",
+    )
 
 
 def _write_synthesis_check(
@@ -5287,6 +5434,28 @@ def _latest_layout_failure_summary(project_dir: Path, state_path: Path | None = 
     return summary
 
 
+def _layout_failure_evidence_text(failure_summary: dict) -> str:
+    """Every bounded piece of evidence in *failure_summary* as one string.
+
+    Used to tell a router DEADLINE apart from a routing verdict in the failure
+    message: ``compose_subcircuits`` prints the ``router_deadline:`` marker when
+    the parent router was killed at its wall-clock limit (see
+    ``cli/_compose_route.py``), and that marker reaches here through the round
+    snapshot's captured stderr tail.
+    """
+    parts: list[str] = []
+    evidence = failure_summary.get("evidence")
+    if isinstance(evidence, dict):
+        parts.extend(str(value) for value in evidence.values())
+    for key in ("reasons", "rejection_reasons"):
+        value = failure_summary.get(key)
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value)
+        elif value:
+            parts.append(str(value))
+    return "\n".join(parts)
+
+
 def _verify_routed_board(pcb: Path) -> dict:
     """Acceptance gate: no shorts, no unconnected (connector-shield items waived),
     no physical-assembly blocker (courtyard overlap / antenna keep-out intrusion),
@@ -5440,20 +5609,57 @@ def _missing_component_refs(expected_refs, board_refs) -> list[str]:
     return sorted(r for r in expected_refs if r not in board)
 
 
-def _maybe_electrical_review(state, project_dir: Path) -> dict:
-    """Layer 4: optional LLM electrical-review fab gate.
+class _RunScopedClient:
+    """Add immutable run provenance to post-wiring model calls.
 
-    ON by default; set ``KICRAFT_ELECTRICAL_REVIEW=0`` (or false/no/off) to
-    disable. Reviews the committed design for topology/value/completeness defects
-    the deterministic gates and DRC cannot see, and reports whether a
-    BLOCKER-severity finding means a structurally-sound board should not be
-    declared fab-ready.
+    Review and silkscreen authoring deliberately use their own routed clients,
+    but their calls still belong to the design invocation's spend ledger row.
+    Keeping that identity at this seam makes their costs separable without
+    changing the electrical-review or silk author APIs.
+    """
 
-    Fail-soft: the disable decision reads the env var directly (so honoring an
-    opt-out never needs an API key), and ANY error (no API key ->
-    ``Settings.from_env`` SystemExit, network, malformed model output) skips the
-    gate rather than blocking a sound board. Only a definite blocker from a
-    successful review blocks.
+    def __init__(self, client, run_id: str | None):
+        self._client = client
+        self.s = getattr(client, "s", None)
+        self._run_id = run_id
+
+    def chat(self, *args, **kwargs):
+        meta_ctx = dict(kwargs.get("meta_ctx") or {})
+        if self._run_id:
+            meta_ctx["run_id"] = self._run_id
+        kwargs["meta_ctx"] = meta_ctx
+        return self._client.chat(*args, **kwargs)
+
+
+def _review_client_and_settings(client=None, settings=None, run_id: str | None = None):
+    """Resolve the review route while allowing batch ownership of its ledger run."""
+    if settings is None:
+        if client is not None:
+            settings = getattr(client, "s", None)
+        if settings is None:
+            from kicraft.server.config import Settings
+
+            settings = Settings.from_env()
+    if client is None:
+        from kicraft.server.client import make_client
+
+        client = make_client(settings.for_review())
+    return _RunScopedClient(client, run_id), settings
+
+
+def _maybe_electrical_review(
+    state,
+    project_dir: Path,
+    *,
+    client=None,
+    settings=None,
+    run_id: str | None = None,
+) -> dict:
+    """Run the optional post-wiring review through the configured review route.
+
+    ``client``/``settings`` let a headless campaign preserve its own guarded run
+    identity.  Web callers omit them and retain the established environment-based
+    review route.
     """
     if state is None or state.bom is None or not state.bom.connections:
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
@@ -5465,24 +5671,19 @@ def _maybe_electrical_review(state, project_dir: Path) -> dict:
     ):
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
     try:
-        from kicraft.server.client import make_client
-        from kicraft.server.config import Settings
-
         from .synthesis.electrical_review import (
             build_design_digest,
             review_design_corroborated,
         )
 
-        s = Settings.from_env()
-        client = make_client(s.for_review())
+        scoped_client, s = _review_client_and_settings(client, settings, run_id)
         digest = build_design_digest(state, project_root=project_dir)
         model = s.review_model or s.model
-        reasoning = s.review_reasoning()
         res = review_design_corroborated(
-            client,
+            scoped_client,
             digest,
             model=model,
-            reasoning=reasoning,
+            reasoning=s.review_reasoning(),
             max_tokens=s.review_max_tokens,
             temperature=s.review_temperature,
             corroboration=s.review_corroboration,
@@ -5520,7 +5721,16 @@ def _emit_review_findings(progress, findings: list[dict]) -> None:
         )
 
 
-def run_post_wiring_review(state_path: Path, project_dir: Path, progress, rewire=None) -> dict:
+def run_post_wiring_review(
+    state_path: Path,
+    project_dir: Path,
+    progress,
+    rewire=None,
+    *,
+    client=None,
+    settings=None,
+    run_id: str | None = None,
+) -> dict:
     """R3 driver: LLM electrical review between the wiring commit and the build.
 
     Owns the whole review lifecycle so the web layer stays thin:
@@ -5548,12 +5758,14 @@ def run_post_wiring_review(state_path: Path, project_dir: Path, progress, rewire
     state = _load_state(state_path) if state_path.exists() else None
     if state is None or state.bom is None or not state.bom.connections:
         return skipped
+    review_settings = settings or getattr(client, "s", None)
     model = None
     try:
-        from kicraft.server.config import Settings
+        if review_settings is None:
+            from kicraft.server.config import Settings
 
-        s = Settings.from_env()
-        model = s.review_model or s.model
+            review_settings = Settings.from_env()
+        model = review_settings.review_model or review_settings.model
     except (Exception, SystemExit):  # noqa: BLE001 - model chip is cosmetic
         pass
     t0 = time.monotonic()
@@ -5566,7 +5778,13 @@ def run_post_wiring_review(state_path: Path, project_dir: Path, progress, rewire
                 "text": "[build]     electrical review: scanning design for electrical defects ...",
             }
         )
-        review = _maybe_electrical_review(state, project_dir)
+        review = _maybe_electrical_review(
+            state,
+            project_dir,
+            client=client,
+            settings=review_settings,
+            run_id=run_id,
+        )
         total_cost += review.get("cost_usd") or 0.0
         if not review["ran"]:
             progress(
@@ -5607,7 +5825,13 @@ def run_post_wiring_review(state_path: Path, project_dir: Path, progress, rewire
                     "text": "[build]     electrical review: re-reviewing after the wiring fix ...",
                 }
             )
-            review = _maybe_electrical_review(state, project_dir)
+            review = _maybe_electrical_review(
+                state,
+                project_dir,
+                client=client,
+                settings=review_settings,
+                run_id=run_id,
+            )
             total_cost += review.get("cost_usd") or 0.0
             if review["ran"]:
                 findings = review["findings"]
@@ -5654,9 +5878,16 @@ def run_post_wiring_review(state_path: Path, project_dir: Path, progress, rewire
 
 
 def run_silk_plan_authoring(
-    state_path: Path, project_dir: Path, progress, *, board_code: str | None = None
+    state_path: Path,
+    project_dir: Path,
+    progress,
+    *,
+    board_code: str | None = None,
+    client=None,
+    settings=None,
+    run_id: str | None = None,
 ) -> dict:
-    """Author the silkscreen content plan (web process, post-wiring).
+    """Author the silkscreen content plan after wiring, before deterministic build.
 
     Same lifecycle slot as ``run_post_wiring_review``: runs after the wiring
     commit and BEFORE the build is enqueued, commits to the top-level
@@ -5693,14 +5924,10 @@ def run_silk_plan_authoring(
             progress(
                 {"kind": "build_log", "text": "[build]     silk plan: authoring board labels ..."}
             )
-            from kicraft.server.client import make_client
-            from kicraft.server.config import Settings
-
             from .synthesis.electrical_review import build_design_digest
             from .synthesis.silk_plan import author_labels, lint_labels
 
-            s = Settings.from_env()
-            client = make_client(s.for_review())
+            scoped_client, s = _review_client_and_settings(client, settings, run_id)
             author_model = s.review_model or s.model
             digest = build_design_digest(state, project_root=project_dir)
             # review_max_tokens, not a small local cap: the reasoning-heavy
@@ -5708,7 +5935,7 @@ def run_silk_plan_authoring(
             # answer; a small cap truncates (finish=length) with EMPTY text
             # (see the review_max_tokens note in server/config.py).
             res = author_labels(
-                client,
+                scoped_client,
                 digest,
                 model=author_model,
                 reasoning=s.review_reasoning(),
@@ -5769,6 +5996,60 @@ def run_silk_plan_authoring(
             }
         )
         return skipped
+
+def run_post_wiring_lifecycle(
+    state_path: Path,
+    project_dir: Path,
+    progress,
+    rewire=None,
+    *,
+    board_code: str | None = None,
+    client=None,
+    settings=None,
+    run_id: str | None = None,
+    execution_mode: str = "web",
+) -> dict:
+    """Run the shared advisory review/repair and silkscreen lifecycle.
+
+    Both phases remain fail-soft and are deliberately reported separately from
+    fulfillment checks.  ``execution_mode`` is durable reporting provenance:
+    it changes neither web behavior nor the review's repair policy.
+    """
+    review = run_post_wiring_review(
+        state_path,
+        project_dir,
+        progress,
+        rewire,
+        client=client,
+        settings=settings,
+        run_id=run_id,
+    )
+    silk = run_silk_plan_authoring(
+        state_path,
+        project_dir,
+        progress,
+        board_code=board_code,
+        client=client,
+        settings=settings,
+        run_id=run_id,
+    )
+    return {
+        "execution_mode": execution_mode,
+        # Completion records that the shared fail-soft lifecycle was exercised;
+        # ``ran`` distinguishes an actual model result from an opt-out/error.
+        # Neither is fulfillment evidence.
+        "post_wiring_review": {
+            "status": "completed",
+            "ran": bool(review.get("ran")),
+            "cost_usd": round(float(review.get("cost_usd") or 0.0), 6),
+        },
+        "silkscreen": {
+            "status": "completed",
+            "ran": bool(silk.get("ran")),
+            "cost_usd": round(float(silk.get("cost_usd") or 0.0), 6),
+        },
+    }
+
 
 
 def _surface_build_warnings(state, state_path: Path, artifacts, warnings: list[str]) -> None:
@@ -6005,14 +6286,42 @@ def _promote_verify_fab(
                 f"[build] 3/5 no parent or leaf board produced; leaving {pcb.name} as-is",
                 file=sys.stderr,
             )
-        print(
-            "error: the layout engine produced no routed parent board -- the "
-            "parent compose/route failed (board not routable as placed). "
-            "Inspect the boards under .experiments/ for what this run "
-            "actually produced.",
-            file=sys.stderr,
-        )
         failure_summary = _latest_layout_failure_summary(project_dir, state_path)
+        # The cause the rounds actually recorded, not a guess: a parent route
+        # killed at the router's wall-clock deadline leaves no board AND no
+        # routability verdict, so "board not routable as placed" would claim
+        # proof this run never obtained (the compose subprocess prints the
+        # ``router_deadline:`` marker; cli/_compose_route.py sets it).
+        _deadline_rounds = _layout_failure_evidence_text(failure_summary).count(
+            "router_deadline:"
+        )
+        if _deadline_rounds:
+            _rejections = sorted(
+                {str(r) for r in (failure_summary.get("reasons") or [])}
+            )
+            print(
+                "error: the layout engine produced no routed parent board -- "
+                f"{_deadline_rounds} parent route attempt(s) were killed at the "
+                "router's wall-clock deadline (a deadline is NOT a routing "
+                "verdict: those placements were never tried to the end)"
+                + (
+                    "; the remaining attempt(s) were rejected: "
+                    + ", ".join(_rejections)
+                    if _rejections
+                    else ""
+                )
+                + ". Inspect the boards under .experiments/ for what this run "
+                "actually produced.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "error: the layout engine produced no routed parent board -- the "
+                "parent compose/route failed (board not routable as placed). "
+                "Inspect the boards under .experiments/ for what this run "
+                "actually produced.",
+                file=sys.stderr,
+            )
         if partial is not None and pcb.is_file():
             failure_summary["board_path"] = str(pcb.resolve())
         _persist_pcb_diagnostics(
@@ -6317,6 +6626,7 @@ def _promote_verify_fab(
     # The review findings are still surfaced by the web layer.
 
     if not do_fab:
+        _write_build_gate(state_path, gate)
         print(f"[build] 5/5 skipped fab export (--no-fab); verified board at {pcb.name}")
         print()
         print(f"{done_label}: {stem}")
@@ -6340,6 +6650,7 @@ def _promote_verify_fab(
     artifacts.step_file = Path(fab["step"]) if fab.get("step") else None
     artifacts.board_3d_png = Path(fab["board_3d_png"]) if fab.get("board_3d_png") else None
     _persist_artifacts(state, state_path, artifacts)
+    _write_build_gate(state_path, gate)
 
     print()
     print(f"{done_label}: {stem}")

@@ -247,7 +247,8 @@ def test_superspeed_never_substitutes_for_another_exact_connector(exact_part):
     requirement = _requirement(
         "usb-c-breakout", ports={"vbus": "VBUS", "gnd": "GND", "tx1p": "TX1+"}
     ).model_copy(update={"exact_part": exact_part})
-    assert lower_requirement(requirement) is None
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
 
 
 @pytest.mark.parametrize(
@@ -323,7 +324,8 @@ def test_explicit_usb_shield_binding_is_not_grounded_or_disconnected(exact_part,
     ],
 )
 def test_passive_usb_lowerer_refuses_unproven_or_unsupported_bindings(ports):
-    assert lower_requirement(_requirement("usb-c-breakout", ports=ports)) is None
+    with pytest.raises(ValueError):
+        lower_requirement(_requirement("usb-c-breakout", ports=ports))
 
 
 def test_lowerer_registry_matches_exact_family_without_ordered_fallback():
@@ -396,17 +398,16 @@ def test_header_lowerer_does_not_coerce_unsupported_row_choices(rows):
         parameters={"rows": rows},
         ports={f"pin{index}": f"NET{index}" for index in range(1, 17)},
     )
-    assert lower_requirement(requirement) is None
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
 
 
-@pytest.mark.parametrize("family", ["pin-header", "fpc-header-breakout"])
-def test_header_physical_numbers_survive_sorted_json_round_trip(family):
+def test_header_physical_numbers_survive_sorted_json_round_trip():
     requirement = _requirement(
-        family, ports={f"pin{index}": f"NET{index}" for index in range(1, 17)}
+        "pin-header", ports={f"pin{index}": f"NET{index}" for index in range(1, 17)}
     )
     reordered = json.loads(json.dumps(requirement.model_dump(mode="json"), sort_keys=True))
-    roles = ("connector",) if family == "pin-header" else ("fpc", "header")
-    expected = {(role, str(index)): f"NET{index}" for role in roles for index in range(1, 17)}
+    expected = {("connector", str(index)): f"NET{index}" for index in range(1, 17)}
     assert {(pin.role, pin.pin): pin.net for pin in lower_requirement(requirement).pins} == expected
     assert {(pin.role, pin.pin): pin.net for pin in lower_requirement(reordered).pins} == expected
 
@@ -423,7 +424,8 @@ def test_header_physical_numbers_survive_sorted_json_round_trip(family):
     ],
 )
 def test_header_rejects_ambiguous_or_gapped_contact_contracts(ports):
-    assert lower_requirement(_requirement("pin-header", ports=ports)) is None
+    with pytest.raises(ValueError):
+        lower_requirement(_requirement("pin-header", ports=ports))
 
 
 @pytest.mark.parametrize(
@@ -434,15 +436,17 @@ def test_header_rejects_ambiguous_or_gapped_contact_contracts(ports):
         {"exact_part": "TSW-118-07-L-D"},
     ],
 )
-def test_header_physical_constraints_remain_model_owned_when_unproven(updates):
+def test_header_physical_constraints_reject_unproven_known_lowerer_claims(updates):
     requirement = _requirement("pin-header", ports={"pin1": "SIGNAL", "pin2": "GND"}).model_copy(
         update=updates
     )
-    assert lower_requirement(requirement) is None
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
     unit = StageWorkUnit(stage="bom", unit_id="bom:MAIN", sheet="MAIN", requirement_ids=("block",))
     state = _state(requirement)
     state["architecture"]["sheets"][0]["function"] = "2-pin header"
-    assert deterministic_bom_candidate(unit, state) is None
+    with pytest.raises(ValueError):
+        deterministic_bom_candidate(unit, state)
 
 
 def test_screw_terminal_honors_registered_row_parameter():
@@ -452,19 +456,20 @@ def test_screw_terminal_honors_registered_row_parameter():
     artifact = lower_requirement(requirement)
     assert artifact is not None
     assert artifact.groups[0].symbol == "Connector:Screw_Terminal_01x02"
-    assert lower_requirement(requirement.model_copy(update={"parameters": {"rows": 2}})) is None
+    with pytest.raises(ValueError):
+        lower_requirement(requirement.model_copy(update={"parameters": {"rows": 2}}))
 
 
-def test_curated_selector_proves_only_its_existing_part_identity():
+def test_selector_cannot_silently_substitute_an_explicit_device():
     requirement = _requirement(
         "voltage_selector_switch",
         parameters={"positions": 3},
-        ports={"SEL0": "SEL0", "SEL1": "SEL1"},
+        ports={"common": "CFG", "throw_1": "R9", "throw_2": "R12", "gnd": "RETURN"},
     )
-    artifact = lower_requirement(requirement.model_copy(update={"exact_part": "MSK13C02-SZ"}))
-    assert artifact is not None
-    assert artifact.groups[0].mpn == "MSK13C02-SZ"
-    assert lower_requirement(requirement.model_copy(update={"exact_part": "MSK12C02"})) is None
+    artifact = lower_requirement(requirement.model_copy(update={"exact_part": "SS13D07VG4"}))
+    assert artifact.groups[0].mpn == "SS13D07VG4"
+    with pytest.raises(ValueError):
+        lower_requirement(requirement.model_copy(update={"exact_part": "MSK13C02-SZ"}))
 
 
 def test_switch_lowerer_does_not_guess_an_absent_pull_policy():
@@ -473,7 +478,8 @@ def test_switch_lowerer_does_not_guess_an_absent_pull_policy():
         parameters={"active_level": "high", "resistance": 10000},
         ports={"signal": "BOOT0", "gnd": "GND", "vdd": "+3V3"},
     )
-    assert lower_requirement(requirement) is None
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
 
 
 def test_internal_switch_bias_cannot_discard_requested_resistor():
@@ -482,31 +488,45 @@ def test_internal_switch_bias_cannot_discard_requested_resistor():
         parameters={"pull_policy": "internal", "resistance": "4.7k"},
         ports={"signal": "BUTTON", "gnd": "GND", "vdd": "3V3"},
     )
-    assert lower_requirement(requirement) is None
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
 
 
-def test_r2r_conflicting_parameter_aliases_remain_model_owned():
+def test_r2r_conflicting_parameter_aliases_reject_known_lowerer_claims():
     requirement = _requirement(
         "r2r-ladder",
         parameters={"bits": 2, "r_value": "10k", "r_series": "22k", "two_r_value": "20k"},
         ports={"bit0": "D0", "bit1": "D1", "output": "OUT", "gnd": "GND"},
     )
-    assert lower_requirement(requirement) is None
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
 
 
-def test_voltage_selector_lowerer_uses_curated_compatible_pair():
+def test_selector_realizes_common_throws_grounded_frame_and_open_position():
+    import json
+
+    ports = json.loads(json.dumps(
+        {"common": "CFG", "throw_1": "R9", "throw_2": "R12", "gnd": "FIELD_RETURN"},
+        sort_keys=True,
+    ))
     artifact = lower_requirement(
+        _requirement("voltage_selector_switch", parameters={"positions": 3}, ports=ports)
+    )
+    assert {pin.pin: pin.net for pin in artifact.pins} == {
+        "1": "R9", "2": "CFG", "3": "R12", "5": "FIELD_RETURN", "6": "FIELD_RETURN",
+    }
+    assert {pin.pin for pin in artifact.no_connects} == {"4"}
+    all_throws = lower_requirement(
         _requirement(
-            "voltage_selector_switch",
-            parameters={"positions": 3},
-            ports={"SEL0": "SEL0", "SEL1": "SEL1"},
+            "voltage_selector_switch", parameters={"positions": 3},
+            ports={**ports, "throw_3": "R20"},
         )
     )
-
-    assert artifact is not None
-    assert artifact.lowerer_id == "voltage-selector-switch@1"
-    assert artifact.groups[0].symbol == "sp3t-switch-msk13c02:MSK13C02-SZ"
-    assert artifact.groups[0].footprint == ("sp3t-switch-msk13c02:SW-SMD_MSK13C02-SZ")
+    assert {pin.pin: pin.net for pin in all_throws.pins} == {
+        "1": "R9", "2": "CFG", "3": "R12", "4": "R20",
+        "5": "FIELD_RETURN", "6": "FIELD_RETURN",
+    }
+    assert not all_throws.no_connects
 
 
 @pytest.mark.parametrize("policy", ["internal", "external"])
@@ -555,9 +575,8 @@ def test_button_actuation_and_bias_follow_explicit_polarity(
     ],
 )
 def test_button_lowerer_refuses_ambiguous_supply_or_actuation(parameters, ports):
-    assert (
-        lower_requirement(_requirement("switch-input", parameters=parameters, ports=ports)) is None
-    )
+    with pytest.raises(ValueError):
+        lower_requirement(_requirement("switch-input", parameters=parameters, ports=ports))
 
 
 def test_coin_cell_holder_lowers_real_source_and_preserves_battery_polarity():
@@ -624,7 +643,8 @@ def test_coin_cell_holder_refuses_other_cells_and_ambiguous_bindings(updates):
         parameters={"cell_format": "CR2032"},
         ports={"positive": "VBAT", "negative": "GND"},
     )
-    assert lower_requirement(requirement.model_copy(update=updates)) is None
+    with pytest.raises(ValueError):
+        lower_requirement(requirement.model_copy(update=updates))
 
     invalid = requirement.model_copy(update=updates)
     result = resolve_architecture_recipes(
@@ -728,7 +748,8 @@ def test_voltage_divider_rejects_unachievable_error_bound():
         },
         ports={"input": "VIN", "output": "SENSE", "gnd": "GND"},
     )
-    assert lower_requirement(requirement) is None
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
 
 
 @pytest.mark.parametrize("capacitance", [10, 400])
@@ -748,7 +769,8 @@ def test_i2c_pullup_lowerer_rejects_out_of_range_capacitance(capacitance):
         parameters={"speed_hz": 400000, "bus_capacitance_pf": capacitance, "voltage": 3.3},
         ports={"vdd": "3V3", "sda": "SDA", "scl": "SCL"},
     )
-    assert lower_requirement(requirement) is None
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
 
 
 def test_r2r_bom_provenance_drives_wiring_from_the_same_artifact():
@@ -817,13 +839,12 @@ def test_lowerer_groups_use_loadable_symbols_and_footprints():
 
     requirements = [
         _requirement("pin-header", parameters={"rows": 1}, ports={"pin1": "GND", "pin2": "3V3"}),
-        _requirement("screw-terminal", ports={"p0": "VIN", "p1": "GND"}),
+        _requirement("screw-terminal", ports={"p1": "VIN", "p2": "GND"}),
         _requirement(
-            "fpc-header-breakout",
+            "fpc-connector",
             parameters={"pitch_mm": 0.5},
-            ports={f"pin{index}": f"N{index}" for index in range(1, 11)},
+            ports={f"pin{index}": f"N{index}" for index in range(1, 25)},
         ),
-        _requirement("test-points", ports={"a": "A", "b": "B"}),
         _requirement(
             "connector-bank",
             parameters={"channels": 2},
@@ -900,3 +921,188 @@ def test_led_lowerer_forward_bias_and_current_follow_physical_symbol():
         next(group.value for group in artifact.groups if group.role == "resistor")
     )
     assert 0 < (3.3 - 2.0) / resistance <= 0.005
+
+
+def test_reviewed_fpc_connector_owns_only_the_24_contact_fpc():
+    requirement = _requirement(
+        "fpc-connector",
+        parameters={"pitch_mm": 0.5},
+        ports={f"pin{index}": f"FPC_{index}" for index in range(1, 25)},
+    )
+
+    artifact = lower_requirement(requirement)
+
+    assert artifact is not None
+    assert artifact.lowerer_id == "fpc-connector@1"
+    assert [(group.role, group.mpn) for group in artifact.groups] == [
+        ("fpc", "KH-FG0.5-H2.0-24PIN")
+    ]
+    assert {(pin.role, pin.pin) for pin in artifact.pins} == {
+        ("fpc", str(index)) for index in range(1, 25)
+    }
+
+
+
+
+def test_reviewed_two_contact_terminal_preserves_exact_identity_and_polarity():
+    artifact = lower_requirement(
+        _requirement(
+            "screw-terminal",
+            parameters={"rows": 1},
+            ports={"positive": "VOUT", "negative": "RETURN"},
+        ).model_copy(update={"exact_part": "WJ126V-5.0-02P-14-00A"})
+    )
+    assert artifact.groups[0].mpn == "WJ126V-5.0-02P-14-00A"
+    assert {pin.pin: pin.net for pin in artifact.pins} == {"1": "VOUT", "2": "RETURN"}
+    assert not artifact.no_connects
+
+
+def test_reviewed_three_position_terminal_uses_the_declared_three_rail_pin_order():
+    requirement = _requirement(
+        "screw-terminal",
+        ports={"positive": "+12V", "common": "ISO_COM", "negative": "-12V"},
+    ).model_copy(update={"exact_part": "WJ126V-5.0-03P-14-00A"})
+    artifact = lower_requirement(
+        json.loads(json.dumps(requirement.model_dump(mode="json"), sort_keys=True))
+    )
+
+    assert artifact is not None
+    assert artifact.groups[0].mpn == "WJ126V-5.0-03P-14-00A"
+    assert [(pin.pin, pin.net) for pin in artifact.pins] == [
+        ("1", "+12V"),
+        ("2", "ISO_COM"),
+        ("3", "-12V"),
+    ]
+
+
+
+
+def test_reviewed_bnc_connector_preserves_signal_and_all_shell_ground_pins():
+    artifact = lower_requirement(
+        _requirement(
+            "bnc-connector",
+            ports={"signal": "FILTER_OUT", "gnd": "GND"},
+        ).model_copy(update={"exact_part": "KH-BNC50-3511"})
+    )
+
+    assert artifact is not None
+    assert artifact.groups[0].mpn == "KH-BNC50-3511"
+    assert {(pin.pin, pin.net) for pin in artifact.pins} == {
+        ("1", "FILTER_OUT"),
+        ("2", "GND"),
+        ("3", "GND"),
+        ("4", "GND"),
+    }
+
+
+def test_reviewed_trim_pot_rc_filter_has_an_adjustable_physical_resistance_path():
+    artifact = lower_requirement(
+        _requirement(
+            "adjustable-rc-lowpass",
+            parameters={
+                "capacitance_f": 10e-9,
+                "capacitor_exact_part": "C0805C103J5GACTU",
+            },
+            ports={"input": "BNC_IN", "output": "FILTER_OUT", "gnd": "GND"},
+        ).model_copy(update={"exact_part": "3296W-1-103LF"})
+    )
+
+    assert artifact is not None
+    assert [(group.role, group.mpn) for group in artifact.groups] == [
+        ("trim_pot", "3296W-1-103LF"),
+        ("capacitor", "C0805C103J5GACTU"),
+    ]
+    assert {
+        (pin.role, pin.pin, pin.net) for pin in artifact.pins if pin.role == "trim_pot"
+    } == {
+        ("trim_pot", "1", "BNC_IN"),
+        ("trim_pot", "2", "FILTER_OUT"),
+        ("trim_pot", "3", "FILTER_OUT"),
+    }
+
+
+def test_reviewed_audio_jack_uses_named_contacts_and_mono_ring_no_connect():
+    artifact = lower_requirement(
+        _requirement(
+            "audio-jack",
+            ports={"sleeve": "AGND", "tip": "CHANNEL_IN", "ring": "NC"},
+        ).model_copy(update={"exact_part": "SJ1-3533NG"})
+    )
+
+    assert artifact is not None
+    assert artifact.groups[0].mpn == "SJ1-3533NG"
+    assert {(pin.pin, pin.net) for pin in artifact.pins} == {
+        ("S", "AGND"),
+        ("T", "CHANNEL_IN"),
+    }
+    assert artifact.no_connects[0].pin == "R"
+
+
+def test_capacitive_touch_lowerer_emits_two_board_fabricated_electrodes():
+    from pathlib import Path
+
+    import pcbnew
+
+    from kicraft.design.synthesis.footprint_library import load_footprint
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    artifact = lower_requirement(
+        _requirement(
+            "capacitive-touch-pad",
+            parameters={
+                "count": 2,
+                "pins": "PA4,PA5",
+                "no_copper_underlay": True,
+            },
+            ports={"touch1": "TOUCH1", "touch2": "TOUCH2"},
+        )
+    )
+
+    assert artifact is not None
+    group = artifact.groups[0]
+    assert (group.quantity, group.assembly) == (2, False)
+    assert {(pin.index, pin.pin, pin.net) for pin in artifact.pins} == {
+        (0, "1", "TOUCH1"),
+        (1, "1", "TOUCH2"),
+    }
+    symbol = lookup_pins(group.symbol, all_units=True)
+    footprint, _ = load_footprint(pcbnew, *group.footprint.split(":"), project_root=Path("."))
+    pad = next(iter(footprint.Pads()))
+    assert {pin["number"] for pin in symbol["pins"]} == {"1"}
+    assert [candidate.GetNumber() for candidate in footprint.Pads()] == ["1"]
+    assert (pcbnew.ToMM(pad.GetSizeX()), pcbnew.ToMM(pad.GetSizeY())) == (12.0, 12.0)
+    assert pad.GetLayerSet().Contains(pcbnew.F_Cu)
+    assert not pad.GetLayerSet().Contains(pcbnew.F_Mask)
+    assert not pad.GetLayerSet().Contains(pcbnew.B_Cu)
+
+
+@pytest.mark.parametrize(
+    ("parameters", "ports"),
+    [
+        (
+            {"count": 0, "pins": "", "no_copper_underlay": True},
+            {},
+        ),
+        (
+            {
+                "count": 501,
+                "pins": ",".join(f"PA{index}" for index in range(1, 502)),
+                "no_copper_underlay": True,
+            },
+            {f"touch{index}": f"T{index}" for index in range(1, 502)},
+        ),
+        (
+            {"count": 2, "pins": "PA4,PA5", "no_copper_underlay": True},
+            {"touch1": "T1", "touch2": "T1"},
+        ),
+        (
+            {"count": 2, "pins": "PA4,PA5", "no_copper_underlay": False},
+            {"touch1": "T1", "touch2": "T2"},
+        ),
+    ],
+)
+def test_capacitive_touch_lowerer_refuses_unsupported_geometry_or_underlay(
+    parameters, ports
+):
+    with pytest.raises(ValueError):
+        lower_requirement(_requirement("capacitive-touch-pad", parameters=parameters, ports=ports))

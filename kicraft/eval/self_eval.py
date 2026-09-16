@@ -13,13 +13,12 @@ result with the existing ``kicraft.eval`` rubric:
      bom -> wiring) over a fresh workspace, auto-answering any clarifying question
      the pipeline parks on with its own first suggested option (the product's
      suggested-answer UX), so a run reaches completion without a human in the loop;
-  2. materialise the scorable ``events.jsonl`` from the driver's progress stream and
-     run the deterministic build (synthesise + place + route + fab), exactly as the
-     web worker does;
+  2. run the shared post-wiring review/repair and silkscreen lifecycle, then the
+     deterministic build (synthesise + place + route + fab), as the web worker does;
   3. score the finished run dir with ``evaluate_project`` (Class-C metrics + the
      LLM judge -> an A-F grade), which writes ``<rundir>/eval/report.json``;
   4. compile a cross-brief ``summary.json`` + ``summary.md`` (per-brief grade,
-     verdict, build/fab-readiness, gates, cost, plus aggregates).
+     verdict, build/fab-readiness, lifecycle spend, gates, plus aggregates).
 
 Each brief runs in its own subdir under the report root, which *is* the eval
 ``project_dir``: the rubric's artifact finders are recursive, so the driver's
@@ -62,6 +61,7 @@ from pathlib import Path
 
 from kicraft.build_slots import ACQUIRED_MARKER, resolve_build_slots
 from kicraft.proc_tree import kill_tree
+from kicraft.design.cli_app import run_post_wiring_lifecycle
 from kicraft.server.session import (
     bom_reconcile_deficits,
     maybe_bom_reconcile,
@@ -77,6 +77,13 @@ from kicraft.tuning.benchmark import SHAPED_OUTLINE_PROMPTS
 
 from .outline_check import evaluate_outline_shape
 from .run_web import evaluate_project
+from .artifact_evidence import generate_artifact_evidence
+from .design_acceptance import write_acceptance_evidence
+from .acceptance_contracts import (
+    APPROVED_5V_DEVICE_CORPUS_VERSION,
+    ORIGINAL_CORPUS_VERSION,
+    contract_for,
+)
 
 
 def _find_parent_board(rundir: Path) -> Path | None:
@@ -164,6 +171,8 @@ _EVENT_KINDS = frozenset(
         "build_done",
     }
 )
+
+_DESIGN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
 
 # kicraft.design.cli_app._cmd_build exit code -> a short human label, so the report
 # shows routing/fab-readiness distinctly from the rubric grade (which judges the
@@ -256,6 +265,27 @@ def _source_fingerprint() -> str:
         return "unknown"
 
 
+
+def _contract_or_placeholder(slug: str, contract_version: str) -> dict:
+    """Return the reviewed contract, or an explicit placeholder for ad-hoc runs.
+
+    A benchmark brief always has a reviewed contract.  A synthetic or ad-hoc
+    corpus entry (used by the harness's own tests and by one-off brief runs) has
+    none, and the runner must still execute it: the placeholder keeps the run
+    self-describing and marks the missing contract instead of aborting.
+    """
+    try:
+        return contract_for(slug, contract_version)
+    except ValueError:
+        return {
+            "slug": slug,
+            "version": contract_version,
+            "contract_missing": True,
+            "execution_brief": None,
+            "consent": [],
+        }
+
+
 def _write_campaign_manifest(
     out_dir: Path,
     *,
@@ -263,9 +293,24 @@ def _write_campaign_manifest(
     judge_model: str | None,
     selected: list[tuple[int, dict]],
     repeats: int,
+    contract_version: str,
 ) -> Path:
     corpus = [
         {"index": index, "slug": entry["slug"], "brief_hash": _stable_hash(entry["brief"])}
+        for index, entry in selected
+    ]
+    execution_corpus = [
+        {
+            "index": index,
+            "slug": entry["slug"],
+            "original_brief_hash": _stable_hash(entry["brief"]),
+            "execution_brief": _contract_or_placeholder(entry["slug"], contract_version)["execution_brief"],
+            "execution_brief_hash": _stable_hash(
+                _contract_or_placeholder(entry["slug"], contract_version)["execution_brief"]
+                or entry["brief"]
+            ),
+            "consent": _contract_or_placeholder(entry["slug"], contract_version)["consent"],
+        }
         for index, entry in selected
     ]
     immutable = {
@@ -301,6 +346,9 @@ def _write_campaign_manifest(
         "repeats": repeats,
         "corpus_hash": _stable_hash(corpus),
         "corpus": corpus,
+        "contract_version": contract_version,
+        "execution_corpus_hash": _stable_hash(execution_corpus),
+        "execution_corpus": execution_corpus,
     }
     payload = {
         "schema_version": 1,
@@ -622,50 +670,89 @@ def _make_judge_client(s, judge_model, skip_judge: bool):
 
 
 def _stage_failure_attribution(state_doc: dict, events_path: Path) -> dict:
-    """Return structured terminal attribution without reparsing human error text."""
+    """Preserve only the terminal stage diagnostic, never stale repaired attempts."""
     events = list(_design_events(events_path))
     statuses = state_doc.get("stage_status") if isinstance(state_doc, dict) else {}
     statuses = statuses if isinstance(statuses, dict) else {}
     failed_stage = next(
         (
             stage
-            for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
+            for stage in _DESIGN_STAGES
             if isinstance(statuses.get(stage), dict) and statuses[stage].get("ok") is False
         ),
         None,
     )
-    # An exception can escape before stage_done/state status is persisted. The
-    # unmatched stage_start identifies the interrupted stage, not the last retry
-    # from a previously completed stage.
+    # An exception can escape before its stage status persists. In that case the
+    # final unmatched start identifies the interrupted stage; a completed retry
+    # cannot leak its old diagnostic into the terminal record.
     active_stage = None
     for event in events:
         if event.get("kind") == "stage_start":
             active_stage = event.get("stage")
         elif event.get("kind") == "stage_done" and event.get("stage") == active_stage:
             active_stage = None
-        if event.get("kind") == "budget_refused":
+        elif event.get("kind") == "budget_refused":
             active_stage = event.get("stage") or active_stage
     failed_stage = active_stage or failed_stage
     status = statuses.get(failed_stage) if failed_stage is not None else None
-    failure_kind = status.get("failure_kind") if isinstance(status, dict) else None
-    terminal_event: dict = {}
-    for event in events:
-        if failed_stage is not None and event.get("stage") == failed_stage:
-            if event.get("kind") in {"retry", "work_unit_attempt", "budget_refused"}:
-                terminal_event = event
+
+    stage_events = [
+        event for event in events if failed_stage is not None and event.get("stage") == failed_stage
+    ]
+    # A failed stage_done is the authoritative terminal event. Only a crash that
+    # prevented it from being emitted falls back to the last diagnostic event.
+    terminal_event = next(
+        (
+            event
+            for event in reversed(stage_events)
+            if event.get("kind") == "stage_done" and event.get("ok") is False
+        ),
+        next(
+            (
+                event
+                for event in reversed(stage_events)
+                if event.get("kind")
+                in {"stage_diagnostic", "retry", "work_unit_attempt", "budget_refused"}
+            ),
+            {},
+        ),
+    )
+    failure_kind = (
+        status.get("failure_kind") if isinstance(status, dict) else None
+    ) or terminal_event.get("failure_kind")
     unit_ids = terminal_event.get("work_unit_ids")
     if not isinstance(unit_ids, list):
         unit_id = terminal_event.get("unit_id")
         unit_ids = [unit_id] if unit_id else []
-    gate_codes = terminal_event.get("commit_gate_codes")
-    if not isinstance(gate_codes, list):
-        gate_codes = []
+
+    raw_codes = terminal_event.get("commit_gate_codes")
+    if not isinstance(raw_codes, list):
+        raw_codes = terminal_event.get("defect_codes")
+    diagnostic = terminal_event.get("diagnostic")
+    if diagnostic is None and isinstance(status, dict):
+        diagnostic = status.get("diagnostic")
+    if not isinstance(raw_codes, list) and isinstance(diagnostic, dict):
+        raw_codes = diagnostic.get("codes") or diagnostic.get("code")
+    if isinstance(raw_codes, str):
+        raw_codes = [raw_codes]
+    if not isinstance(raw_codes, list):
+        raw_codes = []
+    failure_kind = str(failure_kind) if failure_kind else None
     return {
         "failed_stage": failed_stage,
-        "failure_kind": failure_kind or terminal_event.get("failure_kind"),
-        "failure_codes": [str(code) for code in gate_codes],
+        "failure_kind": failure_kind,
+        "failure_codes": [str(code) for code in raw_codes],
+        "terminal_diagnostic": diagnostic,
         "work_unit_ids": [str(unit_id) for unit_id in unit_ids],
         "accepted_siblings_retained": terminal_event.get("accepted_siblings_retained"),
+        "stage_subprocess_crash": bool(
+            failure_kind
+            and (
+                "process" in failure_kind
+                or "subprocess" in failure_kind
+                or "crash" in failure_kind
+            )
+        ),
     }
 
 
@@ -714,6 +801,8 @@ def evaluate_one(
     judge_model,
     skip_judge: bool,
     judge_client=None,
+    lifecycle_client=None,
+    lifecycle_settings=None,
     judge_max_tokens: int | None = None,
     rep: int | None = None,
     max_park_rounds: int = 12,
@@ -721,38 +810,46 @@ def evaluate_one(
     build_gate=None,
     full_events: bool = True,
     design_only: bool = False,
+    contract_version: str = ORIGINAL_CORPUS_VERSION,
 ) -> dict:
-    """Drive + build + score one benchmark brief into ``out_dir/<stem>/``. ``entry``
-    is a ``{"slug", "archetype", "brief"}`` dict from ``BENCHMARK_PROMPTS``. Never
-    raises: any failure is captured in the returned record so the batch continues.
+    """Drive + build + score one benchmark brief into ``out_dir/<stem>/``.
 
-    ``build_gate`` (a semaphore) caps how many build subprocesses run at once when
-    briefs execute concurrently: each route is a single-threaded JVM, so ungated
-    builds would oversubscribe the cores and let CPU contention push otherwise-fine
-    routes into ``--build-timeout``. The LLM design/judge phases stay ungated —
-    they are network-wait and overlap with other briefs' builds for free."""
+    ``prompt`` preserves the original corpus identity; ``execution_prompt`` is
+    the explicitly versioned contract brief sent to generation.
+    """
     t0 = time.time()
     started_at = _now_iso()
-    prompt = entry["brief"]
+    original_prompt = entry["brief"]
+    contract = _contract_or_placeholder(entry["slug"], contract_version)
+    prompt = contract["execution_brief"] or original_prompt
     stem = _stem_for(idx, entry) + (f"__r{rep}" if rep else "")
     rundir = out_dir / stem
     (rundir / ".kicraft").mkdir(parents=True, exist_ok=True)
     (rundir / "brief.txt").write_text(prompt + "\n", encoding="utf-8")
     progress = _event_writer(rundir / "events.jsonl", full=full_events)
     run_id = f"p{stem}-{uuid.uuid4().hex}"
-
-    # ``prompt`` is kept as the record field name (the web admin + report read it) and
-    # mirrors entry["brief"]; ``slug``/``archetype`` are the new corpus identity.
     rec: dict = {
         "index": idx,
         "slug": entry["slug"],
         "repeat": rep,
         "archetype": entry["archetype"],
-        "prompt": prompt,
+        "prompt": original_prompt,
+        "execution_prompt": prompt,
+        "original_brief_hash": _stable_hash(original_prompt),
+        "contract_consent": contract["consent"],
+        "execution_brief_hash": _stable_hash(prompt),
+        "contract_version": contract_version,
         "stem": stem,
         "rundir": str(rundir),
         "run_id": run_id,
+        "execution_mode": "design-only" if design_only else "full",
+        "lifecycle": {
+            "post_wiring_review": {"status": "not-run", "cost_usd": 0.0},
+            "silkscreen": {"status": "not-run", "cost_usd": 0.0},
+            "judge": {"status": "not-run", "cost_usd": 0.0},
+        },
     }
+    guard = getattr(client, "guard", None)
     try:
         try:
             d = run_design(
@@ -766,11 +863,11 @@ def evaluate_one(
                 design_failure_kind=d.get("failure_kind"),
             )
         finally:
-            # Capture before build/judge: they can share run_id and must not be
-            # counted again as design spend. This also runs on budget exceptions.
-            guard = getattr(client, "guard", None)
             if guard is not None and hasattr(guard, "spent_by_stage_for_run"):
-                stage_costs = guard.spent_by_stage_for_run(run_id)
+                raw_stage_costs = guard.spent_by_stage_for_run(run_id)
+                stage_costs = {
+                    stage: cost for stage, cost in raw_stage_costs.items() if stage in _DESIGN_STAGES
+                }
                 rec["design_cost_usd"] = round(sum(stage_costs.values()), 6)
                 rec["design_cost_source"] = "spend_ledger"
             else:
@@ -780,6 +877,38 @@ def evaluate_one(
                 )
                 rec["design_cost_source"] = "stage_results_and_events"
             rec["stage_cost_usd"] = stage_costs
+        if not design_only and d["status"] == "ok":
+            def _rewire(instruction: str) -> None:
+                run_session(
+                    rundir,
+                    prompt,
+                    ["wiring"],
+                    instruction=instruction,
+                    client=client,
+                    progress=progress,
+                    run_id=run_id,
+                )
+
+            rec["lifecycle"] = run_post_wiring_lifecycle(
+                rundir / ".kicraft" / "state.json",
+                rundir,
+                progress,
+                _rewire,
+                client=lifecycle_client,
+                settings=lifecycle_settings,
+                run_id=run_id,
+                execution_mode="batch",
+            )
+            # A review-directed wiring pass is designer spend, whereas review
+            # and silk are tracked in their explicit lifecycle buckets.
+            if guard is not None and hasattr(guard, "spent_by_stage_for_run"):
+                stage_costs = {
+                    stage: cost
+                    for stage, cost in guard.spent_by_stage_for_run(run_id).items()
+                    if stage in _DESIGN_STAGES
+                }
+                rec["stage_cost_usd"] = stage_costs
+                rec["design_cost_usd"] = round(sum(stage_costs.values()), 6)
         state_doc = {}
         try:
             state_doc = json.loads((rundir / ".kicraft" / "state.json").read_text(encoding="utf-8"))
@@ -809,6 +938,14 @@ def evaluate_one(
         if design_only:
             rec["build_rc"] = None
             rec["build_label"] = None
+            rec["delivery_status"] = (
+                "design-only-success" if rec["design_committed"] else "design-only-incomplete"
+            )
+            rec["lifecycle"] = {
+                "post_wiring_review": {"status": "not-applicable", "cost_usd": 0.0},
+                "silkscreen": {"status": "not-applicable", "cost_usd": 0.0},
+                "judge": {"status": "not-applicable", "cost_usd": 0.0},
+            }
             rec["duration_s"] = round(time.time() - t0, 1)
             return rec
         else:
@@ -849,6 +986,11 @@ def evaluate_one(
             dims={k: v.get("level") for k, v in report["dimensions"].items()},
             report_path=str(rundir / "eval" / "report.json"),
         )
+        rec["lifecycle"]["judge"] = {
+            "status": "completed" if judge.get("ran") else "skipped",
+            "cost_usd": round(float(judge.get("cost_usd") or 0.0), 6),
+        }
+        rec["delivery_status"] = "fab-ready" if build_rc == 0 else "not-delivered"
         # Deterministic outline-shape check (shaped briefs only). Reported
         # alongside the rubric score, not folded into the 100-pt scale -- the
         # rubric's finalize rejects N/A dimensions, and it would only apply to
@@ -872,24 +1014,48 @@ def evaluate_one(
                 }
             elif isinstance(e, KillSwitchEngaged):
                 rec["failure_kind"] = rec["design_failure_kind"] = "kill_switch"
+    try:
+        acceptance = generate_artifact_evidence(
+            rundir,
+            entry["slug"],
+            build_rc=rec.get("build_rc"),
+            contract_version=contract_version,
+            design_committed=rec.get("design_committed") is True,
+        )
+        rec["acceptance_evidence_path"] = str(write_acceptance_evidence(rundir, acceptance))
+    except Exception as exc:  # Artifact evidence is fail-closed, never inferred.
+        rec["acceptance_evidence_error"] = f"{type(exc).__name__}: {exc}"[:600]
     rec["duration_s"] = round(time.time() - t0, 1)
     return rec
 
 
 # --------------------------------------------------------------------------- #
-# compile the cross-brief report
-# --------------------------------------------------------------------------- #
+def _lifecycle_cost(record: dict, phase: str) -> float:
+    phase_rec = (record.get("lifecycle") or {}).get(phase) or {}
+    return float(phase_rec.get("cost_usd") or 0.0)
+
+
 def _run_cost(r: dict) -> float:
-    return round((r.get("design_cost_usd") or 0.0) + (r.get("judge_cost_usd") or 0.0), 6)
+    return round(
+        (r.get("design_cost_usd") or 0.0)
+        + _lifecycle_cost(r, "post_wiring_review")
+        + _lifecycle_cost(r, "silkscreen")
+        + (r.get("judge_cost_usd") or 0.0),
+        6,
+    )
 
 
 def _campaign_costs(records: list[dict]) -> dict:
     total = sum(_run_cost(record) for record in records)
     committed = sum(record.get("design_committed") is True for record in records)
     stage_costs: dict[str, float] = {}
+    lifecycle_costs = {"post_wiring_review": 0.0, "silkscreen": 0.0, "judge": 0.0}
     for record in records:
         for stage, cost in (record.get("stage_cost_usd") or {}).items():
             stage_costs[stage] = stage_costs.get(stage, 0.0) + float(cost)
+        for phase in ("post_wiring_review", "silkscreen"):
+            lifecycle_costs[phase] += _lifecycle_cost(record, phase)
+        lifecycle_costs["judge"] += float(record.get("judge_cost_usd") or 0.0)
     return {
         "total_cost_usd": round(total, 6),
         "failed_run_cost_usd": round(
@@ -902,6 +1068,9 @@ def _campaign_costs(records: list[dict]) -> dict:
         ),
         "cost_per_committed_design_usd": round(total / committed, 6) if committed else None,
         "stage_cost_usd": {stage: round(cost, 6) for stage, cost in sorted(stage_costs.items())},
+        "lifecycle_cost_usd": {
+            phase: round(cost, 6) for phase, cost in lifecycle_costs.items()
+        },
     }
 
 
@@ -1007,9 +1176,18 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
             failure_families[family] = failure_families.get(family, 0) + 1
 
     cost_summary = _campaign_costs(records)
+    def _lifecycle_status(phase: str) -> str:
+        statuses = [
+            ((record.get("lifecycle") or {}).get(phase) or {}).get("status")
+            for record in records
+        ]
+        return "completed" if statuses and all(status == "completed" for status in statuses) else "not-recorded"
+
 
     summary = {
         **meta,
+        "execution_mode": meta.get("execution_mode")
+        or ("design-only" if meta.get("design_only") else "full"),
         "n": len(records),
         "n_briefs": len(per_brief),
         "graded_n": len(finals),
@@ -1042,6 +1220,20 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         "archetype_stats": _archetype_stats(records),
         "outline_stats": _outline_stats(records),
         "per_brief": per_brief,
+        "lifecycle": {
+            "post_wiring_review": {
+                "status": _lifecycle_status("post_wiring_review"),
+                "cost_usd": cost_summary["lifecycle_cost_usd"]["post_wiring_review"],
+            },
+            "silkscreen": {
+                "status": _lifecycle_status("silkscreen"),
+                "cost_usd": cost_summary["lifecycle_cost_usd"]["silkscreen"],
+            },
+            "judge": {
+                "status": _lifecycle_status("judge"),
+                "cost_usd": cost_summary["lifecycle_cost_usd"]["judge"],
+            },
+        },
         **cost_summary,
         "runs": records,
     }
@@ -1107,6 +1299,14 @@ def _render_md(s: dict) -> str:
         f"- judge: {(s.get('judge_model') if s.get('judge') else 'off (Class-C only)')}"
         f"  ·  design model: {s.get('design_model')}"
     )
+    lifecycle_spend = s.get("lifecycle_cost_usd") or {}
+    L.append(
+        "- lifecycle spend: "
+        f"designer **${sum((s.get('stage_cost_usd') or {}).values()):.6f}** · "
+        f"review **${lifecycle_spend.get('post_wiring_review', 0.0):.6f}** · "
+        f"silk **${lifecycle_spend.get('silkscreen', 0.0):.6f}** · "
+        f"judge **${lifecycle_spend.get('judge', 0.0):.6f}**"
+    )
     L.append(f"- total spend: **${s['total_cost_usd']}**  ·  report dir: `{s.get('out_dir')}`")
     L.append(
         f"- failed-design spend: **${s['failed_run_cost_usd']}**  ·  "
@@ -1171,8 +1371,17 @@ def _render_md(s: dict) -> str:
     L.append("| # | slug | archetype | grade | final | verdict | build | Q | $ |")
     L.append("|---|------|-----------|-------|-------|---------|-------|---|---|")
     for r in s["runs"]:
-        if r.get("build_rc") is None:
-            build = "—" if not r.get("error") else "—"
+        mode = r.get("execution_mode") or (
+            "design-only" if s.get("design_only") else "full"
+        )
+        if mode == "design-only":
+            build = (
+                "design-only (committed)"
+                if r.get("design_committed")
+                else "design-only (incomplete)"
+            )
+        elif r.get("build_rc") is None:
+            build = "not built"
         else:
             build = r.get("build_label") or str(r.get("build_rc"))
         verdict = r.get("verdict") or ("ERROR" if r.get("error") else r.get("design_status") or "—")
@@ -1202,11 +1411,16 @@ def _render_md(s: dict) -> str:
         if r.get("error")
         or r.get("gates")
         or (isinstance(r.get("final"), (int, float)) and r["final"] < 60)
+        or (
+            (r.get("execution_mode") or ("design-only" if s.get("design_only") else "full"))
+            == "full"
+            and r.get("build_rc") != 0
+        )
     ]
     if flagged:
         L += ["", "## Needs attention"]
         for r in flagged:
-            tag = f"**#{r['index']}** {r['stem']}"
+            tag = f"**#{r['index']}** {r.get('stem') or r.get('slug') or 'run'}"
             if r.get("error"):
                 L.append(f"- {tag}: ERROR — {r['error']}")
             else:
@@ -1215,8 +1429,11 @@ def _render_md(s: dict) -> str:
                     bits.append(f"gates {r['gates']}")
                 if isinstance(r.get("final"), (int, float)) and r["final"] < 60:
                     bits.append(f"final {r['final']} ({r.get('verdict')})")
-                if r.get("build_rc") not in (0, None):
-                    bits.append(f"build {r.get('build_label')}")
+                mode = r.get("execution_mode") or (
+                    "design-only" if s.get("design_only") else "full"
+                )
+                if mode == "full" and r.get("build_rc") != 0:
+                    bits.append(f"build {r.get('build_label') or 'not built'}")
                 L.append(f"- {tag}: {', '.join(bits) or 'see report'} → `{r.get('rundir')}`")
     L.append("")
     return "\n".join(L)
@@ -1322,6 +1539,12 @@ def main(argv=None) -> int:
         "--no-judge",
         action="store_true",
         help="score Class-C only; skip the LLM judge (cheaper, no A-F grade)",
+    )
+    ap.add_argument(
+        "--contract-version",
+        choices=(ORIGINAL_CORPUS_VERSION, APPROVED_5V_DEVICE_CORPUS_VERSION),
+        default=ORIGINAL_CORPUS_VERSION,
+        help="versioned execution contract; original remains the default corpus",
     )
     ap.add_argument(
         "--lean-events",
@@ -1464,6 +1687,7 @@ def main(argv=None) -> int:
         judge_model=None if args.no_judge else judge_model,
         selected=selected,
         repeats=repeats,
+        contract_version=args.contract_version,
     )
     source_fingerprint_start = json.loads(manifest_path.read_text(encoding="utf-8"))["immutable"][
         "source_fingerprint"
@@ -1488,6 +1712,8 @@ def main(argv=None) -> int:
         "design_profile": getattr(s, "design_profile", "custom"),
         "design_provider_order": list(getattr(s, "provider_order", [])),
         "campaign_manifest": str(manifest_path),
+        "contract_version": args.contract_version,
+        "execution_mode": "design-only" if args.design_only else "full",
         "judge": not args.no_judge,
         "judge_model": None if args.no_judge else judge_model,
         "rubric_version": None,
@@ -1561,6 +1787,7 @@ def main(argv=None) -> int:
                 build_timeout_s=args.build_timeout,
                 full_events=not args.lean_events,
                 design_only=args.design_only,
+                contract_version=args.contract_version,
             )
             if rec.get("error"):
                 print(f"   ERROR: {rec['error']}", flush=True)
@@ -1603,6 +1830,7 @@ def main(argv=None) -> int:
                 build_gate=gate,
                 full_events=not args.lean_events,
                 design_only=args.design_only,
+                contract_version=args.contract_version,
             )
             with print_lock:
                 if rec.get("error"):

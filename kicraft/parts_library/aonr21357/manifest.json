@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:79f891feddee1bbf1d44d0c2dc2a0c64c7e60b7d22c45435194b42e1c5db48cd",
+  "datasheet_url": "https://lcsc.com/product-detail/MOSFET_Alpha-Omega-Semicon-AOS-AONR21357_C431196.html",
+  "description": "AOS AONR21357 — 30 V P-channel MOSFET in 3.0 × 3.0 mm DFN-8 with exposed drain thermal pad. Rated 34 A continuous, 12.3 mΩ at VGS = −4.5 V, 30 W, and ±25 V gate-source.",
+  "footprint_name": "DFN-8_L3.0-W3.0-P0.65-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "production",
+  "mpn": "AONR21357",
+  "name": "aonr21357",
+  "provenance": {
+    "added_at": "2026-09-16T03:52:01Z",
+    "kicad_version": "9.0.0",
+    "source": "EasyEDA import from LCSC C431196; symbol/footprint contact set and exposed pad 9 reviewed against the package data. Ratings reviewed from the LCSC product page and attached AOS datasheet.",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C431196"
+  },
+  "symbol_name": "AONR21357",
+  "tags": [
+    "p-channel",
+    "mosfet",
+    "highside-switch",
+    "dfn-8",
+    "thermal-pad"
+  ],
+  "version": "0.1.0",
+  "watch_out_for": "Pins 1/2/3 are source; pin 4 is gate; pins 5/6/7/8 and exposed pad 9 are drain. For a 10 A path, connect every parallel drain pad and pad 9 to the load copper/thermal-via region. Drive the gate within the ±25 V VGS absolute maximum; the 15 V high-side circuit requires its 10 V source-gate clamp."
+}

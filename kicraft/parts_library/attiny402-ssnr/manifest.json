@@ -1,0 +1,33 @@
+{
+  "content_hash": "sha256:2cd80646e9d3d77ca77f00bc1d74953ba7a2ae34ed1316655754d325af55c85a",
+  "datasheet_url": "https://ww1.microchip.com/downloads/aemDocuments/documents/MCU08/ProductDocuments/DataSheets/ATtiny202-204-402-404-406-DataSheet-DS40002318A.pdf",
+  "description": "MICROCHIP ATTINY402-SSNR: tinyAVR 0-series, 4KB Flash, 256B SRAM, SOIC-8, -40 to +105 C, 1.8-5.5 V, 20 MHz, tape-and-reel.",
+  "footprint_name": "SOIC-8_L5.0-W4.0-P1.27-LS6.0-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "ATTINY402-SSNR",
+  "name": "attiny402-ssnr",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "SSN mechanical footprint reused after pin-mapping correction against Microchip DS40002318A \u00a74.1; SSNR manufacturer carrier equivalence reviewed",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "jlcpcb": "C616056",
+    "lcsc": "C616056"
+  },
+  "symbol_name": "ATTINY402-SSNR",
+  "tags": [
+    "mcu",
+    "attiny402",
+    "updi",
+    "soic-8",
+    "tape-and-reel",
+    "portable",
+    "reviewed"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": "Pin 6 is PA3/EXTCLK; pin 7 is PA0/RESET/UPDI, verified against Microchip DS40002318A \u00a74.1. SSNR is the exact same SOIC-8/-40..105 C/1.8-5.5 V grade as SSN with tape-and-reel carrier. Do not substitute SSFR without reviewed operating-range consent."
+}

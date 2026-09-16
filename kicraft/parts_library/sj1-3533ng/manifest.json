@@ -1,0 +1,34 @@
+{
+  "schema_version": "1",
+  "name": "sj1-3533ng",
+  "version": "1.0.0",
+  "content_hash": "sha256:6a6b25b193192c9a4b19851f5caf367b57f51abe9cac0f23d0f7399a1fd2bfa1",
+  "description": "Same Sky SJ1-3533NG right-angle through-hole 3.5 mm stereo jack, three contacts and no internal switches.",
+  "mpn": "SJ1-3533NG",
+  "sourcing": {
+    "digikey": "CP1-3533NG-ND",
+    "jlcpcb": "C4992459",
+    "lcsc": "C4992459"
+  },
+  "datasheet_url": "https://www.sameskydevices.com/product/resource/sj1-353xng.pdf",
+  "tags": [
+    "audio-jack",
+    "3.5mm",
+    "stereo",
+    "trs",
+    "through-hole",
+    "no-switch",
+    "reviewed"
+  ],
+  "watch_out_for": "Exact no-switch variant: S=sleeve/common (manufacturer pin 1), T=tip/left (pin 2), R=ring/right (pin 3); there are no switch terminals 4/5. The authoritative JLC listing is https://jlcpcb.com/partdetail/CUI-SJ13533NG/C4992459. The restored offline JLC catalog reports 323 units and the LCSC retail listing showed 229 units on 2026-09-16; inventory is time-sensitive and must still pass the current §9.26 check at build time.",
+  "maturity": "reviewed",
+  "symbol_name": "SJ1-3533NG",
+  "footprint_name": "Jack_3.5mm_CUI_SJ1-3533NG_Horizontal",
+  "kicad_version_min": "9.0.0",
+  "provenance": {
+    "source": "Same Sky manufacturer datasheet pin mapping; KiCad 9 exact CUI footprint cross-checked to the manufacturer recommended layout",
+    "source_project_stem": null,
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0"
+  }
+}

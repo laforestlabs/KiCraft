@@ -261,33 +261,43 @@ def test_event_writer_keeps_only_design_and_build_kinds(tmp_path):
     ]
 
 
-def test_stage_failure_attribution_uses_structured_gate_and_unit_fields(tmp_path):
+def test_stage_failure_attribution_keeps_only_terminal_diagnostic(tmp_path):
     events = tmp_path / "events.jsonl"
     events.write_text(
-        json.dumps(
-            {
-                "kind": "retry",
-                "stage": "bom",
-                "failure_kind": "commit_rejected",
-                "commit_gate_codes": ["bom_footprint_unresolved"],
-                "work_unit_ids": ["bom-s001"],
-                "accepted_siblings_retained": 3,
-            }
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                {"kind": "stage_start", "stage": "bom"},
+                {
+                    "kind": "retry",
+                    "stage": "bom",
+                    "failure_kind": "commit_rejected",
+                    "commit_gate_codes": ["stale_rejected_attempt"],
+                },
+                {
+                    "kind": "stage_done",
+                    "stage": "bom",
+                    "ok": False,
+                    "failure_kind": "commit_process_failed",
+                    "defect_codes": ["terminal_process_failure"],
+                    "diagnostic": {"code": "form_factor_stack_unowned"},
+                    "work_unit_ids": ["bom-s001"],
+                },
+            ]
         )
         + "\n",
         encoding="utf-8",
     )
     attribution = se._stage_failure_attribution(
-        {"stage_status": {"bom": {"ok": False, "failure_kind": "commit_rejected"}}},
+        {"stage_status": {"bom": {"ok": False, "failure_kind": "commit_process_failed"}}},
         events,
     )
-    assert attribution == {
-        "failed_stage": "bom",
-        "failure_kind": "commit_rejected",
-        "failure_codes": ["bom_footprint_unresolved"],
-        "work_unit_ids": ["bom-s001"],
-        "accepted_siblings_retained": 3,
-    }
+    assert attribution["failed_stage"] == "bom"
+    assert attribution["failure_kind"] == "commit_process_failed"
+    assert attribution["failure_codes"] == ["terminal_process_failure"]
+    assert attribution["terminal_diagnostic"] == {"code": "form_factor_stack_unowned"}
+    assert attribution["work_unit_ids"] == ["bom-s001"]
+    assert attribution["stage_subprocess_crash"] is True
 
 
 def test_stage_failure_report_reads_completed_campaign_without_provider_calls(tmp_path):
@@ -336,10 +346,21 @@ def test_stage_failure_report_reads_completed_campaign_without_provider_calls(tm
 # run_design: park -> auto-answer -> resume -> complete
 # --------------------------------------------------------------------------- #
 _FULL_STATE = {
-    "intent": {},
-    "functional_spec": {},
-    "architecture": {},
-    "bom": {"parts": [{"ref": "R1"}], "connections": [{"net_name": "VBUS"}]},
+    # A minimal state that satisfies the current stage contracts: the nested
+    # models require their own top-level fields, and `design_committed` is read
+    # from stage_status, so a fixture without these drives no build at all.
+    "project_stem": "B1",
+    "intent": {"goal": "a USB LED"},
+    "functional_spec": {"blocks": []},
+    "architecture": {"sheets": [], "power_nets": [], "inter_sheet_nets": [], "requirements": []},
+    "bom": {"parts": [{"ref": "R1", "value": "1k", "symbol": "Device:R",
+                       "footprint": "Resistor_SMD:R_0603_1608Metric", "sheet": "MAIN"}],
+            "connections": [{"net_name": "VBUS", "sheet": "MAIN",
+                             "endpoints": [{"ref": "R1", "pin": "1"}]}]},
+    "stage_status": {
+        stage: {"ok": True}
+        for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
+    },
 }
 
 
@@ -519,6 +540,15 @@ def test_evaluate_one_happy_path_drives_builds_and_scores(tmp_path, monkeypatch)
         progress({"kind": "build_done", "ok": True, "rc": 0})
         built["dir"] = str(rundir)
         return 0
+    monkeypatch.setattr(
+        se,
+        "run_post_wiring_lifecycle",
+        lambda *args, **kwargs: {
+            "execution_mode": kwargs["execution_mode"],
+            "post_wiring_review": {"status": "completed", "cost_usd": 0.002},
+            "silkscreen": {"status": "completed", "cost_usd": 0.003},
+        },
+    )
 
     seen_kw: dict = {}
 
@@ -547,6 +577,9 @@ def test_evaluate_one_happy_path_drives_builds_and_scores(tmp_path, monkeypatch)
     assert seen_kw.get("judge_model") == "judge-x" and seen_kw.get("skip_judge") is False
     assert rec["run_id"] == seen_kw["run_id"]
 
+    assert rec["execution_mode"] == "full"
+    assert rec["lifecycle"]["post_wiring_review"]["cost_usd"] == 0.002
+    assert rec["lifecycle"]["silkscreen"]["cost_usd"] == 0.003
 
 def test_evaluate_one_design_only_skips_build_and_scoring(tmp_path, monkeypatch):
     def fake_run_session(ws, brief, stages, **kw):
@@ -702,6 +735,27 @@ def test_same_brief_campaigns_isolate_budget_and_reported_spend(tmp_path, monkey
     assert guard.spent_total() == pytest.approx(0.12)
 
 
+def test_needs_attention_lists_every_incomplete_or_nonzero_build_run(tmp_path):
+    """A pre-build failure or a non-rc0 build is reported whatever its grade."""
+    records = [
+        # A high-graded design that never committed (the frozen #21 shape).
+        {"index": 21, "slug": "proto-shield", "stem": "PROTO_SHIELD", "final": 76.0, "grade": "B",
+         "design_committed": False, "failed_stage": "wiring", "build_rc": None},
+        # A committed design whose build returned a routing failure code.
+        {"index": 10, "slug": "rp2040-min", "stem": "RP2040_MIN", "final": 83.5, "grade": "B",
+         "design_committed": True, "build_rc": 6},
+        # A clean committed build: NOT a needs-attention entry.
+        {"index": 1, "slug": "rc-lowpass-bnc", "stem": "RC_FILTER_BREAKOUT", "final": 79.5,
+         "grade": "B", "design_committed": True, "build_rc": 0},
+    ]
+    summary = se.compile_report(records, tmp_path, {})
+    attention = (tmp_path / "summary.md").read_text().split("## Needs attention")[-1]
+    assert "PROTO_SHIELD" in attention or "proto-shield" in attention
+    assert "RP2040_MIN" in attention or "rp2040-min" in attention
+    assert "RC_FILTER_BREAKOUT" not in attention
+    assert summary["n"] == 3
+
+
 def test_budget_exception_preserves_paid_failed_stage_and_campaign_cost(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -750,6 +804,44 @@ def test_budget_exception_preserves_paid_failed_stage_and_campaign_cost(tmp_path
     assert report["failed_run_cost_usd"] == pytest.approx(0.0648)
     assert report["cost_per_committed_design_usd"] == pytest.approx(0.0768)
     assert se._campaign_costs([rec])["cost_per_committed_design_usd"] is None
+
+
+def test_failure_matrix_separates_repair_exhaustion_from_subprocess_crash(tmp_path):
+    """A stage-commit crash, a bounded-repair exhaustion and a build-only failure
+    must be distinguishable: collapsing them hides whether the pipeline or the
+    design failed.  (The frozen #21 shape was a traceback reported as a design
+    failure and graded B.)"""
+    from kicraft.eval.stage_failure_report import analyze_campaign
+
+    crashed = tmp_path / "crashed"
+    crashed.mkdir()
+    (crashed / "events.jsonl").write_text("\n".join(json.dumps(event) for event in [
+        {"kind": "stage_start", "stage": "wiring"},
+        {"kind": "stage_crash", "stage": "wiring", "returncode": 1,
+         "traceback": "Traceback (most recent call last): ..."},
+    ]))
+    repaired = tmp_path / "repaired"
+    repaired.mkdir()
+    (repaired / "events.jsonl").write_text("\n".join(json.dumps(event) for event in [
+        {"kind": "stage_start", "stage": "bom"},
+        {"kind": "work_unit_attempt", "stage": "bom", "outcome": "invalid_work_unit",
+         "cost_usd": 0.01},
+        {"kind": "work_unit_repair_exhausted", "stage": "bom", "unit_id": "bom-s002"},
+    ]))
+    (tmp_path / "summary.json").write_text(json.dumps({"runs": [
+        {"slug": "crashed", "rundir": str(crashed), "design_committed": False,
+         "failure_kind": "commit_process_failed"},
+        {"slug": "repaired", "rundir": str(repaired), "design_committed": False,
+         "failure_kind": "unit_repair_exhausted"},
+        # The design committed; only the build (router) failed.  It is not a design failure.
+        {"slug": "route-failed", "design_committed": True, "build_rc": 6,
+         "design_cost_usd": 0.02},
+    ]}))
+    report = analyze_campaign(tmp_path)
+    matrix = {(row["stage"], row["failure_kind"]): row["briefs"] for row in report["failure_matrix"]}
+    assert matrix[("wiring", "commit_process_failed")] == ["crashed"]
+    assert matrix[("bom", "unit_repair_exhausted")] == ["repaired"]
+    assert matrix[("passed", "passed")] == ["route-failed"]
 
 
 def test_legacy_failure_report_recovers_cost_without_double_counting(tmp_path):
@@ -1257,3 +1349,54 @@ def test_compile_report_aggregates_and_writes(tmp_path):
     md = (tmp_path / "summary.md").read_text()
     assert "Needs attention" in md and "erc_errors" in md and "RuntimeError" in md
     assert "By archetype" in md and "usb_c_connector" in md
+
+
+def test_full_report_attends_every_frozen_non_rc0_run(tmp_path):
+    frozen = json.loads(
+        (Path(__file__).parents[1] / "logs/self_eval/20260915T132650Z/summary.json").read_text()
+    )
+    records = frozen["runs"]
+    non_rc0 = [record for record in records if record.get("build_rc") != 0]
+    assert len(non_rc0) == 23
+
+    summary = se.compile_report(
+        records,
+        tmp_path,
+        {key: value for key, value in frozen.items() if key != "runs"},
+    )
+    attention = (tmp_path / "summary.md").read_text().split("## Needs attention", 1)[1]
+    for record in non_rc0:
+        assert f"**#{record['index']}** {record['stem']}" in attention
+    assert "**#10** run_10_rp2040-min" in attention
+    assert "**#21** run_21_proto-shield" in attention
+    assert summary["execution_mode"] == "full"
+    assert {
+        phase: summary["lifecycle"][phase]["status"]
+        for phase in ("post_wiring_review", "silkscreen", "judge")
+    } == {
+        "post_wiring_review": "not-recorded",
+        "silkscreen": "not-recorded",
+        "judge": "not-recorded",
+    }
+
+
+def test_design_only_success_is_not_reported_as_a_build_failure(tmp_path):
+    summary = se.compile_report(
+        [
+            {
+                "index": 1,
+                "slug": "canary",
+                "archetype": "fixture",
+                "prompt": "p",
+                "stem": "run_01_canary",
+                "rundir": "/r",
+                "execution_mode": "design-only",
+                "design_committed": True,
+                "build_rc": None,
+            }
+        ],
+        tmp_path,
+        {"design_only": True, "execution_mode": "design-only"},
+    )
+    assert "Needs attention" not in (tmp_path / "summary.md").read_text()
+    assert summary["fab_ready"] == 0

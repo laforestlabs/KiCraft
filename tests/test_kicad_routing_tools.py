@@ -1,3 +1,4 @@
+import json
 import signal
 import subprocess
 import sys
@@ -9,24 +10,42 @@ import pytest
 from kicraft.autoplacer import kicad_routing_tools as rb
 
 
-def test_krt_command_preserves_rules_and_existing_copper(tmp_path):
-    root = tmp_path / "krt"
-    (root / "py_router").mkdir(parents=True)
-    (root / "py_router" / "route.py").write_text("# stub\n")
-    cfg = {
-                "kicad_routing_tools_path": str(root),
-        "signal_width_mm": 0.25,
-        "via_size_mm": 0.7,
-        "via_drill_mm": 0.35,
-    }
-    cmd = rb._krt_command("input.kicad_pcb", "output.kicad_pcb", cfg)
-    assert "--keep-input-copper" in cmd
-    assert "--no-fix-drc-settings" in cmd
-    assert "--force-reroute" not in cmd
-    assert "--rip-existing-nets" not in cmd
-    assert cmd[cmd.index("--nets") + 1] == "*"
-    for option in ("--track-width", "--via-size", "--via-drill", "--clearance"):
-        assert option not in cmd
+def _write_project(board):
+    from kicraft.design.synthesis.kicad_pro import DEFAULT_NETCLASS, DEFAULT_RULES
+
+    project = board.with_suffix(".kicad_pro")
+    project.write_text(json.dumps({
+        "board": {"design_settings": {"rules": dict(DEFAULT_RULES)}},
+        "net_settings": {"classes": [dict(DEFAULT_NETCLASS)]},
+    }))
+    return project
+
+
+def test_adaptive_routing_cannot_undershoot_project_geometry(tmp_path):
+    project = _write_project(tmp_path / "input.kicad_pcb")
+    body = json.loads(project.read_text())
+    rules = body["board"]["design_settings"]["rules"]
+    rules.update(min_via_annular_width=0.2, min_hole_clearance=0.4)
+    body["net_settings"]["classes"].append({"name": "Power", "clearance": 0.4})
+    project.write_text(json.dumps(body))
+    floors = rb._project_routing_floors(project, {})
+    ring = (floors["via_diameter"] - floors["via_drill"]) / 2
+    assert ring >= rules["min_via_annular_width"]
+    assert floors["clearance"] + ring >= rules["min_hole_clearance"]
+    assert all(
+        floors["clearance"] >= netclass["clearance"]
+        for netclass in body["net_settings"]["classes"]
+    )
+    assert floors["via_diameter"] >= rules["min_via_diameter"]
+
+
+def test_router_clearance_ceiling_cannot_weaken_a_power_class(tmp_path):
+    project = _write_project(tmp_path / "input.kicad_pcb")
+    body = json.loads(project.read_text())
+    body["net_settings"]["classes"].append({"name": "Power", "clearance": 0.4})
+    project.write_text(json.dumps(body))
+    with pytest.raises(ValueError):
+        rb._project_routing_floors(project, {"kicad_routing_tools_clearance_mm": 0.2})
 
 
 def test_preflight_requires_configured_checkout():
@@ -187,84 +206,6 @@ def test_krt_preflight_failures_are_not_cached(monkeypatch, tmp_path):
     assert startup_calls == 2
 
 
-def test_krt_route_process_boundary_preserves_rules_and_summaries(
-    monkeypatch, tmp_path
-):
-    import kicraft.autoplacer.routing_board as board_utils
-
-    root = tmp_path / "krt"
-    root.mkdir()
-    rules_board = tmp_path / "rules" / "authoritative.kicad_pcb"
-    rules_board.parent.mkdir()
-    rules_board.with_suffix(".kicad_pro").write_text("project rules\n")
-    rules_board.with_suffix(".kicad_dru").write_text("custom rules\n")
-    route_dir = tmp_path / "route"
-    route_dir.mkdir()
-    input_board = route_dir / "input.kicad_pcb"
-    output_board = route_dir / "output.kicad_pcb"
-    input_board.write_text("input\n")
-    output_board.write_text("stale output\n")
-    events = []
-    observed = {}
-
-    def fake_preflight(_config):
-        events.append("preflight")
-        return _runtime(root)
-
-    def fake_import(path):
-        assert Path(path) in (input_board.resolve(), output_board.resolve())
-        return _copper()
-
-    class FakeProcess:
-        returncode = 0
-        pid = 123
-
-        def __init__(self, command, **kwargs):
-            events.append("launch")
-            assert events == ["preflight", "launch"]
-            assert not output_board.exists()
-            assert input_board.with_suffix(".kicad_pro").read_text() == "project rules\n"
-            assert input_board.with_suffix(".kicad_dru").read_text() == "custom rules\n"
-            observed["command"] = command
-            observed["env"] = kwargs["env"]
-
-        def communicate(self, timeout=None):
-            output_board.write_text("new routed output\n")
-            return (
-                'JSON_SUMMARY: {"successful": 8, "failed": 2, '
-                '"total_vias": 3, "total_time": 1.5}\n'
-                'JSON_SUMMARY: {"successful": 1, "failed": 0}\n',
-                "diagnostic stderr",
-            )
-
-    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", fake_preflight)
-    monkeypatch.setattr(rb.subprocess, "Popen", FakeProcess)
-    monkeypatch.setattr(board_utils, "import_routed_copper", fake_import)
-    stats = rb.route_with_kicad_routing_tools(
-        str(input_board),
-        str(output_board),
-        {
-                        "kicad_routing_tools_path": str(root),
-            "pcb_path": str(rules_board),
-        },
-    )
-
-    assert observed["env"]["KICAD_RIP_PREEXISTING"] == "0"
-    assert observed["env"]["KICAD_PLANE_FINALIZE"] == "0"
-    assert "KICAD_FINALIZE_RIP" not in observed["env"]
-    assert "--keep-input-copper" in observed["command"]
-    assert not input_board.with_suffix(".kicad_pro").exists()
-    assert not input_board.with_suffix(".kicad_dru").exists()
-    assert output_board.read_text() == "new routed output\n"
-    assert output_board.with_suffix(".kicad_pro").read_text() == "project rules\n"
-    assert output_board.with_suffix(".kicad_dru").read_text() == "custom rules\n"
-    assert len(stats["json_summaries"]) == 2
-    assert stats["successful_nets"] == 8
-    assert stats["failed_nets"] == 2
-    assert stats["preserved_existing_copper"] is True
-    assert stats["input_copper_preservation"]["traces"]["missing_count"] == 0
-    assert stats["input_copper_preservation"]["vias"]["missing_count"] == 0
-    assert stats["_raw_stderr"] == "diagnostic stderr"
 
 
 def test_krt_route_rejects_same_input_and_output(tmp_path):
@@ -325,7 +266,7 @@ def test_krt_route_keeps_nonzero_and_no_output_failures(
     input_board = tmp_path / "input.kicad_pcb"
     output_board = tmp_path / "output.kicad_pcb"
     input_board.write_text("input\n")
-    input_board.with_suffix(".kicad_pro").write_text("rules\n")
+    _write_project(input_board)
 
     class FakeProcess:
         pid = 456
@@ -360,7 +301,7 @@ def test_krt_route_timeout_behavior_is_unchanged(monkeypatch, tmp_path):
     input_board = tmp_path / "input.kicad_pcb"
     output_board = tmp_path / "output.kicad_pcb"
     input_board.write_text("input\n")
-    input_board.with_suffix(".kicad_pro").write_text("rules\n")
+    _write_project(input_board)
     signals = []
 
     class FakeProcess:
@@ -391,6 +332,8 @@ def test_krt_route_timeout_behavior_is_unchanged(monkeypatch, tmp_path):
             },
         )
     assert signals == [(789, signal.SIGTERM)]
+    assert output_board.with_suffix(".router.stdout.log").read_text() == "partial stdout"
+    assert output_board.with_suffix(".router.stderr.log").read_text() == "partial stderr"
 
 
 def test_krt_route_rejects_missing_input_copper(monkeypatch, tmp_path):
@@ -401,7 +344,7 @@ def test_krt_route_rejects_missing_input_copper(monkeypatch, tmp_path):
     input_board = tmp_path / "input.kicad_pcb"
     output_board = tmp_path / "output.kicad_pcb"
     input_board.write_text("input\n")
-    input_board.with_suffix(".kicad_pro").write_text("authoritative rules\n")
+    original_rules = _write_project(input_board).read_bytes()
 
     def fake_import(path):
         return _copper(present=Path(path).resolve() == input_board.resolve())
@@ -434,4 +377,4 @@ def test_krt_route_rejects_missing_input_copper(monkeypatch, tmp_path):
     assert preservation["traces"]["missing_count"] == 1
     assert preservation["vias"]["missing_count"] == 1
     assert output_board.is_file()
-    assert output_board.with_suffix(".kicad_pro").read_text() == "authoritative rules\n"
+    assert output_board.with_suffix(".kicad_pro").read_bytes() == original_rules

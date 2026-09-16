@@ -11,11 +11,14 @@ confident matches into sourcing_note (where fab_export reads the C#).
 """
 from __future__ import annotations
 
+import pytest
+
 import kicraft.design.cli_app as cli_app
 from kicraft.design.cli_app import (
     _check_passive_array_mismatch, _resolve_bom_mpn_sourcing,
 )
 from kicraft.design.models import BOM, BomPart
+from kicraft.parts_library import jlcparts
 from kicraft.parts_library.lcsc_retail import RetailUnavailable
 
 
@@ -246,13 +249,38 @@ def test_pin_header_kicadism_is_normalized_and_pinned(tmp_path, monkeypatch):
     assert p.sourcing_note == "LCSC C492401"
 
 
-def test_test_points_are_not_sourcing_offenders(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("ref", "symbol", "footprint"),
+    [
+        ("TP1", "Connector:TestPoint", "TestPoint:TestPoint_Pad_D1.5mm"),
+        (
+            "PAD1", "capacitive-touch-pad:CapacitiveTouchPad",
+            "capacitive-touch-pad:TouchPad_12mm_Front_NoUnderlay",
+        ),
+    ],
+)
+def test_reviewed_bare_board_features_are_not_sourcing_offenders(tmp_path, monkeypatch, ref, symbol, footprint):
     _install(monkeypatch, _FakeCatalog())
-    p = _part(ref="TP1", mpn=None, symbol="Connector:TestPoint",
-              footprint="TestPoint:TestPoint_Pad_D1.5mm")
-    p.value = "TestPoint"
+    p = _part(ref=ref, mpn=None, symbol=symbol, footprint=footprint)
+    p.value = "PCB copper electrode"
     assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
     assert p.sourcing_note is None
+
+
+def test_bare_board_exemption_is_footprint_exact_not_family_based():
+    """The skipped set is reviewed bare copper/holes, matched exactly.
+
+    A real component drawn onto a bare-board library footprint is NOT exempt:
+    the exemption must not degrade into a family/prefix match, or an unknown
+    controller could ride a reviewed electrode footprint past sourcing. Whether
+    an unfindable generic is an offender is decided by the documented tier-4
+    policy (nothing searchable -> offender; no catalog match -> stay
+    unpinned), so this asserts the exemption boundary itself.
+    """
+    assert jlcparts.is_unsourceable_hardware("capacitive-touch-pad:TouchPad_12mm_Front_NoUnderlay")
+    assert jlcparts.is_unsourceable_hardware("TestPoint:TestPoint_Pad_D1.5mm")
+    assert jlcparts.is_unsourceable_hardware("MountingHole:MountingHole_3.2mm_M3")
+    assert not jlcparts.is_unsourceable_hardware("capacitive-touch-pad:UnknownController")
 
 
 def test_part_with_nothing_searchable_is_an_offender(tmp_path, monkeypatch):

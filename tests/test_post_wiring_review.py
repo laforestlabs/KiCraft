@@ -53,7 +53,7 @@ WARNING = {"severity": "warning", "area": "esd",
 def test_clean_review_emits_stage_events_and_persists(tmp_path, monkeypatch):
     monkeypatch.delenv("KICRAFT_ELECTRICAL_REVIEW", raising=False)
     sp = _write_state(tmp_path)
-    monkeypatch.setattr(cli_app, "_maybe_electrical_review", lambda st, pd: {
+    monkeypatch.setattr(cli_app, "_maybe_electrical_review", lambda st, pd, **_: {
         "ran": True, "blocked": False, "findings": [WARNING], "cost_usd": 0.02})
     events: list[dict] = []
     res = run_post_wiring_review(sp, tmp_path, events.append, rewire=None)
@@ -89,7 +89,7 @@ def test_blocker_re_drives_wiring_once_and_persists_second_pass(tmp_path, monkey
         {"ran": True, "blocked": False, "findings": [WARNING], "cost_usd": 0.03},
     ])
     monkeypatch.setattr(cli_app, "_maybe_electrical_review",
-                        lambda st, pd: next(passes))
+                        lambda st, pd, **_: next(passes))
     rewires: list[str] = []
     events: list[dict] = []
     run_post_wiring_review(sp, tmp_path, events.append, rewires.append)
@@ -107,7 +107,7 @@ def test_blocker_re_drives_wiring_once_and_persists_second_pass(tmp_path, monkey
 def test_skipped_review_closes_the_tab_without_durable_status(tmp_path, monkeypatch):
     monkeypatch.delenv("KICRAFT_ELECTRICAL_REVIEW", raising=False)
     sp = _write_state(tmp_path)
-    monkeypatch.setattr(cli_app, "_maybe_electrical_review", lambda st, pd: {
+    monkeypatch.setattr(cli_app, "_maybe_electrical_review", lambda st, pd, **_: {
         "ran": False, "blocked": False, "findings": [], "cost_usd": 0.0})
     events: list[dict] = []
     res = run_post_wiring_review(sp, tmp_path, events.append)
@@ -132,7 +132,7 @@ def test_review_crash_is_fail_soft(tmp_path, monkeypatch):
     monkeypatch.delenv("KICRAFT_ELECTRICAL_REVIEW", raising=False)
     sp = _write_state(tmp_path)
 
-    def _boom(st, pd):
+    def _boom(st, pd, **_):
         raise RuntimeError("network down")
 
     monkeypatch.setattr(cli_app, "_maybe_electrical_review", _boom)
@@ -149,3 +149,28 @@ def test_missing_state_is_a_silent_skip(tmp_path, monkeypatch):
     res = run_post_wiring_review(tmp_path / "nope" / "state.json", tmp_path,
                                  events.append)
     assert res["ran"] is False and events == []
+
+
+def test_lifecycle_records_execution_mode_and_buckets_spend_separately(tmp_path, monkeypatch):
+    """Batch and web share one lifecycle; the mode is durable provenance and each
+    phase's spend is its own bucket, so review/silk cost can never be read as
+    designer spend or as fulfillment evidence."""
+    sp = _write_state(tmp_path)
+    monkeypatch.setattr(cli_app, "_maybe_electrical_review", lambda st, pd, **_: {
+        "ran": True, "blocked": False, "findings": [WARNING], "cost_usd": 0.02})
+    monkeypatch.setattr(cli_app, "run_silk_plan_authoring", lambda *a, **kw: {
+        "ran": True, "cost_usd": 0.03})
+
+    lifecycle = cli_app.run_post_wiring_lifecycle(
+        sp, tmp_path, lambda event: None, execution_mode="batch"
+    )
+    assert lifecycle["execution_mode"] == "batch"
+    assert lifecycle["post_wiring_review"] == {"status": "completed", "ran": True, "cost_usd": 0.02}
+    assert lifecycle["silkscreen"] == {"status": "completed", "ran": True, "cost_usd": 0.03}
+    # Fail-soft: an opt-out review still reports its phase separately.
+    monkeypatch.setattr(cli_app, "_maybe_electrical_review", lambda st, pd, **_: {
+        "ran": False, "blocked": False, "findings": [], "cost_usd": 0.0})
+    lifecycle = cli_app.run_post_wiring_lifecycle(sp, tmp_path, lambda event: None)
+    assert lifecycle["execution_mode"] == "web"
+    assert lifecycle["post_wiring_review"]["ran"] is False
+    assert lifecycle["post_wiring_review"]["cost_usd"] == 0.0

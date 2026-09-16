@@ -58,6 +58,32 @@ def _stage_extra(stage: str) -> str:
             'object, e.g. {"project_stem": "LED_RING", "goal": "...", '
             '"constraints": [...], ...}. It is stripped from the slot and passed '
             "separately, per the spec."
+            "\n- Capture every explicit physical component class, quantity, adjustability, "
+            "conversion behavior, and numerical limit in `obligations`, using the typed "
+            "schema and stable original_obligation_id values. Preserve units and the "
+            "original requirement; constraints/named_parts prose cannot replace these "
+            "obligations. A BNC is not a header, a binding post is not a banana socket, "
+            "and a trim potentiometer is not a fixed resistor. Record engineering "
+            "assumptions separately. A model default or auto-answer cannot authorize "
+            "a material substitution."
+        )
+    if stage == "functional_spec":
+        return (
+            "\n- Retain every committed intent.obligations row unchanged. Functional "
+            "blocks must cover their required functions without replacing physical "
+            "classes, quantities, operating limits, or adjustability with prose."
+        )
+    if stage == "architecture":
+        return (
+            "\n- Retain all original typed obligations unchanged, assigning each to "
+            "exactly one implementing requirement through its original_obligation_id. "
+            "Use the published finite lowerer interfaces and supported parameters; "
+            "a failed supported lowerer is a contract defect, not permission to invent "
+            "an alternate interface. For uncurated hardware, declare actual numbered "
+            "pins and their functions, and bind each supply/reference domain explicitly. "
+            "Different grounds or rails must not be merged by name similarity. "
+            "A declared standard form factor requires its real owned stacking "
+            "connectors, not generic headers added after wiring."
         )
     if stage == "bom":
         return (
@@ -127,13 +153,14 @@ def _stage_extra(stage: str) -> str:
             "strings. Substituting a generic stock part for a specific IC is wrong.\n"
             "- SEARCH BUDGET: lookup_lcsc_id is one query + at most one retry per part (retry "
             "with the bare part family, no descriptive words). If it still misses — or reports "
-            "the backend unreachable — STOP searching for that part. Resolve it in this response "
-            "to exactly one concrete substitute/default, or ask one material clarifying question "
-            "that offers that concrete substitute (one question may cover several parts). If "
-            "proceeding, add an assumptions entry naming BOTH the asked-for part and the concrete "
-            "substitute ('brief asked for X; substituted Y because Z'). Never leave an unresolved "
-            "instruction to merely 'use the class'. This applies only to specifically requested "
-            "parts, not ordinary generic passives.\n"
+            "the backend unreachable — STOP searching for that part. Select a different "
+            "concrete implementation only if it satisfies the same original physical, "
+            "functional, quantitative, and identity obligations. A material substitution "
+            "requires an explicit human-approved contract change; an assumption, "
+            "substitution-ledger row, model default, or auto-answer is not consent. "
+            "Otherwise report the unresolved sourcing/coverage obligation, never "
+            "a header or annotation pretending to implement the required device. "
+            "Generic passive choices remain allowed within the declared ratings.\n"
             "- POLARIZED caps: an electrolytic/tantalum bulk or reservoir cap uses symbol Device:CP with a polarized footprint (a CP_* or Capacitor_Tantalum_* footprint) -- NEVER Device:C / C_* (non-polarized ceramic/film only); the symbol/footprint polarity mismatch is rejected at commit (9.25).\n"
             "- EFFICIENCY: most work units require ZERO tool calls: use matching curated "
             "parts and the verified generic defaults above directly, without rechecking them. "

@@ -42,6 +42,12 @@ from .synthesis.validation import (
     bom_parts_on_unknown_sheets,
     collect_validations,
     check_typed_led_current_paths,
+    check_reviewed_device_support_networks,
+    check_reviewed_input_operating_ranges,
+    check_reviewed_power_transfer,
+    check_typed_passive_crossover_values,
+    check_reviewed_constant_current_led_feedback,
+    check_requirement_physical_realization,
     run_solve_subcircuits_smoke,
 )
 
@@ -302,6 +308,16 @@ def run(
 
     results = collect_validations(project_dir, state.project_stem, bom=state.bom)
     results.append(check_typed_led_current_paths(state.architecture, state.bom))
+    results.extend(
+        [
+            check_reviewed_device_support_networks(state.bom),
+            check_reviewed_input_operating_ranges(state.architecture, state.bom),
+            check_reviewed_power_transfer(state.architecture, state.bom),
+            check_typed_passive_crossover_values(state.architecture, state.bom),
+            check_reviewed_constant_current_led_feedback(state.architecture, state.bom),
+            check_requirement_physical_realization(state.architecture, state.bom),
+        ]
+    )
     if smoke:
         results.append(
             run_solve_subcircuits_smoke(project_dir, state.project_stem, timeout_s=smoke_timeout_s)

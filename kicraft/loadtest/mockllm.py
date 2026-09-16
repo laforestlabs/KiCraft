@@ -141,6 +141,66 @@ def load_transcript(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+_INTENT_CONTRACT_KEYS = (
+    "goal",
+    "constraints",
+    "named_parts",
+    "inferred_expertise",
+    "assumptions",
+    "form_factor",
+    "obligations",
+)
+
+
+def transcript_from_reference_row(rows: dict, slug: str) -> dict:
+    """Build a replay transcript from one reviewed reference row.
+
+    The row's ``compiler_input`` already holds every stage payload (it is the
+    input the real compiler boundary was exercised with), so a load-test
+    transcript derived from it can never drift out of contract the way a
+    hand-recorded fixture does: the corpus regression test keeps the rows valid.
+    The intent slot is filtered to the stage contract's own fields and carries
+    ``project_stem``/``questions``, which the driver expects.
+    """
+    row = next(
+        (item for item in rows.get("references") or [] if item["acceptance"]["slug"] == slug),
+        None,
+    )
+    if row is None:
+        raise KeyError(f"no reference row for {slug!r}")
+    compiler_input = row["compiler_input"]
+    intent = {
+        key: compiler_input["intent"][key]
+        for key in _INTENT_CONTRACT_KEYS
+        if key in compiler_input["intent"]
+    }
+    intent["project_stem"] = compiler_input["intent"].get("project_stem") or slug.upper().replace("-", "_")
+    intent["questions"] = []
+    # A reference row may record the architecture *before* the stage normalized
+    # it (the intent-shaped payload the boundary driver consumes).  The stage
+    # driver needs the provider-shaped response, so derive it with the pipeline's
+    # own normalizer rather than hand-writing a response.
+    architecture = compiler_input.get("architecture")
+    if architecture is None:
+        from kicraft.server.stage_contracts import _normalize_stage_response
+
+        architecture = _normalize_stage_response(
+            "architecture", compiler_input["architecture_intent"], {}
+        )
+        architecture = architecture[0] if isinstance(architecture, tuple) else architecture
+    stages = {
+        "intent": intent,
+        "functional_spec": compiler_input["functional_spec"],
+        "architecture": architecture,
+        "bom": compiler_input["bom_candidate"],
+        "wiring": compiler_input["wiring_candidate"],
+    }
+    return {
+        "stem": intent["project_stem"],
+        "stages": {stage: json.dumps(payload) for stage, payload in stages.items()},
+    }
+
+
 class _NullGuard:
     """Spend guard stand-in: never touches the ledger, always reports $0.
 

@@ -104,6 +104,7 @@ class BomComponentGroup(BaseModel):
     symbol: str = Field(pattern=r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.+-]+$")
     footprint: str = Field(pattern=r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.,+-]+$")
     sheet: str
+    assembly: bool = True
     mpn: str | None = None
     datasheet: str | None = None
     sourcing_note: str | None = None
@@ -135,21 +136,15 @@ def _requirement_owns_protected_group(group: BomComponentGroup, requirements) ->
             if len(word) >= 2
         }
 
-    group_token = token(group.id)
-    group_words = words(group.id)
     from kicraft.design.recipes import registered_recipes
 
-    component_tokens = {
-        token(group.value),
-        token(group.mpn or ""),
-        token(group.symbol.partition(":")[2]),
-    } - {""}
+    physical_identity = group.mpn or group.value
+    component_tokens = {token(physical_identity)} - {""}
     component_families = [
         words(registered.definition.family) - {"fixed", "minimal"}
         for registered in registered_recipes()
         if token(registered.definition.exact_part) in component_tokens
     ]
-    physical_identity = group.mpn or group.value
     for requirement in requirements or ():
         exact_part = value(requirement, "exact_part")
         if exact_part:
@@ -170,18 +165,6 @@ def _requirement_owns_protected_group(group: BomComponentGroup, requirements) ->
             family_words == family or family_words <= family for family in component_families
         ):
             return True
-        for raw in (
-            value(requirement, "id"),
-            value(requirement, "family"),
-            value(requirement, "exact_part"),
-        ):
-            if not raw:
-                continue
-            requirement_token = token(raw)
-            if requirement_token and requirement_token in group_token:
-                return True
-            if len(group_words & words(raw)) >= 2:
-                return True
     return False
 
 
@@ -603,6 +586,23 @@ def build_stage_response_contract(
 ) -> StageResponseContract:
     schema = _response_schema(stage) if allow_questions else _slot_response_schema(stage)
     apply_collection_bounds(schema, STAGE_COLLECTION_BOUNDS.get(stage, ()))
+    if stage in {"functional_spec", "architecture"}:
+        source_slots = ("intent",) if stage == "functional_spec" else ("intent", "functional_spec")
+        source_keys = {
+            (row["kind"], row["original_obligation_id"])
+            for slot in source_slots
+            for row in (prompt_state.get(slot) or {}).get("obligations") or []
+        }
+        if source_keys:
+            for variant in schema.get("anyOf") or [schema]:
+                properties = variant.get("properties") or {}
+                if "obligations" not in properties:
+                    continue
+                properties["obligations"]["minItems"] = len(source_keys)
+                required = list(variant.get("required") or [])
+                if "obligations" not in required:
+                    required.append("obligations")
+                variant["required"] = required
     if stage == "architecture":
         functional_spec = prompt_state.get("functional_spec")
         if isinstance(functional_spec, dict):
@@ -710,6 +710,56 @@ class StageSchemaError(ValueError):
         super().__init__(message)
 
 
+def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict) -> None:
+    """Reject dropped or changed source obligations before committing a later slot."""
+    if stage not in {"functional_spec", "architecture"}:
+        return
+    from pydantic import TypeAdapter
+
+    adapter = TypeAdapter(list[models.RequirementObligation])
+
+    def canonical(rows):
+        return [
+            row.model_dump(mode="json", exclude_none=True)
+            for row in adapter.validate_python(rows)
+        ]
+
+    expected = {}
+    source_slots = ("intent",) if stage == "functional_spec" else ("intent", "functional_spec")
+    for slot in source_slots:
+        for row in canonical((prompt_state.get(slot) or {}).get("obligations") or []):
+            key = (row["kind"], row["original_obligation_id"])
+            if key in expected and expected[key] != row:
+                raise StageSchemaError(
+                    f"source obligation {key!r} disagrees between committed stages",
+                    diagnostic={
+                        "code": "conflicting_source_obligation",
+                        "message": "Committed source obligations disagree; repair the owning stage.",
+                        "evidence": [expected[key], row],
+                    },
+                )
+            expected[key] = row
+    if not expected:
+        return
+    actual = {}
+    duplicates = []
+    for row in canonical(payload.get("obligations") or []):
+        key = (row["kind"], row["original_obligation_id"])
+        if key in actual:
+            duplicates.append(row)
+        actual[key] = row
+    missing_or_changed = [row for key, row in expected.items() if actual.get(key) != row]
+    if missing_or_changed or duplicates:
+        raise StageSchemaError(
+            "mandatory source obligations were omitted, changed, or duplicated",
+            diagnostic={
+                "code": "source_obligation_not_retained",
+                "message": "Retain the complete original typed obligation at this stage.",
+                "evidence": missing_or_changed + duplicates,
+            },
+        )
+
+
 def _sheet_owns_usb_c_connector(sheet: dict) -> bool:
     """Distinguish a receptacle from sheets merely carrying its signals."""
     name = str(sheet.get("name") or "")
@@ -781,6 +831,28 @@ def _validate_lowerer_parameter_contracts(architecture: models.Architecture) -> 
     )
 
 
+def _apply_authoritative_standard_form_factor(payload: dict, prompt_state: dict) -> dict:
+    """Map the original user-owned standard into the architecture response."""
+
+    from kicraft.design.architecture_intent import apply_authoritative_standard_form_factor
+
+    try:
+        return apply_authoritative_standard_form_factor(payload, prompt_state.get("intent"))
+    except ValueError as exc:
+        candidate = payload.get("standard_form_factor")
+        intent = prompt_state.get("intent")
+        form_factor = intent.get("form_factor") if isinstance(intent, dict) else None
+        standard = form_factor.get("standard") if isinstance(form_factor, dict) else None
+        raise StageSchemaError(
+            str(exc),
+            diagnostic={
+                "code": "contradictory_standard_form_factor",
+                "message": str(exc),
+                "evidence": [f"intent={standard}", f"architecture={candidate}"],
+            },
+        ) from exc
+
+
 def _intent_shaped(payload: dict) -> bool:
     """An intent-shaped architecture answer: it declares signals and no canonical net list."""
     return "signals" in payload and "inter_sheet_nets" not in payload
@@ -820,6 +892,9 @@ def _normalize_stage_response(
             # The strict provider envelope requires the key on every answer, so a
             # slot response carries `questions: []`. It is not part of the slot.
             payload = {key: value for key, value in payload.items() if key != "questions"}
+        if stage == "architecture":
+            payload = _apply_authoritative_standard_form_factor(payload, prompt_state)
+        validate_obligation_retention(stage, payload, prompt_state)
         if stage == "intent":
             return IntentStageResponse.model_validate(payload).model_dump(exclude_none=True), 0
         if stage == "architecture":

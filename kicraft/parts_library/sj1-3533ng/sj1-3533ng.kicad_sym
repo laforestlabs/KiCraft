@@ -1,0 +1,25 @@
+(kicad_symbol_lib
+  (version 20231120)
+  (generator kicraft)
+  (symbol "SJ1-3533NG"
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "J" (at 0 7.62 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "SJ1-3533NG" (at 0 -7.62 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "sj1-3533ng:Jack_3.5mm_CUI_SJ1-3533NG_Horizontal" (at 0 -10.16 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Datasheet" "https://www.sameskydevices.com/product/resource/sj1-353xng.pdf" (at 0 -12.70 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Manufacturer" "Same Sky (formerly CUI Devices)" (at 0 -15.24 0) (effects (font (size 1.27 1.27)) hide))
+    (property "MPN" "SJ1-3533NG" (at 0 -17.78 0) (effects (font (size 1.27 1.27)) hide))
+    (property "LCSC Part" "C4992459" (at 0 -20.32 0) (effects (font (size 1.27 1.27)) hide))
+    (property "ki_keywords" "3.5mm audio jack TRS tip ring sleeve" (at 0 -22.86 0) (effects (font (size 1.27 1.27)) hide))
+    (symbol "SJ1-3533NG_0_1"
+      (rectangle (start -5.08 5.08) (end 5.08 -5.08) (stroke (width 0) (type default)) (fill (type background)))
+      (polyline (pts (xy -2.54 2.54) (xy 2.54 2.54) (xy 2.54 -2.54) (xy -2.54 -2.54)) (stroke (width 0) (type default)) (fill (type none)))
+    )
+    (symbol "SJ1-3533NG_1_1"
+      (pin passive line (at 10.16 2.54 180) (length 5.08) (name "SLEEVE (pin 1)" (effects (font (size 1.27 1.27)))) (number "S" (effects (font (size 1.27 1.27)))))
+      (pin passive line (at 10.16 0 180) (length 5.08) (name "TIP (pin 2)" (effects (font (size 1.27 1.27)))) (number "T" (effects (font (size 1.27 1.27)))))
+      (pin passive line (at 10.16 -2.54 180) (length 5.08) (name "RING (pin 3)" (effects (font (size 1.27 1.27)))) (number "R" (effects (font (size 1.27 1.27)))))
+    )
+  )
+)

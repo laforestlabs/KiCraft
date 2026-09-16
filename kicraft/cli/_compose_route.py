@@ -30,15 +30,33 @@ def _route_parent_board(
     if state.composition is None:
         raise RuntimeError("ParentCompositionState has no composition object")
 
+    from kicraft.autoplacer.kicad_routing_tools import KicadRoutingToolsTimeoutError
+
     routed_pcb = stamped_pcb.parent / "parent_routed.kicad_pcb"
     route_cfg = {**cfg, "pcb_path": str(stamped_pcb)}
     try:
         routing_stats = route_with_kicad_routing_tools(
             str(stamped_pcb), str(routed_pcb), route_cfg
         )
+    except KicadRoutingToolsTimeoutError as exc:
+        # A router killed at its deadline leaves no routed board, but it also
+        # proves nothing about routability. Carry that distinction out of this
+        # function so the run reports a deadline instead of asserting the
+        # placement is unroutable (the rc6 text in design/cli_app.py reads it).
+        return {
+            "failed": True,
+            "deadline_exceeded": True,
+            "error": str(exc),
+            "routed_board_path": str(routed_pcb),
+            "_trace_segments": [],
+            "_via_objects": [],
+            "validation": {},
+            "routing_stats": {},
+        }
     except Exception as exc:
         return {
             "failed": True,
+            "deadline_exceeded": False,
             "error": str(exc),
             "routed_board_path": str(routed_pcb),
             "_trace_segments": [],

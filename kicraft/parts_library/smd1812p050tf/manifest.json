@@ -1,0 +1,27 @@
+{
+  "content_hash": "sha256:28660ec8a352b3c388edbc48d864cf435e190f197a62c2b3989ca7b1d9d4e966",
+  "datasheet_url": "https://lcsc.com/product-detail/Surface-Mount-Fuses_0-5A-15V-Self-healing-type_C12558.html",
+  "description": "0.5A 15V",
+  "footprint_name": "F1812",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "SMD1812P050TF",
+  "name": "smd1812p050tf",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored-from-home-after-pin-mapping-review",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C12558"
+  },
+  "symbol_name": "SMD1812P050TF",
+  "tags": [
+    "portable",
+    "reviewed"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": null
+}

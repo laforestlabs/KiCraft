@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:075196be76d06cf8731cf2137244fd574a1b28b385d7d17a53baaaa5c5688a28",
+  "content_hash": "sha256:592d71165412b5d6cd198d95760697ef4fc941b07838eba8b7e04443a64c5b17",
   "datasheet_url": "https://lcsc.com/product-detail/Others_JST-Sales-America__JST-Sales-America-SM04B-SRSS-TB-LF-SN_C160404.html",
   "description": "JST SM04B-SRSS-TB \u2014 4-pin SH-series wire-to-board connector, 1.0mm pitch, side-entry SMD. Used in Qwiic/Stemma QT ecosystem. Mates with JST SHR-04V-S-B crimp housing.",
   "footprint_name": "CONN-SMD_4P-P1.00_SM04B-SRSS-TB-LF-SN",

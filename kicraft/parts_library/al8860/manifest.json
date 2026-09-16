@@ -1,0 +1,31 @@
+{
+  "content_hash": "sha256:ad31fe273916238471abd1dc7f52b981d6529214a1ba27608ea67252f6422dc1",
+  "datasheet_url": "https://www.diodes.com/datasheet/download/AL8860.pdf",
+  "description": "DIODES(\u7f8e\u53f0) AL8860MP-13",
+  "footprint_name": "MSOP-8_L3.0-W3.0-P0.65-LS4.9-BL-EP1.8",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "AL8860MP-13",
+  "name": "al8860",
+  "provenance": {
+    "added_at": "2026-09-16T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "vendored-from-home-after-pin-mapping-review",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C500782"
+  },
+  "symbol_name": "AL8860MP-13",
+  "tags": [
+    "led-driver",
+    "buck",
+    "constant-current",
+    "1a",
+    "portable",
+    "reviewed"
+  ],
+  "version": "1.0.0",
+  "watch_out_for": "MSOP-8EP supports continuous 1.0 A only with the reviewed 0.100-ohm current-set resistor, thermal exposed-pad copper, and one LED whose forward voltage leaves buck headroom from the USB 5 V input."
+}

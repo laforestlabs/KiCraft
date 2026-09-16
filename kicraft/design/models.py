@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -191,6 +191,9 @@ class IntentSlot(BaseModel):
     # the intent stage (LLM + a deterministic extractor at stage-commit). None /
     # shape "rect" means a conventional rectangular board.
     form_factor: FormFactor | None = None
+    # Typed requirements captured from the original brief. Constraints/named
+    # parts remain explanatory; they are not a substitute for these facts.
+    obligations: "list[RequirementObligation]" = Field(default_factory=list)
 
 
 # ---------- Stage 2: Functional spec ----------
@@ -205,6 +208,8 @@ class FunctionalBlock(BaseModel):
     # block into ``count`` sheets sharing a ``replication_group`` so the layout
     # solves ONE and reuses its placement+routing for the rest.
     count: int = 1
+    # The original obligations this functional block is responsible for.
+    obligation_ids: list[str] = Field(default_factory=list)
 
     @field_validator("count")
     @classmethod
@@ -225,6 +230,9 @@ class FunctionalSpec(BaseModel):
     blocks: list[FunctionalBlock]
     connections: list[BlockConnection] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
+    # The functional decomposition carries the same typed original facts into
+    # architecture; the architecture model verifies requirement ownership.
+    obligations: "list[RequirementObligation]" = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _block_names_unique(self):
@@ -365,6 +373,139 @@ CircuitRole = Literal[
 ]
 
 
+InterfacePortDirection = Literal["input", "output", "bidirectional", "passive", "power"]
+
+
+class DeclaredInterfacePort(BaseModel):
+    """A model-declared physical port preserved for later pin and domain checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]*$")
+    direction: InterfacePortDirection
+    function: str = Field(min_length=1)
+    # The named rail/reference is a claim about this exact port, never inferred
+    # from a port name. The architecture compiler verifies the binding exists.
+    supply_rail: str | None = None
+    reference_domain: str | None = None
+
+    # Pin selector as published by the claimed part's symbol/datasheet. It is
+    # intentionally separate from the logical key so BOM/wiring can verify a
+    # declared interface against the actual component pin inventory.
+    pin: str | None = Field(default=None, pattern=PIN_NUMBER_RE.pattern)
+
+class DeclaredInterfaceClaim(BaseModel):
+    """Canonical persisted interface for hardware without a curated recipe."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ports: list[DeclaredInterfacePort] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _port_keys_unique(self):
+        keys = [port.key for port in self.ports]
+        if len(keys) != len(set(keys)):
+            raise ValueError("DeclaredInterfaceClaim port keys must be unique")
+        return self
+
+
+class PhysicalObligation(BaseModel):
+    """A requested physical component class retained from the original intent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["physical"]
+    original_obligation_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    component_class: str = Field(
+        min_length=1,
+        description="Canonical lowercase kebab-case hardware class, for example "
+        "bnc-connector, trim-potentiometer, pin-header, screw-terminal, "
+        "audio-jack-3-5mm, or microcontroller. Use a physical class, not a component label.",
+    )
+
+    @field_validator("component_class", mode="before")
+    @classmethod
+    def _canonical_class(cls, value: object) -> object:
+        return value.strip().casefold().replace("_", "-") if isinstance(value, str) else value
+
+
+class QuantityObligation(BaseModel):
+    """A required number of independently present implementation items."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["quantity"]
+    original_obligation_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    subject: str = Field(min_length=1)
+    minimum: int = Field(ge=1)
+
+    @field_validator("subject", mode="before")
+    @classmethod
+    def _canonical_subject(cls, value: object) -> object:
+        return value.strip().casefold().replace("_", "-") if isinstance(value, str) else value
+
+
+class AdjustabilityObligation(BaseModel):
+    """A user-adjustable electrical behavior the implementation must retain."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["adjustability"]
+    original_obligation_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    parameter: str = Field(min_length=1)
+    mechanism: str = Field(min_length=1)
+
+
+class ConversionObligation(BaseModel):
+    """A required input-to-output conversion behavior."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["conversion"]
+    original_obligation_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    input_kind: str = Field(min_length=1)
+    output_kind: str = Field(min_length=1)
+    behavior: str = Field(min_length=1)
+
+class QuantitativeObligation(BaseModel):
+    """A numerical limit with its unit and comparison direction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["quantitative"]
+    original_obligation_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    quantity: str = Field(min_length=1)
+    relation: Literal["equal", "minimum", "maximum", "range"]
+    value: float | None = Field(default=None, allow_inf_nan=False)
+    minimum: float | None = Field(default=None, allow_inf_nan=False)
+    maximum: float | None = Field(default=None, allow_inf_nan=False)
+    unit: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _shape(self):
+        if self.relation == "range":
+            if (
+                self.value is not None
+                or self.minimum is None
+                or self.maximum is None
+                or self.minimum > self.maximum
+            ):
+                raise ValueError("range quantitative obligation needs ordered minimum and maximum")
+        elif self.value is None or self.minimum is not None or self.maximum is not None:
+            raise ValueError("scalar quantitative obligation needs value only")
+        return self
+
+
+RequirementObligation = Annotated[
+    PhysicalObligation
+    | QuantityObligation
+    | AdjustabilityObligation
+    | ConversionObligation
+    | QuantitativeObligation,
+    Field(discriminator="kind"),
+]
+
+
 class CircuitRequirement(BaseModel):
     """Bounded implementation requirement emitted by architecture.
 
@@ -380,6 +521,9 @@ class CircuitRequirement(BaseModel):
     family: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]*$")
     exact_part: str | None = None
     parameters: dict[str, JsonScalar] = Field(default_factory=dict)
+    # Canonical fixed-connector role when this generic header is the explicitly
+    # owned host stacking interface of an approved standard form factor.
+    standard_stacking_role: str | None = None
     ports: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -390,6 +534,12 @@ class CircuitRequirement(BaseModel):
         ),
     )
     interfaces: list[str] = Field(default_factory=list)
+    # A complete pin-level claim for uncurated hardware. This is canonical
+    # architecture data, rather than an advisory architecture-level id list.
+    declared_interface: DeclaredInterfaceClaim | None = None
+    # Requirement-local links to original acceptance obligations. Validators
+    # consume these facts rather than trying to recover them from prose.
+    obligations: list[RequirementObligation] = Field(default_factory=list)
     # Exact committed FunctionalSpec block names, never inferred from sheet prose.
     # Empty remains valid for standalone primitive contracts; stage coverage
     # requires explicit membership for a complete architecture.
@@ -403,6 +553,16 @@ class CircuitRequirement(BaseModel):
         if len(names) != len(set(names)):
             raise ValueError("CircuitRequirement.functional_blocks names must be unique")
         return names
+
+    @field_validator("obligations")
+    @classmethod
+    def _obligations_have_unique_source_ids(
+        cls, obligations: list[RequirementObligation]
+    ) -> list[RequirementObligation]:
+        keys = [(obligation.kind, obligation.original_obligation_id) for obligation in obligations]
+        if len(keys) != len(set(keys)):
+            raise ValueError("CircuitRequirement obligation kind/source pairs must be unique")
+        return obligations
 
 
 class RecipePinAllocation(BaseModel):
@@ -479,8 +639,13 @@ class Architecture(BaseModel):
     power_nets: list[str]
     inter_sheet_nets: list[InterSheetNet]
     assumptions: list[str] = Field(default_factory=list)
+    # Approved standard whose fixed connector map is owned by requirements.
+    standard_form_factor: str | None = None
     recipe_selections: list[RecipeSelection] = Field(default_factory=list)
     requirements: list[CircuitRequirement] = Field(default_factory=list)
+    # Canonical original facts survive recipe resolution and all later stage
+    # normalization. Every row must be retained verbatim by one requirement.
+    obligations: list[RequirementObligation] = Field(default_factory=list)
     recipe_resolution: list[RecipeResolutionRecord] = Field(default_factory=list)
     unresolved_requirement_ids: list[str] = Field(default_factory=list)
     protected_identities: list[str] = Field(default_factory=list)
@@ -543,6 +708,29 @@ class Architecture(BaseModel):
             raise ValueError(
                 f"unresolved requirement ids are unknown: {sorted(unknown_unresolved)}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _obligations_are_owned_verbatim(self):
+        expected = {
+            (row.kind, row.original_obligation_id): row.model_dump(mode="json")
+            for row in self.obligations
+        }
+        if len(expected) != len(self.obligations):
+            raise ValueError("Architecture obligations have duplicate kind/source pairs")
+        owned_rows = [
+            row
+            for requirement in self.requirements
+            for row in requirement.obligations
+        ]
+        owned = {
+            (row.kind, row.original_obligation_id): row.model_dump(mode="json")
+            for row in owned_rows
+        }
+        if len(owned) != len(owned_rows):
+            raise ValueError("Architecture obligation is owned by more than one requirement")
+        if owned != expected:
+            raise ValueError("Architecture obligations do not exactly match requirement ownership")
         return self
 
     @model_validator(mode="after")
@@ -1261,3 +1449,10 @@ class ConversationState(BaseModel):
         """Stages overwrite their own slot — questions are slot-scoped too."""
         kept = [q for q in self.open_questions if q.stage != stage]
         self.open_questions = kept + list(new)
+
+
+# These upstream classes refer to the architecture obligation union declared
+# later in this module. Resolve the forward annotations once the complete
+# canonical vocabulary is available.
+IntentSlot.model_rebuild()
+FunctionalSpec.model_rebuild()
