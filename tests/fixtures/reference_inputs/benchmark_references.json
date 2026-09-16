@@ -6216,8 +6216,9 @@
               "sheet": "AUDIO BUFFER",
               "symbol": "Device:R",
               "footprint": "Resistor_SMD:R_0603_1608Metric",
-              "mpn": "ERJ-3EKF1002V",
-              "datasheet": "https://industrial.panasonic.com/cdbs/www-data/pdf/RDM0000/AOA0000C304.pdf"
+              "mpn": "FRC0603F1002TS",
+              "datasheet": "https://industrial.panasonic.com/cdbs/www-data/pdf/RDM0000/AOA0000C304.pdf",
+              "sourcing_note": "Panasonic reviewed 0603 resistor record; the requested ERJ-3EKF1002V order code is not stocked."
             },
             {
               "id": "bias_and_output_resistors",
@@ -6262,7 +6263,13 @@
             "The original brief names no power inlet and the jack count is exactly four, so the reviewed reference adds one 2-pin 2.54 mm header (pin1=+5V, pin2=AGND) as the external 5 V inlet; it is not a fifth jack.",
             "The 100 kOhm bias/output resistors keep the reviewed design value; the reviewed 0603 resistor record is 10 kOhm (ERJ-3EKF1002V), so the 100 kOhm order code is recorded as a pending sourcing gap rather than substituted silently."
           ],
-          "substitutions": []
+          "substitutions": [
+            {
+              "wanted": "ERJ-3EKF1002V",
+              "got": "FRC0603F1002TS",
+              "reason": "the Panasonic order code is not stocked in the reviewed catalogue; the reviewed, in-stock 10k 1% 0603 part is used instead"
+            }
+          ]
         },
         "wiring_candidate": {
           "pins": [
@@ -6327,17 +6334,17 @@
               "net": "AGND"
             },
             {
-              "ref": "J1",
+              "ref": "J6",
               "pin": "S",
               "net": "AGND"
             },
             {
-              "ref": "J1",
+              "ref": "J6",
               "pin": "T",
               "net": "CH1_IN"
             },
             {
-              "ref": "J1",
+              "ref": "J6",
               "pin": "R",
               "no_connect": true
             },
@@ -6397,22 +6404,22 @@
               "net": "AGND"
             },
             {
-              "ref": "J5",
+              "ref": "J1",
               "pin": "1",
               "net": "CH1_OUT"
             },
             {
-              "ref": "J2",
+              "ref": "J7",
               "pin": "S",
               "net": "AGND"
             },
             {
-              "ref": "J2",
+              "ref": "J7",
               "pin": "T",
               "net": "CH2_IN"
             },
             {
-              "ref": "J2",
+              "ref": "J7",
               "pin": "R",
               "no_connect": true
             },
@@ -6472,22 +6479,22 @@
               "net": "AGND"
             },
             {
-              "ref": "J6",
+              "ref": "J2",
               "pin": "1",
               "net": "CH2_OUT"
             },
             {
-              "ref": "J3",
+              "ref": "J8",
               "pin": "S",
               "net": "AGND"
             },
             {
-              "ref": "J3",
+              "ref": "J8",
               "pin": "T",
               "net": "CH3_IN"
             },
             {
-              "ref": "J3",
+              "ref": "J8",
               "pin": "R",
               "no_connect": true
             },
@@ -6547,22 +6554,22 @@
               "net": "AGND"
             },
             {
-              "ref": "J7",
+              "ref": "J3",
               "pin": "1",
               "net": "CH3_OUT"
             },
             {
-              "ref": "J4",
+              "ref": "J9",
               "pin": "S",
               "net": "AGND"
             },
             {
-              "ref": "J4",
+              "ref": "J9",
               "pin": "T",
               "net": "CH4_IN"
             },
             {
-              "ref": "J4",
+              "ref": "J9",
               "pin": "R",
               "no_connect": true
             },
@@ -6622,17 +6629,17 @@
               "net": "AGND"
             },
             {
-              "ref": "J8",
+              "ref": "J4",
               "pin": "1",
               "net": "CH4_OUT"
             },
             {
-              "ref": "J9",
+              "ref": "J5",
               "pin": "1",
               "net": "+5V"
             },
             {
-              "ref": "J9",
+              "ref": "J5",
               "pin": "2",
               "net": "AGND"
             }
@@ -6838,70 +6845,72 @@
               },
               "parameters": {},
               "interfaces": [],
-              "declared_ports": [
-                {
-                  "key": "vdd",
-                  "direction": "power",
-                  "function": "supply",
-                  "pin": "4",
-                  "supply_rail": "+5V"
-                },
-                {
-                  "key": "gnd",
-                  "direction": "power",
-                  "function": "ground",
-                  "pin": "11",
-                  "reference_domain": "AGND"
-                },
-                {
-                  "key": "ch1_in",
-                  "direction": "input",
-                  "function": "amplifier A non-inverting input",
-                  "pin": "3"
-                },
-                {
-                  "key": "ch1_out",
-                  "direction": "output",
-                  "function": "amplifier A output tied to inverting input",
-                  "pin": "1"
-                },
-                {
-                  "key": "ch2_in",
-                  "direction": "input",
-                  "function": "amplifier B non-inverting input",
-                  "pin": "5"
-                },
-                {
-                  "key": "ch2_out",
-                  "direction": "output",
-                  "function": "amplifier B output tied to inverting input",
-                  "pin": "7"
-                },
-                {
-                  "key": "ch3_in",
-                  "direction": "input",
-                  "function": "amplifier C non-inverting input",
-                  "pin": "10"
-                },
-                {
-                  "key": "ch3_out",
-                  "direction": "output",
-                  "function": "amplifier C output tied to inverting input",
-                  "pin": "8"
-                },
-                {
-                  "key": "ch4_in",
-                  "direction": "input",
-                  "function": "amplifier D non-inverting input",
-                  "pin": "12"
-                },
-                {
-                  "key": "ch4_out",
-                  "direction": "output",
-                  "function": "amplifier D output tied to inverting input",
-                  "pin": "14"
-                }
-              ]
+              "declared_interface": {
+                "ports": [
+                  {
+                    "key": "vdd",
+                    "direction": "power",
+                    "function": "supply",
+                    "pin": "4",
+                    "supply_rail": "+5V"
+                  },
+                  {
+                    "key": "gnd",
+                    "direction": "power",
+                    "function": "ground",
+                    "pin": "11",
+                    "reference_domain": "AGND"
+                  },
+                  {
+                    "key": "ch1_in",
+                    "direction": "input",
+                    "function": "amplifier A non-inverting input",
+                    "pin": "3"
+                  },
+                  {
+                    "key": "ch1_out",
+                    "direction": "output",
+                    "function": "amplifier A output tied to inverting input",
+                    "pin": "1"
+                  },
+                  {
+                    "key": "ch2_in",
+                    "direction": "input",
+                    "function": "amplifier B non-inverting input",
+                    "pin": "5"
+                  },
+                  {
+                    "key": "ch2_out",
+                    "direction": "output",
+                    "function": "amplifier B output tied to inverting input",
+                    "pin": "7"
+                  },
+                  {
+                    "key": "ch3_in",
+                    "direction": "input",
+                    "function": "amplifier C non-inverting input",
+                    "pin": "10"
+                  },
+                  {
+                    "key": "ch3_out",
+                    "direction": "output",
+                    "function": "amplifier C output tied to inverting input",
+                    "pin": "8"
+                  },
+                  {
+                    "key": "ch4_in",
+                    "direction": "input",
+                    "function": "amplifier D non-inverting input",
+                    "pin": "12"
+                  },
+                  {
+                    "key": "ch4_out",
+                    "direction": "output",
+                    "function": "amplifier D output tied to inverting input",
+                    "pin": "14"
+                  }
+                ]
+              }
             },
             {
               "id": "power_input",
@@ -6956,7 +6965,7 @@
             "Each SJ1-3533NG is used as a TS mono line input: sleeve contact S is AGND, tip contact T is the channel input, and ring contact R is deliberately NC (not shorted).",
             "Inputs are at most 2.0 Vpp sine centered about external AC ground; each input and output is AC coupled by a reviewed 10 uF 0603 X5R part into a 100 kOhm DC path, so the nominal coupling corner is 1/(2*pi*100k*10uF) = 0.159 Hz.",
             "The four output loads are at least 10 kohm and are not headphones, speakers, or direct cable-capacitive loads.",
-            "MCP6004 runs from +5V and AGND, with VREF=2.5V from a 10k/10k divider and bypass; all four amplifiers are unity followers about VREF.",
+            "The quad op-amp runs from +5V and AGND, with VREF=2.5V from a 10k/10k divider and bypass; all four amplifiers are unity followers about VREF.",
             "The original brief names no power inlet and the jack count is exactly four, so the reviewed reference adds one 2-pin 2.54 mm header (pin1=+5V, pin2=AGND) as the external 5 V inlet; it is not a fifth jack."
           ],
           "named_parts": [

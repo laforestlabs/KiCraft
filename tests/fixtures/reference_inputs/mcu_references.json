@@ -1172,7 +1172,60 @@
           ],
           "comms_protocols": [],
           "declared_interfaces": [],
-          "inter_sheet_nets": [],
+          "inter_sheet_nets": [
+            {
+              "name": "I2C_SCL",
+              "endpoints": [
+                {
+                  "sheet": "MCU",
+                  "direction": "bidirectional"
+                },
+                {
+                  "sheet": "SENSOR",
+                  "direction": "bidirectional"
+                }
+              ]
+            },
+            {
+              "name": "I2C_SDA",
+              "endpoints": [
+                {
+                  "sheet": "MCU",
+                  "direction": "bidirectional"
+                },
+                {
+                  "sheet": "SENSOR",
+                  "direction": "bidirectional"
+                }
+              ]
+            },
+            {
+              "name": "USB_DM",
+              "endpoints": [
+                {
+                  "sheet": "MCU",
+                  "direction": "bidirectional"
+                },
+                {
+                  "sheet": "USB",
+                  "direction": "bidirectional"
+                }
+              ]
+            },
+            {
+              "name": "USB_DP",
+              "endpoints": [
+                {
+                  "sheet": "MCU",
+                  "direction": "bidirectional"
+                },
+                {
+                  "sheet": "USB",
+                  "direction": "bidirectional"
+                }
+              ]
+            }
+          ],
           "mcu_present": true,
           "power_nets": [
             "3V3",
@@ -1191,9 +1244,13 @@
             {
               "exact_part": "ESP32-S3-WROOM-1-N8R8",
               "family": "esp32-s3-wroom-1-module",
-              "functional_blocks": [],
+              "functional_blocks": [
+                "MCU"
+              ],
               "id": "esp32s3",
-              "interfaces": [],
+              "interfaces": [
+                "i2c_controller"
+              ],
               "parameters": {
                 "expected_recipe": "esp32-s3-wroom-1-minimal@1",
                 "native_usb": true
@@ -1202,10 +1259,10 @@
                 "gnd": "GND",
                 "i2c_scl": "I2C_SCL",
                 "i2c_sda": "I2C_SDA",
-                "status_led": "STATUS_LED",
                 "usb_dm": "USB_DM",
                 "usb_dp": "USB_DP",
-                "vdd": "3V3"
+                "vdd": "3V3",
+                "output_status_led": "STATUS_LED"
               },
               "role": "mcu_core",
               "sheet": "MCU"
@@ -1271,7 +1328,9 @@
               },
               "exact_part": "BME280",
               "family": "bme280",
-              "functional_blocks": [],
+              "functional_blocks": [
+                "SENSOR"
+              ],
               "id": "bme280",
               "interfaces": [],
               "parameters": {
@@ -1293,7 +1352,9 @@
             {
               "exact_part": "USB-C-USB2-DEVICE",
               "family": "usb-c-usb2-device",
-              "functional_blocks": [],
+              "functional_blocks": [
+                "USB"
+              ],
               "id": "usb",
               "interfaces": [],
               "parameters": {},
@@ -1308,7 +1369,9 @@
             },
             {
               "family": "current-limited-status-led",
-              "functional_blocks": [],
+              "functional_blocks": [
+                "STATUS"
+              ],
               "id": "status_led",
               "interfaces": [],
               "parameters": {
@@ -1383,7 +1446,7 @@
               "id": "status_led",
               "quantity": 1,
               "reference_prefix": "D",
-              "sheet": "SENSOR",
+              "sheet": "MCU",
               "symbol": "Device:LED",
               "value": "Green LED"
             },
@@ -1392,7 +1455,7 @@
               "id": "status_led_resistor",
               "quantity": 1,
               "reference_prefix": "R",
-              "sheet": "SENSOR",
+              "sheet": "MCU",
               "symbol": "Device:R",
               "value": "1k 1%"
             }
@@ -1463,7 +1526,7 @@
             "USB-C",
             "status LED"
           ],
-          "goal": "esp32-s3-sensor reference realization",
+          "goal": "An ESP32-S3 environmental sensor node: BME280 temp/humidity/pressure, USB-C, and a status LED.",
           "inferred_expertise": "expert",
           "named_parts": [
             "ESP32-S3",
@@ -1555,12 +1618,62 @@
             {
               "net": "STATUS_LED",
               "pin": "1",
-              "ref": "R1"
+              "ref": "R7"
             },
             {
               "net": "STATUS_LED_ANODE",
               "pin": "2",
-              "ref": "R1"
+              "ref": "R7"
+            },
+            {
+              "ref": "U3",
+              "pin": "1",
+              "net": "GND"
+            },
+            {
+              "ref": "U3",
+              "pin": "2",
+              "net": "3V3"
+            },
+            {
+              "ref": "U3",
+              "pin": "3",
+              "net": "I2C_SDA"
+            },
+            {
+              "ref": "U3",
+              "pin": "4",
+              "net": "I2C_SCL"
+            },
+            {
+              "ref": "U3",
+              "pin": "5",
+              "net": "GND"
+            },
+            {
+              "ref": "U3",
+              "pin": "6",
+              "net": "3V3"
+            },
+            {
+              "ref": "U3",
+              "pin": "7",
+              "net": "GND"
+            },
+            {
+              "ref": "U3",
+              "pin": "8",
+              "net": "3V3"
+            },
+            {
+              "ref": "C4",
+              "pin": "1",
+              "net": "3V3"
+            },
+            {
+              "ref": "C4",
+              "pin": "2",
+              "net": "GND"
             }
           ]
         }
@@ -1776,7 +1889,7 @@
                   "sheet": "RF"
                 }
               ],
-              "name": "RF_ANT"
+              "name": "RF_IC"
             },
             {
               "endpoints": [
@@ -1863,7 +1976,7 @@
                 "button": "USER_BUTTON",
                 "gnd": "GND",
                 "reset_n": "RESET_N",
-                "rf": "RF_ANT",
+                "rf": "RF_IC",
                 "swdclk": "SWCLK",
                 "swdio": "SWDIO",
                 "vdd": "VBAT"
@@ -1883,6 +1996,7 @@
                 "keepout_required": true
               },
               "ports": {
+                "rf_in": "RF_IC",
                 "feed": "RF_ANT",
                 "gnd": "GND"
               },
@@ -1909,7 +2023,7 @@
                 ]
               },
               "exact_part": "BS-07-A1BJ001",
-              "family": "cr2032-holder",
+              "family": "coin-cell-holder",
               "functional_blocks": [
                 "BATTERY"
               ],
@@ -2008,18 +2122,7 @@
               "sheet": "MCU",
               "sourcing_note": "Reviewed R7 reel identity; library carrier MPN is NRF52840-QIAA-R / LCSC C190794.",
               "symbol": "nrf52840-qiaa-r:NRF52840-QIAA-R",
-              "value": "NRF52840-QIAA-R7"
-            },
-            {
-              "datasheet": "https://www.lcsc.com/datasheet/C2979167.pdf",
-              "footprint": "Battery:BatteryHolder_MYOUNG_BS-07-A1BJ001_CR2032",
-              "id": "cr2032_holder",
-              "mpn": "BS-07-A1BJ001",
-              "quantity": 1,
-              "reference_prefix": "BT",
-              "sheet": "POWER",
-              "symbol": "Device:Battery_Cell",
-              "value": "BS-07-A1BJ001 CR2032 holder"
+              "value": "nRF52840 BLE SoC"
             },
             {
               "datasheet": "https://www.lcsc.com/datasheet/C2886894.pdf",
@@ -2043,12 +2146,12 @@
               "value": "1.0 mm exposed SWD test pad"
             },
             {
-              "footprint": "Crystal:Crystal_SMD_2016-2Pin_2.0x1.6mm",
+              "footprint": "Crystal:Crystal_SMD_2012-2Pin_2.0x1.2mm",
               "id": "hfxo",
               "quantity": 1,
               "reference_prefix": "X",
               "sheet": "MCU",
-              "sourcing_note": "Reviewed engineering value only (no order code asserted): 32 MHz HFXO, 8 pF load, 10 ppm, per the nRF52840 clock requirements; stock KiCad Device:Crystal pair on the 2016 2-pad land pattern.",
+              "sourcing_note": "Reviewed engineering value only (no order code asserted): 32 MHz HFXO, 8 pF load, 10 ppm, per the nRF52840 clock requirements; stock KiCad Device:Crystal pair on the 2012 2-pad land pattern.",
               "symbol": "Device:Crystal",
               "value": "32 MHz 8 pF 10 ppm crystal"
             },
@@ -2310,7 +2413,7 @@
             "CR2032",
             "nRF52840-QIAA-R7",
             "2.4 GHz chip antenna",
-            "BS-07-A1BJ001 CR2032 holder",
+            "BS-07-A1BJ001",
             "SWD pads"
           ],
           "obligations": [],
@@ -2491,14 +2594,224 @@
               "ref": "U1"
             },
             {
-              "net": "VBAT",
-              "pin": "1",
-              "ref": "BT1"
+              "ref": "U1",
+              "pin": "A8",
+              "no_connect": true
             },
             {
-              "net": "GND",
-              "pin": "2",
-              "ref": "BT1"
+              "ref": "U1",
+              "pin": "A10",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "A12",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "A14",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "A16",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "A20",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AC9",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AC11",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AC15",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AC17",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AC19",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AC21",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AD8",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AD10",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AD12",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AD16",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AD18",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AD20",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "AD22",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "B9",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "B11",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "B13",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "B15",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "B17",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "B19",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "G1",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "H2",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "J1",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "J24",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "K2",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "L1",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "L24",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "M2",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "N1",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "P2",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "P23",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "R1",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "R24",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "T23",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "U1",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "U24",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "V23",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "W24",
+              "no_connect": true
+            },
+            {
+              "ref": "U1",
+              "pin": "Y23",
+              "no_connect": true
             },
             {
               "net": "USER_BUTTON",
@@ -2721,12 +3034,12 @@
               "ref": "L3"
             },
             {
-              "net": "ANT_FEED",
+              "net": "RF_ANT",
               "pin": "2",
               "ref": "L3"
             },
             {
-              "net": "ANT_FEED",
+              "net": "RF_ANT",
               "pin": "1",
               "ref": "AE1"
             },
@@ -3053,25 +3366,25 @@
                     "direction": "bidirectional",
                     "function": "SWD data",
                     "key": "swdio",
-                    "pin": "PA13"
+                    "pin": "23"
                   },
                   {
                     "direction": "input",
                     "function": "SWD clock",
                     "key": "swclk",
-                    "pin": "PA14"
+                    "pin": "24"
                   },
                   {
                     "direction": "bidirectional",
                     "function": "I2C data",
                     "key": "i2c_sda",
-                    "pin": "PB7"
+                    "pin": "30"
                   },
                   {
                     "direction": "output",
                     "function": "I2C clock",
                     "key": "i2c_scl",
-                    "pin": "PB6"
+                    "pin": "29"
                   }
                 ]
               },
@@ -3109,25 +3422,25 @@
                     "direction": "bidirectional",
                     "function": "50ohm antenna port",
                     "key": "rf",
-                    "pin": "ANT"
+                    "pin": "9"
                   },
                   {
                     "direction": "input",
                     "function": "SPI clock",
                     "key": "sck",
-                    "pin": "SCK"
+                    "pin": "4"
                   },
                   {
                     "direction": "input",
                     "function": "SPI MOSI",
                     "key": "mosi",
-                    "pin": "MOSI"
+                    "pin": "3"
                   },
                   {
                     "direction": "output",
                     "function": "SPI MISO",
                     "key": "miso",
-                    "pin": "MISO"
+                    "pin": "2"
                   }
                 ]
               },
@@ -3171,7 +3484,8 @@
                 "shell": "GND"
               },
               "role": "connector",
-              "sheet": "LORA"
+              "sheet": "LORA",
+              "exact_part": "132289"
             },
             {
               "family": "screw-terminal-4p",
@@ -3188,7 +3502,8 @@
                 "vdd": "3V3"
               },
               "role": "connector",
-              "sheet": "SENSOR"
+              "sheet": "SENSOR",
+              "exact_part": "WJ126V-5.0-04P-14-00A"
             },
             {
               "family": "swd-pads",
@@ -3226,6 +3541,26 @@
               },
               "role": "power_input",
               "sheet": "POWER"
+            },
+            {
+              "id": "i2c_pullups",
+              "sheet": "SENSOR",
+              "role": "analog_block",
+              "family": "i2c-pullups",
+              "parameters": {
+                "speed_hz": 100000,
+                "bus_capacitance_pf": 100,
+                "voltage": 3.3
+              },
+              "ports": {
+                "vdd": "3V3",
+                "sda": "I2C_SDA",
+                "scl": "I2C_SCL"
+              },
+              "interfaces": [],
+              "functional_blocks": [
+                "SENSOR"
+              ]
             }
           ],
           "sheets": [
@@ -3348,11 +3683,11 @@
               "datasheet": "https://industrial.panasonic.com/cdbs/www-data/pdf/RDM0000/AOA0000C304.pdf",
               "footprint": "Resistor_SMD:R_0603_1608Metric",
               "id": "boot0_pulldown",
-              "mpn": "ERJ-3EKF1002V",
+              "mpn": "FRC0603F1002TS",
               "quantity": 1,
               "reference_prefix": "R",
               "sheet": "MCU",
-              "sourcing_note": "cached LCSC lookup C191124; retail stock 325600",
+              "sourcing_note": "Panasonic reviewed 0603 resistor record; the requested ERJ-3EKF1002V order code is not stocked.",
               "symbol": "Device:R",
               "value": "10k 1%"
             },
@@ -3360,23 +3695,11 @@
               "datasheet": "https://industrial.panasonic.com/cdbs/www-data/pdf/RDM0000/AOA0000C304.pdf",
               "footprint": "Resistor_SMD:R_0603_1608Metric",
               "id": "reset_pullup",
-              "mpn": "ERJ-3EKF1002V",
+              "mpn": "FRC0603F1002TS",
               "quantity": 1,
               "reference_prefix": "R",
               "sheet": "MCU",
-              "sourcing_note": "cached LCSC lookup C191124; retail stock 325600",
-              "symbol": "Device:R",
-              "value": "10k 1%"
-            },
-            {
-              "datasheet": "https://industrial.panasonic.com/cdbs/www-data/pdf/RDM0000/AOA0000C304.pdf",
-              "footprint": "Resistor_SMD:R_0603_1608Metric",
-              "id": "i2c_pullups",
-              "mpn": "ERJ-3EKF1002V",
-              "quantity": 2,
-              "reference_prefix": "R",
-              "sheet": "SENSOR",
-              "sourcing_note": "cached LCSC lookup C191124; retail stock 325600",
+              "sourcing_note": "Panasonic reviewed 0603 resistor record; the requested ERJ-3EKF1002V order code is not stocked.",
               "symbol": "Device:R",
               "value": "10k 1%"
             },
@@ -3429,7 +3752,13 @@
               "value": "WJ126V-5.0-02P-14-00A"
             }
           ],
-          "substitutions": []
+          "substitutions": [
+            {
+              "wanted": "ERJ-3EKF1002V",
+              "got": "FRC0603F1002TS",
+              "reason": "the Panasonic order code is not stocked in the reviewed catalogue; the reviewed, in-stock 10k 1% 0603 part is used instead"
+            }
+          ]
         },
         "functional_spec": {
           "assumptions": [
@@ -3537,17 +3866,15 @@
             "SWD",
             "regulated 3.3V power input"
           ],
-          "goal": "LoRa sensor node with exact DreamLNK DL-RFM95-868M Semtech-SX1276 module, STM32L031K6T6 MCU, Amphenol 132289 edge SMA, 4-position I2C sensor terminal, SWD and externally regulated 3.3V input.",
+          "goal": "A LoRa node: an SX1276 module with an SMA antenna connector, an STM32L0 MCU, and a screw-terminal sensor input.",
           "inferred_expertise": "expert",
           "named_parts": [
             "SX1276",
-            "STM32L0",
             "STM32L031K6T6",
             "DL-RFM95-868M",
-            "Amphenol 132289 edge SMA",
-            "WJ126V-5.0-04P-14-00A sensor terminal",
-            "WJ126V-5.0-02P-14-00A power terminal",
-            "SWD 1x05 header"
+            "132289",
+            "WJ126V-5.0-04P-14-00A",
+            "WJ126V-5.0-02P-14-00A"
           ],
           "obligations": [],
           "project_stem": "LORA_NODE"
@@ -3886,97 +4213,67 @@
             {
               "net": "BOOT0",
               "pin": "1",
-              "ref": "R1"
+              "ref": "R3"
             },
             {
               "net": "GND",
               "pin": "2",
-              "ref": "R1"
+              "ref": "R3"
             },
             {
               "net": "3V3",
               "pin": "1",
-              "ref": "R2"
+              "ref": "R4"
             },
             {
               "net": "RESET_N",
               "pin": "2",
-              "ref": "R2"
+              "ref": "R4"
             },
             {
               "net": "3V3",
               "pin": "1",
-              "ref": "R3"
-            },
-            {
-              "net": "I2C_SDA",
-              "pin": "2",
-              "ref": "R3"
-            },
-            {
-              "net": "3V3",
-              "pin": "1",
-              "ref": "R4"
-            },
-            {
-              "net": "I2C_SCL",
-              "pin": "2",
-              "ref": "R4"
-            },
-            {
-              "net": "RF_ANT",
-              "pin": "1",
-              "ref": "J1"
+              "ref": "J3"
             },
             {
               "net": "GND",
               "pin": "2",
-              "ref": "J1"
-            },
-            {
-              "net": "3V3",
-              "pin": "1",
-              "ref": "J2"
-            },
-            {
-              "net": "GND",
-              "pin": "2",
-              "ref": "J2"
+              "ref": "J3"
             },
             {
               "net": "I2C_SDA",
               "pin": "3",
-              "ref": "J2"
+              "ref": "J3"
             },
             {
               "net": "I2C_SCL",
               "pin": "4",
-              "ref": "J2"
+              "ref": "J3"
             },
             {
               "net": "SWDIO",
               "pin": "1",
-              "ref": "J3"
+              "ref": "J1"
             },
             {
               "net": "SWCLK",
               "pin": "2",
-              "ref": "J3"
+              "ref": "J1"
             },
             {
               "net": "RESET_N",
               "pin": "3",
-              "ref": "J3"
+              "ref": "J1"
             },
             {
               "net": "3V3",
               "pin": "4",
-              "ref": "J3"
+              "ref": "J1"
             },
             {
               "net": "GND",
               "pin": "5",
-              "ref": "J3"
+              "ref": "J1"
             },
             {
               "net": "3V3",
@@ -3987,6 +4284,31 @@
               "net": "GND",
               "pin": "2",
               "ref": "J4"
+            },
+            {
+              "ref": "J2",
+              "pin": "1",
+              "net": "RF_ANT"
+            },
+            {
+              "ref": "J2",
+              "pin": "2",
+              "net": "GND"
+            },
+            {
+              "ref": "J2",
+              "pin": "3",
+              "net": "GND"
+            },
+            {
+              "ref": "J2",
+              "pin": "4",
+              "net": "GND"
+            },
+            {
+              "ref": "J2",
+              "pin": "5",
+              "net": "GND"
             }
           ]
         }
@@ -5236,7 +5558,21 @@
             "5V",
             "GND"
           ],
-          "inter_sheet_nets": [],
+          "inter_sheet_nets": [
+            {
+              "name": "LED_DATA",
+              "endpoints": [
+                {
+                  "sheet": "MCU",
+                  "direction": "output"
+                },
+                {
+                  "sheet": "LEDS",
+                  "direction": "input"
+                }
+              ]
+            }
+          ],
           "assumptions": [
             "JST-PH supplies 5V/GND and is inside the 60mm circular outline, not on its perimeter.",
             "Worst case full-white current is 12*60mA=720mA; ATtiny412 runs at 5V with accessible UPDI."
@@ -5255,10 +5591,12 @@
                 "vdd": "5V",
                 "gnd": "GND",
                 "updi": "UPDI",
-                "data": "LED_DATA"
+                "output_led_data": "LED_DATA"
               },
               "interfaces": [],
-              "functional_blocks": [],
+              "functional_blocks": [
+                "MCU"
+              ],
               "exact_part": "ATTINY412-SSN"
             },
             {
@@ -5277,7 +5615,9 @@
                 "data_in": "LED_DATA"
               },
               "interfaces": [],
-              "functional_blocks": [],
+              "functional_blocks": [
+                "PIXELS"
+              ],
               "exact_part": "WS2812B-B/T"
             },
             {
@@ -5294,28 +5634,15 @@
                 "negative": "GND"
               },
               "interfaces": [],
-              "functional_blocks": []
-            },
-            {
-              "id": "updi",
-              "sheet": "MCU",
-              "role": "programming",
-              "family": "updi-pads",
-              "parameters": {},
-              "ports": {
-                "updi": "UPDI",
-                "vdd": "5V",
-                "gnd": "GND"
-              },
-              "interfaces": [],
-              "functional_blocks": []
+              "functional_blocks": [
+                "POWER"
+              ]
             }
           ],
           "recipe_selections": [],
           "recipe_resolution": [],
           "unresolved_requirement_ids": [
-            "jst",
-            "updi"
+            "jst"
           ],
           "protected_identities": [],
           "declared_interfaces": []
@@ -5348,7 +5675,7 @@
         ],
         "intent": {
           "project_stem": "ROUND_LED_RING",
-          "goal": "round-led-ring reference realization",
+          "goal": "A round 60 mm LED ring board: twelve WS2812B addressable LEDs evenly spaced in a circle, driven by an ATtiny412, powered from a 2-pin JST-PH header. No edge connectors.",
           "constraints": [
             "round 60 mm outline",
             "12 WS2812B evenly spaced",
@@ -5447,22 +5774,22 @@
         "wiring_candidate": {
           "pins": [
             {
-              "ref": "J1",
+              "ref": "J2",
               "pin": "1",
               "net": "5V"
             },
             {
-              "ref": "J1",
+              "ref": "J2",
               "pin": "2",
               "net": "GND"
             },
             {
-              "ref": "J1",
+              "ref": "J2",
               "pin": "3",
               "no_connect": true
             },
             {
-              "ref": "J1",
+              "ref": "J2",
               "pin": "4",
               "no_connect": true
             }
@@ -6004,7 +6331,7 @@
           "The 3.3 V rail is owned by the reviewed TLV62569DBVR 2 A buck recipe (tlv62569-3v3@1, 2.5-5.5 V input, power_transfer VIN->SW) rather than the ME6211 linear regulator whose reviewed record carries no source-to-load transfer contract; 5 V VBUS input and the ESP32-C3 3.3 V/0.5 A load are inside reviewed limits."
         ],
         "unresolved_coverage": [
-          "ESP32-C3 native-USB recipe owns BOOT/RESET controls and the ME6211C33M5G-N VBUS LDO. Header is an existing pin-header@1 lowering with full 2x10 pin map; opposite-edge geometry remains final placement/route evidence for Main."
+          "ESP32-C3 native-USB recipe owns BOOT/RESET controls and the TLV62569DBVR 2.5-5.5 V to 3.3 V buck. Header is an existing pin-header@1 lowering with full 2x10 pin map; opposite-edge geometry remains final placement/route evidence for Main."
         ],
         "intent": {
           "project_stem": "ROUNDED_C3_DEVBOARD",
@@ -6095,6 +6422,17 @@
             "Reference chooses 3mm corner radius, USB-C on bottom edge, actual 2x10 2.54mm header on opposite top edge."
           ],
           "obligations": []
+        },
+        "bom_candidate": {
+          "groups": [],
+          "arrays": [],
+          "substitutions": [],
+          "assumptions": [
+            "Every part is owned deterministically: esp32-c3-mini-1-minimal@1 supplies the ESP32-C3-MINI-1-N4 module (flash in package) with its bulk/local/EN decoupling, the EN pull-up and the BOOT/RESET controls; tlv62569-3v3@1 supplies the TLV62569DBVR 2.5-5.5 V to 3.3 V/2 A buck with its 4.7 uH switch inductor, 10 uF input and 22 uF output capacitors and the 100k/22k feedback divider; usb-c-usb2-device@1 supplies the TYPE-C-31-M-12 receptacle with the 5.1k CC pulldowns, the USBLC6-2SC6 ESD array and the 22R USB series pair; pin-header@1 lowers the 2x10 0.1-inch GPIO header. The model authors no groups, and the wiring stage assigns no model-owned pins."
+          ]
+        },
+        "wiring_candidate": {
+          "pins": []
         }
       }
     },

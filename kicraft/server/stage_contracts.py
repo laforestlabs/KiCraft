@@ -435,6 +435,13 @@ def _strict_provider_schema(node):
     interactive contracts already express the slot/questions alternation as one
     object (see ``_response_schema``), so this only has to complete ``required``.
 
+    ``oneOf`` is forbidden *anywhere* in a strict schema, and Pydantic emits it
+    for every discriminated union (the typed ``RequirementObligation`` union is
+    the one that reaches the intent/functional_spec/architecture slots). Its
+    branches are disjoint by their literal ``kind`` discriminator, so the
+    provider envelope rewrites ``oneOf`` to ``anyOf`` -- otherwise OpenAI 400s
+    ``invalid_json_schema`` before the model ever runs.
+
     Only the provider envelope is transformed; ``StageResponseContract.schema``
     (prompt text, in-stream guard allowlist, tests) keeps the canonical schema.
     """
@@ -450,7 +457,14 @@ def _strict_provider_schema(node):
             }
         elif key in ("items", "additionalProperties", "not", "contains"):
             out[key] = _strict_provider_schema(value)
-        elif key in ("anyOf", "oneOf", "allOf", "prefixItems") and isinstance(value, list):
+        elif key in ("anyOf", "oneOf") and isinstance(value, list):
+            # OpenAI strict structured outputs accept `anyOf` and reject `oneOf`.
+            # Merge rather than overwrite so a node carrying both keys keeps every
+            # branch (Pydantic never emits both; this only guards the merge).
+            out.setdefault("anyOf", []).extend(
+                _strict_provider_schema(item) for item in value
+            )
+        elif key in ("allOf", "prefixItems") and isinstance(value, list):
             out[key] = [_strict_provider_schema(item) for item in value]
         else:
             out[key] = value

@@ -334,6 +334,37 @@ def test_bom_contract_closes_group_sheet_and_reuses_schema_object():
     assert "SHEET NAMES ARE CLOSED" in prompt
 
 
+def _schema_keyword_count(node, keyword: str) -> int:
+    """Count `keyword` list-schemas anywhere in a (possibly nested) JSON schema."""
+    if isinstance(node, list):
+        return sum(_schema_keyword_count(item, keyword) for item in node)
+    if not isinstance(node, dict):
+        return 0
+    here = 1 if isinstance(node.get(keyword), list) else 0
+    return here + sum(_schema_keyword_count(value, keyword) for value in node.values())
+
+
+@pytest.mark.parametrize("stage", ["intent", "functional_spec", "architecture", "bom"])
+def test_provider_envelope_never_sends_oneOf(stage) -> None:
+    """The strict provider envelope must contain no `oneOf`/`allOf`.
+
+    OpenAI rejects `oneOf` anywhere in a strict response schema
+    ("'oneOf' is not permitted"), and Pydantic emits it for the discriminated
+    ``RequirementObligation`` union that the intent, functional_spec and
+    architecture slots carry. Sending it verbatim 400s every brief on its first
+    provider call (``provider_request_rejected``, cost 0, one attempt).
+    """
+    state = {"architecture": {"sheets": [{"name": "POWER"}]}} if stage == "bom" else {}
+    contract = build_stage_response_contract(stage, state)
+    provider_schema = contract.response_format["json_schema"]["schema"]
+    assert _schema_keyword_count(provider_schema, "oneOf") == 0
+    assert _schema_keyword_count(provider_schema, "allOf") == 0
+    # The rewrite keeps every branch: the canonical union survives as `anyOf`.
+    assert _schema_keyword_count(provider_schema, "anyOf") >= _schema_keyword_count(
+        contract.schema, "oneOf"
+    )
+
+
 @pytest.fixture
 def round10_breakout_contract():
     # Saved run_06_usb-c-full-breakout final candidate: D_P/D_N are bound by

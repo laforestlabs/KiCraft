@@ -2283,3 +2283,63 @@ def test_model_owned_led_unit_cannot_use_zero_ohm_current_limiters():
     assert (
         next(group for group in validated["groups"] if group["id"] == "limiter")["value"] == "270R"
     )
+
+
+def test_pipeline_authored_bank_is_not_wiped_as_a_sibling_header():
+    """A trusted lowerer bank is its own requirement's implementation.
+
+    The servo bank's stock 1x03 groups carry the same 'header' physical feature
+    the derived edge pin-header demands on the same recipe sheet, so the unit
+    discarded every group and failed ``empty-sheet`` instead of committing the
+    bank the lowerer had already built.
+    """
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {"id": "mcu_core", "sheet": "A", "role": "mcu_core", "family": "esp32-s3-module"},
+        {
+            "id": "bank",
+            "sheet": "A",
+            "role": "connector",
+            "family": "servo-connector-bank",
+            "ports": {"gnd": "GND", "vdd": "+5V_SERVO", "signal0": "PWM0"},
+        },
+        {
+            "id": "edge",
+            "sheet": "A",
+            "role": "connector",
+            "family": "pin-header",
+            "ports": {"pin1": "I2C_SDA", "pin2": "I2C_SCL"},
+        },
+    ]
+    state["architecture"]["recipe_selections"] = [
+        {
+            "recipe": "esp32-s3-mini-1-minimal@1",
+            "instance": "mcu_core",
+            "sheets": {"mcu": "A"},
+            "requirement_ids": ["mcu_core"],
+            "port_bindings": {
+                "vdd": "+3V3",
+                "gnd": "GND",
+                "usb_dm": "USB_DM",
+                "usb_dp": "USB_DP",
+            },
+        }
+    ]
+    unit = StageWorkUnit("bom-r001", "bom", "A", requirement_ids=("bank",))
+    payload = {
+        "groups": [
+            {
+                **_group("servo_headers", "A", prefix="J", quantity=16),
+                "value": "Servo_1x03",
+                "symbol": "Connector_Generic:Conn_01x03",
+                "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+            }
+        ],
+        "_trusted_deterministic_candidate": True,
+        "_lowerer_id": "connector-bank@1",
+        "_lowering_requirement_id": "bank",
+    }
+
+    validated = validate_unit_candidate(unit, payload, state, {})
+
+    assert [group["id"] for group in validated["groups"]] == ["servo_headers"]

@@ -3122,13 +3122,18 @@ def _reviewed_identity_for_bom_part(part):
     )
 
 
-def _declared_port_pin(info, ref: str, port) -> str | None:
-    """Resolve an explicit declared-interface selector, never port-name guessing."""
-    selector = (
+def _declared_pin_selector(port) -> str | None:
+    """The explicit pin selector a declared-interface port carries, else None."""
+    return (
         getattr(port, "pin_selector", None)
         or getattr(port, "pin", None)
         or getattr(port, "pin_name", None)
     )
+
+
+def _declared_port_pin(info, ref: str, port) -> str | None:
+    """Resolve an explicit declared-interface selector, never port-name guessing."""
+    selector = _declared_pin_selector(port)
     if selector is None:
         return None
     selector = str(selector)
@@ -3249,13 +3254,23 @@ def check_requirement_physical_realization(
             continue  # the wiring stage proves the model-owned half
         if declared_interface_scope == "model_owned" and deterministic_owned:
             continue  # the BOM stage already proved the expansion-owned half
-        if len(interface_parts) != 1:
+        # One owning hardware family per declared interface.  A bank of
+        # identical instances (two USB-A power outputs behind two identical load
+        # switches) is a single owned family: every instance carries the same
+        # identity, so the claimed port-to-pin map has to hold on one of its
+        # instances.  Claiming one interface with several different
+        # symbol/footprint/mpn triples stays refused, as does an interface with
+        # no matching instance at all.
+        owners = {
+            (part.symbol, part.footprint, (part.mpn or "").casefold())
+            for part in interface_parts
+        }
+        if not interface_parts or len(owners) != 1:
             bad.append(
                 f"E_DECLARED_INTERFACE {requirement.id!r}: needs exactly one "
                 "identity-matched BOM component with resolved pin inventory"
             )
             continue
-        part = interface_parts[0]
         for port in claim.ports:
             expected_net = requirement.ports.get(port.key)
             if expected_net is None:
@@ -3265,14 +3280,26 @@ def check_requirement_physical_realization(
                 # net-graph comparison has nothing to compare against. Only the
                 # ports the requirement actually binds are checked.
                 continue
-            pin = _declared_port_pin(info, part.ref, port)
-            actual_net = (nets.get(part.ref) or {}).get(pin or "")
-            if pin is None or actual_net != expected_net:
+            found = {
+                part.ref: (nets.get(part.ref) or {}).get(
+                    _declared_port_pin(info, part.ref, port) or ""
+                )
+                for part in interface_parts
+            }
+            if expected_net in found.values():
+                continue
+            if len(found) == 1:
+                (part_ref, actual_net) = next(iter(found.items()))
                 bad.append(
                     f"E_DECLARED_INTERFACE {requirement.id!r}.{port.key}: expected "
-                    f"{expected_net!r} on declared pin selector "
-                    f"{getattr(port, 'pin_selector', None) or getattr(port, 'pin', None) or getattr(port, 'pin_name', None)!r} "
-                    f"of {part.ref}, found {actual_net!r}"
+                    f"{expected_net!r} on declared pin selector {_declared_pin_selector(port)!r} "
+                    f"of {part_ref}, found {actual_net!r}"
+                )
+            else:
+                bad.append(
+                    f"E_DECLARED_INTERFACE {requirement.id!r}.{port.key}: expected "
+                    f"{expected_net!r} on declared pin selector {_declared_pin_selector(port)!r} "
+                    f"of one of {sorted(found)}, found {found}"
                 )
     for (sheet, component_class), demand_rows in sorted(aggregate_demands.items()):
         demanded = sum(minimum for _, minimum in demand_rows)

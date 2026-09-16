@@ -739,7 +739,7 @@
               "id": "max31855",
               "reference_prefix": "U",
               "quantity": 1,
-              "value": "MAX31855KASA+",
+              "value": "MAX31855",
               "symbol": "Sensor_Temperature:MAX31855KASA",
               "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
               "sheet": "THERMOCOUPLE",
@@ -1196,21 +1196,10 @@
         "bom_candidate": {
           "arrays": [],
           "assumptions": [
-            "This is a passive breakout; no USB-PD power role or SuperSpeed impedance target beyond the connector-to-header escape is claimed."
+            "This is a passive breakout; no USB-PD power role or SuperSpeed impedance target beyond the connector-to-header escape is claimed.",
+            "J2/J3 are the vendored BOOMELE 2.54-1*40P直针 breakaway strip cut to 1x07: positions 1-7 carry the broken-out contacts and the 33 unused strip positions are declared no-connect because they are not fitted."
           ],
           "groups": [
-            {
-              "datasheet": "https://cdn.amphenol-cs.com/media/wysiwyg/files/drawing/c12401610_c.pdf",
-              "footprint": "Connector_USB:USB_C_Receptacle_Amphenol_12401610E4-2A",
-              "id": "usb_c",
-              "mpn": "12401610E4-2A",
-              "quantity": 1,
-              "reference_prefix": "J",
-              "sheet": "USB BREAKOUT",
-              "sourcing_note": "Amphenol USB-C receptacle; only the explicitly requested VBUS/GND, CC, SBU, and SuperSpeed contacts are broken out.",
-              "symbol": "Connector:USB_C_Receptacle",
-              "value": "12401610E4-2A"
-            },
             {
               "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x07_P2.54mm_Vertical",
               "id": "usb_header_1",
@@ -1270,144 +1259,404 @@
         "wiring_candidate": {
           "pins": [
             {
-              "net": "VBUS",
-              "pin": "A4",
-              "ref": "J1"
-            },
-            {
-              "net": "GND",
-              "pin": "A1",
-              "ref": "J1"
-            },
-            {
-              "net": "CC1",
-              "pin": "A5",
-              "ref": "J1"
-            },
-            {
-              "net": "CC2",
-              "pin": "B5",
-              "ref": "J1"
-            },
-            {
-              "net": "SBU1",
-              "pin": "A8",
-              "ref": "J1"
-            },
-            {
-              "net": "SBU2",
-              "pin": "B8",
-              "ref": "J1"
-            },
-            {
-              "net": "TX1P",
-              "pin": "A2",
-              "ref": "J1"
-            },
-            {
-              "net": "TX1N",
-              "pin": "A3",
-              "ref": "J1"
-            },
-            {
-              "net": "RX1P",
-              "pin": "A11",
-              "ref": "J1"
-            },
-            {
-              "net": "RX1N",
-              "pin": "A10",
-              "ref": "J1"
-            },
-            {
-              "net": "TX2P",
-              "pin": "B2",
-              "ref": "J1"
-            },
-            {
-              "net": "TX2N",
-              "pin": "B3",
-              "ref": "J1"
-            },
-            {
-              "net": "RX2P",
-              "pin": "B11",
-              "ref": "J1"
-            },
-            {
-              "net": "RX2N",
-              "pin": "B10",
-              "ref": "J1"
-            },
-            {
-              "net": "VBUS",
+              "ref": "J2",
               "pin": "1",
-              "ref": "J2"
+              "net": "VBUS"
             },
             {
-              "net": "GND",
+              "ref": "J2",
               "pin": "2",
-              "ref": "J2"
+              "net": "GND"
             },
             {
-              "net": "CC1",
+              "ref": "J2",
               "pin": "3",
-              "ref": "J2"
+              "net": "CC1"
             },
             {
-              "net": "CC2",
+              "ref": "J2",
               "pin": "4",
-              "ref": "J2"
+              "net": "CC2"
             },
             {
-              "net": "SBU1",
+              "ref": "J2",
               "pin": "5",
-              "ref": "J2"
+              "net": "SBU1"
             },
             {
-              "net": "SBU2",
+              "ref": "J2",
               "pin": "6",
-              "ref": "J2"
+              "net": "SBU2"
             },
             {
-              "net": "TX1P",
+              "ref": "J2",
               "pin": "7",
-              "ref": "J2"
+              "net": "TX1P"
             },
             {
-              "net": "TX1N",
+              "ref": "J2",
+              "pin": "8",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "9",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "10",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "11",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "12",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "13",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "14",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "15",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "16",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "17",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "18",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "19",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "20",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "21",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "22",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "23",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "24",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "25",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "26",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "27",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "28",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "29",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "30",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "31",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "32",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "33",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "34",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "35",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "36",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "37",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "38",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "39",
+              "no_connect": true
+            },
+            {
+              "ref": "J2",
+              "pin": "40",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
               "pin": "1",
-              "ref": "J3"
+              "net": "TX1N"
             },
             {
-              "net": "RX1P",
+              "ref": "J3",
               "pin": "2",
-              "ref": "J3"
+              "net": "RX1P"
             },
             {
-              "net": "RX1N",
+              "ref": "J3",
               "pin": "3",
-              "ref": "J3"
+              "net": "RX1N"
             },
             {
-              "net": "TX2P",
+              "ref": "J3",
               "pin": "4",
-              "ref": "J3"
+              "net": "TX2P"
             },
             {
-              "net": "TX2N",
+              "ref": "J3",
               "pin": "5",
-              "ref": "J3"
+              "net": "TX2N"
             },
             {
-              "net": "RX2P",
+              "ref": "J3",
               "pin": "6",
-              "ref": "J3"
+              "net": "RX2P"
             },
             {
-              "net": "RX2N",
+              "ref": "J3",
               "pin": "7",
-              "ref": "J3"
+              "net": "RX2N"
+            },
+            {
+              "ref": "J3",
+              "pin": "8",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "9",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "10",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "11",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "12",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "13",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "14",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "15",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "16",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "17",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "18",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "19",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "20",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "21",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "22",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "23",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "24",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "25",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "26",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "27",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "28",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "29",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "30",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "31",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "32",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "33",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "34",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "35",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "36",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "37",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "38",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "39",
+              "no_connect": true
+            },
+            {
+              "ref": "J3",
+              "pin": "40",
+              "no_connect": true
             }
           ]
         }
@@ -2056,21 +2305,9 @@
             {
               "datasheet": "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588912405972074496",
               "footprint": "usb-a-24ss-w-2:USB-A-SMD_U-A-24SS-W-2",
-              "id": "port1",
+              "id": "usb_a_outputs",
               "mpn": "U-A-24SS-W-2",
-              "quantity": 1,
-              "reference_prefix": "J",
-              "sheet": "POWER SPLIT",
-              "sourcing_note": "LCSC C530629; Korean Hroparts; 1.5 A USB-A receptacle; stock 9522",
-              "symbol": "usb-a-24ss-w-2:U-A-24SS-W-2",
-              "value": "U-A-24SS-W-2"
-            },
-            {
-              "datasheet": "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588912405972074496",
-              "footprint": "usb-a-24ss-w-2:USB-A-SMD_U-A-24SS-W-2",
-              "id": "port2",
-              "mpn": "U-A-24SS-W-2",
-              "quantity": 1,
+              "quantity": 2,
               "reference_prefix": "J",
               "sheet": "POWER SPLIT",
               "sourcing_note": "LCSC C530629; Korean Hroparts; 1.5 A USB-A receptacle; stock 9522",
@@ -2080,21 +2317,9 @@
             {
               "datasheet": "https://www.ti.com/lit/ds/symlink/tps2553.pdf",
               "footprint": "tps2553dbvr:SOT-23-6_DBV",
-              "id": "switch1",
+              "id": "power_switches",
               "mpn": "TPS2553DBVR",
-              "quantity": 1,
-              "reference_prefix": "U",
-              "sheet": "POWER SPLIT",
-              "sourcing_note": "LCSC C55266; TI; 2.5-6.5 V, 1.5 A current-limited distribution switch; stock 44248",
-              "symbol": "tps2553dbvr:TPS2553DBVR",
-              "value": "TPS2553DBVR"
-            },
-            {
-              "datasheet": "https://www.ti.com/lit/ds/symlink/tps2553.pdf",
-              "footprint": "tps2553dbvr:SOT-23-6_DBV",
-              "id": "switch2",
-              "mpn": "TPS2553DBVR",
-              "quantity": 1,
+              "quantity": 2,
               "reference_prefix": "U",
               "sheet": "POWER SPLIT",
               "sourcing_note": "LCSC C55266; TI; 2.5-6.5 V, 1.5 A current-limited distribution switch; stock 44248",
@@ -2134,7 +2359,7 @@
               "reference_prefix": "C",
               "sheet": "POWER SPLIT",
               "sourcing_note": "LCSC C111253; Kyocera AVX 68 uF 10 V, EIA 3528-21 (B) case on the installed Kemet-B 3528-21 land pattern; two per port",
-              "symbol": "Device:C",
+              "symbol": "Device:CP",
               "value": "68 uF 10 V tantalum ±10%"
             },
             {
@@ -2884,7 +3109,6 @@
           "recipe_selections": [],
           "requirements": [
             {
-              "exact_part": "PZ254V-11-05P",
               "family": "pin-header",
               "functional_blocks": [
                 "LOGIC_INTERFACE"
@@ -2895,9 +3119,8 @@
               ],
               "obligations": [],
               "parameters": {
-                "logic_voltage_v": 5.0,
-                "pitch_mm": 2.54,
-                "positions": 5
+                "rows": 1,
+                "gender": "male"
               },
               "ports": {
                 "pin1": "+5V_LOGIC",
@@ -3288,9 +3511,7 @@
               ],
               "obligations": [],
               "parameters": {
-                "field_voltage_class": "low-voltage-functional-isolation",
-                "pitch_mm": 5.0,
-                "positions": 3
+                "rows": 1
               },
               "ports": {
                 "pin1": "A_FIELD",
@@ -3329,18 +3550,6 @@
             "The logic header carries only a 5 V-compatible UART/control interface. Do not attach a 3.3 V host without an upstream 5 V-level-compatible buffer."
           ],
           "groups": [
-            {
-              "datasheet": "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588886922797699072",
-              "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical",
-              "id": "logic_header",
-              "mpn": null,
-              "quantity": 1,
-              "reference_prefix": "J",
-              "sheet": "ISOLATED RS485",
-              "sourcing_note": "stock KiCad 1x05 header land pattern; XFCN PZ254V-11-05P (LCSC C492404) is the orderable part",
-              "symbol": "Connector_Generic:Conn_01x05",
-              "value": "PZ254V-11-05P 1x05 2.54 mm header"
-            },
             {
               "datasheet": "https://www.analog.com/media/en/technical-documentation/data-sheets/ADuM1300_1301.pdf",
               "footprint": "adum1301arwz-rl:SOIC-16W_L10.3-W7.5-P1.27-LS10.3-BL",
@@ -3390,18 +3599,6 @@
               "value": "AMS1117-5.0 field-side LDO"
             },
             {
-              "datasheet": "https://lcsc.com/product-detail/Terminal-Blocks_WJ126V-5-0-3P_C8401.html",
-              "footprint": "screw-terminal-5mm-3p:CONN-TH_3P-P5.00_WJ126V-5.0-3P",
-              "id": "field_terminal",
-              "mpn": "WJ126V-5.0-03P-14-00A",
-              "quantity": 1,
-              "reference_prefix": "J",
-              "sheet": "ISOLATED RS485",
-              "sourcing_note": "LCSC C8401; 3-position through-hole 5.0 mm screw terminal, 250 V/18 A catalog rating, assembly stock 8643 and retail 17600 (minimum 5).",
-              "symbol": "screw-terminal-5mm-3p:WJ126V-5.0-3P",
-              "value": "3-position A/B/GND screw terminal"
-            },
-            {
               "datasheet": "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588888828384333825",
               "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
               "id": "de_re_jumper",
@@ -3438,14 +3635,14 @@
               "value": "10uF 25V X5R"
             },
             {
-              "datasheet": "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8562006748401074176",
+              "datasheet": "https://industrial.panasonic.com/cdbs/www-data/pdf/RDM0000/AOA0000C304.pdf",
               "footprint": "Resistor_SMD:R_0603_1608Metric",
               "id": "control_pulldown",
-              "mpn": "ERJ-3EKF1002V",
+              "mpn": "FRC0603F1002TS",
               "quantity": 1,
               "reference_prefix": "R",
               "sheet": "ISOLATED RS485",
-              "sourcing_note": "reviewed Murata/Panasonic 0603 record in kicraft/design/part_identity.py",
+              "sourcing_note": "Panasonic reviewed 0603 resistor record; one safe-state pull-down from the paired DE//RE net to GND_FIELD.",
               "symbol": "Device:R",
               "value": "10k DE/RE safe-state pull-down"
             },
@@ -3462,7 +3659,13 @@
               "value": "680R 9V minimum-load bleeder"
             }
           ],
-          "substitutions": []
+          "substitutions": [
+            {
+              "wanted": "ERJ-3EKF1002V",
+              "got": "FRC0603F1002TS",
+              "reason": "the Panasonic order code is not stocked in the reviewed catalogue; the reviewed, in-stock 10k 1% 0603 part is used instead"
+            }
+          ]
         },
         "functional_spec": {
           "assumptions": [
@@ -3539,6 +3742,76 @@
             {
               "net": "+5V_LOGIC",
               "pin": "1",
+              "ref": "C1"
+            },
+            {
+              "net": "GND_LOGIC",
+              "pin": "2",
+              "ref": "C1"
+            },
+            {
+              "net": "+5V_FIELD",
+              "pin": "1",
+              "ref": "C2"
+            },
+            {
+              "net": "GND_FIELD",
+              "pin": "2",
+              "ref": "C2"
+            },
+            {
+              "net": "+5V_FIELD",
+              "pin": "1",
+              "ref": "C3"
+            },
+            {
+              "net": "GND_FIELD",
+              "pin": "2",
+              "ref": "C3"
+            },
+            {
+              "net": "+5V_LOGIC",
+              "pin": "1",
+              "ref": "C4"
+            },
+            {
+              "net": "GND_LOGIC",
+              "pin": "2",
+              "ref": "C4"
+            },
+            {
+              "net": "+9V_FIELD",
+              "pin": "1",
+              "ref": "C5"
+            },
+            {
+              "net": "GND_FIELD",
+              "pin": "2",
+              "ref": "C5"
+            },
+            {
+              "net": "+9V_FIELD",
+              "pin": "1",
+              "ref": "C6"
+            },
+            {
+              "net": "GND_FIELD",
+              "pin": "2",
+              "ref": "C6"
+            },
+            {
+              "net": "+5V_FIELD",
+              "pin": "1",
+              "ref": "C7"
+            },
+            {
+              "net": "GND_FIELD",
+              "pin": "2",
+              "ref": "C7"
+            },
+            {
+              "net": "+5V_LOGIC",
+              "pin": "1",
               "ref": "J1"
             },
             {
@@ -3560,6 +3833,51 @@
               "net": "CTRL_LOGIC",
               "pin": "5",
               "ref": "J1"
+            },
+            {
+              "net": "A_FIELD",
+              "pin": "1",
+              "ref": "J2"
+            },
+            {
+              "net": "B_FIELD",
+              "pin": "2",
+              "ref": "J2"
+            },
+            {
+              "net": "GND_FIELD",
+              "pin": "3",
+              "ref": "J2"
+            },
+            {
+              "net": "CTRL_FIELD",
+              "pin": "1",
+              "ref": "JP1"
+            },
+            {
+              "net": "DE_RE_FIELD",
+              "pin": "2",
+              "ref": "JP1"
+            },
+            {
+              "net": "DE_RE_FIELD",
+              "pin": "1",
+              "ref": "R1"
+            },
+            {
+              "net": "GND_FIELD",
+              "pin": "2",
+              "ref": "R1"
+            },
+            {
+              "net": "+9V_FIELD",
+              "pin": "1",
+              "ref": "R2"
+            },
+            {
+              "net": "GND_FIELD",
+              "pin": "2",
+              "ref": "R2"
             },
             {
               "net": "+5V_LOGIC",
@@ -3717,119 +4035,9 @@
               "ref": "U4"
             },
             {
-              "net": "A_FIELD",
-              "pin": "1",
-              "ref": "J2"
-            },
-            {
-              "net": "B_FIELD",
-              "pin": "2",
-              "ref": "J2"
-            },
-            {
-              "net": "GND_FIELD",
-              "pin": "3",
-              "ref": "J2"
-            },
-            {
-              "net": "CTRL_FIELD",
-              "pin": "1",
-              "ref": "JP1"
-            },
-            {
-              "net": "DE_RE_FIELD",
-              "pin": "2",
-              "ref": "JP1"
-            },
-            {
-              "net": "+5V_LOGIC",
-              "pin": "1",
-              "ref": "C1"
-            },
-            {
-              "net": "GND_LOGIC",
-              "pin": "2",
-              "ref": "C1"
-            },
-            {
               "net": "+5V_FIELD",
-              "pin": "1",
-              "ref": "C2"
-            },
-            {
-              "net": "GND_FIELD",
-              "pin": "2",
-              "ref": "C2"
-            },
-            {
-              "net": "+5V_FIELD",
-              "pin": "1",
-              "ref": "C3"
-            },
-            {
-              "net": "GND_FIELD",
-              "pin": "2",
-              "ref": "C3"
-            },
-            {
-              "net": "+5V_LOGIC",
-              "pin": "1",
-              "ref": "C4"
-            },
-            {
-              "net": "GND_LOGIC",
-              "pin": "2",
-              "ref": "C4"
-            },
-            {
-              "net": "+9V_FIELD",
-              "pin": "1",
-              "ref": "C5"
-            },
-            {
-              "net": "GND_FIELD",
-              "pin": "2",
-              "ref": "C5"
-            },
-            {
-              "net": "+9V_FIELD",
-              "pin": "1",
-              "ref": "C6"
-            },
-            {
-              "net": "GND_FIELD",
-              "pin": "2",
-              "ref": "C6"
-            },
-            {
-              "net": "+5V_FIELD",
-              "pin": "1",
-              "ref": "C7"
-            },
-            {
-              "net": "GND_FIELD",
-              "pin": "2",
-              "ref": "C7"
-            },
-            {
-              "net": "DE_RE_FIELD",
-              "pin": "1",
-              "ref": "R1"
-            },
-            {
-              "net": "GND_FIELD",
-              "pin": "2",
-              "ref": "R1"
-            },
-            {
-              "net": "+9V_FIELD",
-              "pin": "1",
-              "ref": "R2"
-            },
-            {
-              "net": "GND_FIELD",
-              "pin": "2",
-              "ref": "R2"
+              "pin": "4",
+              "ref": "U4"
             }
           ]
         }

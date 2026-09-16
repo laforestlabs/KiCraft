@@ -11,6 +11,9 @@ from kicraft.eval.design_acceptance import (
     _stable_hash,
     build_reference_fixture,
     evaluate_obligation,
+    load_reference_rows,
+    reference_row_shape_errors,
+    replay_reference_row,
     verify_campaign,
     verify_reference_fixture,
 )
@@ -262,22 +265,58 @@ def test_reviewed_reference_corpus_validates_except_the_recorded_blockers():
     """The in-repo reference rows are the reviewed corpus, not scratch data."""
     directory = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "reference_inputs"
     rows = {
-        row["acceptance"]["slug"]: row["acceptance"]
+        row["acceptance"]["slug"]: row
         for path in sorted(directory.glob("*.json"))
         for row in json.loads(path.read_text())["references"]
     }
     assert len(rows) == 34, "the reference corpus must cover every original brief"
     unexpected = {}
-    for slug, payload in rows.items():
-        errors = verify_reference_fixture(payload)
+    for slug, row in rows.items():
+        errors = verify_reference_fixture(row["acceptance"])
         if errors and slug not in _EXPECTED_BLOCKED_REFERENCES:
             unexpected[slug] = errors
     assert not unexpected, f"reviewed reference rows regressed: {sorted(unexpected)}"
     for slug, reason in _EXPECTED_BLOCKED_REFERENCES.items():
-        errors = verify_reference_fixture(rows[slug])
+        errors = verify_reference_fixture(rows[slug]["acceptance"])
         assert any(reason in error for error in errors), (
             f"{slug} is listed as blocked on {reason!r} but reports {errors}"
         )
+
+
+def test_every_reference_row_ships_the_inputs_its_boundary_needs():
+    """A row that stores no stage payload cannot reproduce the boundary it claims.
+
+    ``--reference-replay`` re-derives each recorded boundary from the row's own
+    inputs; a row without a BOM or wiring candidate would silently claim a
+    boundary nothing can reach (the 2026-09-16 ``rounded-c3-devboard`` gap).
+    """
+    directory = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "reference_inputs"
+    rows = {row["acceptance"]["slug"]: row for _name, row in load_reference_rows(directory)}
+    shapes = {slug: reference_row_shape_errors(row) for slug, row in rows.items()}
+    assert not {slug: errors for slug, errors in shapes.items() if errors}, shapes
+
+
+def test_reference_replay_derives_its_verdict_from_the_row_inputs(tmp_path, monkeypatch):
+    """The replay gate consumes the row it is given, never a cached claim."""
+
+    def fake_drive_chain(stages, brief, workspace, *args, **kwargs):
+        Path(workspace).mkdir(parents=True, exist_ok=True)
+        return (
+            [{"stage": stage, "commit_ok": stage != "wiring"} for stage in stages],
+            None,
+            str(Path(workspace) / "state.json"),
+        )
+
+    monkeypatch.setattr("kicraft.server.stage_driver.drive_chain", fake_drive_chain)
+    row = next(row for _name, row in load_reference_rows() if row["acceptance"]["slug"] == "rc-lowpass-bnc")
+    entry = replay_reference_row(row)
+    assert entry["replay"] == "refused"
+    assert entry["failed_stage"] == "wiring"
+    assert entry["stages"]["architecture"] is True
+
+    # A row that ships no wiring payload is reported as a row defect, not a boundary.
+    stripped = {"acceptance": row["acceptance"], "compiler_input": {k: v for k, v in row["compiler_input"].items() if k != "wiring_candidate"}}
+    assert replay_reference_row(stripped)["replay"] == "row_shape_invalid"
 
 
 def _campaign(tmp_path):

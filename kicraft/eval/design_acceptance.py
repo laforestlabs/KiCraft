@@ -13,6 +13,8 @@ from kicraft.design.part_identity import declares_package, matches_part_identity
 import hashlib
 import json
 import math
+import os
+import tempfile
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path
@@ -524,11 +526,164 @@ def verify_reference_fixtures(root: Path | None = None) -> list[str]:
             elif isinstance(slug, str):
                 seen[slug] = path.name
             errors.extend(f"{slug}: {error}" for error in verify_reference_fixture(payload))
+            errors.extend(f"{slug}: {error}" for error in reference_row_shape_errors(row))
     missing = sorted(set(_corpus()) - set(seen))
     if missing:
         errors.append("missing reference rows: " + ", ".join(missing))
     return errors
 
+
+
+_REFERENCE_FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "reference_inputs"
+
+
+def load_reference_rows(root: Path | None = None) -> list[tuple[str, dict[str, Any]]]:
+    """Every in-repo reference row as ``(fixture name, row)``, ordered by fixture."""
+    directory = root or _REFERENCE_FIXTURES
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for path in sorted(directory.glob("*.json")):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        rows.extend((path.name, row) for row in (data.get("references") or []))
+    return rows
+
+
+def reference_row_shape_errors(row: Mapping[str, Any]) -> list[str]:
+    """Whether a row ships every stage payload the reviewed boundary needs.
+
+    A row that validates but stores no BOM/wiring candidate cannot reproduce its
+    boundary at all; that is a row defect, not a boundary result.
+    """
+    compiler_input = row.get("compiler_input")
+    if not isinstance(compiler_input, Mapping):
+        return ["row ships no compiler_input"]
+    missing = [
+        key
+        for key in ("intent", "functional_spec", "bom_candidate", "wiring_candidate")
+        if not isinstance(compiler_input.get(key), Mapping)
+    ]
+    if not any(
+        isinstance(compiler_input.get(key), Mapping)
+        for key in ("architecture", "architecture_intent")
+    ):
+        missing.append("architecture")
+    return [f"compiler_input lacks {missing}"] if missing else []
+
+
+def replay_reference_row(row: Mapping[str, Any], *, fixture: str = "") -> dict[str, Any]:
+    """Drive one row's own stored inputs through the real five-stage chain.
+
+    No provider call is made and no spend is recorded: the row's payloads are
+    replayed as the model's answers (`kicraft.loadtest.mockllm`), so the row's
+    recorded boundary is re-derived by the real compiler, work-unit, wiring and
+    stage-commit path from the inputs it ships.  A row that claims a boundary its
+    own inputs cannot reach is therefore refused here (`--reference-replay`).
+    """
+    from kicraft.loadtest import mockllm
+    from kicraft.server.stage_driver import DESIGN_STAGES, drive_chain
+
+    acceptance = row.get("acceptance") or {}
+    slug = str(acceptance.get("slug"))
+    fixture_errors = verify_reference_fixture(acceptance)
+    if fixture_errors:
+        return {
+            "slug": slug,
+            "fixture": fixture,
+            "replay": "blocked",
+            "blocker": "; ".join(fixture_errors),
+        }
+    shape_errors = reference_row_shape_errors(row)
+    if shape_errors:
+        return {"slug": slug, "fixture": fixture, "replay": "row_shape_invalid", "error": shape_errors[0]}
+    compiler_input = row["compiler_input"]
+    intent = compiler_input.get("intent") or {}
+    brief = str(intent.get("goal") or contract_for(slug)["original_brief"])
+    transcript = mockllm.transcript_from_reference_row({"references": [dict(row)]}, slug)
+    previous_mode = os.environ.get("KICRAFT_LLM_MODE")
+    previous_transcript = os.environ.get("KICRAFT_MOCK_TRANSCRIPT")
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"ref_replay_{slug}_") as tmp:
+            slot = Path(tmp) / "transcript.json"
+            slot.write_text(json.dumps(transcript), encoding="utf-8")
+            os.environ["KICRAFT_LLM_MODE"] = "replay"
+            os.environ["KICRAFT_MOCK_TRANSCRIPT"] = str(slot)
+            results, _guard, _state = drive_chain(
+                list(DESIGN_STAGES), brief, Path(tmp) / "workspace"
+            )
+    finally:
+        for name, value in (
+            ("KICRAFT_LLM_MODE", previous_mode),
+            ("KICRAFT_MOCK_TRANSCRIPT", previous_transcript),
+        ):
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+    failed = [item for item in results if not item.get("commit_ok")]
+    entry: dict[str, Any] = {
+        "slug": slug,
+        "fixture": fixture,
+        "stages": {str(item["stage"]): bool(item.get("commit_ok")) for item in results},
+        "replay": "committed" if not failed else "refused",
+    }
+    if failed:
+        entry["failed_stage"] = str(failed[0]["stage"])
+        entry["first_error"] = str(failed[0].get("error"))[:400]
+    return entry
+
+
+def verify_reference_replay(
+    slugs: list[str] | None = None,
+    *,
+    fixtures_root: Path | None = None,
+    report: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Replay every reviewed reference row and require its own boundary.
+
+    A row that ships a complete, validating contract and produces no refusal has
+    to commit all five stages from the inputs it stores.  Two recorded cases are
+    not failures: a row whose fixture does not validate is a named block (owned by
+    ``--references``), and a brief whose contract records a
+    ``specification_conflict`` must *refuse* -- a commit there would be an unsafe
+    acceptance, not progress.
+    """
+    selected = set(slugs) if slugs is not None else None
+    errors: list[str] = []
+    for fixture, row in load_reference_rows(fixtures_root):
+        slug = str((row.get("acceptance") or {}).get("slug"))
+        if selected is not None and slug not in selected:
+            continue
+        entry = replay_reference_row(row, fixture=fixture)
+        if report is not None:
+            report.append(entry)
+        conflicts = False
+        if entry["replay"] != "blocked":
+            try:
+                conflicts = (
+                    contract_for(slug)["feasibility"]["status"] == "specification_conflict"
+                )
+            except ValueError:
+                conflicts = False
+        if entry["replay"] == "blocked":
+            continue
+        if entry["replay"] == "committed" and conflicts:
+            errors.append(
+                f"{slug}: committed despite its recorded specification conflict, "
+                "which the contract requires it to refuse"
+            )
+        elif entry["replay"] == "refused" and conflicts:
+            continue
+        elif entry["replay"] != "committed":
+            errors.append(
+                f"{slug}: reference row does not reproduce its boundary "
+                f"({entry['replay']}"
+                + (f" at {entry.get('failed_stage')}" if entry.get("failed_stage") else "")
+                + f"): {entry.get('error') or entry.get('first_error') or ''}"
+            )
+    if selected is not None:
+        missing = sorted(selected - {str((row.get("acceptance") or {}).get("slug")) for _name, row in load_reference_rows(fixtures_root)})
+        if missing:
+            errors.append("no reference row for: " + ", ".join(missing))
+    return errors
 
 
 def load_reference_evidence() -> dict[str, Any]:
@@ -720,8 +875,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release", action="store_true", help="require three fresh complete full campaigns")
     parser.add_argument("--references", action="store_true", help="validate the in-repo reviewed reference fixtures")
     parser.add_argument("--reference-rows", type=Path, help="validate single-row reference JSON files in a directory")
+    parser.add_argument(
+        "--reference-replay",
+        action="store_true",
+        help="replay every reviewed reference row through the real five-stage chain (no provider calls)",
+    )
     args = parser.parse_args(argv)
     slugs = args.only.split(",") if args.only else None
+    if args.reference_replay:
+        if args.references or args.campaign or args.release or args.reference_rows is not None:
+            parser.error("--reference-replay takes no campaign, --references, --reference-rows, or --release")
+        report: list[dict[str, Any]] = []
+        errors = verify_reference_replay(slugs, report=report)
+        for entry in report:
+            detail = entry.get("blocker") or entry.get("first_error") or entry.get("error") or ""
+            print(f"{entry['slug']:24s} {entry['replay']:<16} {detail}"[:200])
+        committed = sum(1 for entry in report if entry["replay"] == "committed")
+        blocked = sum(1 for entry in report if entry["replay"] == "blocked")
+        label = (
+            f"{committed}/{len(report)} reviewed reference rows reproduce their own boundary"
+            + (f" ({blocked} recorded block(s) reported)" if blocked else "")
+        )
+        if errors:
+            print("design acceptance FAILED:\n" + "\n".join(f"- {error}" for error in errors))
+            return 1
+        print(f"design acceptance passed: {label}")
+        return 0
     if args.reference_rows is not None:
         if args.references or args.campaign or args.release or slugs is not None:
             parser.error("--reference-rows takes no campaign, --references, --only, or --release")

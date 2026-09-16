@@ -1567,7 +1567,19 @@ def _validate_bom_unit(
             and not used_deterministic_candidate
             and not _requirement_owns_protected_group(group, unit_requirements)
         )
-        or any(_group_has_physical_feature(group, feature) for feature in sibling_physical_features)
+        # A trusted pipeline candidate *is* this unit's implementation, so a
+        # group that merely carries a sibling requirement's physical feature is
+        # not a model-authored surplus sibling.  Without this guard the servo
+        # bank's own 1x03 groups (feature 'header', exactly like the sibling
+        # edge header) were flagged, pruned and then reported as
+        # model_authored_protected_identity, failing the unit.
+        or (
+            not used_deterministic_candidate
+            and any(
+                _group_has_physical_feature(group, feature)
+                for feature in sibling_physical_features
+            )
+        )
     ]
     recipe_duplicate_groups = [
         group.id

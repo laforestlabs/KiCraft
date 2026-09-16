@@ -384,7 +384,19 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         contacts=("1", "2", "3", "4"),
         manufacturer_sources=("https://www.lcsc.com/datasheet/C7500906.pdf",),
         lcsc="C7500906",
-        operating_limits={"input_v": 5.0, "output_v": 9.0, "output_power_w": 1.0, "isolation_vdc": 1500},
+        # The reviewed 1 W isolated module's input window: the B_S-1WR3 series is a
+        # 5 V nominal part, and this order code is published as a 4.5-5.5 V input
+        # (LCSC C7500906: "Isolated Module DC DC Converter 9 V 112 mA 4.5 V~5.5 V
+        # Input").  Without the window a design containing it cannot prove its
+        # input rail is inside the reviewed range (§9.38).
+        operating_limits={
+            "input_v": 5.0,
+            "input_voltage_min_v": 4.5,
+            "input_voltage_max_v": 5.5,
+            "output_v": 9.0,
+            "output_power_w": 1.0,
+            "isolation_vdc": 1500,
+        },
         port_pins={"input_negative": "1", "input_positive": "2", "output_negative": "3", "output_positive": "4"},
     ),
     ReviewedPart(
@@ -1655,7 +1667,20 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8756672206577377280",
         ),
         lcsc="C6187",
-        operating_limits={"input_voltage_max_v": 15.0, "output_voltage_v": 5.0, "output_current_a": 1.0},
+        operating_limits={
+            # AMS1117 datasheet (Advanced Monolithic Systems DS1117): absolute
+            # maximum input voltage 15 V, and the drop-out voltage (VIN-VOUT) is
+            # guaranteed maximum 1.3 V at IOUT = 0.8 A.  A 5.0 V output therefore
+            # needs at least 5.0 + 1.3 = 6.3 V in for guaranteed regulation; the
+            # device conducts from its VIN pin to its VOUT pin (three-terminal
+            # pass element), which is the reviewed source-to-load transfer §9.39
+            # needs from a linear regulator.
+            "input_voltage_min_v": 6.3,
+            "input_voltage_max_v": 15.0,
+            "output_voltage_v": 5.0,
+            "output_current_a": 1.0,
+        },
+        power_transfer={"from_pin": "3", "to_pin": "2"},
         port_pins={"ground": "1", "output": "2", "input": "3"},
     ),
     # Kyocera AVX TAJB686K010RNJ tantalum, EIA 3528-21 case B.  The installed

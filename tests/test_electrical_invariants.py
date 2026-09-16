@@ -389,6 +389,85 @@ def test_distinct_requirement_owners_cannot_share_one_reviewed_connector(monkeyp
     assert any("demand 2 distinct" in offender for offender in result.offenders)
 
 
+def _declared_connector_case(*, second_symbol: str = "usb-a:SMD"):
+    """Two identical USB-A outputs behind one model-declared interface family."""
+
+    def declared(ident, net):
+        return SimpleNamespace(
+            id=ident,
+            sheet="POWER",
+            exact_part="U-A-24SS-W-2",
+            family="usb-a-power-output",
+            declared_interface=SimpleNamespace(
+                ports=[SimpleNamespace(key="vbus", pin="1", pin_selector=None, pin_name=None)]
+            ),
+            obligations=[],
+            ports={"vbus": net},
+        )
+
+    parts = [
+        SimpleNamespace(
+            ref="J2",
+            value="U-A-24SS-W-2",
+            mpn="U-A-24SS-W-2",
+            symbol="usb-a:SMD",
+            footprint="usb-a:SMD",
+            sheet="POWER",
+        ),
+        SimpleNamespace(
+            ref="J3",
+            value="U-A-24SS-W-2",
+            mpn="U-A-24SS-W-2",
+            symbol=second_symbol,
+            footprint="usb-a:SMD",
+            sheet="POWER",
+        ),
+    ]
+    architecture = SimpleNamespace(requirements=[declared("port1", "USB_A1_5V"), declared("port2", "USB_A2_5V")])
+    bom = _bom(parts, {"USB_A1_5V": [("J2", "1")], "USB_A2_5V": [("J3", "1")]})
+    bom.recipe_ownership = []
+    return architecture, bom
+
+
+def test_identical_declared_interface_instances_are_one_owned_family(monkeypatch):
+    """A bank of identical instances realizes its own port-to-pin map.
+
+    The splitter reference ships two USB-A receptacles and two load switches; each
+    declared interface must be checked against one instance of its own identity
+    family, not refused because the family has two instances.
+    """
+    monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda _part: None)
+    monkeypatch.setattr(
+        validation,
+        "_pin_info_by_ref",
+        lambda _bom: ({"J2": {"1": {"name": "VBUS"}}, "J3": {"1": {"name": "VBUS"}}}, {}),
+    )
+    architecture, bom = _declared_connector_case()
+    assert validation.check_requirement_physical_realization(architecture, bom).ok
+
+    # A family whose members are different hardware is still split ownership.
+    architecture, bom = _declared_connector_case(second_symbol="other-vendor:USB-A")
+    result = validation.check_requirement_physical_realization(architecture, bom)
+    assert not result.ok
+    assert any("needs exactly one identity-matched BOM component" in offender for offender in result.offenders)
+
+
+def test_declared_interface_requires_a_wired_instance(monkeypatch):
+    """One instance on the wrong net is still an unrealized declared interface."""
+    monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda _part: None)
+    monkeypatch.setattr(
+        validation,
+        "_pin_info_by_ref",
+        lambda _bom: ({"J2": {"1": {"name": "VBUS"}}, "J3": {"1": {"name": "VBUS"}}}, {}),
+    )
+    architecture, bom = _declared_connector_case()
+    bom = _bom(bom.parts, {"GND": [("J2", "1")], "USB_A2_5V": [("J3", "1")]})
+    bom.recipe_ownership = []
+    result = validation.check_requirement_physical_realization(architecture, bom)
+    assert not result.ok
+    assert any("expected 'USB_A1_5V'" in offender for offender in result.offenders)
+
+
 def test_frozen_pd_and_placeholder_converter_fail_without_new_conversion_obligations(reviewed):
     pd = SimpleNamespace(
         id="pd",
