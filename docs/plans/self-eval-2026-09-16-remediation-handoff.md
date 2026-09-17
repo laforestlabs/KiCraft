@@ -110,6 +110,11 @@ obligations/schema is a further 18%. Reaching 34/34 needs option 1 *and* the BOM
 work *and* the obligation/schema class — or the structural split (option 2), which localizes all of
 them. (Bucketing is heuristic: it keys off the terminal diagnostic codes and the failing stage.)
 
+**The implementation plan for this problem is `docs/plans/live-design-completion-2026-09-17-plan.md`**
+— it carries the measured failure inventory, the phases (derive bindings; obligations/schema; BOM
+and library coverage), the guardrails, the verification commands and the do-not-redo list. This
+handoff stays the record for the reference-corpus work.
+
 **Open operator decisions:** deploy or hold the pushed fixes (production still runs the 20:58
 code), and which structural direction (1, 2, or 3).
 
