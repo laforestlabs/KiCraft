@@ -731,8 +731,7 @@ class Architecture(BaseModel):
     @model_validator(mode="after")
     def _obligations_are_owned_verbatim(self):
         expected = {
-            (row.kind, row.original_obligation_id): row.model_dump(mode="json")
-            for row in self.obligations
+            (row.kind, row.original_obligation_id): row for row in self.obligations
         }
         if len(expected) != len(self.obligations):
             raise ValueError("Architecture obligations have duplicate kind/source pairs")
@@ -741,14 +740,37 @@ class Architecture(BaseModel):
             for requirement in self.requirements
             for row in requirement.obligations
         ]
-        owned = {
-            (row.kind, row.original_obligation_id): row.model_dump(mode="json")
-            for row in owned_rows
-        }
-        if len(owned) != len(owned_rows):
-            raise ValueError("Architecture obligation is owned by more than one requirement")
-        if owned != expected:
-            raise ValueError("Architecture obligations do not exactly match requirement ownership")
+        owned = {(row.kind, row.original_obligation_id) for row in owned_rows}
+        # A `quantity` obligation counts a class across the design, so it may live only at the top
+        # level; every other obligation must name a requirement that implements it.
+        unowned = sorted(key for key in set(expected) - owned if key[0] != "quantity")
+        if unowned:
+            raise ValueError(
+                "Architecture obligations must be owned by a requirement: "
+                f"listed_at_top_level_only={unowned} — attach each obligation to the requirement "
+                "that implements it"
+            )
+        # The top-level list is the union of the requirements' own rows: a row only a requirement
+        # carries is added here, a row several requirements carry is normalised from the design's own
+        # row, and nothing is refused for a bookkeeping difference.
+        invented = sorted(owned - set(expected))
+        if invented:
+            self.obligations = [
+                *self.obligations,
+                *(
+                    row
+                    for row in owned_rows
+                    if (row.kind, row.original_obligation_id) in set(invented)
+                ),
+            ]
+            expected = {
+                (row.kind, row.original_obligation_id): row for row in self.obligations
+            }
+        for requirement in self.requirements:
+            requirement.obligations = [
+                expected.get((row.kind, row.original_obligation_id), row)
+                for row in requirement.obligations
+            ]
         return self
 
     @model_validator(mode="after")

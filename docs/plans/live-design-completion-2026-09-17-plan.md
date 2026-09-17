@@ -11,6 +11,12 @@ problem; that handoff remains the record for the reference-corpus work.
 program** (milestones 1–5, ranked GAP list). This plan is the delivery path for the specific
 "live runs do not complete" failure, which that plan covers only in its acceptance text.
 
+**Status (2026-09-17 implementation session).** Phase 1 and Phase 2 are implemented and unit- and
+corpus-verified (see §12). Phase 3 is implemented for the verified class aliases and the pin-less
+claim refusal; its remaining coverage gaps are recorded in §12.3 rather than fixed, because they
+need the operator's sourcing decision. Reference replay is unchanged at 31/34. The live 34×3
+measurement is in §12.4.
+
 ---
 
 ## 1. The problem, as measured
@@ -393,3 +399,222 @@ Branch `simplify/bom-wiring-pipeline`, all pushed; local == origin.
 - **Phase 3:** every demanded physical class resolves to a reviewed part or is a documented gap.
 - **Overall:** live 34-brief × 3 repeats reaches a majority of briefs committing all five stages —
   the prerequisite for the milestone-5 release gate (34/34), which remains far off.
+
+---
+
+## 12. Status — 2026-09-17 implementation session
+
+Everything below is in the working tree with its tests; nothing is deployed (see §10.1).
+
+### 12.1 Phase 1 — bindings derived instead of authored
+
+`kicraft/design/architecture_intent.py`
+
+- A requirement's `supply` binds to the family's own supply port. A family that publishes **no**
+  supply contact (a status LED draws its current from its `drive` signal, not from a rail pin) is no
+  longer refused — `unsupported_supply_port` is gone — and the derivation records why in the
+  assumptions.
+- The family's reference port (`gnd`/`vss`, or a single qualified `gnd_field`) is bound to `GND` for
+  recipe, lowerer and declared-interface catalogs alike, not only for a recipe with a literal
+  `gnd`. `negative`/`common` are deliberately **not** treated as ground: a terminal named that way
+  is just as often a floating output pair.
+- A lowerer's published `required_port_keys` are completed from what the design already states: a
+  supply contact takes the requirement's rail, a reference contact takes ground. Anything else
+  stays unbound and the contract diagnostic names it.
+- Authored `supply_bindings`/`reference_bindings` are honoured when their port exists, and fall back
+  to the family's own port when it does not (`unknown_supply_port`/`unknown_reference_port` are
+  gone). Only a genuinely undeclared rail or a non-zero reference domain still refuses. A pin
+  stated as both a supply input and a reference resolves to the supply input, reported, instead of a
+  schema error.
+- Two signals leaving **one physical source port** are one net under the first name: the second
+  signal's peers join it (with a derived note) instead of `conflicting_port_binding`. Two signals on
+  one **sink** port still refuse — that is genuinely two nets on one pin.
+- A `standard_form_factor`'s stacking pin/net map is derived from the approved template; a
+  *different* authored map still refuses, and a refused map no longer repeats every net as
+  `unknown_tie_net`.
+
+`.agents/skills/kicraft/stages/architecture.md`, `kicraft/server/stage_prompts.py`
+
+- Signals and each requirement's `supply` are stated as the inputs that matter; `ties`,
+  `supply_bindings`, `reference_bindings` and `declared_ports` are optional refinements that the
+  compiler derives when absent. "One port carries one net" is restated as derivation behaviour.
+  A `declared_ports` claim must now state its `pin` (see §12.3).
+- The architecture extras no longer ask the draft to copy obligations into the top-level list.
+
+### 12.2 Phase 2 — obligations and schema refusals
+
+- The architecture's top-level `obligations` list is written by the compiler from the committed
+  intent/functional-spec rows (`restore_source_obligations`, `kicraft/server/stage_contracts.py`).
+  The draft's job is to attach each committed row to the requirement that implements it; a
+  paraphrased or trimmed copy is restored from the committed row instead of refusing the draft
+  (`ArchitectureIntent._obligations_are_owned_once`, `Architecture._obligations_are_owned_verbatim`).
+- Two cases that the model got wrong in this session's first measurement are now legal, because both
+  are bookkeeping rather than design intent: a `quantity` obligation may stand alone at the top
+  level (a count over the whole design is not an implementation claim), and several requirements may
+  carry the *same* row when the design implements one obligation in more than one place (three
+  binding posts; the BOM unit still counts groups per requirement).
+- Still refused, with the fix that is actually possible: a committed obligation attached to **no**
+  requirement (`source_obligation_not_retained`), and an obligation whose copies disagree.
+- An unknown slot key now names itself and the repair
+  (`_schema_error_detail`: `extra_forbidden` → "unknown slot field(s): X … remove each unknown key").
+
+### 12.3 Phase 3 — part resolution and library coverage
+
+- Verified obligation-class aliases (`_group_has_physical_feature`, `kicraft/server/stage_work_units.py`):
+  `momentary-pushbutton`→momentary-button, `status-led`/`power-led`→indicator LED (deliberately not
+  the addressable-led record), `usb-a-connector`→USB-A receptacle, `power-screw-terminal`→screw-terminal,
+  `buck-converter-ic`→buck-converter, `thermocouple-input`→thermocouple-converter,
+  `high-side-load-switch`→highside-switch, `opto-isolator`→optocoupler (not digital-isolator),
+  `lora-radio-module`→lora-module, `logic-input-header`→the stock header class
+  (`pin-header`/`header`), `binding-post-terminal`→the reviewed Keystone 8734 binding post. Each is
+  verified against the reviewed record's own feature vocabulary, and the aliases were read off the
+  classes the recorded canary runs demanded.
+- The alias vocabulary lives in one place, `kicraft.design.part_identity._DEMANDED_CLASS_ALIASES`
+  / `canonical_physical_features`, and both consumers of the reviewed features resolve a demanded
+  class through it: the BOM work-unit obligation check (`_group_has_physical_feature`) and the §9.42
+  physical-realization commit gate (`check_requirement_physical_realization`). Before this, a class
+  could be aliased in one gate and unknown in the other — `three-position-selector-switch`
+  (`usb-pd-trigger`'s demand for the output-voltage selector) was refused by §9.42 with `found 0`
+  while the reviewed record spells that class `three-position-selector`.
+- A physical-obligation failure now names what the unit *did* emit
+  (`; the unit emitted: <group>=<symbol> mpn=<mpn> | …`) instead of only the missing class. Every
+  2026-09-17 BOM failure read `requires 1 real usb-c-receptacle, found 0` with no group named, which
+  made Phase 3.1 undiagnosable from the artefact.
+- Phase 3.1 note: the §9.42 commit gate's offenders *are* recorded in the campaign's `retry` events
+  (`commit_gate_codes`, `offenders`), unlike the terminal `stage_done` event, which `--lean-events`
+  strips down to `failure_kind: commit_rejected`. Read the retry events when a BOM run reports
+  `OTHER:commit_rejected` with no detail.
+- A `declared_ports` claim with no `pin` is refused by name ("claim states no pin number; name the
+  actual contact of <symbol>") instead of the misleading `claimed pin None is not in <symbol>`, and
+  the skill now requires the pin. A claim that cannot be checked is not accepted.
+- **Documented gaps, not fixed here** (each blocks the briefs named):
+  - *Not purchasable parts at all*: `copper-heatsink-area`, `heatsink-copper-area`,
+    `thermal-via-copper-pour` (PCB fabrication features: copper area and thermal vias are realized by
+    the board, not by a BOM line) and `no-microcontroller` (a negative constraint the physical
+    obligation schema cannot express as a component). Briefs: `led-cc-driver`, `star-ornament`,
+    `buck-3a`, `thermocouple-amp`. The fix is a contract change (a fabrication/negative obligation
+    kind), not library authoring.
+  - *No reviewed part yet*: `r-2r-resistor-ladder` (`r2r-dac`). A bare `selector-switch` demand is
+    also unaliased on purpose: the only reviewed selector is a 3-position SP3T, and inferring three
+    positions from a bare "selector" is a design decision. A demand that *names* three positions
+    (`three-position-selector-switch`, what `usb-pd-trigger` actually asked for) is aliased.
+  - *Reviewed class, unresolvable identity* (Phase 3.1): `microcontroller` (`lora-node`),
+    `usb-c-receptacle` (`usb-c-full-breakout`), `usb-a-connector` (`usb-a-power-splitter`),
+    `status-led` (`usb-a-power-splitter`), `fpc-ffc-connector` (`fpc-breakout`),
+    `opto-isolator` (`relay-quad`). These demands *do* resolve when the BOM group's
+    `(mpn, symbol, footprint)` is a reviewed or vendored bundle identity; in the failing runs it is
+    not. Re-deriving each one needs the failing draft, which the canary does not persist — the BOM
+    unit error names the demand but not the group that missed it.
+- **Offline catalog incident (repaired, and guarded).** The nightly
+  `kicraft-jlcparts-update.timer` installed a *truncated* dump on 2026-09-16 04:29 (2,104 rows) and
+  again on 2026-09-17 04:11 (3,343 rows): upstream's split volumes were not downloaded, so only the
+  archive's last part was extracted, pruned and installed over a 633,250-row catalog. Everything
+  that asks the catalog about an explicit C# then fails — the §9.26 gate reports
+  `unresolved-sourcing`, and `test_curated_terminal_resolves_its_explicit_manufacturer_identity`
+  failed in that window because the screw terminal's pinned C8404 read as "not in the offline
+  catalog".
+  - Repair: the Sep-14 catalog was restored into `~/.kicraft/jlcparts/cache.sqlite3`; the truncated
+    artifact is kept as `cache.sqlite3.truncated-20260917`, the pre-refresh one as
+    `cache.sqlite3.before-20260916-refresh`.
+  - Guard: `jlcparts.update()` refuses to install a catalog with fewer than half the rows of the
+    installed one (the message says why, and how to accept a genuinely smaller catalog:
+    `KICRAFT_JLCPARTS_ALLOW_SHRINK=1`), so a truncated download leaves the working catalog in place.
+  - The recorded canary runs 1–5 carry no `unresolved-sourcing` defects, so this incident did not
+    contaminate them or the measurement below; it only broke the one unit test and any operator
+    lookup of a curated C#.
+
+### 12.4 Measurement
+
+`logs/self_eval/canary_20260917T043323Z` — 34 briefs × 3 repeats (102 runs, design-only,
+`parallel=3`, `source_unchanged` tracked, one run incomplete at the 3-attempt budget on
+`thermocouple-amp`). Baseline: runs 3 + 5 of §1.1 (68 runs of the same 34 briefs, one repeat each).
+
+| | runs 3+5 (68 runs) | this campaign (102 runs) |
+|---|---|---|
+| runs committing all five stages | **1** (1.5 %) | **6** (5.9 %) |
+| briefs committing in ≥1 repeat | 1/34 | **4/34** (`rc-lowpass-bnc` 2/3, `esp32-dual-motor` 2/3, `r2r-dac` 1/3, `fpc-breakout` 1/3) |
+| briefs committing in a majority of repeats | 0/34 | 2/34 |
+| first failing stage: architecture | 41 (60 %) | 53 (52 %) |
+| first failing stage: BOM | 25 (37 %) | 41 (40 %) |
+| first failing stage: wiring | 1 | 0 |
+
+Codes, as occurrences per participating run (the plan's §4.2 target set first):
+
+| code | runs 3+5 | this campaign |
+|---|---|---|
+| `unsupported_supply_port` | 0.118 | **0.000** |
+| `ARCH_SCHEMA` (no-evidence schema failures) | 0.147 | **0.010** |
+| `unknown_reference_port` / `unknown_reference_domain` | 0.029 / 0.029 | 0.000 / 0.010 |
+| `unknown_tie_net` / `declared_port_double_bound` | 0.044 / 0.015 | 0.020 / 0.000 |
+| `unbound_required_port` | 0.044 | 0.020 |
+| `conflicting_port_binding` | 0.147 | 0.235 |
+| `unsupported_lowerer_contract` | 0.191 | 0.225 |
+| `declared_signal_port_tied` | 0.044 | 0.059 |
+| `physical-obligation-unfulfilled` | 0.250 | 0.294 |
+| `declared-interface-unrealized` | 0.132 | 0.118 |
+| `OTHER:commit_rejected` + `COMMIT_GATE:9.42` | 0.088 | 0.078 |
+| `source_obligation_not_retained` | 0.147 (as "mandatory source obligations…") | **0.000** |
+
+**Reading it honestly.**
+
+- **What worked.** The compiler-written obligation list with ownership-only checking removed the
+  obligation class entirely (`ARCH_SCHEMA` 0.147 → 0.010, and no run now fails on obligation
+  ownership), and the derived supply/reference bindings removed `unsupported_supply_port` and the
+  reference-port refusals. Committing runs went from 1.5 % to 5.9 %, and 4 briefs now commit in at
+  least one repeat (2 of them in a majority) where only `r2r-dac` had ever committed once.
+- **What did not.** Completion is still far from §11's "majority of briefs" (4/34, 0/34 across all
+  repeats). The two biggest remaining classes are the ones §4.3 kept refusing on purpose:
+  `conflicting_port_binding` (now mostly a signal landing on a *peer* port the compiler already
+  bound — the mirror of the source-side rule, §12.5.1) and `unsupported_lowerer_contract` (now the
+  parameter/count half: a `pin-header` or `screw-terminal` requirement whose contacts the draft
+  never binds). Both rates *rose* per run, because drafts that used to abort on
+  `unsupported_supply_port` now reach those stages — the failure set moved, it did not shrink.
+- **BOM is unchanged** (`physical-obligation-unfulfilled` 0.250 → 0.294,
+  `declared-interface-unrealized` 0.132 → 0.118): the demanded class is usually one the reviewed
+  vocabulary *has* (`usb-c-receptacle`, `microcontroller`), and the draft's own group identity is
+  what fails to resolve. §12.5.2 is the lever; the campaign's defects now name the emitted group.
+- No brief commits in all three repeats, so run-to-run spread still dominates any single brief's
+  outcome — the plan's §3 warning stands.
+
+
+### 12.5 Verification (final tree)
+
+- `--reference-replay`: **31/34 reviewed reference rows reproduce their own boundary**, exit 0
+  (`buck-3a` refuses as its recorded `specification_conflict` requires; `usb-pd-trigger` and
+  `speaker-crossover` are the two recorded blocks). Unchanged from the pre-session baseline — the
+  plan's non-goal holds.
+- `.venv/bin/python -m pytest tests/test_architecture_intent.py tests/test_stage_work_units.py
+  tests/test_design_lowering.py tests/test_stage_driver_retry.py tests/test_part_identity.py -q`:
+  **414 passed**.
+- Every test module that imports a changed module (60 files, including `test_electrical_invariants`,
+  `test_design_acceptance`, `test_jlcparts_catalog`, `test_bom_*`, `test_design_recipes`):
+  **1754 passed, 6 skipped, 0 failed**.
+- `--references` reports only the two recorded supply blocks (that is its pre-session state, not a
+  regression).
+- The DRC/build tail was not exercised: the campaign is design-only, as §3 prescribes.
+
+### 12.6 Next levers, with the evidence this session produced
+
+1. **A signal that lands on a port already bound to `GND`/a rail** is the same "the design said the
+   same thing twice" case the source side now resolves, but on the *peer* side: the campaign still
+   refuses `signal 'TRIM_RETURN': port 'gnd' of 'rc_filter' is already bound to 'GND'` (also
+   `LOGIC_GND`, `SELECT_9V`/`SELECT_12V`/`SELECT_20V`). The source-side rule (the bound net owns the
+   pin, the peers join it, the rename is reported) generalises to it directly. Two signals naming
+   one *sink* port with two different nets is left refused, per §4.3.3.
+2. **Phase 3.1 stays open** — see §12.3. The campaign's `physical-obligation-unfulfilled` defects now
+   name the group the unit emitted, which is what the next pass needs; the BOM stage must then either
+   use the reviewed bundle for those families (a prompt/tool change: `extras.core_defaults_block` and
+   `list_parts` already name the reviewed part) or the class must gain a reviewed part.
+3. **A physical/interface class with no purchasable part** (`copper-heatsink-area`,
+   `thermal-via-copper-pour`, `no-microcontroller`) needs a schema decision: the intent/stage
+   contract should express a fabrication feature or a negative constraint as something other than a
+   component obligation, because no BOM line can satisfy it.
+4. **`declared_ports[].reference_domain` is read by the model as "the domain this port's signal is
+   referenced to"**, not as "the net this pin is tied to" (the field's implemented meaning). The
+   measured drafts write `reference_domain: GND_LOGIC` on an isolator's `logic_tx`/`logic_rx`/
+   `logic_enable` and `supply_rail: VBUS` on a current limiter's `input`: both are domain statements
+   about a *signal* port, and `declared_signal_port_tied` refuses each one. The refusal is
+   deliberately kept (§4.3.2), so the next pass should either rename the fields to what they do
+   (`pin_tied_to`), or accept the domain reading on a port that carries a signal while keeping the
+   tie reading for a strapped pin.
+

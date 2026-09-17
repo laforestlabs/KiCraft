@@ -75,19 +75,24 @@ def _stage_extra(stage: str) -> str:
         )
     if stage == "architecture":
         return (
-            "\n- Retain all original typed obligations unchanged. The architecture's top-level "
-            "`obligations` list and the requirements' own `obligations` lists must be the SAME "
-            "set: every obligation id appears once at the top level AND on exactly one "
-            "implementing requirement through its `original_obligation_id`. Copying "
-            "intent.obligations to the top level without also attaching each row to the part that "
-            "implements it leaves an unowned obligation and refuses the whole draft. "
+            "\n- Retain all original typed obligations unchanged, and attach each one to the "
+            "requirement that implements it through that requirement's own `obligations` rows "
+            "(`kind` + `original_obligation_id` identify them, and the row content is copied "
+            "verbatim; several requirements may carry the same row when the design implements the "
+            "obligation in more than one place). The architecture's top-level `obligations` list is "
+            "written for you from the committed intent and functional spec, so do NOT copy the rows "
+            "into it: an obligation attached to no requirement is refused, and a paraphrased or "
+            "trimmed copy is restored from the committed row. A `quantity` obligation may stay at "
+            "the top level — it counts a class across the design. "
             "Use the published finite lowerer interfaces and supported parameters; "
             "a failed supported lowerer is a contract defect, not permission to invent "
             "an alternate interface. For uncurated hardware, declare actual numbered "
-            "pins and their functions, and bind each supply/reference domain explicitly. "
+            "pins and their functions; a curated or lowerer family needs no port "
+            "bindings at all, because the compiler derives every one it publishes. "
             "Different grounds or rails must not be merged by name similarity. "
             "A declared standard form factor requires its real owned stacking "
-            "connectors, not generic headers added after wiring."
+            "connectors, not generic headers added after wiring; their pin maps come "
+            "from the template."
         )
     if stage == "bom":
         return (

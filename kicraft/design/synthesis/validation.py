@@ -29,6 +29,7 @@ from kicraft.design.models import (
     SheetPin,
     is_power_or_ground_name,
 )
+from kicraft.design.part_identity import canonical_physical_features
 
 
 REQUIRED_SCHEMATIC_VERSION = 20250114
@@ -3216,11 +3217,12 @@ def check_requirement_physical_realization(
                     local_demands[component_class], obligation.minimum
                 )
         for component_class, minimum in local_demands.items():
+            canonical = canonical_physical_features(component_class)
             matching = [
                 part
                 for part in requirement_parts
                 if component_class == reviewed[part.ref].family
-                or component_class in reviewed[part.ref].physical_features
+                or canonical & reviewed[part.ref].physical_features
             ]
             if len(matching) < minimum:
                 bad.append(
@@ -3303,6 +3305,7 @@ def check_requirement_physical_realization(
                 )
     for (sheet, component_class), demand_rows in sorted(aggregate_demands.items()):
         demanded = sum(minimum for _, minimum in demand_rows)
+        canonical = canonical_physical_features(component_class)
         available = [
             part
             for part in bom.parts
@@ -3310,7 +3313,7 @@ def check_requirement_physical_realization(
             and part.ref in reviewed
             and (
                 component_class == reviewed[part.ref].family
-                or component_class in reviewed[part.ref].physical_features
+                or canonical & reviewed[part.ref].physical_features
             )
         ]
         if len(available) < demanded:

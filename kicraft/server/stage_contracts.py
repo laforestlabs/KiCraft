@@ -724,40 +724,116 @@ class StageSchemaError(ValueError):
         super().__init__(message)
 
 
-def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict) -> None:
-    """Reject dropped or changed source obligations before committing a later slot."""
-    if stage not in {"functional_spec", "architecture"}:
-        return
+def _canonical_obligations(rows) -> list[dict]:
+    """Validate obligation rows and normalise them for comparison."""
     from pydantic import TypeAdapter
 
     adapter = TypeAdapter(list[models.RequirementObligation])
+    return [
+        row.model_dump(mode="json", exclude_none=True) for row in adapter.validate_python(rows or [])
+    ]
 
-    def canonical(rows):
-        return [
-            row.model_dump(mode="json", exclude_none=True)
-            for row in adapter.validate_python(rows)
-        ]
 
-    expected = {}
-    source_slots = ("intent",) if stage == "functional_spec" else ("intent", "functional_spec")
-    for slot in source_slots:
-        for row in canonical((prompt_state.get(slot) or {}).get("obligations") or []):
+def source_obligation_rows(prompt_state: dict, *, slots: tuple[str, ...]) -> list[dict]:
+    """The typed obligations the named committed stages carry, in declaration order.
+
+    Raises when two committed stages disagree about one obligation: that is a defect in the
+    owning stage, not something a later stage can repair.
+    """
+    rows: list[dict] = []
+    by_key: dict[tuple[str, str], dict] = {}
+    for slot in slots:
+        for row in _canonical_obligations((prompt_state.get(slot) or {}).get("obligations")):
             key = (row["kind"], row["original_obligation_id"])
-            if key in expected and expected[key] != row:
-                raise StageSchemaError(
-                    f"source obligation {key!r} disagrees between committed stages",
-                    diagnostic={
-                        "code": "conflicting_source_obligation",
-                        "message": "Committed source obligations disagree; repair the owning stage.",
-                        "evidence": [expected[key], row],
-                    },
-                )
-            expected[key] = row
+            if key in by_key:
+                if by_key[key] != row:
+                    raise StageSchemaError(
+                        f"source obligation {key!r} disagrees between committed stages",
+                        diagnostic={
+                            "code": "conflicting_source_obligation",
+                            "message": "Committed source obligations disagree; repair the owning stage.",
+                            "evidence": [by_key[key], row],
+                        },
+                    )
+                continue
+            by_key[key] = row
+            rows.append(row)
+    return rows
+
+
+def restore_source_obligations(payload: dict, prompt_state: dict) -> dict:
+    """Write the architecture's top-level `obligations` from the committed intent/spec set.
+
+    That list is the design's typed obligation set, and the draft's job is to say *where* each row
+    is implemented, so the verbatim copy is the compiler's to write. What the draft has to get right
+    — every committed row attached to the requirement that implements it — is checked by
+    `validate_obligation_retention` below.
+    """
+    try:
+        rows = source_obligation_rows(prompt_state, slots=("intent", "functional_spec"))
+    except ValueError:
+        return payload  # an unreadable source row is reported by validate_obligation_retention
+    if not rows:
+        return payload
+    return {**payload, "obligations": rows}
+
+
+def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict) -> None:
+    """Reject a slot that drops or misplaces the obligations the committed stages carry.
+
+    `functional_spec` must repeat the committed rows verbatim; `architecture` carries the same rows
+    at the top level (written by `restore_source_obligations`) and must attach each one to the
+    requirement that implements it.
+    """
+    if stage not in {"functional_spec", "architecture"}:
+        return
+    source_slots = ("intent",) if stage == "functional_spec" else ("intent", "functional_spec")
+    expected = {
+        (row["kind"], row["original_obligation_id"]): row
+        for row in source_obligation_rows(prompt_state, slots=source_slots)
+    }
     if not expected:
+        return
+    if stage == "architecture":
+        # The top-level list is written from the sources before this runs; what the draft owns is
+        # where each obligation is implemented, so check the requirement rows instead of asking the
+        # model to copy the same rows twice.
+        owned: dict[tuple[str, str], int] = {}
+        for requirement in payload.get("requirements") or []:
+            if not isinstance(requirement, dict):
+                continue
+            for row in _canonical_obligations(requirement.get("obligations")):
+                key = (row["kind"], row["original_obligation_id"])
+                owned[key] = owned.get(key, 0) + 1
+        # A `quantity` obligation counts a class across the design and is not an implementation
+        # claim, so it may live only at the top level; every other committed obligation must name at
+        # least one requirement that implements it (several requirements may carry the same row when
+        # the design implements it in more than one place).
+        unowned = [
+            row
+            for key, row in expected.items()
+            if key not in owned and key[0] != "quantity"
+        ]
+        if unowned:
+            raise StageSchemaError(
+                "source obligations must be owned by a requirement",
+                diagnostic={
+                    "code": "source_obligation_not_retained",
+                    "message": (
+                        "Attach every committed typed obligation to the requirement that implements "
+                        "it through `requirements[].obligations`; the architecture's top-level "
+                        "`obligations` list is written from the committed intent and functional "
+                        "spec, and a paraphrased copy is restored from the committed row. A "
+                        "`quantity` obligation may stay at the top level: it counts a class across "
+                        "the design."
+                    ),
+                    "evidence": unowned,
+                },
+            )
         return
     actual = {}
     duplicates = []
-    for row in canonical(payload.get("obligations") or []):
+    for row in _canonical_obligations(payload.get("obligations")):
         key = (row["kind"], row["original_obligation_id"])
         if key in actual:
             duplicates.append(row)
@@ -888,6 +964,31 @@ def _derive_intent_payload(payload: dict) -> dict:
         raise StageSchemaError(str(exc), diagnostic=diagnostic) from exc
 
 
+def _schema_error_detail(exc: Exception) -> str:
+    """Name the fix when a schema error is an unknown slot field.
+
+    The provider schema is generated from the slot models, so an ``extra_forbidden`` error is a key
+    the draft invented; the repair is to delete it, which the pydantic loc/message does not say.
+    """
+    from pydantic import ValidationError
+
+    if isinstance(exc, ValidationError):
+        unknown = sorted(
+            {
+                ".".join(str(part) for part in row.get("loc") or ()) or "<root>"
+                for row in exc.errors()
+                if row.get("type") == "extra_forbidden"
+            }
+        )
+        if unknown:
+            return (
+                f"{exc} — unknown slot field(s): {', '.join(unknown)}. The slot accepts only the "
+                "fields the published schema lists: remove each unknown key (nested keys are named "
+                "by their path) and re-emit."
+            )
+    return str(exc)
+
+
 def _normalize_stage_response(
     stage: str,
     payload: dict,
@@ -908,6 +1009,7 @@ def _normalize_stage_response(
             payload = {key: value for key, value in payload.items() if key != "questions"}
         if stage == "architecture":
             payload = _apply_authoritative_standard_form_factor(payload, prompt_state)
+            payload = restore_source_obligations(payload, prompt_state)
         validate_obligation_retention(stage, payload, prompt_state)
         if stage == "intent":
             return IntentStageResponse.model_validate(payload).model_dump(exclude_none=True), 0
@@ -963,7 +1065,7 @@ def _normalize_stage_response(
     except (TypeError, ValueError) as exc:
         diagnostic = getattr(exc, "diagnostic", None)
         raise StageSchemaError(
-            str(exc),
+            _schema_error_detail(exc),
             diagnostic=(
                 diagnostic.model_dump(exclude_none=True) if diagnostic is not None else None
             ),

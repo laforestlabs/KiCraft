@@ -265,3 +265,60 @@ def test_search_widens_zero_stock_exact_hit_to_family(catalog):
     rows = jlcparts.search("VL53L1X")
     assert rows[0]["lcsc"] == "C190004" and rows[0]["stock"] == 5640
     assert {r["lcsc"] for r in rows} >= {"C190004", "C2924337"}
+
+
+def test_update_refuses_a_truncated_dump_over_a_working_catalog(tmp_path, monkeypatch):
+    """Upstream's split volumes can go missing; the last part alone must not win.
+
+    On 2026-09-17 the nightly refresh downloaded only `cache.zip` (the last volume of upstream's
+    split dump), installed 3,343 components over a 633,250-row catalog, and every curated part —
+    the screw terminal's C8404, the canonical 10k 0603 — started reading as "not in the offline
+    catalog". A working catalog must survive that, and the operator must be told how to accept a
+    genuinely smaller one.
+    """
+    small = tmp_path / "small.sqlite3"
+    con = sqlite3.connect(small)
+    con.execute(_SCHEMA)
+    # The raw dump clears the row-count sanity check; almost everything in it is dry, so the
+    # pruned result is a fraction of the catalog that is installed.
+    con.executemany(
+        "INSERT INTO jlc_components (lcsc, mfr, package, manufacturer, library_type, stock, price, description) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            (i, f"P{i}", "0805", "m", "expand", 7 if i < 1_000 else 1, "1-:0.01", "r")
+            for i in range(120_000)
+        ),
+    )
+    con.commit()
+    con.close()
+    blob = _make_zip({"cache.sqlite3": small.read_bytes()})
+    site = tmp_path / "site"
+    site.mkdir()
+    _split(blob, site, [len(blob) // 2])
+
+    dest = tmp_path / "installed" / "cache.sqlite3"
+    dest.parent.mkdir()
+    working = tmp_path / "working.sqlite3"
+    con = sqlite3.connect(working)
+    con.execute(_SCHEMA)
+    con.executemany(
+        "INSERT INTO jlc_components (lcsc, mfr, package, manufacturer, library_type, stock, price, description) VALUES (?,?,?,?,?,?,?,?)",
+        ((i, f"G{i}", "0603", "m", "expand", 9, "1-:0.01", "r") for i in range(100_000)),
+    )
+    con.commit()
+    con.close()
+    dest.write_bytes(working.read_bytes())
+
+    with pytest.raises(RuntimeError) as refused:
+        jlcparts.update(dest=dest, base_url=site.as_uri() + "/")
+
+    assert "truncated" in str(refused.value)
+    con = sqlite3.connect(dest)
+    assert con.execute("SELECT COUNT(*) FROM jlc_components").fetchone()[0] == 100_000
+    con.close()
+
+    # The escape hatch accepts a deliberately smaller catalog.
+    monkeypatch.setenv("KICRAFT_JLCPARTS_ALLOW_SHRINK", "1")
+    stats = jlcparts.update(
+        dest=dest, base_url=site.as_uri() + "/", progress=lambda _msg: None
+    )
+    assert stats["rows"] == 1_000

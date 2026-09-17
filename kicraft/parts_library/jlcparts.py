@@ -487,6 +487,20 @@ def prune(db_file: Path, min_stock: int, progress=lambda msg: None) -> int:
     return removed
 
 
+def _installed_rows(dest: Path) -> int | None:
+    """Row count of the catalog currently installed at *dest*, or None."""
+    if not dest.is_file() or dest.stat().st_size == 0:
+        return None
+    try:
+        con = sqlite3.connect(f"file:{dest}?mode=ro", uri=True)
+        try:
+            return con.execute("SELECT COUNT(*) FROM jlc_components").fetchone()[0]
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+
+
 def update(dest: Path | None = None, base_url: str = DATA_URL,
            min_stock: int = 5, progress=lambda msg: None) -> dict:
     """Download the jlcparts dump, extract, prune, index, atomically install.
@@ -497,6 +511,7 @@ def update(dest: Path | None = None, base_url: str = DATA_URL,
     """
     dest = dest or db_path()
     dest.parent.mkdir(parents=True, exist_ok=True)
+    installed_before = _installed_rows(dest)
     tmp = dest.parent / "update.tmp"
     tmp.mkdir(exist_ok=True)
     try:
@@ -544,6 +559,23 @@ def update(dest: Path | None = None, base_url: str = DATA_URL,
             con.close()
 
         size = db_file.stat().st_size
+        # Upstream's dump is a split zip; when the volume parts are absent the last one alone
+        # still extracts into a valid-looking sqlite file holding a fraction of the catalog
+        # (every curated part then reads as "not in the offline catalog", and the §9.26 sourcing
+        # gate refuses broad classes). Never replace a working catalog with a small remnant of
+        # one: the previous catalog stays installed and the operator is told how to accept it.
+        if (
+            installed_before is not None
+            and rows < installed_before // 2
+            and os.environ.get("KICRAFT_JLCPARTS_ALLOW_SHRINK", "") != "1"
+        ):
+            raise RuntimeError(
+                f"refusing to install a catalog with {rows:,} components over the installed "
+                f"{installed_before:,}: the dump looks truncated (upstream's split volumes are "
+                "missing, so only its last part was downloaded). The installed catalog is "
+                "untouched; re-run with KICRAFT_JLCPARTS_ALLOW_SHRINK=1 to accept a smaller "
+                "catalog on purpose."
+            )
         os.replace(db_file, dest)
         progress(f"installed {dest} ({size / 1e9:.2f} GB, {rows:,} parts)")
         return {"db": str(dest), "rows": rows, "pruned": removed, "bytes": size}

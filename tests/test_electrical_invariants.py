@@ -559,3 +559,40 @@ def test_isolated_converter_domains_come_from_each_sides_own_return_port(reviewe
         assert any("E_REFERENCE_DOMAIN" in offender for offender in shared.offenders)
     finally:
         validation._pin_info_by_ref = original
+
+
+def test_demanded_class_aliases_apply_in_the_realization_gate_too(monkeypatch):
+    """One alias vocabulary for both gates that read the reviewed features.
+
+    `three-position-selector-switch` (the class `usb-pd-trigger` demands) matched neither the BOM
+    work-unit check nor this §9.42 gate, whose offender read `requires 1 reviewed
+    'three-position-selector-switch' physical part(s), found 0` while the reviewed record for the
+    part spells the class `three-position-selector`. A class aliased in one gate and unknown in the
+    other is a vocabulary bug, not a model error.
+    """
+    from kicraft.design.part_identity import canonical_physical_features
+
+    assert canonical_physical_features("three-position-selector-switch") == frozenset(
+        {"three-position-selector", "sp3t-selector"}
+    )
+    record = SimpleNamespace(
+        identity="ss13d07vg4",
+        family="three-position-selector",
+        physical_features=frozenset({"three-position-selector", "sp3t-selector"}),
+    )
+    monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda _part: record)
+    monkeypatch.setattr(validation, "_pin_info_by_ref", lambda _bom: ({}, {}))
+    requirement = SimpleNamespace(
+        id="dc_output",
+        sheet="OUTPUT",
+        exact_part=None,
+        family="voltage-selector-switch",
+        declared_interface=None,
+        obligations=[
+            SimpleNamespace(kind="physical", component_class="three-position-selector-switch")
+        ],
+    )
+    architecture = SimpleNamespace(requirements=[requirement])
+    bom = _bom([_part("SW1", "SS13D07VG4", sheet="OUTPUT")], {})
+
+    assert validation.check_requirement_physical_realization(architecture, bom).ok

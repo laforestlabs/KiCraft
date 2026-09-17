@@ -2859,6 +2859,49 @@ def _stock_library_physical_record(symbol: str, footprint: str) -> ReviewedPart 
     return None
 
 
+# Obligation classes the model names that the reviewed feature vocabulary spells differently. Only
+# pairs verified to denote the same physical class belong here: `usb-connector` is a USB-A part, so
+# it is deliberately NOT an alias for a USB-C demand; `opto-isolator` is not a `digital-isolator`.
+#
+# Both consumers of the reviewed vocabulary resolve a demanded class through this one map — the BOM
+# work-unit obligation check and the §9.42 physical-realization commit gate — so a class can never be
+# aliased in one gate and unknown in the other (three-position-selector-switch passed neither until
+# it was aliased here).
+_DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
+    # The model's own shorthands for a class it names elsewhere in full.
+    "fpc": frozenset({"fpc-connector"}),
+    "header": frozenset({"pin-header", "pin-socket"}),
+    "button": frozenset({"momentary-button"}),
+    "selector": frozenset({"three-position-selector", "sp3t-selector"}),
+    "usb-c-connector": frozenset({"usb-c-receptacle"}),
+    "usb-a-connector": frozenset({"usb-a-receptacle", "usb-connector"}),
+    "fpc-ffc-connector": frozenset({"fpc-connector", "ffc-connector"}),
+    "voltage-regulator-ic": frozenset({"voltage-regulator"}),
+    "momentary-pushbutton": frozenset({"momentary-button"}),
+    "status-led": frozenset({"indicator-led", "led-0603", "led-0805"}),
+    "power-led": frozenset({"indicator-led", "led-0603", "led-0805"}),
+    "power-screw-terminal": frozenset({"screw-terminal", "terminal-block", "screw-clamp-terminal"}),
+    "binding-post-terminal": frozenset({"binding-post", "screw-clamp-terminal"}),
+    "buck-converter-ic": frozenset({"buck-converter", "buck-regulator"}),
+    "thermocouple-input": frozenset({"thermocouple-converter"}),
+    "high-side-load-switch": frozenset({"highside-switch"}),
+    "opto-isolator": frozenset({"optocoupler"}),
+    "lora-radio-module": frozenset({"lora-module", "spi-radio-module", "sx1276-module"}),
+    "logic-input-header": frozenset({"header", "pin-header"}),
+    "three-position-selector-switch": frozenset({"three-position-selector", "sp3t-selector"}),
+}
+
+
+def canonical_physical_features(feature: str) -> frozenset[str]:
+    """The reviewed feature names a demanded obligation class may be realized by.
+
+    The demand is the caller's own wording (a brief says "a three-position selector switch"); the
+    reviewed vocabulary spells the class its own way. A class with no verified alias is itself.
+    """
+    key = str(feature or "").strip().casefold()
+    return _DEMANDED_CLASS_ALIASES.get(key, frozenset({key}))
+
+
 def physical_inventory_record(
     *,
     mpn: str | None,

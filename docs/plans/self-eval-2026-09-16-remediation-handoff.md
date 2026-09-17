@@ -61,14 +61,33 @@ LLM stages, no build), both **0/34 committed**, `source_unchanged=true`, ~$0.60 
 | 2 | `logs/self_eval/canary_20260917T001818Z` | 0/34 | 23 | 11 | 0 |
 | 3 | `logs/self_eval/canary_20260917T004307Z` | 1/34 | 19 | 13 | 1 |
 | 5 | `logs/self_eval/canary_20260917T011637Z` | **0/34** | 22 | 12 | 0 |
+| 6 | `logs/self_eval/canary_20260917T042007Z` | (diagnostic pass, cancelled) | — | — | — |
+| 7 | `logs/self_eval/canary_20260917T043323Z` | **4/34 briefs in ≥1 repeat, 6/102 runs** | 53 | 41 | 0 |
 
-(Run 4 — the alias + identity-guard set alone — was cancelled mid-run as superseded by run 5.)
+(Run 4 — the alias + identity-guard set alone — was cancelled mid-run as superseded by run 5.
+Runs 6 and 7 are the 2026-09-17 implementation session's 34-brief × 3-repeat campaigns; run 6 was a
+diagnostic pass, cancelled once its failure codes had been read, and run 7 is the measured one.
+Run 7's `committed` column counts briefs that commit in at least one of three repeats — `rc-lowpass-bnc`
+and `esp32-dual-motor` commit in two of three, `r2r-dac` and `fpc-breakout` in one — against 1/34
+briefs (and 1/68 runs) for runs 3+5. The architecture/BOM columns are first-failing-stage counts
+out of 102 runs. Read `docs/plans/live-design-completion-2026-09-17-plan.md` §12 for what changed,
+what the codes did per run, and the remaining levers.)
 
-Every brief clears `intent` and `functional_spec`. For comparison,
-`canary_20260915T034256Z` (before the 2026-09-16 contract work) committed 13/34 — so the 34/34
-release gate is far away under the current contract.
+In runs 1–5 every brief cleared `intent` and `functional_spec`; run 7 has one `functional_spec`
+failure (`relay-quad`, run 3 of 3) and one run that exhausted its attempts on
+`thermocouple-amp`. For comparison, `canary_20260915T034256Z` (before the 2026-09-16 contract work)
+committed 13/34 — so the 34/34 release gate is far away under the current contract.
+
+**The 2026-09-17 derivation work moved the aggregate for the first time, and its own measurement is
+in plan §12.4:** 6/102 runs commit (1.5 % → 5.9 %) and four briefs commit in at least one repeat
+(two of them in a majority), against one committed run in 68 for runs 3+5. The obligation and
+supply/reference refusal classes collapsed (`ARCH_SCHEMA` 0.147 → 0.010 per run,
+`unsupported_supply_port` 0.118 → 0). What did not move: `conflicting_port_binding` and
+`unsupported_lowerer_contract` (the drafts now reach them instead of aborting earlier), and the BOM
+classes, whose cause is the identity of the group the draft emits rather than the class vocabulary.
 
 **The incremental fixes did not move the aggregate, and run 3's single pass does not reproduce.**
+*(Runs 1–5, before the 2026-09-17 derivation work; superseded by the paragraph above.)*
 Run 3 followed the port-menu work (`618c433`) and showed architecture failures 23→19 with one
 completion; run 5 followed the alias map, the identity guard and the bundle-identity
 classification (`a603b1b`, `00114c3`) and returned 0/34 with architecture failures back up to 22.

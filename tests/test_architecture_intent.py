@@ -1218,10 +1218,9 @@ def test_obligation_ownership_refusal_names_the_fix():
     intent = _hub75_intent()
     intent["obligations"] = [
         {
-            "kind": "quantity",
+            "kind": "physical",
             "original_obligation_id": "single-sensor-input",
-            "subject": "single-sensor-input",
-            "minimum": 1,
+            "component_class": "single-sensor-input",
         }
     ]
     with pytest.raises(ValidationError) as excinfo:
@@ -1303,3 +1302,350 @@ def test_pattern_lowerer_port_refusal_prints_its_contract_not_none():
     assert rows, [d.code for d in excinfo.value.diagnostics]
     assert "(none)" not in rows[0].evidence[0]
     assert "pin" in rows[0].evidence[0].lower()
+
+
+def test_lowerer_supply_without_a_published_port_is_derived_not_refused():
+    """A status LED draws its current from its own `drive` signal, not from a rail pin.
+
+    The canary (2026-09-17, `esp32-s3-sensor`, `chamfered-badge`, `star-ornament`) refused
+    twelve drafts with `unsupported_supply_port` because the lowerer publishes no supply
+    contact. The rail is the intent and it lands on drive/gnd; nothing else is invented, and
+    the derivation says so in the assumptions.
+    """
+    intent = _hub75_intent()
+    intent["requirements"].append(
+        {
+            "id": "status",
+            "sheet": "MCU",
+            "role": "driver",
+            "family": "status-led",
+            "parameters": {"rail_voltage": 3.3, "led_vf": 2.0, "target_current_ma": 2},
+            "supply": "+3V3",
+            "functional_blocks": ["ESP32_S3_CONTROLLER"],
+        }
+    )
+    intent["signals"].append(
+        {"name": "STATUS", "from": "esp32.output_status", "to": "status.drive"}
+    )
+
+    architecture = derive_architecture(intent)
+
+    assert _requirement(architecture, "status").ports == {"drive": "STATUS", "gnd": "GND"}
+    assert any(
+        "status" in note and "publishes no supply port" in note
+        for note in architecture.assumptions
+    )
+
+
+def test_published_lowerer_supply_contact_takes_the_declared_rail():
+    """A lowerer that publishes `vdd` gets its rail there without the model binding it.
+
+    The port set a lowerer's own build code needs is the compiler's to complete: the rail a
+    requirement declares lands on the published supply contact, so `unbound_required_port`
+    and the contract check read a document the model never wrote.
+    """
+    intent = _hub75_intent()
+    intent["requirements"].append(
+        {
+            "id": "pullups",
+            "sheet": "MCU",
+            "role": "bus_interface",
+            "family": "i2c-pullups",
+            "parameters": {"speed_hz": 400000, "bus_capacitance_pf": 50, "voltage": 3.3},
+            "supply": "+3V3",
+            "functional_blocks": ["ESP32_S3_CONTROLLER"],
+        }
+    )
+    intent["signals"].extend(
+        [
+            {"name": "SDA", "from": "esp32.sda", "to": "pullups.sda"},
+            {"name": "SCL", "from": "esp32.scl", "to": "pullups.scl"},
+        ]
+    )
+
+    ports = _requirement(derive_architecture(intent), "pullups").ports
+
+    assert ports["vdd"] == "+3V3"
+    assert ports["sda"] == "SDA" and ports["scl"] == "SCL"
+
+
+def test_unpublished_authored_supply_port_falls_back_to_the_family_port():
+    """A rail named on a port the family does not publish still reaches the part.
+
+    `supply_bindings` is an optional refinement: when the named pin is not one the family
+    publishes, the rail is bound to the family's own supply port instead of refusing the
+    draft for a name the compiler can derive.
+    """
+    intent = _hub75_intent()
+    intent["requirements"].append(
+        {
+            "id": "pullups",
+            "sheet": "MCU",
+            "role": "bus_interface",
+            "family": "i2c-pullups",
+            "supply_bindings": {"vdd_logic": "+3V3"},
+            "parameters": {"speed_hz": 400000, "bus_capacitance_pf": 50, "voltage": 3.3},
+            "functional_blocks": ["ESP32_S3_CONTROLLER"],
+        }
+    )
+    intent["signals"].extend(
+        [
+            {"name": "SDA", "from": "esp32.sda", "to": "pullups.sda"},
+            {"name": "SCL", "from": "esp32.scl", "to": "pullups.scl"},
+        ]
+    )
+
+    ports = _requirement(derive_architecture(intent), "pullups").ports
+
+    assert ports["vdd"] == "+3V3"
+    assert "vdd_logic" not in ports
+
+
+def test_two_signals_out_of_one_source_port_join_the_first_net():
+    """One physical pin carries one net, under the first name the design gave it.
+
+    The canary (2026-09-17, `stm32-min` NRST, `stepper-a4988` DIR, `speaker-crossover`
+    WOOFER_OUT) refused drafts whose second signal left a port the first signal already
+    bound. That is the same pin, so the peers join the existing net and the join is
+    reported rather than refused.
+    """
+    intent = _hub75_intent()
+    intent["sheets"].append(
+        {
+            "name": "SWD",
+            "stem": "SWD",
+            "role": "programming",
+            "function": "Programming header.",
+        }
+    )
+    intent["requirements"].append(
+        {
+            "id": "swd",
+            "sheet": "SWD",
+            "role": "programming",
+            "family": "pin-header",
+            "parameters": {"rows": 1, "gender": "male"},
+            "functional_blocks": ["ESP32_S3_CONTROLLER"],
+        }
+    )
+    intent["signals"].extend(
+        [
+            {"name": "SWD_CLK", "from": "esp32.gpio7", "to": "swd.pin1"},
+            {"name": "SWD_DIO", "from": "esp32.gpio7", "to": "swd.pin2"},
+        ]
+    )
+
+    architecture = derive_architecture(intent)
+
+    assert _requirement(architecture, "swd").ports == {"pin1": "SWD_CLK", "pin2": "SWD_CLK"}
+    assert any("join net SWD_CLK" in note for note in architecture.assumptions)
+
+
+def test_standard_stacking_pinmap_is_derived_from_the_template():
+    """The template owns the pin/net map; the role is the design statement.
+
+    The canary (2026-09-17, `proto-shield`, `snowman-ornament`) refused three stacking
+    connectors for a map the approved template already fixes, then reported every net in
+    that map a second time. The map is derived; a *different* authored map is still refused.
+    """
+    from kicraft.form_factors import get_template
+
+    template = get_template("arduino_uno_shield")
+    intent = _hub75_intent()
+    intent["standard_form_factor"] = template.key
+    intent["sheets"].append(
+        {
+            "name": "UNO HEADERS",
+            "stem": "UNO_HEADERS",
+            "role": "connector",
+            "function": "Arduino Uno shield stacking interface.",
+        }
+    )
+    for connector in template.fixed_connectors:
+        intent["requirements"].append(
+            {
+                "id": f"uno_{connector.role}",
+                "sheet": "UNO HEADERS",
+                "role": "connector",
+                "family": "pin-header",
+                "parameters": {"rows": 1, "gender": "female"},
+                "standard_stacking_role": connector.role,
+                "functional_blocks": ["UNO_HOST_INTERFACE"],
+            }
+        )
+
+    architecture = derive_architecture(intent)
+    owned = {
+        requirement.standard_stacking_role: requirement
+        for requirement in architecture.requirements
+        if requirement.standard_stacking_role
+    }
+    assert owned["power"].ports["pin6"] == "GND"
+    assert owned["power"].ports["pin1"] == "NC"
+
+    wrong = _hub75_intent()
+    wrong["standard_form_factor"] = template.key
+    wrong["sheets"] = [*wrong["sheets"], *intent["sheets"][-1:]]
+    wrong["requirements"] = [
+        *wrong["requirements"],
+        *[
+            {**row, "ties": {"pin1": "GND"}}
+            for row in intent["requirements"]
+            if row.get("standard_stacking_role") == "power"
+        ],
+    ]
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(wrong)
+    assert "invalid_standard_stacking_pinmap" in {d.code for d in excinfo.value.diagnostics}
+
+
+def test_architecture_top_level_obligations_are_written_from_the_committed_set():
+    """The top-level list is the committed set; the draft states ownership only.
+
+    The canary (2026-09-17, `r2r-dac`, `round-led-ring`, `rounded-c3-devboard`,
+    `snowman-ornament`) refused six drafts per run for an obligation list the compiler can
+    write. The draft's job is to attach each committed row, once and verbatim, to the
+    requirement that implements it.
+    """
+    obligation = {
+        "kind": "physical",
+        "original_obligation_id": "status-led",
+        "component_class": "status-led",
+    }
+    prompt_state = {
+        "intent": {"goal": "reference board", "obligations": [obligation]},
+        "functional_spec": {"obligations": [obligation]},
+    }
+    intent = _hub75_intent()
+    next(row for row in intent["requirements"] if row["id"] == "led")["obligations"] = [
+        {**obligation, "component_class": "led"}
+    ]
+
+    payload, _expanded = _normalize_stage_response("architecture", intent, prompt_state)
+
+    assert payload["obligations"] == [obligation]
+    restored = next(row for row in payload["requirements"] if row["id"] == "led")
+    assert restored["obligations"] == [obligation]
+    # The parsed architecture the stage commits agrees with the payload it was built from.
+    from kicraft.design.models import Architecture
+
+    assert Architecture.model_validate(payload).obligations[0].model_dump(
+        mode="json", exclude_none=True
+    ) == obligation
+
+
+def test_committed_obligation_with_no_implementing_requirement_is_refused():
+    """An obligation nobody owns cannot be derived: the refusal names the fix.
+
+    The direction that *is* derivable (the draft only attaches rows) is written by the
+    compiler; this is the one the draft has to get right.
+    """
+    from kicraft.server.stage_contracts import StageSchemaError
+
+    obligation = {
+        "kind": "physical",
+        "original_obligation_id": "status-led",
+        "component_class": "status-led",
+    }
+    prompt_state = {"intent": {"goal": "reference board", "obligations": [obligation]}}
+
+    with pytest.raises(StageSchemaError) as rejected:
+        _normalize_stage_response("architecture", _hub75_intent(), prompt_state)
+
+    assert rejected.value.diagnostic["code"] == "source_obligation_not_retained"
+    assert rejected.value.diagnostic["evidence"] == [obligation]
+
+
+def test_unknown_slot_field_names_itself_and_the_fix():
+    """An invented key must be repairable from the refusal alone.
+
+    The provider schema is generated from the slot models, so an `extra_forbidden` error is a
+    key the draft invented; the pydantic text names the key but not the repair.
+    """
+    from kicraft.server.stage_contracts import StageSchemaError
+
+    intent = _hub75_intent()
+    intent["questions_asked"] = ["Which LED colour?"]
+
+    with pytest.raises(StageSchemaError) as rejected:
+        _normalize_stage_response("architecture", intent, {"intent": {}, "functional_spec": {}})
+
+    message = str(rejected.value)
+    assert "questions_asked" in message
+    assert "remove each unknown key" in message
+
+
+def test_quantity_obligation_may_stand_alone_at_the_top_level():
+    """A count over the whole design is not an implementation claim.
+
+    The canary (2026-09-17, `rc-lowpass-bnc`, 2 BNC jacks + a trim pot) attached the physical rows
+    to their parts and left `two-bnc-connectors-count` at the top level: two jacks are two
+    requirements, so no single one implements the count. Refusing it cost the whole design.
+    """
+    quantity = {
+        "kind": "quantity",
+        "original_obligation_id": "two-bnc-connectors-count",
+        "subject": "bnc connectors",
+        "minimum": 2,
+    }
+    prompt_state = {
+        "intent": {"goal": "reference board", "obligations": [quantity]},
+        "functional_spec": {"obligations": [quantity]},
+    }
+
+    payload, _expanded = _normalize_stage_response("architecture", _hub75_intent(), prompt_state)
+
+    assert payload["obligations"] == [quantity]
+    assert not any(row.get("obligations") for row in payload["requirements"])
+
+
+def test_one_obligation_may_be_implemented_by_several_requirements():
+    """Three binding posts are three requirements, each claiming the one binding-post obligation.
+
+    The canary (2026-09-17, `speaker-crossover`) attached the same row to all three connectors and
+    was refused as a duplicate owner. The rows are identical, so ownership is unambiguous; the BOM
+    unit counts the groups per requirement.
+    """
+    obligation = {
+        "kind": "physical",
+        "original_obligation_id": "binding_post_terminal",
+        "component_class": "binding-post-terminal",
+    }
+    prompt_state = {
+        "intent": {"goal": "reference board", "obligations": [obligation]},
+        "functional_spec": {"obligations": [obligation]},
+    }
+    intent = _hub75_intent()
+    intent["sheets"].append(
+        {
+            "name": "OUT",
+            "stem": "OUT",
+            "role": "connector",
+            "function": "Speaker output terminals.",
+        }
+    )
+    for index in (1, 2, 3):
+        intent["requirements"].append(
+            {
+                "id": f"post_{index}",
+                "sheet": "OUT",
+                "role": "connector",
+                "family": "binding-post",
+                "obligations": [obligation],
+                "declared_ports": [
+                    {
+                        "key": "signal",
+                        "pin": str(index),
+                        "direction": "bidirectional",
+                        "function": "speaker output contact",
+                    }
+                ],
+                "functional_blocks": ["ESP32_S3_CONTROLLER"],
+            }
+        )
+
+    payload, _expanded = _normalize_stage_response("architecture", intent, prompt_state)
+
+    owning = [row["id"] for row in payload["requirements"] if row.get("obligations")]
+    assert owning == ["post_1", "post_2", "post_3"]
+    assert payload["obligations"] == [obligation]

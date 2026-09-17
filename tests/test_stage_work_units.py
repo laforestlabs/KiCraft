@@ -2346,10 +2346,18 @@ def test_pipeline_authored_bank_is_not_wiped_as_a_sibling_header():
 
 
 def _group_for(identity: str):
+    from kicraft.design import part_identity
     from kicraft.design.part_identity import reviewed_part
     from kicraft.server.stage_contracts import BomComponentGroup
 
-    rec = reviewed_part(identity)
+    rec = reviewed_part(identity) or next(
+        (
+            row
+            for row in part_identity._STANDARD_LIBRARY_PARTS
+            if row.identity.casefold() == identity.casefold()
+        ),
+        None,
+    )
     return BomComponentGroup(
         id="g", sheet="MAIN", reference_prefix="J", quantity=1, value=rec.identity,
         symbol=rec.symbol, footprint=rec.footprint, mpn=rec.identity,
@@ -2370,3 +2378,86 @@ def test_obligation_class_aliases_match_the_reviewed_feature_vocabulary():
     assert _group_has_physical_feature(usb_a, "usb-c-connector") is False
     assert _group_has_physical_feature(_group_for("kh-fg0.5-h2.0-24pin"), "fpc-ffc-connector") is True
     assert _group_has_physical_feature(_group_for("ams1117-5.0"), "voltage-regulator-ic") is True
+    # Classes the 2026-09-17 canary demanded under a second spelling of a reviewed class.
+    assert _group_has_physical_feature(_group_for("tl3342f260qg"), "momentary-pushbutton") is True
+    assert _group_has_physical_feature(_group_for("u-a-24ss-w-2"), "usb-a-connector") is True
+    assert _group_has_physical_feature(_group_for("wj126v-5.0-02p-14-00a"), "power-screw-terminal") is True
+    assert _group_has_physical_feature(_group_for("tps5430ddar"), "buck-converter-ic") is True
+    assert _group_has_physical_feature(_group_for("max31855kasa+"), "thermocouple-input") is True
+    assert _group_has_physical_feature(_group_for("aonr21357"), "high-side-load-switch") is True
+    assert _group_has_physical_feature(_group_for("pc817c-s"), "opto-isolator") is True
+    assert _group_has_physical_feature(_group_for("dl-rfm95-868m"), "lora-radio-module") is True
+    assert _group_has_physical_feature(_group_for("ltst-c190kgkt"), "status-led") is True
+    assert _group_has_physical_feature(_group_for("e6c0805wway1uda(1.1t m)"), "power-led") is True
+    # An addressable LED is not an indicator LED, and a digital isolator is not an optocoupler.
+    assert _group_has_physical_feature(_group_for("ws2812b-b/t"), "status-led") is False
+    assert _group_has_physical_feature(_group_for("adum1301arwz-rl"), "opto-isolator") is False
+
+
+def test_pin_less_declared_interface_claim_is_refused_by_name(monkeypatch):
+    """A claim without a pin number cannot be verified; say that, not "pin None".
+
+    The canary (2026-09-17, `lora-node`) reported `mcu:vdd: claimed pin None is not in
+    stm32l031…`, which reads as a wrong pin rather than a missing one, while the stage skill
+    asked for a claim with no pin at all.
+    """
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    symbol = _group_for("stm32l031k6t6").symbol
+    requirement = {
+        "id": "mcu",
+        "family": "stm32l0-mcu",
+        "exact_part": "STM32L031K6T6",
+        "obligations": [],
+        "declared_interface": {
+            "ports": [
+                {"key": "vdd", "direction": "power", "function": "logic supply"},
+                {"key": "pa9", "pin": "99", "direction": "output", "function": "uart tx"},
+            ]
+        },
+    }
+    group = _group_for("stm32l031k6t6")
+
+    defects = _requirement_obligation_defects([requirement], [group])[
+        "declared-interface-unrealized"
+    ]
+
+    assert any("vdd" in row and "states no pin number" in row for row in defects), defects
+    assert any("pa9" in row and "claimed pin '99'" in row for row in defects), defects
+    assert not any("claimed pin None" in row for row in defects)
+    assert symbol
+
+
+def test_unfulfilled_obligation_names_the_groups_the_unit_emitted():
+    """The defect must say what the unit *did* emit, not only that a class is missing.
+
+    Every 2026-09-17 canary BOM failure reads `requires 1 real usb-c-receptacle, found 0` while
+    naming neither the group the unit emitted nor its identity, so the repair (and the next
+    diagnosis) cannot tell "the draft picked an unreviewed part" from "the draft emitted no part".
+    """
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    requirement = {
+        "id": "usb_c",
+        "family": "usb-c-breakout",
+        "exact_part": "TYPE-C-31-M-12",
+        "obligations": [
+            {
+                "kind": "physical",
+                "original_obligation_id": "usb-c-input",
+                "component_class": "usb-c-receptacle",
+            }
+        ],
+    }
+    unreviewed = _group_for("12401610e4#2a").model_copy(
+        update={"id": "usb_c", "symbol": "Connector:USB_C_Receptacle_USB2.0_16P"}
+    )
+
+    defects = _requirement_obligation_defects([requirement], [unreviewed])[
+        "physical-obligation-unfulfilled"
+    ]
+
+    assert len(defects) == 1
+    assert "requires 1 real usb-c-receptacle, found 0" in defects[0]
+    assert "the unit emitted: usb_c=Connector:USB_C_Receptacle_USB2.0_16P" in defects[0]
+

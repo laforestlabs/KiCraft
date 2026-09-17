@@ -1169,3 +1169,59 @@ def test_lowerer_refusal_names_required_ports():
         ports={"input": "SIG_IN", "output": "SIG_FILT", "gnd": "GND"},
     )
     assert lowerer_contract_diagnostic(bound) is None
+
+
+def test_lowerer_summary_publishes_the_reviewed_part_and_parameter_choices():
+    """What a lowerer can build must be discoverable before a draft is written.
+
+    `extras.circuit_lowerers` is the model's only view of these contracts: an audio jack
+    that realizes exactly one reviewed part, and a filter whose two parameters have one
+    accepted value each, are unreachable by a draft that cannot read them.
+    """
+    from kicraft.design.lowering import lowerer_summaries
+
+    rows = {row["lowerer"]: row for row in lowerer_summaries()}
+    assert rows["audio-jack@1"]["required_exact_part"] == "SJ1-3533NG"
+    assert rows["bnc-connector@1"]["reviewed_exact_part"] == "KH-BNC50-3511"
+    assert rows["fpc-connector@1"]["reviewed_exact_part"] == "KH-FG0.5-H2.0-24PIN"
+    assert rows["adjustable-rc-lowpass@1"]["parameter_choices"] == {
+        "capacitance_f": [10e-9],
+        "capacitor_exact_part": ["C0805C103J5GACTU"],
+    }
+    # A family that realizes no specific reviewed part publishes none.
+    assert "required_exact_part" not in rows["pin-header@1"]
+    assert "reviewed_exact_part" not in rows["pin-header@1"]
+
+
+def test_lowerer_refusal_names_the_reviewed_part_and_the_accepted_parameter():
+    """The refusal must name the accepted value, not only that none was accepted.
+
+    The canary (2026-09-17, `audio-jack-buffer`, `rc-lowpass-bnc`) refused four audio jacks
+    and two filters with "cannot realize this port/parameter combination": the draft had
+    bound every contact, and the one wrong fact — the ordering code, or one parameter
+    value — was not published anywhere the draft could read.
+    """
+    jack_ports = {"sleeve": "GND", "tip": "IN", "ring": "OUT"}
+    wrong_part = CircuitRequirement(
+        id="jack",
+        sheet="MAIN",
+        role="connector",
+        family="audio-jack",
+        exact_part="SJ1-3533",
+        ports=jack_ports,
+    )
+    diagnostic = lowerer_contract_diagnostic(wrong_part)
+    assert diagnostic is not None
+    assert "SJ1-3533NG" in diagnostic.message
+    assert "required_exact_part=SJ1-3533NG" in diagnostic.evidence
+
+    wrong_value = _requirement(
+        "adjustable-rc-lowpass",
+        parameters={"capacitance_f": 2.2e-6, "capacitor_exact_part": "C0805C103J5GACTU"},
+        ports={"input": "IN", "output": "OUT", "gnd": "GND"},
+    )
+    diagnostic = lowerer_contract_diagnostic(wrong_value)
+    assert diagnostic is not None
+    assert "capacitance_f" in diagnostic.message
+    assert "1e-08" in diagnostic.message
+    assert "parameter_choices=capacitance_f=[1e-08]" in ";".join(diagnostic.evidence)

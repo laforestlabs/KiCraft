@@ -633,28 +633,15 @@ def _bundled_reviewed_record(group: BomComponentGroup):
 
 
 def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
-    from kicraft.design.part_identity import physical_inventory_record
+    from kicraft.design.part_identity import canonical_physical_features, physical_inventory_record
 
     reviewed = physical_inventory_record(
         mpn=group.mpn, symbol=group.symbol, footprint=group.footprint,
     )
     if reviewed is None:
         reviewed = _bundled_reviewed_record(group)
-    canonical_features = {
-        "fpc": {"fpc-connector"},
-        "header": {"pin-header", "pin-socket"},
-        "button": {"momentary-button"},
-        "selector": {"three-position-selector", "sp3t-selector"},
-        # Obligation classes the model names that the reviewed feature vocabulary spells
-        # differently. Only pairs verified to denote the same physical class belong here:
-        # `usb-connector` is a USB-A part, so it is deliberately NOT an alias for a USB-C
-        # demand; `opto-isolator` is not a `digital-isolator`.
-        "usb-c-connector": {"usb-c-receptacle"},
-        "fpc-ffc-connector": {"fpc-connector", "ffc-connector"},
-        "voltage-regulator-ic": {"voltage-regulator"},
-    }.get(feature, {feature})
     return reviewed is not None and bool(
-        canonical_features.intersection(reviewed.physical_features)
+        canonical_physical_features(feature).intersection(reviewed.physical_features)
     )
 
 
@@ -1426,9 +1413,21 @@ def _requirement_obligation_defects(requirements, groups: list[BomComponentGroup
                 group.quantity for group in groups if _group_has_physical_feature(group, feature)
             ) - consumed.get(feature, 0)
             if actual < minimum:
+                # Name the groups the unit emitted, with the identity each one resolved to: the
+                # repair (and the next diagnosis) needs to tell "the draft picked an unreviewed
+                # part" from "the draft emitted no part at all".
+                emitted = [
+                    f"{group.id}={group.symbol} mpn={group.mpn or group.value}"
+                    for group in groups[:8]
+                ]
                 defects["physical-obligation-unfulfilled"].append(
                     f"{requirement['id']}:{obligation['original_obligation_id']}: "
                     f"requires {minimum} real {feature}, found {actual}"
+                    + (
+                        "; the unit emitted: " + " | ".join(emitted)
+                        if emitted
+                        else "; the unit emitted no groups"
+                    )
                 )
             consumed[feature] = consumed.get(feature, 0) + minimum
         claim = requirement.get("declared_interface")
@@ -1456,9 +1455,20 @@ def _requirement_obligation_defects(requirements, groups: list[BomComponentGroup
             )
             continue
         for port in claim["ports"]:
-            if not port.get("pin") or port["pin"] not in pins:
+            claimed = port.get("pin")
+            if not claimed:
+                # A declared interface is a claim about a real part, and the only thing that makes
+                # the claim checkable is the pin number: `declared_ports` entries without one are
+                # refused by name instead of reading as "claimed pin None is not in <symbol>".
                 defects["declared-interface-unrealized"].append(
-                    f"{requirement['id']}:{port['key']}: claimed pin {port.get('pin')!r} "
+                    f"{requirement['id']}:{port['key']}: claim states no pin number; name the "
+                    f"actual contact of {owners[0].symbol} (available pins={sorted(pins)}) so the "
+                    "claimed function can be verified"
+                )
+                continue
+            if claimed not in pins:
+                defects["declared-interface-unrealized"].append(
+                    f"{requirement['id']}:{port['key']}: claimed pin {claimed!r} "
                     f"is not in {owners[0].symbol}; available pins={sorted(pins)}"
                 )
     return defects

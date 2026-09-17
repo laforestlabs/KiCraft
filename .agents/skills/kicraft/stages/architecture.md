@@ -3,17 +3,27 @@ Stage 3: Architecture. State the design; the compiler writes the wiring bookkeep
 This stage used to ask you to hand-write derived data — canonical net names, a `ports` value per
 requirement that had to equal a net name declared elsewhere, an endpoint list per net, rail nets,
 and the connector a signal needs. Those are *consequences* of the design, and they are now derived
-from what you state here by `derive_architecture`. You state intent; the compiler writes:
+from what you state here by `derive_architecture`. You state intent — **`signals` and each
+requirement's `supply` are the inputs that matter** — and the compiler writes:
 
 - the canonical net names, one per signal you declare;
 - every `requirements[].ports` binding (which port sits on which net) on **both** ends of a signal;
+- each requirement's **supply and ground pins**: `supply` is bound to the family's own supply port
+  (a regulator's `input`, a logic part's `vdd`, a driver's `vm`), and the family's reference port
+  (its `gnd`/`vss`) to `GND` — and a lowerer's published `vdd`/`gnd` contacts the same way;
+- the spare-port ties a reviewed recipe allows to float no longer: a required, groundable port your
+  design does not use is tied to `GND` with a note;
 - `inter_sheet_nets`, with the endpoint sheets and directions the parts imply;
 - `power_nets` and `rail_voltages` from the rails you declare;
 - the physical connector an off-board (`edge:`) signal needs, including the rails that peer asked
-  for, plus the ground tie for a required recipe port your design does not use.
+  for;
+- the top-level `obligations` list, from the obligations the intent and functional spec committed;
+- the pin/net map of a `standard_form_factor`'s stacking connectors, from the approved template.
 
 Do not write any of those. There is no `ports`, `inter_sheet_nets`, `power_nets` or
-`rail_voltages` field in this slot, and a port you name must exist (see *Port keys*).
+`rail_voltages` field in this slot, and a port you name must exist (see *Port keys*). The optional
+refinements — `ties`, `supply_bindings`, `reference_bindings`, `declared_ports` — are honoured
+where you state them and derived where you do not; never write them to satisfy a check.
 
 Slot shape:
 
@@ -49,8 +59,11 @@ Slot shape:
     user's part identity; do not substitute a different family.
   - `parameters`: the family's own bounded keys (`rows`, `gender`, `output_voltage`,
     `supply_voltage`, …). Use only keys the reference data advertises.
-  - `supply`: the rail this part is powered from (a declared `power.rails` name). The compiler
-    binds it to the family's supply port (a regulator's input, a logic part's vdd, a driver's vm).
+  - `supply`: the rail this part is powered from (a declared `power.rails` name). The compiler binds
+    it to the family's supply port (a regulator's input, a logic part's vdd, a driver's vm); a
+    family that publishes no supply port — a status LED draws its current from its `drive` signal —
+    simply has no pin on that rail, and saying so is not an error. Omit `supply` only for a part
+    that genuinely draws nothing from a declared rail.
   - `programming`: how a programmable part is flashed — `native_usb`, `usb_uart_bridge`, `swd`,
     `updi`, `bootsel`, `none`. See *Programming*.
   - `interfaces`: the recipe's interface names you use (`i2c_controller`, `spi_controller`,
@@ -61,11 +74,21 @@ Slot shape:
     `parallel_<i>` ports you bind. You do not have to get the list exactly right; the ports decide.
   - `functional_blocks`: the exact committed Functional Spec block names this part implements.
     Every block needs an owner; several requirements may implement one block.
-  - `ties`: port key → declared net for a direct tie no signal names: a connector shell to `GND`,
-    an enable pin to the rail it runs on, a spare input held low. The net must be `GND`, a declared
-    rail, or a net one of your signals names.
+  - `obligations`: the committed intent/functional-spec obligation rows this part implements,
+    copied verbatim (`kind` and `original_obligation_id` identify them). Attach each committed
+    obligation to the requirement that implements it — several requirements may carry the same row
+    when your design implements one obligation in more than one place (three binding posts), and a
+    `quantity` count over the whole design may stay at the top level. The top-level `obligations`
+    list itself is written for you from the committed set: do not copy the rows into it.
+  - `ties`: rare. The compiler already ties the family's ground, its unused groundable ports, and a
+    standard template's stacking pin map. State a tie only for a direct connection no signal names
+    and no rule derives: a connector shell to `GND`, an enable pin to the rail it runs on. The net
+    must be `GND`, a declared rail, or a net one of your signals names.
+  - `supply_bindings` / `reference_bindings`: rare refinements for a part with several supply or
+    reference domains (an isolated side named `GND_ISO`); a domain must be a declared zero-volt
+    rail. The compiler binds the single supply/reference case itself — do not restate it.
   - `declared_ports`: **only** for a part with no curated recipe (see *Parts the code has never
-    seen*).
+    seen*); on a curated or lowerer family there is nothing to declare.
 - `signals`: one entry per named application signal. `name` is the net name (canonical, unique,
   not a declared rail); `from` is `"<requirement_id>.<port>"`, `to` is one peer reference or a list
   of them, each `"<requirement_id>.<port>"` or `"edge:<NAME>"`. Optional:
@@ -88,17 +111,27 @@ Slot shape:
 - the lowerer's keyed ports for a lowerer family (`pin1` … `pinN` for `pin-header`, in physical
   pin order — the pins are ordered by the order you bind them, so bind each connector pin once).
 
-**One port carries one net, once.** A port key may be bound exactly once. Two signals that name
-the same `<requirement>.<port>` are refused, naming the ports that were available. A family whose
-port list has a single signal port (`switch-input`'s `signal`; `connector-bank`'s
+**How the compiler binds ports.** A port key may be bound exactly once, and the compiler is the one
+that binds it:
+
+- A signal binds its source port to its own net and each peer port to the same net. Two signals that
+  name the same **peer** port are refused, naming the ports that were available: that really is two
+  nets on one pin.
+- Two signals that leave the **same** source port are one physical net under two names — the first
+  name owns it, the second signal's peers join it, and the join is recorded as a derived assumption.
+  That is legal, not a habit: prefer one signal per net.
+- A port a rail or ground already owns keeps that net; a signal out of it joins the peers to the
+  rail instead of naming a second net.
+
+A family whose port list has a single signal port (`switch-input`'s `signal`; `connector-bank`'s
 `signal0…signalN`) realises **one instance per requirement** — three microstep switches are three
 requirements, or the family's numbered port pattern, never one `signal` port bound three times.
 
-A key that is none of these is refused, naming the ports that do exist. Do not invent a port to
-carry a signal the part cannot. **Every required port of a selected recipe must end up bound** — by
-a signal, by `supply`, by ground, or by a `ties` entry; a required port nobody binds is refused,
-naming it. A port whose signal continues off the board (a WS2812 driver's `data_out` feeding the
-string) is bound like any other, to the same `edge:` peer as the rest of that interface.
+A key that is none of the published ones is refused, naming the ports that do exist. Do not invent a
+port to carry a signal the part cannot. A required port of a selected recipe nobody binds is
+refused by name: wire it with a signal or a `ties` entry. A port whose signal continues off the
+board (a WS2812 driver's `data_out` feeding the string) is bound like any other, to the same `edge:`
+peer as the rest of that interface.
 
 **Off-board interfaces.** Send a signal to `edge:<NAME>` and the compiler adds the connector: a
 USB data socket when the source is a native-USB MCU's `usb_dm`/`usb_dp` (both must be sent to the
@@ -145,12 +178,15 @@ ground, then the rails you listed in `rails`. So `LED_DATA` → `edge:LED_STRING
 **Parts the code has never seen.** A curated recipe owns its connections. For anything else:
 
 - A part with no recipe is acceptable when you state its interface: give the requirement
-  `declared_ports`, one entry per pin function — `{"key": "...", "direction":
-  "input|output|bidirectional|passive|power", "function": "<what it does>"}`. The compiler then
-  treats it like a curated part: it binds the wires you named, exposes the off-board connector,
-  and records the interface as a **claim** in the review and in the assumptions — the pin functions
-  are yours, not verified against a curated table. Wires you name across a declared interface are
-  the risk the review cannot check: get the functions right.
+  `declared_ports`, one entry per pin function — `{"key": "...", "pin": "<the ordering code's own
+  contact>", "direction": "input|output|bidirectional|passive|power", "function": "<what it
+  does>"}`. `pin` is what makes the claim checkable: the BOM resolves the real symbol and refuses a
+  function claimed on a contact that part does not have, and a claim that states no pin at all.
+  The compiler then treats the part like a curated one: it binds the wires you named, exposes the
+  off-board connector, and records the interface as a **claim** in the review and in the
+  assumptions — the pin functions are yours, not verified against a curated table. Wires you name
+  across a declared interface are the risk the review cannot check: get the pins and functions
+  right.
 - Without `declared_ports`, a requirement whose ports a signal needs is **refused once**, naming
   the part: nothing can be wired to a part whose connections are unknown. State the interface (or
   use a family with a curated recipe) and re-emit.

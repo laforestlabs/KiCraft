@@ -136,6 +136,12 @@ class RegisteredLowerer:
     # model-owned merely because its contract was malformed.
     port_directions: tuple[tuple[str, str], ...] = ()
     port_patterns: tuple[tuple[str, str], ...] = ()
+    # The reviewed ordering code the lowerer realizes. A build that refuses every other code
+    # (including none) publishes it here, so the refusal can name the part the draft must state.
+    required_exact_part: str | None = None
+    # The reviewed ordering code a build realizes *when one is stated*; the family still accepts a
+    # requirement with no `exact_part`. Published so a draft names a part the lowerer can build.
+    reviewed_exact_part: str | None = None
 
 
 _REGISTRY: dict[str, RegisteredLowerer] = {}
@@ -193,6 +199,16 @@ def lowerer_summaries() -> list[dict]:
             **(
                 {"port_patterns": [pattern for pattern, _direction in lowerer.port_patterns]}
                 if lowerer.port_patterns
+                else {}
+            ),
+            **(
+                {"required_exact_part": lowerer.required_exact_part}
+                if lowerer.required_exact_part
+                else {}
+            ),
+            **(
+                {"reviewed_exact_part": lowerer.reviewed_exact_part}
+                if lowerer.reviewed_exact_part
                 else {}
             ),
         }
@@ -307,8 +323,22 @@ def lowerer_contract_diagnostic(
     ]
     if lowerer.required_port_keys:
         evidence.insert(0, "required_ports=" + ",".join(lowerer.required_port_keys))
+    if lowerer.parameter_choices:
+        evidence.append(
+            "parameter_choices="
+            + ",".join(f"{key}={list(values)}" for key, values in lowerer.parameter_choices)
+        )
+    if lowerer.required_parameter_keys:
+        evidence.append("required_parameters=" + ",".join(lowerer.required_parameter_keys))
+    if lowerer.required_exact_part:
+        evidence.append("required_exact_part=" + lowerer.required_exact_part)
+    if lowerer.reviewed_exact_part:
+        evidence.append("reviewed_exact_part=" + lowerer.reviewed_exact_part)
     if failure:
         evidence.append(failure)
+    missing_required = sorted(
+        key for key in lowerer.required_port_keys if key not in requirement.ports
+    )
     if not requirement.ports and (
         lowerer.required_port_keys or lowerer.port_directions or lowerer.port_patterns
     ):
@@ -330,10 +360,51 @@ def lowerer_contract_diagnostic(
             f"known lowerer {lowerer_id} does not support ports {unknown_ports}; "
             "use its published port contract or choose a genuinely model-owned family"
         )
-    elif parameter_diagnostics:
+    elif missing_required:
+        # The draft named part of the contract and left a contact unbound. Name the ports the
+        # published contract still requires rather than the generic "cannot realize" sentence.
         message = (
-            f"known lowerer {lowerer_id} has unsupported parameters; "
+            f"known lowerer {lowerer_id} needs every published contact bound, but "
+            f"{missing_required} {'is' if len(missing_required) == 1 else 'are'} unbound; its "
+            f"required ports are {', '.join(lowerer.required_port_keys)}"
+        )
+    elif parameter_diagnostics:
+        # Name the offending key, the value the draft gave it, and the accepted values, so the
+        # refusal is repairable without reading the lowerer's source.
+        detail = "; ".join(
+            f"parameters.{row.parameter}="
+            + ("<missing>" if row.missing else repr(row.value))
+            + (
+                f" ({row.constraint})"
+                if row.constraint
+                else (
+                    f" (accepted: {list(row.choices)!r})"
+                    if row.choices
+                    else " (published contract)"
+                )
+            )
+            for row in parameter_diagnostics[:4]
+        )
+        message = (
+            f"known lowerer {lowerer_id} has unsupported parameters: {detail}; "
             "use its published parameter contract"
+        )
+    elif lowerer.required_exact_part and (
+        requirement.exact_part or ""
+    ).casefold() != lowerer.required_exact_part.casefold():
+        message = (
+            f"known lowerer {lowerer_id} realizes exactly the reviewed part "
+            f"{lowerer.required_exact_part!r}; set exact_part to that ordering code"
+        )
+    elif (
+        lowerer.reviewed_exact_part
+        and requirement.exact_part
+        and requirement.exact_part.casefold() != lowerer.reviewed_exact_part.casefold()
+    ):
+        message = (
+            f"known lowerer {lowerer_id} realizes the reviewed part "
+            f"{lowerer.reviewed_exact_part!r}, not {requirement.exact_part!r}; state that ordering "
+            "code or omit exact_part"
         )
     else:
         message = (
@@ -1456,6 +1527,7 @@ for _lowerer in (
         (),
         ("signal", "gnd"),
         required_port_keys=("signal", "gnd"),
+        reviewed_exact_part="KH-BNC50-3511",
     ),
     RegisteredLowerer(
         "audio-jack@1",
@@ -1465,6 +1537,7 @@ for _lowerer in (
         ("sleeve", "tip", "ring"),
         port_directions=(("sleeve", "bidirectional"), ("tip", "bidirectional"), ("ring", "bidirectional")),
         required_port_keys=("sleeve", "tip", "ring"),
+        required_exact_part="SJ1-3533NG",
     ),
     RegisteredLowerer(
         "pin-header@1",
@@ -1500,6 +1573,7 @@ for _lowerer in (
         ("pitch_mm",),
         ("<pin1..pin24: contiguous explicit physical contacts>",),
         port_patterns=((r"pin(?:[1-9]|1[0-9]|2[0-4])", "bidirectional"),),
+        reviewed_exact_part="KH-FG0.5-H2.0-24PIN",
     ),
     RegisteredLowerer(
         "test-points@1",
@@ -1573,6 +1647,11 @@ for _lowerer in (
         ("input", "output", "gnd"),
         required_port_keys=("input", "output", "gnd"),
         required_parameter_keys=("capacitance_f", "capacitor_exact_part"),
+        parameter_choices=(
+            ("capacitance_f", (10e-9,)),
+            ("capacitor_exact_part", ("C0805C103J5GACTU",)),
+        ),
+        reviewed_exact_part="3296W-1-103LF",
     ),
     RegisteredLowerer(
         "i2c-pullups@1",
@@ -1624,6 +1703,7 @@ for _lowerer in (
         ("cell_format",),
         ("positive", "negative"),
         required_port_keys=("positive", "negative"),
+        reviewed_exact_part="BS-07-A1BJ001",
     ),
     RegisteredLowerer(
         "capacitive-touch-pad@1",
