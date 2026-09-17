@@ -59,32 +59,41 @@ LLM stages, no build), both **0/34 committed**, `source_unchanged=true`, ~$0.60 
 |---|---|---|---|---|---|
 | 1 | `logs/self_eval/canary_20260916T234557Z` | 0/34 | 23 | 11 | 0 |
 | 2 | `logs/self_eval/canary_20260917T001818Z` | 0/34 | 23 | 11 | 0 |
-| 3 | `logs/self_eval/canary_20260917T004307Z` | **1/34** | 19 | 13 | 1 |
+| 3 | `logs/self_eval/canary_20260917T004307Z` | 1/34 | 19 | 13 | 1 |
+| 5 | `logs/self_eval/canary_20260917T011637Z` | **0/34** | 22 | 12 | 0 |
+
+(Run 4 — the alias + identity-guard set alone — was cancelled mid-run as superseded by run 5.)
 
 Every brief clears `intent` and `functional_spec`. For comparison,
 `canary_20260915T034256Z` (before the 2026-09-16 contract work) committed 13/34 — so the 34/34
 release gate is far away under the current contract.
 
-**Run 3 followed the port-menu work** (`618c433`: lowerers publish `required_port_keys`;
-`_Catalog.choices` prints the published pattern instead of `(none)`; the binding conflict names the
-menu and the one-port-one-net rule; the architecture spec states it). The targeted class moved:
-`conflicting_port_binding` 12 → 4 and `declared_signal_port_tied` 5 → 2, and `r2r-dac` is the first
-brief to commit all five stages. Single-sample caveat: 1-vs-0 is weak on its own; the
-binding-conflict drop is the direct target and did move.
+**The incremental fixes did not move the aggregate, and run 3's single pass does not reproduce.**
+Run 3 followed the port-menu work (`618c433`) and showed architecture failures 23→19 with one
+completion; run 5 followed the alias map, the identity guard and the bundle-identity
+classification (`a603b1b`, `00114c3`) and returned 0/34 with architecture failures back up to 22.
+Each fix is correct in isolation and unit-tested, but with one sample per brief the run-to-run
+spread is the same order as the gains, so none of them is a demonstrated improvement. Two classes
+did not respond as predicted: `physical-obligation-unfulfilled` is still 8 despite the
+bundle-identity fix, and the obligation-ownership schema class grew (7 briefs now report
+`1 validation error for ArchitectureIntent`, the class the prompt change in `c5d6138` targeted).
 
-**The wall has shifted to BOM** — 17 of the 33 failures are now there
-(`physical-obligation-unfulfilled` 9, `declared-interface-unrealized` 5, `commit_rejected` 3), e.g.
-`E_PHYSICAL_REALIZATION 'usb': requires 1 reviewed 'usb-c-connector' physical part(s), found 0 with
-exact MPN/symbol/footprint evidence`. That is a part-resolution/coverage problem (milestone 2:
-resolve exact parts, packages and pin inventories, reuse and extend reviewed assets), not a wording
-one. Residual architecture causes: `unsupported_lowerer_contract` 9 (now usually a parameter or
-count mismatch rather than missing ports), supply-rail naming, standard-stacking pinmaps.
+**Conclusion: stop fixing this one refusal at a time.** The architecture stage asks the model to
+author a large document (sheets, requirements, ports, rails, ties, bindings, obligations, signals)
+that must satisfy ~30 independent checks in three attempts, and each run fails a different subset.
+The recommendation is now structural, in order of leverage:
 
-**Recommendation (operator decision, not yet taken):** next, attack the BOM
-part-resolution class (`physical-obligation-unfulfilled` + `declared-interface-unrealized`) by
-making each required physical class resolve to a reviewed `(mpn, symbol, footprint)` — the same
-kind of closed-menu fix that worked for ports. Keep the alternative open: split the architecture
-stage into smaller validated steps, or route uncurated hardware to a review/park path.
+1. **Derive instead of author** — for recipe/lowerer families let the compiler bind ports from the
+   signals the model names, so the model never authors `ports`/`supply_bindings`/`ties`/
+   `declared_ports`. Deletes the class that produces most refusals.
+2. **Split architecture into validated sub-steps** (sheets → requirements → bindings → signals) so
+   each piece is small enough to conform and a repair fixes one thing.
+3. **Library authoring** for the genuinely missing classes (`high-side-load-switch`,
+   `opto-isolator`, `status-led`, `power-led`, `thermocouple-input`, `r-2r-resistor-ladder`) —
+   independent of 1 and 2.
+
+**Open operator decisions:** deploy or hold the pushed fixes (production still runs the 20:58
+code), and which structural direction (1, 2, or 3).
 
 **Pre-fix baseline (run 2).** Ranked first-failure causes were 12 `conflicting_port_binding`,
 10 `unsupported_lowerer_contract`, 7 `unsupported_supply_port`, 5 `declared_signal_port_tied`, 4
