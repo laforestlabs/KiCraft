@@ -605,12 +605,41 @@ def _required_physical_feature(requirement: dict) -> str | None:
     return None
 
 
+def _bundled_reviewed_record(group: BomComponentGroup):
+    """The reviewed record for a group whose identity IS the curated bundle's.
+
+    The parts loader resolves an MPN to a curated bundle whose symbol/footprint pair can
+    differ from the reviewed record's name for the same device (KiCad-stock vs vendored
+    easyeda). It is one MPN and one device, so the group must classify: otherwise the
+    physical-obligation check reports a part the BOM did resolve as "requires 1 real
+    <class>, found 0". The group's MPN is not trusted here -- the bundle manifest's own
+    MPN selects the record.
+    """
+    from kicraft.design.part_identity import reviewed_part
+
+    library = (group.symbol or "").partition(":")[0]
+    if not library:
+        return None
+    by_name, _by_mpn = _curated_part_indexes()
+    loaded = by_name.get(library)
+    if loaded is None:
+        return None
+    if group.symbol != f"{library}:{loaded.manifest.symbol_name}":
+        return None
+    if group.footprint != f"{library}:{loaded.manifest.footprint_name}":
+        return None
+    mpn = str(loaded.manifest.mpn or "").strip()
+    return reviewed_part(mpn) if mpn else None
+
+
 def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
     from kicraft.design.part_identity import physical_inventory_record
 
     reviewed = physical_inventory_record(
         mpn=group.mpn, symbol=group.symbol, footprint=group.footprint,
     )
+    if reviewed is None:
+        reviewed = _bundled_reviewed_record(group)
     canonical_features = {
         "fpc": {"fpc-connector"},
         "header": {"pin-header", "pin-socket"},

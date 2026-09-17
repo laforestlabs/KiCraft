@@ -2387,3 +2387,28 @@ def test_curated_normalization_keeps_an_identity_the_records_classify():
     out = _normalize_curated_group_identities([_group_for("stm32l031k6t6")])
     assert out[0].symbol == rec.symbol
     assert out[0].footprint == rec.footprint
+
+
+def test_bundle_identity_group_classifies_against_the_reviewed_record():
+    """A group carrying the loader's bundle identity must still classify.
+
+    The BOM tool lists curated bundles first, so the model emits that identity — whose
+    symbol/footprint differ from the reviewed record's for the same device. Without
+    this, the obligation check reports "requires 1 real <class>, found 0" for a part the
+    BOM resolved (the dominant canary BOM failure).
+    """
+    from kicraft.design.part_identity import reviewed_part
+    from kicraft.server.stage_contracts import BomComponentGroup
+    from kicraft.server.stage_work_units import _group_has_physical_feature
+
+    rec = reviewed_part("stm32l031k6t6")
+    bundle = BomComponentGroup(
+        id="u1", sheet="MCU", reference_prefix="U", quantity=1,
+        value=rec.identity, mpn=rec.identity,
+        symbol="stm32l031k6t6:STM32L031K6T6",
+        footprint="stm32l031k6t6:LQFP-32_L7.0-W7.0-P0.80-LS9.0-BL",
+    )
+    assert _group_has_physical_feature(bundle, "microcontroller") is True
+    # The bundle identity must still be exact: a mismatched footprint is not that part.
+    broken = bundle.model_copy(update={"footprint": "stm32l031k6t6:NOT_THE_BUNDLE"})
+    assert _group_has_physical_feature(broken, "microcontroller") is False
