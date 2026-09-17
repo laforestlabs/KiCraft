@@ -1154,21 +1154,10 @@ def _normalize_curated_group_identities(
     groups: list[BomComponentGroup],
 ) -> list[BomComponentGroup]:
     """Use curated bundles as authoritative, reusable component defaults."""
-    from kicraft.design.part_identity import physical_inventory_record
-
     by_name, by_mpn = _curated_part_indexes()
     normalized: list[BomComponentGroup] = []
     for group in groups:
         original_symbol = group.symbol
-        # A group whose identity the reviewed records already classify keeps it. The curated
-        # bundle for the same MPN often names a different symbol/footprint pair, and rewriting
-        # to it makes physical_inventory_record (which demands an exact triple) fail the group
-        # -- reporting "requires 1 real <class>, found 0" for a part the BOM did resolve.
-        if physical_inventory_record(
-            mpn=group.mpn, symbol=original_symbol, footprint=group.footprint
-        ) is not None:
-            normalized.append(group)
-            continue
         group = group.model_copy(update={"symbol": canonical_symbol_id(original_symbol)})
         selected_identities = {
             _identity_token(value)
