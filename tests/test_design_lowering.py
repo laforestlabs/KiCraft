@@ -1122,3 +1122,50 @@ def test_lowerer_refusal_names_missing_ports():
     # With its contacts bound, the lowerer realizes it and there is no refusal.
     realized = _requirement("screw-terminal", ports={"pin1": "+3V3", "pin2": "GND"})
     assert lowerer_contract_diagnostic(realized) is None
+
+
+def test_lowerer_summary_publishes_required_ports():
+    """The model must be told which ports a lowerer needs.
+
+    These lowerers privately demanded specific ports in their build code while
+    publishing no port contract, so a draft could not discover them and the refusal
+    named nothing. `extras.circuit_lowerers` carries `required_port_keys` whenever the
+    lowerer sets it.
+    """
+    from kicraft.design.lowering import lowerer_summaries
+
+    rows = {row["lowerer"]: row for row in lowerer_summaries()}
+    for lowerer_id, wanted in {
+        "rc-lowpass@1": ["input", "output", "gnd"],
+        "adjustable-rc-lowpass@1": ["input", "output", "gnd"],
+        "voltage-divider@1": ["input", "output", "gnd"],
+        "i2c-pullups@1": ["vdd", "sda", "scl"],
+        "led-current-resistor@1": ["drive", "gnd"],
+        "open-drain-pullup@1": ["vdd", "signal"],
+        "switch-input@1": ["signal", "gnd", "vdd"],
+        "coin-cell-holder@1": ["positive", "negative"],
+        "explicit-decoupling@1": ["vdd", "gnd"],
+    }.items():
+        assert rows[lowerer_id]["required_port_keys"] == wanted
+
+
+def test_lowerer_refusal_names_required_ports():
+    """An unported lowerer family names the exact ports its build code wants.
+
+    `rc-lowpass@1` was the top live blocker: a draft declared none of input/output/gnd
+    and got "cannot realize this port/parameter combination", which names nothing to
+    bind, so the repair rounds repeated it.
+    """
+    diagnostic = lowerer_contract_diagnostic(
+        _requirement("rc-lowpass", parameters={"cutoff_hz": 1000, "resistance_ohm": 10_000})
+    )
+    assert diagnostic is not None
+    assert "input, output, gnd" in diagnostic.message
+    assert "required_ports=input,output,gnd" in diagnostic.evidence
+    # With its contacts bound the lowerer realizes it, so there is no refusal.
+    bound = _requirement(
+        "rc-lowpass",
+        parameters={"cutoff_hz": 1000, "resistance_ohm": 10_000},
+        ports={"input": "SIG_IN", "output": "SIG_FILT", "gnd": "GND"},
+    )
+    assert lowerer_contract_diagnostic(bound) is None

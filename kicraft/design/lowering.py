@@ -305,16 +305,25 @@ def lowerer_contract_diagnostic(
         ),
         "parameters=" + ",".join(lowerer.parameter_keys),
     ]
+    if lowerer.required_port_keys:
+        evidence.insert(0, "required_ports=" + ",".join(lowerer.required_port_keys))
     if failure:
         evidence.append(failure)
-    if not requirement.ports and (lowerer.port_directions or lowerer.port_patterns):
+    if not requirement.ports and (
+        lowerer.required_port_keys or lowerer.port_directions or lowerer.port_patterns
+    ):
         # The lowerer owns this family, so a model-authored fallback is refused; the
-        # requirement has simply declared no contacts. Say that, rather than the generic
+        # requirement has simply declared no contacts. Name the exact ports its build
+        # code wants (published as required_port_keys) instead of the generic
         # "cannot realize this port/parameter combination" a model cannot act on.
+        wanted = (
+            "bind every contact — " + ", ".join(lowerer.required_port_keys) + " —"
+            if lowerer.required_port_keys
+            else "bind every contact using its published port contract (see evidence)"
+        )
         message = (
             f"known lowerer {lowerer_id} needs this requirement's ports declared, but it declares "
-            "none; bind every contact using its published port contract (see evidence) so the "
-            "lowerer can build the part"
+            f"none; {wanted} so the lowerer can build the part"
         )
     elif unknown_ports:
         message = (
@@ -1537,6 +1546,7 @@ for _lowerer in (
         _led_resistor,
         ("rail_voltage", "led_vf", "target_current_ma", "color"),
         ("drive", "gnd"),
+        required_port_keys=("drive", "gnd"),
         required_parameter_keys=_LED_PARAMETER_KEYS,
     ),
     RegisteredLowerer(
@@ -1545,6 +1555,7 @@ for _lowerer in (
         _voltage_divider,
         ("input_voltage", "target_voltage", "bottom_resistance_ohm", "max_error_percent"),
         ("input", "output", "gnd"),
+        required_port_keys=("input", "output", "gnd"),
     ),
     RegisteredLowerer(
         "rc-lowpass@1",
@@ -1552,6 +1563,7 @@ for _lowerer in (
         _rc_filter,
         ("cutoff_hz", "resistance_ohm", "max_error_percent"),
         ("input", "output", "gnd"),
+        required_port_keys=("input", "output", "gnd"),
     ),
     RegisteredLowerer(
         "adjustable-rc-lowpass@1",
@@ -1559,6 +1571,7 @@ for _lowerer in (
         _adjustable_rc_filter,
         ("capacitance_f", "capacitor_exact_part"),
         ("input", "output", "gnd"),
+        required_port_keys=("input", "output", "gnd"),
         required_parameter_keys=("capacitance_f", "capacitor_exact_part"),
     ),
     RegisteredLowerer(
@@ -1567,6 +1580,7 @@ for _lowerer in (
         _i2c_pullups,
         ("speed_hz", "bus_capacitance_pf", "voltage"),
         ("vdd", "sda", "scl"),
+        required_port_keys=("vdd", "sda", "scl"),
     ),
     RegisteredLowerer(
         "open-drain-pullup@1",
@@ -1574,6 +1588,7 @@ for _lowerer in (
         _pullup,
         ("resistance",),
         ("vdd", "signal"),
+        required_port_keys=("vdd", "signal"),
     ),
     RegisteredLowerer(
         "switch-input@1",
@@ -1581,6 +1596,7 @@ for _lowerer in (
         _switch_input,
         ("pull_policy", "resistance", "active_level"),
         ("signal", "gnd", "vdd"),
+        required_port_keys=("signal", "gnd", "vdd"),
         parameter_choices=(
             ("pull_policy", ("internal", "external")),
             ("active_level", ("low", "high")),
@@ -1607,6 +1623,7 @@ for _lowerer in (
         _coin_cell_holder,
         ("cell_format",),
         ("positive", "negative"),
+        required_port_keys=("positive", "negative"),
     ),
     RegisteredLowerer(
         "capacitive-touch-pad@1",
@@ -1623,6 +1640,7 @@ for _lowerer in (
         _decoupling,
         ("count", "value"),
         ("vdd", "gnd"),
+        required_port_keys=("vdd", "gnd"),
     ),
 ):
     register_lowerer(_lowerer)
