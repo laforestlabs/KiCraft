@@ -50,6 +50,41 @@ milestone 5 (three paid campaigns + release) still needs approval and spend. §5
 ("wire replay into reference acceptance") is done — `verify_reference_replay` and the
 `--reference-rows` / `--reference-replay` CLI modes are the landing described there.
 
+### Live design canary — the reference corpus does not predict live generation
+
+Two full live runs of the 34-brief corpus (`./deploy/verify-design-canary.sh`, design-only: five
+LLM stages, no build), both **0/34 committed**, `source_unchanged=true`, ~$0.60 each:
+
+| run | dir | committed | architecture fails | BOM fails |
+|---|---|---|---|---|
+| 1 | `logs/self_eval/canary_20260916T234557Z` | 0/34 | 23 | 11 |
+| 2 | `logs/self_eval/canary_20260917T001818Z` | 0/34 | 23 | 11 |
+
+Every brief clears `intent` and `functional_spec`; none clears `architecture` + BOM + wiring. For
+comparison, `canary_20260915T034256Z` (before the 2026-09-16 contract work) committed 13/34 — so
+the 34/34 release gate is far away under the current contract.
+
+**The dominant cause class is the port/binding vocabulary**, not wording. Ranked first-failure
+causes across run 2 (one sample per brief, so treat single-run deltas as noise): 12
+`conflicting_port_binding`, 10 `unsupported_lowerer_contract`, 7 `unsupported_supply_port`, 5
+`declared_signal_port_tied`, 4 `unknown_interface_port`, plus obligation/schema (`invalid_schema`)
+and BOM unit defects (`declared-interface-unrealized`, `physical-obligation-unfulfilled`,
+`commit_rejected`). Concrete model errors: three microstep signals bound to one `signal` port;
+`supply_rail` stamped on a header's signal pin; ports invented that the lowerer does not publish
+(`termination.canh`); rails named that no requirement declares.
+
+**Recommendation (operator decision, not yet taken):** stop fixing this one message at a time. Make
+`stage-prep` publish, per requirement, the closed menu of allowed port keys, rail and reference, so
+the model only fills values and a pre-check rejects a binding against that menu before the full
+derivation (today ~30 opaque binding refusals become a short satisfiable list). Alternatives:
+split the architecture stage into smaller schema-validated steps, or route uncurated hardware to a
+review/park path instead of demanding one-shot conformance.
+
+Diagnostic fixes landed while measuring (all committed): `declared_port_double_bound` /
+`declared_signal_port_tied` name the tie-field misuse instead of five cryptic conflicts; the
+obligation-ownership refusal states the invariant; an unported lowerer family names its required
+ports; and nine lowerers now publish the `required_port_keys` their build code always demanded.
+
 ## 1. Deployment state (changed this session)
 
 The production box now runs the improved code:
