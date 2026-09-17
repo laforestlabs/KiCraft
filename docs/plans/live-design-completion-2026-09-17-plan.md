@@ -616,3 +616,12 @@ Codes, as occurrences per participating run (the plan's §4.2 target set first):
    (`pin_tied_to`), or accept the domain reading on a port that carries a signal while keeping the
    tie reading for a strapped pin.
 
+
+---
+
+## 13. Follow-up
+
+The next moves (split the architecture answer into small steps, let the compiler own the part identity
+for families we have reviewed, run the build tail on the briefs that commit, and give non-part
+requirements their own obligation kinds) are planned in
+`docs/plans/design-completion-followup-2026-09-17-plan.md`, with §12's measurement as their baseline.

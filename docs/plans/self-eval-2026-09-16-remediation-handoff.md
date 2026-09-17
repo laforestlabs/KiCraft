@@ -289,6 +289,13 @@ Two systematic row defects were found and fixed in passing (use these patterns f
 
 ## 5. Next steps, in order
 
+0. **Design completion (2026-09-17 onwards).** The live-design work has its own plan: the
+   delivered phase is `docs/plans/live-design-completion-2026-09-17-plan.md` §12, and the next
+   moves (architecture sub-steps, compiler-owned part identity, the build tail on the briefs
+   that commit, non-part obligation kinds) are in
+   `docs/plans/design-completion-followup-2026-09-17-plan.md`. That plan's §0 carries the
+   measured baseline; items 1-5 below remain for the reference corpus, routing and release.
+
 1. **Finish the corpus repairs** (section 4 list), then re-run the replay:
    ```bash
    .venv/bin/python logs/self_eval/remediation_20260916T013532Z/reference_replay_all.py
