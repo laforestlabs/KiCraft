@@ -384,7 +384,20 @@ class _Catalog:
 
     @property
     def choices(self) -> str:
-        return ",".join(sorted(self.directions)) or "(none)"
+        concrete = ",".join(sorted(self.directions))
+        if concrete:
+            return concrete
+        # A lowerer whose ports are a pattern (pin1..pinN) or a named set publishes its
+        # contract in words, not concrete keys. Every port refusal embeds this menu, so an
+        # empty "(none)" teaches the draft nothing about what it may declare.
+        if self.lowerer is not None:
+            described = "; ".join(
+                [key for key in self.lowerer.port_keys if key]
+                + [pattern for pattern, _direction in self.lowerer.port_patterns]
+            )
+            if described:
+                return described
+        return "(none)"
 
 
 @dataclass(frozen=True)
@@ -530,7 +543,11 @@ def _catalog(
         lowerer = lowerers[requirement.family]
         names = {
             key.lower()
-            for key in (*lowerer.port_keys, *(key for key, _direction in lowerer.port_directions))
+            for key in (
+                *lowerer.port_keys,
+                *lowerer.required_port_keys,
+                *(key for key, _direction in lowerer.port_directions),
+            )
             if key.isidentifier()
         }
         return _Catalog(
@@ -756,9 +773,15 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
         row = bindings.setdefault(requirement_id, {})
         existing = row.get(port)
         if existing is not None and existing != net:
+            catalog = catalogs.get(requirement_id)
             _fail(
                 "conflicting_port_binding",
-                f"{context}: port {port!r} of {requirement_id!r} is already bound to {existing!r}",
+                (
+                    f"{context}: port {port!r} of {requirement_id!r} is already bound to "
+                    f"{existing!r} — one port carries one net, so bind this connection to another "
+                    "of this requirement's ports"
+                    + (f" ({catalog.choices})" if catalog is not None else "")
+                ),
                 requirement_id=requirement_id,
                 sheet=requirements[requirement_id].sheet,
             )
@@ -912,9 +935,13 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
             if resolved is None:
                 _fail(
                     "unknown_reference_port",
-                    f"requirement {requirement_id!r} has no reference port {port_name!r}",
+                    (
+                        f"requirement {requirement_id!r} has no reference port {port_name!r}; its "
+                        f"{catalog.source} ports are {catalog.choices}"
+                    ),
                     requirement_id=requirement_id,
                     sheet=requirement.sheet,
+                    evidence=[f"ports={catalog.choices}", f"requested={port_name}"],
                 )
                 continue
             if net != GND_NET and net not in rail_names:
@@ -942,9 +969,13 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
             if resolved is None:
                 _fail(
                     "unknown_supply_port",
-                    f"requirement {requirement_id!r} has no supply port {port_name!r}",
+                    (
+                        f"requirement {requirement_id!r} has no supply port {port_name!r}; its "
+                        f"{catalog.source} ports are {catalog.choices}"
+                    ),
                     requirement_id=requirement_id,
                     sheet=requirement.sheet,
+                    evidence=[f"ports={catalog.choices}", f"requested={port_name}"],
                 )
                 continue
             if rail not in rail_names:

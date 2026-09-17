@@ -1230,3 +1230,76 @@ def test_obligation_ownership_refusal_names_the_fix():
     assert "single-sensor-input" in message
     assert "listed_at_top_level_only" in message
     assert "union of the requirements" in message
+
+
+def test_one_port_carries_one_net_and_the_refusal_names_the_menu():
+    """Two signals on one port must name the alternatives (the top live failure).
+
+    `switch-input` has a single `signal` port, so three microstep switches are three
+    requirements — not one port bound three times. The refusal must show the menu.
+    """
+    intent = _hub75_intent()
+    intent["sheets"].append(
+        {
+            "name": "SW",
+            "stem": "SW",
+            "role": "user_io",
+            "function": "Microstep select switches.",
+        }
+    )
+    intent["requirements"].append(
+        {
+            "id": "microstep",
+            "sheet": "SW",
+            "role": "user_io",
+            "family": "switch-input",
+            "parameters": {"pull_policy": "internal"},
+            "functional_blocks": ["MICROSTEP_SELECT"],
+        }
+    )
+    intent["signals"] = [
+        *intent["signals"],
+        {"name": "MS1", "from": "esp32.gpio4", "to": "microstep.signal"},
+        {"name": "MS2", "from": "esp32.gpio5", "to": "microstep.signal"},
+    ]
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(intent)
+    row = next(d for d in excinfo.value.diagnostics if d.code == "conflicting_port_binding")
+    assert "one port carries one net" in row.message
+    assert "gnd,signal,vdd" in row.message  # the requirement's actual menu
+
+
+def test_pattern_lowerer_port_refusal_prints_its_contract_not_none():
+    """A pattern lowerer publishes words, not keys; the menu must not read "(none)".
+
+    Every port refusal embeds the requirement's port menu. For a family whose ports
+    are a pattern (screw-terminal's pinN/pN), an empty menu teaches the draft nothing.
+    """
+    intent = _hub75_intent()
+    intent["sheets"].append(
+        {
+            "name": "TERM",
+            "stem": "TERM",
+            "role": "connector",
+            "function": "Sensor terminal.",
+        }
+    )
+    intent["requirements"].append(
+        {
+            "id": "sensor_term",
+            "sheet": "TERM",
+            "role": "connector",
+            "family": "screw-terminal",
+            "functional_blocks": ["SENSOR_INPUT"],
+        }
+    )
+    intent["signals"] = [
+        *intent["signals"],
+        {"name": "SENSOR_ADC", "from": "esp32.gpio6", "to": "sensor_term.nope"},
+    ]
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(intent)
+    rows = [d for d in excinfo.value.diagnostics if d.code == "unknown_interface_port"]
+    assert rows, [d.code for d in excinfo.value.diagnostics]
+    assert "(none)" not in rows[0].evidence[0]
+    assert "pin" in rows[0].evidence[0].lower()

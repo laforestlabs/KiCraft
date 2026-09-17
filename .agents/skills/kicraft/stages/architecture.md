@@ -88,6 +88,12 @@ Slot shape:
 - the lowerer's keyed ports for a lowerer family (`pin1` … `pinN` for `pin-header`, in physical
   pin order — the pins are ordered by the order you bind them, so bind each connector pin once).
 
+**One port carries one net, once.** A port key may be bound exactly once. Two signals that name
+the same `<requirement>.<port>` are refused, naming the ports that were available. A family whose
+port list has a single signal port (`switch-input`'s `signal`; `connector-bank`'s
+`signal0…signalN`) realises **one instance per requirement** — three microstep switches are three
+requirements, or the family's numbered port pattern, never one `signal` port bound three times.
+
 A key that is none of these is refused, naming the ports that do exist. Do not invent a port to
 carry a signal the part cannot. **Every required port of a selected recipe must end up bound** — by
 a signal, by `supply`, by ground, or by a `ties` entry; a required port nobody binds is refused,
