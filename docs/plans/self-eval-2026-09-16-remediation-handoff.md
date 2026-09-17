@@ -55,30 +55,43 @@ milestone 5 (three paid campaigns + release) still needs approval and spend. §5
 Two full live runs of the 34-brief corpus (`./deploy/verify-design-canary.sh`, design-only: five
 LLM stages, no build), both **0/34 committed**, `source_unchanged=true`, ~$0.60 each:
 
-| run | dir | committed | architecture fails | BOM fails |
-|---|---|---|---|---|
-| 1 | `logs/self_eval/canary_20260916T234557Z` | 0/34 | 23 | 11 |
-| 2 | `logs/self_eval/canary_20260917T001818Z` | 0/34 | 23 | 11 |
+| run | dir | committed | architecture fails | BOM fails | wiring fails |
+|---|---|---|---|---|---|
+| 1 | `logs/self_eval/canary_20260916T234557Z` | 0/34 | 23 | 11 | 0 |
+| 2 | `logs/self_eval/canary_20260917T001818Z` | 0/34 | 23 | 11 | 0 |
+| 3 | `logs/self_eval/canary_20260917T004307Z` | **1/34** | 19 | 13 | 1 |
 
-Every brief clears `intent` and `functional_spec`; none clears `architecture` + BOM + wiring. For
-comparison, `canary_20260915T034256Z` (before the 2026-09-16 contract work) committed 13/34 — so
-the 34/34 release gate is far away under the current contract.
+Every brief clears `intent` and `functional_spec`. For comparison,
+`canary_20260915T034256Z` (before the 2026-09-16 contract work) committed 13/34 — so the 34/34
+release gate is far away under the current contract.
 
-**The dominant cause class is the port/binding vocabulary**, not wording. Ranked first-failure
-causes across run 2 (one sample per brief, so treat single-run deltas as noise): 12
-`conflicting_port_binding`, 10 `unsupported_lowerer_contract`, 7 `unsupported_supply_port`, 5
-`declared_signal_port_tied`, 4 `unknown_interface_port`, plus obligation/schema (`invalid_schema`)
-and BOM unit defects (`declared-interface-unrealized`, `physical-obligation-unfulfilled`,
-`commit_rejected`). Concrete model errors: three microstep signals bound to one `signal` port;
-`supply_rail` stamped on a header's signal pin; ports invented that the lowerer does not publish
-(`termination.canh`); rails named that no requirement declares.
+**Run 3 followed the port-menu work** (`618c433`: lowerers publish `required_port_keys`;
+`_Catalog.choices` prints the published pattern instead of `(none)`; the binding conflict names the
+menu and the one-port-one-net rule; the architecture spec states it). The targeted class moved:
+`conflicting_port_binding` 12 → 4 and `declared_signal_port_tied` 5 → 2, and `r2r-dac` is the first
+brief to commit all five stages. Single-sample caveat: 1-vs-0 is weak on its own; the
+binding-conflict drop is the direct target and did move.
 
-**Recommendation (operator decision, not yet taken):** stop fixing this one message at a time. Make
-`stage-prep` publish, per requirement, the closed menu of allowed port keys, rail and reference, so
-the model only fills values and a pre-check rejects a binding against that menu before the full
-derivation (today ~30 opaque binding refusals become a short satisfiable list). Alternatives:
-split the architecture stage into smaller schema-validated steps, or route uncurated hardware to a
-review/park path instead of demanding one-shot conformance.
+**The wall has shifted to BOM** — 17 of the 33 failures are now there
+(`physical-obligation-unfulfilled` 9, `declared-interface-unrealized` 5, `commit_rejected` 3), e.g.
+`E_PHYSICAL_REALIZATION 'usb': requires 1 reviewed 'usb-c-connector' physical part(s), found 0 with
+exact MPN/symbol/footprint evidence`. That is a part-resolution/coverage problem (milestone 2:
+resolve exact parts, packages and pin inventories, reuse and extend reviewed assets), not a wording
+one. Residual architecture causes: `unsupported_lowerer_contract` 9 (now usually a parameter or
+count mismatch rather than missing ports), supply-rail naming, standard-stacking pinmaps.
+
+**Recommendation (operator decision, not yet taken):** next, attack the BOM
+part-resolution class (`physical-obligation-unfulfilled` + `declared-interface-unrealized`) by
+making each required physical class resolve to a reviewed `(mpn, symbol, footprint)` — the same
+kind of closed-menu fix that worked for ports. Keep the alternative open: split the architecture
+stage into smaller validated steps, or route uncurated hardware to a review/park path.
+
+**Pre-fix baseline (run 2).** Ranked first-failure causes were 12 `conflicting_port_binding`,
+10 `unsupported_lowerer_contract`, 7 `unsupported_supply_port`, 5 `declared_signal_port_tied`, 4
+`unknown_interface_port`. Concrete model errors: three microstep signals bound to one `signal`
+port; `supply_rail` stamped on a header's signal pin; ports invented that the lowerer does not
+publish (`termination.canh`); rails named that no requirement declares. That is the class the
+port-menu work (run 3) targeted.
 
 Diagnostic fixes landed while measuring (all committed): `declared_port_double_bound` /
 `declared_signal_port_tied` name the tie-field misuse instead of five cryptic conflicts; the
