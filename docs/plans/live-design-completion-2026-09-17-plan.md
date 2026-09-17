@@ -83,6 +83,10 @@ aggregate (see the commit list in §8):
 - Verified class aliases: `usb-c-connector`→`usb-c-receptacle`,
   `fpc-ffc-connector`→`fpc-connector`/`ffc-connector`, `voltage-regulator-ic`→`voltage-regulator`.
 - Identity guard: do not rewrite a group identity the reviewed records already classify.
+  **Tried in `a603b1b`, reverted in `834752a`** — skipping the rewrite also skipped the curated
+  bundle's enrichment, and two reference rows stopped reproducing
+  (`usb-c-full-breakout` at BOM, `rs485-terminal` at wiring). The bundle-identity fallback below
+  already covers the same goal more safely, so the guard was redundant as well as harmful.
 - Bundle-identity classification: classify a group whose `(symbol, footprint)` is the curated
   bundle's, selecting the record by the bundle manifest's MPN.
 - Named refusals for: declared-port tie misuse, obligation ownership, lowerer missing ports.
@@ -361,8 +365,10 @@ Branch `simplify/bom-wiring-pipeline`, all pushed; local == origin.
 | `fde8f54`, `94d9ec6` | lowerer refusals name missing ports; nine lowerers publish `required_port_keys` |
 | `56aaf9d` | failure reason carried in the `stage_done` progress event |
 | `618c433` | port menu shown in every port refusal; one-port-one-net rule stated |
-| `a603b1b`, `00114c3` | identity guard, verified class aliases, bundle-identity classification |
+| `a603b1b`, `00114c3` | verified class aliases; bundle-identity classification (`a603b1b`'s identity guard was reverted in `834752a`) |
 | `6789922` | canary `--repeats` passthrough |
+| `e18e95c` | this plan |
+| `834752a` | revert of the identity guard — it regressed two reference rows |
 | `77a825b`, `e74faa1`, `037b035`, `1550f12` | canary runs 1–5 recorded, option leverage quantified |
 
 ---
