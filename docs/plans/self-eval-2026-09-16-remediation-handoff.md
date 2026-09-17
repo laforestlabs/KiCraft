@@ -92,6 +92,24 @@ The recommendation is now structural, in order of leverage:
    `opto-isolator`, `status-led`, `power-led`, `thermocouple-input`, `r-2r-resistor-ladder`) —
    independent of 1 and 2.
 
+**Expected leverage of option 1 (measured).** Bucketing every first-failure across runs 3 and 5
+(68 brief-runs) by what would remove it:
+
+| bucket | brief-runs | share |
+|---|---|---|
+| BOM/unit (part resolution, coverage, commit gates) | 26 | 38% |
+| **model-authored ports/rails/bindings (option 1 removes)** | 25 | 37% |
+| obligations / schema validation | 12 | 18% |
+| parts/recipes/form-factor | 2 | 3% |
+| other | 2 | 3% |
+| passed | 1 | 1% |
+
+So option 1 would clear the largest *coherent, single-cause* class (~37%), but it is not the
+majority: **BOM/unit failures are equally large (38%) and option 1 does not touch them**, and
+obligations/schema is a further 18%. Reaching 34/34 needs option 1 *and* the BOM part-resolution
+work *and* the obligation/schema class — or the structural split (option 2), which localizes all of
+them. (Bucketing is heuristic: it keys off the terminal diagnostic codes and the failing stage.)
+
 **Open operator decisions:** deploy or hold the pushed fixes (production still runs the 20:58
 code), and which structural direction (1, 2, or 3).
 
