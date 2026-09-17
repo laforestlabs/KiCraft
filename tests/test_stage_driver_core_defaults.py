@@ -393,3 +393,42 @@ def test_bundle_row_kept_without_fresh_retail_reading(monkeypatch):
     ]
     out = sd._format_core_defaults_block(rows)
     assert out is not None and "dc-motor-driver" in out
+
+
+def test_operational_failure_progress_carries_the_reason(tmp_path, monkeypatch):
+    """A stage that cannot start must name why in the progress stream.
+
+    The stage tabs render `failure_kind` from `stage_done`, and per-brief failure
+    attribution reads the same event. A bare {"ok": False} left a real
+    `stage_contract_failed` with no cause anywhere the operator or the canary
+    looked (only state.json had it).
+    """
+    from types import SimpleNamespace
+
+    from kicraft.server import stage_runtime as stage_runtime_mod
+
+    (tmp_path / ".kicraft").mkdir(parents=True, exist_ok=True)
+    state_path = tmp_path / ".kicraft" / "state.json"
+    state_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        stage_runtime_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="boom"),
+    )
+    events: list[dict] = []
+    result = drive_stage(
+        _RecordingClient(),
+        "bom",
+        "a USB-powered LED",
+        state_path,
+        tmp_path,
+        max_retries=0,
+        progress=events.append,
+    )
+    assert result["failure_kind"] == "stage_prep_failed"
+    done = [event for event in events if event.get("kind") == "stage_done"]
+    assert done, "no stage_done event was emitted"
+    assert done[-1]["ok"] is False
+    assert done[-1]["failure_kind"] == "stage_prep_failed"
+    assert "boom" in str(done[-1].get("error"))

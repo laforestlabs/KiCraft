@@ -3374,7 +3374,28 @@ def drive_stage(
                 failure_kind=failure_kind,
             )
             if progress:
-                progress({"kind": "stage_done", "stage": stage, "ok": False})
+                # Carry the terminal reason. This event stream is what the stage tabs
+                # render and what per-brief failure attribution reads, so a bare
+                # {"ok": False} leaves a real failure with no cause anywhere the operator
+                # or the harness looks (state.json still has it, the stream did not).
+                progress(
+                    {
+                        "kind": "stage_done",
+                        "stage": stage,
+                        "ok": False,
+                        "cost": 0.0,
+                        "attempts": 0,
+                        "warning": False,
+                        "failure_kind": failure_kind,
+                        "error": error,
+                        "retryable": failure_kind == "provider_rate_limited",
+                        "retry_action": (
+                            "retry_stage"
+                            if failure_kind == "provider_rate_limited"
+                            else None
+                        ),
+                    }
+                )
         return {
             "stage": stage,
             "commit_ok": False,
