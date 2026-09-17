@@ -534,9 +534,7 @@ Everything below is in the working tree with its tests; nothing is deployed (see
 | runs committing all five stages | **1** (1.5 %) | **6** (5.9 %) |
 | briefs committing in ≥1 repeat | 1/34 | **4/34** (`rc-lowpass-bnc` 2/3, `esp32-dual-motor` 2/3, `r2r-dac` 1/3, `fpc-breakout` 1/3) |
 | briefs committing in a majority of repeats | 0/34 | 2/34 |
-| first failing stage: architecture | 41 (60 %) | 53 (52 %) |
-| first failing stage: BOM | 25 (37 %) | 41 (40 %) |
-| first failing stage: wiring | 1 | 0 |
+| first failing stage (campaign manifest `stage_outcomes`) | architecture 41, BOM 25, wiring 1, passed 1 | architecture 53, BOM 42, functional_spec 1, passed 6 |
 
 Codes, as occurrences per participating run (the plan's §4.2 target set first):
 
