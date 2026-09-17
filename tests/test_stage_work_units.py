@@ -2343,3 +2343,47 @@ def test_pipeline_authored_bank_is_not_wiped_as_a_sibling_header():
     validated = validate_unit_candidate(unit, payload, state, {})
 
     assert [group["id"] for group in validated["groups"]] == ["servo_headers"]
+
+
+def _group_for(identity: str):
+    from kicraft.design.part_identity import reviewed_part
+    from kicraft.server.stage_contracts import BomComponentGroup
+
+    rec = reviewed_part(identity)
+    return BomComponentGroup(
+        id="g", sheet="MAIN", reference_prefix="J", quantity=1, value=rec.identity,
+        symbol=rec.symbol, footprint=rec.footprint, mpn=rec.identity,
+    )
+
+
+def test_obligation_class_aliases_match_the_reviewed_feature_vocabulary():
+    """Obligation classes the model names must reach the reviewed feature vocabulary.
+
+    Only verified pairs are aliased: `usb-connector` is a USB-A part, so it must NOT
+    satisfy a USB-C demand.
+    """
+    from kicraft.server.stage_work_units import _group_has_physical_feature
+
+    usb_c = _group_for("12401610e4#2a")   # feature: usb-c-receptacle
+    usb_a = _group_for("u-a-24ss-w-2")    # feature: usb-connector (USB-A)
+    assert _group_has_physical_feature(usb_c, "usb-c-connector") is True
+    assert _group_has_physical_feature(usb_a, "usb-c-connector") is False
+    assert _group_has_physical_feature(_group_for("kh-fg0.5-h2.0-24pin"), "fpc-ffc-connector") is True
+    assert _group_has_physical_feature(_group_for("ams1117-5.0"), "voltage-regulator-ic") is True
+
+
+def test_curated_normalization_keeps_an_identity_the_records_classify():
+    """Do not rewrite a group identity the reviewed records already classify.
+
+    The curated bundle for the same MPN names a different symbol/footprint pair;
+    rewriting to it makes physical_inventory_record fail the group and the obligation
+    check report "requires 1 real <class>, found 0" for a part the BOM resolved.
+    """
+    from kicraft.design.part_identity import reviewed_part
+    from kicraft.server.stage_work_units import _normalize_curated_group_identities
+
+    rec = reviewed_part("stm32l031k6t6")
+    assert rec.symbol == "MCU_ST_STM32L0:STM32L031K6Tx"  # not the resolved bundle id
+    out = _normalize_curated_group_identities([_group_for("stm32l031k6t6")])
+    assert out[0].symbol == rec.symbol
+    assert out[0].footprint == rec.footprint
