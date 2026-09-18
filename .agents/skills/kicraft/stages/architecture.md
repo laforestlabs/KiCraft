@@ -20,6 +20,12 @@ requirement's `supply` are the inputs that matter** — and the compiler writes:
 - the top-level `obligations` list, from the obligations the intent and functional spec committed;
 - the pin/net map of a `standard_form_factor`'s stacking connectors, from the approved template.
 
+When the prompt carries a `STANDARD FORM FACTOR` block, that template's fixed connectors are the
+board's host interface and the block lists every role with its exact pin/net map. Emit exactly one
+requirement per listed role (`role: "connector"`, `family: "pin-header"`, `parameters:
+{"rows": 1, "gender": "female"}`, `standard_stacking_role: <role>`, owned by the functional block
+that owns the host interface) — never one composite or renamed header in their place.
+
 Do not write any of those. There is no `ports`, `inter_sheet_nets`, `power_nets` or
 `rail_voltages` field in this slot, and a port you name must exist (see *Port keys*). The optional
 refinements — `ties`, `supply_bindings`, `reference_bindings`, `declared_ports` — are honoured

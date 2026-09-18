@@ -220,3 +220,41 @@ def test_intent_commit_reads_brief_when_goal_drops_shape(tmp_path, capsys):
     )
     assert rc == 0, payload
     assert written["intent"]["form_factor"]["shape"] == "snowman"
+
+
+# --------------------------------------------------------------------------- #
+# The architecture stage's view of the standard template
+# --------------------------------------------------------------------------- #
+
+
+def test_standard_form_factor_block_states_every_role_and_pin_map():
+    """The architecture stage must be shown the template it is required to reproduce.
+
+    Root cause of the 155 `incomplete_standard_stacking_interface` refusals: the stage was
+    told to use the template's pin map while the roles and maps lived only in Python, so
+    the proto-shield brief answered with one composite requirement whose stacking role was
+    the template key. The block is deterministic reference data, rendered from the intent.
+    """
+    from kicraft.form_factors import get_template
+    from kicraft.server.stage_runtime import _standard_form_factor_block
+
+    block = _standard_form_factor_block(
+        {"form_factor": {"shape": "rect", "standard": "arduino_uno_shield"}}
+    )
+    assert block is not None
+    template = get_template("arduino_uno_shield")
+    for connector in template.fixed_connectors:
+        assert connector.role in block
+        assert f"{len(connector.net_by_pin)} pins" in block
+        for index, net in enumerate(connector.net_by_pin, start=1):
+            assert f"pin{index}={net}" in block
+    # The requirement shape the contract enforces travels with the names.
+    assert 'family: "pin-header"' in block
+    assert '"rows": 1, "gender": "female"' in block
+    assert "standard_stacking_role" in block
+    assert "functional_blocks" in block
+
+    # No standard in play: the prompt for every other design is unchanged.
+    assert _standard_form_factor_block({"form_factor": {"shape": "circle"}}) is None
+    assert _standard_form_factor_block({}) is None
+    assert _standard_form_factor_block({"form_factor": {"standard": "not_a_template"}}) is None

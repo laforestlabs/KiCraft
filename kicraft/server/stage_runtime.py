@@ -3278,6 +3278,56 @@ def _drive_work_unit_stage(
     )
 
 
+def _standard_form_factor_block(intent: dict) -> str | None:
+    """The pin/net contract of the design's standard mechanical template.
+
+    A brief that resolved to a standard form factor (an Arduino Uno shield, say) owns that
+    standard's *fixed* connectors, and the architecture stage must emit exactly those
+    connectors with the template's own pin map. The template lives in
+    ``kicraft.form_factors``, so without this block the stage is asked to reproduce role
+    names and a 32-pin map it was never shown: the proto-shield brief answered with ONE
+    composite requirement whose stacking role was the template key, and three correction
+    rounds could not recover the four roles or their maps. Same shape as the recipe and
+    lowerer summaries: deterministic reference data, rendered from the committed intent.
+
+    Returns None when no validated standard is in play, so every other design's prompt is
+    unchanged.
+    """
+    from kicraft.form_factors import get_template
+
+    form_factor = intent.get("form_factor") or {}
+    standard = form_factor.get("standard") if isinstance(form_factor, dict) else None
+    template = get_template(standard)
+    if template is None or not template.validated:
+        return None
+    lines = [
+        f"STANDARD FORM FACTOR: {template.key} ({template.display_name}), "
+        f"{template.board_width_mm} x {template.board_height_mm} mm, "
+        f"{len(template.mounting_holes)} fixed mounting holes.",
+        "This board's host interface is the standard's own FIXED CONNECTORS. Emit exactly "
+        "one requirement per role below — never a composite, renamed, or arbitrary header — "
+        "each with:",
+        '  role: "connector" | family: "pin-header" | exact_part: null | '
+        'parameters: {"rows": 1, "gender": "female"}',
+        "  standard_stacking_role: the role name below",
+        "  functional_blocks: the committed functional block that owns the host interface",
+        "  ties: leave empty to accept this template's pin map (state it only if a pin must "
+        "tie to a net this map does not already name)",
+    ]
+    for connector in template.fixed_connectors:
+        pins = ", ".join(
+            f"pin{index}={net}" for index, net in enumerate(connector.net_by_pin, start=1)
+        )
+        lines.append(
+            f"  {connector.role} ({len(connector.net_by_pin)} pins): {pins}"
+        )
+    lines.append(
+        "The template owns these pin positions and nets; do not re-plan them, and do not add "
+        "headers for them after wiring."
+    )
+    return "\n".join(lines)
+
+
 def _architecture_recipe_summaries(intent: dict) -> list[dict]:
     """Do not offer unrelated MCU alternatives to an explicitly named design.
 
@@ -3457,6 +3507,9 @@ def drive_stage(
         from kicraft.design.lowering import lowerer_summaries
 
         extras["circuit_lowerers"] = lowerer_summaries()
+        standard_block = _standard_form_factor_block(prep_json["state"].get("intent") or {})
+        if standard_block:
+            extras["standard_form_factor"] = standard_block
 
     # Bookkeeping the model has no use for stays out of its prompt.
     prompt_state = dict(prep_json["state"])

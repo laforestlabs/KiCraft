@@ -106,7 +106,9 @@ def _stage_extra(stage: str) -> str:
             "Different grounds or rails must not be merged by name similarity. "
             "A declared standard form factor requires its real owned stacking "
             "connectors, not generic headers added after wiring; their pin maps come "
-            "from the template."
+            "from the template. The STANDARD FORM FACTOR block in this prompt lists "
+            "that template's fixed connector roles and pin maps verbatim: emit exactly "
+            "those roles as your stacking requirements."
         )
     if stage == "bom":
         return (
