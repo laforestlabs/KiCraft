@@ -67,7 +67,10 @@ def _stage_extra(stage: str) -> str:
             "(printed copper area as a heatsink, a thermal-via field) or the absence of a "
             "class ('no microcontroller') is never a `physical` obligation: use `kind` "
             "`fabrication` with its `feature` and any stated `minimum`/`unit`, or `kind` "
-            "`negative` with the `absent_class`. Record engineering "
+            "`negative` with the `absent_class`. A prototyping area (a pad field the user "
+            "solders into: a prototyping shield, board, perfboard or pad field) is such a "
+            "board feature and MUST be recorded as `kind` `fabrication` with `feature` "
+            "`prototyping-area` -- no component class can carry it. Record engineering "
             "assumptions separately. A model default or auto-answer cannot authorize "
             "a material substitution."
         )
@@ -76,6 +79,11 @@ def _stage_extra(stage: str) -> str:
             "\n- Retain every committed intent.obligations row unchanged. Functional "
             "blocks must cover their required functions without replacing physical "
             "classes, quantities, operating limits, or adjustability with prose."
+            "\n- A board feature that names no component function is NOT a block: do not emit a "
+            "block for a prototyping pad field (a prototyping shield, board, perfboard or pad "
+            "field), and draw no connection to or from it -- a block is a user-visible function, "
+            "and the pad field carries no signal of its own. Its sheet and its bare 2.54 mm pad "
+            "grid are derived downstream from the intent's `fabrication` obligation."
         )
     if stage == "architecture":
         return (

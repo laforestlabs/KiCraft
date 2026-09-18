@@ -79,6 +79,8 @@ def is_unsourceable_hardware(footprint: str) -> bool:
     fp = footprint or ""
     if fp == "capacitive-touch-pad:TouchPad_12mm_Front_NoUnderlay":
         return True
+    if fp == "prototyping-area:PrototypingPad_1.5mm_Drill0.8mm":
+        return True
     lib, _, leaf = fp.partition(":")
     return bool(_UNSOURCEABLE_FP_RE.match(leaf or lib)
                 or _UNSOURCEABLE_FP_RE.match(lib))

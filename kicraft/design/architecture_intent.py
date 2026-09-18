@@ -23,6 +23,7 @@ once, here.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -58,11 +59,81 @@ from .recipes.resolver import (
     _net_identity,
     _recipe_for_exact,
 )
+from .synthesis.board_features import (
+    PROTOTYPING_AREA_FEATURE,
+    PROTOTYPING_AREA_OBLIGATION_ID,
+    has_prototyping_area,
+    prototyping_area_requested,
+)
 
 EDGE_PREFIX = "edge:"
 """Signals whose peer is off the board: `"to": "edge:LED_STRING"`."""
 
 GND_NET = "GND"
+
+# The board fabricated from a `fabrication` obligation is a pad field, a thing no component
+# class names and no pin draws a net through. Its whole shape is determined by the obligation,
+# so the derivation writes the sheet, the requirement and the field's default geometry -- the
+# same way it writes a board-edge connector from an `edge:` peer -- instead of asking the model
+# for a part it cannot name. The obligation itself stays the design's own statement.
+PROTOTYPING_AREA_SHEET_NAME = "PROTOTYPING AREA"
+PROTOTYPING_AREA_SHEET_STEM = "PROTOTYPING_AREA"
+PROTOTYPING_AREA_FAMILY = "prototyping-area"
+PROTOTYPING_AREA_FUNCTION = (
+    "Bare pad field the user solders through-hole parts into; no net, no part, board fabricated"
+)
+# The smallest field that is still a usable prototyping area, on the 2.54 mm breadboard pitch
+# the lowerer drills. A brief rarely states a size, and the obligation records only the fact.
+PROTOTYPING_AREA_PARAMETERS: dict[str, int | float] = {
+    "rows": 5,
+    "cols": 5,
+    "pitch_mm": 2.54,
+}
+
+
+def _committed_block_names(functional_spec: object | None) -> list[str]:
+    """The block names a committed `functional_spec` carries, in committed order.
+
+    Accepts the slot as the committed mapping a stage state holds, or as a `FunctionalSpec`; a
+    caller with neither (a derivation run on its own) passes nothing and gets no names.
+    """
+    if functional_spec is None:
+        return []
+    rows = (
+        functional_spec.get("blocks")
+        if isinstance(functional_spec, Mapping)
+        else getattr(functional_spec, "blocks", None)
+    )
+    names: list[str] = []
+    for row in rows or ():
+        name = row.get("name") if isinstance(row, Mapping) else getattr(row, "name", None)
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+    return names
+
+
+def _names_prototyping_area(name: str) -> bool:
+    """Whether a slot name (a functional block, a sheet stem) names the pad field.
+
+    The brief-level phrase rule (`kicraft.design.synthesis.board_features`) is the one canonical
+    reading of "the user asked for a prototyping area"; a slot name is the same words with
+    separators (`PROTOTYPING_AREA`, `PROTO BOARD`, `PAD_FIELD`), so it is read by that same rule
+    rather than a second vocabulary that could drift away from it.
+    """
+    return prototyping_area_requested(name.replace("_", " ")) is not None
+
+
+def _prototyping_area_block(functional_spec: object | None) -> str | None:
+    """The committed functional block that asks for the pad field, or None.
+
+    The derived requirement must claim the *exact* committed block name, or the block-coverage
+    check reports that block unowned. The name only exists in the functional spec, so it is read
+    off it rather than invented; the first block that names the field in committed order wins.
+    """
+    for name in _committed_block_names(functional_spec):
+        if _names_prototyping_area(name):
+            return name
+    return None
 
 
 def apply_authoritative_standard_form_factor(
@@ -637,8 +708,14 @@ def _edge_label(target: str) -> str | None:
     return label or None
 
 
-def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
+def derive_architecture(
+    intent: ArchitectureIntent | dict,
+    functional_spec: object | None = None,
+) -> Architecture:
     """Turn an intent-shaped slot into the canonical `Architecture`.
+
+    `functional_spec` is the committed functional-spec slot when the caller has it: a derived
+    requirement claims the exact block that asked for it, and only that slot names the block.
 
     Raises `ArchitectureIntentError` carrying *every* blocking refusal at once, so a rejected draft
     names all the parts, ports and rails it could not derive wiring from in a single answer.
@@ -1110,6 +1187,55 @@ def derive_architecture(intent: ArchitectureIntent | dict) -> Architecture:
                     f"{requirement_id}: supply {rail} stated on unpublished port {stated!r}; bound "
                     f"to the family's own {port} (derived)"
                 )
+
+    # A committed `fabrication` obligation naming the prototyping area is a board feature no
+    # requirement can implement: it names no component class, owns no pin and draws no net, so a
+    # model that states it as prose only leaves its sheet with nothing to build. The obligation is
+    # the whole statement, so the sheet, the requirement that makes the field buildable, and the
+    # field's default geometry are derived here -- deterministic input, deterministic output, the
+    # same way a board-edge connector is written from an `edge:` peer. A model that already
+    # declared the sheet or the requirement keeps exactly what it wrote, and a design whose
+    # obligations never named the feature is untouched. The requirement carries no port: the pad
+    # field shares no net with the circuit, and the obligation itself stays a top-level row
+    # (`fabrication` owns no requirement).
+    stated_obligations = [
+        *intent.obligations,
+        *(row for requirement in intent.requirements for row in requirement.obligations),
+    ]
+    modelled_prototyping_area = any(
+        row.id == PROTOTYPING_AREA_OBLIGATION_ID or row.family == PROTOTYPING_AREA_FAMILY
+        for row in intent.requirements
+    )
+    if has_prototyping_area(stated_obligations) and not modelled_prototyping_area:
+        sheet = sheet_by_stem.get(PROTOTYPING_AREA_SHEET_STEM)
+        if sheet is None:
+            sheet = Sheet(
+                name=PROTOTYPING_AREA_SHEET_NAME,
+                stem=PROTOTYPING_AREA_SHEET_STEM,
+                function=PROTOTYPING_AREA_FUNCTION,
+            )
+            sheets.append(sheet)
+            sheet_by_stem[sheet.stem] = sheet
+            sheet_names.add(sheet.name)
+        # The block that asked for the field is this requirement's implementation claim, so the
+        # derivation claims its committed name rather than leaving the block unowned. A functional
+        # spec that never emitted one leaves the list empty: no block name may be invented.
+        block = _prototyping_area_block(functional_spec)
+        requirements[PROTOTYPING_AREA_OBLIGATION_ID] = CircuitRequirement(
+            id=PROTOTYPING_AREA_OBLIGATION_ID,
+            sheet=sheet.name,
+            role="user_io",
+            family=PROTOTYPING_AREA_FAMILY,
+            parameters=dict(PROTOTYPING_AREA_PARAMETERS),
+            functional_blocks=[block] if block is not None else [],
+        )
+        bindings[PROTOTYPING_AREA_OBLIGATION_ID] = {}
+        derived_notes.append(
+            f"{PROTOTYPING_AREA_OBLIGATION_ID}: sheet {sheet.name!r} and a "
+            f"{PROTOTYPING_AREA_PARAMETERS['rows']}x{PROTOTYPING_AREA_PARAMETERS['cols']} pad "
+            f"field at {PROTOTYPING_AREA_PARAMETERS['pitch_mm']} mm derived from the committed "
+            f"{PROTOTYPING_AREA_FEATURE!r} fabrication obligation (derived)"
+        )
 
     # Off-board peers: one connector per `edge:` label, carrying only what named it.
     edge_connectors: dict[str, tuple[str, str, list[str]]] = {}  # label -> (id, mode, rails)

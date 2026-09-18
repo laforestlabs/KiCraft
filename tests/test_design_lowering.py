@@ -1225,3 +1225,255 @@ def test_lowerer_refusal_names_the_reviewed_part_and_the_accepted_parameter():
     assert "capacitance_f" in diagnostic.message
     assert "1e-08" in diagnostic.message
     assert "parameter_choices=capacitance_f=[1e-08]" in ";".join(diagnostic.evidence)
+
+
+# ---------- the prototyping pad field: a board feature, not a component ------
+#
+# A prototyping shield's defining feature is a bare 2.54 mm pad field. It owns no
+# contact, so its requirement declares no ports; the lowerer builds the pads from
+# stock KiCad, declares every one a no-connect (no provider involvement at all) and
+# declares the grid its members must be placed on instead of leaving them to the
+# annealing solver.
+
+_PAD_SYMBOL = "prototyping-area:PrototypingPad"
+_PAD_FOOTPRINT = "prototyping-area:PrototypingPad_1.5mm_Drill0.8mm"
+_PAD_SHEET = "PROTOTYPING AREA"
+
+
+def _prototyping_area_requirement(**parameters) -> CircuitRequirement:
+    return CircuitRequirement(
+        id="prototyping_area",
+        sheet=_PAD_SHEET,
+        role="user_io",
+        family="prototyping-area",
+        parameters=parameters or {"rows": 5, "cols": 5, "pitch_mm": 2.54},
+    )
+
+
+def _prototyping_area_state(requirement: CircuitRequirement) -> dict:
+    """The architecture the derivation writes for a pad-field obligation."""
+    return {
+        "architecture": {
+            "sheets": [
+                {
+                    "name": _PAD_SHEET,
+                    "stem": "PROTOTYPING_AREA",
+                    "function": "Bare pad field the user solders through-hole parts into.",
+                }
+            ],
+            "requirements": [requirement.model_dump(mode="json")],
+            "recipe_selections": [],
+            "power_nets": ["GND"],
+            "inter_sheet_nets": [],
+        },
+        "bom": {"parts": []},
+    }
+
+
+def _lower_prototyping_area_bom():
+    """The deterministic BOM the pipeline commits for one pad-field requirement."""
+    from kicraft.design.models import BOM
+    from kicraft.server.stage_contracts import _normalize_stage_response
+
+    requirement = _prototyping_area_requirement()
+    state = _prototyping_area_state(requirement)
+    unit = StageWorkUnit("bom-r000", "bom", _PAD_SHEET, requirement_ids=(requirement.id,))
+    candidate = deterministic_bom_candidate(unit, state)
+    assert candidate is not None, "a ports-less board feature must not reach the provider"
+    validated = validate_unit_candidate(
+        unit, {**candidate, "_trusted_deterministic_candidate": True}, state, {}
+    )
+    merged, _ref_to_unit, ref_to_lowering, trusted = merge_bom_units(
+        (unit,), {unit.unit_id: validated}, state
+    )
+    normalized, _count = _normalize_stage_response(
+        "bom", merged, {"architecture": state["architecture"], "_trusted_lowering_group_ids": trusted}
+    )
+    return state, BOM.model_validate(normalized), ref_to_lowering
+
+
+def test_prototyping_area_lowerer_builds_a_board_fabricated_pad_field():
+    artifact = lower_requirement(_prototyping_area_requirement())
+    assert artifact.lowerer_id == "prototyping-area@1"
+    assert len(artifact.groups) == 1
+    field = artifact.groups[0]
+    assert (field.role, field.reference_prefix, field.quantity) == ("pad_field", "PB", 25)
+    assert (field.symbol, field.footprint) == (_PAD_SYMBOL, _PAD_FOOTPRINT)
+    assert field.assembly is False
+    assert "2.54 mm" in field.value
+    # The grid is the deliverable, so it travels with the group.
+    assert field.array is not None
+    assert (field.array.pattern, field.array.rows, field.array.cols) == ("grid", 5, 5)
+    assert field.array.pitch_mm == 2.54
+    # No pad carries a net: each is a declared no-connect at its own array index.
+    assert artifact.pins == ()
+    assert [(row.role, row.index, row.pin) for row in artifact.no_connects] == [
+        ("pad_field", index, "1") for index in range(25)
+    ]
+
+
+def test_prototyping_area_lowerer_reads_the_declared_field_size():
+    artifact = lower_requirement(_prototyping_area_requirement(rows=4, cols=8))
+    field = artifact.groups[0]
+    assert field.quantity == 32
+    assert (field.array.rows, field.array.cols) == (4, 8)
+    assert [row.index for row in artifact.no_connects] == list(range(32))
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"rows": 4, "cols": 4, "pitch_mm": 2.54},  # 16 pads: no 0.1 inch part fits
+        {"rows": 5, "cols": 5, "pitch_mm": 1.27},  # not the 0.1 inch grid
+        {"rows": 25, "cols": 25, "pitch_mm": 2.54},  # 625 pads: beyond one group
+        {"rows": "5", "cols": 5, "pitch_mm": 2.54},
+        {"rows": True, "cols": 25, "pitch_mm": 2.54},
+        {"rows": 5, "cols": 5, "pitch_mm": "2.54"},
+    ],
+)
+def test_prototyping_area_lowerer_refuses_geometry_it_cannot_deliver(parameters):
+    with pytest.raises(ValueError):
+        lower_requirement(_prototyping_area_requirement(**parameters))
+
+
+def test_prototyping_area_pad_symbol_pin_maps_to_its_footprint_pad():
+    """§9.27: the symbol's one pin number must be a pad number on the footprint."""
+    from pathlib import Path
+
+    from kicraft.design.cli_app import _footprint_pad_numbers
+    from kicraft.design.synthesis.footprint_library import lookup_footprint
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    pins = lookup_pins(_PAD_SYMBOL, all_units=True)["pins"]
+    assert [(pin["number"], pin["electrical_type"]) for pin in pins] == [("1", "passive")]
+    assert _footprint_pad_numbers(_PAD_FOOTPRINT, Path(".")) == {"1"}
+    assert lookup_footprint(_PAD_FOOTPRINT, project_root=Path(".")) is not None
+
+
+def test_prototyping_area_unit_passes_the_bom_identity_and_sourcing_gates():
+    """The pads are bare copper: §9.27 resolves and §9.26 has nothing to order."""
+    from pathlib import Path
+
+    requirement = _prototyping_area_requirement()
+    state = _prototyping_area_state(requirement)
+    unit = StageWorkUnit("bom-r000", "bom", _PAD_SHEET, requirement_ids=(requirement.id,))
+    candidate = deterministic_bom_candidate(unit, state)
+    # A project root turns on the unit's own identity (§9.27 symbol/footprint pair,
+    # resolvable library ids) and sourcing (§9.26) seams.
+    validated = validate_unit_candidate(
+        unit,
+        {**candidate, "_trusted_deterministic_candidate": True},
+        state,
+        {"_validation_project_root": Path(".")},
+    )
+    assert [group["reference_prefix"] for group in validated["groups"]] == ["PB"]
+
+
+def test_ports_less_requirement_without_a_builder_stays_model_owned():
+    """The empty-ports rule still holds for a lowerer that needs declared contacts."""
+    requirement = _requirement("pin-header", parameters={"rows": 1})
+    state = _state(requirement)
+    unit = StageWorkUnit("bom-r000", "bom", "MAIN", requirement_ids=(requirement.id,))
+    assert deterministic_bom_candidate(unit, state) is None
+
+
+def test_prototyping_area_bom_carries_its_grid_over_the_pad_refs():
+    from kicraft.design.models import BOM
+
+    state, bom, ref_to_lowering = _lower_prototyping_area_bom()
+    assert [part.ref for part in bom.parts] == [f"PB{n}" for n in range(1, 26)]
+    assert {part.assembly for part in bom.parts} == {False}
+    assert len(bom.arrays) == 1
+    grid = bom.arrays[0]
+    assert grid.refs == [part.ref for part in bom.parts]
+    assert (grid.pattern, grid.rows, grid.cols) == ("grid", 5, 5)
+    assert grid.rows * grid.cols == len(grid.refs) == 25
+    assert grid.pitch_mm == 2.54
+    assert ref_to_lowering["PB1"] == {
+        "resolution_id": "prototyping-area@1",
+        "lowering_requirement_id": "prototyping_area",
+        "lowering_role": "pad_field",
+        "lowering_index": 0,
+    }
+    # Additive: a requirement that declares no pattern keeps the empty array list.
+    header = _requirement("pin-header", parameters={"rows": 1}, ports={"pin1": "GND"})
+    header_state = _state(header)
+    header_unit = StageWorkUnit("bom-r000", "bom", "MAIN", requirement_ids=(header.id,))
+    assert deterministic_bom_candidate(header_unit, header_state)["arrays"] == []
+
+
+def test_prototyping_area_bom_keeps_a_model_declared_array_for_the_group():
+    """One array per group: a pattern already declared for it is not duplicated."""
+    requirement = _prototyping_area_requirement()
+    state = _prototyping_area_state(requirement)
+    unit = StageWorkUnit("bom-r000", "bom", _PAD_SHEET, requirement_ids=(requirement.id,))
+    validated = validate_unit_candidate(
+        unit,
+        {"groups": [], "arrays": [{"group_id": "pad_field", "rows": 1, "cols": 25}]},
+        state,
+        {},
+    )
+    assert [array["group_id"] for array in validated["arrays"]] == ["pad_field"]
+    assert (validated["arrays"][0]["rows"], validated["arrays"][0]["cols"]) == (1, 25)
+    assert len(validated["groups"]) == 1
+
+
+def test_prototyping_area_pads_are_declared_no_connects_after_expansion():
+    """Every pad is addressed by (role, index) -> PB{index + 1} and left unwired."""
+    from kicraft.design.models import PinEndpoint
+    from kicraft.design.synthesis.validation import check_net_coverage
+
+    state, bom, ref_to_lowering = _lower_prototyping_area_bom()
+    state["bom"] = {
+        "parts": [
+            {
+                **part.model_dump(exclude_none=True),
+                "resolution_source": "lowerer",
+                **ref_to_lowering[part.ref],
+            }
+            for part in bom.parts
+        ]
+    }
+    extras = {
+        "symbol_pinouts": {
+            part.ref: {"pins": [{"number": "1", "electrical_type": "passive"}]}
+            for part in bom.parts
+        }
+    }
+    units = plan_stage_work_units("wiring", state, extras)
+    assert len(units) == 1 and units[0].planned_resolution_source == "lowerer"
+    wiring = deterministic_wiring_candidate(units[0], state, extras)
+    assert wiring["pins"] == [
+        {"ref": f"PB{n}", "pin": "1", "no_connect": True} for n in range(1, 26)
+    ]
+    # §9.11: every symbol pin is accounted for by the declared no-connects.
+    committed = bom.model_copy(
+        update={
+            "no_connect_pins": [
+                PinEndpoint(ref=row["ref"], pin=row["pin"]) for row in wiring["pins"]
+            ]
+        }
+    )
+    coverage = check_net_coverage(committed)
+    assert coverage.ok, coverage.offenders
+
+
+def test_prototyping_area_pads_are_what_populate_their_sheet():
+    """§9.13: the derived sheet is a BOM work unit, not an empty sheet.
+
+    A requirement-less sheet dies here -- it emits a blank leaf and any inter-sheet
+    net routed through it has no pin to land on -- which is why the pad field's
+    requirement and its parts are both derived rather than left to the model.
+    """
+    from kicraft.design.models import Architecture, BOM
+    from kicraft.design.synthesis.validation import (
+        check_bom_parts_reference_architecture_sheets,
+        check_sheets_have_parts,
+    )
+
+    state, bom, _ref_to_lowering = _lower_prototyping_area_bom()
+    architecture = Architecture.model_validate(state["architecture"])
+    assert check_sheets_have_parts(architecture, bom).ok
+    assert check_bom_parts_reference_architecture_sheets(architecture, bom).ok
+    # The same sheet with no pads is exactly the empty sheet §9.13 refuses.
+    assert not check_sheets_have_parts(architecture, BOM(parts=[])).ok

@@ -1142,6 +1142,14 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
             "a new sensor class) is legitimate — keep the user's own class name and let the "
             "parts stage resolve the real part."
         )
+    if any(d.code == "intent_prototyping_area_omitted" for d in diagnostics):
+        message += (
+            " The brief asks for a prototyping area (a pad field the user solders into). "
+            "Record it as an obligation row with kind `fabrication` and feature "
+            "`prototyping-area` — no size, no unit, and no component class: it is a "
+            "property of the board itself, so it owns no requirement. Keep the brief's "
+            "own wording in constraints too."
+        )
     if any(d.code == "functional_spec_external_load_power_assumed" for d in diagnostics):
         message += (
             " Do not guess whether the board powers the external display or LED "

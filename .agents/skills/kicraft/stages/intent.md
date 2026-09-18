@@ -23,6 +23,13 @@ thermal-via field, an edge treatment) or the *absence* of a class ("no microcont
 never a `physical` obligation: use `kind: "fabrication"` with its `feature` and any stated
 `minimum`/`unit`, or `kind: "negative"` with the `absent_class`.
 
+A **prototyping area** (a pad field the user solders into — the defining feature of a
+prototyping shield, board, perfboard or pad field) is one of those board features: record
+`kind: "fabrication"` with `feature: "prototyping-area"`, and keep the brief's wording in
+`constraints`. State no `minimum`/`unit` unless the brief states a size. Nothing else can
+carry it — it names no part, owns no pin and draws no net — so a brief that asks for one
+and a slot that omits it is an incomplete capture.
+
 A `physical` obligation's `component_class` names a *part class*, not a fact about the
 board or its wiring. Write the class, not the user's phrase or a qualifier: the reviewed
 vocabulary spells the Arduino shield interface `stacking-header` (not

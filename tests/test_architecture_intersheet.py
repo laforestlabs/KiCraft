@@ -11,6 +11,7 @@ from kicraft.design.models import (
     Architecture,
     BlockConnection,
     CircuitRequirement,
+    FabricationObligation,
     FunctionalBlock,
     FunctionalSpec,
     InterSheetNet,
@@ -28,12 +29,13 @@ def _fs(*blocks, connections=None):
     return FunctionalSpec(blocks=list(blocks), connections=list(connections or []))
 
 
-def _arch(sheets, inter_sheet_nets=None, requirements=()):
+def _arch(sheets, inter_sheet_nets=None, requirements=(), obligations=()):
     return Architecture(
         sheets=list(sheets),
         power_nets=[],
         inter_sheet_nets=list(inter_sheet_nets or []),
         requirements=list(requirements),
+        obligations=list(obligations),
     )
 
 
@@ -83,6 +85,82 @@ def test_block_has_sheet_zero_sheets():
     assert result.ok is False
     assert any("MCU" in offender for offender in result.offenders)
     assert any("POWER" in offender for offender in result.offenders)
+
+
+def test_board_feature_requirement_needs_no_functional_block():
+    """A `fabrication` obligation derives a requirement no functional block can own.
+
+    The proto-shield shape: the intent carries `fabrication`/`prototyping-area`, the compiler
+    derives the PROTOTYPING AREA sheet and its pad-field requirement from that row, and the
+    functional spec declares no block for the field at all -- a block is a user-visible function
+    and bare pads carry no signal of their own. Requiring membership would refuse the board the
+    brief asked for, at both R4 gates.
+    """
+    arch = _arch(
+        [
+            Sheet(name="POWER", stem="POWER", function="rail"),
+            Sheet(name="PROTOTYPING AREA", stem="PROTOTYPING_AREA", function="pad field"),
+        ],
+        requirements=[
+            _requirement("power", "POWER", "POWER"),
+            CircuitRequirement(
+                id="prototyping_area",
+                sheet="PROTOTYPING AREA",
+                role="user_io",
+                family="prototyping-area",
+                parameters={"rows": 5, "cols": 5, "pitch_mm": 2.54},
+            ),
+        ],
+        obligations=[
+            FabricationObligation(
+                kind="fabrication",
+                original_obligation_id="prototyping_area",
+                feature="prototyping-area",
+            )
+        ],
+    )
+    fs = _fs(FunctionalBlock(name="POWER", category="power", purpose="rail"))
+
+    assert check_every_block_has_sheet(fs, arch).ok is True
+    assert check_fs_connections_mapped(fs, arch).ok is True
+
+
+def test_only_the_board_feature_row_excuses_block_membership():
+    """The exemption is keyed by the `fabrication` row, never by an empty block list.
+
+    A requirement with no such row behind it keeps exactly the refusal it has today, so the
+    gate cannot be cleared by simply leaving `functional_blocks` out -- and a `fabrication` row
+    with another obligation id is a different fact that excuses nothing.
+    """
+
+    def offenders(obligation_ids: tuple[str, ...]) -> list[str]:
+        return check_every_block_has_sheet(
+            _fs(),
+            _arch(
+                [Sheet(name="PROTOTYPING AREA", stem="PROTOTYPING_AREA", function="pad field")],
+                requirements=[
+                    CircuitRequirement(
+                        id="prototyping_area",
+                        sheet="PROTOTYPING AREA",
+                        role="user_io",
+                        family="prototyping-area",
+                    )
+                ],
+                obligations=[
+                    FabricationObligation(
+                        kind="fabrication",
+                        original_obligation_id=source,
+                        feature="prototyping-area",
+                    )
+                    for source in obligation_ids
+                ],
+            ),
+        ).offenders
+
+    missing = ["requirement 'prototyping_area' has no functional_blocks membership"]
+    assert offenders(()) == missing
+    assert offenders(("copper_pour_area",)) == missing
+    assert offenders(("prototyping_area",)) == []
 
 
 # ---------------------------------------------------------------------------

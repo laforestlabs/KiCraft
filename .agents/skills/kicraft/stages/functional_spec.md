@@ -42,6 +42,12 @@ Block-boundary heuristics:
   `assumptions` ending `(defaulted)`.
 - Aim for 3-8 blocks total for a typical hobbyist project. More is fine for
   complex designs.
+- A board feature that names no component function is NOT a block: do not emit a
+  block for a prototyping pad field (a prototyping shield, perfboard or pad
+  field), and draw no connection to or from it. A block is a user-visible
+  function and the pad field carries no signal of its own; its sheet and its
+  bare 2.54 mm pad grid are derived downstream from the intent's `fabrication`
+  obligation.
 
 Open-question discipline matches Stage 1: `blocking`, `material`, or silent default in `assumptions`.
 

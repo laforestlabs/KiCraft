@@ -8,6 +8,8 @@ grid-placed deterministically, skipping the optimizer. See
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from kicraft.autoplacer.brain.array_placement import (
@@ -976,3 +978,43 @@ def test_ring_counts_for_leaf_is_fully_array() -> None:
     # Partial ring (member on another leaf) is not claimed.
     del comps["D6"]
     assert leaf_is_fully_array(comps, [{"refs": refs, "pattern": "ring"}]) is False
+
+
+def test_a_declared_pad_field_grid_is_placed_by_the_array_placer() -> None:
+    """The prototyping pad field is placed from its declared grid, never by the solver.
+
+    The BOM carries the field as one 5x5 ``ArraySpec`` at 2.54 mm, and the member
+    size is the vendored pad's courtyard, exactly as the autoplacer's adapter reads
+    it. That courtyard is 1.93 mm, so the placer's courtyard-plus-gap floor
+    (1.93 + 0.6 = 2.53) stays inside the declared pitch and all 25 members land on
+    ONE 0.1 inch grid, locked, instead of being scattered by the annealing solver.
+    """
+    import pcbnew
+
+    from kicraft.design.synthesis.footprint_library import load_footprint
+
+    pad, _library_dir = load_footprint(
+        pcbnew, "prototyping-area", "PrototypingPad_1.5mm_Drill0.8mm", project_root=Path(".")
+    )
+    court = pad.GetCourtyard(pcbnew.F_CrtYd).BBox()
+    width = pcbnew.ToMM(court.GetWidth())
+    height = pcbnew.ToMM(court.GetHeight())
+    assert width + 0.6 <= 2.54, "the pad's courtyard must not floor the 0.1 inch pitch"
+
+    comps = {
+        f"PB{i}": _comp(f"PB{i}", "Prototyping pad, 2.54 mm pitch", width, height, 1)
+        for i in range(1, 26)
+    }
+    arrays = [{"refs": [f"PB{i}" for i in range(1, 26)], "rows": 5, "cols": 5, "pitch_mm": 2.54}]
+
+    placed, fully = place_array_leaves(comps, arrays, {"placement_clearance_mm": 0.0})
+
+    assert placed == set(comps)
+    assert fully is True
+    assert all(comps[ref].locked and comps[ref].array_member for ref in comps)
+    xs = sorted({round(comps[ref].pos.x, 6) for ref in comps})
+    ys = sorted({round(comps[ref].pos.y, 6) for ref in comps})
+    assert len(xs) == len(ys) == 5
+    assert xs[1] - xs[0] == pytest.approx(2.54)
+    assert all(abs(xs[index + 1] - xs[index] - 2.54) < 1e-9 for index in range(4))
+    assert ys == xs

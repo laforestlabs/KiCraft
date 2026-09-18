@@ -514,3 +514,129 @@ def test_touch_electrode_with_copper_routed_under_it_fails(tmp_path, reviewed_re
     facts = _facts(path, _touch_board(path, underlay=True), _touch_state(), "chamfered-badge")
     assert facts["gates"]["touch_no_underlay"] == "fail"
     assert facts["geometry_diagnostics"]["touch_electrodes"]["reason"] == "delivered_copper_under_electrode"
+
+
+# ------------------------- proto-shield prototyping area ---------------------
+#
+# The feature is the pad field itself: the field's own pads are obstacles to the
+# free-area search, so a board that DELIVERS a 2.54 mm field can have almost no
+# free area left and must still pass. The field is proved by copper (lone
+# through-hole pads on one uniform grid), never by a label.
+
+_PAD_FOOTPRINT = "prototyping-area:PrototypingPad_1.5mm_Drill0.8mm"
+
+
+def _pad_field_board(
+    path: Path,
+    *,
+    rows: int = 5,
+    cols: int = 5,
+    pitch: float = 2.54,
+    width: float = 14.0,
+    height: float = 14.0,
+    origin: tuple[float, float] = (2.0, 2.0),
+):
+    board = _board(path, width, height)
+    index = 1
+    for row in range(rows):
+        for column in range(cols):
+            at = (origin[0] + column * pitch, origin[1] + row * pitch)
+            fp = _footprint(board, f"PB{index}", _PAD_FOOTPRINT, at)
+            _pth_pad(fp, "1", at)
+            index += 1
+    return board
+
+
+def _pad_field_state(rows: int = 5, cols: int = 5):
+    return _state(
+        *(
+            {
+                "ref": f"PB{index}",
+                "value": "Prototyping pad, 2.54 mm pitch",
+                "symbol": "prototyping-area:PrototypingPad",
+                "footprint": _PAD_FOOTPRINT,
+            }
+            for index in range(1, rows * cols + 1)
+        )
+    )
+
+
+def _proto(path: Path, board, state, slug: str = "proto-shield"):
+    facts = _facts(path, board, state, slug)
+    return facts["gates"]["prototyping_area"], facts["geometry_diagnostics"]["prototyping_area"]
+
+
+def test_delivered_pad_field_is_a_usable_prototyping_area(tmp_path):
+    path = tmp_path / "b.kicad_pcb"
+    gate, proto = _proto(path, _pad_field_board(path), _pad_field_state())
+    assert gate == "pass"
+    assert proto["pad_grid"]["usable"] is True
+    assert proto["pad_grid"]["holes"] == 25
+    assert (proto["pad_grid"]["columns"], proto["pad_grid"]["rows"]) == (5, 5)
+    assert proto["pad_grid"]["pitch_mm"] == pytest.approx(2.54)
+    # The field's own pads are obstacles, so this pass comes from the delivered grid.
+    assert proto["free_area"]["usable"] is False
+    assert proto["usable"] is True
+
+
+def test_free_board_area_still_passes_without_a_pad_field(tmp_path):
+    path = tmp_path / "b.kicad_pcb"
+    gate, proto = _proto(path, _board(path, 40.0, 30.0), _state())
+    assert gate == "pass"
+    assert proto["free_area"]["usable"] is True
+    assert proto["free_area"]["grid_holes"] >= 25
+    assert proto["free_area"]["pitch_mm"] == pytest.approx(2.54)
+    assert proto["pad_grid"]["holes"] == 0
+    assert proto["usable"] is True
+
+
+def test_a_pad_field_off_the_0_1_inch_grid_is_not_usable(tmp_path):
+    # DIP parts and 0.1 inch headers fit 0.1 inch only, so a field spread at some
+    # other spacing is not this feature, however many pads it holds.
+    path = tmp_path / "b.kicad_pcb"
+    gate, proto = _proto(
+        path, _pad_field_board(path, pitch=3.1925, width=18.0, height=18.0), _pad_field_state()
+    )
+    assert proto["pad_grid"]["usable"] is False
+    assert gate == "fail"
+
+
+def test_pad_field_below_the_minimum_hole_count_is_not_usable(tmp_path):
+    path = tmp_path / "b.kicad_pcb"
+    gate, proto = _proto(
+        path,
+        _pad_field_board(path, rows=4, cols=5, width=12.0, height=12.0),
+        _pad_field_state(4, 5),
+    )
+    assert proto["pad_grid"]["pads"] == 20
+    assert proto["pad_grid"]["holes"] == 0
+    assert proto["pad_grid"]["usable"] is False
+    assert gate == "fail"
+
+
+def test_scattered_through_hole_pads_are_not_a_pad_field(tmp_path):
+    # 25 lone pads on a diagonal are not a grid, however many there are.
+    path = tmp_path / "b.kicad_pcb"
+    board = _board(path, 12.0, 12.0)
+    for index in range(25):
+        at = (1.0 + 0.4 * index, 1.0 + 0.4 * index)
+        fp = _footprint(board, f"PB{index + 1}", _PAD_FOOTPRINT, at)
+        _pth_pad(fp, "1", at)
+    gate, proto = _proto(path, board, _pad_field_state())
+    assert proto["pad_grid"]["pads"] == 25
+    assert proto["pad_grid"]["holes"] == 0
+    assert gate == "fail"
+
+
+def test_a_pin_bank_is_not_a_pad_field(tmp_path):
+    # A header's pads share one footprint; a pad field is lone plated holes.
+    path = tmp_path / "b.kicad_pcb"
+    board = _board(path, 14.0, 14.0)
+    fp = _footprint(board, "J1", _HEADER_FOOTPRINT, (7.0, 7.0))
+    for column in range(10):
+        for row in range(10):
+            _pth_pad(fp, str(column * 10 + row + 1), (2.0 + column * 1.0, 2.0 + row * 1.0))
+    gate, proto = _proto(path, board, _state())
+    assert proto["pad_grid"]["pads"] == 0
+    assert proto["pad_grid"]["holes"] == 0
+    assert gate == "fail"

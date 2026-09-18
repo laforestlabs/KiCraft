@@ -7,6 +7,11 @@ import re
 from collections.abc import Iterable
 
 from kicraft.design.models import Architecture, BOM, StageDiagnostic, is_power_or_ground_name
+from kicraft.design.synthesis.board_features import (
+    PROTOTYPING_AREA_FEATURE,
+    has_prototyping_area,
+    prototyping_area_requested,
+)
 from kicraft.design.synthesis.validation import named_part_tokens
 
 DETECTOR_VERSION = 1
@@ -115,6 +120,34 @@ def normalize_project_stem(value: str) -> str:
     return words[0][:32] if words else "PROJECT"
 
 
+def _names_board_field(name: object) -> bool:
+    """Whether a block name names the prototyping pad field, whatever separators it uses."""
+    return prototyping_area_requested(str(name or "").replace("_", " ")) is not None
+
+
+def _omitted_board_features(brief: str, candidate: dict) -> list[StageDiagnostic]:
+    """Board features the brief asks for that no row records.
+
+    A prototyping area is the whole point of a prototyping shield and it fits no other
+    field: it is not a component class, owns no pin and draws no net, so if the intent
+    drops it there is nothing for any later stage to build. Recorded as a `fabrication`
+    row, it survives to the sheet and the pad field the realization stages derive from it.
+    """
+    phrase = prototyping_area_requested(
+        _text([brief, candidate.get("goal"), candidate.get("constraints")])
+    )
+    if phrase is None or has_prototyping_area(candidate.get("obligations")):
+        return []
+    return [
+        _diag(
+            "intent_prototyping_area_omitted",
+            "repair_required",
+            "The brief asks for a prototyping area; record it as a board feature.",
+            [f"{phrase} -> obligations: kind fabrication, feature {PROTOTYPING_AREA_FEATURE}"],
+        )
+    ]
+
+
 def _unrealizable_obligation_classes(obligations) -> list[StageDiagnostic]:
     """Physical obligations whose class is a not-a-part fact or a puzzled variant name.
 
@@ -199,6 +232,7 @@ def _intent(brief: str, candidate: dict) -> list[StageDiagnostic]:
             )
         )
     diagnostics.extend(_unrealizable_obligation_classes(candidate.get("obligations")))
+    diagnostics.extend(_omitted_board_features(brief, candidate))
     goal = re.sub(r"\s+", " ", str(candidate.get("goal") or "")).strip().lower()
     source = re.sub(r"\s+", " ", brief).strip().lower()
     copied = bool(source and (goal == source or (len(source) >= 40 and goal in source)))
@@ -432,6 +466,29 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
                 "repair_required",
                 "A driven output has no incoming power flow.",
                 missing_drive_power,
+            )
+        )
+
+    # A board feature is not a function: a prototyping pad field names no component function,
+    # owns no pin and carries no signal of its own, so it is not a functional block and no
+    # connection may touch it. Its sheet and its bare pad grid are derived downstream from the
+    # intent's `fabrication` row; a block for it here asks the architecture for a part that
+    # cannot exist -- and would then need a bound port on a sheet whose pads carry no net at all,
+    # which the block/connection mapping gate and the pad-field lowerer both refuse.
+    board_field_blocks = [
+        f"{block.get('name')}: remove this block — a board feature is not a functional block; "
+        "the sheet and pad field are derived from the intent's fabrication obligation"
+        for block in candidate.get("blocks") or []
+        if isinstance(block, dict) and _names_board_field(block.get("name"))
+    ]
+    if board_field_blocks:
+        diagnostics.append(
+            _diag(
+                "functional_spec_board_feature_block",
+                "repair_required",
+                "A board feature is not a functional block; remove it and let the derived sheet "
+                "own the pad field.",
+                board_field_blocks,
             )
         )
 

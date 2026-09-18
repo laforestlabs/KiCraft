@@ -79,6 +79,7 @@ from .synthesis.footprint_library import (
     lookup_footprint,
     search_footprints,
 )
+from .synthesis.board_features import extract_board_features, has_prototyping_area
 from .synthesis.form_factor import extract_form_factor
 from .synthesis.symbol_pinout import SymbolNotFoundError, canonical_symbol_id, lookup_pins
 from .synthesis.parts_lookup import (
@@ -3640,6 +3641,31 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
                 state.intent.form_factor = detected
                 form_factor_capture = detected.standard or detected.shape
 
+    # Intent board-feature capture (deterministic; a safety net for the LLM). A board
+    # feature names no component class, so nothing downstream can recover it from prose:
+    # when the brief text asks for a prototyping area and no row records it, add the typed
+    # `fabrication` obligation the realization stages derive the sheet and pad field from.
+    board_feature_capture: list[str] = []
+    if stage == "intent" and state.intent is not None:
+        if not has_prototyping_area(state.intent.obligations):
+            try:
+                raw_brief = (state_path.resolve().parent.parent / "brief.txt").read_text()
+            except OSError:
+                raw_brief = ""
+            added = extract_board_features(
+                "\n".join(
+                    [
+                        state.intent.goal,
+                        *state.intent.constraints,
+                        *state.intent.assumptions,
+                        raw_brief,
+                    ]
+                )
+            )
+            if added:
+                state.intent.obligations = [*state.intent.obligations, *added]
+                board_feature_capture = [row.feature for row in added]
+
     # Wiring netlist normalization (deterministic; a no-op on an already-correct
     # netlist). Runs before validation + persistence, so the committed state and
     # the emitter both see the repaired netlist:
@@ -4289,6 +4315,8 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         summary["bom_normalizations"] = bom_normalizations
     if form_factor_capture:
         summary["form_factor"] = form_factor_capture
+    if board_feature_capture:
+        summary["board_features"] = board_feature_capture
     # Placement rules referencing refs the BOM no longer carries are
     # tolerated (parts churn across BOM re-runs); synthesis drops them
     # with a warning. Surface them at commit time too so the UI can show

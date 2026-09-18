@@ -167,6 +167,104 @@ def test_intent_flags_interface_and_printed_board_rows_as_not_a_part():
     assert all("not a part class" in " ".join(d.evidence) for d in flagged)
 
 
+def test_intent_records_a_prototyping_area_as_a_board_feature():
+    """The defining feature of a prototyping shield must survive as a typed row.
+
+    Regression guard for the proto-shield brief: "prototyping" is not a component class,
+    owns no pin and draws no net, so if the intent drops it nothing downstream can build
+    the pad field (no sheet, no requirement, no pads) and the delivered board fails the
+    `prototyping_area` acceptance gate.
+    """
+    brief = (
+        "An Arduino-Uno-format prototyping shield with stacking through-hole headers "
+        "and an onboard SMT 3.3 V regulator."
+    )
+    candidate = {
+        "goal": brief,
+        "constraints": ["Arduino Uno format/outline", "Stacking through-hole headers"],
+        "named_parts": [],
+        "obligations": [
+            {"kind": "physical", "original_obligation_id": "stacking_headers",
+             "component_class": "stacking-header"},
+        ],
+    }
+    diagnostics = diagnose_stage("intent", brief=brief, upstream_state={}, candidate=candidate)
+    omitted = [d for d in diagnostics if d.code == "intent_prototyping_area_omitted"]
+    assert len(omitted) == 1
+    assert omitted[0].severity == "repair_required"
+    assert "prototyping-area" in " ".join(omitted[0].evidence)
+
+    # Recorded as a fabrication row the diagnostic clears, and nothing else changes.
+    candidate["obligations"].append(
+        {"kind": "fabrication", "original_obligation_id": "prototyping_area",
+         "feature": "prototyping-area"}
+    )
+    assert [
+        d.code
+        for d in diagnose_stage("intent", brief=brief, upstream_state={}, candidate=candidate)
+        if "prototyping" in d.code
+    ] == []
+
+
+def test_intent_ignores_a_plain_prototype_mention():
+    """A one-off "prototype" build is not a pad field."""
+    brief = "A prototype board with an ESP32-S3 and a USB-C connector."
+    diagnostics = diagnose_stage(
+        "intent",
+        brief=brief,
+        upstream_state={},
+        candidate={"goal": brief, "constraints": ["USB-C"], "named_parts": [], "obligations": []},
+    )
+    assert [d.code for d in diagnostics if "prototyping" in d.code] == []
+
+
+def test_functional_spec_rejects_a_block_for_the_prototyping_pad_field():
+    """A pad field is a board feature, not a user-visible function: it is not a block.
+
+    Regression guard for the proto-shield run that declared PROTOTYPING_AREA and then tried to
+    route rails into it (`malformed_signal_ref`, `unsupported_lowerer_contract`). The sheet the
+    compiler derives owns no port -- its pads are bare copper with no net -- so a block for it
+    asks the architecture for a part that cannot exist; the field is derived from the intent's
+    `fabrication` row instead.
+    """
+    code = "functional_spec_board_feature_block"
+
+    def block(name: str) -> dict:
+        return {"name": name, "category": "interface", "purpose": "One function.", "count": 1}
+
+    def codes(blocks: list[dict]) -> set[str]:
+        return _codes("functional_spec", {"blocks": blocks, "connections": [], "assumptions": []})
+
+    diagnostics = diagnose_stage(
+        "functional_spec",
+        brief=_load("rp2040_brief.json")["brief"],
+        upstream_state={},
+        candidate={
+            "blocks": [block("ARDUINO_HEADERS"), block("PROTOTYPING_AREA")],
+            "connections": [
+                {
+                    "from_block": "ARDUINO_HEADERS",
+                    "to_block": "PROTOTYPING_AREA",
+                    "signal_type": "power",
+                }
+            ],
+            "assumptions": [],
+        },
+    )
+    flagged = next(d for d in diagnostics if d.code == code)
+    assert flagged.severity == "repair_required"
+    # The repair is a delete, and it names the block it is about.
+    assert len(flagged.evidence) == 1
+    assert "prototyping_area" in flagged.evidence[0]
+    assert "not a functional block" in flagged.evidence[0]
+
+    # The wording the model chose does not matter; a real function that merely starts with
+    # "proto" is not the field.
+    assert code in codes([block("ARDUINO_HEADERS"), block("PAD_FIELD")])
+    assert code not in codes([block("ARDUINO_HEADERS"), block("PROTOCOL_BRIDGE")])
+    assert code not in codes([block("ARDUINO_HEADERS"), block("POWER_CONVERSION")])
+
+
 def test_functional_spec_rejects_hidden_topology_and_explicit_defaults():
     brief = "USB C PD power configured for 5V to an ESP32-S3-WROOM-1-N16R8 with a speaker output"
     candidate = {

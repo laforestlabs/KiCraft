@@ -4881,10 +4881,21 @@ def _functional_block_sheets(
     block_sheets: dict[str, set[str]] = {block.name: set() for block in functional_spec.blocks}
     sheet_names = {sheet.name for sheet in architecture.sheets}
     bad: list[str] = []
+    # A `fabrication` row is a property of the board itself (a printed pad field, a thermal-via
+    # field), never a user-visible function: the requirement derived from such a row implements no
+    # functional block and no functional block implements it, so membership is not something it
+    # can state. Requiring it would refuse every design whose intent carries the feature, so the
+    # derived requirement is exempt -- and only that one: a requirement with no `fabrication` row
+    # behind it still declares its block, so the gate cannot be cleared by leaving the field out.
+    board_feature_ids = {
+        row.original_obligation_id
+        for row in (getattr(architecture, "obligations", None) or ())
+        if row.kind == "fabrication"
+    }
     if not architecture.requirements:
         bad.append("architecture has no implementation requirements")
     for requirement in architecture.requirements:
-        if not requirement.functional_blocks:
+        if not requirement.functional_blocks and requirement.id not in board_feature_ids:
             bad.append(f"requirement {requirement.id!r} has no functional_blocks membership")
         if requirement.sheet not in sheet_names:
             bad.append(

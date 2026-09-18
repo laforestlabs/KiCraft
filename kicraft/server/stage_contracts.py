@@ -951,12 +951,19 @@ def _intent_shaped(payload: dict) -> bool:
     return "signals" in payload and "inter_sheet_nets" not in payload
 
 
-def _derive_intent_payload(payload: dict) -> dict:
-    """Intent slot -> canonical slot; every refusal is carried as one diagnostic."""
+def _derive_intent_payload(payload: dict, functional_spec: object | None = None) -> dict:
+    """Intent slot -> canonical slot; every refusal is carried as one diagnostic.
+
+    ``functional_spec`` is the committed spec slot, when there is one. A board
+    feature the spec names as its own block (the prototyping pad field) has no
+    architecture counterpart to claim it, so the derivation needs the spec to
+    give the derived requirement that block's exact name; with no spec, or with
+    no matching block, the derived requirement owns none.
+    """
     from kicraft.design.architecture_intent import ArchitectureIntentError, derive_architecture
 
     try:
-        return derive_architecture(payload).model_dump(exclude_none=True)
+        return derive_architecture(payload, functional_spec).model_dump(exclude_none=True)
     except ArchitectureIntentError as exc:
         rows = [row.model_dump(exclude_none=True) for row in exc.diagnostics]
         diagnostic = (
@@ -1030,7 +1037,7 @@ def _normalize_stage_response(
             if _intent_shaped(payload):
                 # The answer states the design; the canonical shape (net names, port
                 # bindings, endpoints, connector exposure) is derived from it here.
-                payload = _derive_intent_payload(payload)
+                payload = _derive_intent_payload(payload, prompt_state.get("functional_spec"))
             response = models.Architecture.model_validate(payload)
             _validate_lowerer_parameter_contracts(response)
             canonical = response.model_dump(exclude_none=True)

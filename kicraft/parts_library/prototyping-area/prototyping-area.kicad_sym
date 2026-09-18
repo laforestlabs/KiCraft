@@ -1,0 +1,26 @@
+(kicad_symbol_lib
+  (version 20231120)
+  (generator kicraft)
+  (symbol "PrototypingPad"
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "PB" (at 0 2.54 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Value" "Prototyping pad, 2.54 mm pitch" (at 0 -2.54 0)
+      (effects (font (size 1.27 1.27))))
+    (property "Footprint" "prototyping-area:PrototypingPad_1.5mm_Drill0.8mm" (at 0 -5.08 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Datasheet" "" (at 0 -7.62 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (property "Description" "Board-fabricated 1.5 mm through-hole prototyping pad, 0.8 mm drill, on a 0.1 inch grid. Bare copper the user wires by hand; nothing here is a purchasable part." (at 0 -10.16 0)
+      (effects (font (size 1.27 1.27)) hide))
+    (symbol "PrototypingPad_0_1"
+      (circle (center 0 0) (radius 0.75)
+        (stroke (width 0.1) (type default))
+        (fill (type none))))
+    (symbol "PrototypingPad_1_1"
+      (pin passive line (at 2.54 0 180) (length 1.79)
+        (name "PAD" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))))
+  )
+)

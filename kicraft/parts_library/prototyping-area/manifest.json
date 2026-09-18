@@ -1,0 +1,31 @@
+{
+  "content_hash": "sha256:7f52a9a932e07ed3eac109b49adf74f074c175739929e51b274127b7f471c159",
+  "datasheet_url": null,
+  "description": "Board-fabricated 1.5 mm through-hole prototyping pad on a 0.1 inch (2.54 mm) grid. It is not a purchasable component: pad 1 is a bare plated hole the user wires by hand, and the field is a grid of these pads. The 1.93 mm courtyard is deliberately sized so the array placer's courtyard-plus-gap floor (1.93 + 0.6 = 2.53) stays inside the declared 2.54 mm pitch, while 2.54 mm pitch leaves a 0.61 mm courtyard gap between neighbouring pads.",
+  "footprint_name": "PrototypingPad_1.5mm_Drill0.8mm",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "PCB-FABRICATED-PROTOTYPING-PAD-1P5",
+  "name": "prototyping-area",
+  "provenance": {
+    "added_at": "2026-09-18T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "manual; courtyard sized for the 2.54 mm array pitch",
+    "source_project_stem": "PROTO_SHIELD"
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "manufacturer-reference": "0.1 inch prototyping/stripboard pad grid"
+  },
+  "symbol_name": "PrototypingPad",
+  "tags": [
+    "prototyping",
+    "pad-field",
+    "board-fabricated",
+    "tht",
+    "0.1-inch"
+  ],
+  "three_d_model": "unavailable",
+  "version": "1.0.0",
+  "watch_out_for": "Every pad is deliberately unwired and declared a no-connect: the user wires the field. Do not fit a part here and do not substitute a purchasable test point -- its courtyard is wider than 1.93 mm, which floors the placed pitch above 0.1 inch and breaks the grid the feature exists for."
+}

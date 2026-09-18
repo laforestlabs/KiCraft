@@ -1095,9 +1095,15 @@ def deterministic_bom_candidate(
         if not requirement.ports:
             # A known-lowerer family with no declared ports publishes nothing for
             # the lowerer to refuse: the requirement is simply unfinished work
-            # for this unit, not a contract claim the lowerer must reject.
-            return None
-        artifact = lower_requirement(requirement)
+            # for this unit, not a contract claim the lowerer must reject. A
+            # board-fabricated feature (the prototyping pad field) owns no
+            # contact at all, so the artifact -- not the port list -- decides.
+            try:
+                artifact = lower_requirement(requirement)
+            except ValueError:
+                return None
+        else:
+            artifact = lower_requirement(requirement)
         if artifact is not None:
             return {
                 "groups": [
@@ -1116,7 +1122,16 @@ def deterministic_bom_candidate(
                     }
                     for group in artifact.groups
                 ],
-                "arrays": [],
+                # A declared pattern is part of the deliverable (the pad field's
+                # 2.54 mm grid), so it rides with the groups the lowerer owns.
+                "arrays": [
+                    {
+                        "group_id": group.role,
+                        **group.array.model_dump(exclude_none=True),
+                    }
+                    for group in artifact.groups
+                    if group.array is not None
+                ],
                 "assumptions": list(artifact.assumptions),
                 "substitutions": [],
                 "_lowerer_id": artifact.lowerer_id,
@@ -1507,6 +1522,7 @@ def _validate_bom_unit(
     )
     assumptions = [str(value) for value in payload.get("assumptions") or []]
     used_deterministic_candidate = payload.get("_trusted_deterministic_candidate") is True
+    deterministic_arrays: list[dict] = []
     lowering_metadata = {
         key: value
         for key, value in payload.items()
@@ -1523,7 +1539,18 @@ def _validate_bom_unit(
                 for key, value in deterministic.items()
                 if key.startswith("_") and key != "_trusted_deterministic_candidate"
             }
+            deterministic_arrays = list(deterministic.get("arrays") or [])
     arrays = [BomArrayGroup.model_validate(array) for array in (payload.get("arrays") or [])]
+    # A lowerer declares the pattern its own group is placed on (the pad field's
+    # 2.54 mm grid) as part of the artifact. One array per group is the BOM
+    # contract, so a pattern already declared for a group wins and the lowered
+    # declaration only fills the groups the payload left uncovered.
+    covered_by_payload = {array.group_id for array in arrays}
+    arrays.extend(
+        BomArrayGroup.model_validate(array)
+        for array in deterministic_arrays
+        if str(array.get("group_id")) not in covered_by_payload
+    )
     group_ids = [group.id for group in groups]
     array_group_ids = [array.group_id for array in arrays]
     architecture = prompt_state.get("architecture") or {}

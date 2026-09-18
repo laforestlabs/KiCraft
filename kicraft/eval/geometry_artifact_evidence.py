@@ -26,6 +26,12 @@ _HANGER_TOP_FRACTION = 0.20
 _THERMAL_VIA_PAD_MARGIN_MM = 0.35
 _PROTO_GRID_PITCH_MM = 2.54
 _PROTO_MIN_HOLES = 25
+# A delivered pad field is measured from its own pads, and it must BE the 0.1
+# inch grid: DIP parts and 0.1 inch headers fit nothing else. The tolerance
+# covers KiCad's 0.01 mm coordinate resolution and the save/load round trip, not
+# a different grid.
+_PROTO_GRID_PITCH_TOL_MM = 0.05
+_PROTO_GRID_MAX_SIDE = 24
 # A reviewed RF/electrode clearance shape is transcribed from a manufacturer
 # layout, so the delivered outline must match it within transcription slack --
 # far tighter than the distance between an antenna keep-out and its neighbour.
@@ -748,7 +754,7 @@ def _rect_hits(rect: tuple[float, float, float, float], box: tuple[float, float,
     return rect[0] < box[2] and rect[2] > box[0] and rect[1] < box[3] and rect[3] > box[1]
 
 
-def _prototyping_area(board: Any, box: tuple[float, float, float, float]) -> dict[str, Any]:
+def _prototyping_area_free(board: Any, box: tuple[float, float, float, float]) -> dict[str, Any]:
     obstacles = [item for fp in _iter(board.GetFootprints()) if (item := _padded_bbox(fp)) is not None]
     obstacles.extend(item for track in _iter(board.GetTracks()) if (item := _box(track)) is not None)
     # Board outline and actual footprint/copper envelopes are the evidence.  A
@@ -779,6 +785,117 @@ def _prototyping_area(board: Any, box: tuple[float, float, float, float]) -> dic
             "pitch_mm": _PROTO_GRID_PITCH_MM, "origin_mm": {"x": x, "y": y},
             "area_mm2": round(cols * rows * _PROTO_GRID_PITCH_MM ** 2, 2),
             "usable": cols * rows >= _PROTO_MIN_HOLES}
+
+
+def _bare_pth_pad_points(board: Any) -> list[_Point]:
+    """Centres of the delivered bare through-hole pads.
+
+    A prototyping pad is a LONE plated hole. A header or connector position
+    shares its footprint with its neighbours, so requiring one pad per footprint
+    keeps an ordinary pin bank from ever reading as a pad field.
+    """
+    points: list[_Point] = []
+    for fp in _iter(board.GetFootprints()):
+        pads = _iter(fp.Pads())
+        if len(pads) != 1 or not _is_pth(pads[0]):
+            continue
+        point = _pad_center(pads[0])
+        if point is not None:
+            points.append(point)
+    return points
+
+
+def _pad_cells(points: list[_Point], pitch: float, anchor: _Point) -> dict[tuple[int, int], _Point]:
+    """The delivered pads that sit on the ``pitch`` lattice through ``anchor``.
+
+    A cell is filled only by a pad within ``_PROTO_GRID_PITCH_TOL_MM`` of it, so
+    a field at any other spacing never fills the square below.
+    """
+    cells: dict[tuple[int, int], _Point] = {}
+    for point in points:
+        column = round((point.x - anchor.x) / pitch)
+        row = round((point.y - anchor.y) / pitch)
+        if column < 0 or row < 0:
+            continue
+        if abs(point.x - anchor.x - column * pitch) > _PROTO_GRID_PITCH_TOL_MM:
+            continue
+        if abs(point.y - anchor.y - row * pitch) > _PROTO_GRID_PITCH_TOL_MM:
+            continue
+        cells.setdefault((column, row), point)
+    return cells
+
+
+def _pad_square_side(cells: dict[tuple[int, int], _Point]) -> int:
+    """Largest fully-populated square grown from the lattice origin.
+
+    Every cell of the square must hold a delivered pad, so a scatter of
+    unrelated holes cannot accumulate into a field.
+    """
+    side = 0
+    while side < _PROTO_GRID_MAX_SIDE and all(
+        (column, row) in cells for column in range(side + 1) for row in range(side + 1)
+    ):
+        side += 1
+    return side
+
+
+def _delivered_pitch(cells: dict[tuple[int, int], _Point], side: int) -> float:
+    """Mean cell spacing of a matched square, measured from its own pads."""
+    if side < 2:
+        return 0.0
+    row = sorted(cells[(column, 0)].x for column in range(side))
+    return sum(row[index + 1] - row[index] for index in range(side - 1)) / (side - 1)
+
+
+def _proto_pad_grid(board: Any) -> dict[str, Any]:
+    """The delivered pad field, measured from its own pads.
+
+    The field *is* the deliverable, so it is proved by copper rather than by a
+    label: a complete square of lone through-hole pads on ONE 0.1 inch grid, at
+    the 0.1 inch pitch within ``_PROTO_GRID_PITCH_TOL_MM``. Anything else is not
+    this feature -- a wider field fits no DIP part and no 0.1 inch header.
+    """
+    points = _bare_pth_pad_points(board)
+    if len(points) < _PROTO_MIN_HOLES:
+        return {"holes": 0, "pads": len(points), "usable": False}
+    best: tuple[int, int, _Point, dict[tuple[int, int], _Point]] | None = None
+    for anchor in points:
+        cells = _pad_cells(points, _PROTO_GRID_PITCH_MM, anchor)
+        side = _pad_square_side(cells)
+        if best is None or side * side > best[0]:
+            best = (side * side, side, anchor, cells)
+    if best is None or best[0] < _PROTO_MIN_HOLES:
+        return {"holes": 0, "pads": len(points), "usable": False}
+    holes, side, anchor, cells = best
+    pitch = _delivered_pitch(cells, side)
+    return {
+        "holes": holes,
+        "pads": len(points),
+        "columns": side,
+        "rows": side,
+        "pitch_mm": round(pitch, 3),
+        "origin_mm": {"x": round(anchor.x, 3), "y": round(anchor.y, 3)},
+        "usable": abs(pitch - _PROTO_GRID_PITCH_MM) <= _PROTO_GRID_PITCH_TOL_MM,
+    }
+
+
+def _prototyping_area(board: Any, box: tuple[float, float, float, float]) -> dict[str, Any]:
+    """A usable prototyping area is free board space OR a delivered pad field.
+
+    Free area and a real 2.54 mm pad bank are different evidence for the same
+    feature: the field's own pads are obstacles to the free-area search, so a
+    board that DELIVERS the field can have little free area left and must still
+    pass. Both measurements are reported; the existing keys keep the free-area
+    numbers they always carried.
+    """
+    free_area = _prototyping_area_free(board, box)
+    pad_grid = _proto_pad_grid(board)
+    return {
+        **free_area,
+        "pad_grid": pad_grid,
+        "free_area": free_area,
+        "usable": bool(free_area["usable"] or pad_grid["usable"]),
+    }
 
 
 def _is_pth(pad: Any) -> bool:

@@ -10,11 +10,33 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from kicraft.design.models import CircuitRequirement, JsonScalar
+
+
+class LoweringArray(BaseModel):
+    """The placement pattern one lowered group's members must be laid out on.
+
+    A board feature whose geometry *is* the deliverable (a prototyping pad
+    field on a 0.1 inch grid) cannot be handed to the force/simulated-annealing
+    placer: the solver would scatter the members, and the delivered board would
+    no longer carry the pitch the field is for. The lowerer therefore declares
+    the pattern here, and the BOM stage turns it into a ``models.ArraySpec`` so
+    the array placer lays the group out programmatically.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pattern: Literal["grid", "ring"] = "grid"
+    rows: int | None = Field(default=None, gt=0)
+    cols: int | None = Field(default=None, gt=0)
+    pitch_mm: float | None = Field(default=None, gt=0)
+    serpentine: bool = True
+    radius_mm: float | None = Field(default=None, gt=0)
+    start_angle_deg: float = 0.0
 
 
 class LoweringGroup(BaseModel):
@@ -32,6 +54,8 @@ class LoweringGroup(BaseModel):
     # Board-fabricated copper features remain on the PCB but are omitted from
     # assembly BOM and position exports.
     assembly: bool = True
+    # Declared only when the members' pattern is part of the deliverable.
+    array: LoweringArray | None = None
 
 
 class LoweringPin(BaseModel):
@@ -1414,6 +1438,95 @@ def _coin_cell_holder(requirement: CircuitRequirement) -> LoweringArtifact | Non
     )
 
 
+# The reviewed bare-board pad field: one 1.5 mm through-hole pad per 2.54 mm
+# grid position. The pad is vendored (`parts_library/prototyping-area`) because
+# no stock single-pad footprint can be laid at 0.1 inch: the array placer floors
+# a requested pitch to the member's courtyard plus its gap, and every stock pad's
+# courtyard is wider than 1.94 mm. The vendored courtyard is 1.93 mm, so
+# 1.93 + 0.6 = 2.53 stays inside the declared 2.54 mm pitch.
+_PROTOTYPING_AREA_FAMILY = "prototyping-area"
+_PROTOTYPING_AREA_SYMBOL = "prototyping-area:PrototypingPad"
+_PROTOTYPING_AREA_FOOTPRINT = "prototyping-area:PrototypingPad_1.5mm_Drill0.8mm"
+_PROTOTYPING_AREA_PITCH_MM = 2.54
+_PROTOTYPING_AREA_DEFAULT_ROWS = 5
+_PROTOTYPING_AREA_DEFAULT_COLS = 5
+# The smallest field a user can solder a part into, and the size the
+# `prototyping_area` acceptance gate counts as usable (5x5 at 0.1 inch).
+_PROTOTYPING_AREA_MIN_PADS = 25
+_PROTOTYPING_AREA_MAX_PADS = 500
+
+
+def _prototyping_area(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """Lower a bare-board 2.54 mm pad field: real pads, no nets, one grid.
+
+    The field is a fabrication feature, not a component: it owns no contact, so
+    the requirement declares no ports and this is the only lowerer that builds
+    anything from one. Every pad is deliberately unwired and is declared as a
+    no-connect (the same deterministic path the other lowerers use), so net
+    coverage (§9.11) is satisfied without any provider involvement. The grid
+    travels with the group as a declared array, so the members are laid out as
+    one uniform grid at the requested pitch (the placer floors that pitch to the
+    pad's courtyard plus its gap) instead of being scattered by the solver.
+    """
+
+    rows = requirement.parameters.get("rows", _PROTOTYPING_AREA_DEFAULT_ROWS)
+    cols = requirement.parameters.get("cols", _PROTOTYPING_AREA_DEFAULT_COLS)
+    pitch = requirement.parameters.get("pitch_mm", _PROTOTYPING_AREA_PITCH_MM)
+    # JSON booleans are ints in Python; a boolean is not a declared dimension.
+    if type(rows) is not int or type(cols) is not int:
+        return None
+    if not 1 <= rows <= _PROTOTYPING_AREA_MAX_PADS:
+        return None
+    if not 1 <= cols <= _PROTOTYPING_AREA_MAX_PADS:
+        return None
+    pads = rows * cols
+    if not _PROTOTYPING_AREA_MIN_PADS <= pads <= _PROTOTYPING_AREA_MAX_PADS:
+        return None
+    if isinstance(pitch, bool) or not isinstance(pitch, (int, float)):
+        return None
+    # Only the 0.1 inch grid is realized: the pad's courtyard and the array
+    # placer's own grid arithmetic are both built around it, so a different
+    # declared pitch is refused rather than silently redrawn at 2.54 mm.
+    if abs(float(pitch) - _PROTOTYPING_AREA_PITCH_MM) > 1e-6:
+        return None
+    field = LoweringGroup(
+        role="pad_field",
+        reference_prefix="PB",
+        quantity=pads,
+        value=f"Prototyping pad, {_PROTOTYPING_AREA_PITCH_MM} mm pitch",
+        symbol=_PROTOTYPING_AREA_SYMBOL,
+        footprint=_PROTOTYPING_AREA_FOOTPRINT,
+        assembly=False,
+        array=LoweringArray(
+            pattern="grid",
+            rows=rows,
+            cols=cols,
+            pitch_mm=float(pitch),
+        ),
+    )
+    return _artifact(
+        "prototyping-area@1",
+        requirement,
+        (field,),
+        (),
+        no_connects=tuple(
+            LoweringNoConnect(
+                role="pad_field",
+                index=index,
+                pin="1",
+                reason="bare prototyping pad; the user wires the field by hand",
+            )
+            for index in range(pads)
+        ),
+        assumptions=(
+            "The field is a grid of bare 1.5 mm through-hole pads (0.8 mm drill) on a "
+            "2.54 mm pitch; no pad carries a net, because the user wires the field.",
+            "The pads are placed as a declared grid, never by the placement solver, so "
+            "the delivered board keeps the 2.54 mm pitch.",
+        ),
+    )
+
+
 def _capacitive_touch_pad(requirement: CircuitRequirement) -> LoweringArtifact | None:
     """Lower board-fabricated PTC electrodes with explicit no-underlay copper."""
 
@@ -1713,6 +1826,14 @@ for _lowerer in (
         ("<touch1..touchN: contiguous electrically distinct electrodes>",),
         required_parameter_keys=("count", "pins", "no_copper_underlay"),
         port_patterns=((r"touch[1-9][0-9]*", "bidirectional"),),
+    ),
+    # The one lowerer whose requirement declares no ports: a pad field owns no
+    # contact, so its contract is the field's dimensions alone.
+    RegisteredLowerer(
+        "prototyping-area@1",
+        frozenset({_PROTOTYPING_AREA_FAMILY}),
+        _prototyping_area,
+        ("rows", "cols", "pitch_mm"),
     ),
     RegisteredLowerer(
         "explicit-decoupling@1",

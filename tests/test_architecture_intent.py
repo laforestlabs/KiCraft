@@ -1792,3 +1792,244 @@ def test_ownership_exemption_is_per_row_and_does_not_shield_a_physical_row():
     with pytest.raises(StageSchemaError) as refused:
         _normalize_stage_response("architecture", intent, prompt_state)
     assert refused.value.diagnostic["evidence"] == [physical]
+
+
+_PROTOTYPING_AREA_OBLIGATION = {
+    "kind": "fabrication",
+    "original_obligation_id": "prototyping_area",
+    "feature": "prototyping-area",
+}
+
+
+def _prototyping_area_intent() -> dict:
+    """A brief whose only stated board feature is the pad field: no part, no net, no signal."""
+    return {
+        "mcu_present": False,
+        "sheets": [],
+        "requirements": [],
+        "signals": [],
+        "obligations": [dict(_PROTOTYPING_AREA_OBLIGATION)],
+    }
+
+
+def _prototyping_area_spec(name: str = "PROTOTYPING AREA") -> dict:
+    return {
+        "blocks": [
+            {
+                "name": name,
+                "category": "interface",
+                "purpose": "Bare pad field the user solders through-hole parts into.",
+                "count": 1,
+            }
+        ],
+        "connections": [],
+    }
+
+
+def test_fabrication_obligation_derives_the_prototyping_area_sheet_and_requirement():
+    """A `fabrication` obligation is the whole statement; the derivation writes the rest.
+
+    The measured failure: the brief asks for a prototyping area, the model records it as an
+    adjective, and every later stage has nothing to build -- a sheet with no requirement dies at
+    BOM (empty sheet) and a part the model invents from prose dies at the architecture gates.
+    Here the field is the only thing the board has: the spec declares no block for it (it must
+    not -- a block is a user-visible function), so the derived requirement owns none.
+    """
+    from kicraft.design.models import Architecture, FunctionalSpec
+    from kicraft.design.synthesis.validation import (
+        check_every_block_has_sheet,
+        check_fs_connections_mapped,
+    )
+
+    spec = {"blocks": [], "connections": []}
+    architecture = derive_architecture(_prototyping_area_intent(), spec)
+
+    sheet = next(row for row in architecture.sheets if row.stem == "PROTOTYPING_AREA")
+    assert sheet.name == "PROTOTYPING AREA"
+    assert "solders" in sheet.function
+
+    requirement = _requirement(architecture, "prototyping_area")
+    assert requirement.sheet == "PROTOTYPING AREA"
+    assert requirement.role == "user_io"
+    assert requirement.family == "prototyping-area"
+    assert requirement.parameters == {"rows": 5, "cols": 5, "pitch_mm": 2.54}
+    assert requirement.ports == {}
+    assert requirement.functional_blocks == []
+    # The row is a board-level fact: `fabrication` is ownership-exempt and owns no requirement.
+    assert requirement.obligations == []
+    assert [row.model_dump(exclude_none=True) for row in architecture.obligations] == [
+        _PROTOTYPING_AREA_OBLIGATION
+    ]
+    assert any(
+        row.startswith("prototyping_area:") and row.endswith("(derived)")
+        for row in architecture.assumptions
+    )
+
+    # The gates the architecture stage commits on (`cli_app.py` R4) pass with no block owning the
+    # field: the board's own `fabrication` row is the exemption from block membership, and the
+    # field binds no net to cross a sheet with. The real normalization keeps the requirement.
+    functional_spec = FunctionalSpec.model_validate(spec)
+    assert check_every_block_has_sheet(functional_spec, architecture).ok
+    assert check_fs_connections_mapped(functional_spec, architecture).ok
+    payload, _expanded = _normalize_stage_response(
+        "architecture",
+        architecture.model_dump(exclude_none=True),
+        {"intent": _prototyping_area_intent(), "functional_spec": spec},
+    )
+    committed = Architecture.model_validate(payload)
+    assert [row.id for row in committed.requirements] == ["prototyping_area"]
+    # No recipe is invented for a board feature, and the requirement itself resolves to the
+    # deterministic pad-field lowerer: its sheet is BOM work with a known build rather than an
+    # empty sheet the model would have to invent parts for.
+    assert committed.unresolved_requirement_ids == ["prototyping_area"]
+    assert committed.recipe_selections == []
+    from kicraft.design.lowering import lower_requirement
+
+    assert lower_requirement(_requirement(committed, "prototyping_area")) is not None
+
+
+def test_prototyping_area_requirement_claims_the_committed_block_that_asked_for_it():
+    """No block is expected by default; one is claimed only if a spec declares it anyway.
+
+    The functional spec must not declare a block for the pad field (it is a board feature, not a
+    user-visible function), so the derived requirement owns no block in the normal case. The
+    matching is kept for the spec that declares one anyway: the requirement must then claim that
+    block's exact name, or the block-coverage gate reports it unowned.
+    """
+    from kicraft.design.models import FunctionalSpec
+
+    matched = derive_architecture(_prototyping_area_intent(), _prototyping_area_spec("PROTO BOARD"))
+    assert _requirement(matched, "prototyping_area").functional_blocks == ["PROTO BOARD"]
+
+    # The committed slot reaches the derivation as a mapping or as its own model.
+    committed = FunctionalSpec.model_validate(_prototyping_area_spec("PAD_FIELD"))
+    assert _requirement(
+        derive_architecture(_prototyping_area_intent(), committed), "prototyping_area"
+    ).functional_blocks == ["PAD_FIELD"]
+
+    for spec in (None, _prototyping_area_spec("POWER INPUT"), {"blocks": []}):
+        architecture = derive_architecture(_prototyping_area_intent(), spec)
+        assert _requirement(architecture, "prototyping_area").functional_blocks == []
+
+
+def test_derived_pad_field_clears_the_commit_gates_with_no_spec_block():
+    """The default shape: no block for the field, and R4 still commits the board.
+
+    A `fabrication` row is a property of the board, so the derived requirement implements no
+    functional block and claims none; `check_every_block_has_sheet` exempts exactly that case
+    (keyed by the row's obligation id) while every other requirement still declares its block.
+    """
+    from kicraft.design.models import FunctionalSpec
+    from kicraft.design.synthesis.validation import (
+        check_every_block_has_sheet,
+        check_fs_connections_mapped,
+    )
+
+    intent = _hub75_intent()
+    intent["obligations"] = [dict(_PROTOTYPING_AREA_OBLIGATION)]
+    spec = {
+        "blocks": [
+            {"name": name, "category": "interface", "purpose": "Stated function.", "count": 1}
+            for name in (
+                "ESP32_S3_CONTROLLER",
+                "POWER_DISTRIBUTION",
+                "HUB75_DISPLAY_INTERFACE",
+                "ADDRESSABLE_LED_OUTPUT",
+                "USB_C_PD_INPUT",
+            )
+        ],
+        "connections": [],
+    }
+
+    architecture = derive_architecture(intent, spec)
+
+    assert _requirement(architecture, "prototyping_area").functional_blocks == []
+    functional_spec = FunctionalSpec.model_validate(spec)
+    assert check_every_block_has_sheet(functional_spec, architecture).ok
+    assert check_fs_connections_mapped(functional_spec, architecture).ok
+
+
+def test_a_requirement_owned_fabrication_row_still_derives_the_pad_field():
+    """`fabrication` may ride a requirement (it is ownership-exempt); the fact still counts."""
+    intent = _hub75_intent()
+    next(row for row in intent["requirements"] if row["id"] == "led")["obligations"] = [
+        dict(_PROTOTYPING_AREA_OBLIGATION)
+    ]
+
+    architecture = derive_architecture(intent, _prototyping_area_spec())
+
+    assert _requirement(architecture, "prototyping_area").sheet == "PROTOTYPING AREA"
+
+
+def test_second_derivation_pass_does_not_duplicate_the_prototyping_area():
+    """The derivation is a pure function of the obligation, and a declared field is left alone."""
+    spec = _prototyping_area_spec()
+    first = derive_architecture(_prototyping_area_intent(), spec)
+    second = derive_architecture(_prototyping_area_intent(), spec)
+    assert first.model_dump() == second.model_dump()
+    assert [row.stem for row in first.sheets] == ["PROTOTYPING_AREA"]
+
+    # A model that stated the feature itself -- its own sheet prose, its own family, its own
+    # ports -- keeps every one of those. The guard reads the id and the family, so no second
+    # requirement and no second sheet appear at all.
+    declared = {
+        "sheets": [
+            {
+                "name": "PROTO AREA",
+                "stem": "PROTOTYPING_AREA",
+                "role": "user_io",
+                "function": "Pad field the user solders into (model text).",
+            }
+        ],
+        "requirements": [
+            {
+                "id": "prototyping_area",
+                "sheet": "PROTO AREA",
+                "role": "user_io",
+                "family": "pin-header",
+                "parameters": {"rows": 1, "gender": "male"},
+                "functional_blocks": ["PROTOTYPING AREA"],
+                "ties": {"pin1": "GND"},
+            }
+        ],
+        "signals": [],
+        "obligations": [dict(_PROTOTYPING_AREA_OBLIGATION)],
+    }
+    architecture = derive_architecture(declared, spec)
+
+    assert [row.stem for row in architecture.sheets] == ["PROTOTYPING_AREA"]
+    assert architecture.sheets[0].function == "Pad field the user solders into (model text)."
+    requirement = _requirement(architecture, "prototyping_area")
+    assert requirement.sheet == "PROTO AREA"
+    assert requirement.family == "pin-header"
+    assert requirement.parameters == {"rows": 1, "gender": "male"}
+    assert requirement.ports == {"pin1": "GND"}
+    assert not any("derived from the committed" in row for row in architecture.assumptions)
+
+
+def test_declared_prototyping_area_sheet_is_reused_not_duplicated():
+    """A model-declared sheet keeps its prose; only the missing requirement is derived onto it."""
+    intent = _prototyping_area_intent()
+    intent["sheets"] = [
+        {
+            "name": "PROTO AREA",
+            "stem": "PROTOTYPING_AREA",
+            "role": "user_io",
+            "function": "Pad field the user solders into (model text).",
+        }
+    ]
+
+    architecture = derive_architecture(intent, _prototyping_area_spec())
+
+    assert [row.stem for row in architecture.sheets] == ["PROTOTYPING_AREA"]
+    assert architecture.sheets[0].function == "Pad field the user solders into (model text)."
+    assert _requirement(architecture, "prototyping_area").sheet == "PROTO AREA"
+
+
+def test_intent_without_the_fabrication_obligation_derives_no_prototyping_area():
+    """A design that never named the feature is untouched, even when a spec block names it."""
+    with_block = derive_architecture(_hub75_intent(), _prototyping_area_spec())
+
+    assert with_block.model_dump() == derive_architecture(_hub75_intent()).model_dump()
+    assert not any(row.stem == "PROTOTYPING_AREA" for row in with_block.sheets)
+    assert not any(row.id == "prototyping_area" for row in with_block.requirements)
