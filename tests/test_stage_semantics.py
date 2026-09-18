@@ -54,6 +54,119 @@ def test_vague_intent_may_leave_classification_empty():
     assert diagnostics == []
 
 
+def test_intent_rejects_physical_obligation_no_reviewed_part_implements():
+    """A board-format or qualifier-wording class is unsatisfiable at every later gate.
+
+    Reproduces the live proto-shield draft, whose stacking/regulator/format rows are the
+    wording no reviewed record carries: `physical-obligation-unfulfilled` at BOM, not a
+    repairable intent defect (see part_identity._REVIEWED_FEATURE_VOCABULARY).
+    """
+    brief = (
+        "An Arduino-Uno-format prototyping shield with stacking through-hole headers "
+        "and an onboard SMT 3.3 V regulator."
+    )
+    diagnostics = diagnose_stage(
+        "intent",
+        brief=brief,
+        upstream_state={},
+        candidate={
+            "goal": "An Arduino Uno-format prototyping shield.",
+            "constraints": ["Arduino Uno-format board"],
+            "named_parts": [],
+            "obligations": [
+                {"kind": "physical", "original_obligation_id": "uno_format",
+                 "component_class": "arduino-uno-format-board"},
+                {"kind": "physical", "original_obligation_id": "stacking_headers",
+                 "component_class": "stacking-through-hole-header"},
+                {"kind": "physical", "original_obligation_id": "regulator",
+                 "component_class": "smt-voltage-regulator"},
+                {"kind": "quantitative", "original_obligation_id": "vout",
+                 "quantity": "output voltage", "relation": "equal", "value": 3.3, "unit": "V"},
+            ],
+        },
+    )
+    unrealizable = [d for d in diagnostics if d.code == "intent_obligation_class_unrealizable"]
+    assert [d.severity for d in unrealizable] == ["repair_required"] * 3
+    # The repair must be actionable: the reviewed spelling travels in the evidence.
+    stacking = next(
+        d for d in unrealizable if "stacking-through-hole-header" in " ".join(d.evidence)
+    )
+    assert "stacking-header" in " ".join(stacking.evidence)
+
+
+def test_intent_accepts_reviewed_physical_classes():
+    """The reviewed spellings of the same requirements raise nothing."""
+    diagnostics = diagnose_stage(
+        "intent",
+        brief="A shield with stacking headers and a 3.3 V regulator.",
+        upstream_state={},
+        candidate={
+            "goal": "A shield with stacking headers and a regulator.",
+            "constraints": ["3.3 V regulated output"],
+            "named_parts": [],
+            "obligations": [
+                {"kind": "physical", "original_obligation_id": "stacking_headers",
+                 "component_class": "stacking-header"},
+                {"kind": "physical", "original_obligation_id": "regulator",
+                 "component_class": "voltage-regulator"},
+                {"kind": "physical", "original_obligation_id": "terminals",
+                 "component_class": "power-screw-terminal"},
+            ],
+        },
+    )
+    assert [d.code for d in diagnostics if "obligation" in d.code] == []
+
+
+def test_intent_leaves_a_new_part_category_alone():
+    """A class the reviewed library does not cover yet is legitimate, not a defect.
+
+    Regression guard: an earlier version of this gate flagged any class with no reviewed
+    coverage and suggested the nearest reviewed name, which made a GPS brief draft a
+    *wifi* module (`gps-module` shares only "module" with `wifi-module`). A new category
+    must pass through untouched and keep its own name.
+    """
+    diagnostics = diagnose_stage(
+        "intent",
+        brief="A GPS tracker board with a u-blox NEO-6M GPS module and USB-C power.",
+        upstream_state={},
+        candidate={
+            "goal": "A GPS tracker board with a GPS module and USB-C power.",
+            "constraints": ["USB-C power"],
+            "named_parts": ["u-blox NEO-6M"],
+            "obligations": [
+                {"kind": "physical", "original_obligation_id": "gnss",
+                 "component_class": "gps-module"},
+                {"kind": "physical", "original_obligation_id": "air",
+                 "component_class": "air-quality-sensor"},
+            ],
+        },
+    )
+    assert [d.code for d in diagnostics if "obligation" in d.code] == []
+
+
+def test_intent_flags_interface_and_printed_board_rows_as_not_a_part():
+    """A bus or a copper feature is not a class, and the evidence says so."""
+    diagnostics = diagnose_stage(
+        "intent",
+        brief="A panel board with an I2C interface and a thermal-via copper pour.",
+        upstream_state={},
+        candidate={
+            "goal": "A panel board with an I2C interface and a copper heat spreader.",
+            "constraints": [],
+            "named_parts": [],
+            "obligations": [
+                {"kind": "physical", "original_obligation_id": "i2c",
+                 "component_class": "i2c-interface"},
+                {"kind": "physical", "original_obligation_id": "pour",
+                 "component_class": "thermal-via-copper-pour"},
+            ],
+        },
+    )
+    flagged = [d for d in diagnostics if d.code == "intent_obligation_class_unrealizable"]
+    assert len(flagged) == 2
+    assert all("not a part class" in " ".join(d.evidence) for d in flagged)
+
+
 def test_functional_spec_rejects_hidden_topology_and_explicit_defaults():
     brief = "USB C PD power configured for 5V to an ESP32-S3-WROOM-1-N16R8 with a speaker output"
     candidate = {

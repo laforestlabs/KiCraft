@@ -3165,15 +3165,52 @@ def _part_is_deterministic_owned(bom, ref: str) -> bool:
     return False
 
 
+def _part_names_exact_part(part, reviewed_record, exact_part: str | None) -> bool:
+    """Whether a BOM part is the exact identity a requirement pinned."""
+    if exact_part is None:
+        return True
+    if reviewed_record is not None:
+        return reviewed_record.identity == exact_part.casefold()
+    return str(getattr(part, "mpn", "") or "").casefold() == exact_part.casefold()
+
+
+def _part_implements_physical_class(part, reviewed_record, component_class: str) -> bool:
+    """Whether one BOM part implements a demanded physical class.
+
+    A reviewed record answers from its own family and reviewed features. A demanded class
+    with no reviewed coverage anywhere falls back to real-part evidence — an exact MPN, a
+    symbol whose pin inventory resolves, and a footprint (part_identity.
+    resolved_part_evidence). The library cannot answer for a class it has never covered,
+    and refusing such a demand would block exactly the new designs the pipeline exists to
+    build; the part must still be real and resolvable, never a family label or a bare value.
+    """
+    from kicraft.design.part_identity import has_reviewed_coverage, resolved_part_evidence
+
+    if not has_reviewed_coverage(component_class):
+        return resolved_part_evidence(
+            mpn=getattr(part, "mpn", None),
+            symbol=getattr(part, "symbol", None),
+            footprint=getattr(part, "footprint", None),
+        )
+    if reviewed_record is None:
+        return False
+    canonical = canonical_physical_features(component_class)
+    return component_class == reviewed_record.family or bool(
+        canonical & reviewed_record.physical_features
+    )
+
+
 def check_requirement_physical_realization(
     architecture, bom, *, declared_interface_scope: str = "all"
 ) -> CheckResult:
     """§9.42 — physical obligations and declared interfaces must be real BOM pins.
 
-    A BOM group label or family-like value has no fulfillment authority.  Only
-    an exact reviewed identity with its reviewed symbol/footprint pair can
-    satisfy a physical class or provide the component whose declared interface
-    is checked against the committed net graph.
+    A BOM group label or family-like value has no fulfillment authority. For a class the
+    reviewed library covers, only an exact reviewed identity with its reviewed
+    symbol/footprint pair can satisfy it; a class with no reviewed coverage at all is
+    satisfied by a real resolved part instead (see
+    :func:`_part_implements_physical_class`). The declared-interface half always needs an
+    identity-matched component whose pin inventory resolves.
 
     ``declared_interface_scope`` splits the declared-interface half across the
     two stages that can prove it, because only recipe/lowerer expansions create
@@ -3182,6 +3219,8 @@ def check_requirement_physical_realization(
     complete. A declared interface is never silently unchecked: each stage
     evaluates the half it can prove, with the same offenders.
     """
+    from kicraft.design.part_identity import has_reviewed_coverage
+
     info, _ = _pin_info_by_ref(bom)
     nets = _nets_by_ref(bom)
     reviewed = {
@@ -3196,11 +3235,7 @@ def check_requirement_physical_realization(
             part
             for part in bom.parts
             if part.sheet == requirement.sheet
-            and part.ref in reviewed
-            and (
-                requirement.exact_part is None
-                or reviewed[part.ref].identity == requirement.exact_part.casefold()
-            )
+            and _part_names_exact_part(part, reviewed.get(part.ref), requirement.exact_part)
         ]
         physical_classes = {
             obligation.component_class.casefold()
@@ -3217,16 +3252,17 @@ def check_requirement_physical_realization(
                     local_demands[component_class], obligation.minimum
                 )
         for component_class, minimum in local_demands.items():
-            canonical = canonical_physical_features(component_class)
             matching = [
                 part
                 for part in requirement_parts
-                if component_class == reviewed[part.ref].family
-                or canonical & reviewed[part.ref].physical_features
+                if _part_implements_physical_class(part, reviewed.get(part.ref), component_class)
             ]
             if len(matching) < minimum:
+                # "reviewed" only where the library could answer; a class it has never
+                # covered is proven by a real resolved part instead.
+                evidence = "reviewed" if has_reviewed_coverage(component_class) else "real"
                 bad.append(
-                    f"E_PHYSICAL_REALIZATION {requirement.id!r}: requires {minimum} reviewed "
+                    f"E_PHYSICAL_REALIZATION {requirement.id!r}: requires {minimum} {evidence} "
                     f"{component_class!r} physical part(s), found {len(matching)} with exact "
                     "MPN/symbol/footprint evidence"
                 )
@@ -3305,22 +3341,18 @@ def check_requirement_physical_realization(
                 )
     for (sheet, component_class), demand_rows in sorted(aggregate_demands.items()):
         demanded = sum(minimum for _, minimum in demand_rows)
-        canonical = canonical_physical_features(component_class)
         available = [
             part
             for part in bom.parts
             if part.sheet == sheet
-            and part.ref in reviewed
-            and (
-                component_class == reviewed[part.ref].family
-                or canonical & reviewed[part.ref].physical_features
-            )
+            and _part_implements_physical_class(part, reviewed.get(part.ref), component_class)
         ]
         if len(available) < demanded:
             owners = ", ".join(f"{requirement_id}×{minimum}" for requirement_id, minimum in demand_rows)
+            evidence = "reviewed" if has_reviewed_coverage(component_class) else "real"
             bad.append(
                 f"E_PHYSICAL_REALIZATION {sheet!r}/{component_class!r}: {owners} demand "
-                f"{demanded} distinct part(s), but only {len(available)} exact reviewed "
+                f"{demanded} distinct part(s), but only {len(available)} exact {evidence} "
                 "MPN/symbol/footprint realization(s) exist"
             )
     return CheckResult(

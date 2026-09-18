@@ -633,8 +633,25 @@ def _bundled_reviewed_record(group: BomComponentGroup):
 
 
 def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
-    from kicraft.design.part_identity import canonical_physical_features, physical_inventory_record
+    """Whether one BOM group implements a demanded physical class.
 
+    A reviewed record answers from its own features. A class with no reviewed coverage
+    anywhere — a part category the library has never heard of — falls back to real-part
+    evidence instead (exact MPN, resolvable symbol, footprint): the library cannot answer
+    for a class it never covered, and refusing the demand would block exactly the new
+    designs the pipeline exists to build (see part_identity.has_reviewed_coverage).
+    """
+    from kicraft.design.part_identity import (
+        canonical_physical_features,
+        has_reviewed_coverage,
+        physical_inventory_record,
+        resolved_part_evidence,
+    )
+
+    if not has_reviewed_coverage(feature):
+        return resolved_part_evidence(
+            mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
+        )
     reviewed = physical_inventory_record(
         mpn=group.mpn, symbol=group.symbol, footprint=group.footprint,
     )

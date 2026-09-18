@@ -366,6 +366,38 @@ def test_physical_quantity_requires_exact_reviewed_identity_evidence(monkeypatch
     assert result.offenders[0].startswith("E_PHYSICAL_REALIZATION")
 
 
+def test_new_part_category_is_realized_by_a_resolved_part(monkeypatch):
+    """A class the reviewed library has never covered is proven by a real resolved part.
+
+    Decision 2026-09-18: the library can only answer for the classes it covers, so a demand
+    for a new part category (`gps-module`) is met by a real, resolvable part — exact MPN,
+    resolvable symbol pin inventory, footprint — instead of refusing every design that needs
+    hardware nobody has reviewed yet. A label without an orderable identity is not evidence.
+    """
+    monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda _part: None)
+    monkeypatch.setattr(validation, "_pin_info_by_ref", lambda _bom: ({}, {}))
+    requirement = SimpleNamespace(
+        id="gnss",
+        sheet="IO",
+        exact_part=None,
+        family="gnss-receiver",
+        declared_interface=None,
+        obligations=[SimpleNamespace(kind="physical", component_class="gps-module")],
+    )
+    architecture = SimpleNamespace(requirements=[requirement])
+    resolved = SimpleNamespace(
+        ref="U1", value="NEO-6M", mpn="NEO-6M-0-001", symbol="Device:R",
+        footprint="Resistor_SMD:R_0603_1608Metric", sheet="IO",
+    )
+    assert validation.check_requirement_physical_realization(architecture, _bom([resolved], {})).ok
+
+    unlabelled = SimpleNamespace(**{**vars(resolved), "mpn": None})
+    result = validation.check_requirement_physical_realization(architecture, _bom([unlabelled], {}))
+    assert not result.ok
+    assert result.offenders[0].startswith("E_PHYSICAL_REALIZATION")
+    assert "requires 1 real 'gps-module'" in result.offenders[0]
+
+
 def test_board_fact_obligations_are_not_physical_component_demands(monkeypatch):
     """§9.42 reads `physical` rows only: a board feature and an absence demand no part.
 

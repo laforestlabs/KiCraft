@@ -2394,6 +2394,29 @@ def test_obligation_class_aliases_match_the_reviewed_feature_vocabulary():
     assert _group_has_physical_feature(_group_for("adum1301arwz-rl"), "opto-isolator") is False
 
 
+def test_unreviewed_part_class_is_proven_by_a_real_resolved_part():
+    """A class the library has never covered is satisfied by a real part, not refused.
+
+    Decision 2026-09-18: the reviewed library can only answer for the classes it covers, so a
+    demand for a new category (`gps-module`) must be met by a real, resolvable part — exact
+    MPN, symbol pin inventory, footprint — instead of blocking every novel design. A label
+    with no orderable identity is still not evidence, and a covered class still needs its
+    reviewed record.
+    """
+    from kicraft.server.stage_work_units import _group_has_physical_feature
+
+    resolved = BomComponentGroup(
+        id="gnss", sheet="MAIN", reference_prefix="U", quantity=1, value="NEO-6M",
+        symbol="Device:R", footprint="Resistor_SMD:R_0603_1608Metric", mpn="NEO-6M-0-001",
+    )
+    assert _group_has_physical_feature(resolved, "gps-module") is True
+    assert _group_has_physical_feature(resolved, "air-quality-sensor") is True
+    # No orderable identity: the parts stage emitted a label, so the demand stands.
+    assert _group_has_physical_feature(resolved.model_copy(update={"mpn": None}), "gps-module") is False
+    # An unreviewed part never answers for a class the reviewed library does cover.
+    assert _group_has_physical_feature(resolved, "usb-c-receptacle") is False
+
+
 def test_pin_less_declared_interface_claim_is_refused_by_name(monkeypatch):
     """A claim without a pin number cannot be verified; say that, not "pin None".
 

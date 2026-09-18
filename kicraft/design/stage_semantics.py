@@ -115,6 +115,64 @@ def normalize_project_stem(value: str) -> str:
     return words[0][:32] if words else "PROJECT"
 
 
+def _unrealizable_obligation_classes(obligations) -> list[StageDiagnostic]:
+    """Physical obligations whose class is a not-a-part fact or a puzzled variant name.
+
+    Two cases only, both safe to reject at the stage that writes them:
+
+    * the class carries a token no physical class can have (an interface, bus, board
+      format, package style, or printed-board feature), so it belongs in `constraints`,
+      a `fabrication` row, or a `negative` row;
+    * the class is a longer spelling of a reviewed class, so the reviewed name is the
+      repair.
+
+    A class with no reviewed coverage and no such relation — a genuinely new part category
+    such as `gps-module` or `air-quality-sensor` — is deliberately NOT flagged. The
+    reviewed library can only answer for the classes it covers; refusing a new category
+    here, or renaming it to a reviewed neighbour, would block or silently distort exactly
+    the novel designs the pipeline exists to build.
+    """
+    from kicraft.design.part_identity import (
+        class_is_not_a_part,
+        realizable_physical_features,
+        reviewed_class_variants,
+    )
+
+    diagnostics: list[StageDiagnostic] = []
+    seen: set[str] = set()
+    for obligation in obligations or []:
+        if not isinstance(obligation, dict) or obligation.get("kind") != "physical":
+            continue
+        component_class = str(obligation.get("component_class") or "").strip().casefold()
+        if not component_class or component_class in seen:
+            continue
+        if realizable_physical_features(component_class):
+            continue
+        seen.add(component_class)
+        not_a_part = class_is_not_a_part(component_class)
+        variants = reviewed_class_variants(component_class)
+        if not_a_part:
+            diagnostics.append(
+                _diag(
+                    "intent_obligation_class_unrealizable",
+                    "repair_required",
+                    "A physical obligation names an interface, board format or board "
+                    "fabrication feature rather than a part class.",
+                    [f"{component_class} -> not a part class ({', '.join(not_a_part)})"],
+                )
+            )
+        elif variants:
+            diagnostics.append(
+                _diag(
+                    "intent_obligation_class_unrealizable",
+                    "repair_required",
+                    "A physical obligation spells a reviewed part class differently.",
+                    [f"{component_class} -> reviewed class: {', '.join(variants)}"],
+                )
+            )
+    return diagnostics
+
+
 def _intent(brief: str, candidate: dict) -> list[StageDiagnostic]:
     diagnostics: list[StageDiagnostic] = []
     expected = named_part_tokens([brief])
@@ -140,6 +198,7 @@ def _intent(brief: str, candidate: dict) -> list[StageDiagnostic]:
                 facts,
             )
         )
+    diagnostics.extend(_unrealizable_obligation_classes(candidate.get("obligations")))
     goal = re.sub(r"\s+", " ", str(candidate.get("goal") or "")).strip().lower()
     source = re.sub(r"\s+", " ", brief).strip().lower()
     copied = bool(source and (goal == source or (len(source) >= 40 and goal in source)))

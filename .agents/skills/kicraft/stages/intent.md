@@ -23,6 +23,20 @@ thermal-via field, an edge treatment) or the *absence* of a class ("no microcont
 never a `physical` obligation: use `kind: "fabrication"` with its `feature` and any stated
 `minimum`/`unit`, or `kind: "negative"` with the `absent_class`.
 
+A `physical` obligation's `component_class` names a *part class*, not a fact about the
+board or its wiring. Write the class, not the user's phrase or a qualifier: the reviewed
+vocabulary spells the Arduino shield interface `stacking-header` (not
+`stacking-through-hole-header`) and a 3.3 V regulator `voltage-regulator` (not
+`smt-voltage-regulator`). An interface or bus (`i2c-interface`), a board format
+(`arduino-uno-format-board`) and a printed-copper feature (`thermal-via-copper-pour`) are
+not part classes: a board format goes in `constraints`, a printed-board feature uses
+`kind: "fabrication"`, and an absent class uses `kind: "negative"`.
+
+A part class the reviewed library does not cover yet is legitimate — name it plainly
+(`gps-module`, `air-quality-sensor`) and never substitute an unrelated reviewed class just
+to look familiar. If the shell tools reject the class at intent time, follow the evidence
+it returns.
+
 `project_stem` rule (top-level state field, NOT inside the slot — pass via `--project-stem`):
 
 Pick the 2-3 most significant words from the goal, uppercase-and-underscore them, cap at 32 chars. Examples: goal "USB-powered Li-ion charger" → `"USB_LIION_CHARGER"`; goal "ESP32 weather station" → `"ESP32_WEATHER_STATION"`.

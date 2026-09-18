@@ -1132,6 +1132,16 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
             "part or family named by the user. Do not leave either list empty "
             "when the brief contains those facts."
         )
+    if any(d.code == "intent_obligation_class_unrealizable" for d in diagnostics):
+        message += (
+            " Fix each flagged physical obligation by its evidence: when the evidence "
+            "names a reviewed class, use that spelling; when it says 'not a part class', "
+            "move the fact out of `obligations` into `constraints`, or record it as a "
+            "`fabrication`/`negative` row. NEVER rename a demand to an unrelated reviewed "
+            "class. A part category the reviewed library does not cover yet (a GPS module, "
+            "a new sensor class) is legitimate — keep the user's own class name and let the "
+            "parts stage resolve the real part."
+        )
     if any(d.code == "functional_spec_external_load_power_assumed" for d in diagnostics):
         message += (
             " Do not guess whether the board powers the external display or LED "

@@ -2777,6 +2777,16 @@ _ARDUINO_SHIELD_STACKING_PAIRS = frozenset({
 })
 
 
+# The physical features each stock pattern record below can carry. They live here, not
+# inline in the builder, because _REVIEWED_FEATURE_VOCABULARY (and through it the
+# realizable-class gate) must know every feature a reviewed record can carry without
+# re-deriving these regexes.
+_TERMINAL_PATTERN_FEATURES = frozenset({"screw-terminal", "terminal-block"})
+_HEADER_PATTERN_FEATURES = frozenset({"pin-header", "header"})
+_STACKING_HEADER_FEATURE = "stacking-header"
+_LED0805_PATTERN_FEATURES = frozenset({"led-0805"})
+
+
 def _stock_library_physical_record(symbol: str, footprint: str) -> ReviewedPart | None:
     """Return an evidence-backed stock KiCad record for a canonical pair."""
     common = next(
@@ -2803,7 +2813,7 @@ def _stock_library_physical_record(symbol: str, footprint: str) -> ReviewedPart 
             bundle="kicad-standard",
             symbol=symbol,
             footprint=footprint,
-            physical_features=frozenset({"screw-terminal", "terminal-block"}),
+            physical_features=_TERMINAL_PATTERN_FEATURES,
             contacts=tuple(str(number) for number in range(1, contacts_count + 1)),
             manufacturer_sources=(
                 "https://gitlab.com/kicad/libraries/kicad-symbols",
@@ -2824,9 +2834,9 @@ def _stock_library_physical_record(symbol: str, footprint: str) -> ReviewedPart 
         ):
             return None
         contacts = tuple(str(number) for number in range(1, contact_count + 1))
-        features = {"pin-header", "header"}
+        features = set(_HEADER_PATTERN_FEATURES)
         if (symbol, footprint) in _ARDUINO_SHIELD_STACKING_PAIRS:
-            features.add("stacking-header")
+            features.add(_STACKING_HEADER_FEATURE)
         return ReviewedPart(
             identity=f"kicad-{header_footprint['kind'].casefold()}-{header_symbol['rows']}x{header_symbol['pins']}",
             family="pin-header",
@@ -2849,7 +2859,7 @@ def _stock_library_physical_record(symbol: str, footprint: str) -> ReviewedPart 
             bundle="kicad-standard",
             symbol=symbol,
             footprint=footprint,
-            physical_features=frozenset({"led-0805"}),
+            physical_features=_LED0805_PATTERN_FEATURES,
             contacts=("1", "2"),
             manufacturer_sources=(
                 "https://gitlab.com/kicad/libraries/kicad-symbols",
@@ -2900,6 +2910,107 @@ def canonical_physical_features(feature: str) -> frozenset[str]:
     """
     key = str(feature or "").strip().casefold()
     return _DEMANDED_CLASS_ALIASES.get(key, frozenset({key}))
+
+
+# Every physical feature a reviewed record can carry. Both consumers of the reviewed
+# vocabulary — the BOM work-unit obligation check (_group_has_physical_feature) and the
+# §9.42 physical-realization gate — match a demand against a record's physical_features,
+# so this union is exactly the set of demands some reviewed part can satisfy.
+_REVIEWED_FEATURE_VOCABULARY: frozenset[str] = frozenset().union(
+    _TERMINAL_PATTERN_FEATURES,
+    _HEADER_PATTERN_FEATURES,
+    _LED0805_PATTERN_FEATURES,
+    {_STACKING_HEADER_FEATURE},
+    *(
+        part.physical_features
+        for part in (*REVIEWED_PARTS, *_STANDARD_LIBRARY_PARTS, *_STOCK_COMMON_PARTS)
+    ),
+)
+
+
+def realizable_physical_features(component_class: str) -> frozenset[str]:
+    """The reviewed features that could satisfy a demanded obligation class.
+
+    An empty result means NO reviewed part can implement the demanded class, so the
+    demand is unsatisfiable wherever it is checked (`physical-obligation-unfulfilled`
+    at BOM, `E_PHYSICAL_REALIZATION` at commit) and must be re-worded by the stage that
+    wrote it, not discovered later as an unrepairable work-unit defect.
+    """
+    return canonical_physical_features(component_class) & _REVIEWED_FEATURE_VOCABULARY
+
+
+def has_reviewed_coverage(component_class: str) -> bool:
+    """Whether the reviewed library can answer for a demanded obligation class.
+
+    False means no reviewed part carries the class: the demand is new ground, and every
+    check that would otherwise demand reviewed evidence must fall back to
+    :func:`resolved_part_evidence` instead of refusing it.
+    """
+    return bool(realizable_physical_features(component_class))
+
+
+def resolved_part_evidence(
+    *, mpn: str | None, symbol: str | None, footprint: str | None
+) -> bool:
+    """Whether a BOM group is a real part that resolves, with no reviewed record.
+
+    The evidence a demanded class the library has never covered is allowed to accept: an
+    exact orderable identity (a named MPN, never a family label or a bare value) plus a
+    symbol whose pin inventory resolves and a footprint to draw it with. A new part
+    category is then built from a real part — the same standard the pipeline already
+    applies to a part's declared wiring — instead of being refused.
+    """
+    if not str(mpn or "").strip() or not str(symbol or "").strip() or not str(footprint or "").strip():
+        return False
+    # Local import: the symbol pinout layer sits above this one.
+    from kicraft.design.synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
+
+    try:
+        pins = lookup_pins(str(symbol))
+    except (SymbolNotFoundError, ValueError, OSError):
+        return False
+    return bool(pins.get("pins"))
+
+
+def _class_tokens(value: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", str(value).strip().casefold()))
+
+
+# Tokens that name a fact about the board or its wiring rather than a physical class: a bus
+# ("i2c-interface"), a board format ("arduino-uno-format-board"), a package style, or a
+# printed-copper feature ("thermal-via-copper-pour"). A demand carrying one belongs in
+# constraints, a `fabrication` row, or a `negative` row instead.
+_NOT_A_PART_CLASS_TOKENS = frozenset({
+    "interface", "bus", "protocol", "format", "outline", "layout", "shape",
+    "package", "footprint", "pour", "plane", "via", "vias", "net", "netlist",
+})
+
+
+def class_is_not_a_part(component_class: str) -> tuple[str, ...]:
+    """The tokens that mark a demanded class as a board/wiring fact, not a part class."""
+    return tuple(sorted(_class_tokens(component_class) & _NOT_A_PART_CLASS_TOKENS))
+
+
+def reviewed_class_variants(component_class: str) -> tuple[str, ...]:
+    """Reviewed class names the demanded class is a longer spelling of, best first.
+
+    Only a superset relation is safe to act on: "smt-voltage-regulator" contains the
+    reviewed "voltage-regulator", and "stacking-through-hole-header" contains
+    "stacking-header". A bare shared token is deliberately NOT a relation —
+    "gps-module" shares only "module" with "wifi-module", and renaming a new category to
+    a reviewed neighbour would trade a visible late failure for a silently wrong part.
+    """
+    demanded = _class_tokens(component_class)
+    if not demanded:
+        return ()
+    scored = sorted(
+        (
+            (-len(tokens), feature)
+            for feature in _REVIEWED_FEATURE_VOCABULARY
+            if (tokens := _class_tokens(feature)) and tokens < demanded
+        )
+    )
+    return tuple(feature for _, feature in scored[:6])
 
 
 def physical_inventory_record(
