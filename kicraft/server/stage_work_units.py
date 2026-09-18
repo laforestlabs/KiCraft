@@ -7,7 +7,7 @@ import json
 import re
 
 from dataclasses import asdict, dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from pathlib import Path
 
 from kicraft.fsutil import atomic_write_text
@@ -24,6 +24,10 @@ from .stage_contracts import (
     _sheet_owns_usb_c_connector,
     _validate_power_requirement_contracts,
 )
+
+if TYPE_CHECKING:
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.part_identity import ReviewedPart
 
 WORK_UNIT_WIRING_PIN_LIMIT = 256
 _COUNT_WORDS = {
@@ -629,7 +633,13 @@ def _bundled_reviewed_record(group: BomComponentGroup):
     if group.footprint != f"{library}:{loaded.manifest.footprint_name}":
         return None
     mpn = str(loaded.manifest.mpn or "").strip()
-    return reviewed_part(mpn) if mpn else None
+    record = reviewed_part(mpn) if mpn else None
+    if record is None:
+        # A curated bundle can carry the reviewed pair under a different manifest spelling
+        # ("8734" for the reviewed "keystone-8734"); this join is the bundle's own exact
+        # symbol/footprint pair, so it can only ever confirm the part the bundle ships.
+        record = _curated_record_by_bundle().get(library)
+    return record
 
 
 def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
@@ -1066,11 +1076,587 @@ def _standard_connector_sheet_candidate(
     }
 
 
+@dataclass(frozen=True)
+class ReviewedBomIdentity:
+    """One reviewed part a compiler-owned BOM decision commits for a requirement.
+
+    ``symbol``/``footprint``/``mpn`` are the exact reviewed pair and order code to
+    commit (the curated bundle's own library pair whenever the loader resolves that MPN,
+    exactly the way ``_normalize_curated_group_identities`` writes a group), ``value``
+    the BOM display value for the same part, and ``role`` the lowerer role the part
+    plays when the identity came from a typed artifact.  ``reference_prefix`` is set
+    only when the part's own KiCad symbol declares the reference class -- a
+    stock-library part; a vendored bundle's symbol carries arbitrary ``Reference`` text
+    ("USBC" for a USB-C receptacle, "RLY" for a relay), so the compiler never names the
+    reference class of a vendored part.
+    """
+
+    identity: str
+    family: str
+    role: str
+    symbol: str
+    footprint: str
+    mpn: str | None
+    value: str
+    datasheet: str | None
+    sourcing_note: str | None
+    reference_prefix: str | None
+    features: frozenset[str]
+    committable: bool
+    source: Literal["lowerer", "reviewed-default"]
+
+
+def _reviewed_identity_record(group: BomComponentGroup) -> "ReviewedPart | None":
+    """The reviewed record this group's own identity resolves to, or None."""
+    from kicraft.design.part_identity import physical_inventory_record
+
+    record = physical_inventory_record(
+        mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
+    )
+    return record if record is not None else _bundled_reviewed_record(group)
+
+
+def _reviewed_manufacturer_identity(record: "ReviewedPart") -> str | None:
+    """The chosen manufacturing identity a reviewed record states, or None.
+
+    The reviewed ``kicad-*`` records are unbranded stock KiCad pairs: they name a
+    validated symbol/footprint contract, not an order code, so they are never an
+    explicit choice of one part over another.
+    """
+    return None if record.identity.startswith("kicad-") else record.identity
+
+
+@lru_cache(maxsize=1)
+def _reviewed_family_index() -> dict[str, tuple["ReviewedPart", ...]]:
+    """Reviewed portable parts by the exact family/demand key a requirement spells.
+
+    Built from the curated bundles (``_curated_part_indexes``: the bundle's own name
+    plus the one MPN its manifest names) and from ``part_identity.REVIEWED_PARTS`` (the
+    record's reviewed family and every physical feature it realizes).  Only a portable
+    record -- a complete, reviewed library pair -- can answer: an identity-only record
+    is a reviewed package boundary, never a part a BOM may commit.
+    """
+    from kicraft.design.part_identity import REVIEWED_PARTS, reviewed_part
+
+    by_name, _by_mpn = _curated_part_indexes()
+    index: dict[str, set[str]] = {}
+    records: dict[str, object] = {}
+
+    def add(key: object, record: object | None) -> None:
+        token = str(key or "").strip().casefold()
+        if not token or record is None or not record.is_portable_candidate:
+            return
+        records.setdefault(record.identity, record)
+        index.setdefault(token, set()).add(record.identity)
+
+    for name, bundle in by_name.items():
+        add(name, reviewed_part(str(bundle.manifest.mpn or "")))
+    for record in REVIEWED_PARTS:
+        add(record.family, record)
+        for feature in record.physical_features:
+            add(feature, record)
+    return {
+        key: tuple(records[identity] for identity in sorted(identities))
+        for key, identities in index.items()
+    }
+
+
+def reviewed_family_parts(family: str) -> tuple["ReviewedPart", ...]:
+    """Reviewed parts realizing one exact requirement family or demand class.
+
+    A demand the reviewed vocabulary spells differently resolves through the one alias map
+    both BOM gates already share (``canonical_physical_features``), so
+    ``binding-post-terminal`` reaches the reviewed binding post and ``status-led`` the
+    reviewed indicator LEDs.  The exact key's own hits come first and aliases only add, in
+    sorted order, so the answer is deterministic.  A key with no exact and no aliased
+    spelling returns nothing: the compiler never infers a family from a prefix, a token
+    overlap or a "close enough" name, and never invents a new alias.
+    """
+    from kicraft.design.part_identity import canonical_physical_features
+
+    key = str(family or "").strip().casefold()
+    if not key:
+        return ()
+    index = _reviewed_family_index()
+    found: dict[str, "ReviewedPart"] = {}
+    for spelling in dict.fromkeys((key, *sorted(canonical_physical_features(key)))):
+        for record in index.get(spelling, ()):
+            found.setdefault(record.identity, record)
+    return tuple(found.values())
+
+
+@lru_cache(maxsize=1)
+def _curated_reviewed_joins() -> tuple[dict[str, object], dict[str, object]]:
+    """Curated bundle <-> reviewed record joins, both exact.
+
+    A bundle is joined to its reviewed record **both** by the manifest MPN and by the
+    reviewed library pair: a curated bundle may carry the same pair under a different
+    manifest spelling (``8734`` for the reviewed ``keystone-8734``), and the MPN join alone
+    would silently miss it.  The two directions are returned together so they can never
+    disagree: reviewed identity -> bundle, and bundle name -> reviewed record.
+    """
+    from kicraft.design.part_identity import REVIEWED_PARTS, reviewed_part
+
+    by_name, _by_mpn = _curated_part_indexes()
+    bundles: dict[str, object] = {}
+    pairs: dict[tuple[str, str], object] = {}
+    for bundle in by_name.values():
+        manifest = bundle.manifest
+        pairs[
+            (f"{manifest.name}:{manifest.symbol_name}", f"{manifest.name}:{manifest.footprint_name}")
+        ] = bundle
+    records: dict[str, object] = {}
+    for record in REVIEWED_PARTS:
+        if not record.is_portable_candidate:
+            continue
+        bundle = pairs.get((record.symbol, record.footprint))
+        if bundle is not None:
+            # The reviewed pair itself: the record's own symbol/footprint, verbatim.
+            bundles.setdefault(record.identity, bundle)
+            records.setdefault(bundle.manifest.name, record)
+    for bundle in by_name.values():
+        manifest = bundle.manifest
+        record = reviewed_part(str(manifest.mpn or ""))
+        if record is None or not record.is_portable_candidate:
+            continue
+        records.setdefault(manifest.name, record)
+        bundles.setdefault(record.identity, bundle)
+    return bundles, records
+
+
+def _curated_bundle_by_identity() -> dict[str, object]:
+    """Reviewed identity -> the curated bundle that carries it."""
+    return _curated_reviewed_joins()[0]
+
+
+def _curated_record_by_bundle() -> dict[str, object]:
+    """Curated bundle name -> the reviewed record its own pair realizes."""
+    return _curated_reviewed_joins()[1]
+
+
+@lru_cache(maxsize=256)
+def _stock_library_reference_prefix(symbol: str) -> str | None:
+    """The reference class a stock KiCad symbol declares, or None.
+
+    Only KiCad's own libraries carry an authoritative ``Reference`` property, so this
+    reads the class off the symbol's own library file and refuses anything that is not a
+    short alphabetic class.  A vendored (easyeda-imported) bundle lives in another
+    library tier and is rejected outright: its ``Reference`` is arbitrary text.
+    """
+    from kicraft.design.cli_app import _symbol_reference_prefix
+    from kicraft.design.synthesis.parts_lookup import (
+        DEFAULT_KICAD_SYMBOL_DIR,
+        LibraryNotFoundError,
+        resolve_symbol_library_path,
+    )
+    from kicraft.design.synthesis.symbol_library import extract_symbol_block
+
+    library, _, name = str(symbol or "").partition(":")
+    if not library or not name:
+        return None
+    try:
+        path = resolve_symbol_library_path(library, project_root=None)
+    except LibraryNotFoundError:
+        return None
+    if path.parent != DEFAULT_KICAD_SYMBOL_DIR:
+        return None
+    try:
+        prefix = _symbol_reference_prefix(extract_symbol_block(library, name, project_root=None))
+    except (OSError, ValueError, LookupError):
+        return None
+    return prefix if prefix and re.fullmatch(r"[A-Z]{1,4}", prefix) else None
+
+
+def _reviewed_bom_identity(
+    record: "ReviewedPart", *, requirement, source: str
+) -> ReviewedBomIdentity:
+    """The identity of one reviewed record for this requirement.
+
+    ``committable`` marks the identities the compiler may *commit*: a curated bundle
+    supplies the exportable library pair, the real order code and its sourcing note, and a
+    pair that is itself a reviewed stock KiCad pair commits the way the pipeline commits any
+    stock part -- that exact pair with no asserted MPN.  A vendored record with no curated
+    bundle carries a normalized identity that is not itself an order code (the reviewed
+    vocabulary drops carrier suffixes), so it is usable for matching and refusal only, never
+    for a committed BOM line.
+    """
+    from kicraft.design.part_identity import physical_inventory_record
+
+    bundle = _curated_bundle_by_identity().get(record.identity)
+    if bundle is not None:
+        manifest = bundle.manifest
+        symbol = f"{manifest.name}:{manifest.symbol_name}"
+        footprint = f"{manifest.name}:{manifest.footprint_name}"
+        mpn = manifest.mpn
+        lcsc = (manifest.sourcing or {}).get("lcsc")
+        sourcing_note = f"LCSC {lcsc}" if lcsc else None
+        committable = True
+    else:
+        symbol, footprint = record.symbol, record.footprint
+        mpn, sourcing_note = None, None
+        committable = (
+            physical_inventory_record(mpn=None, symbol=symbol, footprint=footprint) is not None
+        )
+    return ReviewedBomIdentity(
+        identity=record.identity,
+        family=str(requirement.family),
+        role=str(requirement.role),
+        symbol=symbol,
+        footprint=footprint,
+        mpn=mpn,
+        value=mpn or record.identity,
+        datasheet=None,
+        sourcing_note=sourcing_note,
+        reference_prefix=_stock_library_reference_prefix(str(record.symbol or "")),
+        features=record.physical_features,
+        committable=committable,
+        source=source,
+    )
+
+
+def _architecture_requirement_row(
+    unit: StageWorkUnit, prompt_state: dict, requirement_id: str
+) -> dict | None:
+    for row in (prompt_state.get("architecture") or {}).get("requirements") or []:
+        if isinstance(row, dict) and str(row.get("id")) == requirement_id:
+            return row
+    return None
+
+
+def _requirement_demand_keys(
+    row: dict | None, requirement: "CircuitRequirement"
+) -> tuple[str, ...]:
+    """The reviewed demand classes a requirement needs realized by real hardware.
+
+    The requirement's own family is a lookup key, not a demand: it names the device or
+    the block ("tps5430", "max31855").  The demands are the typed feature
+    ``_required_physical_feature`` reads plus every physical obligation's class.
+    """
+    keys: list[str] = []
+    if row is not None:
+        feature = _required_physical_feature(row)
+        if feature:
+            keys.append(str(feature))
+        for obligation in row.get("obligations") or []:
+            if obligation.get("kind") == "physical" and obligation.get("component_class"):
+                keys.append(str(obligation["component_class"]))
+    return tuple(dict.fromkeys(keys))
+
+
+def _recipe_requirement_ids(prompt_state: dict) -> frozenset[str]:
+    """Requirement ids the committed architecture already gave to a circuit recipe."""
+    from kicraft.design.recipes import expand_selections
+
+    selections = (prompt_state.get("architecture") or {}).get("recipe_selections") or []
+    return frozenset(
+        str(requirement_id)
+        for expansion in expand_selections(selections)
+        for requirement_id in (
+            *expansion.selection.requirement_ids,
+            expansion.selection.instance,
+        )
+    )
+
+
+def _reviewed_identities_for_keys(
+    keys: tuple[str, ...], requirement: "CircuitRequirement"
+) -> tuple[ReviewedBomIdentity, ...]:
+    """The reviewed parts the family table names for these exact keys."""
+    found: dict[str, ReviewedBomIdentity] = {}
+    for key in keys:
+        for record in reviewed_family_parts(str(key)):
+            identity = _reviewed_bom_identity(
+                record, requirement=requirement, source="reviewed-default"
+            )
+            found.setdefault(identity.identity, identity)
+    return tuple(found[name] for name in sorted(found))
+
+
+def _reviewed_default_identities(
+    unit: StageWorkUnit, prompt_state: dict, requirement: "CircuitRequirement"
+) -> tuple[ReviewedBomIdentity, ...]:
+    """Reviewed parts the compiler owns for a requirement no lowerer implements.
+
+    The requirement's own family comes first: it names the device or block
+    ("stm32l0", "screw-terminal"), so when the reviewed vocabulary spells it the
+    answer is that family's realisations.  Only when the family itself is not a
+    reviewed key do the demand classes of its obligations decide.  A requirement the
+    architecture already gave to a recipe keeps the recipe's identity, and a
+    requirement with several reviewed realisations is left to the draft, which must
+    then pick one of them.
+    """
+    if requirement.id in _recipe_requirement_ids(prompt_state):
+        return ()
+    identities = _reviewed_identities_for_keys((requirement.family,), requirement)
+    if identities:
+        return identities
+    row = _architecture_requirement_row(unit, prompt_state, requirement.id)
+    return _reviewed_identities_for_keys(_requirement_demand_keys(row, requirement), requirement)
+
+
+def _candidate_reviewed_identities(
+    candidate: dict, requirement: "CircuitRequirement"
+) -> tuple[ReviewedBomIdentity, ...]:
+    """The reviewed identities a deterministic candidate commits, in artifact order."""
+    identities: list[ReviewedBomIdentity] = []
+    for raw in candidate.get("groups") or []:
+        group = BomComponentGroup.model_validate(raw)
+        record = _reviewed_identity_record(group)
+        if record is None:
+            continue
+        identities.append(
+            ReviewedBomIdentity(
+                identity=record.identity,
+                family=str(requirement.family),
+                role=group.id,
+                symbol=group.symbol,
+                footprint=group.footprint,
+                mpn=group.mpn,
+                value=group.value,
+                datasheet=group.datasheet,
+                sourcing_note=group.sourcing_note,
+                reference_prefix=group.reference_prefix,
+                features=record.physical_features,
+                committable=True,
+                source="lowerer",
+            )
+        )
+    return tuple(identities)
+
+
+def _identity_names(identities: tuple[ReviewedBomIdentity, ...]) -> str:
+    return ", ".join(sorted(identity.identity for identity in identities))
+
+
+def _identity_group_update(identity: ReviewedBomIdentity) -> dict:
+    """The BOM identity fields a compiler-owned part commits, verbatim."""
+    update = {
+        "value": identity.value,
+        "symbol": identity.symbol,
+        "footprint": identity.footprint,
+        "mpn": identity.mpn,
+        "datasheet": identity.datasheet,
+    }
+    if identity.sourcing_note:
+        update["sourcing_note"] = identity.sourcing_note
+    return update
+
+
+def _identity_realizes_demands(identity: ReviewedBomIdentity, demands: tuple[str, ...]) -> bool:
+    """Whether one reviewed part realizes every demanded class of the requirement."""
+    from kicraft.design.part_identity import canonical_physical_features
+
+    return all(canonical_physical_features(key) & identity.features for key in demands)
+
+
+def _identity_answers_demand(identity: ReviewedBomIdentity, demands: tuple[str, ...]) -> bool:
+    """Whether one reviewed part realizes at least one of these demanded classes."""
+    from kicraft.design.part_identity import canonical_physical_features
+
+    return any(canonical_physical_features(key) & identity.features for key in demands)
+
+
+def _reviewed_identity_quantity(row: dict | None, identity: ReviewedBomIdentity) -> int:
+    """How many instances the requirement's own quantity obligations demand of this part."""
+    from kicraft.design.part_identity import canonical_physical_features
+
+    if row is None:
+        return 1
+    return max(
+        (
+            int(obligation["minimum"])
+            for obligation in row.get("obligations") or []
+            if obligation.get("kind") == "quantity"
+            and obligation.get("minimum")
+            and canonical_physical_features(str(obligation.get("subject") or ""))
+            & identity.features
+        ),
+        default=1,
+    )
+
+
+def _group_is_identity_slot(
+    group: BomComponentGroup,
+    groups: list[BomComponentGroup],
+    row: dict | None,
+    identities: tuple[ReviewedBomIdentity, ...],
+) -> bool:
+    """Whether an unreviewed draft group stands in the compiler identity's place.
+
+    Exact evidence only: the group is the unit's only group, it names the requirement's
+    own device (``_requirement_owns_protected_group``), or it carries the reference class
+    the compiler's part is placed in.  A support passive matches none of these, so it is
+    never rewritten.
+    """
+    if len(groups) == 1:
+        return True
+    if row is not None and _requirement_owns_protected_group(
+        group.model_copy(update={"id": ""}), (row,)
+    ):
+        return True
+    prefixes = {identity.reference_prefix for identity in identities if identity.reference_prefix}
+    return bool(prefixes) and group.reference_prefix in prefixes
+
+
+def _group_claims_requirement(
+    group: BomComponentGroup, row: dict | None, demands: tuple[str, ...]
+) -> bool:
+    """Whether this draft group is the requirement's own part, by exact reviewed evidence.
+
+    Only two exact relations count: the group resolves to a reviewed part that realizes
+    one of the requirement's demanded classes, or the group's own identity is the
+    device/family the requirement names.
+    """
+    from kicraft.design.part_identity import canonical_physical_features
+
+    record = _reviewed_identity_record(group)
+    if record is not None and any(
+        canonical_physical_features(key) & record.physical_features for key in demands
+    ):
+        return True
+    return row is not None and _requirement_owns_protected_group(
+        group.model_copy(update={"id": ""}), (row,)
+    )
+
+
+def _substitution_note(group: BomComponentGroup, identity: ReviewedBomIdentity) -> str:
+    """The derived note that records a compiler-owned identity substitution."""
+    supplied = "recipe" if identity.source == "lowerer" else "reviewed default"
+    return (
+        f"{group.id}: identity supplied by the {identity.family} {supplied} "
+        f"({identity.mpn or identity.identity}); the draft's "
+        f"{group.symbol}/{group.mpn or group.value} is not a reviewed part"
+    )
+
+
+def _reviewed_default_note(requirement_id: str, identity: ReviewedBomIdentity) -> str:
+    """The derived note that records a compiler-built unit's reviewed identity."""
+    return (
+        f"{requirement_id}: identity supplied by the {identity.family} reviewed default "
+        f"({identity.mpn or identity.identity}); the unit emitted no group"
+    )
+
+
+def _reconcile_family_identities(
+    unit: StageWorkUnit,
+    prompt_state: dict,
+    groups: list[BomComponentGroup],
+    assumptions: list[str],
+    lowering_metadata: dict,
+) -> tuple[list[BomComponentGroup], list[str], dict, dict[str, list[str]], frozenset[str]]:
+    """Make the reviewed identity the compiler owns binding on a family-backed unit.
+
+    The compiler owns the *part identity* of every requirement it can implement itself
+    (a typed lowerer, or a reviewed part the family table names uniquely), while the
+    draft keeps its own reference class and support groups.  Each outcome is made
+    visible in the committed result:
+
+    * a draft group that states a *different reviewed manufacturing identity* of the
+      requirement is refused -- an unapproved substitution is never committed;
+    * an *unreviewed* draft group standing in the compiler identity's place is replaced
+      by the reviewed identity, and the substitution names that identity in
+      ``assumptions``;
+    * a draft group that already carries the reviewed identity is committed unchanged.
+
+    When the requirement's demands have reviewed realisations and the draft realizes
+    none of them, the unit is refused with those identities named.  A unit whose
+    requirement is not family-backed is returned exactly as it arrived.
+    """
+    requirement = _unit_requirement(unit, prompt_state)
+    if requirement is None or not groups:
+        return groups, assumptions, lowering_metadata, {}, frozenset()
+    row = _architecture_requirement_row(unit, prompt_state, requirement.id)
+    demands = _requirement_demand_keys(row, requirement)
+    candidate = deterministic_bom_candidate(unit, prompt_state)
+    identities = (
+        _candidate_reviewed_identities(candidate, requirement)
+        if candidate is not None
+        else _reviewed_default_identities(unit, prompt_state, requirement)
+    )
+    if not identities:
+        return groups, assumptions, lowering_metadata, {}, frozenset()
+    by_identity = {identity.identity: identity for identity in identities}
+    replaced: dict[str, BomComponentGroup] = {}
+    compiler_owned: set[str] = set()
+    assigned_roles: dict[str, str] = {}
+    defects: dict[str, list[str]] = {}
+    # The demand classes this unit does NOT realize with a reviewed part: the requirement
+    # is unimplemented exactly there, so that is where the compiler may supply its own.
+    unmet = tuple(
+        key
+        for key in demands
+        if not any(_group_has_physical_feature(group, key) for group in groups)
+    )
+    for group in groups:
+        record = _reviewed_identity_record(group)
+        claim = None if record is None else _reviewed_manufacturer_identity(record)
+        if claim is not None:
+            if claim in by_identity:
+                # The draft already names this requirement's reviewed part.
+                compiler_owned.add(group.id)
+                continue
+            if not _group_claims_requirement(group, row, demands):
+                continue
+            named = _identity_names(identities)
+            defects.setdefault("reviewed-identity-substitution", []).append(
+                f"{requirement.id}: the draft names the reviewed part {claim} ({group.symbol}); "
+                f"the reviewed part of this requirement is "
+                f"{named if len(identities) == 1 else 'one of ' + named}"
+            )
+            continue
+        # No chosen manufacturer part: an unreviewed identity, or an unbranded stock KiCad
+        # pair (a validated land-pattern contract, not a part anyone ordered).  The
+        # compiler supplies the reviewed part -- but only where the unit failed to realize
+        # the demand itself, so a support group is never rewritten to satisfy a demand the
+        # unit already implements elsewhere.
+        if len(identities) != 1 or not identities[0].committable:
+            continue
+        identity = identities[0]
+        if not _identity_answers_demand(identity, unmet):
+            continue
+        if not _group_is_identity_slot(group, groups, row, identities):
+            continue
+        replaced[group.id] = group.model_copy(update=_identity_group_update(identity))
+        assigned_roles[group.id] = identity.role
+        assumptions.append(_substitution_note(group, identity))
+    if replaced:
+        groups = [replaced.get(group.id, group) for group in groups]
+    for key in demands:
+        candidates = reviewed_family_parts(key)
+        if not candidates:
+            continue
+        if any(_group_has_physical_feature(group, key) for group in groups):
+            continue
+        defects.setdefault("reviewed-identity-required", []).append(
+            f"{requirement.id}:{key}: the unit realizes no reviewed {key}; the reviewed "
+            f"{'part is' if len(candidates) == 1 else 'parts are'} "
+            f"{', '.join(sorted(record.identity for record in candidates))}"
+        )
+    artifact_groups = (candidate or {}).get("groups") or []
+    if (
+        artifact_groups
+        and candidate.get("_lowerer_id")
+        and len(replaced) == len(artifact_groups) == len(groups)
+        and len(identities) == len(artifact_groups)
+    ):
+        # Every committed group *is* the artifact's own part, so the unit keeps the
+        # lowerer's wiring contract; a partial replacement must not claim it.
+        lowering_metadata = {
+            key: candidate[key]
+            for key in ("_lowerer_id", "_lowering_requirement_id", "_calculations")
+            if key in candidate
+        }
+        lowering_metadata["_lowering_roles"] = {
+            group_id: {"lowering_role": role} for group_id, role in assigned_roles.items()
+        }
+    return groups, assumptions, lowering_metadata, defects, frozenset(compiler_owned | set(replaced))
+
+
 def deterministic_bom_candidate(
     unit: StageWorkUnit,
     prompt_state: dict,
 ) -> dict | None:
-    """Return deterministic BOM groups from a typed lowerer or standard sheet."""
+    """Return deterministic BOM groups from a typed lowerer, reviewed family, or sheet."""
     from kicraft.design.lowering import lower_requirement
 
     requirement = _unit_requirement(unit, prompt_state)
@@ -1111,12 +1697,63 @@ def deterministic_bom_candidate(
                     calculation.model_dump(mode="json") for calculation in artifact.calculations
                 ],
             }
+        identities = _reviewed_default_identities(unit, prompt_state, requirement)
+        if (
+            len(identities) == 1
+            and identities[0].committable
+            and identities[0].reference_prefix is not None
+        ):
+            # A family the reviewed vocabulary names exactly once, with a curated bundle
+            # that names one orderable MPN and a KiCad symbol whose own library fixes the
+            # reference class: the compiler can build this unit itself.
+            row = _architecture_requirement_row(unit, prompt_state, requirement.id)
+            if _identity_realizes_demands(
+                identities[0], _requirement_demand_keys(row, requirement)
+            ):
+                candidate = _reviewed_identity_candidate(requirement, identities[0], row)
+                try:
+                    validate_unit_candidate(
+                        unit,
+                        {**candidate, "_trusted_deterministic_candidate": True},
+                        prompt_state,
+                        {},
+                    )
+                except (WorkUnitValidationError, TypeError, ValueError):
+                    # The compiler claims a unit only when its own contract validation
+                    # accepts the part it would commit -- a declared pin-level interface
+                    # the reviewed part cannot answer keeps the unit the draft's job.
+                    return None
+                return candidate
         return None
     if unit.requirement_ids:
         # A prose-based sheet fallback cannot prove a typed contract, whether
         # its family is unknown or a registered lowerer declined its constraints.
         return None
     return _standard_connector_sheet_candidate(unit, prompt_state)
+
+
+def _reviewed_identity_candidate(
+    requirement: "CircuitRequirement", identity: ReviewedBomIdentity, row: dict | None
+) -> dict:
+    """The compiler's own unit for a requirement one reviewed part implements completely."""
+    return {
+        "groups": [
+            {
+                "id": re.sub(r"[^a-z0-9_]+", "_", str(requirement.id).lower()),
+                "reference_prefix": identity.reference_prefix,
+                "quantity": _reviewed_identity_quantity(row, identity),
+                "value": identity.value,
+                "symbol": identity.symbol,
+                "footprint": identity.footprint,
+                "sheet": requirement.sheet,
+                **({"mpn": identity.mpn} if identity.mpn else {}),
+                **({"sourcing_note": identity.sourcing_note} if identity.sourcing_note else {}),
+            }
+        ],
+        "arrays": [],
+        "assumptions": [_reviewed_default_note(str(requirement.id), identity)],
+        "substitutions": [],
+    }
 
 
 def _identity_token(value: object) -> str:
@@ -1506,6 +2143,24 @@ def _validate_bom_unit(
                 for key, value in deterministic.items()
                 if key.startswith("_") and key != "_trusted_deterministic_candidate"
             }
+        reviewed_identity_defects: dict[str, list[str]] = {}
+        compiler_owned_group_ids: frozenset[str] = frozenset()
+    elif used_deterministic_candidate:
+        # The payload *is* the compiler's own candidate for this unit, so its part
+        # identity is already the reviewed one and there is nothing to reconcile.
+        reviewed_identity_defects = {}
+        compiler_owned_group_ids = frozenset()
+    else:
+        # A family-backed requirement's part identity is the compiler's, not the
+        # draft's: substitute an unreviewed identity, refuse a substituted reviewed
+        # part, and record which reviewed identity was used.
+        (
+            groups,
+            assumptions,
+            lowering_metadata,
+            reviewed_identity_defects,
+            compiler_owned_group_ids,
+        ) = _reconcile_family_identities(unit, prompt_state, groups, assumptions, lowering_metadata)
     arrays = [BomArrayGroup.model_validate(array) for array in (payload.get("arrays") or [])]
     group_ids = [group.id for group in groups]
     array_group_ids = [array.group_id for array in arrays]
@@ -1611,6 +2266,9 @@ def _validate_bom_unit(
         if (
             protected_identity_matches(group.id, group.symbol, group.value, group.mpn)
             and not used_deterministic_candidate
+            # A group whose identity the compiler itself just substituted *is* this
+            # unit's implementation: it is not a model claim on a protected part.
+            and group.id not in compiler_owned_group_ids
             and not _requirement_owns_protected_group(group, unit_requirements)
         )
         # A trusted pipeline candidate *is* this unit's implementation, so a
@@ -1621,6 +2279,7 @@ def _validate_bom_unit(
         # model_authored_protected_identity, failing the unit.
         or (
             not used_deterministic_candidate
+            and group.id not in compiler_owned_group_ids
             and any(
                 _group_has_physical_feature(group, feature)
                 for feature in sibling_physical_features
@@ -1719,6 +2378,9 @@ def _validate_bom_unit(
         ),
     }
     defects.update(_requirement_obligation_defects(unit_requirements, groups))
+    for name, rows in reviewed_identity_defects.items():
+        defects.setdefault(name, [])
+        defects[name].extend(row for row in rows if row not in defects[name])
     project_root = extras.get("_validation_project_root")
     if project_root:
         root = Path(str(project_root))
@@ -1728,11 +2390,16 @@ def _validate_bom_unit(
             groups, sourcing_defects = _validate_bom_unit_sourcing(groups, root)
             defects["unresolved-sourcing"] = sourcing_defects
     if any(defects.values()):
+        # An identity *substitution* is a decision about which reviewed part the
+        # requirement gets, so the compiler does not quietly overrule it.  An identity
+        # that is merely missing (reviewed-identity-required) is what the deterministic
+        # candidate below exists to supply, and is adopted as usual.
+        identity_refused = bool(reviewed_identity_defects.get("reviewed-identity-substitution"))
         # A typed lowerer already knows how to build this requirement. When the
         # model's attempt is defective and a deterministic candidate exists,
         # determinism wins: adopt the lowered groups instead of burning repair
         # turns (or failing the stage) on a part the pipeline can build itself.
-        if not used_deterministic_candidate:
+        if not used_deterministic_candidate and not identity_refused:
             deterministic = deterministic_bom_candidate(unit, prompt_state)
             if deterministic is not None:
                 return _validate_bom_unit(

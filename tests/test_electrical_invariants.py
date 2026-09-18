@@ -366,6 +366,38 @@ def test_physical_quantity_requires_exact_reviewed_identity_evidence(monkeypatch
     assert result.offenders[0].startswith("E_PHYSICAL_REALIZATION")
 
 
+def test_board_fact_obligations_are_not_physical_component_demands(monkeypatch):
+    """§9.42 reads `physical` rows only: a board feature and an absence demand no part.
+
+    The canary (2026-09-17, `led-cc-driver`, `star-ornament`, `buck-3a`, `thermocouple-amp`)
+    recorded "printed copper area as a heatsink" and "no microcontroller" as physical classes, so
+    this check refused them forever. A `negative` row naming a class the BOM *does* contain is
+    neither satisfied nor unfulfilled by it.
+    """
+    record = SimpleNamespace(
+        identity="reviewed-bnc",
+        family="bnc-connector",
+        physical_features=frozenset({"bnc-connector"}),
+    )
+    monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda _part: record)
+    monkeypatch.setattr(validation, "_pin_info_by_ref", lambda _bom: ({}, {}))
+    requirement = SimpleNamespace(
+        id="led_driver",
+        sheet="IO",
+        exact_part=None,
+        family="led-cc-driver",
+        declared_interface=None,
+        obligations=[
+            SimpleNamespace(kind="fabrication", feature="copper-area", minimum=300, unit="mm2"),
+            SimpleNamespace(kind="negative", absent_class="bnc-connector"),
+        ],
+    )
+    architecture = SimpleNamespace(requirements=[requirement])
+    bom = _bom([_part("J1", "BNC", sheet="IO")], {})
+
+    assert validation.check_requirement_physical_realization(architecture, bom).ok
+
+
 def test_distinct_requirement_owners_cannot_share_one_reviewed_connector(monkeypatch):
     record = SimpleNamespace(
         identity="reviewed-bnc",

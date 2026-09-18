@@ -2178,17 +2178,41 @@ def test_physical_obligation_requires_real_connector_class_and_count():
         "symbol": part.symbol, "footprint": part.footprint,
     }
     assert validate_unit_candidate(unit, {"groups": [group]}, state, {})["groups"][0]["quantity"] == 2
-    for changed in (
-        {**group, "quantity": 1},
+    with pytest.raises(WorkUnitValidationError) as rejected:
+        validate_unit_candidate(unit, {"groups": [{**group, "quantity": 1}]}, state, {})
+    assert rejected.value.defects["physical-obligation-unfulfilled"]
+
+    # A stock pin header carries no manufacturer identity, so it is not a BNC: the
+    # reviewed part the requirement names takes its place, at the count it demands.
+    substituted = validate_unit_candidate(
+        unit,
         {
-            **group, "mpn": None, "value": "header",
-            "symbol": "Connector_Generic:Conn_01x02",
-            "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+            "groups": [
+                {
+                    **group,
+                    "mpn": None,
+                    "value": "header",
+                    "symbol": "Connector_Generic:Conn_01x02",
+                    "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+                }
+            ]
         },
-    ):
-        with pytest.raises(WorkUnitValidationError) as rejected:
-            validate_unit_candidate(unit, {"groups": [changed]}, state, {})
-        assert rejected.value.defects["physical-obligation-unfulfilled"]
+        state,
+        {},
+    )
+
+    (panel,) = substituted["groups"]
+    assert (panel["symbol"], panel["footprint"], panel["quantity"]) == (
+        part.symbol,
+        part.footprint,
+        2,
+    )
+    assert panel["mpn"].casefold() == part.identity
+    assert substituted["assumptions"] == [
+        "coaxial: identity supplied by the custom-input-panel reviewed default "
+        "(KH-BNC50-3511); the draft's Connector_Generic:Conn_01x02/header is not a "
+        "reviewed part"
+    ]
 
 
 def _usb_breakout_wiring_state():
@@ -2461,3 +2485,473 @@ def test_unfulfilled_obligation_names_the_groups_the_unit_emitted():
     assert "requires 1 real usb-c-receptacle, found 0" in defects[0]
     assert "the unit emitted: usb_c=Connector:USB_C_Receptacle_USB2.0_16P" in defects[0]
 
+
+def test_board_fact_obligations_are_not_bom_component_demands():
+    """A fabrication feature and an absent class never demand a BOM group.
+
+    The demand side reads `physical` rows only (the plan's Phase D step 3). A `negative` row
+    naming a class the unit *does* emit must not be reported either: as an unowned demand it
+    would read "requires 1 real <class>, found 1", and no group can ever implement an absence.
+    """
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    requirement = {
+        "id": "led_driver",
+        "family": "led-cc-driver",
+        "obligations": [
+            {
+                "kind": "fabrication",
+                "original_obligation_id": "copper_heatsink_area",
+                "feature": "copper-area",
+                "minimum": 300,
+                "unit": "mm2",
+            },
+            {
+                "kind": "negative",
+                "original_obligation_id": "no_microcontroller",
+                "absent_class": "usb-c-receptacle",
+            },
+        ],
+    }
+    # The group is a reviewed usb-c-receptacle: exactly the class the negative row forbids.
+    present = _group_for("12401610e4#2a")
+
+    defects = _requirement_obligation_defects([requirement], [present])
+
+    assert defects == {
+        "physical-obligation-unfulfilled": [],
+        "declared-interface-unrealized": [],
+    }
+
+
+
+def _usb_breakout_state():
+    """One family-backed requirement (typed lowerer) with a declared part obligation."""
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "usb",
+            "sheet": "A",
+            "role": "connector",
+            "family": "usb-c-breakout",
+            "ports": {"vbus": "VBUS", "gnd": "GND"},
+            "obligations": [
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "usb-c-input",
+                    "component_class": "usb-c-receptacle",
+                }
+            ],
+        }
+    ]
+    return state
+
+
+def _usb_breakout_unit():
+    return StageWorkUnit("bom-usb", "bom", "A", requirement_ids=("usb",))
+
+
+def _unreviewed_usb_receptacle():
+    return {
+        **_group("usb_c", "A", prefix="J"),
+        "value": "USB_C_Receptacle_USB2.0_16P",
+        "symbol": "Connector:USB_C_Receptacle_USB2.0_16P",
+        "footprint": "Connector_USB:USB_C_Receptacle_USB2.0_16P_P2.50mm",
+    }
+
+
+def _lowered_usb_receptacle():
+    from kicraft.design.lowering import lower_requirement
+
+    group = lower_requirement(
+        {
+            "id": "usb",
+            "sheet": "A",
+            "role": "connector",
+            "family": "usb-c-breakout",
+            "ports": {"vbus": "VBUS", "gnd": "GND"},
+        }
+    ).groups[0]
+    return {
+        **_group("usb_c", "A", prefix=group.reference_prefix),
+        "value": group.value,
+        "symbol": group.symbol,
+        "footprint": group.footprint,
+        "mpn": group.mpn,
+    }
+
+
+def test_family_backed_unit_replaces_an_unreviewed_part_with_the_reviewed_identity():
+    """A stock KiCad pair is not a part: the compiler's reviewed identity replaces it.
+
+    The canary's largest BOM class reads `requires 1 real usb-c-receptacle, found 0`
+    while the draft emitted a stock `Connector:USB_C_Receptacle…` pair nobody reviewed.
+    The reviewed identity the compiler owns for this family replaces the draft's, and
+    the substitution is recorded as a derived fact in the unit's assumptions.
+    """
+    validated = validate_unit_candidate(
+        _usb_breakout_unit(),
+        {"groups": [_unreviewed_usb_receptacle()]},
+        _usb_breakout_state(),
+        {},
+    )
+
+    (committed,) = validated["groups"]
+    assert committed["id"] == "usb_c"
+    assert (committed["symbol"], committed["footprint"]) == (
+        "usb-c-16p:TYPE-C-31-M-12",
+        "usb-c-16p:USB-C_SMD-TYPE-C-31-M-12_1",
+    )
+    assert committed["mpn"] == "TYPE-C-31-M-12"
+    assert validated["assumptions"] == [
+        "usb_c: identity supplied by the usb-c-breakout recipe (TYPE-C-31-M-12); the "
+        "draft's Connector:USB_C_Receptacle_USB2.0_16P/USB_C_Receptacle_USB2.0_16P is "
+        "not a reviewed part"
+    ]
+
+
+def test_family_backed_unit_keeps_a_draft_that_already_names_the_reviewed_part():
+    """A draft already carrying the reviewed identity is committed unchanged."""
+    validated = validate_unit_candidate(
+        _usb_breakout_unit(),
+        {"groups": [_lowered_usb_receptacle()], "assumptions": ["kept"]},
+        _usb_breakout_state(),
+        {},
+    )
+
+    (committed,) = validated["groups"]
+    assert committed["id"] == "usb_c"
+    assert committed["mpn"] == "TYPE-C-31-M-12"
+    assert committed["symbol"] == "usb-c-16p:TYPE-C-31-M-12"
+    assert validated["assumptions"] == ["kept"]
+
+
+def test_family_backed_unit_refuses_a_substituted_reviewed_part():
+    """An explicit different reviewed part is a substitution, not the compiler's part.
+
+    The Amphenol receptacle is a reviewed usb-c-receptacle with its own order code, so
+    it is a real (and unapproved) substitution for the family's reviewed part, not an
+    unidentified stock pair the compiler may simply fill in.
+    """
+    from kicraft.design.part_identity import reviewed_part
+
+    alternate = reviewed_part("12401610E4#2A")
+    payload = {
+        "groups": [
+            {
+                **_lowered_usb_receptacle(),
+                "value": "USB-C receptacle",
+                "symbol": alternate.symbol,
+                "footprint": alternate.footprint,
+                "mpn": "12401610E4#2A",
+            }
+        ]
+    }
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(_usb_breakout_unit(), payload, _usb_breakout_state(), {})
+
+    (row,) = caught.value.defects["reviewed-identity-substitution"]
+    assert "the draft names the reviewed part 12401610e4#2a" in row
+    assert "the reviewed part of this requirement is type-c-31-m-12" in row
+
+
+def _film_capacitor_state():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "filter",
+            "sheet": "A",
+            "role": "analog_block",
+            "family": "film-capacitor",
+            "ports": {"in": "FILTER_IN", "out": "FILTER_OUT"},
+            "obligations": [
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "film_cap",
+                    "component_class": "film-capacitor",
+                }
+            ],
+        }
+    ]
+    return state
+
+
+def test_family_with_several_reviewed_parts_requires_a_reviewed_choice():
+    """The draft may choose, but only among the reviewed realisations of the family.
+
+    `film-capacitor` has two reviewed realisations and no single compiler answer, so
+    the choice stays with the draft -- an unreviewed capacitor is refused with the
+    reviewed order codes named, and a reviewed one is committed as drawn.
+    """
+    from kicraft.design.part_identity import reviewed_parts_for_feature
+
+    state = _film_capacitor_state()
+    unit = StageWorkUnit("bom-filter", "bom", "A", requirement_ids=("filter",))
+    assert sorted(
+        record.identity for record in reviewed_parts_for_feature("film-capacitor")
+    ) == ["mkp1848510924k2", "mkp20685j2g362230"]
+    unreviewed = {
+        **_group("film_cap", "A", prefix="C"),
+        "value": "4.7uF film",
+        "symbol": "Device:C",
+        "footprint": "Capacitor_THT:C_Rect_L7.0mm_W2.5mm_P5.00mm",
+    }
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, {"groups": [unreviewed]}, state, {})
+
+    (row,) = caught.value.defects["reviewed-identity-required"]
+    assert row.startswith(
+        "filter:film-capacitor: the unit realizes no reviewed film-capacitor"
+    )
+    assert "mkp1848510924k2" in row
+    assert "mkp20685j2g362230" in row
+
+    reviewed = {
+        **_group("film_cap", "A", prefix="C"),
+        "value": "MKP1848510924K2",
+        "symbol": "vishay-mkp1848510924k2:VISHAY_MKP1848510924K2",
+        "footprint": "vishay-mkp1848510924k2:VISHAY_MKP1848510924K2_P27.5mm",
+        "mpn": "MKP1848510924K2",
+    }
+    validated = validate_unit_candidate(unit, {"groups": [reviewed]}, state, {})
+
+    (committed,) = validated["groups"]
+    assert committed["id"] == "film_cap"
+    assert committed["mpn"] == "MKP1848510924K2"
+
+
+def test_reviewed_default_builds_the_unit_a_family_names_once():
+    """A family the reviewed vocabulary names once is a compiler decision.
+
+    `stm32l0` has exactly one reviewed realisation whose curated bundle names one
+    orderable MPN, so the compiler builds the unit itself and states which identity it
+    used; the group's reference class comes from the symbol's own KiCad library.
+    """
+    from kicraft.design.part_identity import reviewed_part
+
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "mcu",
+            "sheet": "A",
+            "role": "mcu_core",
+            "family": "stm32l0",
+            "ports": {"vdd": "+3V3", "gnd": "GND"},
+            "obligations": [
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "mcu",
+                    "component_class": "microcontroller",
+                }
+            ],
+        }
+    ]
+    unit = StageWorkUnit("bom-mcu", "bom", "A", requirement_ids=("mcu",))
+
+    candidate = deterministic_bom_candidate(unit, state)
+
+    record = reviewed_part("STM32L031K6T6")
+    assert candidate is not None
+    (group,) = candidate["groups"]
+    assert group["reference_prefix"] == "U"
+    assert group["mpn"].casefold() == record.identity
+    assert candidate["assumptions"] == [
+        f"mcu: identity supplied by the stm32l0 reviewed default ({group['mpn']}); "
+        "the unit emitted no group"
+    ]
+    validated = validate_unit_candidate(unit, candidate, state, {})
+
+    assert validated["groups"][0]["mpn"] == group["mpn"]
+    assert validated["assumptions"] == candidate["assumptions"]
+
+
+def test_reviewed_family_table_resolves_the_spelled_differently_demand_classes():
+    """A demand the reviewed vocabulary spells differently still reaches its reviewed parts.
+
+    The bridge is the one alias map both BOM gates already share
+    (`part_identity.canonical_physical_features`); the exact key is tried first and aliases
+    only add.  Classes with no reviewed realisation stay empty: `resistor-ladder` is a
+    documented gap, never aliased in this module.
+    """
+    from kicraft.server.stage_work_units import reviewed_family_parts
+
+    assert [record.identity for record in reviewed_family_parts("binding-post-terminal")] == [
+        "keystone-8734"
+    ]
+    assert [record.identity for record in reviewed_family_parts("opto-isolator")] == ["pc817c-s"]
+    assert [record.identity for record in reviewed_family_parts("status-led")] == [
+        "e6c0805wway1uda(1.1t m)",
+        "ltst-c190kgkt",
+    ]
+    assert [record.identity for record in reviewed_family_parts("power-led")] == [
+        "e6c0805wway1uda(1.1t m)",
+        "ltst-c190kgkt",
+    ]
+    assert [record.identity for record in reviewed_family_parts("thermocouple-input")] == [
+        "max31855kasa+"
+    ]
+    assert reviewed_family_parts("r2r-resistor-ladder") == ()
+    assert reviewed_family_parts("resistor-ladder") == ()
+
+
+def _single_requirement_unit(unit_id, requirement_id):
+    return StageWorkUnit(unit_id, "bom", "A", requirement_ids=(requirement_id,))
+
+
+def _electromechanical_state(requirement):
+    state = _state()
+    state["architecture"]["requirements"] = [requirement]
+    return state
+
+
+def _unreviewed_connector_group(group_id, prefix="J"):
+    return {
+        **_group(group_id, "A", prefix=prefix),
+        "value": "Conn_01x02",
+        "symbol": "Connector_Generic:Conn_01x02",
+        "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+    }
+
+
+def test_aliased_binding_post_demand_replaces_an_unreviewed_group():
+    """`binding-post-terminal` resolves to the reviewed binding post, not to nothing.
+
+    speaker-crossover's terminal units emitted a stock `Conn_01x02` for this demand and
+    read `requires 1 real binding-post-terminal, found 0`.  A stock header carries no
+    manufacturer identity, so the compiler's reviewed part takes its place -- and the
+    substitution names the order code it used.
+    """
+    state = _electromechanical_state(
+        {
+            "id": "input_terminal",
+            "sheet": "A",
+            "role": "connector",
+            "family": "binding-post-terminal",
+            "ports": {"positive": "SPK_IN", "negative": "GND"},
+            "obligations": [
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "binding_post_terminals",
+                    "component_class": "binding-post-terminal",
+                }
+            ],
+        }
+    )
+    unit = _single_requirement_unit("bom-spk", "input_terminal")
+
+    validated = validate_unit_candidate(
+        unit, {"groups": [_unreviewed_connector_group("connector")]}, state, {}
+    )
+
+    (committed,) = validated["groups"]
+    assert committed["id"] == "connector"
+    assert committed["symbol"] == "keystone-8734-binding-post:Keystone_8734"
+    assert committed["mpn"] == "8734"
+    assert validated["assumptions"] == [
+        "connector: identity supplied by the binding-post-terminal reviewed default "
+        "(8734); the draft's Connector_Generic:Conn_01x02/Conn_01x02 is not a reviewed "
+        "part"
+    ]
+
+
+def test_aliased_opto_isolator_demand_replaces_an_unreviewed_group():
+    """The same bridge for a class the model spells its own way (`opto-isolator`)."""
+    state = _electromechanical_state(
+        {
+            "id": "iso",
+            "sheet": "A",
+            "role": "bus_interface",
+            "family": "signal-isolator",
+            "ports": {"in": "RX", "out": "RX_ISO"},
+            "obligations": [
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "isolation",
+                    "component_class": "opto-isolator",
+                }
+            ],
+        }
+    )
+    unit = _single_requirement_unit("bom-iso", "iso")
+    draft = {
+        "groups": [
+            {
+                **_group("opto", "A", prefix="U"),
+                "value": "PC817",
+                "symbol": "Isolator:PC817",
+                "footprint": "Package_DIP:DIP-4_W7.62mm",
+            }
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, draft, state, {})
+
+    (committed,) = validated["groups"]
+    assert committed["symbol"] == "pc817c-s:PC817C-S"
+    assert committed["mpn"] == "PC817C-S"
+    assert validated["assumptions"] == [
+        "opto: identity supplied by the signal-isolator reviewed default (PC817C-S); the "
+        "draft's Isolator:PC817/PC817 is not a reviewed part"
+    ]
+
+
+def test_demand_without_a_reviewed_realisation_keeps_the_unit_and_its_failure():
+    """A class with no reviewed part is a documented gap, not something to invent.
+
+    `r2r-resistor-ladder` has no reviewed realisation, so the identity machinery neither
+    rewrites the draft's parts nor refuses them: the unit's existing failure stands,
+    unchanged and with no new defect class.
+    """
+    from kicraft.server.stage_work_units import _reconcile_family_identities
+
+    state = _electromechanical_state(
+        {
+            "id": "ladder",
+            "sheet": "A",
+            "role": "analog_block",
+            "family": "r2r-resistor-ladder",
+            "ports": {"bit0": "B0", "out": "DAC_OUT"},
+            "obligations": [
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "r2r",
+                    "component_class": "resistor-ladder",
+                }
+            ],
+        }
+    )
+    unit = _single_requirement_unit("bom-ladder", "ladder")
+    groups = group_models(
+        [
+            {
+                **_group("series", "A", quantity=8),
+                "value": "10k",
+            }
+        ]
+    )
+
+    reconciled, assumptions, _metadata, defects, owned = _reconcile_family_identities(
+        unit, state, groups, [], {}
+    )
+
+    assert [group.id for group in reconciled] == ["series"]
+    assert assumptions == []
+    assert defects == {}
+    assert owned == frozenset()
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(unit, {"groups": [group.model_dump() for group in groups]}, state, {})
+    assert caught.value.defects["physical-obligation-unfulfilled"]
+    assert "reviewed-identity-substitution" not in caught.value.defects
+    assert "reviewed-identity-required" not in caught.value.defects
+
+
+def group_models(raw_groups):
+    """Validate raw group payloads the way a work-unit candidate does."""
+    from kicraft.server.stage_work_units import _normalize_curated_group_identities
+    from kicraft.server.stage_work_units import _normalize_bom_optional_metadata
+
+    return _normalize_curated_group_identities(
+        [BomComponentGroup.model_validate(_normalize_bom_optional_metadata(group)) for group in raw_groups]
+    )

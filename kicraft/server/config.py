@@ -436,6 +436,13 @@ class Settings:
     # Correction-ladder arm(s) for the schema/contract path; see
     # CONTRACT_LADDER_MODES. KICRAFT_CONTRACT_LADDER.
     contract_ladder: str = "stock"
+    # Phase A of the design-completion follow-up: when a whole-slot architecture answer is refused,
+    # ask for the sections it still owes (sheets / parts / signals / obligations) one small call at
+    # a time and re-validate the assembled document. It measurably costs provider calls
+    # (1.3-1.9x per design-only run on the 2026-09-18 bounded campaigns) without a completion gain
+    # that survives the run-to-run spread, so it is OFF until an operator turns it on for a measured
+    # campaign (plan §8.1 asked for exactly that decision). KICRAFT_ARCHITECTURE_SECTIONS=1.
+    architecture_sections: bool = False
     # --- Design-stage reasoning budget + in-stream loop breaker ---------------
     # Structured design stages default to reasoning disabled. Operators may
     # opt in for architecture/BOM experiments, but recovery does not pay for a
@@ -660,6 +667,9 @@ class Settings:
                         os.environ.get("KICRAFT_CONTRACT_LADDER", cls.contract_ladder)
                     )
                 )
+            ),
+            architecture_sections=_env_bool_default(
+                "KICRAFT_ARCHITECTURE_SECTIONS", cls.architecture_sections
             ),
             design_reasoning_tokens=int(
                 os.environ.get("KICRAFT_DESIGN_REASONING_TOKENS", cls.design_reasoning_tokens)

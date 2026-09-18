@@ -16,6 +16,13 @@ named IC/family/connector in `named_parts`. Do not merely copy the brief into
 Valid: `named_parts: ["RP2040"]` and constraints containing the package,
 interface, clock, and castellation requirements.
 
+`obligations`: the typed form of those explicit requirements — one row per physical class,
+quantity, adjustability, conversion behavior, numerical limit, board fabrication feature, or
+absent class. A board *fabrication* feature (a printed copper area acting as a heatsink, a
+thermal-via field, an edge treatment) or the *absence* of a class ("no microcontroller") is
+never a `physical` obligation: use `kind: "fabrication"` with its `feature` and any stated
+`minimum`/`unit`, or `kind: "negative"` with the `absent_class`.
+
 `project_stem` rule (top-level state field, NOT inside the slot — pass via `--project-stem`):
 
 Pick the 2-3 most significant words from the goal, uppercase-and-underscore them, cap at 32 chars. Examples: goal "USB-powered Li-ion charger" → `"USB_LIION_CHARGER"`; goal "ESP32 weather station" → `"ESP32_WEATHER_STATION"`.

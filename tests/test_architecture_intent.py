@@ -1649,3 +1649,146 @@ def test_one_obligation_may_be_implemented_by_several_requirements():
     owning = [row["id"] for row in payload["requirements"] if row.get("obligations")]
     assert owning == ["post_1", "post_2", "post_3"]
     assert payload["obligations"] == [obligation]
+
+
+# A board fabrication feature and an absent class: the two obligations that are not parts. The
+# raw rows spell the feature/class the way a brief does, so the canonicalising validator is
+# exercised too.
+_FABRICATION_OBLIGATION = {
+    "kind": "fabrication",
+    "original_obligation_id": "copper_heatsink_area",
+    "feature": "Copper_Area",
+    "minimum": 300,
+    "unit": "mm2",
+}
+_FABRICATION_CANONICAL = {**_FABRICATION_OBLIGATION, "feature": "copper-area"}
+_NEGATIVE_OBLIGATION = {
+    "kind": "negative",
+    "original_obligation_id": "no_microcontroller",
+    "absent_class": "Microcontroller",
+}
+_NEGATIVE_CANONICAL = {**_NEGATIVE_OBLIGATION, "absent_class": "microcontroller"}
+
+
+@pytest.mark.parametrize(
+    "obligation, canonical",
+    [
+        pytest.param(_FABRICATION_OBLIGATION, _FABRICATION_CANONICAL, id="fabrication"),
+        pytest.param(_NEGATIVE_OBLIGATION, _NEGATIVE_CANONICAL, id="negative"),
+    ],
+)
+def test_board_fact_obligation_commits_with_no_owning_requirement(obligation, canonical):
+    """A printed board feature and an absent class are board-level facts, not parts.
+
+    The canary (2026-09-17, `led-cc-driver`, `star-ornament`, `buck-3a`, `thermocouple-amp`)
+    turned "printed copper area as a heatsink" and "no microcontroller" into `physical`
+    obligations with a component class no BOM line can ever be, so
+    `physical-obligation-unfulfilled` refused those designs forever.
+    """
+    from kicraft.design.models import Architecture
+
+    prompt_state = {
+        "intent": {"goal": "reference board", "obligations": [obligation]},
+        "functional_spec": {"obligations": [obligation]},
+    }
+
+    payload, _expanded = _normalize_stage_response("architecture", _hub75_intent(), prompt_state)
+
+    assert payload["obligations"] == [canonical]
+    # No requirement implements it, and the architecture stage commits it that way.
+    assert not any(row.get("obligations") for row in payload["requirements"])
+    assert Architecture.model_validate(payload).obligations[0].model_dump(
+        mode="json", exclude_none=True
+    ) == canonical
+
+
+def test_board_fact_obligations_survive_intent_to_architecture_verbatim():
+    """Retention is keyed by `(kind, original_obligation_id)`, so the new kinds flow through.
+
+    Measured with the real helpers rather than assumed: the intent row is canonicalised once,
+    `restore_source_obligations` writes the top-level list from the committed set, the
+    functional_spec copy is compared row-for-row and still refuses a dropped row, and the
+    architecture stage commits both rows with no owner.
+    """
+    from kicraft.server.stage_contracts import (
+        StageSchemaError,
+        restore_source_obligations,
+        validate_obligation_retention,
+    )
+
+    rows = [_FABRICATION_CANONICAL, _NEGATIVE_CANONICAL]
+    prompt_state = {
+        "intent": {"goal": "reference board", "obligations": [*rows]},
+        "functional_spec": {"obligations": [*rows]},
+    }
+
+    restored = restore_source_obligations({}, {"intent": prompt_state["intent"]})
+    assert restored["obligations"] == rows
+
+    spec = {
+        "blocks": [{"name": "DRIVER", "category": "drive", "purpose": "Drive the LED string."}],
+        "obligations": [*rows],
+    }
+    committed, _expanded = _normalize_stage_response(
+        "functional_spec", spec, {"intent": prompt_state["intent"]}
+    )
+    assert committed["obligations"] == rows
+
+    with pytest.raises(StageSchemaError) as dropped:
+        _normalize_stage_response(
+            "functional_spec",
+            {**spec, "obligations": rows[:1]},
+            {"intent": prompt_state["intent"]},
+        )
+    assert dropped.value.diagnostic["evidence"] == [_NEGATIVE_CANONICAL]
+    # Neither row needs a requirement, in the retention check or in the committed architecture.
+    validate_obligation_retention("architecture", {}, prompt_state)
+
+    payload, _expanded = _normalize_stage_response("architecture", _hub75_intent(), prompt_state)
+
+    assert payload["obligations"] == rows
+    assert not any(row.get("obligations") for row in payload["requirements"])
+
+
+def test_fabrication_obligation_limit_needs_a_minimum():
+    """A unit with no minimum states no limit: the model refuses the meaningless row."""
+    from kicraft.design.models import FabricationObligation
+
+    with pytest.raises(ValueError):
+        FabricationObligation(
+            kind="fabrication",
+            original_obligation_id="copper_heatsink_area",
+            feature="copper-area",
+            unit="mm2",
+        )
+
+
+def test_ownership_exemption_is_per_row_and_does_not_shield_a_physical_row():
+    """A `fabrication` row beside an unowned `physical` row does not excuse the physical one."""
+    from kicraft.server.stage_contracts import StageSchemaError
+
+    physical = {
+        "kind": "physical",
+        "original_obligation_id": "status_led",
+        "component_class": "status-led",
+    }
+    prompt_state = {
+        "intent": {
+            "goal": "reference board",
+            "obligations": [physical, _FABRICATION_CANONICAL],
+        },
+        "functional_spec": {"obligations": [physical, _FABRICATION_CANONICAL]},
+    }
+    intent = _hub75_intent()
+    next(row for row in intent["requirements"] if row["id"] == "led")["obligations"] = [physical]
+
+    payload, _expanded = _normalize_stage_response("architecture", intent, prompt_state)
+
+    assert payload["obligations"] == [physical, _FABRICATION_CANONICAL]
+    assert [row["id"] for row in payload["requirements"] if row.get("obligations")] == ["led"]
+
+    for row in intent["requirements"]:
+        row.pop("obligations", None)
+    with pytest.raises(StageSchemaError) as refused:
+        _normalize_stage_response("architecture", intent, prompt_state)
+    assert refused.value.diagnostic["evidence"] == [physical]

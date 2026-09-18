@@ -514,12 +514,87 @@ class QuantitativeObligation(BaseModel):
         return self
 
 
+class FabricationObligation(BaseModel):
+    """A board fabrication feature the design must carry, never a component demand.
+
+    A printed copper area, a thermal-via field or an edge treatment is a property of the
+    board itself: the PCB-side checks own it and no BOM line can satisfy it, so it is not
+    an implementation claim a requirement owns.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["fabrication"]
+    original_obligation_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    feature: str = Field(
+        min_length=1,
+        description="Canonical lowercase kebab-case fabrication feature, for example "
+        "copper-area, thermal-via-field, castellated-edge, or edge-plating. Use a board "
+        "feature, not a component class.",
+    )
+    minimum: int | None = Field(default=None, ge=1)
+    unit: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Unit the stated minimum is counted in (mm2, vias, A); a unit without a "
+        "minimum states no limit.",
+    )
+
+    @field_validator("feature", mode="before")
+    @classmethod
+    def _canonical_feature(cls, value: object) -> object:
+        return value.strip().casefold().replace("_", "-") if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def _limit_needs_a_minimum(self):
+        if self.unit is not None and self.minimum is None:
+            raise ValueError("fabrication obligation unit needs a minimum")
+        return self
+
+
+class NegativeObligation(BaseModel):
+    """A physical class the design must NOT contain, never a component demand.
+
+    An absence is a constraint on the whole board, not a part: no BOM line implements it,
+    so it is not an implementation claim a requirement owns.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["negative"]
+    original_obligation_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    absent_class: str = Field(
+        min_length=1,
+        description="the canonical physical class that must NOT appear, for example "
+        "microcontroller or bnc-connector.",
+    )
+
+    @field_validator("absent_class", mode="before")
+    @classmethod
+    def _canonical_absent_class(cls, value: object) -> object:
+        return value.strip().casefold().replace("_", "-") if isinstance(value, str) else value
+
+
+# Obligation kinds that state a board-level fact instead of naming the requirement that
+# implements it. A `quantity` counts a class across the design, a `fabrication` feature is a
+# printed-board property the PCB side owns rather than any part, and a `negative` forbids a
+# class: none of the three is an implementation claim, so none has to appear on a
+# requirement's own rows. `Architecture._obligations_are_owned_verbatim`,
+# `ArchitectureIntent._obligations_are_owned_once` and
+# `stage_contracts.validate_obligation_retention` all read this one set.
+OWNERSHIP_EXEMPT_OBLIGATION_KINDS: frozenset[str] = frozenset(
+    {"quantity", "fabrication", "negative"}
+)
+
+
 RequirementObligation = Annotated[
     PhysicalObligation
     | QuantityObligation
     | AdjustabilityObligation
     | ConversionObligation
-    | QuantitativeObligation,
+    | QuantitativeObligation
+    | FabricationObligation
+    | NegativeObligation,
     Field(discriminator="kind"),
 ]
 
@@ -742,8 +817,12 @@ class Architecture(BaseModel):
         ]
         owned = {(row.kind, row.original_obligation_id) for row in owned_rows}
         # A `quantity` obligation counts a class across the design, so it may live only at the top
-        # level; every other obligation must name a requirement that implements it.
-        unowned = sorted(key for key in set(expected) - owned if key[0] != "quantity")
+        # level; every other obligation must name a requirement that implements it. `fabrication`
+        # and `negative` are exempt the same way: a printed board feature and an absent class are
+        # board-level facts, not implementation claims (OWNERSHIP_EXEMPT_OBLIGATION_KINDS).
+        unowned = sorted(
+            key for key in set(expected) - owned if key[0] not in OWNERSHIP_EXEMPT_OBLIGATION_KINDS
+        )
         if unowned:
             raise ValueError(
                 "Architecture obligations must be owned by a requirement: "

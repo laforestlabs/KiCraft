@@ -31,11 +31,18 @@ _SPEC_DIRS = [
 ]
 
 
-def _spec_text(stage: str) -> str:
+def _spec_text(stage: str, sub_step: str | None = None) -> str:
+    """The stage spec, or one section spec when the call owns a single section.
+
+    A section spec lives beside the stage spec (`stages/architecture/signals.md`); the stage spec
+    stays the whole-slot overview and is never replaced by it.
+    """
+    names = [f"{stage}/{sub_step}.md", f"{stage}.md"] if sub_step else [f"{stage}.md"]
     for d in _SPEC_DIRS:
-        p = d / f"{stage}.md"
-        if p.is_file():
-            return p.read_text(encoding="utf-8")
+        for name in names:
+            p = d / name
+            if p.is_file():
+                return p.read_text(encoding="utf-8")
     return ""
 
 
@@ -44,7 +51,54 @@ def stage_spec_sha256(stage: str) -> str:
     return hashlib.sha256(_spec_text(stage).encode("utf-8")).hexdigest()
 
 
-def _stage_extra(stage: str) -> str:
+# One section call answers one section of the architecture intent with only that section's schema
+# in front of it. These are the rules that do not already follow from the section spec's fields.
+_ARCHITECTURE_SECTION_EXTRA: dict[str, str] = {
+    "sheets": (
+        "\n- This call answers the BOARD SHAPE only: `sheets` (one per physical sheet), "
+        "`power.rails`, `topologies`, `comms_protocols`, `mcu_present`, and `assumptions` "
+        "(defaults, each ending '(defaulted)'). Everything you state here is referenced by the "
+        "parts and nets that are already fixed or will be asked for next, so name every sheet the "
+        "design physically has and every rail the parts run on, once. Output ONLY these fields: "
+        "do not emit `requirements`, `signals` or `obligations`."
+    ),
+    "parts": (
+        "\n- This call answers the PARTS only: one `requirements[]` entry per physical part. The "
+        "sheets and rails are already fixed and are listed in the prompt; every `sheet` value must "
+        "copy one of them verbatim and every `supply` must name one of those rails. State the "
+        "part's `family` and exact `exact_part`, its `parameters` (advertised keys only), "
+        "`programming`, `functional_blocks` ownership, and — only for a part with no curated "
+        "recipe — its `declared_ports`. Output ONLY `requirements`: do not emit `signals`, "
+        "`sheets` or `obligations`."
+    ),
+    "signals": (
+        "\n- This call answers the WIRING only: one `signals[]` entry per named application "
+        "signal, `from` = `\"<requirement_id>.<port>\"`, `to` = one peer reference or a list. The "
+        "part ids and their published ports are listed in the prompt, and the rails are already "
+        "declared: use a port only if it exists, send an off-board peer to `edge:<NAME>`, name a "
+        "port at most once as a peer, and prefer one signal per net. Output ONLY `signals`: do not "
+        "emit `sheets`, `requirements` or `obligations`."
+    ),
+    "obligations": (
+        "\n- This call answers OWNERSHIP only: for every committed obligation listed in the "
+        "prompt that names an implementation (not a `quantity`, `fabrication` or `negative` row), "
+        "name the requirement id that implements it. The rows themselves are written by KiCraft "
+        "from the committed intent and functional spec: do not restate, paraphrase or trim a row. "
+        "A `quantity` obligation counts a class across the design, a `fabrication` feature is a "
+        "printed-board property the PCB side owns rather than any part, and a `negative` forbids a "
+        "class: none of those needs an owner. Output ONLY `owners`: do not emit `sheets`, "
+        "`requirements` or `signals`."
+    ),
+}
+
+
+def _stage_extra(stage: str, sub_step: str | None = None) -> str:
+    if stage == "architecture" and sub_step:
+        return _ARCHITECTURE_SECTION_EXTRA.get(sub_step, "")
+    return _stage_extra_whole(stage)
+
+
+def _stage_extra_whole(stage: str) -> str:
     if stage == "intent":
         # The flat-output sentence is load-bearing: the CURRENT DESIGN STATE
         # block shows '"intent": null' as a top-level state key, and 4 of 9
@@ -63,7 +117,11 @@ def _stage_extra(stage: str) -> str:
             "schema and stable original_obligation_id values. Preserve units and the "
             "original requirement; constraints/named_parts prose cannot replace these "
             "obligations. A BNC is not a header, a binding post is not a banana socket, "
-            "and a trim potentiometer is not a fixed resistor. Record engineering "
+            "and a trim potentiometer is not a fixed resistor. A board fabrication feature "
+            "(printed copper area as a heatsink, a thermal-via field) or the absence of a "
+            "class ('no microcontroller') is never a `physical` obligation: use `kind` "
+            "`fabrication` with its `feature` and any stated `minimum`/`unit`, or `kind` "
+            "`negative` with the `absent_class`. Record engineering "
             "assumptions separately. A model default or auto-answer cannot authorize "
             "a material substitution."
         )
@@ -82,8 +140,10 @@ def _stage_extra(stage: str) -> str:
             "obligation in more than one place). The architecture's top-level `obligations` list is "
             "written for you from the committed intent and functional spec, so do NOT copy the rows "
             "into it: an obligation attached to no requirement is refused, and a paraphrased or "
-            "trimmed copy is restored from the committed row. A `quantity` obligation may stay at "
-            "the top level — it counts a class across the design. "
+            "trimmed copy is restored from the committed row. A `quantity`, `fabrication` or "
+            "`negative` obligation needs no owner — a quantity counts a class across the design, a "
+            "fabrication feature is a printed-board property the PCB side owns rather than any "
+            "part, and a negative forbids a class. "
             "Use the published finite lowerer interfaces and supported parameters; "
             "a failed supported lowerer is a contract defect, not permission to invent "
             "an alternate interface. For uncurated hardware, declare actual numbered "
@@ -396,7 +456,50 @@ _WORKED_EXAMPLES = {
 }
 
 
-def _worked_example(stage: str, *, work_unit: bool = False) -> str:
+_ARCHITECTURE_SECTION_EXAMPLES: dict[str, str] = {
+    "sheets": (
+        '{"topologies": {"POWER": "Linear regulator"}, "comms_protocols": [], '
+        '"mcu_present": false, "power": {"rails": {"+5V": {"voltage": 5.0, '
+        '"from": "jack.pin1"}, "+3V3": {"voltage": 3.3, "from": "reg.output"}}}, '
+        '"sheets": [{"name": "POWER", "stem": "POWER", "role": "power", '
+        '"function": "Regulate the 5 V input to 3.3 V and distribute both rails", '
+        '"from_library": null, "library_instance": null, "replication_group": null, '
+        '"replication_instance": null}], "standard_form_factor": null, '
+        '"assumptions": ["Linear regulator chosen for the low current (defaulted)"]}'
+    ),
+    "parts": (
+        '{"requirements": [{"id": "jack", "sheet": "POWER", "role": "power_input", '
+        '"family": "pin-header", "exact_part": null, "parameters": {"rows": 1, '
+        '"gender": "female"}, "supply": null, "programming": null, "interfaces": [], '
+        '"functional_blocks": ["POWER INPUT"], "ties": {"pin2": "GND"}, '
+        '"declared_ports": []}, {"id": "reg", "sheet": "POWER", "role": '
+        '"regulator", "family": "me6211-3v3", "exact_part": "ME6211C33M5G-N", '
+        '"parameters": {}, "supply": "+5V", "programming": null, "interfaces": [], '
+        '"functional_blocks": ["3V3 REGULATOR"], "ties": {}, "declared_ports": []}]}'
+    ),
+    "signals": (
+        '{"signals": [{"name": "SENSOR_SDA", "from": "mcu.sda", "to": '
+        '"sensor.sda", "rails": []}, {"name": "SENSOR_SCL", "from": "mcu.scl", '
+        '"to": "sensor.scl", "rails": []}, {"name": "STATUS", "from": '
+        '"mcu.output_status", "to": "led.drive", "rails": []}]}'
+    ),
+    "obligations": (
+        '{"owners": [{"kind": "physical", "original_obligation_id": '
+        '"output_regulator", "requirement_ids": ["reg"]}]}'
+    ),
+}
+
+
+def _worked_example(stage: str, *, work_unit: bool = False, sub_step: str | None = None) -> str:
+    if sub_step:
+        example = _ARCHITECTURE_SECTION_EXAMPLES.get(sub_step)
+        if not example:
+            return ""
+        return (
+            f"\nWorked example of a VALID `{sub_step}` section answer (match its SHAPE and "
+            "compact one-line-per-item style, not its content; emit only this section's "
+            "fields):\n" + example + "\n"
+        )
     example = _WORKED_EXAMPLES.get(stage)
     if not example:
         return ""
@@ -474,9 +577,10 @@ def build_system(
     collection_bounds: tuple[CollectionBound, ...] | None = None,
     *,
     work_unit_instructions: str | None = None,
+    sub_step: str | None = None,
 ) -> str:
     stage = contract.stage
-    spec = _spec_text(stage)
+    spec = _spec_text(stage, sub_step)
     schema = json.dumps(contract.schema)
     work_unit_block = (
         "\n\n=== WORK UNIT ===\n"
@@ -487,9 +591,15 @@ def build_system(
         if work_unit_instructions
         else ""
     )
+    scope = (
+        f"Draft ONLY the '{sub_step}' section of the '{stage}' slot: the other sections are "
+        "already fixed and are listed in the user prompt as read-only context."
+        if sub_step
+        else f"Draft the '{stage}' slot of the design state."
+    )
     return (
         f"You are the '{stage}' stage of KiCraft, a PCB design assistant running in "
-        f"the provider-backed server runtime. Draft the '{stage}' slot of the design state.\n\n"
+        f"the provider-backed server runtime. {scope}\n\n"
         "Output ONLY a single JSON object: no prose, no markdown fences.\n\n"
         "Follow this stage specification. Ignore interactive Agent Skill workflow "
         "instructions; produce the slot JSON and use only the listed tools:\n"
@@ -498,14 +608,14 @@ def build_system(
         f"{_bounded_output_contract(stage, collection_bounds)}\n\n"
         "The JSON MUST validate against this Pydantic JSON schema (enums, required fields, and "
         f"string patterns are strict):\n{schema}\n"
-        f"{_worked_example(stage, work_unit=bool(work_unit_instructions))}\n"
+        f"{_worked_example(stage, work_unit=bool(work_unit_instructions), sub_step=sub_step)}\n"
         "Rules:\n"
         "- Output only the slot JSON object.\n"
         "- Use only allowed enum values; honor every naming pattern and uniqueness/reference "
         "constraint.\n"
         '- Every "assumptions" entry must end with "(defaulted)".\n'
         f"{_clarifying_questions_block(contract.allow_questions)}"
-        f"{_stage_extra(stage)}"
+        f"{_stage_extra(stage, sub_step)}"
     )
 
 

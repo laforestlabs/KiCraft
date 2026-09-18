@@ -63,6 +63,20 @@ LLM stages, no build), both **0/34 committed**, `source_unchanged=true`, ~$0.60 
 | 5 | `logs/self_eval/canary_20260917T011637Z` | **0/34** | 22 | 12 | 0 |
 | 6 | `logs/self_eval/canary_20260917T042007Z` | (diagnostic pass, cancelled) | — | — | — |
 | 7 | `logs/self_eval/canary_20260917T043323Z` | **4/34 briefs in ≥1 repeat, 6/102 runs** | 53 | 41 | 0 |
+| 8 | `logs/self_eval/canary_20260917T232036Z` | **2/21 briefs in ≥1 repeat, 4/63 runs** (21-brief subset × 3) | 26 | 32 | 1 |
+| 9 | `logs/self_eval/canary_20260918T000517Z` | **2/21 briefs in ≥1 repeat, 3/63 runs** (21-brief subset × 3) | 33 | 25 | 2 |
+| 10 | `logs/self_eval/full_20260918T005221Z` | **1/2 fab-ready** (full pipeline, 2 briefs, `--build-slots 1`) | — | — | — |
+
+(Runs 8–10 are the 2026-09-18 implementation session, which built the design-completion follow-up
+plan's Phases A/B/D and then measured them. Run 10 is the first time the pipeline reached
+`build=fab-ready` on a live brief at all — `rc-lowpass-bnc` (271 s, five stages committed, BOM and
+wiring entirely compiler-authored), whose remaining acceptance obligations are
+`sourceable-parts: fail`, `adjustable-response: unverified`,
+`complete-required-connections: unverified`. Runs 8 and 9 are 21-brief × 3-repeat design-only
+subsets, so their committed counts are not comparable to the 34-brief rows above; read
+`docs/plans/design-completion-followup-2026-09-17-plan.md` §11 for the like-for-like baseline
+comparison, the null result on completion, and why the architecture section rung is now gated OFF by
+default (`KICRAFT_ARCHITECTURE_SECTIONS=1` to enable it).)
 
 (Run 4 — the alias + identity-guard set alone — was cancelled mid-run as superseded by run 5.
 Runs 6 and 7 are the 2026-09-17 implementation session's 34-brief × 3-repeat campaigns; run 6 was a

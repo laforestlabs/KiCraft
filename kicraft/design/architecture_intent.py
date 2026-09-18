@@ -35,6 +35,7 @@ from .lowering import (
     registered_lowerers,
 )
 from .models import (
+    OWNERSHIP_EXEMPT_OBLIGATION_KINDS,
     SHEET_NAME_RE,
     SHEET_STEM_RE,
     Architecture,
@@ -329,8 +330,13 @@ class ArchitectureIntent(BaseModel):
         listed = {(row.kind, row.original_obligation_id) for row in self.obligations}
         # A `quantity` obligation counts a class across the whole design (two binding posts, three
         # stepper axes), so it is not an implementation claim and may live only at the top level.
+        # `fabrication` and `negative` are exempt the same way: a board fabrication feature and the
+        # absence of a class are board-level facts no requirement implements
+        # (OWNERSHIP_EXEMPT_OBLIGATION_KINDS).
         unowned = sorted(
-            key for key in listed - set(owned_keys) if key[0] != "quantity"
+            key
+            for key in listed - set(owned_keys)
+            if key[0] not in OWNERSHIP_EXEMPT_OBLIGATION_KINDS
         )
         if unowned:
             raise ValueError(

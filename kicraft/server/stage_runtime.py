@@ -38,6 +38,11 @@ from .stage_contracts import (
     _extract_json,
     _normalize_stage_response,
     apply_collection_bounds,
+    architecture_draft,
+    architecture_pending_sections,
+    architecture_section_contract,
+    architecture_section_context,
+    assemble_architecture_sections,
     build_stage_response_contract,
 )
 from .stage_prompts import (
@@ -254,7 +259,12 @@ def _work_unit_attempt_event(
 # passes than the simpler, smaller-slot stages, so they floor higher (BOM must
 # also resolve every symbol/footprint to a real library entry within its budget).
 _STAGE_MIN_RETRIES = {"architecture": 3, "wiring": 7, "bom": 4}
-
+# Phase A: a refused architecture answer earns a bounded number of SMALL section calls before the
+# ordinary corrections — one section at a time, each re-validated against the whole architecture
+# contract. The per-section retry count bounds one section's own repair; the call budget bounds the
+# rung as a whole, and the stage's provider-call budget still caps the drive.
+_ARCHITECTURE_SECTION_CALL_BUDGET = 6
+_ARCHITECTURE_SECTION_RETRIES = 2
 # In-stream reasoning-loop breakout budget: when the client aborts a completion
 # (finish_reason="reasoning_loop"), retry once with reasoning disabled + higher
 # temperature to escape the deterministic cycle. A second loop in a row means the
@@ -483,9 +493,18 @@ def _contract_ladder_modes(client) -> frozenset[str]:
     return (modes & CONTRACT_LADDER_MODES) or frozenset({"stock"})
 
 
+def _architecture_sections_enabled(client) -> bool:
+    """Whether this drive runs the architecture section rung (default: off).
+
+    The rung costs real provider calls and has not shown a completion gain that survives the
+    run-to-run spread (see `Settings.architecture_sections`); an operator enables it for a measured
+    campaign rather than paying for it in production by default.
+    """
+    return bool(getattr(getattr(client, "s", None), "architecture_sections", False))
+
+
 def _declared_identities(payload: dict) -> set[str]:
     """The declared content a revision must preserve (O5).
-
     ``inter_sheet_nets[*].name`` plus every non-empty ``requirements[*].ports``
     value, each tagged by kind so a dropped net declaration is distinguishable
     from a dropped port binding of the same name.
@@ -1359,6 +1378,180 @@ def run_serialization_recovery(
         wall_s=round(time.monotonic() - call_t0, 3),
         response_format_mode=("json_schema" if response_format is not None else "none"),
     )
+
+
+def _architecture_section_instruction(
+    sub_step: str,
+    assembled: dict,
+    prompt_state: dict,
+    refusal: str,
+) -> str:
+    """The user turn for one section call: only this section, plus what it depends on."""
+    context = architecture_section_context(sub_step, assembled, prompt_state)
+    return (
+        f"The whole-slot `architecture` answer was refused. Answer ONLY the `{sub_step}` section of "
+        f"the architecture intent now, as one JSON object matching the `{sub_step}` schema in the "
+        "system prompt: emit that section's fields and nothing else. Every id you reference must "
+        "exist in the design state and in the fixed context below.\n\n"
+        + (
+            "REFUSAL TO FIX:\n" + refusal[:1500] + "\n\n"
+            if refusal
+            else ""
+        )
+        + (
+            "FIXED CONTEXT (already decided, read-only):\n"
+            + json.dumps(context, separators=(",", ":"), default=str)
+            + "\n\n"
+            if context
+            else ""
+        )
+        + f"Produce the `{sub_step}` section JSON now."
+    )
+
+
+def _architecture_section_followup(
+    client,
+    prepared: PreparedStage,
+    *,
+    facts: ProviderFacts,
+    outcome: AttemptOutcome,
+    progress,
+    meta_ctx: dict,
+    temperature: float,
+    reasoning: dict | None,
+    reasoning_guard,
+    call_budget: int,
+    attempt_base: int,
+) -> tuple[ProviderFacts, AttemptOutcome, int, float, bool]:
+    """Ask for the architecture sections one at a time, then re-validate the assembled document.
+
+    The whole-slot answer is one large document for ~thirty rules, and its refusals are interactions
+    between sections: a repair that fixes the contact list breaks the net binding. When that answer
+    is refused, the sections it still owes (or the ones the refusal's own codes name) are asked for
+    alone with a small contract, and after every merge the *whole* intent document is validated
+    against the real architecture contract — the section calls never have their own private gate.
+    Each step re-reads the refusal, so a section that a later merge broke is repaired by its own
+    small schema. Returns the answer to carry forward (the assembled document when anything was
+    merged), the decode of that answer, and the calls/cost spent on sections. `used` is False when
+    no section was owed.
+    """
+    prompt_state = prepared.prompt_state
+    draft = architecture_draft(facts.raw)
+    refusal = _rejection_text(
+        outcome.payload.get("schema_error"), outcome.payload.get("diagnostic")
+    )
+    diagnostic = outcome.payload.get("diagnostic")
+    if not architecture_pending_sections(draft, prompt_state, diagnostic):
+        return facts, outcome, 0, 0.0, False
+    assembled = dict(draft)
+    calls = 0
+    cost = 0.0
+    last_facts = facts
+    last_answer = facts.raw
+
+    def fused_facts(base: ProviderFacts) -> ProviderFacts:
+        return replace(
+            base,
+            raw=json.dumps(assembled, default=str),
+            finish="stop",
+            had_content=True,
+            loop_detected=False,
+            collection_limit=None,
+        )
+
+    asked: dict[str, int] = {}
+    while calls < call_budget:
+        section = next(
+            (
+                candidate
+                for candidate in architecture_pending_sections(
+                    assembled, prompt_state, diagnostic
+                )
+                if asked.get(candidate, 0) <= _ARCHITECTURE_SECTION_RETRIES
+            ),
+            None,
+        )
+        if section is None:
+            break
+        asked[section] = asked.get(section, 0) + 1
+        contract = architecture_section_contract(section, prompt_state)
+        messages = [
+            {
+                "role": "system",
+                "content": build_system(
+                    contract, prepared.policy.collection_bounds, sub_step=section
+                ),
+            },
+            *prepared.base_messages[1:],
+            *([{"role": "assistant", "content": last_answer}] if last_answer.strip() else []),
+            {
+                "role": "user",
+                "content": _architecture_section_instruction(
+                    section, assembled, prompt_state, refusal
+                ),
+            },
+        ]
+        try:
+            section_facts = call_stage_provider(
+                client,
+                replace(prepared, contract=contract),
+                messages=messages,
+                response_format=contract.response_format,
+                max_tokens=int(prepared.policy.normal_max_tokens),
+                temperature=temperature,
+                reasoning=reasoning,
+                reasoning_guard=reasoning_guard,
+                progress=progress,
+                meta_ctx={
+                    **(meta_ctx or {}),
+                    "stage": "architecture",
+                    "architecture_section": section,
+                    "call_mode": "architecture_section",
+                },
+            )
+        except (*_TRANSPORT_FAILURE_EXC, *_PROVIDER_FAILURE_EXC):
+            # The section calls are an optional extra rung: a provider failure here ends the rung
+            # and hands the best assembled document to the ordinary correction ladder.
+            fused = fused_facts(last_facts)
+            return fused, decode_stage_response(prepared, fused), calls, cost, True
+        calls += 1
+        cost += section_facts.cost_usd
+        last_facts = section_facts
+        answer = architecture_draft(section_facts.raw)
+        if answer:
+            assemble_architecture_sections(assembled, answer, section, prompt_state)
+        fused = fused_facts(section_facts)
+        fused_outcome = decode_stage_response(prepared, fused)
+        refusal = _rejection_text(
+            fused_outcome.payload.get("schema_error"),
+            fused_outcome.payload.get("diagnostic"),
+        )
+        diagnostic = fused_outcome.payload.get("diagnostic")
+        if progress:
+            progress(
+                {
+                    "kind": "architecture_section",
+                    "stage": "architecture",
+                    "section": section,
+                    "attempt": attempt_base + calls,
+                    "accepted": fused_outcome.kind in {"candidate", "questions"},
+                    "cost_usd": round(section_facts.cost_usd, 6),
+                }
+            )
+        if fused_outcome.kind in {"candidate", "questions"}:
+            _record_attempt_facts(
+                client,
+                run_id=(meta_ctx or {}).get("run_id"),
+                stage="architecture",
+                attempt=attempt_base + calls,
+                call_mode="architecture_section",
+                outcome="candidate",
+                facts=section_facts,
+            )
+            return fused, fused_outcome, calls, cost, True
+        last_answer = json.dumps(assembled, default=str)
+    fused = fused_facts(last_facts)
+    return fused, decode_stage_response(prepared, fused), calls, cost, True
 
 
 def _unknown_sheet_references(prepared: PreparedStage, candidate: dict) -> list[dict[str, str]]:
@@ -3724,6 +3917,10 @@ def drive_stage(
     expanded_component_count = 0
     emitted_collection_count = 0
     provider_call_budget = max_retries + 1
+    if stage == "architecture" and _architecture_sections_enabled(active_client):
+        # Phase A: the section rung spends its own bounded budget; the stage cap still bounds the
+        # whole drive (first draft + sections + corrections).
+        provider_call_budget += _ARCHITECTURE_SECTION_CALL_BUDGET
     provider_ok = False
     schema_ok = False
     semantic_repair_attempted = False
@@ -4003,6 +4200,61 @@ def drive_stage(
             continue
 
         outcome = decode_stage_response(prepared, facts)
+        if (
+            stage == "architecture"
+            and attempt == 0
+            and outcome.kind == "recoverable_failure"
+            and provider_call_budget - attempts > 0
+            and _architecture_sections_enabled(active_client)
+        ):
+            # Phase A: the first refusal earns the section rung — the answer's own refusal is
+            # published exactly as the ordinary path publishes it (so the measurement instrument
+            # still names the class the reader refused), then the sections the answer still owes are
+            # asked for alone with a small contract and assembled into one re-validated document.
+            refusal_kind = outcome.payload.get("failure_kind")
+            refusal_codes = _diagnostic_codes(outcome.payload.get("diagnostic"))
+            defect_codes.extend(refusal_codes)
+            if refusal_codes:
+                contract_rejections += 1
+            if progress:
+                progress(
+                    {
+                        "kind": "retry",
+                        "stage": stage,
+                        "errors": [_FAILURE_KIND_ERROR.get(refusal_kind, refusal_kind)],
+                        "failure_kind": refusal_kind,
+                        "call_mode": "architecture_section",
+                        "schema_error": _redacted_schema_error(
+                            outcome.payload.get("schema_error")
+                        ),
+                        "diagnostic": outcome.payload.get("diagnostic"),
+                        "declared_identities": ladder_identities(raw),
+                        "model": _client_model(active_client),
+                    }
+                )
+            facts, outcome, section_calls, section_cost, section_rung = (
+                _architecture_section_followup(
+                    active_client,
+                    prepared,
+                    facts=facts,
+                    outcome=outcome,
+                    progress=progress,
+                    meta_ctx=ctx,
+                    temperature=temperature,
+                    reasoning=reasoning,
+                    reasoning_guard=reasoning_guard,
+                    call_budget=min(
+                        _ARCHITECTURE_SECTION_CALL_BUDGET, provider_call_budget - attempts
+                    ),
+                    attempt_base=attempts,
+                )
+            )
+            if section_rung:
+                total_cost += section_cost
+                attempts += section_calls
+                current_attempt_number = attempts
+                raw = facts.raw
+                current_facts = facts
         emit_candidate_decoded(
             outcome,
             provider_attempt=attempts,

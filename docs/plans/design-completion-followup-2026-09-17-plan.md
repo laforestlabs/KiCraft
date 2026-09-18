@@ -432,3 +432,135 @@ worker `ready`).
 | part classes | one alias vocabulary used by both the work-unit check and the §9.42 gate (`kicraft/design/part_identity.py::canonical_physical_features`), 12 measured classes aliased; lowerer part/parameter contracts published (`required_exact_part`, `reviewed_exact_part`, `parameter_choices`) |
 | diagnostics | a physical-obligation failure names the groups the unit emitted; a declared claim with no pin is refused by name; commit-gate codes are in the `retry` events |
 | ops | the JLC catalogue truncated by the nightly timer was restored from `~/.kicraft/jlcparts/cache.sqlite3.before-20260916-refresh` (artifact kept as `...truncated-20260917`), and `jlcparts.update()` refuses to install a catalogue with fewer than half the installed rows (`KICRAFT_JLCPARTS_ALLOW_SHRINK=1` to accept one on purpose) |
+
+---
+
+## 11. What this session implemented, and what it measured
+
+Four moves were implemented in one worktree (branch `simplify/bom-wiring-pipeline`): §2 Phase A
+(the architecture stage's section rung), §3 Phase B (compiler-owned part identity), §5 Phase D
+(`fabrication` / `negative` obligation kinds), plus the §6 measurement itself and this record.
+Every deterministic gate stayed green throughout:
+
+- `--reference-replay` **31/34, exit 0** (twice: before the campaign and on the final tree);
+  `buck-3a` refused as recorded, `speaker-crossover` / `usb-pd-trigger` blocked as recorded.
+- `--references` reports exactly those two blocks, nothing else.
+- 2062 tests pass (every file that imports a changed module), including 7 new Phase A tests,
+  9 new Phase B tests and 5 new Phase D tests.
+
+### 11.1 The campaigns
+
+Two bounded repeated campaigns on the same 21 briefs (the 9 architecture-only briefs, the 6
+BOM-only briefs, the 4 regression briefs and the Phase-D briefs) × 3 repeats, against the same set
+extracted from `canary_20260917T043323Z`:
+
+| | 043323Z (baseline) | `canary_20260917T232036Z` (v1) | `canary_20260918T000517Z` (v2) |
+|---|---|---|---|
+| committed runs / 63 | 6 | 4 | 3 |
+| briefs committing ≥2 of 3 | 2 | 2 | 1 |
+| briefs committing ≥1 | 4 | 2 | 2 |
+| first failing stage | arch 33 · bom 24 | arch 26 · bom 32 | arch 33 · bom 25 |
+| spend | $1.164 | $1.465 (1.26×) | $2.149 (1.85×) |
+
+v1 = Phase A with keyword-mapped section selection, Phase B as first written, Phase D.
+v2 = v1 plus the code-driven section selection and Phase B's alias bridge (both described below).
+
+**Read this as a null result.** Two of the three deltas that look like movement (architecture
+33 → 26, BOM 24 → 32 between baseline and v1; both reversed in v2) are the same size as the
+run-to-run spread §1 warns about, and the regression briefs did not hold: `esp32-dual-motor`
+commits 2/3 at baseline and 0/3 in both v1 and v2, `r2r-dac` 1/3 → 0/3, `fpc-breakout` 1/3 → 1/3,
+`rc-lowpass-bnc` 2/3 → 2/3 → 2/3. The one delta that is *not* noise is cost: the section rung
+spends real provider calls (108 section calls over 63 runs in v1) and buys no commit that survives
+repetition.
+
+### 11.2 What the events said (and the two defects they exposed)
+
+The v1 event stream showed the rung entering 46 of 63 runs, 89 of its 108 section calls going to
+`signals`, and only 9 merges accepted. The cause was a real bug in the implementation: the section
+was selected by scanning the refusal *text* for keywords, and the aggregate
+`multiple_intent_contracts` message contains every section's words, so `declared_signal_port_tied`
+about an `mcp23017` `declared_ports` entry asked the signals section three times and never reached
+`parts`. v2 selects the section from the refusal's own **codes**
+(`_ARCHITECTURE_CODE_SECTIONS`), one entry per code the architecture stage actually raises.
+
+Phase B exposed the more useful finding, and it invalidates §3's premise. The measured BOM failures
+are not group-identity failures at all:
+
+- `speaker-crossover`: `input_terminal:binding_post_terminals: requires 1 real binding-post-terminal,
+  found 0; the unit emitted: connector=Connector_Generic:Conn_01x02` — and the committed requirement
+  is `{"family": "pin-header", "ports": {"pin1": ..., "pin2": ...}}` with a
+  `binding-post-terminal` obligation.
+- `thermocouple-amp`: the same shape (`Connector:Screw_Terminal_01x02` against a
+  `thermocouple-input` demand), `led-cc-driver` likewise (`power-led`/`status-led`).
+
+The requirement is backed by a *lowerer* (`pin-header`), so the compiler has an artifact for it, the
+artifact does not realize the demanded class, and no substitution inside the unit can change the
+requirement's family. Phase B's substitution path therefore never fired in 63 runs (zero derived
+notes committed), and its two refusals replaced a `physical-obligation-unfulfilled` failure that was
+already going to happen. The remaining BOM class is a **requirement-family defect authored in the
+architecture stage** — the lever is either an architecture rule tying a physical obligation's class
+to the requirement's family, or a BOM-side decision to replace the whole unit (which would abandon
+the declared ports and their wiring). Neither is what §3 described; both are worth a plan of their
+own, with the demand-class list from §11.3 as the input.
+
+### 11.3 Disposition in the tree
+
+- **Phase A is implemented and OFF by default.** `Settings.architecture_sections`
+  (`KICRAFT_ARCHITECTURE_SECTIONS=1`) enables the rung; the flag is read once per drive in
+  `_architecture_sections_enabled`. Default-off is the measured call above and the decision §8.1
+  reserved to the operator: the rung costs 1.26–1.85× per design-only run and has not shown a gain
+  that survives repetition. With the flag off nothing else about the architecture stage changed —
+  contract name, prompt, decode, commit path and telemetry are byte-identical to the pre-session
+  behaviour, which is what the reference replay measures, and `dev`-style runs pay nothing.
+- **Phase B is kept**, with the alias bridge (`reviewed_family_parts` resolves a key through
+  `canonical_physical_features`, exact key first) and the exact-pair bundle join. It adds no
+  provider cost, its refusals are strictly more informative than the defect they replace, and its
+  tests pin the precedence rules of §3 step 2. It is inert on today's briefs for the reason above.
+- **Phase D is kept and measured working.** `fabrication` rows committed in 13 of 63 runs and
+  `negative` rows in 15 (e.g. `buck-3a`: `thermal-via-field` + `copper-area`; `rp2040-min`:
+  `castellated-edge`; `chamfered-badge`: `chamfered-corners`; `led-cc-driver`, `rc-lowpass-bnc`,
+  `audio-jack-buffer`, `speaker-crossover`: `negative microcontroller` / `active-component`), the
+  four §5 briefs no longer fail on those classes, and no new refusal appeared.
+
+### 11.4 §9 acceptance, honestly
+
+| criterion | result |
+|---|---|
+| Phase A: architecture-first ≥40 % below 0.52 | **not met** (33/63 → 26/63 → 33/63; ≤0.31 required) |
+| Phase A: ≥5 of 9 architecture-only briefs in ≥2/3 | **not met** (1 of 9 in v1, 1 of 9 in v2) |
+| Phase B: 6 BOM-only briefs in ≥2/3, BOM codes halved | **not met** (0 of 6; `physical-obligation-unfulfilled` 0.159 → 0.302 → 0.190 per run) |
+| Phase B: regression briefs unchanged | **not met** (`esp32-dual-motor` 2/3 → 0/3, `r2r-dac` 1/3 → 0/3) |
+| Phase D: fabricating/negative briefs unblocked | **met** (§11.3) |
+| Corpus + test gates green before each campaign | **met** (31/34 exit 0 twice; 2062 tests) |
+
+### 11.5 Phase C — the first fab-ready brief
+
+Two briefs that had committed in ≥2 of 3 repeats (`rc-lowpass-bnc`, `audio-jack-buffer`) were run
+through the **full** pipeline (`.venv/bin/python -m kicraft.eval.self_eval --only … --repeats 1
+--build-slots 1`, no `--design-only`), `logs/self_eval/full_20260918T005221Z`:
+
+- `rc-lowpass-bnc`: five stages committed, `build=fab-ready` in 271 s. Its BOM and wiring were
+  **fully compiler-authored** (`bom … attempts=0 tools=0`, `wiring … attempts=0`).
+- `audio-jack-buffer`: failed at architecture this time (it commits 2 of 3, so this is the third
+  sample), so it delivered no artifact.
+
+`design_acceptance … --mode full --only rc-lowpass-bnc` names the remaining fab-ready backlog as
+obligations, exactly as §4 step 3 asks — this is the first time the pipeline is judged on the
+artifact rather than the form:
+
+- `rc-lowpass-bnc.sourceable-parts`: **fail**
+- `rc-lowpass-bnc.adjustable-response`: **unverified**
+- `rc-lowpass-bnc.complete-required-connections`: **unverified**
+
+A two-brief subset cannot satisfy production acceptance by construction (it also requires the judge,
+the corpus manifest and a positive software-fulfillment proof), so §4's "at least one brief passes
+full artifact acceptance" is **not met**: it needs a full 34-brief, judge-enabled, build-enabled
+campaign, which §8.4 still leaves to the operator. The build tail itself is no longer the unknown:
+one brief reached `fab-ready`.
+
+### 11.6 Cost of the campaign path
+
+v2's $2.149 for 63 design-only runs (3.4¢/run, vs 1.8¢/run at baseline) is the price of the section
+rung alone; with the flag off the tree spends what it spent before. `cost_per_committed_design_usd`
+was $0.716 in v2, $0.366 in v1 and $0.307 in the baseline campaign — i.e. the *design-only* path is
+still paying almost entirely for runs that fail, which is the number any further work has to move.
