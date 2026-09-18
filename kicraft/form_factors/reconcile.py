@@ -162,8 +162,12 @@ def reconcile_standard_form_factor(state) -> list[str]:
     if typed:
         if len(owners) != len(geometry) or len({r.id for r in owners}) != len(owners):
             raise ValueError("standard header migration requires one existing owner per fixed connector")
-        if len({tuple(sorted(r.functional_blocks)) for r in owners}) != 1:
-            raise ValueError("cannot redistribute standard ports across distinct functional owners")
+        # Owners may implement different functional blocks: a shield's power connector also
+        # implements the power-input block, say, and refusing that outright blocked a proto-shield
+        # netlist whose design was correct ("cannot redistribute standard ports across distinct
+        # functional owners"). What must actually hold is that no owner loses a requested signal --
+        # checked per owner below against the template's own nets -- and the migration never
+        # rewrites a requirement's functional blocks, so ownership cannot silently move.
         # Preserve IDs/refs and choose the closest physical role by electrical
         # coverage, not arbitrary BOM ordering or the erroneous old pin count.
         old_parts = list(max(

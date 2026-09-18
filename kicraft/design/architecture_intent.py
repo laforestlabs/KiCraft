@@ -824,6 +824,45 @@ def derive_architecture(
                     ),
                     evidence=[*sorted(expected), *sorted(actual)],
                 )
+            # The four fixed connectors are ONE board interface, and the wiring stage may permute
+            # which owner carries which template geometry, so their functional-block membership must
+            # be identical: the proto-shield architecture gave the power connector an extra block
+            # (that connector also serves POWER_INPUT) and the migration then refused the whole
+            # netlist with "cannot redistribute standard ports across distinct functional owners".
+            # Normalising to the block they all implement keeps the interface coherent; when they
+            # agree on none, the refusal stays and names the disagreement.
+            stacked = [
+                requirements[row.id] for row in actual.values() if row.id in requirements
+            ]
+            shared_blocks = set.intersection(
+                *(set(requirement.functional_blocks) for requirement in stacked)
+            ) if stacked else set()
+            # Only an extra block that ANOTHER requirement still implements may be dropped:
+            # a functional block with no implementation requirement is refused by the commit
+            # ("functional block 'POWER_INPUT' has no implementation requirement on a sheet"),
+            # so normalising must never orphan one. When the connector is that block's only
+            # owner, its membership stays and the migration's own per-owner checks decide.
+            orphans = {
+                block
+                for requirement in stacked
+                for block in requirement.functional_blocks
+                if block not in shared_blocks
+                and not any(
+                    block in other.functional_blocks
+                    for other in requirements.values()
+                    if other is not requirement
+                )
+            }
+            if shared_blocks and not orphans and any(
+                sorted(requirement.functional_blocks) != sorted(shared_blocks)
+                for requirement in stacked
+            ):
+                for requirement in stacked:
+                    requirement.functional_blocks = sorted(shared_blocks)
+                derived_notes.append(
+                    f"standard stacking connectors share the {sorted(shared_blocks)[0]!r} "
+                    "interface block (derived)"
+                )
             for role, connector in expected.items():
                 row = actual.get(role)
                 if row is None:
@@ -1300,6 +1339,33 @@ def derive_architecture(
             f"field at {PROTOTYPING_AREA_PARAMETERS['pitch_mm']} mm derived from the committed "
             f"{PROTOTYPING_AREA_FEATURE!r} fabrication obligation (derived)"
         )
+    elif has_prototyping_area(stated_obligations):
+        # The model declared the field itself: its sheet, id and role are kept, but the field's
+        # SIZE and its netless nature are the reviewed contract, not a free choice. A real run
+        # asked for 10x15 (150 plated pads) and its board was the one the layout engine could not
+        # route ("no routed parent board"), while the acceptance check asks for a usable field of
+        # at least 25 positions. A port bound to the field is dropped for the same reason: the pad
+        # field shares no net with the circuit, and no requirement can own one.
+        for requirement_id, requirement in list(requirements.items()):
+            # Only a requirement that IS the pad field (its family), never one that merely
+            # reuses the obligation id while declaring some other family: that is a different
+            # model choice, reported by the gates that own it.
+            if requirement.family != PROTOTYPING_AREA_FAMILY:
+                continue
+            if dict(requirement.parameters) != dict(PROTOTYPING_AREA_PARAMETERS):
+                requirement.parameters = dict(PROTOTYPING_AREA_PARAMETERS)
+                derived_notes.append(
+                    f"{requirement_id}: pad field set to the reviewed "
+                    f"{PROTOTYPING_AREA_PARAMETERS['rows']}x{PROTOTYPING_AREA_PARAMETERS['cols']} "
+                    f"at {PROTOTYPING_AREA_PARAMETERS['pitch_mm']} mm (derived)"
+                )
+            if requirement.ports or bindings.get(requirement_id):
+                requirement.ports = {}
+                bindings[requirement_id] = {}
+                derived_notes.append(
+                    f"{requirement_id}: pad field declares no port — a bare pad shares no net "
+                    "with the circuit (derived)"
+                )
 
     # Off-board peers: one connector per `edge:` label, carrying only what named it.
     edge_connectors: dict[str, tuple[str, str, list[str]]] = {}  # label -> (id, mode, rails)
