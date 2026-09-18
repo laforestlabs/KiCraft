@@ -75,8 +75,9 @@ wiring entirely compiler-authored), whose remaining acceptance obligations are
 `complete-required-connections: unverified`. Runs 8 and 9 are 21-brief × 3-repeat design-only
 subsets, so their committed counts are not comparable to the 34-brief rows above; read
 `docs/plans/design-completion-followup-2026-09-17-plan.md` §11 for the like-for-like baseline
-comparison, the null result on completion, and why the architecture section rung is now gated OFF by
-default (`KICRAFT_ARCHITECTURE_SECTIONS=1` to enable it).)
+comparison, the null result on completion, and why two of the three moves were **stripped from the
+tree again** rather than left disabled — only Phase D (`fabrication` / `negative` obligations)
+survives, and the measured reason is in §11.3–§11.4.)
 
 (Run 4 — the alias + identity-guard set alone — was cancelled mid-run as superseded by run 5.
 Runs 6 and 7 are the 2026-09-17 implementation session's 34-brief × 3-repeat campaigns; run 6 was a

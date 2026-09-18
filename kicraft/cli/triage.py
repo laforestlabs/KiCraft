@@ -347,8 +347,8 @@ def collect_build_meta(run: Path) -> dict | None:
 # answer "why did a stage not commit".
 _STAGE_EVENT_KINDS = frozenset({
     "stage_start", "stage_done", "retry", "stage_diagnostic", "question",
-    "serialization_recovery", "candidate_decoded", "architecture_section",
-    "work_unit_plan", "work_unit_attempt", "work_unit_done", "budget_refused",
+    "serialization_recovery", "candidate_decoded", "work_unit_plan",
+    "work_unit_attempt", "work_unit_done", "budget_refused",
 })
 
 # failure_kind families: the taxonomy the runtime already assigns. Only

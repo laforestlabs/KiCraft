@@ -162,10 +162,6 @@ _EVENT_KINDS = frozenset(
         "serialization_recovery",
         "candidate_decoded",
         "stage_diagnostic",
-        # The architecture stage's section rung (one small section call per refused section);
-        # it carries only the section name and acceptance, so the lean stream can still say
-        # which section a run spent its extra calls on.
-        "architecture_section",
         "work_unit_plan",
         "work_unit_attempt",
         "work_unit_done",
