@@ -442,6 +442,35 @@ def isolate_array_sheets(bom: BOM, architecture: Architecture) -> list[str]:
                 else:
                     bom.component_zones.pop(ref, None)
         moved.extend(impure)
+        # The parts' owning requirements move with them. Section 9.42 matches a requirement
+        # to its implementing parts BY SHEET, so relocating the parts alone made a correct
+        # board fail synthesis with "requires 1 reviewed 'stacking-header' physical part(s),
+        # found 0" while those very parts sat on the new sheet: the requirement still pointed
+        # at the array sheet. A lowered part names its requirement directly; a RECIPE-owned
+        # part does not (its `lowering_requirement_id` is null), so the recipe ownership
+        # manifests supply that link. Recipe selections name their sheets too, and the
+        # wiring/BOM provenance in state.json has to stay consistent with both.
+        ownership_by_ref: dict[str, set[str]] = {}
+        for manifest in bom.recipe_ownership or ():
+            for manifest_ref in manifest.refs:
+                ownership_by_ref.setdefault(manifest_ref, set()).update(manifest.requirement_ids)
+        moved_requirements = {
+            requirement_id
+            for ref in impure
+            for requirement_id in (
+                {getattr(parts_by_ref[ref], "lowering_requirement_id", None)}
+                | ownership_by_ref.get(ref, set())
+            )
+            if requirement_id
+        }
+        for requirement in architecture.requirements:
+            if requirement.id in moved_requirements:
+                requirement.sheet = name
+        for selection in architecture.recipe_selections:
+            selection.sheets = {
+                role: name if sheet == sh else sheet
+                for role, sheet in selection.sheets.items()
+            }
         notes.append(
             f"moved {len(impure)} non-array part(s) ({', '.join(impure)}) off array "
             f"sheet {sh!r} onto a dedicated sheet {name!r} so the array leaf stays a "
