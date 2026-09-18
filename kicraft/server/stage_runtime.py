@@ -20,6 +20,7 @@ from kicraft.design.stage_semantics import (
     diagnose_stage,
     external_load_budget_stated,
     normalize_project_stem,
+    remove_board_feature_blocks,
     remove_mislabeled_architecture_defaults,
     remove_mislabeled_functional_defaults,
 )
@@ -3328,6 +3329,64 @@ def _standard_form_factor_block(intent: dict) -> str | None:
     return "\n".join(lines)
 
 
+def _reviewed_class_options_block(intent: dict) -> str | None:
+    """The reviewed parts that can satisfy each physical class this design demands.
+
+    A demanded class is realized only by a reviewed part (``E_PHYSICAL_REALIZATION``), and
+    the stage that picks the part never sees which parts those are: one proto-shield run
+    answered the demanded ``voltage-regulator`` with the familiar but unreviewed
+    ``AMS1117-3.3``, which resolves as a bundle and therefore passes every earlier gate,
+    then refuses at the BOM with "found 0 ... exact MPN/symbol/footprint evidence" and no
+    correction round left. Listing the reviewed options with their ratings lets the stage
+    choose a realizable part where it is still choosing. Classes with no reviewed coverage
+    are omitted: their honest route is the exact part the user named.
+    """
+    from kicraft.design.part_identity import (
+        canonical_physical_features,
+        reviewed_parts_for_feature,
+    )
+
+    demanded = sorted(
+        {
+            str(row.get("component_class") or "").strip().casefold()
+            for row in (intent.get("obligations") or [])
+            if isinstance(row, dict) and row.get("kind") == "physical"
+        }
+        - {""}
+    )
+    lines: list[str] = []
+    for component_class in demanded:
+        options: dict[str, str] = {}
+        for feature in sorted(canonical_physical_features(component_class)):
+            for part in reviewed_parts_for_feature(feature):
+                limits = dict(part.operating_limits or {})
+                ratings = [
+                    f"{key.removesuffix('_v').removesuffix('_a').replace('_', ' ')}="
+                    f"{limits[key]}"
+                    for key in ("output_voltage_v", "output_current_a", "input_voltage_max_v")
+                    if limits.get(key) is not None
+                ]
+                options.setdefault(
+                    part.identity,
+                    f"{part.identity}"
+                    + (f" ({part.family}: {', '.join(ratings)})" if ratings else f" ({part.family})"),
+                )
+        if options:
+            lines.append(
+                f"  {component_class}: " + "; ".join(sorted(options.values())[:6])
+            )
+    if not lines:
+        return None
+    return "\n".join(
+        [
+            "REVIEWED PARTS FOR THE DEMANDED CLASSES: a demanded physical class is realized "
+            "only by one of these reviewed identities (with its own symbol/footprint pair), "
+            "so prefer them, and name `exact_part` only from this list:",
+            *lines,
+        ]
+    )
+
+
 def _architecture_recipe_summaries(intent: dict) -> list[dict]:
     """Do not offer unrelated MCU alternatives to an explicitly named design.
 
@@ -3510,6 +3569,9 @@ def drive_stage(
         standard_block = _standard_form_factor_block(prep_json["state"].get("intent") or {})
         if standard_block:
             extras["standard_form_factor"] = standard_block
+        class_options = _reviewed_class_options_block(prep_json["state"].get("intent") or {})
+        if class_options:
+            extras["reviewed_class_options"] = class_options
 
     # Bookkeeping the model has no use for stays out of its prompt.
     prompt_state = dict(prep_json["state"])
@@ -4456,7 +4518,12 @@ def drive_stage(
             obj = complete_intent_classification(brief, obj)
             obj["project_stem"] = normalize_project_stem(obj.get("project_stem", ""))
         elif stage == "functional_spec":
-            obj = remove_mislabeled_functional_defaults(brief, semantic_state, obj)
+            # A board-feature block cannot be wired (it owns no net), so it is removed
+            # deterministically here: the pad field survives as the intent's fabrication
+            # row, and the stage still reports the block through its diagnostic.
+            obj = remove_board_feature_blocks(
+                remove_mislabeled_functional_defaults(brief, semantic_state, obj)
+            )
         elif stage == "architecture":
             obj = remove_mislabeled_architecture_defaults(semantic_state, obj)
         original_obj = obj

@@ -1465,6 +1465,13 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "output_current_a": 0.5,
         },
         port_pins={"input": "VIN", "ground": "VSS", "enable": "CE", "no_connect": "NC", "output": "VOUT"},
+        # The reviewed source-to-load path §9.39 proves: this linear regulator conducts
+        # VIN to VOUT. Its siblings (`ap2112k-3.3trg1`, `ams1117-5.0`) already carry this
+        # fact; without it a 5 V to 3.3 V shield has no transfer witness at all and the
+        # wiring stage refuses with "no reviewed source-to-load transfer", even though the
+        # part is the reviewed one its recipe emits. Pin names come from the record's own
+        # `port_pins` above (Microne ME6211 datasheet: VIN pin 1, VOUT pin 5, SOT-23-5).
+        power_transfer={"from_pin": "VIN", "to_pin": "VOUT"},
     ),
     ReviewedPart(
         identity="ap2112k-3.3trg1",

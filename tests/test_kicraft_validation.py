@@ -2312,3 +2312,49 @@ def test_typed_led_guard_does_not_reverse_negative_rail_indicator():
             if endpoint.ref == "D1":
                 endpoint.pin = "1" if endpoint.pin == "2" else "2"
     assert check_typed_led_current_paths(architecture, bom).ok
+
+
+def test_board_fabricated_leaf_is_not_an_unwired_sheet(tmp_path: Path) -> None:
+    """§9.9 exempts a leaf built only from board-fabricated parts.
+
+    A prototyping pad field is bare copper: its pads carry no net by design, so the leaf
+    has no wires — and the check exists to catch a leaf whose wiring was LOST, not one
+    that never had any. Keyed off the BOM's own `assembly=False` flag, so an ordinary
+    unwired leaf is still reported.
+    """
+    from kicraft.design.synthesis.validation import check_connectivity
+
+    stem = "PROTO"
+    (tmp_path / f"{stem}.kicad_sch").write_text("(kicad_sch (version 20250114) (lib_symbols))\n")
+    fields = "".join(
+        "\t(symbol (lib_id \"prototyping-area:PrototypingPad\") (at 10 10 0)\n"
+        f'\t\t(uuid "0000000{i}-0000-0000-0000-000000000000")\n'
+        f'\t\t(property "Reference" "PB{i}" (at 0 0 0))\n'
+        "\t)\n"
+        for i in range(1, 5)
+    )
+    (tmp_path / "PADS.kicad_sch").write_text(
+        f"(kicad_sch (version 20250114) (lib_symbols)\n{fields})\n"
+    )
+
+    # Ordinary unwired leaf: still a defect.
+    (tmp_path / "LOST.kicad_sch").write_text(
+        "(kicad_sch (version 20250114) (lib_symbols)\n"
+        '\t(symbol (lib_id "Device:R") (at 10 10 0)\n'
+        '\t\t(uuid "99999999-0000-0000-0000-000000000001")\n'
+        '\t\t(property "Reference" "R1" (at 0 0 0))\n\t)\n'
+        '\t(symbol (lib_id "Device:C") (at 20 10 0)\n'
+        '\t\t(uuid "99999999-0000-0000-0000-000000000002")\n'
+        '\t\t(property "Reference" "C1" (at 0 0 0))\n\t)\n'
+        ")\n"
+    )
+    result = check_connectivity(tmp_path, stem, board_fabricated=frozenset({"prototyping-area:PrototypingPad"}))
+    assert not result.ok
+    assert len(result.offenders) == 1
+    assert "LOST.kicad_sch" in result.offenders[0]
+
+    # The same project with the pad leaf wired is clean, and without the flag the pad
+    # leaf is reported too (the exemption is what silences it).
+    assert check_connectivity(tmp_path, stem).offenders != []
+    (tmp_path / "LOST.kicad_sch").write_text("(kicad_sch (version 20250114) (lib_symbols))\n")
+    assert check_connectivity(tmp_path, stem, board_fabricated=frozenset({"prototyping-area:PrototypingPad"})).ok

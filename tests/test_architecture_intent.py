@@ -1140,6 +1140,65 @@ def test_approved_uno_template_requires_and_constructs_each_explicit_stacking_ow
     assert owned["power"].ports["pin1"] == "NC"
 
 
+def test_unused_template_pin_names_become_no_connects_not_nets():
+    """A template pin name is the HOST's label, not a net of this board.
+
+    The four headers carry the template's full 32-pin map (SCL, SDA, AREF, D13..D0,
+    A0..A5, IOREF, RESET), while a shield that never uses those signals realizes only the
+    rails it draws from. Binding the rest would put a host label on a net with a single
+    pin -- exactly the dangling label §9.15 refuses, and what stopped the proto-shield
+    brief from wiring ("deterministic wiring binds a singleton signal without a declared
+    architecture endpoint"). The pin stays on the connector (its physical size comes from
+    the port count) and becomes a no-connect.
+    """
+    from kicraft.form_factors import get_template
+
+    template = get_template("arduino_uno_shield")
+    intent = _hub75_intent()
+    intent["standard_form_factor"] = template.key
+    intent["sheets"].append(
+        {
+            "name": "UNO HEADERS",
+            "stem": "UNO_HEADERS",
+            "role": "connector",
+            "function": "Arduino Uno shield stacking interface.",
+        }
+    )
+    for connector in template.fixed_connectors:
+        intent["requirements"].append(
+            {
+                "id": f"uno_{connector.role}",
+                "sheet": "UNO HEADERS",
+                "role": "connector",
+                "family": "pin-header",
+                "parameters": {"rows": 1, "gender": "female"},
+                "standard_stacking_role": connector.role,
+                "functional_blocks": ["UNO_HOST_INTERFACE"],
+            }
+        )
+
+    architecture = derive_architecture(intent)
+    owned = {
+        requirement.standard_stacking_role: requirement
+        for requirement in architecture.requirements
+        if requirement.standard_stacking_role
+    }
+    # Host signal labels nobody on this board drives: no-connect, never a one-pin net.
+    for role, pins in (("digital_high", ("pin1", "pin2", "pin3", "pin5")),
+                       ("digital_low", ("pin1", "pin2")),
+                       ("analog", ("pin1", "pin6"))):
+        for pin in pins:
+            assert owned[role].ports[pin] == "NC", (role, pin, owned[role].ports[pin])
+    # The rails the shield draws from stay bound, and ground stays ground.
+    assert owned["digital_high"].ports["pin4"] == "GND"
+    assert owned["power"].ports["pin4"] == "+3V3"
+    assert owned["power"].ports["pin5"] == "+5V"
+    assert owned["power"].ports["pin1"] == "NC"
+    # The connector is still the template's own size (the ports carry every pin).
+    assert len(owned["digital_high"].ports) == 10
+    assert len(owned["analog"].ports) == 6
+
+
 def _declared_port_misuse_intent(*, vdd_both: bool, sig_reference: bool) -> dict:
     """The reference intent plus one uncurated part carrying declared ports."""
     intent = _hub75_intent()
@@ -2033,3 +2092,38 @@ def test_intent_without_the_fabrication_obligation_derives_no_prototyping_area()
     assert with_block.model_dump() == derive_architecture(_hub75_intent()).model_dump()
     assert not any(row.stem == "PROTOTYPING_AREA" for row in with_block.sheets)
     assert not any(row.id == "prototyping_area" for row in with_block.requirements)
+
+
+def test_unreviewed_exact_part_for_a_covered_class_is_refused_with_options():
+    """An exact part the reviewed library does not hold cannot satisfy a physical class.
+
+    The BOM stage is deterministic for these requirements, so it cannot repair the choice:
+    it refused the proto-shield runs with "requires 1 reviewed 'voltage-regulator' physical
+    part(s), found 0" and no correction round left, because the model answered the demanded
+    class with the familiar but unreviewed `AMS1117-3.3`. Refusing at the architecture stage
+    keeps the correction where the part is still being chosen, and names the reviewed ones.
+    """
+    intent = _hub75_intent()
+    buck = next(row for row in intent["requirements"] if row["id"] == "buck")
+    buck["exact_part"] = "AMS1117-3.3"
+    buck["obligations"] = [
+        {
+            "kind": "physical",
+            "original_obligation_id": "regulator",
+            "component_class": "voltage-regulator",
+        }
+    ]
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(intent)
+    diagnostics = excinfo.value.diagnostics
+    refused = [d for d in diagnostics if d.code == "unreviewed_exact_part"]
+    assert len(refused) == 1
+    assert refused[0].requirement_id == "buck"
+    # The reviewed options travel with the refusal, so the repair is one step.
+    assert "me6211c33m5g-n" in refused[0].evidence
+    assert "ap2112k-3.3trg1" in refused[0].evidence
+
+    # The reviewed identity for the same class passes untouched.
+    buck["exact_part"] = "ME6211C33M5G-N"
+    architecture = derive_architecture(intent)
+    assert next(r for r in architecture.requirements if r.id == "buck").exact_part == "ME6211C33M5G-N"

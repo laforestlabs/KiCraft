@@ -200,6 +200,25 @@ def _edge_vertices(board: Any) -> list[_Point]:
     return points
 
 
+def _has_radius(item: Any) -> bool:
+    """Whether a delivered drawing's shape actually has a radius to read.
+
+    ``PCB_SHAPE.GetRadius()`` is only implemented for circles and arcs: on a segment it
+    raises a KiCad assert that aborts the whole process, which no Python ``except`` can
+    catch. A board whose Edge.Cuts are segments (every rectangular outline) therefore has
+    to be filtered by shape BEFORE the call -- the crash this caused read
+    "GetRadius: unimplemented for S_SEGMENT" and killed a routing round.
+    """
+    try:
+        import pcbnew
+    except Exception:
+        return False
+    try:
+        return item.GetShape() in (pcbnew.SHAPE_T_CIRCLE, pcbnew.SHAPE_T_ARC)
+    except Exception:
+        return False
+
+
 def _edge_circles(board: Any) -> list[tuple[_Point, float]]:
     out: list[tuple[_Point, float]] = []
     try:
@@ -210,6 +229,8 @@ def _edge_circles(board: Any) -> list[tuple[_Point, float]]:
     for drawing in _iter(board.GetDrawings()):
         try:
             if edge_layer is not None and drawing.GetLayer() != edge_layer:
+                continue
+            if not _has_radius(drawing):
                 continue
             center = _point(drawing.GetCenter())
             radius = _mm(drawing.GetRadius())

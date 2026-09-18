@@ -1136,3 +1136,41 @@ def test_intent_family_separator_spellings_do_not_duplicate_named_parts():
         "ESP32-C3 or esp32 C3; ATtiny1614 or ATtiny 1614", {"named_parts": [], "constraints": []}
     )
     assert completed["named_parts"] == ["ESP32-C3", "ATtiny1614"]
+
+
+def test_board_feature_block_is_removed_with_its_connections():
+    """A block for a board feature is dropped deterministically, connections and all.
+
+    A live run (proto-shield r2) kept its `PROTOTYPING_AREA` block through the one semantic
+    repair round, and the architecture stage then refused twice with "crosses sheets but
+    has no inter_sheet_net": those connections can never be mapped, because the pad-field
+    requirement owns no port. The pad field survives as the intent's `fabrication` row and
+    the sheet is derived from it, so removing the block loses nothing.
+    """
+    from kicraft.design.stage_semantics import remove_board_feature_blocks
+
+    candidate = {
+        "blocks": [
+            {"name": "ARDUINO_SHIELD_INTERFACE", "category": "interface", "purpose": "x", "count": 1},
+            {"name": "POWER_INPUT", "category": "power", "purpose": "y", "count": 1},
+            {"name": "PROTOTYPING_AREA", "category": "interface", "purpose": "z", "count": 1},
+        ],
+        "connections": [
+            {"from_block": "ARDUINO_SHIELD_INTERFACE", "to_block": "POWER_INPUT",
+             "signal_type": "power", "description": "supply"},
+            {"from_block": "ARDUINO_SHIELD_INTERFACE", "to_block": "PROTOTYPING_AREA",
+             "signal_type": "digital", "description": "breakout"},
+            {"from_block": "POWER_INPUT", "to_block": "PROTOTYPING_AREA",
+             "signal_type": "power", "description": "rail to the field"},
+        ],
+        "assumptions": [],
+    }
+    cleaned = remove_board_feature_blocks(candidate)
+    assert [b["name"] for b in cleaned["blocks"]] == ["ARDUINO_SHIELD_INTERFACE", "POWER_INPUT"]
+    assert [c["to_block"] for c in cleaned["connections"]] == ["POWER_INPUT"]
+    # The input is never mutated, and a spec without such a block is returned unchanged.
+    assert len(candidate["blocks"]) == 3
+    assert remove_board_feature_blocks({"blocks": [{"name": "POWER"}], "connections": []}) == {
+        "blocks": [{"name": "POWER"}],
+        "connections": [],
+    }

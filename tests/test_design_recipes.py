@@ -1524,6 +1524,39 @@ def test_stm32_can_rejects_unreviewed_remap_at_architecture():
     assert "pd0-pd1" in diagnostic.evidence[0]
 
 
+def test_reviewed_class_options_name_realizable_parts_with_ratings():
+    """The stage that picks a part for a demanded class must see the reviewed options.
+
+    One proto-shield run answered the demanded `voltage-regulator` with the familiar but
+    unreviewed `AMS1117-3.3`: it resolves as a bundle, passes every earlier gate, then
+    refuses at the BOM with "found 0 ... exact MPN/symbol/footprint evidence" and no
+    correction round left. The block lists the reviewed identities (with ratings, so the
+    3.3 V part is choosable), and stays silent for classes the library does not cover.
+    """
+    from kicraft.server.stage_runtime import _reviewed_class_options_block
+
+    block = _reviewed_class_options_block(
+        {
+            "obligations": [
+                {"kind": "physical", "component_class": "voltage-regulator"},
+                {"kind": "physical", "component_class": "gps-module"},
+                {"kind": "quantity", "subject": "voltage-regulator", "minimum": 1},
+            ]
+        }
+    )
+    assert block is not None
+    assert "voltage-regulator" in block
+    # The reviewed 3.3 V options and their ratings, so the stage can choose one.
+    assert "me6211c33m5g-n" in block
+    assert "ap2112k-3.3trg1" in block
+    assert "output voltage=3.3" in block
+    # A class with no reviewed coverage is omitted: naming the exact part is its route.
+    assert "gps-module" not in block
+    # Nothing demanded, nothing rendered.
+    assert _reviewed_class_options_block({}) is None
+    assert _reviewed_class_options_block({"obligations": []}) is None
+
+
 def test_non_numbered_mcu_advertises_allocatable_output_and_reviewed_touch():
     from kicraft.design.models import CircuitRequirement
     from kicraft.design.recipes.pin_allocator import allocate_requirement_pins

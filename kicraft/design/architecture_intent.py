@@ -48,6 +48,7 @@ from .models import (
     InterSheetNet,
     Sheet,
     SheetPin,
+    is_power_or_ground_name,
 )
 from .recipes.models import RegisteredRecipe
 from .recipes.pin_allocator import FIXED_INTERFACES
@@ -936,10 +937,31 @@ def derive_architecture(
         if (sheet, direction) not in rows:
             rows.append((sheet, direction))
 
+    # A standard template's pin names are the HOST's labels (D5, A2, IOREF, RESET...), not
+    # nets of this board: the shield only realizes a name when its own circuits use it (the
+    # rails it draws from) or when another requirement already binds that net. Binding the
+    # rest would put a template label on a net with a single pin, which is exactly the
+    # dangling label §9.15 refuses -- and wiring an unused host pin to nothing is the honest
+    # netlist. The port stays (a connector's physical size comes from its port count), so the
+    # pin becomes a no-connect instead of disappearing from the header.
+    realized_nets = {
+        net
+        for requirement_id, ports in bindings.items()
+        if requirement_id not in standard_port_bindings
+        for net in ports.values()
+    }
+    rail_names = set(intent.power.rails)
     for requirement_id, ports in standard_port_bindings.items():
         for port, net in ports.items():
-            if net == "NC":
-                bindings[requirement_id][port] = net
+            # A power/ground pin of a standard shield IS that rail (the board is powered
+            # through it), so it stays bound even when this design names its own rail
+            # differently; only the signal labels are host-side names this board may never
+            # realize.
+            host_label = net != "NC" and not (
+                net in realized_nets or net in rail_names or is_power_or_ground_name(net)
+            )
+            if net == "NC" or host_label:
+                bindings[requirement_id][port] = "NC"
             else:
                 _bind(
                     requirement_id,
@@ -993,7 +1015,6 @@ def derive_architecture(
         port, direction = resolved
         return _SheetRef(models_by_id[requirement_id], port, direction)
 
-    rail_names = set(intent.power.rails)
     # Connectors that expose a rail rather than draw from it (`supply` on a connector family).
     connector_rails: dict[str, str] = {}
     for net, rail in intent.power.rails.items():
@@ -1187,6 +1208,49 @@ def derive_architecture(
                     f"{requirement_id}: supply {rail} stated on unpublished port {stated!r}; bound "
                     f"to the family's own {port} (derived)"
                 )
+
+    # A requirement that must be realized by a reviewed part may not pin an exact identity the
+    # reviewed library does not hold: the BOM stage is deterministic for these requirements, so
+    # it cannot repair the choice and refuses with "found 0 ... exact MPN/symbol/footprint
+    # evidence" and no correction round left (the proto-shield runs answered the demanded
+    # `voltage-regulator` with the familiar but unreviewed `AMS1117-3.3`). Refusing here keeps
+    # the correction where the part is still being chosen, and the evidence names the reviewed
+    # options. A class with no reviewed coverage at all is left alone: naming the exact part is
+    # legitimately its only route.
+    from kicraft.design.part_identity import (
+        canonical_physical_features,
+        reviewed_part,
+        reviewed_parts_for_feature,
+    )
+
+    for requirement_id, requirement in requirements.items():
+        exact = str(requirement.exact_part or "").strip()
+        if not exact or reviewed_part(exact) is not None:
+            continue
+        for obligation in requirement.obligations:
+            component_class = str(getattr(obligation, "component_class", "") or "").casefold()
+            if obligation.kind != "physical" or not component_class:
+                continue
+            options = {
+                part.identity: part
+                for feature in canonical_physical_features(component_class)
+                for part in reviewed_parts_for_feature(feature)
+            }
+            if not options:
+                continue  # a class the library does not cover: the exact part is its route
+            _fail(
+                "unreviewed_exact_part",
+                (
+                    f"requirement {requirement_id!r} pins exact_part {exact!r}, which the reviewed "
+                    f"library does not hold, while its {component_class!r} obligation must be "
+                    "realized by a reviewed part; use one of the reviewed identities below, or "
+                    "drop exact_part and let the parts stage choose"
+                ),
+                requirement_id=requirement_id,
+                sheet=requirement.sheet,
+                evidence=sorted(options),
+            )
+            break
 
     # A committed `fabrication` obligation naming the prototyping area is a board feature no
     # requirement can implement: it names no component class, owns no pin and draws no net, so a

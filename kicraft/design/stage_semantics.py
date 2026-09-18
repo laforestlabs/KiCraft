@@ -303,6 +303,46 @@ def remove_mislabeled_functional_defaults(brief: str, upstream: dict, candidate:
     return completed
 
 
+def remove_board_feature_blocks(candidate: dict) -> dict:
+    """Drop functional blocks that model a board feature, with every connection they carry.
+
+    A prototyping pad field is not a functional block: it names no component function and
+    carries no signal, so a block for it can only be wired through nets no requirement can
+    own — the architecture stage then refuses with "crosses sheets but has no
+    inter_sheet_net" and the design stops there (seen on the proto-shield r2 run, twice,
+    after the semantic repair round the functional-spec stage still commits with).
+
+    Removing it is deterministic and lossless: the pad field itself survives as the intent's
+    `fabrication` row, from which the sheet and the pad grid are derived. The semantic
+    diagnostic still reports the block, so the model's mistake stays visible.
+    """
+    from kicraft.design.synthesis.board_features import prototyping_area_requested
+
+    blocks = candidate.get("blocks") or []
+    board_feature_names = {
+        str(block.get("name") or "")
+        for block in blocks
+        if isinstance(block, dict)
+        and prototyping_area_requested(str(block.get("name") or "").replace("_", " "))
+    }
+    if not board_feature_names:
+        return candidate
+    completed = dict(candidate)
+    completed["blocks"] = [
+        block
+        for block in blocks
+        if not isinstance(block, dict) or str(block.get("name") or "") not in board_feature_names
+    ]
+    completed["connections"] = [
+        connection
+        for connection in candidate.get("connections") or []
+        if isinstance(connection, dict)
+        and str(connection.get("from_block") or "") not in board_feature_names
+        and str(connection.get("to_block") or "") not in board_feature_names
+    ]
+    return completed
+
+
 def remove_mislabeled_architecture_defaults(upstream: dict, candidate: dict) -> dict:
     """Remove architecture assumptions that merely repeat a stage answer."""
     answer_values = [

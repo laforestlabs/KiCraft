@@ -4021,12 +4021,20 @@ def check_breakout_connectivity(intent, bom) -> CheckResult:
 _LIB_ID_RE = re.compile(r'\(lib_id\s+"([^"]+)"')
 
 
-def check_connectivity(project_dir: Path, project_stem: str) -> CheckResult:
+def check_connectivity(
+    project_dir: Path, project_stem: str, *, board_fabricated: frozenset[str] = frozenset()
+) -> CheckResult:
     """§9.9 — every leaf sheet with ≥2 component symbols must contain at
     least one ``(wire …)`` or at least one ``(symbol (lib_id "power:…")…)``
     instance. A leaf with components but zero electrical artifacts is a
     Stage-B regression (or a Stage-A pre-wiring snapshot, which is gated
     out by the caller).
+
+    ``board_fabricated`` lists the symbols of parts the BOM marks as board-fabricated
+    (``assembly=False``): a leaf built only from those — the prototyping pad field — has no
+    wires by design, because its pads ARE the user's own wiring surface. The exemption
+    reads the BOM's own flag, never a name or a library prefix, so a leaf that is merely
+    unwired is still reported.
     """
     bad: list[str] = []
     root_name = f"{project_stem}.kicad_sch"
@@ -4034,21 +4042,23 @@ def check_connectivity(project_dir: Path, project_stem: str) -> CheckResult:
         if sch.name == root_name:
             continue  # root has no components
         text = sch.read_text()
-        non_power_components = 0
+        components: list[str] = []
         power_symbols = 0
         for _offset, block in _iter_symbol_instance_blocks(text):
             lib_id_m = _LIB_ID_RE.search(block)
             if lib_id_m and lib_id_m.group(1).startswith("power:"):
                 power_symbols += 1
             else:
-                non_power_components += 1
-        if non_power_components < 2:
+                components.append(lib_id_m.group(1) if lib_id_m else "")
+        if len(components) < 2:
             continue
+        if components and all(symbol in board_fabricated for symbol in components):
+            continue  # a bare board-fabricated field, wired by the user
         # Wire count (top-level only is fine — wires never appear inside
         # lib_symbols).
         wire_count = text.count("(wire")
         if wire_count == 0 and power_symbols == 0:
-            bad.append(f"{sch.name}: {non_power_components} components, 0 wires, 0 power symbols")
+            bad.append(f"{sch.name}: {len(components)} components, 0 wires, 0 power symbols")
     return CheckResult(
         name="9.9 connectivity",
         ok=not bad,
@@ -4393,7 +4403,15 @@ def collect_validations(
         results.append(check_single_net_per_pin(bom))
         results.append(check_family_wiring_contracts(bom))
         results.append(check_mcu_programming_access(bom))
-        results.append(check_connectivity(project_dir, project_stem))
+        results.append(
+            check_connectivity(
+                project_dir,
+                project_stem,
+                board_fabricated=frozenset(
+                    part.symbol for part in bom.parts if not part.assembly
+                ),
+            )
+        )
         results.append(check_erc(project_dir, project_stem))
         results.append(check_netlist_faithfulness(project_dir, project_stem, bom))
     return results
