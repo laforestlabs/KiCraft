@@ -23,7 +23,8 @@ authoritative plan is written *the plan's §N*.
 | Verdict | the loss is the contract layer (§2); **Move D pays ≈ 0** (§3); the binding wall is the BOM obligation/interface layer |
 | Tree state | **no source change**: HEAD + the three inherited dirty files; the A4 scaffolding stayed in its own worktree |
 | Production impact | web process never died (HTTP 200 throughout, 7 failed health checks over ~3.25 min at the memory plateau); **a SIGKILLed campaign orphaned a build that held a host build slot for 12 h 24 m**, halving the build worker's concurrency until it was reaped; `KICRAFT_BUILD_SLOTS` is now **1** (was 2) and a supervisor reclaims leaked slots (§6.6, §11) |
-| Committed | `a879461` — the plan document with the measured `## §2 Results` |
+| Committed | `a879461` — the plan document with the measured `## §2 Results`; handoff + slot monitor in `7c8e06d`, `9682988`, `750b31f`, `81748fb` |
+| **$0 gate** | `--reference-replay` is **RED** on HEAD: `proto-shield` refuses at `functional_spec` while its contract records no conflict — a 2026-09-16 fixture never refreshed across 37 commits (§12). Reproduce in 1.2 s; do not read it as a regression you caused |
 | Next | attack `unsupported_lowerer_contract` (§5 Move 1), then the BOM obligation layer (§5 Move 3) |
 
 ---
@@ -462,4 +463,73 @@ leak was reproduced deliberately and the tool exercised against it end-to-end:
 After the config change the same checks report `0 held / 1 total`, and the running services show
 `[build-worker] ready (max 1 concurrent build(s))` with `slot_count()` = 1 in a `.env`-loaded
 process.
+
+---
+
+## 12. The $0 reference gate is RED on HEAD
+
+`python -m kicraft.eval.design_acceptance --reference-replay` — the gate §5 tells you to run first —
+**fails on this tree**. Read that as "the guard is stale and must be repaired before it can guard
+anything", not as "the tree is broken".
+
+Measured: 34 rows → **30 committed · 2 recorded blocks** (`speaker-crossover`, `usb-pd-trigger`) **·
+2 refusals** (`buck-3a`, `proto-shield`). `buck-3a`'s refusal is *acceptance* — its contract records
+`feasibility.status == "specification_conflict"`, and `verify_reference_replay` exempts exactly that
+case. The failure is one row:
+
+```
+design acceptance FAILED:
+- proto-shield: reference row does not reproduce its boundary (refused at functional_spec):
+  the reply was schema-valid but a deterministic design contract refused it (see the diagnostic)
+```
+
+The refusing reply is the row's own recorded functional-spec payload:
+
+```json
+{"assumptions": [], "blocks": [{"category": "interface", "name": "UNO_SHIELD",
+ "purpose": "canonical stacking headers and proto area"}], "connections": [], "obligations": []}
+```
+
+with stage status `attempts=3`, `schema_ok=false`, `failure_kind=contract_rejected`,
+`diagnostics=[]` — empty, which is why the printed detail stays generic. The row's contract
+feasibility is `not_yet_reviewed`, not a conflict:
+
+```
+the row's deferred set does not match the contract's deferred obligations;
+the row's obligation ids do not match the contract's reference obligations;
+proto-shield.stacking: has no reviewed pass; proto-shield.proto-regulator: has no reviewed pass;
+proto-shield.regulator: has no valid result status; proto-shield.sourceable-parts: has no reviewed pass
+```
+
+**Why: the row is stale, and the arithmetic is unambiguous.**
+`tests/fixtures/reference_inputs/interface_references.json` was last touched on **2026-09-16**
+(`adb7597`), and **37 commits** have landed since — including every 09-18 commit about the standard
+shield and the prototyping area, none of which touched the reference inputs (`66dc3ea`, `3c382c1`,
+`b3cc6b3`, `bf28b1e` → 0 changes to `reference_inputs`). The functional_spec contract moved
+(09-17's obligation-ownership invariant, 09-18's obligation kinds) and the recorded row was not
+refreshed with it.
+
+**Reproduce in 1.2 s** (the full 34-row gate takes ~9 min):
+
+```bash
+env -i HOME=/home/kicraft PATH="$PATH" TERM=xterm PYTHONUNBUFFERED=1 \
+  .venv/bin/python -m kicraft.eval.design_acceptance --reference-replay --only proto-shield
+```
+
+Note this is also the only way to see the refusing diagnostic: the replay drives the chain inside a
+`tempfile.TemporaryDirectory` and deletes the workspace, and the stage's `diagnostics` list is empty,
+so mirroring the replay with a kept workspace (`/tmp/proto_diag.py` on this box) is how the contract
+reason string above was read.
+
+**The decision this leaves you** — the same shape as the repo's own precedent,
+`834752a "Revert the identity guard: it regressed the reference corpus"`, where the corpus
+arbitrated: either the tightened functional_spec contract is intended and the row's recorded inputs
+plus its deferred/obligation ids must be refreshed, or the contract change was wrong and must be
+reverted. Refreshing is the likely answer, since the contract's own reason names an id and deferred-set
+mismatch rather than a design defect — but that needs evidence, not taste.
+
+Until it is repaired, §5's "cheap gates first" step cannot be used as a pass/fail signal. Use
+`--references` (fixture validation) and the per-arm smoke, and treat `--reference-replay` FAILED as
+the known-red baseline rather than a regression you caused.
+
 
