@@ -545,7 +545,8 @@ same 34-brief corpus and the same box, so the arms isolate code paths:
 | typed layer | **A2** `bc6a2f8` (08-25, pre-typed) → **A3** `b4b8be5` (09-15) | **21 → 13** of 34 | the typed design layer costs ~8 briefs |
 | 09-16 contract push | **A3** (09-15) → **A1** `de74af7` (HEAD) | **13 → 4** of 34 | the contract push costs ~9 briefs |
 
-A2's 21/34 briefs reproduces the era's recorded 22–25/34, so this is not a model or environment
+A2's 21/34 briefs lands one brief below the era's recorded 22–25/34 and well inside that era's own
+±2 spread (§6, item 1), so this is not a model or environment
 story: luna drives the older pipelines to era-level yield on this box today. The plan's first
 pre-registered row is cleared with a wide margin (A2 ≫ 15 fab-ready), which is the gate §3 sets
 for building the pipeline switch. The second row — "the typed layer is fine; the 09-16 contract

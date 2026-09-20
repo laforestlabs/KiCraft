@@ -53,7 +53,10 @@ summary schema, which has no such field (§7).
 | typed design layer | A2 `bc6a2f8` → A3 `b4b8be5` | 21 → 13 of 34 | ~8 briefs |
 | 09-16 contract push | A3 `b4b8be5` → A1 `de74af7` | 13 → 4 of 34 | ~9 briefs |
 
-**A2's 21/34 reproduces the era's recorded 22–25/34** with the *same designer* as the other arms.
+**A2's 21/34 lands one brief below the era's recorded 22–25/34, well inside that era's own ±2
+spread** (the plan's §6 records 22, 24, 22, 25 across four July batches) with the *same designer* as
+the other arms. Note A2 ran ×2 repeats where the era's batches were single passes, so treat 21 vs 22
+as the same band rather than a deficit.
 That kills two hypotheses at once: the model is not the constraint (Luna drives the pre-typed
 pipeline to era yield), and neither is the box. The plan's §3 gate ("build the switch only if
 A2 shows the legacy tree still delivers", threshold ≥15 fab-ready) is cleared with margin.
