@@ -563,7 +563,12 @@ def test_supply_must_name_a_declared_rail():
     assert "unknown_supply_rail" in codes
 
 
-def test_uncurated_part_without_a_declared_interface_is_refused_once():
+def test_uncurated_part_without_a_declared_interface_is_recorded_once():
+    """§4.3 A RECORD class: the claim is recorded, not refused, and only once.
+
+    The part is real and buildable; what is missing is *proof* that its pin functions are the
+    part's own, so the board ships with the note (and the exact part string) on the artifact.
+    """
     intent = _hub75_intent()
     intent["sheets"].append(
         {
@@ -592,10 +597,12 @@ def test_uncurated_part_without_a_declared_interface_is_refused_once():
         {"name": "I2C_SDA", "from": "esp32.sda", "to": "bme.sda"},
         {"name": "I2C_SCL", "from": "esp32.scl", "to": "bme.scl"},
     ]
-    with pytest.raises(ArchitectureIntentError) as excinfo:
-        derive_architecture(intent)
-    assert [row.code for row in excinfo.value.diagnostics] == ["unknown_part_refused"]
-    assert "bme280" in excinfo.value.diagnostics[0].message
+    architecture = derive_architecture(intent)
+    codes = [row.code for row in architecture.advisories]
+    assert codes.count("unknown_part_refused") == 1
+    recorded = next(row for row in architecture.advisories if row.code == "unknown_part_refused")
+    assert "bme280" in recorded.message
+    assert "exact_part=BME280" in recorded.evidence
 
     for row in intent["requirements"]:
         if row["id"] == "bme":
@@ -607,13 +614,13 @@ def test_uncurated_part_without_a_declared_interface_is_refused_once():
             ]
     architecture = derive_architecture(intent)
     assert architecture.declared_interfaces == ["bme"]
+    assert [row.code for row in architecture.advisories] == []
     assert _requirement(architecture, "bme").ports == {
         "gnd": "GND",
         "vdd": "+3V3",
         "sda": "I2C_SDA",
         "scl": "I2C_SCL",
     }
-    assert any("pin functions are a claim" in row for row in architecture.assumptions)
 
 
 def test_intent_slot_commits_on_the_first_draft_through_the_real_driver(tmp_path):
@@ -1199,7 +1206,9 @@ def test_unused_template_pin_names_become_no_connects_not_nets():
     assert len(owned["analog"].ports) == 6
 
 
-def _declared_port_misuse_intent(*, vdd_both: bool, sig_reference: bool) -> dict:
+def _declared_port_misuse_intent(
+    *, vdd_both: bool, sig_reference: bool, spare_both: bool = False
+) -> dict:
     """The reference intent plus one uncurated part carrying declared ports."""
     intent = _hub75_intent()
     intent["sheets"].append(
@@ -1216,6 +1225,12 @@ def _declared_port_misuse_intent(*, vdd_both: bool, sig_reference: bool) -> dict
     sig = {"key": "sig", "direction": "output", "function": "conditioned output"}
     if sig_reference:
         sig["reference_domain"] = "GND"
+    # A pin the design neither powers nor wires: a stated rail *and* a stated reference are
+    # two claims about one net, with no signal to arbitrate them.
+    spare = {"key": "spare", "direction": "input", "function": "unused input"}
+    if spare_both:
+        spare["supply_rail"] = "+3V3"
+        spare["reference_domain"] = "GND"
     intent["requirements"].append(
         {
             "id": "sensor_af",
@@ -1227,6 +1242,7 @@ def _declared_port_misuse_intent(*, vdd_both: bool, sig_reference: bool) -> dict
                 {"key": "gnd", "direction": "power", "function": "ground", "reference_domain": "GND"},
                 {"key": "csb", "direction": "input", "function": "chip select, tied high", "supply_rail": "+3V3"},
                 sig,
+                *([spare] if spare_both else []),
             ],
         }
     )
@@ -1234,19 +1250,51 @@ def _declared_port_misuse_intent(*, vdd_both: bool, sig_reference: bool) -> dict
     return intent
 
 
-def test_declared_port_tie_misuse_is_refused_by_name():
-    """A pin cannot both carry a signal and be tied to its reference.
+def test_declared_port_domain_statement_on_a_signal_port_is_derived():
+    """`reference_domain: GND` on a signal port is the signal's domain, not the pin's tie.
 
-    A model commonly writes reference_domain='GND' on every declared port meaning
-    "ground-referenced"; that ties each pin to GND, so the pin's own supply and signal
-    bindings then conflict with a diagnostic that never names the field. The refusal
-    must point at the misuse rather than surface as conflicting_port_binding.
+    A model commonly writes reference_domain='GND' (and supply_rail=<its own supply>) on
+    every declared port meaning "ground-referenced" / "belongs to the 3V3 domain". The field
+    name cannot tell that apart from the net the pin is tied to, and the design's own signals
+    already state the pin's net, so the compiler takes the signal and records the statement
+    instead of failing the run for it (moves 1a-1b of the yield-recovery plan).
     """
     intent = _declared_port_misuse_intent(vdd_both=True, sig_reference=True)
+    architecture = derive_architecture(intent)
+    requirement = next(row for row in architecture.requirements if row.id == "sensor_af")
+    assert requirement.ports["sig"] == "SENSOR_SIG"
+    notes = "\n".join(architecture.assumptions)
+    assert "the signal owns the pin" in notes
+    assert "the supply input owns the pin" in notes
+
+
+def test_declared_port_tie_misuse_is_still_refused_when_unplaceable():
+    """What the compiler cannot place stays a refusal, named where it is written.
+
+    A pin the design neither powers nor wires, carrying a rail *and* a reference, is two
+    claims about one net with no signal to arbitrate: that stays `declared_port_double_bound`.
+    """
+    intent = _declared_port_misuse_intent(vdd_both=False, sig_reference=False, spare_both=True)
     with pytest.raises(ArchitectureIntentError) as excinfo:
         derive_architecture(intent)
     codes = {row.code for row in excinfo.value.diagnostics}
     assert "declared_port_double_bound" in codes
+
+
+def test_declared_port_unrelated_domain_on_a_signal_port_is_still_refused():
+    """A net that is not the requirement's own supply or ground is a different statement.
+
+    The derive covers the domain statement about the rail that feeds the requirement. A signal
+    port pinned to some other domain is not that, so `declared_signal_port_tied` still names it.
+    """
+    intent = _declared_port_misuse_intent(vdd_both=False, sig_reference=False)
+    intent["power"]["rails"]["GND_LOGIC"] = {"voltage": 0.0}
+    sensor = next(row for row in intent["requirements"] if row["id"] == "sensor_af")
+    sig = next(port for port in sensor["declared_ports"] if port["key"] == "sig")
+    sig["reference_domain"] = "GND_LOGIC"
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(intent)
+    codes = {row.code for row in excinfo.value.diagnostics}
     assert "declared_signal_port_tied" in codes
 
 
@@ -2094,14 +2142,14 @@ def test_intent_without_the_fabrication_obligation_derives_no_prototyping_area()
     assert not any(row.id == "prototyping_area" for row in with_block.requirements)
 
 
-def test_unreviewed_exact_part_for_a_covered_class_is_refused_with_options():
-    """An exact part the reviewed library does not hold cannot satisfy a physical class.
+def test_unreviewed_exact_part_for_a_covered_class_is_recorded_with_its_options():
+    """§4.3 A RECORD class: the part is shipped as chosen, with the reviewed options listed.
 
-    The BOM stage is deterministic for these requirements, so it cannot repair the choice:
-    it refused the proto-shield runs with "requires 1 reviewed 'voltage-regulator' physical
-    part(s), found 0" and no correction round left, because the model answered the demanded
-    class with the familiar but unreviewed `AMS1117-3.3`. Refusing at the architecture stage
-    keeps the correction where the part is still being chosen, and names the reviewed ones.
+    The proto-shield runs answered the demanded `voltage-regulator` class with the familiar but
+    unreviewed `AMS1117-3.3`. The board is buildable and very likely correct, so the choice is
+    recorded on the artifact — with the reviewed identities that would have proven it — instead
+    of killing the run (design-yield-recovery plan §4.3 A; measured as a null while it stayed a
+    refusal, because every run it rescued died one stage later).
     """
     intent = _hub75_intent()
     buck = next(row for row in intent["requirements"] if row["id"] == "buck")
@@ -2113,20 +2161,19 @@ def test_unreviewed_exact_part_for_a_covered_class_is_refused_with_options():
             "component_class": "voltage-regulator",
         }
     ]
-    with pytest.raises(ArchitectureIntentError) as excinfo:
-        derive_architecture(intent)
-    diagnostics = excinfo.value.diagnostics
-    refused = [d for d in diagnostics if d.code == "unreviewed_exact_part"]
-    assert len(refused) == 1
-    assert refused[0].requirement_id == "buck"
-    # The reviewed options travel with the refusal, so the repair is one step.
-    assert "me6211c33m5g-n" in refused[0].evidence
-    assert "ap2112k-3.3trg1" in refused[0].evidence
+    architecture = derive_architecture(intent)
+    recorded = [a for a in architecture.advisories if a.code == "unreviewed_exact_part"]
+    assert len(recorded) == 1
+    # The reviewed options travel with the note, so a reviewer can act on it in one step.
+    assert "me6211c33m5g-n" in recorded[0].evidence
+    assert "ap2112k-3.3trg1" in recorded[0].evidence
+    assert next(r for r in architecture.requirements if r.id == "buck").exact_part == "AMS1117-3.3"
 
-    # The reviewed identity for the same class passes untouched.
+    # The reviewed identity for the same class passes untouched, with nothing to record.
     buck["exact_part"] = "ME6211C33M5G-N"
     architecture = derive_architecture(intent)
     assert next(r for r in architecture.requirements if r.id == "buck").exact_part == "ME6211C33M5G-N"
+    assert [a.code for a in architecture.advisories] == []
 
 
 def test_model_declared_pad_field_is_normalized_to_the_reviewed_default():
@@ -2246,966 +2293,87 @@ def test_stacking_owners_share_one_interface_block():
     )
 
 
-def _declared_port_misuse_intent(*, vdd_both: bool, sig_reference: bool) -> dict:
-    """The reference intent plus one uncurated part carrying declared ports."""
-    intent = _hub75_intent()
-    intent["sheets"].append(
-        {
-            "name": "SENSOR",
-            "stem": "SENSOR",
-            "role": "analog_block",
-            "function": "Condition a sensor signal.",
-        }
-    )
-    vdd = {"key": "vdd", "direction": "power", "function": "3.3 V supply", "supply_rail": "+3V3"}
-    if vdd_both:
-        vdd["reference_domain"] = "GND"
-    sig = {"key": "sig", "direction": "output", "function": "conditioned output"}
-    if sig_reference:
-        sig["reference_domain"] = "GND"
-    intent["requirements"].append(
-        {
-            "id": "sensor_af",
-            "sheet": "SENSOR",
-            "role": "analog_block",
-            "family": "uncurated-sensor-frontend",
-            "declared_ports": [
-                vdd,
-                {"key": "gnd", "direction": "power", "function": "ground", "reference_domain": "GND"},
-                {"key": "csb", "direction": "input", "function": "chip select, tied high", "supply_rail": "+3V3"},
-                sig,
-            ],
-        }
-    )
-    intent["signals"].append({"name": "SENSOR_SIG", "from": "sensor_af.sig", "to": "edge:SENSOR"})
-    return intent
-
-
-def test_declared_port_tie_misuse_is_refused_by_name():
-    """A pin cannot both carry a signal and be tied to its reference.
-
-    A model commonly writes reference_domain='GND' on every declared port meaning
-    "ground-referenced"; that ties each pin to GND, so the pin's own supply and signal
-    bindings then conflict with a diagnostic that never names the field. The refusal
-    must point at the misuse rather than surface as conflicting_port_binding.
-    """
-    intent = _declared_port_misuse_intent(vdd_both=True, sig_reference=True)
-    with pytest.raises(ArchitectureIntentError) as excinfo:
-        derive_architecture(intent)
-    codes = {row.code for row in excinfo.value.diagnostics}
-    assert "declared_port_double_bound" in codes
-    assert "declared_signal_port_tied" in codes
-
-
-def test_declared_port_tie_on_supply_ground_and_strap_pins_is_legal():
-    """The field's real meaning: the supply pin, the ground pin, and a strapped pin.
-
-    `vdd` carries its rail, `gnd` is tied to its reference, and `csb` is a signal pin
-    held at the rail — none of these is the misuse, so the guard must not fire.
-    """
-    intent = _declared_port_misuse_intent(vdd_both=False, sig_reference=False)
-    try:
-        derive_architecture(intent)
-    except ArchitectureIntentError as exc:
-        codes = {row.code for row in exc.value.diagnostics}
-        assert "declared_port_double_bound" not in codes
-        assert "declared_signal_port_tied" not in codes
-
-
-def test_obligation_ownership_refusal_names_the_fix():
-    """An obligation listed only at the top level must be refused with an actionable message.
-
-    The draft has to be repairable from the error alone: name the obligation and the
-    invariant (the top-level `obligations` list is the union of the requirements' own
-    rows), not just "ownership mismatch", which the model cannot act on.
-    """
-    from pydantic import ValidationError
-
-    intent = _hub75_intent()
-    intent["obligations"] = [
-        {
-            "kind": "physical",
-            "original_obligation_id": "single-sensor-input",
-            "component_class": "single-sensor-input",
-        }
-    ]
-    with pytest.raises(ValidationError) as excinfo:
-        derive_architecture(intent)
-    message = str(excinfo.value)
-    assert "single-sensor-input" in message
-    assert "listed_at_top_level_only" in message
-    assert "union of the requirements" in message
-
-
-def test_one_port_carries_one_net_and_the_refusal_names_the_menu():
-    """Two signals on one port must name the alternatives (the top live failure).
-
-    `switch-input` has a single `signal` port, so three microstep switches are three
-    requirements — not one port bound three times. The refusal must show the menu.
-    """
-    intent = _hub75_intent()
-    intent["sheets"].append(
-        {
-            "name": "SW",
-            "stem": "SW",
-            "role": "user_io",
-            "function": "Microstep select switches.",
-        }
-    )
-    intent["requirements"].append(
-        {
-            "id": "microstep",
-            "sheet": "SW",
-            "role": "user_io",
-            "family": "switch-input",
-            "parameters": {"pull_policy": "internal"},
-            "functional_blocks": ["MICROSTEP_SELECT"],
-        }
-    )
-    intent["signals"] = [
-        *intent["signals"],
-        {"name": "MS1", "from": "esp32.gpio4", "to": "microstep.signal"},
-        {"name": "MS2", "from": "esp32.gpio5", "to": "microstep.signal"},
-    ]
-    with pytest.raises(ArchitectureIntentError) as excinfo:
-        derive_architecture(intent)
-    row = next(d for d in excinfo.value.diagnostics if d.code == "conflicting_port_binding")
-    assert "one port carries one net" in row.message
-    assert "gnd,signal,vdd" in row.message  # the requirement's actual menu
-
-
-def test_pattern_lowerer_port_refusal_prints_its_contract_not_none():
-    """A pattern lowerer publishes words, not keys; the menu must not read "(none)".
-
-    Every port refusal embeds the requirement's port menu. For a family whose ports
-    are a pattern (screw-terminal's pinN/pN), an empty menu teaches the draft nothing.
-    """
-    intent = _hub75_intent()
-    intent["sheets"].append(
-        {
-            "name": "TERM",
-            "stem": "TERM",
-            "role": "connector",
-            "function": "Sensor terminal.",
-        }
-    )
-    intent["requirements"].append(
-        {
-            "id": "sensor_term",
-            "sheet": "TERM",
-            "role": "connector",
-            "family": "screw-terminal",
-            "functional_blocks": ["SENSOR_INPUT"],
-        }
-    )
-    intent["signals"] = [
-        *intent["signals"],
-        {"name": "SENSOR_ADC", "from": "esp32.gpio6", "to": "sensor_term.nope"},
-    ]
-    with pytest.raises(ArchitectureIntentError) as excinfo:
-        derive_architecture(intent)
-    rows = [d for d in excinfo.value.diagnostics if d.code == "unknown_interface_port"]
-    assert rows, [d.code for d in excinfo.value.diagnostics]
-    assert "(none)" not in rows[0].evidence[0]
-    assert "pin" in rows[0].evidence[0].lower()
-
-
-def test_lowerer_supply_without_a_published_port_is_derived_not_refused():
-    """A status LED draws its current from its own `drive` signal, not from a rail pin.
-
-    The canary (2026-09-17, `esp32-s3-sensor`, `chamfered-badge`, `star-ornament`) refused
-    twelve drafts with `unsupported_supply_port` because the lowerer publishes no supply
-    contact. The rail is the intent and it lands on drive/gnd; nothing else is invented, and
-    the derivation says so in the assumptions.
-    """
-    intent = _hub75_intent()
-    intent["requirements"].append(
-        {
-            "id": "status",
-            "sheet": "MCU",
-            "role": "driver",
-            "family": "status-led",
-            "parameters": {"rail_voltage": 3.3, "led_vf": 2.0, "target_current_ma": 2},
-            "supply": "+3V3",
-            "functional_blocks": ["ESP32_S3_CONTROLLER"],
-        }
-    )
-    intent["signals"].append(
-        {"name": "STATUS", "from": "esp32.output_status", "to": "status.drive"}
-    )
-
-    architecture = derive_architecture(intent)
-
-    assert _requirement(architecture, "status").ports == {"drive": "STATUS", "gnd": "GND"}
-    assert any(
-        "status" in note and "publishes no supply port" in note
-        for note in architecture.assumptions
-    )
-
-
-def test_published_lowerer_supply_contact_takes_the_declared_rail():
-    """A lowerer that publishes `vdd` gets its rail there without the model binding it.
-
-    The port set a lowerer's own build code needs is the compiler's to complete: the rail a
-    requirement declares lands on the published supply contact, so `unbound_required_port`
-    and the contract check read a document the model never wrote.
-    """
-    intent = _hub75_intent()
-    intent["requirements"].append(
-        {
-            "id": "pullups",
-            "sheet": "MCU",
-            "role": "bus_interface",
-            "family": "i2c-pullups",
-            "parameters": {"speed_hz": 400000, "bus_capacitance_pf": 50, "voltage": 3.3},
-            "supply": "+3V3",
-            "functional_blocks": ["ESP32_S3_CONTROLLER"],
-        }
-    )
-    intent["signals"].extend(
-        [
-            {"name": "SDA", "from": "esp32.sda", "to": "pullups.sda"},
-            {"name": "SCL", "from": "esp32.scl", "to": "pullups.scl"},
-        ]
-    )
-
-    ports = _requirement(derive_architecture(intent), "pullups").ports
-
-    assert ports["vdd"] == "+3V3"
-    assert ports["sda"] == "SDA" and ports["scl"] == "SCL"
-
-
-def test_unpublished_authored_supply_port_falls_back_to_the_family_port():
-    """A rail named on a port the family does not publish still reaches the part.
-
-    `supply_bindings` is an optional refinement: when the named pin is not one the family
-    publishes, the rail is bound to the family's own supply port instead of refusing the
-    draft for a name the compiler can derive.
-    """
-    intent = _hub75_intent()
-    intent["requirements"].append(
-        {
-            "id": "pullups",
-            "sheet": "MCU",
-            "role": "bus_interface",
-            "family": "i2c-pullups",
-            "supply_bindings": {"vdd_logic": "+3V3"},
-            "parameters": {"speed_hz": 400000, "bus_capacitance_pf": 50, "voltage": 3.3},
-            "functional_blocks": ["ESP32_S3_CONTROLLER"],
-        }
-    )
-    intent["signals"].extend(
-        [
-            {"name": "SDA", "from": "esp32.sda", "to": "pullups.sda"},
-            {"name": "SCL", "from": "esp32.scl", "to": "pullups.scl"},
-        ]
-    )
-
-    ports = _requirement(derive_architecture(intent), "pullups").ports
-
-    assert ports["vdd"] == "+3V3"
-    assert "vdd_logic" not in ports
-
-
-def test_two_signals_out_of_one_source_port_join_the_first_net():
-    """One physical pin carries one net, under the first name the design gave it.
-
-    The canary (2026-09-17, `stm32-min` NRST, `stepper-a4988` DIR, `speaker-crossover`
-    WOOFER_OUT) refused drafts whose second signal left a port the first signal already
-    bound. That is the same pin, so the peers join the existing net and the join is
-    reported rather than refused.
-    """
-    intent = _hub75_intent()
-    intent["sheets"].append(
-        {
-            "name": "SWD",
-            "stem": "SWD",
-            "role": "programming",
-            "function": "Programming header.",
-        }
-    )
-    intent["requirements"].append(
-        {
-            "id": "swd",
-            "sheet": "SWD",
-            "role": "programming",
-            "family": "pin-header",
-            "parameters": {"rows": 1, "gender": "male"},
-            "functional_blocks": ["ESP32_S3_CONTROLLER"],
-        }
-    )
-    intent["signals"].extend(
-        [
-            {"name": "SWD_CLK", "from": "esp32.gpio7", "to": "swd.pin1"},
-            {"name": "SWD_DIO", "from": "esp32.gpio7", "to": "swd.pin2"},
-        ]
-    )
-
-    architecture = derive_architecture(intent)
-
-    assert _requirement(architecture, "swd").ports == {"pin1": "SWD_CLK", "pin2": "SWD_CLK"}
-    assert any("join net SWD_CLK" in note for note in architecture.assumptions)
-
-
-def test_standard_stacking_pinmap_is_derived_from_the_template():
-    """The template owns the pin/net map; the role is the design statement.
-
-    The canary (2026-09-17, `proto-shield`, `snowman-ornament`) refused three stacking
-    connectors for a map the approved template already fixes, then reported every net in
-    that map a second time. The map is derived; a *different* authored map is still refused.
-    """
-    from kicraft.form_factors import get_template
-
-    template = get_template("arduino_uno_shield")
-    intent = _hub75_intent()
-    intent["standard_form_factor"] = template.key
-    intent["sheets"].append(
-        {
-            "name": "UNO HEADERS",
-            "stem": "UNO_HEADERS",
-            "role": "connector",
-            "function": "Arduino Uno shield stacking interface.",
-        }
-    )
-    for connector in template.fixed_connectors:
-        intent["requirements"].append(
-            {
-                "id": f"uno_{connector.role}",
-                "sheet": "UNO HEADERS",
-                "role": "connector",
-                "family": "pin-header",
-                "parameters": {"rows": 1, "gender": "female"},
-                "standard_stacking_role": connector.role,
-                "functional_blocks": ["UNO_HOST_INTERFACE"],
-            }
-        )
-
-    architecture = derive_architecture(intent)
-    owned = {
-        requirement.standard_stacking_role: requirement
-        for requirement in architecture.requirements
-        if requirement.standard_stacking_role
-    }
-    assert owned["power"].ports["pin6"] == "GND"
-    assert owned["power"].ports["pin1"] == "NC"
-
-    wrong = _hub75_intent()
-    wrong["standard_form_factor"] = template.key
-    wrong["sheets"] = [*wrong["sheets"], *intent["sheets"][-1:]]
-    wrong["requirements"] = [
-        *wrong["requirements"],
-        *[
-            {**row, "ties": {"pin1": "GND"}}
-            for row in intent["requirements"]
-            if row.get("standard_stacking_role") == "power"
-        ],
-    ]
-    with pytest.raises(ArchitectureIntentError) as excinfo:
-        derive_architecture(wrong)
-    assert "invalid_standard_stacking_pinmap" in {d.code for d in excinfo.value.diagnostics}
-
-
-def test_architecture_top_level_obligations_are_written_from_the_committed_set():
-    """The top-level list is the committed set; the draft states ownership only.
-
-    The canary (2026-09-17, `r2r-dac`, `round-led-ring`, `rounded-c3-devboard`,
-    `snowman-ornament`) refused six drafts per run for an obligation list the compiler can
-    write. The draft's job is to attach each committed row, once and verbatim, to the
-    requirement that implements it.
-    """
-    obligation = {
-        "kind": "physical",
-        "original_obligation_id": "status-led",
-        "component_class": "status-led",
-    }
-    prompt_state = {
-        "intent": {"goal": "reference board", "obligations": [obligation]},
-        "functional_spec": {"obligations": [obligation]},
-    }
-    intent = _hub75_intent()
-    next(row for row in intent["requirements"] if row["id"] == "led")["obligations"] = [
-        {**obligation, "component_class": "led"}
-    ]
-
-    payload, _expanded = _normalize_stage_response("architecture", intent, prompt_state)
-
-    assert payload["obligations"] == [obligation]
-    restored = next(row for row in payload["requirements"] if row["id"] == "led")
-    assert restored["obligations"] == [obligation]
-    # The parsed architecture the stage commits agrees with the payload it was built from.
-    from kicraft.design.models import Architecture
-
-    assert Architecture.model_validate(payload).obligations[0].model_dump(
-        mode="json", exclude_none=True
-    ) == obligation
-
-
-def test_committed_obligation_with_no_implementing_requirement_is_refused():
-    """An obligation nobody owns cannot be derived: the refusal names the fix.
-
-    The direction that *is* derivable (the draft only attaches rows) is written by the
-    compiler; this is the one the draft has to get right.
-    """
-    from kicraft.server.stage_contracts import StageSchemaError
-
-    obligation = {
-        "kind": "physical",
-        "original_obligation_id": "status-led",
-        "component_class": "status-led",
-    }
-    prompt_state = {"intent": {"goal": "reference board", "obligations": [obligation]}}
-
-    with pytest.raises(StageSchemaError) as rejected:
-        _normalize_stage_response("architecture", _hub75_intent(), prompt_state)
-
-    assert rejected.value.diagnostic["code"] == "source_obligation_not_retained"
-    assert rejected.value.diagnostic["evidence"] == [obligation]
-
-
-def test_unknown_slot_field_names_itself_and_the_fix():
-    """An invented key must be repairable from the refusal alone.
-
-    The provider schema is generated from the slot models, so an `extra_forbidden` error is a
-    key the draft invented; the pydantic text names the key but not the repair.
-    """
-    from kicraft.server.stage_contracts import StageSchemaError
-
-    intent = _hub75_intent()
-    intent["questions_asked"] = ["Which LED colour?"]
-
-    with pytest.raises(StageSchemaError) as rejected:
-        _normalize_stage_response("architecture", intent, {"intent": {}, "functional_spec": {}})
-
-    message = str(rejected.value)
-    assert "questions_asked" in message
-    assert "remove each unknown key" in message
-
-
-def test_quantity_obligation_may_stand_alone_at_the_top_level():
-    """A count over the whole design is not an implementation claim.
-
-    The canary (2026-09-17, `rc-lowpass-bnc`, 2 BNC jacks + a trim pot) attached the physical rows
-    to their parts and left `two-bnc-connectors-count` at the top level: two jacks are two
-    requirements, so no single one implements the count. Refusing it cost the whole design.
-    """
-    quantity = {
-        "kind": "quantity",
-        "original_obligation_id": "two-bnc-connectors-count",
-        "subject": "bnc connectors",
-        "minimum": 2,
-    }
-    prompt_state = {
-        "intent": {"goal": "reference board", "obligations": [quantity]},
-        "functional_spec": {"obligations": [quantity]},
-    }
-
-    payload, _expanded = _normalize_stage_response("architecture", _hub75_intent(), prompt_state)
-
-    assert payload["obligations"] == [quantity]
-    assert not any(row.get("obligations") for row in payload["requirements"])
-
-
-def test_one_obligation_may_be_implemented_by_several_requirements():
-    """Three binding posts are three requirements, each claiming the one binding-post obligation.
-
-    The canary (2026-09-17, `speaker-crossover`) attached the same row to all three connectors and
-    was refused as a duplicate owner. The rows are identical, so ownership is unambiguous; the BOM
-    unit counts the groups per requirement.
-    """
-    obligation = {
-        "kind": "physical",
-        "original_obligation_id": "binding_post_terminal",
-        "component_class": "binding-post-terminal",
-    }
-    prompt_state = {
-        "intent": {"goal": "reference board", "obligations": [obligation]},
-        "functional_spec": {"obligations": [obligation]},
-    }
-    intent = _hub75_intent()
-    intent["sheets"].append(
-        {
-            "name": "OUT",
-            "stem": "OUT",
-            "role": "connector",
-            "function": "Speaker output terminals.",
-        }
-    )
-    for index in (1, 2, 3):
-        intent["requirements"].append(
-            {
-                "id": f"post_{index}",
-                "sheet": "OUT",
-                "role": "connector",
-                "family": "binding-post",
-                "obligations": [obligation],
-                "declared_ports": [
-                    {
-                        "key": "signal",
-                        "pin": str(index),
-                        "direction": "bidirectional",
-                        "function": "speaker output contact",
-                    }
-                ],
-                "functional_blocks": ["ESP32_S3_CONTROLLER"],
-            }
-        )
-
-    payload, _expanded = _normalize_stage_response("architecture", intent, prompt_state)
-
-    owning = [row["id"] for row in payload["requirements"] if row.get("obligations")]
-    assert owning == ["post_1", "post_2", "post_3"]
-    assert payload["obligations"] == [obligation]
-
-
-# A board fabrication feature and an absent class: the two obligations that are not parts. The
-# raw rows spell the feature/class the way a brief does, so the canonicalising validator is
-# exercised too.
-_FABRICATION_OBLIGATION = {
-    "kind": "fabrication",
-    "original_obligation_id": "copper_heatsink_area",
-    "feature": "Copper_Area",
-    "minimum": 300,
-    "unit": "mm2",
-}
-_FABRICATION_CANONICAL = {**_FABRICATION_OBLIGATION, "feature": "copper-area"}
-_NEGATIVE_OBLIGATION = {
-    "kind": "negative",
-    "original_obligation_id": "no_microcontroller",
-    "absent_class": "Microcontroller",
-}
-_NEGATIVE_CANONICAL = {**_NEGATIVE_OBLIGATION, "absent_class": "microcontroller"}
-
-
-@pytest.mark.parametrize(
-    "obligation, canonical",
-    [
-        pytest.param(_FABRICATION_OBLIGATION, _FABRICATION_CANONICAL, id="fabrication"),
-        pytest.param(_NEGATIVE_OBLIGATION, _NEGATIVE_CANONICAL, id="negative"),
-    ],
-)
-def test_board_fact_obligation_commits_with_no_owning_requirement(obligation, canonical):
-    """A printed board feature and an absent class are board-level facts, not parts.
-
-    The canary (2026-09-17, `led-cc-driver`, `star-ornament`, `buck-3a`, `thermocouple-amp`)
-    turned "printed copper area as a heatsink" and "no microcontroller" into `physical`
-    obligations with a component class no BOM line can ever be, so
-    `physical-obligation-unfulfilled` refused those designs forever.
-    """
-    from kicraft.design.models import Architecture
-
-    prompt_state = {
-        "intent": {"goal": "reference board", "obligations": [obligation]},
-        "functional_spec": {"obligations": [obligation]},
-    }
-
-    payload, _expanded = _normalize_stage_response("architecture", _hub75_intent(), prompt_state)
-
-    assert payload["obligations"] == [canonical]
-    # No requirement implements it, and the architecture stage commits it that way.
-    assert not any(row.get("obligations") for row in payload["requirements"])
-    assert Architecture.model_validate(payload).obligations[0].model_dump(
-        mode="json", exclude_none=True
-    ) == canonical
-
-
-def test_board_fact_obligations_survive_intent_to_architecture_verbatim():
-    """Retention is keyed by `(kind, original_obligation_id)`, so the new kinds flow through.
-
-    Measured with the real helpers rather than assumed: the intent row is canonicalised once,
-    `restore_source_obligations` writes the top-level list from the committed set, the
-    functional_spec copy is compared row-for-row and still refuses a dropped row, and the
-    architecture stage commits both rows with no owner.
-    """
-    from kicraft.server.stage_contracts import (
-        StageSchemaError,
-        restore_source_obligations,
-        validate_obligation_retention,
-    )
-
-    rows = [_FABRICATION_CANONICAL, _NEGATIVE_CANONICAL]
-    prompt_state = {
-        "intent": {"goal": "reference board", "obligations": [*rows]},
-        "functional_spec": {"obligations": [*rows]},
-    }
-
-    restored = restore_source_obligations({}, {"intent": prompt_state["intent"]})
-    assert restored["obligations"] == rows
-
-    spec = {
-        "blocks": [{"name": "DRIVER", "category": "drive", "purpose": "Drive the LED string."}],
-        "obligations": [*rows],
-    }
-    committed, _expanded = _normalize_stage_response(
-        "functional_spec", spec, {"intent": prompt_state["intent"]}
-    )
-    assert committed["obligations"] == rows
-
-    with pytest.raises(StageSchemaError) as dropped:
-        _normalize_stage_response(
-            "functional_spec",
-            {**spec, "obligations": rows[:1]},
-            {"intent": prompt_state["intent"]},
-        )
-    assert dropped.value.diagnostic["evidence"] == [_NEGATIVE_CANONICAL]
-    # Neither row needs a requirement, in the retention check or in the committed architecture.
-    validate_obligation_retention("architecture", {}, prompt_state)
-
-    payload, _expanded = _normalize_stage_response("architecture", _hub75_intent(), prompt_state)
-
-    assert payload["obligations"] == rows
-    assert not any(row.get("obligations") for row in payload["requirements"])
-
-
-def test_fabrication_obligation_limit_needs_a_minimum():
-    """A unit with no minimum states no limit: the model refuses the meaningless row."""
-    from kicraft.design.models import FabricationObligation
-
-    with pytest.raises(ValueError):
-        FabricationObligation(
-            kind="fabrication",
-            original_obligation_id="copper_heatsink_area",
-            feature="copper-area",
-            unit="mm2",
-        )
-
-
-def test_ownership_exemption_is_per_row_and_does_not_shield_a_physical_row():
-    """A `fabrication` row beside an unowned `physical` row does not excuse the physical one."""
-    from kicraft.server.stage_contracts import StageSchemaError
-
-    physical = {
-        "kind": "physical",
-        "original_obligation_id": "status_led",
-        "component_class": "status-led",
-    }
-    prompt_state = {
-        "intent": {
-            "goal": "reference board",
-            "obligations": [physical, _FABRICATION_CANONICAL],
-        },
-        "functional_spec": {"obligations": [physical, _FABRICATION_CANONICAL]},
-    }
-    intent = _hub75_intent()
-    next(row for row in intent["requirements"] if row["id"] == "led")["obligations"] = [physical]
-
-    payload, _expanded = _normalize_stage_response("architecture", intent, prompt_state)
-
-    assert payload["obligations"] == [physical, _FABRICATION_CANONICAL]
-    assert [row["id"] for row in payload["requirements"] if row.get("obligations")] == ["led"]
-
-    for row in intent["requirements"]:
-        row.pop("obligations", None)
-    with pytest.raises(StageSchemaError) as refused:
-        _normalize_stage_response("architecture", intent, prompt_state)
-    assert refused.value.diagnostic["evidence"] == [physical]
-
-
-_PROTOTYPING_AREA_OBLIGATION = {
-    "kind": "fabrication",
-    "original_obligation_id": "prototyping_area",
-    "feature": "prototyping-area",
-}
-
-
-def _prototyping_area_intent() -> dict:
-    """A brief whose only stated board feature is the pad field: no part, no net, no signal."""
+def _one_part_intent(requirement: dict, signals: list[dict] | None = None) -> dict:
+    """The smallest intent that can carry one lowerer-family part of its own."""
     return {
+        "topologies": {"POWER": "5 V input header"},
+        "comms_protocols": [],
         "mcu_present": False,
-        "sheets": [],
-        "requirements": [],
-        "signals": [],
-        "obligations": [dict(_PROTOTYPING_AREA_OBLIGATION)],
-    }
-
-
-def _prototyping_area_spec(name: str = "PROTOTYPING AREA") -> dict:
-    return {
-        "blocks": [
-            {
-                "name": name,
-                "category": "interface",
-                "purpose": "Bare pad field the user solders through-hole parts into.",
-                "count": 1,
-            }
-        ],
-        "connections": [],
-    }
-
-
-def test_fabrication_obligation_derives_the_prototyping_area_sheet_and_requirement():
-    """A `fabrication` obligation is the whole statement; the derivation writes the rest.
-
-    The measured failure: the brief asks for a prototyping area, the model records it as an
-    adjective, and every later stage has nothing to build -- a sheet with no requirement dies at
-    BOM (empty sheet) and a part the model invents from prose dies at the architecture gates.
-    Here the field is the only thing the board has: the spec declares no block for it (it must
-    not -- a block is a user-visible function), so the derived requirement owns none.
-    """
-    from kicraft.design.models import Architecture, FunctionalSpec
-    from kicraft.design.synthesis.validation import (
-        check_every_block_has_sheet,
-        check_fs_connections_mapped,
-    )
-
-    spec = {"blocks": [], "connections": []}
-    architecture = derive_architecture(_prototyping_area_intent(), spec)
-
-    sheet = next(row for row in architecture.sheets if row.stem == "PROTOTYPING_AREA")
-    assert sheet.name == "PROTOTYPING AREA"
-    assert "solders" in sheet.function
-
-    requirement = _requirement(architecture, "prototyping_area")
-    assert requirement.sheet == "PROTOTYPING AREA"
-    assert requirement.role == "user_io"
-    assert requirement.family == "prototyping-area"
-    assert requirement.parameters == {"rows": 5, "cols": 5, "pitch_mm": 2.54}
-    assert requirement.ports == {}
-    assert requirement.functional_blocks == []
-    # The row is a board-level fact: `fabrication` is ownership-exempt and owns no requirement.
-    assert requirement.obligations == []
-    assert [row.model_dump(exclude_none=True) for row in architecture.obligations] == [
-        _PROTOTYPING_AREA_OBLIGATION
-    ]
-    assert any(
-        row.startswith("prototyping_area:") and row.endswith("(derived)")
-        for row in architecture.assumptions
-    )
-
-    # The gates the architecture stage commits on (`cli_app.py` R4) pass with no block owning the
-    # field: the board's own `fabrication` row is the exemption from block membership, and the
-    # field binds no net to cross a sheet with. The real normalization keeps the requirement.
-    functional_spec = FunctionalSpec.model_validate(spec)
-    assert check_every_block_has_sheet(functional_spec, architecture).ok
-    assert check_fs_connections_mapped(functional_spec, architecture).ok
-    payload, _expanded = _normalize_stage_response(
-        "architecture",
-        architecture.model_dump(exclude_none=True),
-        {"intent": _prototyping_area_intent(), "functional_spec": spec},
-    )
-    committed = Architecture.model_validate(payload)
-    assert [row.id for row in committed.requirements] == ["prototyping_area"]
-    # No recipe is invented for a board feature, and the requirement itself resolves to the
-    # deterministic pad-field lowerer: its sheet is BOM work with a known build rather than an
-    # empty sheet the model would have to invent parts for.
-    assert committed.unresolved_requirement_ids == ["prototyping_area"]
-    assert committed.recipe_selections == []
-    from kicraft.design.lowering import lower_requirement
-
-    assert lower_requirement(_requirement(committed, "prototyping_area")) is not None
-
-
-def test_prototyping_area_requirement_claims_the_committed_block_that_asked_for_it():
-    """No block is expected by default; one is claimed only if a spec declares it anyway.
-
-    The functional spec must not declare a block for the pad field (it is a board feature, not a
-    user-visible function), so the derived requirement owns no block in the normal case. The
-    matching is kept for the spec that declares one anyway: the requirement must then claim that
-    block's exact name, or the block-coverage gate reports it unowned.
-    """
-    from kicraft.design.models import FunctionalSpec
-
-    matched = derive_architecture(_prototyping_area_intent(), _prototyping_area_spec("PROTO BOARD"))
-    assert _requirement(matched, "prototyping_area").functional_blocks == ["PROTO BOARD"]
-
-    # The committed slot reaches the derivation as a mapping or as its own model.
-    committed = FunctionalSpec.model_validate(_prototyping_area_spec("PAD_FIELD"))
-    assert _requirement(
-        derive_architecture(_prototyping_area_intent(), committed), "prototyping_area"
-    ).functional_blocks == ["PAD_FIELD"]
-
-    for spec in (None, _prototyping_area_spec("POWER INPUT"), {"blocks": []}):
-        architecture = derive_architecture(_prototyping_area_intent(), spec)
-        assert _requirement(architecture, "prototyping_area").functional_blocks == []
-
-
-def test_derived_pad_field_clears_the_commit_gates_with_no_spec_block():
-    """The default shape: no block for the field, and R4 still commits the board.
-
-    A `fabrication` row is a property of the board, so the derived requirement implements no
-    functional block and claims none; `check_every_block_has_sheet` exempts exactly that case
-    (keyed by the row's obligation id) while every other requirement still declares its block.
-    """
-    from kicraft.design.models import FunctionalSpec
-    from kicraft.design.synthesis.validation import (
-        check_every_block_has_sheet,
-        check_fs_connections_mapped,
-    )
-
-    intent = _hub75_intent()
-    intent["obligations"] = [dict(_PROTOTYPING_AREA_OBLIGATION)]
-    spec = {
-        "blocks": [
-            {"name": name, "category": "interface", "purpose": "Stated function.", "count": 1}
-            for name in (
-                "ESP32_S3_CONTROLLER",
-                "POWER_DISTRIBUTION",
-                "HUB75_DISPLAY_INTERFACE",
-                "ADDRESSABLE_LED_OUTPUT",
-                "USB_C_PD_INPUT",
-            )
-        ],
-        "connections": [],
-    }
-
-    architecture = derive_architecture(intent, spec)
-
-    assert _requirement(architecture, "prototyping_area").functional_blocks == []
-    functional_spec = FunctionalSpec.model_validate(spec)
-    assert check_every_block_has_sheet(functional_spec, architecture).ok
-    assert check_fs_connections_mapped(functional_spec, architecture).ok
-
-
-def test_a_requirement_owned_fabrication_row_still_derives_the_pad_field():
-    """`fabrication` may ride a requirement (it is ownership-exempt); the fact still counts."""
-    intent = _hub75_intent()
-    next(row for row in intent["requirements"] if row["id"] == "led")["obligations"] = [
-        dict(_PROTOTYPING_AREA_OBLIGATION)
-    ]
-
-    architecture = derive_architecture(intent, _prototyping_area_spec())
-
-    assert _requirement(architecture, "prototyping_area").sheet == "PROTOTYPING AREA"
-
-
-def test_second_derivation_pass_does_not_duplicate_the_prototyping_area():
-    """The derivation is a pure function of the obligation, and a declared field is left alone."""
-    spec = _prototyping_area_spec()
-    first = derive_architecture(_prototyping_area_intent(), spec)
-    second = derive_architecture(_prototyping_area_intent(), spec)
-    assert first.model_dump() == second.model_dump()
-    assert [row.stem for row in first.sheets] == ["PROTOTYPING_AREA"]
-
-    # A model that stated the feature itself -- its own sheet prose, its own family, its own
-    # ports -- keeps every one of those. The guard reads the id and the family, so no second
-    # requirement and no second sheet appear at all.
-    declared = {
+        "power": {"rails": {"+5V": {"voltage": 5.0, "from": "input.pin1"}}},
         "sheets": [
             {
-                "name": "PROTO AREA",
-                "stem": "PROTOTYPING_AREA",
-                "role": "user_io",
-                "function": "Pad field the user solders into (model text).",
-            }
+                "name": "INPUT",
+                "stem": "INPUT",
+                "role": "connector",
+                "function": "5 V input header.",
+            },
+            {
+                "name": "PART",
+                "stem": "PART",
+                "role": "analog_block",
+                "function": "The part under test.",
+            },
         ],
         "requirements": [
             {
-                "id": "prototyping_area",
-                "sheet": "PROTO AREA",
-                "role": "user_io",
+                "id": "input",
+                "sheet": "INPUT",
+                "role": "connector",
                 "family": "pin-header",
                 "parameters": {"rows": 1, "gender": "male"},
-                "functional_blocks": ["PROTOTYPING AREA"],
-                "ties": {"pin1": "GND"},
-            }
+                "ties": {"pin1": "+5V", "pin2": "GND"},
+                "functional_blocks": ["POWER_IN"],
+            },
+            {"sheet": "PART", "functional_blocks": ["THE_PART"], **requirement},
         ],
-        "signals": [],
-        "obligations": [dict(_PROTOTYPING_AREA_OBLIGATION)],
+        "signals": signals or [],
+        "assumptions": [],
     }
-    architecture = derive_architecture(declared, spec)
-
-    assert [row.stem for row in architecture.sheets] == ["PROTOTYPING_AREA"]
-    assert architecture.sheets[0].function == "Pad field the user solders into (model text)."
-    requirement = _requirement(architecture, "prototyping_area")
-    assert requirement.sheet == "PROTO AREA"
-    assert requirement.family == "pin-header"
-    assert requirement.parameters == {"rows": 1, "gender": "male"}
-    assert requirement.ports == {"pin1": "GND"}
-    assert not any("derived from the committed" in row for row in architecture.assumptions)
 
 
-def test_declared_prototyping_area_sheet_is_reused_not_duplicated():
-    """A model-declared sheet keeps its prose; only the missing requirement is derived onto it."""
-    intent = _prototyping_area_intent()
-    intent["sheets"] = [
-        {
-            "name": "PROTO AREA",
-            "stem": "PROTOTYPING_AREA",
-            "role": "user_io",
-            "function": "Pad field the user solders into (model text).",
-        }
-    ]
+def test_published_return_contact_is_answered_with_the_design_ground():
+    """A lowerer's return contact is a fact about the part, not a statement to extract.
 
-    architecture = derive_architecture(intent, _prototyping_area_spec())
-
-    assert [row.stem for row in architecture.sheets] == ["PROTOTYPING_AREA"]
-    assert architecture.sheets[0].function == "Pad field the user solders into (model text)."
-    assert _requirement(architecture, "prototyping_area").sheet == "PROTO AREA"
-
-
-def test_intent_without_the_fabrication_obligation_derives_no_prototyping_area():
-    """A design that never named the feature is untouched, even when a spec block names it."""
-    with_block = derive_architecture(_hub75_intent(), _prototyping_area_spec())
-
-    assert with_block.model_dump() == derive_architecture(_hub75_intent()).model_dump()
-    assert not any(row.stem == "PROTOTYPING_AREA" for row in with_block.sheets)
-    assert not any(row.id == "prototyping_area" for row in with_block.requirements)
-
-
-def test_unreviewed_exact_part_for_a_covered_class_is_refused_with_options():
-    """An exact part the reviewed library does not hold cannot satisfy a physical class.
-
-    The BOM stage is deterministic for these requirements, so it cannot repair the choice:
-    it refused the proto-shield runs with "requires 1 reviewed 'voltage-regulator' physical
-    part(s), found 0" and no correction round left, because the model answered the demanded
-    class with the familiar but unreviewed `AMS1117-3.3`. Refusing at the architecture stage
-    keeps the correction where the part is still being chosen, and names the reviewed ones.
+    A coin cell's `negative` is the return of the reviewed part, so the design's own ground
+    answers it: the compiler binds the published return instead of refusing the run for the
+    one contact the draft did not restate (move 1a). The draft binds `positive` itself.
     """
-    intent = _hub75_intent()
-    buck = next(row for row in intent["requirements"] if row["id"] == "buck")
-    buck["exact_part"] = "AMS1117-3.3"
-    buck["obligations"] = [
+    intent = _one_part_intent(
         {
-            "kind": "physical",
-            "original_obligation_id": "regulator",
-            "component_class": "voltage-regulator",
-        }
-    ]
-    with pytest.raises(ArchitectureIntentError) as excinfo:
-        derive_architecture(intent)
-    diagnostics = excinfo.value.diagnostics
-    refused = [d for d in diagnostics if d.code == "unreviewed_exact_part"]
-    assert len(refused) == 1
-    assert refused[0].requirement_id == "buck"
-    # The reviewed options travel with the refusal, so the repair is one step.
-    assert "me6211c33m5g-n" in refused[0].evidence
-    assert "ap2112k-3.3trg1" in refused[0].evidence
-
-    # The reviewed identity for the same class passes untouched.
-    buck["exact_part"] = "ME6211C33M5G-N"
-    architecture = derive_architecture(intent)
-    assert next(r for r in architecture.requirements if r.id == "buck").exact_part == "ME6211C33M5G-N"
-
-
-def test_model_declared_pad_field_is_normalized_to_the_reviewed_default():
-    """The pad field's size and its netless nature are the reviewed contract.
-
-    A real run declared 10x15 (150 plated pads) and its board was the one the layout engine
-    could not route, while the acceptance check asks for a usable field of >=25 positions.
-    The model keeps its sheet, id and role; the size and the empty port set are derived.
-    """
-    intent = _hub75_intent()
-    intent["obligations"] = [
-        {
-            "kind": "fabrication",
-            "original_obligation_id": "prototyping_area",
-            "feature": "prototyping-area",
-        }
-    ]
-    intent["sheets"].append(
-        {"name": "PROTO FIELD", "stem": "PROTO_FIELD", "role": "interface", "function": "Pads."}
+            "id": "battery",
+            "role": "power_input",
+            "family": "coin-cell-holder",
+            "parameters": {"cell_format": "CR2032"},
+            "exact_part": "BS-07-A1BJ001",
+            "ties": {},
+        },
+        [{"name": "VBAT", "from": "battery.positive", "to": "edge:VBAT_OUT"}],
     )
-    intent["requirements"].append(
+    architecture = derive_architecture(intent)
+    battery = _requirement(architecture, "battery")
+    assert battery.ports["positive"] == "VBAT"
+    assert battery.ports["negative"] == "GND"
+
+
+def test_connector_contact_naming_a_declared_rail_binds_that_rail():
+    """A connector pin a signal names after a declared rail is that rail's exposure.
+
+    The compiler already derives this shape when `power.rails[net].from_ref` names the pin;
+    a draft that states it with a signal names a declared net on a pin it also named, so the
+    contact carries the rail instead of the run dying on the signal and then again on the
+    contact the refusal left unbound.
+    """
+    intent = _one_part_intent(
         {
-            "id": "prototyping_area",
-            "sheet": "PROTO FIELD",
+            "id": "host",
             "role": "connector",
-            "family": "prototyping-area",
-            "parameters": {"rows": 10, "cols": 15, "pitch_mm": 2.54},
-            "functional_blocks": ["POWER_DISTRIBUTION"],
-        }
+            "family": "pin-header",
+            "parameters": {"rows": 1, "gender": "female"},
+        },
+        [{"name": "+5V", "from": "host.pin1", "to": "edge:RAIL_OUT"}],
     )
+    intent["power"]["rails"]["+5V"]["from"] = "host.pin2"
     architecture = derive_architecture(intent)
-    field = next(r for r in architecture.requirements if r.id == "prototyping_area")
-    assert field.parameters == {"rows": 5, "cols": 5, "pitch_mm": 2.54}
-    assert field.ports == {}
-    assert field.sheet == "PROTO FIELD"  # the model's own sheet is kept
+    host = _requirement(architecture, "host")
+    assert host.ports["pin1"] == "+5V"
+    assert any("carries rail '+5V'" in row for row in architecture.assumptions)

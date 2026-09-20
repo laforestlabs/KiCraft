@@ -79,6 +79,7 @@ from .synthesis.footprint_library import (
     lookup_footprint,
     search_footprints,
 )
+from .advisories import advisory_line, recorded_advisory_codes
 from .synthesis.board_features import extract_board_features, has_prototyping_area
 from .synthesis.form_factor import extract_form_factor
 from .synthesis.symbol_pinout import SymbolNotFoundError, canonical_symbol_id, lookup_pins
@@ -4126,16 +4127,28 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             # part check runs here; UPDI reachability gates the
             # wiring commit below.
             check_mcu_programming_access(state.bom),
-            # §9.33/§9.34 (2026-07-27 fix-plan P2): a
-            # spec-named MPN or brief-stated mount type the BOM
-            # walks away from must be recorded in
-            # bom.substitutions -- the silent_substitution gate
-            # fires on the silence, not the swap.
+        ]
+        # §9.33/§9.34 (2026-07-27 fix-plan P2) are RECORD-class under the BLOCK-vs-RECORD bar
+        # (design-yield-recovery plan §4.3 B): a spec-named MPN or brief-stated mount type the
+        # BOM walks away from is a *legal* board whose swap was not proven to be the asked-for
+        # part -- the defect was the silence, so record the finding and keep building instead of
+        # killing the run. The offending part string stays in the record.
+        for record_advisory in (
             check_spec_named_mpn_substitutions(
                 state.functional_spec, state.architecture, state.bom
             ),
             check_mount_type_consistency(state.intent, state.bom),
-        ]
+        ):
+            if record_advisory.ok:
+                continue
+            line = advisory_line(
+                record_advisory.name,
+                record_advisory.message,
+                record_advisory.offenders or (),
+            )
+            if line not in state.bom.assumptions:
+                state.bom.assumptions.append(line)
+            bom_normalizations.append(line)
         if state.architecture is not None:
             identity_checks.append(check_sheets_have_parts(state.architecture, state.bom))
             identity_checks.append(

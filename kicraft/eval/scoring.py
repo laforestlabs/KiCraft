@@ -192,6 +192,19 @@ def eval_script_gates(m, rubric) -> list[dict]:
     if attempted and not m["generated"]["synthesized"]:
         fired.append({"id": "synthesis_broken", "cap": caps["synthesis_broken"], "by": "script",
                       "why": "synthesize attempted (transcript) but no project files produced"})
+    # RECORD-class advisories are *recorded*, never blocked (design-yield-recovery plan §4.2
+    # step 3, operator decision D6): the gate carries no effective cap, so it can only ever say
+    # which notes a board shipped with -- no count of advisories penalises or stops a ship.
+    advisories = list((m["state"].get("advisory_codes") if isinstance(m["state"], dict) else None) or ())
+    if advisories:
+        fired.append({
+            "id": "shipped_with_advisories",
+            "cap": caps["shipped_with_advisories"],
+            "by": "script",
+            "why": "shipped with RECORD-class advisories (recorded, never blocking)",
+            "advisories": advisories,
+            "advisory_count": len(advisories),
+        })
     return fired
 
 

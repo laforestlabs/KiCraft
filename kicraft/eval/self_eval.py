@@ -756,6 +756,18 @@ def _stage_failure_attribution(state_doc: dict, events_path: Path) -> dict:
     }
 
 
+def _recorded_advisories(state_doc: dict) -> list[str]:
+    """Distinct RECORD-class advisory codes the committed design shipped with.
+
+    Design-yield-recovery plan §4.2 step 2: the advisories a stage downgraded instead of
+    refusing must reach the artifact and the scorecard. The carriers and the line format live
+    in `kicraft.design.advisories`, which the board's promote provenance reads too.
+    """
+    if not isinstance(state_doc, dict):
+        return []
+    return recorded_advisory_codes(state_doc.get("architecture"), state_doc.get("bom"))
+
+
 def _design_events(events_path: Path):
     if not events_path.is_file():
         return

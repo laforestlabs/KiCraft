@@ -40,6 +40,7 @@ from .models import (
     SHEET_NAME_RE,
     SHEET_STEM_RE,
     Architecture,
+    ArchitectureAdvisory,
     CircuitRequirement,
     CircuitRole,
     DeclaredInterfaceClaim,
@@ -725,9 +726,22 @@ def derive_architecture(
     recipes = tuple(registered_recipes())
     lowerers = {family: row for row in registered_lowerers() for family in row.families}
     diagnostics: list[IntentDiagnostic] = []
+    advisories: list[IntentDiagnostic] = []
 
     def _fail(code: str, message: str, **kw) -> None:
         diagnostics.append(IntentDiagnostic(code=code, message=message, **kw))
+
+    def _advise(code: str, message: str, **kw) -> None:
+        """Record a property that could not be *proven*; the design still compiles.
+
+        RECORD half of the BLOCK-vs-RECORD bar (design-yield-recovery plan §4.3): the board is
+        very likely fine, what is missing is proof. The row is carried on
+        `Architecture.advisories` and mirrored into `assumptions`, so the artifact says what the
+        board shipped with; it is never a refusal and never capped (plan D6).
+        """
+        row = IntentDiagnostic(code=code, message=message, **kw)
+        advisories.append(row)
+        derived_notes.append(f"advisory [{code}]: {message}")
 
     # Statements the compiler derived rather than read off the draft, and the signal renames a
     # rail that owns a pin forced: both are carried into the review's assumptions.
@@ -930,18 +944,21 @@ def derive_architecture(
         row = models_by_id[requirement_id]
         if row.declared_ports:
             continue
-        _fail(
+        _advise(
             "unknown_part_refused",
             (
                 f"requirement {row.id!r} ({row.family}"
                 + (f", {row.exact_part}" if row.exact_part else "")
-                + ") has no curated recipe and declares no interface; state the part's interface "
-                "(`declared_ports`: one entry per pin function with a direction) so its wiring can "
-                "be derived, or use a family with a curated recipe"
+                + ") has no curated recipe and declares no interface; recorded (not refused) — its "
+                "pin functions are a claim nothing verified against a curated recipe, and the exact "
+                "part string is kept so the board says which identity was unproven"
             ),
             requirement_id=row.id,
             sheet=row.sheet,
-            evidence=[row.family, *([row.exact_part] if row.exact_part else [])],
+            evidence=[
+                f"family={row.family}",
+                *([f"exact_part={row.exact_part}"] if row.exact_part else ["no_declared_interface"]),
+            ],
         )
 
     # Endpoint bookkeeping: every port binding, with the direction it contributes to its net.
@@ -1346,17 +1363,17 @@ def derive_architecture(
             }
             if not options:
                 continue  # a class the library does not cover: the exact part is its route
-            _fail(
+            _advise(
                 "unreviewed_exact_part",
                 (
                     f"requirement {requirement_id!r} pins exact_part {exact!r}, which the reviewed "
                     f"library does not hold, while its {component_class!r} obligation must be "
-                    "realized by a reviewed part; use one of the reviewed identities below, or "
-                    "drop exact_part and let the parts stage choose"
+                    "realized by a reviewed part; recorded (not refused) — the part is shipped as "
+                    "chosen and the reviewed alternatives are listed for review"
                 ),
                 requirement_id=requirement_id,
                 sheet=requirement.sheet,
-                evidence=sorted(options),
+                evidence=[f"exact_part={exact}", *sorted(options)],
             )
             break
 
@@ -2008,6 +2025,18 @@ def derive_architecture(
         power_nets=[GND_NET, *sorted(rail_names)],
         inter_sheet_nets=_inter_sheet_nets(final_requirements, endpoints, rail_names),
         assumptions=[*intent.assumptions, *derived_notes, *renamed, *notes],
+        advisories=[
+            ArchitectureAdvisory(
+                code=row.code,
+                message=row.message,
+                evidence=[
+                    *([f"requirement={row.requirement_id}"] if row.requirement_id else []),
+                    *([f"sheet={row.sheet}"] if row.sheet else []),
+                    *row.evidence,
+                ],
+            )
+            for row in advisories
+        ],
         requirements=final_requirements,
         obligations=list(intent.obligations),
         declared_interfaces=declared,

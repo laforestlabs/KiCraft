@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from kicraft.design.advisories import recorded_advisory_codes
+
 
 def _find_one(run_dir: Path, name: str) -> Path | None:
     """First match of an exact filename anywhere under run_dir (shallowest wins)."""
@@ -87,6 +89,9 @@ def analyze_state(path: Path | None) -> dict:
         "open_questions": len(s.get("open_questions") or []),
         "bom_parts": len(bom.get("parts") or []),
         "project_stem": s.get("project_stem"),
+        # RECORD-class advisories the committed design shipped with (design-yield-recovery plan
+        # §4.2): the rubric's recording gate and the self-eval record both read them here.
+        "advisory_codes": recorded_advisory_codes(s.get("architecture"), bom),
     }
 
 

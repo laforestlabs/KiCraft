@@ -15,8 +15,8 @@
 # edit it directly (it stays valid) and re-run rubric_hash.py compute --write.
 
 meta:
-  version: 2
-  sha256: "b2f9009995cc44d0c3c6fdc933fcc632d692e3536c8db367fb22b430a153ad2b"
+  version: 3
+  sha256: "2edf273f6c24e9b903c84171b42808f964f22a4a81265265170aa1029a70289e"
   scale_note: 'Every dimension is scored on an anchored 0-4 level. Weighted score = sum(weight_i * level_i
     / 4) over all dimensions; weights sum to 100, so a flawless run scores 100. The final score is then
     capped by the lowest hard-fail gate that triggered: final = min(weighted, min(triggered gate caps)).'
@@ -234,6 +234,14 @@ gates:
   detected_by: script
   cap: 25
   condition: synthesize crashed or produced no project files.
+- id: shipped_with_advisories
+  detected_by: script
+  cap: 100
+  condition: The board shipped carrying RECORD-class advisories - properties the design could not prove
+    (an unreviewed exact part, an uncurated interface, a spec-named part the BOM walked away from).
+    RECORDED, never blocking - the shipped board is legal and very likely correct, so the count and the
+    codes exist so a downgrade is auditable over time, and the cap is unreachable so no number of
+    advisories can penalise or stop a ship (design-yield-recovery plan §4.2 step 3, operator decision D6).
 - id: erc_errors
   detected_by: script
   cap: 45

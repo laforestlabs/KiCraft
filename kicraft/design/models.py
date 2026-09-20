@@ -723,6 +723,19 @@ class RecipeSelection(BaseModel):
     pin_allocations: list[RecipePinAllocation] = Field(default_factory=list)
 
 
+class ArchitectureAdvisory(BaseModel):
+    """A property the derivation could not *prove* about an otherwise buildable design.
+
+    The RECORD half of the BLOCK-vs-RECORD bar: recorded on the artifact and counted in the
+    scorecard, never a refusal. Not part of the provider slot schema (the architecture stage
+    answers `ArchitectureIntent`).
+    """
+
+    code: str
+    message: str = ""
+    evidence: list[str] = Field(default_factory=list)
+
+
 class Architecture(BaseModel):
     topologies: dict[str, str] = Field(default_factory=dict)
     rail_voltages: dict[str, float] = Field(default_factory=dict)
@@ -732,6 +745,9 @@ class Architecture(BaseModel):
     power_nets: list[str]
     inter_sheet_nets: list[InterSheetNet]
     assumptions: list[str] = Field(default_factory=list)
+    # RECORD-class findings (design-yield-recovery plan §4): properties that could not be
+    # proven, carried so the artifact and the scorecard say what a board shipped with.
+    advisories: list[ArchitectureAdvisory] = Field(default_factory=list)
     # Approved standard whose fixed connector map is owned by requirements.
     standard_form_factor: str | None = None
     recipe_selections: list[RecipeSelection] = Field(default_factory=list)

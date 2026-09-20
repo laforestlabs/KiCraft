@@ -1,6 +1,6 @@
 # KiCraft skill-eval rubric
 
-> **Rubric v2 — `sha256:4ad2c2ceacb88417b4fee89e39f8554eaee94c58f920d6f4c31c5f50707718c8`**
+> **Rubric v3 — `sha256:2edf273f6c24e9b903c84171b42808f964f22a4a81265265170aa1029a70289e`**
 >
 > Human-readable mirror of [`rubric.yaml`](../../kicraft/eval/rubric.yaml), which is the canonical
 > source of truth. If the two ever disagree, **`rubric.yaml` wins.** Regenerate the
@@ -70,9 +70,15 @@ A triggered gate caps the **final** score regardless of the weighted sum; the
 lowest cap wins. Script-detectable gates are set by `score_run.py`; observer
 gates are set when grading the relevant dimension.
 
+`shipped_with_advisories` is a **recording** gate: its cap is unreachable, so it never
+changes a score. It exists so a RECORD-class downgrade (a property the design could not
+prove, shipped anyway) is countable and auditable, with no cap on how many a board may
+carry (design-yield-recovery plan §4.2 step 3 / operator decision D6).
+
 | Gate | Detected by | Cap | Condition |
 |---|---|---|---|
 | `synthesis_broken` | script | 25 | synthesize crashed / produced no files |
+| `shipped_with_advisories` | script | 100 | board shipped with RECORD-class advisories (recorded, never blocking) |
 | `erc_errors` | script | 45 | ≥1 ERC **error** (warnings don't trigger) |
 | `unprogrammable_mcu` | observer | 50 | MCU present, no first-flash path, gap not surfaced |
 | `silent_substitution` | observer | 55 | inferior part swapped in unsurfaced, reached synthesis |
@@ -100,6 +106,7 @@ gates are set when grading the relevant dimension.
 
 ### Changelog
 
+- **v3** (`2edf273f…`) — added the `shipped_with_advisories` recording gate (script, unreachable cap): the RECORD half of the BLOCK-vs-RECORD bar, so a board that shipped with recorded advisories is countable in the scorecard. No weight, anchor or band changed.
 - **v2** (`4ad2c2ce…`) — added `board_self_description` (Class J, wt 4): does the
   fabricated board carry a silkscreen legend (name/rev/maker) + a functional label?
   Funded by trimming the two process-friction axes (`convergence_efficiency` 8→6,
