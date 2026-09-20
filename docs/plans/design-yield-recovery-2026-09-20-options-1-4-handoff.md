@@ -26,6 +26,7 @@ two; the daily ceiling is $20 and is shared with the live site.
 | **Branch** | `simplify/bom-wiring-pipeline`, **19 commits ahead of `origin`** (this session added 8). Nothing pushed; the box runs the local commits. |
 | **Free gate** | `--reference-replay` **green: 31/34 rows reproduce their own boundary**, 2 recorded blocks (floor ≥31). Red at session start. |
 | **Unit suite** | **4301 passed**, 15 skipped, 1 xfailed, **2 failed** — both pre-existing and environmental (`test_vendored_bundles_are_not_prototype`: `ams1117-5v0-fixed` still defaults to prototype; `test_krt_preflight_uses_environment_defaults`: `No module named 'py_router.startup_checks'`). Both fail identically on the pre-session tree. |
+| **Next-session target, already censused** | `source_obligation_not_retained` (11 of 69 architecture deaths). Its 51 unowned obligation rows split into `quantitative` 22, board-shape classes 10+, realizable classes the draft never attached 9 — three different repairs, all priced in §4 Step 4. |
 | **Running right now** | The option-1 design-only screening (34 briefs × 3, `--design-only --parallel 2`): batch `logs/self_eval/opt1_designonly_20260920`, log `…_20260920.log`, pid in `…_20260920.pid`. See §3 for how to read and how to stop it. |
 | **Spend so far** | Session 1 campaign: $9.42. This session: $0 of campaign money until the screening started (the free gate and the draft replays are $0). |
 | **The wall that matters** | A1 baseline (`logs/self_eval/movea_a1_current_20260919T1431Z`): 102 attempts, **7 committed designs, 3 briefs committing in ≥2 repeats, 5 fab-ready runs / 4 briefs**. Milestone ladder in §4. |
@@ -170,15 +171,40 @@ move 1a/1b must raise committed designs ≥3 briefs over A1; move 2a is expected
 committing designs and ≥3 finished boards (its 30-defect class); move 4a/4b must add no *unproven*
 boards — every newly shipped board that carries a note names it.
 
-### Step 4 — the largest single remaining architecture class
+### Step 4 — the largest single remaining architecture class, already censused
 
 `source_obligation_not_retained`: 11 of A1's 69 architecture deaths, more than any code this
-session touched, and in none of the four options. The draft must attach each committed obligation
-to the requirement that implements it. Two directions, cheapest first:
-(a) make the refusal actionable (name *which* requirement should own it, from the design's own
-sheets/families) — wording alone will not pay, so measure it as a derive: where exactly one
-requirement's family can realize the obligation's class, the compiler attaches it and notes it;
-(b) otherwise leave it blocking and record the null.
+session touched, and in none of the four options. The 51 unowned obligation rows behind those
+deaths (A1 + A4, read from each run's `retry` evidence at $0) split into three sub-cases with
+three different repairs — do them in this order:
+
+**(a) `quantitative` is not exempt, and it should be (22 of the 51 rows).** The kind means "a
+numerical limit with its unit and comparison direction" (`models.QuantitativeObligation`); the
+ownership rule exempts `quantity`, `fabrication` and `negative` as "board-level facts, not
+implementation claims" — and a numeric limit such as *board width ≤ 40 mm* or *dissipation ≥ 2 W*
+is exactly that. Nothing implements a dimension. Either add `quantitative` (and `adjustability`,
+same argument) to `OWNERSHIP_EXEMPT_OBLIGATION_KINDS` with the reason recorded, or attach it to the
+requirement that owns its subject the way a `quantity` row is counted — but do not leave it
+demanding an owner. **This is the cheapest large win in the dataset**; measure it on the same
+design-only screen (§3) before spending anything else.
+
+**(b) A novel "physical" class no part can ever carry (10+ rows).** Real labels from the runs:
+`snowman-shaped-board` (9), `rounded-rectangular-pcb`, `chamfered-board-outline`,
+`mounting-hole` (2). These are board *shape/feature* facts typed as part classes: the library
+cannot realize them (`realizable_physical_features(...) == []` for the first two,
+`class_is_not_a_part(...) == ()` — the vocabulary has no token for "board"/"shape"), the intent
+stage deliberately lets novel classes through, and then ownership can never be satisfied. Repair:
+retype a `physical` obligation to `fabrication` when its class names a board/outline/shape fact
+*and* no reviewed part and no reviewed variant could carry it (the board-feature path already
+derives the field from `FabricationObligation`). Careful: `mounting-hole` **is** realizable as a
+part (`realizable_physical_features('mounting-hole') == ['mounting-hole']`), so the rule must not
+be a naive token match on `hole`.
+
+**(c) A realizable class the draft simply never attached** (`crystal` 5, `warm-white-led` 3,
+`stacking-header`, `screw-terminal`, `qspi-flash-memory`). These are genuine omissions — a real
+requirement in the design emits that part — so the derive is: where exactly one requirement's
+family/recipe realizes the obligation's class, the compiler attaches the row and notes it
+("derived"); where zero or several could, the refusal stands and names the candidates.
 
 ### Step 5 — option 2's real wall
 
