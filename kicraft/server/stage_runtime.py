@@ -666,6 +666,39 @@ def _redacted_rejection_facts(
     }
 
 
+def _commit_rejection_diagnostics(commit_result: object) -> list[dict]:
+    """A rejected deterministic commit's own reasons, as diagnostics rows.
+
+    A commit gate names its offenders on the transient ``retry`` event and in the ledger
+    signature, but the stage status recorded only the *semantic* diagnostics. A BOM whose
+    commit was refused for six unproven realization contracts plus a fabrication gate
+    therefore reported the fabrication row alone, and the six reasons a reader needs had to
+    be recovered from the event stream — the same shape as a contract refusal's empty
+    ``diagnostics``. What the stage refused the candidate for is durable evidence: record
+    it, with the gate codes, and let the status name every reason.
+    """
+    if not isinstance(commit_result, dict):
+        return []
+    if commit_result.get("failure_kind") == "commit_process_failed":
+        return []
+    gate_codes, _offenders = _commit_rejection_signature(commit_result)
+    errors = [re.sub(r"\s+", " ", str(item)).strip() for item in (commit_result.get("errors") or [])]
+    offenders = [str(item)[:600] for item in (commit_result.get("offenders") or [])]
+    if not errors and not offenders:
+        return []
+    return [
+        {
+            "code": "commit_gate_rejected",
+            "severity": "fab_gate",
+            "message": errors[0]
+            if errors
+            else "the deterministic commit gate refused the candidate",
+            "evidence": [*errors[1:8], *offenders[:24]],
+            "gate_codes": list(gate_codes),
+        }
+    ]
+
+
 def _reasoning_failure_kind(facts) -> str | None:
     if facts is None:
         return None
@@ -3282,7 +3315,7 @@ def _drive_work_unit_stage(
             **last,
             "provider_ok": provider_ok,
             "schema_ok": schema_ok,
-            "diagnostics": diagnostic_rows,
+            "diagnostics": diagnostic_rows + _commit_rejection_diagnostics(last.get("commit")),
             "work_units": len(units),
             "reused_work_units": reused_work_units,
             "aggregate_repair_rounds": aggregate_repair_rounds,
@@ -4883,7 +4916,7 @@ def drive_stage(
             "schema_ok": schema_ok,
             "repair_attempted": semantic_repair_attempted,
             "repair_adopted": semantic_repair_adopted,
-            "diagnostics": diagnostic_rows,
+            "diagnostics": diagnostic_rows + _commit_rejection_diagnostics(out),
         }
         if progress:
             progress(

@@ -2451,6 +2451,46 @@ def test_pin_less_declared_interface_claim_is_refused_by_name(monkeypatch):
     assert symbol
 
 
+def test_declared_interface_claim_may_name_a_pin_by_its_symbol_name(monkeypatch):
+    """A symbol names a contact twice; a claim may use either name.
+
+    The 2026-09-19 baseline's BOM deaths were dominated by correct claims read as wrong pins:
+    a draft wrote `pin: "VIN"` for the TPS5430DDA or `"VDD"` for the MCP23017-E_SO, the check
+    compared that against the symbol's pin *numbers* and refused every one of them. The
+    synthesis side already resolves a claimed selector against the pin names
+    (`validation._declared_port_pin`); the BOM realization check must too, and refuse only a
+    string that is neither a number nor one unique pin name.
+    """
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    group = BomComponentGroup(
+        id="mcp", sheet="GPIO", reference_prefix="U", quantity=1,
+        value="MCP23017-E/SS", symbol="mcp23017-soic:MCP23017-E_SO",
+        footprint="Package_SO:SSOP-28_5.3x10.2mm_P0.65mm", mpn="MCP23017T-E/SS",
+    )
+    requirement = {
+        "id": "mcp23017",
+        "family": "mcp23017",
+        "exact_part": "MCP23017T-E/SS",
+        "obligations": [],
+        "declared_interface": {
+            "ports": [
+                {"key": "vdd", "pin": "VDD", "direction": "power", "function": "logic supply"},
+                {"key": "gnd", "pin": "9", "direction": "power", "function": "ground"},
+                {"key": "reset", "pin": "RESET", "direction": "input", "function": "not a pin"},
+            ]
+        },
+    }
+
+    defects = _requirement_obligation_defects([requirement], [group])[
+        "declared-interface-unrealized"
+    ]
+
+    assert not any("vdd" in row for row in defects), defects
+    assert not any("gnd" in row for row in defects), defects
+    assert any("reset" in row and "claimed pin 'RESET'" in row for row in defects), defects
+
+
 def test_unfulfilled_obligation_names_the_groups_the_unit_emitted():
     """The defect must say what the unit *did* emit, not only that a class is missing.
 

@@ -1480,29 +1480,53 @@ def _requirement_obligation_defects(requirements, groups: list[BomComponentGroup
             )
             continue
         try:
-            pins = set(_pin_numbers(lookup_pins(owners[0].symbol)))
+            inventory = lookup_pins(owners[0].symbol)
         except (OSError, ValueError, KeyError) as exc:
             defects["declared-interface-unrealized"].append(
                 f"{requirement['id']}:{owners[0].id}: pin inventory unavailable: {exc}"
             )
             continue
+        pins = set(_pin_numbers(inventory))
+        # A claim names a contact, and a symbol publishes two ways to name one: its number and its
+        # name (`VIN` is pin 1 of the TPS5430DDA). Comparing a name against the number list refused
+        # every claim a draft wrote by name — 30 of the 50 BOM defects in the 2026-09-19 baseline,
+        # all of them correct statements about the part — so resolve the claim the same way the
+        # synthesis side already does (`validation._declared_port_pin`), and only refuse a string
+        # that is neither a pin number nor one unique pin name.
+        by_name: dict[str, list[str]] = {}
+        for pin in inventory.get("pins") or []:
+            if not isinstance(pin, dict) or pin.get("number") is None:
+                continue
+            name = str(pin.get("name") or "").strip().casefold()
+            if name:
+                by_name.setdefault(name, []).append(str(pin["number"]))
         for port in claim["ports"]:
             claimed = port.get("pin")
             if not claimed:
                 # A declared interface is a claim about a real part, and the only thing that makes
-                # the claim checkable is the pin number: `declared_ports` entries without one are
-                # refused by name instead of reading as "claimed pin None is not in <symbol>".
+                # the claim checkable is the contact it names: `declared_ports` entries without one
+                # are refused by name instead of reading as "claimed pin None is not in <symbol>".
                 defects["declared-interface-unrealized"].append(
                     f"{requirement['id']}:{port['key']}: claim states no pin number; name the "
                     f"actual contact of {owners[0].symbol} (available pins={sorted(pins)}) so the "
                     "claimed function can be verified"
                 )
                 continue
-            if claimed not in pins:
-                defects["declared-interface-unrealized"].append(
-                    f"{requirement['id']}:{port['key']}: claimed pin {claimed!r} "
-                    f"is not in {owners[0].symbol}; available pins={sorted(pins)}"
+            claimant = str(claimed)
+            if claimant in pins:
+                continue
+            named = by_name.get(claimant.strip().casefold()) or []
+            if len(named) == 1:
+                continue
+            defects["declared-interface-unrealized"].append(
+                f"{requirement['id']}:{port['key']}: claimed pin {claimed!r} "
+                f"is not in {owners[0].symbol}; available pins={sorted(pins)}"
+                + (
+                    f" (its name matches {sorted(named)}, so it is not a unique contact either)"
+                    if len(named) > 1
+                    else ""
                 )
+            )
     return defects
 
 
