@@ -22,6 +22,16 @@ echo "=== host ==="; hostname; whoami; uptime | tr -s ' '
 echo; echo "=== service: kicraft-web ==="
 systemctl is-active kicraft-web 2>/dev/null
 systemctl show kicraft-web -p ActiveState,SubState,NRestarts,ExecMainStartTimestamp 2>/dev/null
+echo; echo "=== build slots (leaked-slot watch) ==="
+echo "KICRAFT_BUILD_SLOTS=$(grep -E '^KICRAFT_BUILD_SLOTS=' "$HOME/KiCraft/.env" 2>/dev/null | cut -d= -f2-)"
+SD="${KICRAFT_BUILD_SLOTS_DIR:-$HOME/.kicraft/build_slots}"
+for f in "$SD"/slot_*.lock; do
+  [ -e "$f" ] || continue
+  echo "$(basename "$f"): $(cat "$f" 2>/dev/null)"
+done
+echo "orphaned build processes (ppid 1 = parent died; a leak if a slot is held):"
+ps -eo pid,ppid,stat,etimes,rss,cmd | awk '$2==1 && /cli_app build|solve_subcircuits|route\.py/ {print "  " $0}'
+echo "detector: KiCraft/deploy/check-build-slots.sh (run with --reap to clean up)"
 echo; echo "=== KiCad libraries ==="
 echo "symbol libs:    $(ls /usr/share/kicad/symbols/*.kicad_sym 2>/dev/null | wc -l) .kicad_sym files"
 echo "footprint libs: $(ls -d /usr/share/kicad/footprints/*.pretty 2>/dev/null | wc -l) .pretty dirs"
