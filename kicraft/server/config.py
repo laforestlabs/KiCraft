@@ -442,6 +442,10 @@ class Settings:
     # known reasoning loop before asking for the required JSON.
     # KICRAFT_DESIGN_REASONING_TOKENS.
     design_reasoning_tokens: int = 0
+    # Which design pipeline builds a project: `current` (this tree) or `legacy` (the August
+    # tree at its pinned commit, behind the admin switch). The durable routing config wins
+    # when it sets one; this is the environment default. KICRAFT_PIPELINE.
+    pipeline: str = "current"
     # Hard per-call reasoning ceiling enforced IN-STREAM by the client (provider-
     # independent): a reasoning-only stream that exceeds this many tokens with no
     # answer content is aborted. max_tokens does NOT bound DeepSeek's reasoning
@@ -664,6 +668,7 @@ class Settings:
             design_reasoning_tokens=int(
                 os.environ.get("KICRAFT_DESIGN_REASONING_TOKENS", cls.design_reasoning_tokens)
             ),
+            pipeline=str(os.environ.get("KICRAFT_PIPELINE", cls.pipeline)),
             reasoning_max_tokens=int(
                 os.environ.get("KICRAFT_REASONING_MAX_TOKENS", cls.reasoning_max_tokens)
             ),

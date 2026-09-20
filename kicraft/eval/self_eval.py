@@ -61,6 +61,8 @@ from pathlib import Path
 
 from kicraft.build_slots import ACQUIRED_MARKER, resolve_build_slots
 from kicraft.proc_tree import kill_tree
+from kicraft.design.advisories import recorded_advisory_codes
+from kicraft.server import pipeline as pipeline_dispatch
 from kicraft.design.cli_app import run_post_wiring_lifecycle
 from kicraft.server.session import (
     bom_reconcile_deficits,
@@ -940,6 +942,11 @@ def evaluate_one(
             stage_statuses[stage].get("fab_safe") is not False
             for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
         )
+        # RECORD-class advisories the run shipped with (design-yield-recovery plan §4.2).
+        rec["advisories"] = _recorded_advisories(state_doc)
+        # Which pipeline built it (option 3): the workspace's own marker, so a campaign that
+        # ran a legacy project is grouped and never silently read as a current-tree board.
+        rec["pipeline"] = pipeline_dispatch.project_pipeline(rundir)
         rec.update(
             _stage_failure_attribution(
                 state_doc,
@@ -1188,6 +1195,14 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
             failure_families[family] = failure_families.get(family, 0) + 1
 
     cost_summary = _campaign_costs(records)
+    advisory_codes: dict[str, int] = {}
+    pipeline_counts: dict[str, int] = {}
+    for record in records:
+        name = str(record.get("pipeline") or pipeline_dispatch.PIPELINE_CURRENT)
+        pipeline_counts[name] = pipeline_counts.get(name, 0) + 1
+    for record in records:
+        for code in record.get("advisories") or ():
+            advisory_codes[code] = advisory_codes.get(code, 0) + 1
     def _lifecycle_status(phase: str) -> str:
         statuses = [
             ((record.get("lifecycle") or {}).get(phase) or {}).get("status")
@@ -1229,6 +1244,13 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         ),
         "grade_counts": grade_counts,
         "gate_counts": gate_counts,
+        # RECORD-class advisories: no cap, no ship-block, no scoring penalty -- the count exists
+        # so a downgrade is auditable over time (design-yield-recovery plan §4.2 step 3).
+        "boards_with_advisories": sum(1 for r in records if r.get("advisories")),
+        "advisory_codes": dict(sorted(advisory_codes.items())),
+        # Which design pipeline built each run, so boards from different trees are never
+        # compared as one cohort (design-yield-recovery plan option 3).
+        "pipeline_counts": dict(sorted(pipeline_counts.items())),
         "archetype_stats": _archetype_stats(records),
         "outline_stats": _outline_stats(records),
         "per_brief": per_brief,
@@ -1324,7 +1346,38 @@ def _render_md(s: dict) -> str:
         f"- failed-design spend: **${s['failed_run_cost_usd']}**  ·  "
         f"all campaign spend / committed design: **{s['cost_per_committed_design_usd']} USD**"
     )
+    if s.get("boards_with_advisories"):
+        L.append(
+            f"- advisory-flagged designs: **{s['boards_with_advisories']}/{s['n']}**  ·  codes: "
+            + ", ".join(f"{c}×{n}" for c, n in (s.get("advisory_codes") or {}).items())
+        )
+    if len(s.get("pipeline_counts") or {}) > 1 or "legacy" in (s.get("pipeline_counts") or {}):
+        L.append(
+            "- pipelines: "
+            + ", ".join(f"{name}×{n}" for name, n in (s.get("pipeline_counts") or {}).items())
+        )
     L.append("")
+
+    advisory_rows = [r for r in s.get("runs") or () if r.get("advisories")]
+    if advisory_rows:
+        L.append("## Shipped with advisories")
+        L.append("")
+        L.append("| run | committed | fab-ready | advisory codes |")
+        L.append("|-----|-----------|-----------|----------------|")
+        for r in advisory_rows:
+            L.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(r.get("run_id") or r.get("stem") or "—"),
+                        "yes" if r.get("design_committed") is True else "no",
+                        "yes" if r.get("build_rc") == 0 else "no",
+                        ", ".join(r.get("advisories") or []),
+                    ]
+                )
+                + " |"
+            )
+        L.append("")
 
     arche = s.get("archetype_stats") or {}
     if arche:

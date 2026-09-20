@@ -39,6 +39,7 @@ from kicraft.build_slots import ACQUIRED_MARKER, host_cpu_count, slot_count
 from kicraft.proc_tree import kill_tree
 
 from .accounts import AccountStore, BuildJob
+from . import pipeline as pipeline_dispatch
 
 # Mirrors the web worker's build invocation (relative paths against the job's
 # workspace, no archive sweep).
@@ -184,7 +185,9 @@ class BuildWorker:
             _log(f"job {job.id}: unknown job kind {kind!r} -> failed")
             self.store.finish_build(job.id, rc=None, status="failed")
             return
-        _log(f"job {job.id}: {kind} in {ws}")
+        pipeline = pipeline_dispatch.project_pipeline(ws)
+        cmd_base = pipeline_dispatch.build_command(cmd_base, pipeline)
+        _log(f"job {job.id}: {kind} in {ws} [{pipeline} pipeline]")
         log_path.parent.mkdir(parents=True, exist_ok=True)
         # The worker itself captures the child's stdout into build.log below, so
         # tell `kicraft build` NOT to open the same file (a second writer would
@@ -198,6 +201,8 @@ class BuildWorker:
         # mid-round with zero artifacts (same 0.9 factor as self_eval's
         # export); setdefault so an operator env override wins.
         env.setdefault("KICRAFT_BUILD_MAX_WALL_S", f"{self.timeout_s * 0.9:.0f}")
+        if pipeline == pipeline_dispatch.PIPELINE_LEGACY:
+            env = pipeline_dispatch.legacy_env(env)
         cmd = list(cmd_base)
         if kind == "build":
             quality = self.store.build_quality_for_user(job.user_id)

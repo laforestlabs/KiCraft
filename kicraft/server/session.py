@@ -26,6 +26,7 @@ from kicraft.design.stage_state import (
 from kicraft.fsutil import atomic_write_text
 
 from .stage_pipeline import DESIGN_STAGES, drive_chain
+from . import pipeline as pipeline_dispatch
 from .storage import _state_path
 
 # The deterministic build sub-phases, in pipeline order after DESIGN_STAGES.
@@ -273,6 +274,10 @@ def run_session(
     stages = list(stages)
     if not stages:
         return {"status": "ok", "results": [], "guard": None, "questions": None, "last_stage": None}
+    pipeline = pipeline_dispatch.project_pipeline(ws)
+    pipeline_dispatch.write_marker(ws, pipeline)
+    if pipeline == pipeline_dispatch.PIPELINE_LEGACY:
+        return _run_legacy_session(ws, brief, stages, progress=progress, instruction=instruction)
     results, guard, state_path = drive_chain(
         stages,
         brief,
@@ -303,6 +308,71 @@ def run_session(
         "retry_action": (
             "retry_stage" if last and last.get("failure_kind") == "provider_rate_limited" else None
         ),
+    }
+
+
+def _run_legacy_session(ws, brief: str, stages, *, progress=None, instruction=None) -> dict:
+    """Drive the same stages through the legacy tree's own headless driver.
+
+    The legacy package cannot be imported beside this one, so the design runs as a
+    subprocess (see `kicraft.server.pipeline`). Its driver commits the five slots into the
+    same workspace and reports rc 0 only when every stage committed, so the status mapping
+    stays exactly the current pipeline's: a user sees "ok"/"failed" either way, and the
+    result rows are rebuilt from the workspace's own stage status.
+    """
+    if instruction:
+        # The legacy driver has no per-run instruction channel: it re-drafts from the
+        # committed state. Say so instead of dropping the instruction silently.
+        progress and progress(
+            {
+                "kind": "build_log",
+                "text": "legacy pipeline: per-run instructions are not supported; "
+                "the driver re-drafts from the committed state\n",
+            }
+        )
+    from kicraft.server.config import Settings
+
+    try:
+        budget = float(Settings.from_env().project_llm_budget_usd)
+    except (SystemExit, ValueError):
+        budget = 0.10
+    rc, stdout, stderr = pipeline_dispatch.run_legacy_design(
+        ws, brief, stages, budget_usd=budget
+    )
+    if progress:
+        tail = "\n".join((stdout or "").strip().splitlines()[-12:])
+        progress({"kind": "build_log", "text": f"[legacy] rc={rc}\n{tail}\n"})
+    state = read_state(ws) or {}
+    status_block = state.get("stage_status") or {}
+    results = []
+    for stage in stages:
+        row = status_block.get(stage) or {}
+        results.append(
+            {
+                "stage": stage,
+                "commit_ok": bool(row.get("ok")),
+                "error": row.get("error"),
+                "failure_kind": row.get("failure_kind"),
+                "cost_usd": row.get("cost_usd"),
+                "attempts": row.get("attempts"),
+                "pipeline": pipeline_dispatch.PIPELINE_LEGACY,
+            }
+        )
+    committed = bool(results) and all(row["commit_ok"] for row in results)
+    last = results[-1] if results else None
+    return {
+        "status": "ok" if committed and rc == 0 else "failed",
+        "results": results,
+        "guard": None,
+        "state_path": str(_state_path(Path(ws))),
+        "questions": None,
+        "last_stage": (last["stage"] if last else None),
+        "failure_kind": (last["failure_kind"] if last else None),
+        "retryable": False,
+        "retry_action": None,
+        "pipeline": pipeline_dispatch.PIPELINE_LEGACY,
+        "stdout_tail": (stdout or "")[-2000:],
+        "stderr_tail": (stderr or "")[-2000:],
     }
 
 

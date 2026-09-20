@@ -6227,6 +6227,26 @@ def _castellation_geometry_violations(state, pcb_path: Path) -> list[str]:
     return violations
 
 
+def _pipeline_provenance() -> dict:
+    """The pipeline stamp the promote provenance carries (plan option 3).
+
+    Read from the workspace marker the dispatch wrote, never guessed: a board built by the
+    legacy fork says so in its own provenance file.
+    """
+    from kicraft.server import pipeline as pipeline_switch
+
+    return pipeline_switch.provenance_fields(pipeline_switch.selected())
+
+
+def _shipped_advisory_codes(state) -> list[str]:
+    """The RECORD-class advisory codes this design shipped with (plan §4.2 step 2)."""
+    if state is None:
+        return []
+    return recorded_advisory_codes(
+        getattr(state, "architecture", None), getattr(state, "bom", None)
+    )
+
+
 def _promote_verify_fab(
     state,
     state_path: Path,
@@ -6311,6 +6331,8 @@ def _promote_verify_fab(
                 source_board=partial,
                 source_kind="partial",
                 fresh=partial_fresh,
+                advisories=_shipped_advisory_codes(state),
+                pipeline=_pipeline_provenance(),
             )
             if not partial_fresh:
                 print(
@@ -6384,6 +6406,8 @@ def _promote_verify_fab(
         source_board=routed,
         source_kind="routed",
         fresh=True,
+        advisories=_shipped_advisory_codes(state),
+        pipeline=_pipeline_provenance(),
     )
     print(f"[build] 3/5 promoted routed parent -> {pcb.name}")
 
@@ -7146,6 +7170,8 @@ def _layout_route_fab(
             source_board=placed,
             source_kind="placed",
             fresh=True,
+            advisories=_shipped_advisory_codes(state),
+            pipeline=_pipeline_provenance(),
         )
         print(f"[build] 3/5 promoted placed parent -> {pcb.name} (placement only; no verify/fab)")
         print()

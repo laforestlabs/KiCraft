@@ -90,6 +90,7 @@ async def test_save_round_trips_through_the_routing_file(harness):
 
     with u.client:
         next(iter(u.find(marker="routing-profile-select").elements)).value = "deepseek"
+        next(iter(u.find(marker="routing-pipeline-select").elements)).value = "legacy"
     u.find(marker="routing-tokens").clear().type("2048")
     u.find(marker="routing-budget").clear().type("0.05")
     u.find(marker="routing-reasoning").clear().type("1024")
@@ -100,6 +101,7 @@ async def test_save_round_trips_through_the_routing_file(harness):
     written = json.loads(Path(path).read_text())
     assert written == {
         "active_profile": "deepseek",
+        "pipeline": "legacy",
         "design_reasoning_tokens": 1024,
         "design_temperature": 0.25,
         "max_tokens_per_call": 2048,

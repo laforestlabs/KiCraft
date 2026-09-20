@@ -85,6 +85,7 @@ from kicraft import __version__ as KICRAFT_VERSION
 from kicraft.build_slots import ACQUIRED_MARKER, slot_count
 
 from . import billing, notify
+from . import pipeline
 from .build_worker import JOB_KIND_COMMANDS, _kill_build
 from .stage_driver import DESIGN_STAGES
 from .stagetabs import StageTabs, _build_substage, demo_events
@@ -1736,8 +1737,13 @@ def _persist_project(state: dict) -> None:
             {"kind": "build_log", "text": f"persist error: {e}"})
     finally:
         try:
-            store.finish_project(pid, status, stem=stem, cost_usd=state.get("spend"),
-                                 dir_path=dir_path, zip_path=zip_path)
+            store.finish_project(
+                pid, status, stem=stem, cost_usd=state.get("spend"),
+                dir_path=dir_path, zip_path=zip_path,
+                pipeline=(
+                    pipeline.project_pipeline(dir_path) if dir_path else pipeline.selected()
+                ),
+            )
         except Exception as e:
             # This write flips the durable row to its terminal status; losing it
             # silently leaves a phantom 'running' project with no diagnostics.

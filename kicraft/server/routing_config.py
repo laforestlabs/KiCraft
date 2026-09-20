@@ -43,12 +43,16 @@ MAX_REASONING_TOKENS = 65536
 ALLOWED_KEYS = frozenset(
     {
         "active_profile",
+        "pipeline",
         "max_tokens_per_call",
         "project_llm_budget_usd",
         "design_reasoning_tokens",
         "design_temperature",
     }
 )
+
+#: The design pipelines an admin may select (see `pipeline.py` for what they mean).
+PIPELINES = ("current", "legacy")
 
 _warned: set[str] = set()
 
@@ -79,6 +83,10 @@ class RoutingConfig:
     """The allowlisted admin knobs, with ``None`` meaning "leave env alone"."""
 
     active_profile: str = ""
+    # Which design pipeline builds a project: `current` (the typed contract tree) or `legacy`
+    # (the August tree at its pinned commit). Persisted like `active_profile`, and read per
+    # design run and per build job, so a swap needs no restart.
+    pipeline: str = ""
     max_tokens_per_call: int | None = None
     project_llm_budget_usd: float | None = None
     design_reasoning_tokens: int | None = None
@@ -94,6 +102,8 @@ class RoutingConfig:
         data: dict = {}
         if self.active_profile:
             data["active_profile"] = self.active_profile
+        if self.pipeline:
+            data["pipeline"] = self.pipeline
         for key, value in (
             ("max_tokens_per_call", self.max_tokens_per_call),
             ("project_llm_budget_usd", self.project_llm_budget_usd),
@@ -109,6 +119,7 @@ class RoutingConfig:
         overrides = {
             key: value
             for key, value in (
+                ("pipeline", self.pipeline or None),
                 ("max_tokens_per_call", self.max_tokens_per_call),
                 ("project_llm_budget_usd", self.project_llm_budget_usd),
                 ("design_reasoning_tokens", self.design_reasoning_tokens),
@@ -176,8 +187,14 @@ def from_dict(data: dict) -> RoutingConfig:
     if dropped:
         _warn_once(f"ignoring invalid value(s) for: {', '.join(sorted(dropped))}")
 
+    raw_pipeline = str(data.get("pipeline") or "").strip().lower()
+    pipeline = raw_pipeline if raw_pipeline in PIPELINES else ""
+    if raw_pipeline and not pipeline:
+        dropped.append("pipeline")
+
     return RoutingConfig(
         active_profile=active,
+        pipeline=pipeline,
         max_tokens_per_call=max_tokens,
         project_llm_budget_usd=budget,
         design_reasoning_tokens=reasoning,
@@ -208,6 +225,10 @@ def load(path: Path | None = None) -> RoutingConfig:
 
 def validate(config: RoutingConfig) -> RoutingConfig:
     """Return the config if every set knob is in bounds, else raise ValueError."""
+    if config.pipeline and config.pipeline not in PIPELINES:
+        raise ValueError(
+            f"pipeline must be one of {list(PIPELINES)}, got {config.pipeline!r}"
+        )
     if config.active_profile not in _known_profiles():
         raise ValueError(
             f"active_profile must be one of {sorted(_known_profiles())}, got "

@@ -26,6 +26,7 @@ from nicegui import ui
 from kicraft.cli.artifact_paths import LEAF_ROUTED, artifact_root
 
 from . import billing
+from . import pipeline
 from . import routing_config
 from .accounts import (
     CORE_COMPONENT_CATEGORIES,
@@ -505,6 +506,29 @@ def admin_routing_page():
                 )
 
         with ui.card().classes("w-full gap-2").style(_admin_card_style()):
+            ui.label("Design pipeline").classes("text-base font-semibold text-white")
+            pipeline_state = pipeline.describe()
+            pipeline_select = (
+                ui.select(
+                    {
+                        "current": "current pipeline (this tree, typed contracts)",
+                        "legacy": f"{pipeline.LEGACY_LABEL} — measured 21/34 finished boards",
+                    },
+                    value=pipeline_state["selected"],
+                    label="pipeline",
+                )
+                .classes("w-96")
+                .props("dark outlined dense")
+                .mark("routing-pipeline-select")
+            )
+            ui.label(pipeline_state["trade_off"]).classes("text-xs").style("color:#fbbf24")
+            if not pipeline_state["available"]:
+                ui.label(
+                    f"legacy tree not available at {pipeline_state['root']} — the switch falls "
+                    "back to the current pipeline"
+                ).classes("text-xs").style("color:#f87171")
+
+        with ui.card().classes("w-full gap-2").style(_admin_card_style()):
             ui.label("Behavior").classes("text-base font-semibold text-white")
             with ui.row().classes("w-full items-center gap-4 flex-wrap"):
                 tokens_input = (
@@ -598,6 +622,7 @@ def admin_routing_page():
             try:
                 config = routing_config.RoutingConfig(
                     active_profile=str(profile_select.value or ""),
+                    pipeline=str(pipeline_select.value or "current"),
                     max_tokens_per_call=(
                         int(tokens_input.value) if tokens_input.value is not None else None
                     ),
