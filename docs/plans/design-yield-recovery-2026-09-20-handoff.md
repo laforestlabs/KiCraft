@@ -25,7 +25,7 @@ authoritative plan is written *the plan's §N*.
 | Production impact | web process never died (HTTP 200 throughout, 7 failed health checks over ~3.25 min at the memory plateau); **a SIGKILLed campaign orphaned a build that held a host build slot for 12 h 24 m**, halving the build worker's concurrency until it was reaped; `KICRAFT_BUILD_SLOTS` is now **1** (was 2) and a supervisor reclaims leaked slots (§6.6, §11) |
 | Committed | `a879461` — the plan document with the measured `## §2 Results`; handoff + slot monitor in `7c8e06d`, `9682988`, `750b31f`, `81748fb` |
 | **$0 gate** | `--reference-replay` is **RED** on HEAD: `proto-shield` refuses at `functional_spec` while its contract records no conflict — a 2026-09-16 fixture never refreshed across 37 commits (§12). Confirmed identical on a pristine HEAD worktree, so it is not this session's uncommitted work. Reproduce in 1.2 s |
-| Next | attack `unsupported_lowerer_contract` (§5 Move 1), then the BOM obligation layer (§5 Move 3) |
+| Next | attack `unsupported_lowerer_contract` (§5 Move 1), then the BOM obligation layer (§5 Move 3). **The sequenced version — prerequisites, the census to work from, per-move expectations and kill criteria, budget and cadence — is `docs/plans/design-yield-recovery-2026-09-20-options-1-4-plan.md`; start there, and use this handoff as its evidence base.** |
 
 ---
 
