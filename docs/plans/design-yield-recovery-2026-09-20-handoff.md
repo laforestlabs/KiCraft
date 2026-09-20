@@ -518,8 +518,9 @@ env -i HOME=/home/kicraft PATH="$PATH" TERM=xterm PYTHONUNBUFFERED=1 \
 
 Note this is also the only way to see the refusing diagnostic: the replay drives the chain inside a
 `tempfile.TemporaryDirectory` and deletes the workspace, and the stage's `diagnostics` list is empty,
-so mirroring the replay with a kept workspace (`/tmp/proto_diag.py` on this box) is how the contract
-reason string above was read.
+so mirroring the replay with a kept workspace is how the contract reason string above was read. That
+mirror is saved at `logs/self_eval/movea_tools_20260919/proto_diag.py` (an artifact, not tracked —
+`/tmp` does not survive a reboot).
 
 **The decision this leaves you** — the same shape as the repo's own precedent,
 `834752a "Revert the identity guard: it regressed the reference corpus"`, where the corpus
