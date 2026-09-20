@@ -51,10 +51,16 @@ BLOCK_ARCHITECTURE_CODES = {
     "empty_edge_connector",
     "unsupported_lowerer_contract",
     "unbound_required_port",
+    # §4.3 A lists this as RECORD; the boundary in §4.1 overrides the table, and it is
+    # measured: downgraded, the requirement is dropped from the netlist entirely (no curated
+    # recipe, no declared interface, no catalog) and the obligation it owned fails the
+    # ownership check one validation later under a message that no longer names the cause.
+    "unknown_part_refused",
 }
 
-# §4.3 A: the two architecture codes the plan reclassifies as RECORD.
-RECORD_ARCHITECTURE_CODES = {"unreviewed_exact_part", "unknown_part_refused"}
+# §4.3 A: the architecture code the plan reclassifies as RECORD, where the requirement IS
+# carried (its family is curated, the chosen part is emitted, and the note names it).
+RECORD_ARCHITECTURE_CODES = {"unreviewed_exact_part"}
 
 
 def _code_literals(function: str) -> set[str]:
@@ -168,14 +174,22 @@ def test_unreviewed_exact_part_is_recorded_on_the_artifact_not_refused():
     assert "unreviewed_exact_part" in json.dumps(architecture.model_dump(exclude_none=True))
 
 
-def test_uncurated_interface_is_recorded_with_the_part_string():
-    """RECORD class 2: the exact part string is kept, because it is what was not proven."""
-    architecture = derive_architecture(
-        _regulator_intent(declared=False, exact_part="SEN5X", obligation=False)
-    )
-    codes = [row.code for row in architecture.advisories]
-    assert codes == ["unknown_part_refused"]
-    assert "exact_part=SEN5X" in architecture.advisories[0].evidence
+def test_uncurated_interface_is_refused_because_the_part_would_not_be_carried():
+    """§4.1's boundary over the RECORD table: a part nothing carries is not "unproven".
+
+    Downgraded, this case does not ship a board with a note -- it drops the requirement (no
+    curated recipe, no declared interface, so it has no catalog at all) and the obligation it
+    owned then fails the ownership check one validation later. A part with nothing implementing
+    it is a missing feature, so the refusal stands and names the repair.
+    """
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(
+            _regulator_intent(declared=False, exact_part="SEN5X", obligation=False)
+        )
+    diagnostics = excinfo.value.diagnostics
+    refused = [row for row in diagnostics if row.code == "unknown_part_refused"]
+    assert len(refused) == 1
+    assert "declared_ports" in refused[0].message
 
 
 def test_recorded_advisories_reach_the_rubric_gate_and_never_cap():

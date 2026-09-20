@@ -563,11 +563,14 @@ def test_supply_must_name_a_declared_rail():
     assert "unknown_supply_rail" in codes
 
 
-def test_uncurated_part_without_a_declared_interface_is_recorded_once():
-    """§4.3 A RECORD class: the claim is recorded, not refused, and only once.
+def test_uncurated_part_without_a_declared_interface_is_refused_once():
+    """A part nothing implements is a missing feature, not an unproven one.
 
-    The part is real and buildable; what is missing is *proof* that its pin functions are the
-    part's own, so the board ships with the note (and the exact part string) on the artifact.
+    §4.3 A's table lists this code as RECORD; §4.1's boundary overrides it, and the reason is
+    mechanical: with no curated recipe and no declared interface the requirement has no catalog,
+    so it never enters the architecture — the design would ship with the part absent from the
+    netlist (measured 2026-09-20: three production drafts whose only advisory was this code died
+    on the ownership check one validation later instead). The refusal names the repair, once.
     """
     intent = _hub75_intent()
     intent["sheets"].append(
@@ -597,12 +600,10 @@ def test_uncurated_part_without_a_declared_interface_is_recorded_once():
         {"name": "I2C_SDA", "from": "esp32.sda", "to": "bme.sda"},
         {"name": "I2C_SCL", "from": "esp32.scl", "to": "bme.scl"},
     ]
-    architecture = derive_architecture(intent)
-    codes = [row.code for row in architecture.advisories]
-    assert codes.count("unknown_part_refused") == 1
-    recorded = next(row for row in architecture.advisories if row.code == "unknown_part_refused")
-    assert "bme280" in recorded.message
-    assert "exact_part=BME280" in recorded.evidence
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(intent)
+    assert [row.code for row in excinfo.value.diagnostics] == ["unknown_part_refused"]
+    assert "bme280" in excinfo.value.diagnostics[0].message
 
     for row in intent["requirements"]:
         if row["id"] == "bme":

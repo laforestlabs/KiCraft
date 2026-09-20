@@ -944,21 +944,27 @@ def derive_architecture(
         row = models_by_id[requirement_id]
         if row.declared_ports:
             continue
-        _advise(
+        # BLOCK, not RECORD, and measured rather than argued: with this downgraded the
+        # requirement is not carried at all (no curated recipe, no declared interface, so it has
+        # no catalog and never enters `requirements`), so the design ships with the part absent
+        # from the netlist — and the obligation it owned then fails the ownership check one
+        # validation later, under a message that no longer names the cause (2026-09-20: three of
+        # three production drafts whose only advisory was this code died exactly that way). A
+        # part with nothing implementing it is §4.1's BLOCK case, so the check that says so
+        # stands; recording this class needs the architecture to carry an unverified interface
+        # first, which is a move of its own.
+        _fail(
             "unknown_part_refused",
             (
                 f"requirement {row.id!r} ({row.family}"
                 + (f", {row.exact_part}" if row.exact_part else "")
-                + ") has no curated recipe and declares no interface; recorded (not refused) — its "
-                "pin functions are a claim nothing verified against a curated recipe, and the exact "
-                "part string is kept so the board says which identity was unproven"
+                + ") has no curated recipe and declares no interface; state the part's interface "
+                "(`declared_ports`: one entry per pin function with a direction) so its wiring can "
+                "be derived, or use a family with a curated recipe"
             ),
             requirement_id=row.id,
             sheet=row.sheet,
-            evidence=[
-                f"family={row.family}",
-                *([f"exact_part={row.exact_part}"] if row.exact_part else ["no_declared_interface"]),
-            ],
+            evidence=[row.family, *([row.exact_part] if row.exact_part else [])],
         )
 
     # Endpoint bookkeeping: every port binding, with the direction it contributes to its net.
