@@ -1,0 +1,19 @@
+[Unit]
+Description=KiCraft build-slot leak sweep (reclaim host build slots held by orphaned builds)
+# A SIGKILLed campaign orphans its build child, and the build timeout lives in the *parent*, so
+# the orphan is unbounded: if it is blocked rather than dead it keeps the flock on a host build
+# slot forever. Measured 2026-09-19 on this box: an orphaned `cli_app build` held slot_0 for
+# 12 h 24 m at 1 s CPU / 407 MB while the build worker — which sizes its concurrency from the same
+# host gate — ran on one slot instead of two. Nothing else notices, because a leaked slot is
+# silent: the next build simply takes another slot and looks healthy.
+#
+# The sweep only matches orphaned (ppid 1) build/route command lines, so the detached services
+# (kicraft.server.web and kicraft.server.build_worker are ppid 1 by design) are never touched, and
+# --min-age-s (120 s) leaves a restart's in-flight orphans time to exit on their own.
+
+[Service]
+Type=oneshot
+User=kicraft
+Environment=KICRAFT_BUILD_SLOTS_MONITOR_LOG=/home/kicraft/KiCraft/logs/build_slots_monitor.log
+ExecStart=/bin/bash -c 'exec /home/kicraft/KiCraft/deploy/check-build-slots.sh --reap >> "$KICRAFT_BUILD_SLOTS_MONITOR_LOG" 2>&1'
+TimeoutStartSec=120

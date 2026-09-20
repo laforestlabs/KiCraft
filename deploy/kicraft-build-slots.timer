@@ -1,0 +1,12 @@
+[Unit]
+Description=Sweep for leaked KiCraft host build slots every 5 minutes
+
+[Timer]
+# Five minutes bounds the waste from a leak to well under one build's worth of the host's
+# concurrency; the sweep is a sub-second read of /proc, so the cadence costs nothing.
+OnBootSec=3min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

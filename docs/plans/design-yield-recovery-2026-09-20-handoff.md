@@ -280,6 +280,21 @@ hub ps                                   # process name: build-slot-monitor
 cat logs/build_slots_monitor.log         # one line per pass, 300 s interval
 ```
 
+**Durable version.** A detached process does not survive a reboot, so the repo's provisioning
+pattern (unit files in `deploy/` + installer lines — the jlcparts nightly is the precedent) now
+carries `deploy/kicraft-build-slots.service` + `.timer`: a 5-minute sweep, `Persistent=true`,
+logging to the same file. Installing needs root, and privileged actions on this box stay gated,
+so it is not installed yet:
+
+```bash
+cd ~/KiCraft && sudo cp deploy/kicraft-build-slots.{service,timer} /etc/systemd/system/ \
+  && sudo systemctl daemon-reload && sudo systemctl enable --now kicraft-build-slots.timer
+```
+
+(`deploy/03-service-setup.sh` installs it on a fresh box, next to the jlcparts timer.) Once the
+timer is live the detached loop is redundant — stop it with `hub stop build-slot-monitor` or
+`pkill -f 'check-build-slots.sh --loop'`.
+
 **Root cause is NOT fixed by the monitor.** Nothing makes a build child exit when its parent dies;
 the monitor only reclaims the slot afterwards (up to one interval late). The real fix is a
 parent-death bound on the spawned build — `prctl(PR_SET_PDEATHSIG, SIGTERM)` in the child, or a

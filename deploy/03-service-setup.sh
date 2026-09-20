@@ -18,6 +18,12 @@ sudo cp deploy/kicraft-jlcparts-update.service /etc/systemd/system/
 sudo cp deploy/kicraft-jlcparts-update.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now kicraft-jlcparts-update.timer
+
+# --- build-slot leak sweep (a leaked slot silently halves build concurrency) ---
+sudo cp deploy/kicraft-build-slots.service /etc/systemd/system/
+sudo cp deploy/kicraft-build-slots.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now kicraft-build-slots.timer
 sleep 3
 curl -fsS -o /dev/null -w "local app: HTTP %{http_code}\n" http://127.0.0.1:8080/login \
   || echo "app not responding yet; check:  journalctl -u kicraft-web -e"
