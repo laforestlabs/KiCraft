@@ -24,7 +24,7 @@ authoritative plan is written *the plan's §N*.
 | Tree state | **no source change**: HEAD + the three inherited dirty files; the A4 scaffolding stayed in its own worktree |
 | Production impact | web process never died (HTTP 200 throughout, 7 failed health checks over ~3.25 min at the memory plateau); **a SIGKILLed campaign orphaned a build that held a host build slot for 12 h 24 m**, halving the build worker's concurrency until it was reaped; `KICRAFT_BUILD_SLOTS` is now **1** (was 2) and a supervisor reclaims leaked slots (§6.6, §11) |
 | Committed | `a879461` — the plan document with the measured `## §2 Results`; handoff + slot monitor in `7c8e06d`, `9682988`, `750b31f`, `81748fb` |
-| **$0 gate** | `--reference-replay` is **RED** on HEAD: `proto-shield` refuses at `functional_spec` while its contract records no conflict — a 2026-09-16 fixture never refreshed across 37 commits (§12). Reproduce in 1.2 s; do not read it as a regression you caused |
+| **$0 gate** | `--reference-replay` is **RED** on HEAD: `proto-shield` refuses at `functional_spec` while its contract records no conflict — a 2026-09-16 fixture never refreshed across 37 commits (§12). Confirmed identical on a pristine HEAD worktree, so it is not this session's uncommitted work. Reproduce in 1.2 s |
 | Next | attack `unsupported_lowerer_contract` (§5 Move 1), then the BOM obligation layer (§5 Move 3) |
 
 ---
@@ -528,6 +528,23 @@ arbitrated: either the tightened functional_spec contract is intended and the ro
 plus its deferred/obligation ids must be refreshed, or the contract change was wrong and must be
 reverted. Refreshing is the likely answer, since the contract's own reason names an id and deferred-set
 mismatch rather than a design defect — but that needs evidence, not taste.
+
+**Not caused by the uncommitted work — measured, not reasoned.** A pristine HEAD worktree
+(`/tmp/kc-head-clean`: `git worktree add --detach HEAD`, its own `--system-site-packages` venv,
+`git status` clean) reproduces the failure **exactly** — same 30 committed / 2 blocked / 2 refused,
+same single error on `proto-shield` at `functional_spec`, exit 1:
+
+```
+$ git -C /tmp/kc-head-clean log -1 --format=%h   # 81748fb, dirty files absent
+design acceptance FAILED:
+- proto-shield: reference row does not reproduce its boundary (refused at functional_spec) …
+=== 2026-09-20T04:35:09Z  control replay exit=1 ===
+```
+
+Log: `logs/self_eval/reference_replay_head_clean.log` (the control script is saved beside it as
+`movea_tools_20260919/control_replay.sh`). So the gate was already red before this session's
+inherited dirty files existed, and `--reference-replay` must be repaired on its own merits — it is
+not evidence for or against landing that work.
 
 Until it is repaired, §5's "cheap gates first" step cannot be used as a pass/fail signal. Use
 `--references` (fixture validation) and the per-arm smoke, and treat `--reference-replay` FAILED as
