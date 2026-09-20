@@ -454,7 +454,7 @@ production projects' `answer_delta` event stream, replayed through the real deri
 
 | observation (distinct codes per draft, 26 drafts) | before | after |
 |---|---|---|
-| drafts that commit | 3 | **4** |
+| drafts that commit | 3 | **5** |
 | `unsupported_lowerer_contract` | 9 | **6** |
 | `conflicting_port_binding` | 7 | **6** |
 | `declared_port_double_bound` | 3 | **0** |
@@ -536,7 +536,7 @@ a crystal obligation. `_commit_rejection_diagnostics` now puts the gate codes, t
 offenders on the stage's own `diagnostics`, in both the work-unit and the single-payload commit
 paths.
 
-### Move 4a/4b — the advisory machinery, and the classification as specified
+### Move 4a/4b — the advisory machinery, and the classification (one measured exception)
 
 Landed from the validated preview patch (`logs/self_eval/movea_a4_recordpatch.patch`) plus what the
 preview deliberately left out:
@@ -552,14 +552,25 @@ preview deliberately left out:
   unreachable (100), so it cannot penalise or stop a ship — no cap, no block, no suppression
   (D6) — and the gate row carries the codes and the count. `meta.version` 2 → 3, hash refreshed,
   `RUBRIC.md` mirror updated.
-- **§4.3 A/B applied as written**: `unreviewed_exact_part` and `unknown_part_refused` are RECORD;
-  §9.33/§9.34 are RECORD; the three BOM obligation/interface codes stay BLOCK; every architecture
-  code the plan lists as BLOCK still raises.
+- **§4.3 A/B applied, with one measured exception.** `unreviewed_exact_part` is RECORD where the
+  requirement *is* carried (its family is curated and the chosen part is emitted; the note keeps the
+  exact string and the reviewed alternatives), §9.33/§9.34 are RECORD, the three BOM
+  obligation/interface codes stay BLOCK, and every other architecture code the plan lists as BLOCK
+  still raises. **`unknown_part_refused` stays BLOCK**: the table lists it as RECORD, but the
+  downgrade does not do what the table assumes. With no curated recipe and no declared interface the
+  requirement has no catalog, so it never enters `requirements` — the design would ship with the
+  part *absent from the netlist*, and the obligation it owned then fails the ownership check one
+  validation later under a message that no longer names the cause (3 of 3 production drafts whose
+  only advisory was this code died exactly that way: `1_870`, `1_867`, `1_862`). §4.1's boundary —
+  "the brief asked for X and nothing implements X" is BLOCK, always — overrides the table row, and
+  §10 forbids widening RECORD. Recording this class needs the architecture to be able to carry a
+  requirement whose interface is unverified, which is a move of its own.
 
 Guard tests (`tests/test_design_advisories.py`) pin both halves: an AST snapshot asserts the
-module's `_fail` literals still contain all 28 BLOCK codes while the two RECORD codes appear only
-in `_advise`, and the live paths are exercised (the two RECORD classes reach
-`architecture.advisories` and the rubric gate; two nets on one pin still refuse end to end).
+module's `_fail` literals still contain all 29 BLOCK codes (the 28 the plan lists plus
+`unknown_part_refused`) while the one RECORD code appears only in `_advise`, and the live paths are
+exercised (`unreviewed_exact_part` reaches `architecture.advisories` and the rubric gate; the
+uncurated-interface case still refuses by name; two nets on one pin still refuse end to end).
 
 ### Option 3 — the pipeline switch
 
@@ -598,7 +609,7 @@ environment, the project row, the provenance file, the summary grouping).
 |---|---|
 | `--reference-replay` (34 rows, $0) after 1a | **passed: 31/34** · 2 recorded blocks (floor ≥31 met) — `logs/self_eval/reference_replay_after_1a.log` |
 | `--reference-replay` on the final tree (1a + 2a + 4a/4b + option 3) | **passed: see §12.6** — `logs/self_eval/reference_replay_final.log` (run on `9a44ec1`; the commit after it is comment-only) |
-| real-draft corpus, 1a before/after | 3 → 4 drafts commit; 6 refusal classes shrink (table above) |
+| real-draft corpus, before/after the whole session | 3 → **5** of 26 drafts commit; 6 refusal classes shrink (table above) |
 | `tests/` full suite | **4301 passed**, 15 skipped, 1 xfailed, 2 failed — both failures pre-existing and environmental: `test_vendored_bundles_are_not_prototype` (`ams1117-5v0-fixed` still defaults to prototype) and `test_krt_preflight_uses_environment_defaults` (KRT backend unavailable: `No module named 'py_router.startup_checks'`). Both fail identically on the pre-session tree (`b7a379f` worktree). |
 | touched test files only (advisories, switch, BOM, intent, routing, lowering) | 315 passed |
 | legacy dispatch smoke | `pipeline.describe()` reports `available: true`, `/home/kicraft/KiCraft-legacy`, `bc6a2f8`; the legacy interpreter resolves `kicraft` from the legacy root in a job-shaped cwd; the driver's argv/environment are pinned by `tests/test_pipeline_switch.py` |
@@ -632,8 +643,20 @@ at least one named note**. The baselines to compare against are frozen and must 
 
 **Owed to the operator, unchanged:** §11.1 (option 3 in or out, manual or automatic — this session
 implements manual only), §11.3 (may paid campaigns run here at all), §11.4 (how long the legacy
-fork lives), §11.5 (install the sweep timer). New, from this session: the `bom_castellation_placeholder`
-death of `rp2040-min` is a *real* defect (a castellated edge drawn as an assembly header) and is
-now the only named reason on the stage status, but the recipe-owned BOM expansion of that run never
-reached the stage (`attempts: 0`, one work unit) — that is option 2's real remaining wall, and it
-is a session of its own.
+fork lives), §11.5 (install the sweep timer).
+
+**New, from this session, in the order the evidence suggests:**
+
+1. **Option 2's real wall is an empty BOM, not an unsatisfiable class.** In
+   `run_10_rp2040-min__r1` the recipe-owned BOM expansion never reached the stage (`attempts: 0`,
+   one work unit), so the commit gate judged a BOM with no parts and refused a *castellation
+   representation* (`bom_castellation_placeholder` on `j2`) alongside six realization contracts.
+   That run now names all of it (2b), and the next session should start from the recipe-owned
+   unit that produced nothing.
+2. **`unknown_part_refused` needs a mechanism before it can be a note**: the architecture must be
+   able to carry a requirement whose interface is unverified. Until then it stays a refusal, as
+   implemented.
+3. **`source_obligation_not_retained` is the largest single architecture class** (11 of A1's 69
+   architecture deaths, terminal on its own): the draft must attach each committed obligation to
+   the requirement that implements it. It is not in any of this plan's four options; it is the
+   first candidate for the next session's census.
