@@ -488,7 +488,10 @@ cd /home/kicraft/KiCraft-legacy && git checkout --detach bc6a2f8
 ```
 
 Production notes: web + build worker run on this box (`127.0.0.1:8080`, Caddy → kicraft.io); builds
-share one host gate (`KICRAFT_BUILD_SLOTS=2`); never run two campaigns concurrently. The deploy path
+share one host gate (`KICRAFT_BUILD_SLOTS`, **now 1** — was 2 until 2026-09-20, which oversubscribed
+this 2-core host against the gate module's own `slots * 6 ≈ cores` rule; see the handoff §6.6); never
+run two campaigns concurrently, and reap leaked slots after any abnormal exit
+(`deploy/check-build-slots.sh`, supervised on the box). The deploy path
 (`deploy/deploy-production.sh`) deliberately excludes the live canary — run
 `./deploy/verify-design-canary.sh` on purpose, never as part of a restart. Services run as detached
 processes managed by `deploy/restart-web.sh` / `deploy/restart-build-worker.sh`, not systemd.
