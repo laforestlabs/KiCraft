@@ -189,6 +189,8 @@ def run_legacy_design(
         "--max-retries",
         str(int(max_retries)),
     ]
+    # `cwd` is the legacy root and PYTHONPATH pins it: the current checkout must never be the
+    # one that resolves, whichever of the two a future caller's cwd happens to be.
     env = {**os.environ, **LEGACY_ENV, "PYTHONPATH": str(root)}
     env["KICRAFT_PROJECTS_DIR"] = os.environ.get(
         "KICRAFT_LEGACY_PROJECTS_DIR", str(Path.home() / ".kicraft" / "projects-legacy")
@@ -213,9 +215,11 @@ def build_command(cmd_base: list[str], pipeline: str) -> list[str]:
     """Substitute the legacy interpreter for a legacy workspace's build job.
 
     Only the interpreter changes: the argv contract (the module, the subcommand and its paths)
-    is the same in both trees, and the legacy venv resolves its own package. Its editable
-    install points at THIS checkout, though, so `PYTHONPATH` pins the legacy root — the same
-    pin the design subprocess uses (see `legacy_env`).
+    is the same in both trees, and the legacy venv's editable install resolves its own checkout
+    from any directory that does not itself hold a `kicraft/` package (measured: a build job's
+    workspace, and the legacy root, both resolve to `/home/kicraft/KiCraft-legacy/kicraft`).
+    `PYTHONPATH` pins that explicitly (see `legacy_env`) so the current checkout can never
+    shadow it, whatever the child's cwd turns out to be.
     """
     if normalise(pipeline) != PIPELINE_LEGACY or not cmd_base:
         return list(cmd_base)
@@ -223,7 +227,7 @@ def build_command(cmd_base: list[str], pipeline: str) -> list[str]:
 
 
 def legacy_env(base: dict | None = None) -> dict:
-    """The environment a legacy build subprocess needs (its own package first)."""
+    """The environment a legacy build subprocess needs (its own package, never this one)."""
     return {**(base or {}), "PYTHONPATH": str(legacy_root())}
 
 
