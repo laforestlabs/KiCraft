@@ -608,14 +608,15 @@ environment, the project row, the provenance file, the summary grouping).
 | check | result |
 |---|---|
 | `--reference-replay` (34 rows, $0) after 1a | **passed: 31/34** · 2 recorded blocks (floor ≥31 met) — `logs/self_eval/reference_replay_after_1a.log` |
-| `--reference-replay` on the final tree (1a + 2a + 4a/4b + option 3) | **passed: see §12.6** — `logs/self_eval/reference_replay_final.log` (run on `9a44ec1`; the commit after it is comment-only) |
+| `--reference-replay` on the final tree (1a + 2a + 4a/4b + option 3) | **passed: 31/34** · 2 recorded blocks — `logs/self_eval/reference_replay_final.log`, run at `80f219a` (the only commits after it are this document) |
 | real-draft corpus, before/after the whole session | 3 → **5** of 26 drafts commit; 6 refusal classes shrink (table above) |
 | `tests/` full suite | **4301 passed**, 15 skipped, 1 xfailed, 2 failed — both failures pre-existing and environmental: `test_vendored_bundles_are_not_prototype` (`ams1117-5v0-fixed` still defaults to prototype) and `test_krt_preflight_uses_environment_defaults` (KRT backend unavailable: `No module named 'py_router.startup_checks'`). Both fail identically on the pre-session tree (`b7a379f` worktree). |
 | touched test files only (advisories, switch, BOM, intent, routing, lowering) | 315 passed |
 | legacy dispatch smoke | `pipeline.describe()` reports `available: true`, `/home/kicraft/KiCraft-legacy`, `bc6a2f8`; the legacy interpreter resolves `kicraft` from the legacy root in a job-shaped cwd; the driver's argv/environment are pinned by `tests/test_pipeline_switch.py` |
 
 **Commits** (in order): `b7a379f` P1 + P2 + moves 1a–1b · `036d8fb` move 2a/2b · `b432205`
-moves 4a/4b · `9a44ec1` option 3 · `a8c405b` a comment correction.
+moves 4a/4b · `9a44ec1` option 3 · `a8c405b` a comment correction · `210a82e` the migration guard ·
+`80f219a` `unknown_part_refused` back to BLOCK · this document.
 
 ### §12.6 What is measured and what is owed
 
