@@ -6776,7 +6776,13 @@
             }
           ],
           "connections": [],
-          "obligations": []
+          "obligations": [
+            {
+              "kind": "fabrication",
+              "original_obligation_id": "prototyping_area",
+              "feature": "prototyping-area"
+            }
+          ]
         },
         "intent": {
           "assumptions": [

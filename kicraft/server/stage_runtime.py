@@ -1504,6 +1504,17 @@ def finalize_stage(
     """Persist status and ledger once, then build the caller-visible result."""
     wall_s = round(time.monotonic() - t0, 3)
     cpu_s = round(_child_cpu_s() - cpu0, 3)
+    # A refusal raised by a deterministic contract is not a draft defect, so it
+    # carries a bare `diagnostic` rather than a `StageDiagnostic` row. Surface it
+    # as this stage's one diagnostics row: the status, the event stream and every
+    # later investigation read `diagnostics`, and an empty list there is why a
+    # refusal's reason had to be recovered by hand (a replayed contract refusal
+    # printed "see the diagnostic" and nothing else).
+    diagnostics = list(outcome.get("diagnostics") or [])
+    if not diagnostics:
+        refusal = outcome.get("diagnostic")
+        if isinstance(refusal, dict) and refusal:
+            diagnostics = [refusal]
     stamp_stage_status(
         state_path,
         stage,
@@ -1521,7 +1532,7 @@ def finalize_stage(
         fab_safe=outcome.get("fab_safe"),
         repair_attempted=outcome.get("repair_attempted", False),
         repair_adopted=outcome.get("repair_adopted", False),
-        diagnostics=outcome.get("diagnostics") or [],
+        diagnostics=diagnostics,
         error=outcome.get("error"),
         failure_kind=outcome.get("failure_kind"),
         work_units=outcome.get("work_units"),

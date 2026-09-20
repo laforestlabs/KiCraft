@@ -956,12 +956,29 @@ def derive_architecture(
         existing = row.get(port)
         if existing is not None and existing != net:
             catalog = catalogs.get(requirement_id)
+            # A supply or reference pin conflict has one repair, and it is not "bind another
+            # port": the rail/ground already tied to this pin IS its net, so the duplicate
+            # connection is what goes. Say that instead of sending the draft port-shopping.
+            rail_bound = existing in intent.power.rails or existing == GND_NET
+            if rail_bound and _supply_port_name(port):
+                tail = (
+                    f" and {existing!r} is the rail that feeds it: delete the connection that "
+                    "duplicates the rail (a rail is distributed by declaring it under "
+                    "power.rails, never by a second signal on the same pin)"
+                )
+            elif rail_bound and _reference_port_name(port):
+                tail = (
+                    f" and {existing!r} is the net tied to it: delete the connection that "
+                    "duplicates it"
+                )
+            else:
+                tail = ", so bind this connection to another of this requirement's ports"
             _fail(
                 "conflicting_port_binding",
                 (
                     f"{context}: port {port!r} of {requirement_id!r} is already bound to "
-                    f"{existing!r} — one port carries one net, so bind this connection to another "
-                    "of this requirement's ports"
+                    f"{existing!r} — one port carries one net"
+                    + tail
                     + (f" ({catalog.choices})" if catalog is not None else "")
                 ),
                 requirement_id=requirement_id,
@@ -1067,11 +1084,71 @@ def derive_architecture(
     for requirement_id, requirement in requirements.items():
         row = models_by_id[requirement_id]
         catalog = catalogs[requirement_id]
+        # Which ports the design's own signals bind, before any statement about them is read.
+        signal_ports = {
+            resolved[0]
+            for item in signals
+            for peer in (item.from_ref, *item.peers())
+            if peer.partition(".")[0] == requirement_id
+            and (resolved := _resolve_port(row, catalog, peer.partition(".")[2])) is not None
+        }
+        # `supply_rail`/`reference_domain` on a declared port name the net the PIN IS TIED TO.
+        # A draft that writes `reference_domain: GND` (and `supply_rail: <its own supply>`) on
+        # every port means the *domain* the signal belongs to, and the field name cannot tell the
+        # two meanings apart. Where the compiler already knows the owner it takes it and reports
+        # the domain statement instead of refusing the draft for it:
+        #   * a port the design's own signals bind belongs to that signal — and a rail that *feeds*
+        #     the requirement (`supply`), or ground, is exactly a domain statement about it;
+        #   * a port that *is* a supply input keeps its rail and drops the reference, which is the
+        #     precedence this compiler already applies to `supply_bindings`.
+        # A statement the compiler cannot place either way stays a refusal below, and an unrelated
+        # net on a signal's pin stays `conflicting_port_binding` (two nets, one pin).
+        domain_statements: set[str] = set()
+        reference_dropped_by_supply: set[str] = set()
+        for port in row.declared_ports:
+            if _supply_port_name(port.key.casefold()) and port.supply_rail:
+                if port.reference_domain:
+                    reference_dropped_by_supply.add(port.key)
+                continue
+            if port.key not in signal_ports:
+                continue
+            if port.supply_rail and port.supply_rail == row.supply:
+                domain_statements.add(port.key)
+            elif port.reference_domain == GND_NET:
+                domain_statements.add(port.key)
+        for port in row.declared_ports:
+            if port.key in reference_dropped_by_supply:
+                derived_notes.append(
+                    f"{requirement_id}.{port.key}: stated as both a supply input "
+                    f"({port.supply_rail!r}) and a reference; the supply input owns the pin (derived)"
+                )
+            elif port.key in domain_statements and port.key not in bindings[requirement_id]:
+                derived_notes.append(
+                    f"{requirement_id}.{port.key}: stated "
+                    + ", ".join(
+                        statement
+                        for statement in (
+                            f"supply_rail={port.supply_rail!r}" if port.supply_rail else "",
+                            f"reference_domain={port.reference_domain!r}"
+                            if port.reference_domain
+                            else "",
+                        )
+                        if statement
+                    )
+                    + " on a port the design's own signals bind: the signal owns the pin, and the "
+                    "statement is its domain (derived)"
+                )
         declared_supply = {
-            port.key: port.supply_rail for port in row.declared_ports if port.supply_rail
+            port.key: port.supply_rail
+            for port in row.declared_ports
+            if port.supply_rail and port.key not in domain_statements
         }
         declared_references = {
-            port.key: port.reference_domain for port in row.declared_ports if port.reference_domain
+            port.key: port.reference_domain
+            for port in row.declared_ports
+            if port.reference_domain
+            and port.key not in domain_statements
+            and port.key not in reference_dropped_by_supply
         }
         supply_bindings = {**declared_supply, **row.supply_bindings}
         stated_references = {**declared_references, **row.reference_bindings}
@@ -1106,20 +1183,12 @@ def derive_architecture(
                 requirement_id=requirement_id,
                 sheet=requirement.sheet,
             )
-        # supply_rail / reference_domain on a declared port name the net this PIN IS TIED
-        # TO (the supply input, the ground pin, or a strap held at that net) — never "the
-        # domain this signal belongs to". A model commonly writes reference_domain='GND' on
-        # every port; that ties each pin to GND, so the pin's own supply/signal binding then
-        # conflicts with a diagnostic that never names the misuse. Refuse it where it is
-        # written so the refusal points at the field.
-        signal_ports = {
-            resolved[0]
-            for item in signals
-            for peer in (item.from_ref, *item.peers())
-            if peer.partition(".")[0] == requirement_id
-            and (resolved := _resolve_port(row, catalog, peer.partition(".")[2])) is not None
-        }
+        # What the compiler could not place above stays a refusal, so the misuse the field name
+        # invites is still named where it is written: a pin is one net, and a statement the design
+        # never attaches to a signal is a claim about the net the pin carries.
         for port in row.declared_ports:
+            if port.key in domain_statements or port.key in reference_dropped_by_supply:
+                continue  # the compiler placed this statement: the owner is known
             if port.supply_rail and port.reference_domain:
                 _fail(
                     "declared_port_double_bound",
@@ -1588,6 +1657,33 @@ def derive_architecture(
             _join_peers(signal, source, source_net)
             continue
         if signal.name in rail_names or signal.name == GND_NET:
+            # A connector contact that the design's own signal names after a declared net *is*
+            # that net's exposure on the board: the compiler already models exactly this shape
+            # when `power.rails[net].from_ref` names the connector pin, and the draft stating it
+            # with a signal names a declared net on a pin it also named. Take it — the contact
+            # carries the net and the signal's peers join it — instead of refusing the exposure
+            # and then refusing the connector again for the contact the refusal left unbound.
+            # Everywhere else a signal still may not *be* a rail.
+            if source.requirement.role == "connector" and signal.name != GND_NET:
+                _bind(
+                    source.requirement.id,
+                    source.port,
+                    signal.name,
+                    "input",
+                    context=f"signal {signal.name!r}",
+                )
+                _join_peers(
+                    signal,
+                    source,
+                    signal.name,
+                    peer_direction="input",
+                    bind_edge_pins=False,
+                )
+                derived_notes.append(
+                    f"{source.requirement.id}.{source.port}: carries rail {signal.name!r} "
+                    f"(named by signal {signal.name!r}) (derived)"
+                )
+                continue
             _fail(
                 "signal_names_rail",
                 (
@@ -1802,7 +1898,7 @@ def derive_architecture(
             if _supply_port_name(port) and rail is not None:
                 _bind(requirement_id, port, rail, "input", context="published supply port")
                 derived_notes.append(f"{requirement_id}: published {port} carries {rail} (derived)")
-            elif _reference_port_name(port):
+            elif _reference_port_name(port) or port in catalog.lowerer.reference_port_keys:
                 _bind(
                     requirement_id,
                     port,

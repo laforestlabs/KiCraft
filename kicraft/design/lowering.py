@@ -10,11 +10,12 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Callable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from kicraft.design.models import CircuitRequirement, JsonScalar
+from kicraft.design.part_identity import reviewed_part
 
 
 class LoweringArray(BaseModel):
@@ -160,6 +161,12 @@ class RegisteredLowerer:
     # model-owned merely because its contract was malformed.
     port_directions: tuple[tuple[str, str], ...] = ()
     port_patterns: tuple[tuple[str, str], ...] = ()
+    #: Published contacts that *are* the part's return, spelled as the family names them.
+    #: `_reference_port_name` reads the conventional tokens (`gnd`, `vss`); a family whose
+    #: contract names its return something else (`negative` on a coin cell, `sleeve` on a
+    #: TRS jack) publishes it here, so the compiler answers it with the design's ground
+    #: instead of asking a draft to restate a fact the reviewed part already holds.
+    reference_port_keys: tuple[str, ...] = ()
     # The reviewed ordering code the lowerer realizes. A build that refuses every other code
     # (including none) publishes it here, so the refusal can name the part the draft must state.
     required_exact_part: str | None = None
@@ -343,6 +350,8 @@ def lowerer_contract_diagnostic(
         *(
             "port_patterns=" + ",".join(pattern for pattern, _direction in lowerer.port_patterns),
         ),
+        *(["port_contract=" + "; ".join(lowerer.port_keys)] if lowerer.port_keys else []),
+        "requirement_ports=" + ",".join(sorted(requirement.ports)),
         "parameters=" + ",".join(lowerer.parameter_keys),
     ]
     if lowerer.required_port_keys:
@@ -597,6 +606,81 @@ def _passive(role: str, prefix: str, value: str, *, quantity: int = 1) -> Loweri
     )
 
 
+_CONTACT_KEY_RE = re.compile(r"(?P<prefix>pin|p)(?P<index>[1-9][0-9]*)")
+
+#: Contact key prefixes a cable-side connector family publishes, in match order.
+_CONTACT_KEY_PREFIXES = ("pin", "p")
+
+#: The reviewed family the screw-terminal lowerer realizes.
+_SCREW_TERMINAL_FAMILY = "screw-terminal"
+
+
+def _contact_net_map(
+    ports: Mapping[str, str], *, prefixes: tuple[str, ...] = _CONTACT_KEY_PREFIXES
+) -> dict[int, str] | None:
+    """``{contact number: net}`` from explicit ``pinN``/``pN`` keys, or None.
+
+    JSON objects have no physical ordering, so a contact number is only ever what the
+    draft states: the key names the position, and a family publishes one key alphabet
+    (`pin`) or accepts both.
+    """
+    if not ports:
+        return None
+    indexed: dict[int, str] = {}
+    prefix: str | None = None
+    for key, net in ports.items():
+        match = _CONTACT_KEY_RE.fullmatch(str(key))
+        if match is None or match["prefix"] not in prefixes:
+            return None
+        if prefix is None:
+            prefix = match["prefix"]
+        elif match["prefix"] != prefix:
+            return None
+        index = int(match["index"])
+        if index in indexed or not str(net).strip():
+            return None
+        indexed[index] = str(net)
+    return indexed
+
+
+def _contact_nets(
+    ports: Mapping[str, str], *, prefixes: tuple[str, ...] = _CONTACT_KEY_PREFIXES
+) -> tuple[str, ...] | None:
+    """Ordered nets of explicit contacts, or None when the numbering is ambiguous.
+
+    A draft states a contact number; a gap, a duplicate, or a second key alphabet leaves
+    which physical position carries which net undecidable, so the family refuses instead
+    of guessing the part's size from the highest number it happened to see.
+    """
+    indexed = _contact_net_map(ports, prefixes=prefixes)
+    if indexed is None:
+        return None
+    if set(indexed) != set(range(1, len(indexed) + 1)):
+        return None
+    return tuple(indexed[index] for index in range(1, len(indexed) + 1))
+
+
+def _reviewed_terminal_part(identity: str) -> tuple[int, str, str, str] | None:
+    """``(contacts, ordering code, symbol, footprint)`` for a reviewed screw terminal.
+
+    The reviewed library keys a part by its canonical identity -- the shipped ordering
+    code in lower case, which is what the manifest and the BOM both carry -- while a
+    draft states that code in its shipped case. Resolving through the library realizes
+    both spellings, and every reviewed contact count, instead of only the two codes a
+    private table happened to hold.
+    """
+    record = reviewed_part(identity)
+    if (
+        record is None
+        or record.family != _SCREW_TERMINAL_FAMILY
+        or record.lcsc is None
+        or not record.symbol
+        or not record.footprint
+    ):
+        return None
+    return len(record.contacts), record.identity.upper(), record.symbol, record.footprint
+
+
 def _connector(
     requirement: CircuitRequirement, *, terminal: bool = False
 ) -> LoweringArtifact | None:
@@ -606,7 +690,21 @@ def _connector(
         rows = int(requirement.parameters.get("rows", 1))
     except (TypeError, ValueError):
         return None
-    count = len(requirement.ports)
+    if terminal:
+        semantic_order = (
+            ("positive", "negative")
+            if len(requirement.ports) == 2
+            else ("positive", "common", "negative")
+        )
+        if set(requirement.ports) == set(semantic_order):
+            ordered_nets = tuple(requirement.ports[key] for key in semantic_order)
+        else:
+            ordered_nets = _contact_nets(requirement.ports)
+    else:
+        ordered_nets = _contact_nets(requirement.ports, prefixes=("pin",))
+    if ordered_nets is None:
+        return None
+    count = len(ordered_nets)
     if count % rows:
         return None
     per_row = count // rows
@@ -615,45 +713,12 @@ def _connector(
         if not 2 <= count <= 12:
             return None
         lowerer_id = "screw-terminal@1"
-        semantic_order = (
-            ("positive", "negative") if count == 2 else ("positive", "common", "negative")
-        )
-        if set(requirement.ports) == set(semantic_order):
-            ordered_nets = tuple(requirement.ports[key] for key in semantic_order)
-        else:
-            prefix = next(
-                (
-                    candidate
-                    for candidate in ("pin", "p")
-                    if set(requirement.ports)
-                    == {f"{candidate}{index}" for index in range(1, count + 1)}
-                ),
-                None,
-            )
-            if prefix is None:
-                return None
-            ordered_nets = tuple(
-                requirement.ports[f"{prefix}{index}"] for index in range(1, count + 1)
-            )
         if requirement.exact_part is not None:
-            reviewed = {
-                "WJ126V-5.0-02P-14-00A": (
-                    2,
-                    "screw-terminal-5mm-2p:WJ126V-5.0-2P",
-                    "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P",
-                ),
-                "WJ126V-5.0-03P-14-00A": (
-                    3,
-                    "screw-terminal-5mm-3p:WJ126V-5.0-3P",
-                    "screw-terminal-5mm-3p:CONN-TH_3P-P5.00_WJ126V-5.0-3P",
-                ),
-            }
-            selected = reviewed.get(requirement.exact_part)
+            selected = _reviewed_terminal_part(str(requirement.exact_part))
             if selected is None or selected[0] != count:
                 return None
-            _, symbol, footprint = selected
-            value = requirement.exact_part
-            mpn = value
+            _, mpn, symbol, footprint = selected
+            value = mpn
         else:
             symbol = f"Connector:Screw_Terminal_01x{count:02d}"
             footprint = (
@@ -662,7 +727,6 @@ def _connector(
             )
             value = f"ScrewTerminal_1x{count:02d}"
     else:
-        ordered_nets = tuple(requirement.ports.values())
         gender = str(requirement.parameters.get("gender", "male")).lower()
         if gender not in ("male", "female"):
             return None
@@ -866,14 +930,12 @@ def _usb_c_breakout(requirement: CircuitRequirement) -> LoweringArtifact | None:
 
 
 def _numbered_connector_ports(requirement: CircuitRequirement) -> dict[str, str] | None:
-    # JSON objects have no physical ordering. Only explicit, contiguous pinN
-    # bindings establish the contact numbers of a generic header.
-    ports = requirement.ports
-    if set(ports) != {f"pin{index}" for index in range(1, len(ports) + 1)}:
+    # JSON objects have no physical ordering. Only explicit, contiguous `pinN` bindings
+    # establish the contact numbers of a generic header.
+    ordered = _contact_nets(requirement.ports, prefixes=("pin",))
+    if ordered is None:
         return None
-    if any(not net.strip() for net in ports.values()):
-        return None
-    return {f"pin{index}": ports[f"pin{index}"] for index in range(1, len(ports) + 1)}
+    return {f"pin{index}": net for index, net in enumerate(ordered, 1)}
 
 
 def _pin_header(requirement: CircuitRequirement) -> LoweringArtifact | None:
@@ -1650,6 +1712,7 @@ for _lowerer in (
         ("sleeve", "tip", "ring"),
         port_directions=(("sleeve", "bidirectional"), ("tip", "bidirectional"), ("ring", "bidirectional")),
         required_port_keys=("sleeve", "tip", "ring"),
+        reference_port_keys=("sleeve",),
         required_exact_part="SJ1-3533NG",
     ),
     RegisteredLowerer(
@@ -1816,6 +1879,7 @@ for _lowerer in (
         ("cell_format",),
         ("positive", "negative"),
         required_port_keys=("positive", "negative"),
+        reference_port_keys=("negative",),
         reviewed_exact_part="BS-07-A1BJ001",
     ),
     RegisteredLowerer(

@@ -975,6 +975,57 @@ def test_reviewed_three_position_terminal_uses_the_declared_three_rail_pin_order
     ]
 
 
+def test_reviewed_terminal_identity_resolves_in_its_canonical_lower_case_spelling():
+    """The reviewed library's own spelling of a part must realize it.
+
+    `part_identity` keys a screw terminal by its canonical identity
+    (`wj126v-5.0-02p-14-00a`) while the shipped ordering code is the same string in
+    another case. A private code table matched only the upper-case spelling, so the
+    architecture derivation -- which writes the canonical identity onto the requirement --
+    refused the very part it had just chosen (the 2026-09-18 self-eval: 29 refusals over
+    10 briefs, the largest single fatal cause).
+    """
+    for spelling in ("wj126v-5.0-02p-14-00a", "WJ126V-5.0-02P-14-00A"):
+        artifact = lower_requirement(
+            _requirement(
+                "screw-terminal",
+                parameters={"rows": 1},
+                ports={"pin1": "VOUT", "pin2": "RETURN"},
+            ).model_copy(update={"exact_part": spelling})
+        )
+        assert artifact is not None, spelling
+        # The claimed part is the shipped ordering code, never the raw draft spelling.
+        assert artifact.groups[0].mpn == "WJ126V-5.0-02P-14-00A"
+        assert artifact.groups[0].footprint == "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
+
+
+def test_reviewed_four_contact_terminal_realizes_the_reviewed_four_way_part():
+    """Every reviewed contact count is reachable, not only the two a table held."""
+    artifact = lower_requirement(
+        _requirement(
+            "screw-terminal",
+            parameters={"rows": 1},
+            ports={f"pin{index}": f"NET{index}" for index in range(1, 5)},
+        ).model_copy(update={"exact_part": "wj126v-5.0-04p-14-00a"})
+    )
+
+    assert artifact is not None
+    assert artifact.groups[0].mpn == "WJ126V-5.0-04P-14-00A"
+    assert artifact.groups[0].footprint == "screw-terminal-5mm-4p:CONN-TH_4P-P5.00_WJ126V-5.0-4P-1"
+    assert len(artifact.pins) == 4
+
+
+def test_unreviewed_terminal_identity_is_still_refused():
+    with pytest.raises(ValueError):
+        lower_requirement(
+            _requirement(
+                "screw-terminal",
+                parameters={"rows": 1},
+                ports={"pin1": "VOUT", "pin2": "RETURN"},
+            ).model_copy(update={"exact_part": "WJ126V-5.0-02P"})
+        )
+
+
 
 
 def test_reviewed_bnc_connector_preserves_signal_and_all_shell_ground_pins():
@@ -1147,6 +1198,24 @@ def test_lowerer_summary_publishes_required_ports():
         "explicit-decoupling@1": ["vdd", "gnd"],
     }.items():
         assert rows[lowerer_id]["required_port_keys"] == wanted
+
+
+def test_lowerer_refusal_publishes_the_declared_contacts_and_the_family_contract():
+    """A refusal must name the contacts the draft declared and the shapes the family builds.
+
+    The 2026-09-18 self-eval refused five terminals whose contact numbers were gapped or
+    written in a second key alphabet, with only the generic "cannot realize this
+    port/parameter combination" text: the draft could not see which of its own contacts
+    the lowerer rejected, nor which contact spellings the family accepts.
+    """
+    diagnostic = lowerer_contract_diagnostic(
+        _requirement("screw-terminal", parameters={"rows": 1}, ports={"pin1": "A", "pin3": "B"})
+    )
+
+    assert diagnostic is not None
+    assert "requirement_ports=pin1,pin3" in diagnostic.evidence
+    contract = [line for line in diagnostic.evidence if line.startswith("port_contract=")]
+    assert contract and "positive/negative" in contract[0]
 
 
 def test_lowerer_refusal_names_required_ports():
