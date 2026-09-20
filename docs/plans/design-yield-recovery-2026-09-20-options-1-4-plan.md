@@ -398,3 +398,242 @@ defect stay at **zero**.
    current tree. Carrying both indefinitely has a cost that should be a decision, not a default.
 5. **Install the sweep timer** (`sudo cp deploy/kicraft-build-slots.{service,timer} …`, the handoff
    §6.6) so a reboot cannot silently end the leak watch.
+
+## §12 Results — implementation session, 2026-09-20
+
+**What this session was.** The four options as *code*, with the prerequisites settled and every
+claim re-measured at $0. **No paid campaign was run**: this box is the production host, the plan's
+own §P3 keeps paid campaigns off-hours and the campaign/measurement decision is still owed to the
+operator (§8, §11.3). So every number below is a free measurement (`--reference-replay`, a corpus
+of real drafts, the unit suite), and each move's *pre-registered paid delta* is handed to the
+operator as a command rather than claimed as a result. Nothing here is a re-run of an arm.
+
+### P1 — the free gate is green again (done, verified)
+
+| | before | after |
+|---|---|---|
+| `--reference-replay` | **FAILED** on `proto-shield`, 30 committed / 2 blocked / 2 refused | **passed: 31/34 rows reproduce their own boundary** (2 recorded blocks reported) |
+| the refusal's own record | `diagnostics: []`, message "see the diagnostic" | the refusing contract's code/message/evidence is this stage's one diagnostics row |
+
+The row was stale, not the contract: `proto-shield`'s recorded `functional_spec` reply (last
+touched 2026-09-16) predates the 09-18 board-feature capture, so it omits the
+`prototyping_area` fabrication obligation the intent commit derives from the brief. The row is
+re-recorded with that one compiler-owned row (7 lines); `buck-3a`'s contract-recorded conflict is
+still accepted, and nothing else changed. Log: `logs/self_eval/reference_replay_after_1a.log`
+(the run that produced 31/34), then re-run on the final tree (§12.5).
+
+### P2 — the inherited work is landed, deliberately
+
+`kicraft/design/lowering.py` (the contact derivation + the reviewed screw-terminal table),
+`kicraft/design/architecture_intent.py` (the rail-tie refusal message) and
+`tests/test_design_lowering.py` are committed. Rationale recorded in the commit: the work was
+present in *every* measured arm (A1/A3/A4), so reverting it would have re-baselined the campaign
+for no gain, and it is the derive half of move 1a.
+
+### Move 1a — the derive/refuse split for the compiler-known pin owner
+
+Implemented as the plan's §1 says (one move, not two), on the evidence of what the code actually
+refused. Three derives, each where the compiler already knows which net owns the pin:
+
+1. **A domain statement is not a tie.** `supply_rail`/`reference_domain` on a port the design's own
+   signals bind is the *signal's domain* ("ground-referenced"), which is what drafts mean by it:
+   the compiler takes the signal and records the statement. A **supply port** keeps its rail and
+   drops the reference — the precedence this compiler already applies to `supply_bindings`. An
+   unrelated net on a pin, or a statement nothing arbitrates, still refuses
+   (`conflicting_port_binding`, `declared_port_double_bound`, `declared_signal_port_tied`).
+2. **A lowerer publishes its return contact** (`reference_port_keys`): the coin cell's `negative`
+   and the TRS jack's `sleeve` are answered with the design's own ground instead of being asked
+   for.
+3. **A connector contact a signal names after a declared rail is that rail's exposure** — the shape
+   `power.rails[net].from_ref` already models — so it binds the rail instead of refusing the signal
+   and then refusing the connector again for the contact that refusal left unbound.
+
+Measured on a **corpus of real drafts** (26 per-attempt architecture drafts recovered from the
+production projects' `answer_delta` event stream, replayed through the real derivation at $0;
+`logs/self_eval/movea_tools_20260919/` shows the extraction idiom):
+
+| observation (distinct codes per draft, 26 drafts) | before | after |
+|---|---|---|
+| drafts that commit | 3 | **4** |
+| `unsupported_lowerer_contract` | 9 | **6** |
+| `conflicting_port_binding` | 7 | **6** |
+| `declared_port_double_bound` | 3 | **0** |
+| `declared_signal_port_tied` | 2 | **0** |
+| `signal_names_rail` | 1 | **0** |
+
+**The census needed correcting first, and that correction is a result of its own.** The plan's §1.1
+counts attempts whose failure text *contains* a code; the A1 summary's terminal diagnostic is a
+bundle (`multiple_intent_contracts`) whose members are the actionable content. Expanded over A1's
+69 architecture deaths:
+
+| terminal bundle | runs |
+|---|---|
+| `source_obligation_not_retained` alone | **11** |
+| `unsupported_lowerer_contract` alone | **6** |
+| a tie class alone (`conflicting_port_binding` / `declared_*`) | **8** |
+| `unreviewed_exact_part` alone | 5 |
+| any tie code present (with any others) | 31 |
+| `unsupported_lowerer_contract` present (with any others) | 32 |
+
+So `unsupported_lowerer_contract` on its own can convert at most **6 of 102** attempts — the plan's
+"expect ≥10 more attempts commit a design" is only reachable for the *bundle* this move addresses
+(tie codes + `unsupported_lowerer_contract` + the contact contract), which is what was
+implemented. `source_obligation_not_retained` (11, the largest single class) is the architecture
+stage's **ownership** rule — the draft must attach each committed obligation to the requirement
+that implements it — and is deliberately left blocking (plan §4.1).
+
+### Move 1b — settled inside 1a
+
+`conflicting_port_binding` (24 firings) and `declared_signal_port_tied` (12) were, on the evidence,
+not a prompt-wording problem but the same domain-statement misread (1a.1). Measured above. Nothing
+was changed in the prompt/contract shape: the plan's §10 forbids another wording rewrite, and the
+derive removes the refusal without touching what the draft is told.
+
+### Move 1c — not taken
+
+`unreviewed_exact_part` (18) is now a RECORD-class note (move 4b) and the remaining `1c` codes
+(`unknown_supply_rail` 5, `unbound_required_port` 5, `unknown_interface_port` 6) are small, and the
+evidence says they are dangling references (the BLOCK class), not bookkeeping.
+
+### Move 2a — the realization checks now see the part the design emitted
+
+`kicraft/server/stage_work_units.py::_requirement_obligation_defects` compared a declared-interface
+claim's `pin` against the symbol's pin **numbers** only, so a draft that named the contact the way
+the symbol names it was refused for a correct statement. That is 30 of the ~50 BOM defects in A1:
+
+```
+mcp23017:vdd: claimed pin 'VDD' is not in mcp23017-soic:MCP23017-E_SO; available pins=['1','10',...]
+```
+
+The same symbol publishes `VDD` as pin 9 in the same payload the check already reads, and the
+synthesis side already resolved names this way (`validation._declared_port_pin`). A claim is now
+resolved by number, else by one unique pin name (case-insensitive), and refused only when it is
+neither — naming the string that failed and, when a name matches several pins, which ones.
+
+### Move 2b — the premise did not survive the evidence (recorded, not implemented)
+
+The plan's example ("an obligation asks for a class the reviewed library has no part for") is
+**refuted** by the run it quotes. In `logs/self_eval/movea_a4_recordpatch/run_10_rp2040-min__r1`:
+
+```
+stage_status.bom = {"attempts": 0, "work_units": 1, "failure_kind": "commit_rejected",
+                    "diagnostics": [{"code": "bom_castellation_placeholder", "severity": "fab_gate",
+                                     "message": "Board-fabricated castellations were represented as
+                                                 assembly headers.", "evidence": ["j2"]}]}
+```
+
+The run died on a **castellation-representation gate** over a BOM whose recipe-owned expansion
+never reached the stage; the six `E_PHYSICAL_REALIZATION` offenders (`crystal`, `microcontroller`,
+`usb-c-connector`, ...) are members of the same commit rejection, and the library **does** hold
+those classes (`nx3215sa-32.768k-std-mua-9` carries `crystal`; `rp2040` carries
+`microcontroller`). Nothing was derived or downgraded on this premise.
+
+What *was* implemented is the part of 2b the data supports and that P1's rule already requires:
+**a rejected commit records every reason it refused.** Before this change the stage status carried
+only the semantic diagnostics (`bom_castellation_placeholder`) and the six realization contracts
+lived on the transient `retry` event — which is exactly how the plan mis-attributed this death to
+a crystal obligation. `_commit_rejection_diagnostics` now puts the gate codes, the errors and the
+offenders on the stage's own `diagnostics`, in both the work-unit and the single-payload commit
+paths.
+
+### Move 4a/4b — the advisory machinery, and the classification as specified
+
+Landed from the validated preview patch (`logs/self_eval/movea_a4_recordpatch.patch`) plus what the
+preview deliberately left out:
+
+- `ArchitectureAdvisory` on the committed architecture, `_advise(...)` beside `_fail(...)`, the
+  §9.33/§9.34 BOM notes, per-run `advisories` in the eval record, summary counts, and the
+  "Shipped with advisories" table in the rendered report;
+- the shared line/marker protocol in `kicraft/design/advisories.py` (the BOM note writer, the
+  self-eval reader and the board's promote provenance all read it);
+- **persistence into the board's provenance**: `<stem>.provenance.json` now carries
+  `advisories: [...]`, so the board itself says what it could not prove;
+- **the recording rubric gate** `shipped_with_advisories` (`detected_by: script`). Its cap is
+  unreachable (100), so it cannot penalise or stop a ship — no cap, no block, no suppression
+  (D6) — and the gate row carries the codes and the count. `meta.version` 2 → 3, hash refreshed,
+  `RUBRIC.md` mirror updated.
+- **§4.3 A/B applied as written**: `unreviewed_exact_part` and `unknown_part_refused` are RECORD;
+  §9.33/§9.34 are RECORD; the three BOM obligation/interface codes stay BLOCK; every architecture
+  code the plan lists as BLOCK still raises.
+
+Guard tests (`tests/test_design_advisories.py`) pin both halves: an AST snapshot asserts the
+module's `_fail` literals still contain all 28 BLOCK codes while the two RECORD codes appear only
+in `_advise`, and the live paths are exercised (the two RECORD classes reach
+`architecture.advisories` and the rubric gate; two nets on one pin still refuse end to end).
+
+### Option 3 — the pipeline switch
+
+`kicraft/server/pipeline.py` owns the switch: the pinned commit (`bc6a2f8`), the legacy tree's
+paths, the **measured environment the legacy tree needs to reach the current model at all**
+(`KICRAFT_PROVIDER_ORDER=openai`, the price caps, reasoning 0 — without these every call fails in
+under a second at zero cost, handoff §6.3), the workspace marker, and the provenance fields.
+
+- **Config**: `pipeline` in `routing_config.ALLOWED_KEYS` + `RoutingConfig` + validation
+  (`current`|`legacy`), and a `Settings.pipeline` default (`KICRAFT_PIPELINE`). A save needs no
+  restart: both dispatch sites re-read it per run/job.
+- **Admin**: a "Design pipeline" select on `/admin/routing`, labelled with the pinned commit and
+  the measured 21/34, with the trade-off line beside it (a legacy build serializes against a
+  production build on a one-slot host; the fork does not receive options 1–2's fixes).
+- **Design dispatch**: `session.run_session` writes the marker and, for `legacy`, runs the legacy
+  tree's own headless driver as a subprocess (`-m kicraft.server.stage_driver run … --no-build`)
+  with its own interpreter, its own cwd and `PYTHONPATH` pinned to the legacy root. Measured: the
+  legacy venv's editable install resolves `/home/kicraft/KiCraft-legacy/kicraft` from any directory
+  that does not itself hold a `kicraft/` package (a job workspace, the legacy root, `/tmp`), and
+  the pin makes the current checkout unable to shadow it whatever the child's cwd is. The result
+  rows and status mapping are rebuilt from the workspace's stage status, so the caller sees the
+  same shape either way, and an unsupported per-run instruction is reported rather than dropped.
+- **Build dispatch**: `build_worker._execute_job` substitutes the legacy interpreter for a legacy
+  workspace (from the *marker*, not the config, so a design/build pair can never disagree) and
+  pins `PYTHONPATH`; the argv contract is otherwise identical.
+- **Marking**: the workspace marker, the `projects.pipeline` column (additive migration), the
+  promote provenance, and the eval summary's `pipeline_counts` + rendered line.
+
+Guard tests: `tests/test_pipeline_switch.py` (config round-trip and rejection, the marker as the
+build's source of truth, interpreter substitution, the dispatch subprocess's command *and*
+environment, the project row, the provenance file, the summary grouping).
+
+### §12.5 Verification run in this session
+
+| check | result |
+|---|---|
+| `--reference-replay` (34 rows, $0) after 1a | **passed: 31/34** · 2 recorded blocks (floor ≥31 met) — `logs/self_eval/reference_replay_after_1a.log` |
+| `--reference-replay` on the final tree (1a + 2a + 4a/4b + option 3) | **passed: see §12.6** — `logs/self_eval/reference_replay_final.log` (run on `9a44ec1`; the commit after it is comment-only) |
+| real-draft corpus, 1a before/after | 3 → 4 drafts commit; 6 refusal classes shrink (table above) |
+| `tests/` full suite | **4301 passed**, 15 skipped, 1 xfailed, 2 failed — both failures pre-existing and environmental: `test_vendored_bundles_are_not_prototype` (`ams1117-5v0-fixed` still defaults to prototype) and `test_krt_preflight_uses_environment_defaults` (KRT backend unavailable: `No module named 'py_router.startup_checks'`). Both fail identically on the pre-session tree (`b7a379f` worktree). |
+| touched test files only (advisories, switch, BOM, intent, routing, lowering) | 315 passed |
+| legacy dispatch smoke | `pipeline.describe()` reports `available: true`, `/home/kicraft/KiCraft-legacy`, `bc6a2f8`; the legacy interpreter resolves `kicraft` from the legacy root in a job-shaped cwd; the driver's argv/environment are pinned by `tests/test_pipeline_switch.py` |
+
+**Commits** (in order): `b7a379f` P1 + P2 + moves 1a–1b · `036d8fb` move 2a/2b · `b432205`
+moves 4a/4b · `9a44ec1` option 3 · `a8c405b` a comment correction.
+
+### §12.6 What is measured and what is owed
+
+**Not measured (and not claimed):** the plan's per-move paid deltas. Each is one `env -i` command
+away, and §7's protocol applies unchanged:
+
+```bash
+REPO=/home/kicraft/KiCraft
+# Option 1 screening (design-only, 34 briefs x 3): ~$1.80
+env -i HOME=/home/kicraft PATH="$PATH" TERM=xterm PYTHONUNBUFFERED=1 \
+  "$REPO/.venv/bin/python" -m kicraft.eval.self_eval --out logs/self_eval/opt1_designonly \
+  --design-only --repeats 3
+# The confirming full run (builds boards): ~$2-3, off-hours, --parallel 2
+env -i HOME=/home/kicraft PATH="$PATH" TERM=xterm PYTHONUNBUFFERED=1 \
+  "$REPO/.venv/bin/python" -m kicraft.eval.self_eval --out logs/self_eval/opt1_full --repeats 3
+# Option 3 acceptance: one brief under pipeline=legacy, five stages + a finished board
+```
+
+Pre-registered, per the plan: option 1's screen must show the per-brief median commit count rising
+(≥3 briefs) or the move is reverted; option 2a must add ≥6 committing designs and ≥3 finished
+boards on the confirming run; option 4 must add ≥3 finished boards **with every new board carrying
+at least one named note**. The baselines to compare against are frozen and must not be overwritten:
+`logs/self_eval/movea_a1_current_20260919T1431Z` (current tree) and
+`logs/self_eval/movea_a3_precontract_b4b8be5` (13/34).
+
+**Owed to the operator, unchanged:** §11.1 (option 3 in or out, manual or automatic — this session
+implements manual only), §11.3 (may paid campaigns run here at all), §11.4 (how long the legacy
+fork lives), §11.5 (install the sweep timer). New, from this session: the `bom_castellation_placeholder`
+death of `rp2040-min` is a *real* defect (a castellated edge drawn as an assembly header) and is
+now the only named reason on the stage status, but the recipe-owned BOM expansion of that run never
+reached the stage (`attempts: 0`, one work unit) — that is option 2's real remaining wall, and it
+is a session of its own.

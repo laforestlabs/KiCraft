@@ -85,6 +85,36 @@ def test_project_row_records_the_pipeline(tmp_path):
     assert row is not None and row.pipeline == "legacy"
 
 
+def test_existing_database_gains_the_pipeline_column(tmp_path):
+    """The production box's accounts.db predates this column: it must migrate in place."""
+    import sqlite3
+
+    db = tmp_path / "accounts.db"
+    conn = sqlite3.connect(db)
+    # The production schema minus `pipeline` (the column this migration adds).
+    conn.execute(
+        "CREATE TABLE projects (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL,"
+        " brief TEXT NOT NULL, project_stem TEXT, status TEXT NOT NULL DEFAULT 'running',"
+        " created_at TEXT NOT NULL, finished_at TEXT, cost_usd REAL, dir_path TEXT,"
+        " zip_path TEXT, viewed_at TEXT, is_public INTEGER NOT NULL DEFAULT 1,"
+        " cloned_from_id INTEGER, view_count INTEGER NOT NULL DEFAULT 0,"
+        " clone_count INTEGER NOT NULL DEFAULT 0, like_count INTEGER NOT NULL DEFAULT 0,"
+        " quality TEXT, board_code TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO projects (id, user_id, brief, created_at) VALUES (7, 1, 'old', '2026-09-01')"
+    )
+    conn.commit()
+    conn.close()
+    store = AccountStore(db_path=db, projects_dir=tmp_path / "projects")
+    row = store.get_project(7)
+    assert row is not None
+    # NULL reads as "built before the switch existed", i.e. the current pipeline.
+    assert row.pipeline is None
+    store.finish_project(7, "ok", pipeline="legacy")
+    assert store.get_project(7).pipeline == "legacy"
+
+
 def test_legacy_dispatch_uses_the_legacy_tree_and_its_environment(monkeypatch, tmp_path):
     """The design subprocess runs the legacy driver with the measured provider overrides.
 
