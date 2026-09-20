@@ -6,8 +6,9 @@ the environment recipes that took several attempts to get right, and what must n
 does not replace `docs/plans/design-yield-recovery-2026-09-19-plan.md`, which remains the
 authoritative plan — its `## §2 Results` section is the measurement this document interprets.
 
-**Read order.** §1 (state in one screen) → §3 (the target list) → §4 (what to do next). §5–§8 are
-reference.
+**Read order.** §1 (state in one screen) → §4 (the target list) → §5 (what to do next). §6–§8 are
+reference. **Convention:** `§N` unqualified is a section of *this* document; a section of the
+authoritative plan is written *the plan's §N*.
 
 ---
 
@@ -23,7 +24,7 @@ reference.
 | Tree state | **no source change**: HEAD + the three inherited dirty files; the A4 scaffolding stayed in its own worktree |
 | Production impact | web process never died (HTTP 200 throughout, 7 failed health checks over ~3.25 min at the memory plateau); **a SIGKILLed campaign orphaned a build that held a host build slot for 12 h 24 m**, halving the build worker's concurrency until it was reaped; `KICRAFT_BUILD_SLOTS` is now **1** (was 2) and a supervisor reclaims leaked slots (§6.6, §11) |
 | Committed | `a879461` — the plan document with the measured `## §2 Results` |
-| Next | attack `unsupported_lowerer_contract` (§4 Move 1), then the BOM obligation layer (§4 Move 3) |
+| Next | attack `unsupported_lowerer_contract` (§5 Move 1), then the BOM obligation layer (§5 Move 3) |
 
 ---
 
@@ -71,7 +72,7 @@ A4 exercised the RECORD downgrade exactly as specified and it converted nothing:
 - 12 of 102 runs carried an advisory; on **all 12** the RECORD-class codes were the *only*
   architecture diagnostics, so the downgrade is what let them pass the stage A1 killed them at.
 - **All 12 then died at the BOM stage.** **Zero boards shipped carrying an advisory** — the plan's
-  §4.4 acceptance criterion fails outright.
+  the plan's §4.4 acceptance criterion fails outright.
 - The headline delta is variance: the two briefs that improved (`rc-lowpass-bnc` 1/3→3/3,
   `r2r-dac` 1/3→3/3) *committed*, so an advisory would have been persisted had one fired — none
   did, so no RECORD code fired and their code path is identical to A1's. `audio-jack-buffer`
@@ -80,9 +81,9 @@ A4 exercised the RECORD downgrade exactly as specified and it converted nothing:
 
 This is the plan's own "≈ 0" branch, and its re-derivation instruction ("re-derive from A4's
 per-board failure path") resolves cleanly: the wall is the **BOM obligation/interface layer**,
-which §4.1 rules out of the RECORD class by design.
+which the plan's §4.1 rules out of the RECORD class by design.
 
-**Do not run §4 as specified.** Widening RECORD would repeat a measured null.
+**Do not run the plan's §4 as specified.** Widening RECORD would repeat a measured null.
 
 ---
 
@@ -110,7 +111,8 @@ Totals: A1 69 architecture-failing runs / 13 distinct codes; A3 25 / 7; A4 67 / 
 **`unsupported_lowerer_contract` is the single highest-value target in the dataset**: it was
 introduced by the 09-16 push, it fires on 32 of A1's 102 runs (46 % of A1's architecture deaths),
 and it is **absent at A3** — the tree that delivers 13/34. The plan already prescribes its split
-(§4.3 A, last row): *derive* the contacts when the draft's own signals name them (§5 B-2), and
+(the plan's §4.3 A, last row): *derive* the contacts when the draft's own signals name them
+(the plan's §5 B-2), and
 refuse only when the geometry is genuinely outside the family's range.
 
 ### 4.2 BOM walls — the stage that binds once architecture passes
@@ -137,7 +139,8 @@ The model **did** emit the LED; the deterministic check cannot see it as a real 
   E_PHYSICAL_REALIZATION 'rp2040': requires 1 reviewed 'crystal' physical part
 ```
 
-Neither is "the model was wrong" — both are the compiler's own bookkeeping. That is §5 B-2's
+Neither is "the model was wrong" — both are the compiler's own bookkeeping. That is the plan's
+§5 B-2's
 territory ("stop asking the model for what the compiler can derive"), whose precedent quadrupled
 completion (1/34 → 4/34 briefs on 09-17).
 
@@ -187,7 +190,7 @@ the legacy tree cannot talk to Luna at all under the production `.env` (§6.3 wi
 gives every call a `<1 s` "provider error" at $0.00). Production could serve 21/34 boards through
 it; the cost is a maintained fork of an 08-25 tree.
 
-**Do not:** run §4 (measured null), widen RECORD, chase the model axis (§5 B-4 — A2/A3 show Luna
+**Do not:** run the plan's §4 (measured null), widen RECORD, chase the model axis (the plan's §5 B-4 — A2/A3 show Luna
 is not the constraint), or restore FreeRouting (§6.4 unchanged: `java` absent, no such directory,
 and the legacy tree routes with KRT fine).
 
@@ -319,6 +322,15 @@ Verified after restart: `[build-worker] ready (max 1 concurrent build(s))` (was 
 field in `routes_admin.py` (≈2306/2353/2401) belongs to the loadtest launcher, and neither
 `routing_config.ALLOWED_KEYS` nor `Settings` carries it. If the operator wants to change it again,
 it is `.env` plus the two restart scripts.
+
+**Consequence of one slot, stated because it changes the blast radius.** With a single host slot a
+leak no longer halves build capacity — it removes *all* of it until the sweep runs, which makes the
+monitor load-bearing rather than a nicety (worst case ≈7 min: 5 min cadence + the 120 s age guard).
+The same slot also serializes a campaign build against a production build, so a campaign run during
+business hours can delay a user's build by up to one build timeout (2400 s). Both are acceptable
+against what they replace (a silent 12 h leak, and two CPU-saturating builds on two cores), but they
+are reasons to keep running campaigns off-hours — and reasons to prefer the parent-death fix below
+over the sweep.
 
 
 
