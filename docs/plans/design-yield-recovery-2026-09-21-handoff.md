@@ -31,7 +31,8 @@ daily ceiling is shared with the live site (a runner-side guard aborts at $13).
 | **Free gate ($0)** | `--reference-replay` **31/34** rows reproduce their own boundary, 2 recorded blocks (floor ≥31). Green; red at the start of the session. |
 | **Unit suite** | **4301 passed**, 15 skipped, 1 xfailed, **2 failed** — both pre-existing and environmental (`test_vendored_bundles_are_not_prototype`: `ams1117-5v0-fixed` still defaults to prototype; `test_krt_preflight_uses_environment_defaults`: `No module named 'py_router.startup_checks'`). |
 | **First paid screen (design-only, 34×3)** | **102/102 runs, $1.78, 50 min.** Committed designs **7** (A1 baseline: 7). Briefs committing at all **3** (A1: 4); briefs committing in ≥2 repeats **2** (A1: 3). **Headline flat** — but the failures moved one stage downstream: architecture deaths **69 → 51**, BOM deaths **23 → 41**. §2 reads this. |
-| **A/B attribution** | Ran at the same time as this document (batches `ab_move1a_before` / `ab_move1a_after`): the five briefs that moved, 3 repeats each, on the two trees that differ *only* by moves 1a–1b. Result in §2.3. |
+| **A/B attribution** | First attempt (batches `ab_move1a_before` / `ab_move1a_after`) was **contaminated and discarded**: the "after" tree contains the option-3 switch, so it honoured the production routing file — and that file has said `pipeline: legacy` since 2026-09-21 00:55. Re-run with the pipeline pinned to `current` for both arms (`ab_move1a_pinned_*`); result in §2.3. |
+| **Production switch state** | `~/.kicraft/routing.json` (written 2026-09-21 00:55) selects **`pipeline: legacy`**. Every design run started since then — including anything a user starts on kicraft.io — is driven by the August tree, so **options 1–2's fixes are not in play for those runs**. Put it back to `current` when the point is to test the fixes; either choice is legitimate, but it must be deliberate. §5.7 has the trap this exposed. |
 | **Spend** | 2026-09-20: $4.24 (session-1 arm $2.02 + this session's screen $1.78 + smokes). 2026-09-21: $0.11 at the time of writing. Daily ceiling $20. |
 | **The ladder** | current tree **4/34** fab-ready briefs (A1) · 09-15 tree **13/34** (A3) · August tree **21/34** (A2) · best recorded July batch **25/34** · target **34/34** (never achieved). |
 
@@ -106,7 +107,11 @@ on *identical* inputs, so a single arm cannot attribute those. A/B run (both arm
 session, 3 repeats, only the 1a derives differing): `logs/self_eval/ab_move1a_20260921.log`,
 batches `ab_move1a_before` / `ab_move1a_after`, ~$0.55.
 
-> **Result:** see `§2.3 result` at the end of this document (filled in when the run completed).
+> **Result:** see the appended §2.3 result. The method note that matters more than the numbers:
+> with 3 repeats, a single brief's commit count swings by **±2 of 3** on the same tree — measured
+> this session, on five briefs, two arms, including one arm that was later re-run pinned. Individual
+> brief deltas are therefore noise; only the *sum over briefs*, the *stage split* and the *refusal
+> composition* carry signal. This is the plan's §7.1 warning, quantified.
 
 ---
 
@@ -197,7 +202,50 @@ One move per screen, each with a pre-registered delta and a kill criterion. Scre
 M3 screen + M5 confirmation ≈ **$6–8** and one working day, inside the daily ceiling if spread over
 two days.
 
-**Parallel track B — the legacy switch (already deployed, needs proving once).**
+### 4b. The legacy switch as deployed DOES NOT WORK YET — two reproduced defects (2026-09-21)
+
+The operator switched production to `pipeline: legacy` at 00:55 and submitted real projects. Three
+of them failed; both failure modes are reproducible and diagnosed:
+
+**Defect B1 — the tail is split across two trees, and the current tree corrupts the legacy state.**
+Project 878 (`pipeline: legacy`): the design stages committed through the legacy driver
+(`[legacy] rc=0 … [ok] intent … wiring`), then the **current tree's** post-design tail ran in the
+web process — the BOM reconcile and the post-wiring lifecycle (`electrical_review`, silkscreen) —
+and re-serialized `state.json` through the *current* models. The build then ran with the legacy
+interpreter (the marker was honoured: `job 322: build in … [legacy pipeline]`) and died with **171
+schema errors**:
+
+```
+schema validation failed:
+171 validation errors for ConversationState
+bom.parts.0.assembly          Extra inputs are not permitted [input_value=True]
+bom.parts.0.recipe_id         Extra inputs are not permitted [input_value=None]
+bom.parts.0.lowering_role     Extra inputs are not permitted …
+```
+
+`assembly`, `recipe_id`, `resolution_*` and `lowering_*` exist in the current tree and **not at all**
+in the legacy tree (`grep -c` : 4 vs 0). The state a legacy project ends up with is therefore
+neither schema, and only the current tree can read it. My dispatch passed `--no-build`, so the
+legacy tree never ran its own tail — **the pipeline was split mid-tail**, which is exactly the
+hazard the plan's §3.3 named ("the legacy tree writes a different state schema") and which the
+marker only mitigated on the *reading* side.
+
+*Fix shape (next session, ~1 h):* for a legacy workspace **no current-tree code may write
+`state.json`**. Two changes: let the legacy driver run its own tail (drop `--no-build`, so
+design+build happen in one legacy process), and guard the BOM-reconcile / post-wiring-lifecycle
+paths so they skip a legacy workspace entirely. Then retry project 878 as the acceptance test — the
+artifact is already on disk. **Until that lands, `pipeline: legacy` is a broken configuration for
+users** (see §8.2).
+
+**Defect B2 — a legacy run that parks on a question is reported as a failure.** Projects 876 and 877
+(legacy) had every design stage commit and then `wiring` **parked**: the legacy driver asked a
+clarifying question (`-> parked: awaiting input`), and my `_run_legacy_session` maps anything short of
+"all stages committed" to `status: failed`. The question never reaches the user, and the project row
+says `failed`. *Fix shape:* the legacy driver must surface its park the way the current driver does
+(`status: awaiting_input` + the question attached), or the dispatch must detect the parked stage from
+the workspace's own `open_questions` and translate it.
+
+**Parallel track B — the legacy switch (deployed; needs the two fixes above before it is usable).**
 `~$0.10` + one build: drive one brief with `pipeline=legacy` end to end (five stages **and** a
 finished board), switch back, confirm `current`, and check the pipeline is named in the project row,
 the provenance file and the summary. This is the only untested path in the whole session and it is
@@ -216,9 +264,11 @@ the expected delta *before* the run and revert when it misses.
 
 ## 5. The next three actions, as commands
 
-**1. Finish the attribution that is already running** (batches `ab_move1a_before`/`ab_move1a_after`)
-and read §2.3. If the before-arm wins clearly, revert `b7a379f`'s derive hunks and re-baseline
-before M2; if not, M2 proceeds on the current tree.
+**1. Read the pinned attribution** (§2.3, batches `ab_move1a_pinned_before`/`_after`, ~$0.45). If
+the before arm wins clearly, revert `b7a379f`'s derive hunks and re-baseline before M2; if the arms
+are equal (as the discarded first attempt suggested, and as ±2/3 noise would predict), M2 proceeds
+on the current tree. **Also decide the production switch state** (§8.2): `legacy` since 00:55 means
+user runs are not getting the fixes this plan is building.
 
 **2. Implement M2** (§3.1) — `_requirement_owns_protected_group` in
 `kicraft/server/stage_contracts.py`, plus a guard test built from the reproduced case
@@ -262,6 +312,22 @@ env -i HOME=/home/kicraft PATH="$PATH" TERM=xterm PYTHONUNBUFFERED=1 \
   directory without a `kicraft/` package; the `PYTHONPATH` pin is belt-and-braces.
 - **Deploy**: `deploy/restart-build-worker.sh && deploy/restart-web.sh` — both services, because
   the build dispatch lives in the worker. No `pip install` unless dependencies changed.
+- **The harness follows the admin switch.** `kicraft.eval.self_eval` drives designs through
+  `session.run_session`, which honours `routing.json`'s `pipeline`, so a campaign silently measures
+  whatever the switch says — this session's first A/B was discarded for exactly that reason (the
+  "after" tree contained the switch, the "before" tree did not, so the two arms ran different
+  pipelines). Two rules from here on:
+  1. **Every campaign records which pipeline it measured**: `summary.json.pipeline_counts` (added
+     this session) says `{current: 102}` or `{legacy: 102}`; read it before interpreting anything.
+     It is what proved the M1 screen was a current-tree measurement.
+  2. **To measure a specific tree, pin the pipeline for that run** instead of changing production:
+     ```bash
+     cp ~/.kicraft/routing.json /tmp/routing_ab_current.json
+     # set "pipeline": "current" in the copy, then launch the arm with
+     #   env -i ... KICRAFT_ROUTING_CONFIG=/tmp/routing_ab_current.json ...
+     ```
+     `routing_config.default_path()` honours that variable, and the copy carries the same profile
+     and knobs, so the arm is comparable to a campaign run under the production file.
 
 ---
 
@@ -283,9 +349,14 @@ env -i HOME=/home/kicraft PATH="$PATH" TERM=xterm PYTHONUNBUFFERED=1 \
 ## 8. Operator decisions still open
 
 1. **Push the branch?** 19 local commits are the only copy; the box serves them locally.
-2. **Option 3, in or out — and manual or automatic?** Manual is what shipped. An automatic retry of
-   a failed `current` design on the legacy pipeline means two configurations producing boards with
-   no human choosing; the plan's default is no.
+2. **Option 3 is IN and currently broken for users — decide tonight.** `~/.kicraft/routing.json`
+   has said `pipeline: legacy` since 2026-09-21 00:55. Three real projects have been submitted under
+   it and **all three failed**, for the two reasons above (B1: the current tree's tail corrupts the
+   legacy state, so the legacy build cannot read it; B2: a parked legacy run reports as failed).
+   Two honest choices: (a) set it back to `current` until B1/B2 are fixed — users then get the
+   current tree's 4/34, which at least runs; or (b) fix B1/B2 first (~1 h, production build path,
+   validated by retrying project 878), then leave `legacy` on for the 21/34 yield. Do not leave it
+   on as-is: it is currently converting a design failure into a build failure for every user.
 3. **How long does the legacy fork live?** It buys 21/34 today and receives none of M2–M6's fixes.
 4. **Install the build-slot sweep timer** (needs root):
    `sudo cp deploy/kicraft-build-slots.{service,timer} /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now kicraft-build-slots.timer`
