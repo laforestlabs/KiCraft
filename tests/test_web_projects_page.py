@@ -13,6 +13,7 @@ on the fresh app.
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 
 import pytest
@@ -158,3 +159,94 @@ async def test_delete_can_be_cancelled(harness):
     await u.should_see('"KEEPER" will be deleted')
     u.find("Cancel").click()
     assert store.get_project(pid) is not None  # untouched
+
+
+# ---- identity, truthful status, and no stale downloads ----------------------
+
+
+async def test_row_is_named_from_its_brief_before_any_commit(harness):
+    """A project with no committed stem yet is identifiable by its brief -- never
+    an empty or "(building...)" label."""
+    u, web, store, acct = harness
+    store.create_project(acct.id, "USB-C temperature logger")
+
+    await _login(u)
+    await u.open("/projects")
+    await u.should_see("USB-C temperature logger")
+
+
+async def test_committed_stem_appears_without_a_page_reload(harness):
+    """The row is polled: a stem committed after the page loaded replaces the
+    brief-derived title in place (and the brief stays the fallback)."""
+    u, web, store, acct = harness
+    pid = store.create_project(acct.id, "usb battery bank")
+
+    await _login(u)
+    await u.open("/projects")
+    await u.should_see("usb battery bank")
+
+    base = store.projects_dir / str(acct.id) / str(pid)
+    (base / ".kicraft").mkdir(parents=True, exist_ok=True)
+    (base / ".kicraft" / "state.json").write_text(
+        '{"project_stem": "USB_BANK"}', encoding="utf-8")
+    store.finish_project(pid, "running", stem="USB_BANK", dir_path=str(base))
+
+    await u.should_see("USB_BANK", retries=40)  # the 2 s poll picks it up
+
+
+async def test_two_rows_keep_their_own_identity_across_updates(harness):
+    """Rows are updated by project id: one project changing must never rewrite or
+    reorder another's row."""
+    u, web, store, acct = harness
+    first = store.create_project(acct.id, "first board")
+    second = store.create_project(acct.id, "second board")
+    store.finish_project(second, "failed")
+
+    await _login(u)
+    await u.open("/projects")
+    await u.should_see("first board")
+    await u.should_see("second board")
+    await u.should_see("Failed")
+
+    store.finish_project(first, "interrupted")
+    await u.should_see("Interrupted", retries=40)
+    await u.should_see("Failed")  # the other row is untouched
+
+
+async def test_queued_build_without_a_live_registry_is_not_interrupted(harness):
+    """A build the worker drives outlives the web process: with an empty
+    _LIVE_RUNS the row must read as queued work, not as a lost run, and must not
+    offer a duplicate build."""
+    u, web, store, acct = harness
+    pid = store.create_project(acct.id, "queued board")
+    base = store.projects_dir / str(acct.id) / str(pid)
+    base.mkdir(parents=True, exist_ok=True)
+    store.enqueue_build(workspace=str(base), project_id=pid, user_id=acct.id)
+
+    await _login(u)
+    await u.open("/projects")
+    await u.should_see("Queued for board build")
+    await u.should_not_see("Interrupted")
+    await u.should_not_see("Rebuild board")
+
+
+async def test_failed_row_with_an_old_package_offers_no_download(harness):
+    """A leftover zip from an earlier build is evidence, not a deliverable: a
+    failed row never offers it (the rebuild action is what it offers instead)."""
+    u, web, store, acct = harness
+    pid = store.create_project(acct.id, "doomed board")
+    base = store.projects_dir / str(acct.id) / str(pid)
+    (base / ".kicraft").mkdir(parents=True, exist_ok=True)
+    (base / ".kicraft" / "state.json").write_text(
+        json.dumps({"project_stem": "DOOMED",
+                    "stage_status": {k: {"ok": True} for k in web.DESIGN_STAGES}}),
+        encoding="utf-8")
+    (base / "kicraft_project.zip").write_bytes(b"stale package")
+    store.finish_project(pid, "failed", stem="DOOMED", dir_path=str(base),
+                         zip_path=str(base / "kicraft_project.zip"))
+
+    await _login(u)
+    await u.open("/projects")
+    await u.should_see("Failed")
+    await u.should_not_see("Download")
+    await u.should_see("Rebuild board")

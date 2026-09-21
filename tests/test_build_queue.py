@@ -208,6 +208,48 @@ def test_list_unfinalized_builds(store):
     assert store.list_unfinalized_builds() == []  # project finalized
 
 
+def test_project_build_jobs_is_owner_scoped_newest_per_project(store):
+    """The UI's one-query view: newest job per project, only for the owner."""
+    mine = store.create_user("mine@example.com", "pw12345678")
+    theirs = store.create_user("theirs@example.com", "pw12345678")
+    p1 = store.create_project(mine.id, "first")
+    p2 = store.create_project(mine.id, "second")
+    other = store.create_project(theirs.id, "not mine")
+
+    older = store.enqueue_build(workspace="/ws1", project_id=p1, user_id=mine.id)
+    store.finish_build(older, rc=0)
+    newest = store.enqueue_build(workspace="/ws1", project_id=p1, user_id=mine.id)
+    store.claim_build(newest, "pid:1")
+    store.enqueue_build(workspace="/ws2", project_id=p2, user_id=mine.id)
+    store.enqueue_build(workspace="/ws3", project_id=other, user_id=theirs.id)
+
+    jobs = store.project_build_jobs(mine.id)
+    assert set(jobs) == {p1, p2}                 # the other owner's job is absent
+    assert jobs[p1].id == newest                 # newest wins, not the oldest
+    assert jobs[p1].status == "running"
+    assert jobs[p2].status == "queued"
+    # The reaper's own API keeps its meaning: a RUNNING job is not unfinalized.
+    assert all(j.id != newest for j in store.list_unfinalized_builds())
+
+
+def test_project_build_jobs_reports_finished_job_waiting_on_finalization(store):
+    """A done job whose project row has not caught up: the list shows Finalizing,
+    so the presentation can tell it apart from genuinely active work."""
+    u = store.create_user("f@example.com", "pw12345678")
+    pid = store.create_project(u.id, "a board")
+    j = store.enqueue_build(workspace="/ws", project_id=pid, user_id=u.id)
+    store.claim_build(j, "pid:1")
+    store.finish_build(j, rc=0)
+
+    assert store.project_build_jobs(u.id)[pid].status == "done"
+    assert store.get_project(pid).status == "running"
+
+
+def test_project_build_jobs_empty_for_a_user_without_projects(store):
+    u = store.create_user("none@example.com", "pw12345678")
+    assert store.project_build_jobs(u.id) == {}
+
+
 def test_worker_heartbeat(store):
     assert store.build_worker_alive() is False
     store.beat_build_worker()

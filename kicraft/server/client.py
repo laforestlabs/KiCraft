@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+import uuid
 from dataclasses import replace
 
 
@@ -98,6 +99,47 @@ _FALLBACK_DEFAULT = (10.0, 30.0)  # unknown model: assume expensive
 # enough total tool calls -- stop offering tools and force the final JSON.
 _MAX_REDUNDANT_TOOL_CALLS = 3
 _MAX_TOTAL_TOOL_CALLS = 16
+
+#: How much of a tool result the UI may show. Deliberately NOT the 4,000-char
+#: model-message policy below it: the model keeps its bounded prompt budget while
+#: the user gets the evidence (a lookup beyond character 600 used to be dropped
+#: with no indication that anything was missing).
+_MAX_TOOL_OUTPUT_CHARS = 16384
+
+_EXIT_MARKER_RE = re.compile(r"\bexit=(\d+)\b")
+
+
+def _classify_tool_result(result) -> bool | None:
+    """Whether a tool result is a validated success, an error, or unverified.
+
+    Only explicit contracts count: an executor exception (``tool error:``), an
+    unknown tool, a leading nonzero ``<command> exit=N`` marker, or a top-level
+    JSON object carrying ``ok`` or a nonempty ``error``. Anything else returns
+    None -- "returned", never a validated success. Inferring success from
+    arbitrary prose is exactly how a failed lookup used to render as a pass.
+    """
+    text = str(result)
+    stripped = text.strip()
+    head = stripped[:64].lower()
+    if head.startswith("tool error:") or head.startswith("unknown tool"):
+        return False
+    first_line = stripped.splitlines()[0] if stripped else ""
+    marker = _EXIT_MARKER_RE.search(first_line)
+    if marker is not None:
+        return marker.group(1) == "0"
+    if stripped[:1] in "{[":
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("ok"), bool):
+                return parsed["ok"]
+            if parsed.get("error"):
+                return False
+        return None
+    return None
+
 
 # Reasoning-loop breaker: a reasoning model can burn its whole output budget
 # re-deriving one decision and emit NO content. max_tokens does NOT bound
@@ -1258,10 +1300,15 @@ class CappedOpenRouterClient:
         total_cost = 0.0
         n_tool_calls = 0
         seen: dict[str, int] = {}  # (name, args) signature -> times requested
-        cache: dict[str, str] = {}  # signature -> first result (reused on repeats)
+        cache: dict[str, tuple[str, bool | None]] = {}  # signature -> (result, ok)
         redundant = 0  # identical calls served from cache
         force_final = False  # thrash detected -> hard-stop tools next round
         on_delta = self._delta_progress(progress)
+        # Local identity for this invocation's tool calls. The provider's own call
+        # id can repeat across rounds (and across providers), so pairing a result
+        # with its call in the UI needs an id this loop mints itself.
+        call_token = uuid.uuid4().hex[:8]
+        tool_ordinal = 0
         for rnd in range(max_rounds):
             last_round = rnd == max_rounds - 1
             final_response = force_final or last_round
@@ -1339,6 +1386,8 @@ class CappedOpenRouterClient:
                 }
             for tc in tcs:
                 n_tool_calls += 1
+                tool_ordinal += 1
+                call_id = f"{call_token}-{tool_ordinal}"
                 fn = tc.get("function") or {}
                 name = fn.get("name", "")
                 try:
@@ -1346,22 +1395,29 @@ class CappedOpenRouterClient:
                 except json.JSONDecodeError:
                     args = {}
                 if progress:
-                    progress({"kind": "tool", "name": name, "args": args})
+                    progress({"kind": "tool", "call_id": call_id, "name": name,
+                              "args": args})
                 # Break identical-call thrash. A weak model repeats the exact same
                 # call for rounds on end; the result cannot change, so reuse the
                 # cached one instead of re-running the tool (saves the subprocess)
                 # and tell it to converge.
                 sig = name + "|" + json.dumps(args, sort_keys=True)
                 seen[sig] = seen.get(sig, 0) + 1
-                if sig in cache:
-                    result = cache[sig]
+                cached_hit = sig in cache
+                started = time.monotonic()
+                if cached_hit:
+                    result, ok = cache[sig]
                     redundant += 1
                 else:
                     try:
                         result = executor(name, args)
                     except Exception as e:  # surface tool errors, don't crash
                         result = f"tool error: {e}"
-                    cache[sig] = result
+                    # Classify the RAW result, before any cache-reuse notice is
+                    # prepended: the notice is scaffolding, not the tool's answer.
+                    ok = _classify_tool_result(result)
+                    cache[sig] = (result, ok)
+                duration_ms = int((time.monotonic() - started) * 1000)
                 if seen[sig] >= 3:
                     # Hard cutoff: the 2nd repeat already got the notice + full
                     # payload, and a reflexive re-verifier repeats anyway (live
@@ -1387,7 +1443,19 @@ class CappedOpenRouterClient:
                 if redundant >= _MAX_REDUNDANT_TOOL_CALLS or n_tool_calls >= _MAX_TOTAL_TOOL_CALLS:
                     force_final = True
                 if progress:
-                    progress({"kind": "tool_result", "name": name, "output": str(result)[:600]})
+                    text = str(result)
+                    shown = text[:_MAX_TOOL_OUTPUT_CHARS]
+                    progress({
+                        "kind": "tool_result",
+                        "call_id": call_id,
+                        "name": name,
+                        "output": shown,
+                        "duration_ms": duration_ms,
+                        "cached": cached_hit,
+                        "ok": ok,
+                        "output_chars": len(text),
+                        "output_truncated": len(text) > len(shown),
+                    })
                 messages.append(
                     {
                         "role": "tool",

@@ -2077,6 +2077,26 @@ class AccountStore:
                 "SELECT COUNT(*) FROM build_jobs WHERE status='running'").fetchone()[0]
         return int(ahead), int(depth), int(running)
 
+    def project_build_jobs(self, user_id: int) -> dict[int, BuildJob]:
+        """The newest build job per project owned by `user_id`, keyed by project id.
+
+        Read-only view for the UI: ONE query per list refresh (never one per
+        row), and it includes each job's terminal status so the list can show
+        "Finalizing" in the window between a job finishing and its project row
+        catching up. This is not the reaper's API -- `list_unfinalized_builds`
+        deliberately excludes running jobs and exists only for the orphan
+        janitor."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT b.* FROM build_jobs b "
+                "JOIN (SELECT project_id, MAX(id) AS id FROM build_jobs "
+                "      WHERE project_id IS NOT NULL GROUP BY project_id) newest "
+                "  ON newest.id = b.id "
+                "JOIN projects p ON p.id = b.project_id "
+                "WHERE p.user_id = ?",
+                (user_id,)).fetchall()
+        return {int(r["project_id"]): self._row_to_build_job(r) for r in rows}
+
     def list_unfinalized_builds(self) -> list[BuildJob]:
         """Jobs whose owning project is still 'running' but which no longer have
         (or may not have) a live driving thread: finished ones to finalize, and

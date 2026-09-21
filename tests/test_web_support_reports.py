@@ -156,17 +156,22 @@ async def test_support_button_files_user_report(harness):
 
 
 @pytest.mark.anyio
-async def test_failed_run_auto_opens_dialog_and_attaches_feedback(harness):
+async def test_failed_run_shows_inline_cause_and_no_modal(harness):
+    """A failure is reported IN the page: the cause, what survived, and the
+    actions that are possible. Nothing opens a modal over the user, and no
+    artifact is claimed that is not on disk."""
     u, sim_web, sim_store, acct = harness
-    from nicegui import ui
 
     pid = sim_store.create_project(acct.id, "doomed board")
     p = sim_store.get_project(pid)
-    # The terminal state a failed worker leaves behind, error report included
-    # (in production _run_design files it via _file_failure_report).
     live = sim_web._fresh_run_state()
-    live.update(done=True, ok=False, user_id=acct.id, project_id=pid,
-                brief="doomed board", board_code=p.board_code)
+    live.update(done=True, ok=False, running=False, user_id=acct.id, project_id=pid,
+                brief="doomed board", board_code=p.board_code,
+                activity={"stage": "intent", "phase_status": "failed",
+                          "failure": {"kind": "provider_error", "stage": "intent",
+                                      "retryable": False, "retry_action": None,
+                                      "message": "Intent failed"},
+                          "last_activity": "Intent failed", "issues": []})
     sim_web._file_failure_report(live)
     rid = live["support_report_id"]
     assert rid is not None
@@ -174,8 +179,32 @@ async def test_failed_run_auto_opens_dialog_and_attaches_feedback(harness):
 
     await _login(u)
     await u.open(f"/?project={pid}")  # attach to the failed live run
-    await u.should_see("Something went wrong")        # dialog auto-opened once
-    await u.should_see(f"Board ID: {p.board_code}")   # the workspace chip
+    await u.should_see("Intent failed")                # the cause, inline
+    await u.should_not_see("Something went wrong")     # no automatic modal
+    await u.should_see("No artifacts were produced for this run.")
+    await u.should_see(f"Board ID: {p.board_code}")
+    await u.should_see("Details recorded for support.")
+    await u.should_see("Contact support")              # the explicit affordance
+
+
+@pytest.mark.anyio
+async def test_explicit_contact_attaches_feedback_to_the_one_report(harness):
+    u, sim_web, sim_store, acct = harness
+    from nicegui import ui
+
+    pid = sim_store.create_project(acct.id, "doomed board")
+    p = sim_store.get_project(pid)
+    live = sim_web._fresh_run_state()
+    live.update(done=True, ok=False, running=False, user_id=acct.id, project_id=pid,
+                brief="doomed board", board_code=p.board_code)
+    sim_web._file_failure_report(live)
+    rid = live["support_report_id"]
+    sim_web._LIVE_RUNS[pid] = live
+
+    await _login(u)
+    await u.open(f"/?project={pid}")
+    u.find("Contact support", kind=ui.button).click()
+    await u.should_see("Contact support")
     u.find("Anything you'd like to add?").type("I only changed the LED color")
     u.find("Send report", kind=ui.button).click()
     await u.should_see(f"Your reference is {p.board_code}")
@@ -185,6 +214,39 @@ async def test_failed_run_auto_opens_dialog_and_attaches_feedback(harness):
     assert reports[0].id == rid
     assert reports[0].kind == "error_auto"
     assert reports[0].message == "I only changed the LED color"
+
+
+def test_reopened_failed_report_says_failed_with_stage_and_cause(swapped_store, tmp_path):
+    """A reopened failed project carries ok=None; the diagnostics must say
+    'failed' (never 'running') and name the stage and cause."""
+    state, _p = _failed_state(swapped_store)
+    state["events"] = []
+    state["failed"] = True
+    state["ok"] = None
+    state["running"] = False
+    state["activity"] = {
+        "stage": "place_route", "phase_status": "failed",
+        "failure": {"kind": "route_unroutable", "stage": "place_route",
+                    "message": "Build stopped during Place/Route"},
+        "issues": [], "last_activity": "Build stopped during Place/Route",
+    }
+    d = web._collect_support_diagnostics(state)
+    assert d["run_status"] == "failed"
+    assert d["stage"] == "place_route"
+    assert d["failure"]["kind"] == "route_unroutable"
+    assert d["failure"]["message"] == "Build stopped during Place/Route"
+
+
+def test_unrecorded_failure_report_claims_nothing(store, monkeypatch):
+    """If filing the failure report fails, no surface may claim one exists."""
+    state, _p = _failed_state(store)
+    old = web._STORE
+    web._STORE = _ExplodingStore()
+    try:
+        web._file_failure_report(state)
+    finally:
+        web._STORE = old
+    assert state.get("support_report_id") is None
 
 
 # ---- admin support page: investigations + highlighting ----------------------

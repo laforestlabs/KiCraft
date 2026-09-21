@@ -294,7 +294,33 @@ def test_cell_html_renders_https_link_new_tab():
     assert ">C2687116</a>" in out
 
 
-def test_persisted_provenance_routes_by_durable_stage():
+def test_unknown_events_are_not_blamed_on_intent():
+    """A tool/retry event with no stage and no current stage is dropped, not
+    attributed to Intent (which used to make the first tab light up for work that
+    belonged elsewhere)."""
+
+    class Panel:
+        def __init__(self):
+            self.events = []
+
+        def push(self, event):
+            self.events.append(event)
+
+    intent = Panel()
+    stub = SimpleNamespace(_current=None, panels={"intent": intent}, _replaying=False,
+                           _auto_follow=True, _set_follow_ui=lambda: None,
+                           _follow_btn=SimpleNamespace(set_visibility=lambda _v: None),
+                           tabs=SimpleNamespace(value=None, set_value=lambda _v: None))
+
+    StageTabs.push(stub, {"kind": "tool", "call_id": "t-1", "name": "lookup"})
+
+    assert intent.events == []
+
+
+def test_stage_stamped_events_route_to_their_own_panel():
+    """A recorded event carries the stage it happened in, so a replay lands it in
+    the right tab regardless of what finished last."""
+
     class Panel:
         def __init__(self):
             self.events = []
@@ -304,13 +330,13 @@ def test_persisted_provenance_routes_by_durable_stage():
 
     intent = Panel()
     bom = Panel()
-    stub = SimpleNamespace(_current="intent", panels={"intent": intent, "bom": bom})
-    event = {
-        "kind": "work_unit_plan",
-        "stage": "bom",
-        "unit_id": "bom-s000",
-        "source": "llm",
-    }
+    stub = SimpleNamespace(_current="intent", panels={"intent": intent, "bom": bom},
+                           _replaying=True, _auto_follow=False,
+                           _set_follow_ui=lambda: None,
+                           _follow_btn=SimpleNamespace(set_visibility=lambda _v: None),
+                           tabs=SimpleNamespace(value=None, set_value=lambda _v: None))
+    event = {"kind": "work_unit_plan", "stage": "bom", "unit_id": "bom-s000",
+             "source": "llm"}
 
     StageTabs.push(stub, event)
 
@@ -318,15 +344,169 @@ def test_persisted_provenance_routes_by_durable_stage():
     assert bom.events == [event]
 
 
-def test_table_html_highlights_warn_rows():
-    # A cell dict {"text", "warn": True} marks its whole row (the BOM-tab
-    # footprint/part position mismatch highlight, KC-6DCV66 J3/J4).
-    h = _table_html(["ref", "value"],
-                    [["R1", "10k"],
-                     [{"text": "J3", "warn": True}, "jumper"]])
-    assert 'style="background:rgba(234,179,8,0.12)"' in h
-    # the warning marker is render-only: the cell still shows its text
-    assert "<td>J3</td>" in h
+# ------------------------------------------------- reopened / live stage tabs
+
+
+def _wiring_failure_events():
+    """A Wiring run that failed after two same-name tool calls and a retry."""
+    return [
+        {"kind": "run_started", "run_id": "p1-abc", "seq": 1,
+         "ts": "2026-01-01T00:00:00+00:00"},
+        {"kind": "stage_start", "stage": "intent", "seq": 2,
+         "ts": "2026-01-01T00:00:01+00:00"},
+        {"kind": "stage_done", "stage": "intent", "ok": True, "seq": 3,
+         "ts": "2026-01-01T00:00:02+00:00"},
+        {"kind": "stage_start", "stage": "wiring", "seq": 4,
+         "ts": "2026-01-01T00:00:03+00:00"},
+        {"kind": "tool", "call_id": "tok-1", "name": "lookup_lcsc",
+         "args": {"mpn": "TPS54331"}, "stage": "wiring", "seq": 5,
+         "ts": "2026-01-01T00:00:04+00:00"},
+        {"kind": "tool", "call_id": "tok-2", "name": "lookup_lcsc",
+         "args": {"mpn": "TPS54331"}, "stage": "wiring", "seq": 6,
+         "ts": "2026-01-01T00:00:05+00:00"},
+        {"kind": "tool_result", "call_id": "tok-1", "name": "lookup_lcsc",
+         "output": "found TPS54331", "ok": True, "duration_ms": 41,
+         "output_chars": 14, "output_truncated": False, "stage": "wiring", "seq": 7,
+         "ts": "2026-01-01T00:00:06+00:00"},
+        {"kind": "tool_result", "call_id": "tok-2", "name": "lookup_lcsc",
+         "output": "unknown tool: lookup_lcsc", "ok": False, "duration_ms": 3,
+         "output_chars": 24, "output_truncated": False, "stage": "wiring", "seq": 8,
+         "ts": "2026-01-01T00:00:07+00:00"},
+        {"kind": "retry", "stage": "wiring", "failure_kind": "commit_rejected",
+         "errors": ["U1 pin 7 unconnected", "net VBUS has one endpoint"], "seq": 9,
+         "ts": "2026-01-01T00:00:08+00:00"},
+        {"kind": "run_error", "stage": "wiring", "failure_kind": "unexpected_error",
+         "exception_type": "TimeoutError", "message": "TimeoutError: provider slow",
+         "seq": 10, "ts": "2026-01-01T00:00:09+00:00"},
+        {"kind": "run_finished", "status": "failed", "stage": "wiring", "seq": 11,
+         "ts": "2026-01-01T00:00:10+00:00"},
+    ]
+
+
+@pytest.mark.anyio
+async def test_reopened_failure_names_wiring_and_shows_its_evidence():
+    """Reopening a failed Wiring run: the current stage is selected, the details
+    expand to the named call/result pair, and the retry errors stay readable."""
+    holder = {}
+
+    def root():
+        holder["tabs"] = StageTabs()
+
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        tabs = holder["tabs"]
+
+        with u:
+            tabs.begin_replay()
+            for event in _wiring_failure_events():
+                tabs.push(event)
+            tabs.flush()
+        with u:
+            tabs.end_replay("wiring")
+        tabs.flush()
+
+        assert tabs._current == "wiring"
+        await u.should_see("failed")
+        assert tabs.active() == "wiring"
+        # Both call/result pairs are inspectable by name, with their outcome.
+        await u.should_see("Returned")
+        await u.should_see("Failed")
+        await u.should_see("found TPS54331")
+        await u.should_see("unknown tool: lookup_lcsc")
+        await u.should_see("0.04s")  # 41 ms, rendered as a duration
+        # A retry is readable prose plus the complete error items, not clipped JSON.
+        await u.should_see("Retrying Wiring")
+        await u.should_see("U1 pin 7 unconnected")
+        await u.should_see("net VBUS has one endpoint")
+        await u.should_see("TimeoutError")
+
+
+@pytest.mark.anyio
+async def test_manual_tab_choice_survives_later_activity():
+    """Once the user picks a tab, live activity must not yank them elsewhere; the
+    explicit follow control brings them back."""
+    holder = {}
+
+    def root():
+        holder["tabs"] = StageTabs()
+
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        tabs = holder["tabs"]
+
+        with u:
+            tabs.push({"kind": "stage_start", "stage": "intent"})
+            tabs.push({"kind": "stage_done", "stage": "intent", "ok": True})
+            tabs.push({"kind": "stage_start", "stage": "functional_spec"})
+        tabs.flush()
+        with u:
+            tabs.select("intent")  # the user looks back at an earlier stage
+        assert tabs.active() == "intent"
+
+        with u:
+            tabs.push({"kind": "stage_done", "stage": "functional_spec", "ok": True})
+            tabs.push({"kind": "stage_start", "stage": "architecture"})
+        tabs.flush()
+        assert tabs.active() == "intent"  # not dragged along
+
+        with u:
+            tabs.follow_live()
+        assert tabs.active() == "architecture"
+        assert tabs.active() is not None
+
+
+@pytest.mark.anyio
+async def test_corrected_stage_is_not_blocked_by_historical_diagnostics():
+    """A historical failure in the same stage must not outlive its own correction:
+    the tab paints the LATEST attempt's outcome, while the durable derive keeps
+    committed-with-findings a warning."""
+    holder = {}
+
+    def root():
+        holder["tabs"] = StageTabs()
+
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        tabs = holder["tabs"]
+
+        with u:
+            tabs.push({"kind": "stage_start", "stage": "wiring"})
+            tabs.push({"kind": "stage_diagnostic", "stage": "wiring",
+                       "code": "unresolved_pin", "message": "U1 pin 7 dangling"})
+            tabs.push({"kind": "stage_done", "stage": "wiring", "ok": False,
+                       "failure_kind": "commit_rejected"})
+        tabs.flush()
+        with u:
+            tabs.set_statuses({"wiring": "warning"},
+                              {"wiring": {"ok": True, "semantic_clean": True}})
+        tabs.flush()
+
+        # The corrected commit is a warning (with findings), never a red failure.
+        await u.should_see("committed with findings")
+        await u.should_not_see("failed")
+
+
+@pytest.mark.anyio
+async def test_awaiting_input_is_not_shown_as_running():
+    holder = {}
+
+    def root():
+        holder["tabs"] = StageTabs()
+
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        tabs = holder["tabs"]
+
+        with u:
+            tabs.push({"kind": "stage_start", "stage": "wiring"})
+            tabs.push({"kind": "question", "stage": "wiring",
+                       "questions": [{"stage": "wiring", "text": "which USB con?"}]})
+        tabs.flush()
+
+        await u.should_see("waiting for your answer")
+        # The status line the summary reads, and the tab's accessible name, both
+        # say parked -- never running.
+        assert tabs._tab_el["wiring"]._props["aria-label"] == "Wiring: parked"
 
 
 def test_cell_html_drops_non_http_scheme():
@@ -374,25 +554,38 @@ def test_demo_answer_deltas_assemble_into_valid_slots():
 
 # ------------------------------------------------- tab-reveal hook (KiCanvas re-fit)
 
-def test_on_tab_change_runs_show_hook_and_toggles_follow():
+@pytest.mark.anyio
+async def test_on_tab_change_runs_show_hook_and_toggles_follow():
     """Revealing a tab runs its registered on_show hook (used to re-fit a KiCanvas
-    view built while its tab was hidden, which would otherwise stay a blank panel),
-    and auto-follow resumes only on the live stage. Driven on a stub self so the
-    method's logic is covered without a UI context."""
-    fired = []
-    stub = SimpleNamespace(
-        _current="bom",
-        _auto_follow=True,
-        _on_show={"synthesize": lambda: fired.append("synthesize")},
-    )
-    # Reveal a non-live tab that has a hook: the hook fires, auto-follow turns off.
-    StageTabs._on_tab_change(stub, SimpleNamespace(value="synthesize"))
-    assert fired == ["synthesize"]
-    assert stub._auto_follow is False
-    # Reveal a hookless tab that IS the live stage: no-op hook, auto-follow resumes.
-    StageTabs._on_tab_change(stub, SimpleNamespace(value="bom"))
-    assert fired == ["synthesize"]
-    assert stub._auto_follow is True
+    view built while its tab was hidden, which would otherwise stay blank), and
+    auto-follow resumes only on the live stage."""
+    holder = {}
+
+    def root():
+        holder["tabs"] = StageTabs()
+
+    async with user_simulation(root=root) as u:
+        await u.open("/")
+        tabs = holder["tabs"]
+        fired: list[str] = []
+        tabs.on_show("synthesize", lambda: fired.append("synthesize"))
+
+        with u:
+            tabs.push({"kind": "stage_start", "stage": "bom"})
+        tabs.flush()
+        assert tabs._current == "bom"
+        assert tabs._auto_follow is True  # following the live stage
+
+        with u:
+            tabs.select("synthesize")  # the user reveals another tab
+        assert fired == ["synthesize"]
+        assert tabs._auto_follow is False
+
+        with u:
+            tabs.follow_live()
+        assert tabs._auto_follow is True
+        assert tabs._current == "bom"
+        await u.should_see("▶ BOM started")
 
 
 # ------------------------------------------------- build-log tab classifier

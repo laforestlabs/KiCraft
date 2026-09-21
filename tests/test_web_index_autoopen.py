@@ -62,14 +62,16 @@ async def harness(tmp_path):
 
 def _persisted_project(store, user_id: int, brief: str, stem: str) -> int:
     """Lay a finished project on disk the way build-in-place does (brief +
-    .kicraft/state.json) and record its row, so open/clone flows run against the
-    real artifact layout."""
+    .kicraft/state.json + the fab package) and record its row, so open/clone flows
+    run against the real artifact layout."""
     pid = store.create_project(user_id, brief)
     base = store.projects_dir / str(user_id) / str(pid)
     (base / ".kicraft").mkdir(parents=True)
     (base / "brief.txt").write_text(brief, encoding="utf-8")
     shutil.copy2(STATE_FIXTURE, base / ".kicraft" / "state.json")
-    store.finish_project(pid, "ok", stem=stem, dir_path=str(base))
+    (base / "kicraft_project.zip").write_bytes(b"package")
+    store.finish_project(pid, "ok", stem=stem, dir_path=str(base),
+                         zip_path=str(base / "kicraft_project.zip"))
     return pid
 
 
@@ -92,10 +94,9 @@ async def test_returning_to_index_attaches_to_live_run(harness):
 
     await _login(u)  # lands on "/" -- the return to the workspace
     await u.should_see("usb battery bank")  # attached to the run, not blank
-    # The live status line, not a blank composer. (An earlier revision
-    # asserted "Open", which only ever matched placeholder text of the
-    # since-removed stage-edit panel -- the project list lives on /projects.)
-    await u.should_see("live progress is in")
+    # The live summary (above the stage tabs) says what is happening; the project
+    # list lives on /projects, so this is the workspace's own status surface.
+    await u.should_see("Running")
 
 
 async def test_blank_composer_when_nothing_needs_attention(harness):
@@ -175,7 +176,7 @@ async def test_clone_deep_link_outranks_parked_default(harness):
     assert err is None
 
     await _login(u)  # plain "/": the parked design wins the default pick
-    await u.should_see("waiting for your answer below")
+    await u.should_see("Waiting for your answer")
 
     await u.open(f"/?project={pid}")  # what do_clone navigates to
-    await u.should_see("Done. Your KiCad project is ready.")
+    await u.should_see("Design complete")

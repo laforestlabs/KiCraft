@@ -53,6 +53,7 @@ from .web import (
     _current_user,
     _load_persisted_state,
     _persisted_generated_dir,
+    _project_display_name,
     _render_bom_table,
     _render_scorecard,
     _render_synth_view,
@@ -2895,7 +2896,7 @@ def admin_projects_page():
                     ui.label("action").style("width:70px")
                 for row in visible:
                     owner = row.get("owner_email") or "(deleted user)"
-                    stem = row.get("project_stem") or "(untitled)"
+                    stem = _project_display_name(row)
                     brief = (row.get("brief") or "").strip()
                     with (
                         ui.row()
@@ -2962,7 +2963,7 @@ def admin_project_view_page(project: str = ""):
     store = _store()
     owner = store.get_user(source.user_id)
     owner_email = owner.email if owner is not None else "(deleted user)"
-    stem = source.project_stem or "(untitled)"
+    stem = _project_display_name(source)
     gen = _persisted_generated_dir(source.dir_path, source.project_stem)
     token = _register_project_dir(gen) if gen else None
 

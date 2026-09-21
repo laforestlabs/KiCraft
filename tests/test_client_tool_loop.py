@@ -131,3 +131,165 @@ def test_distinct_tool_calls_are_not_force_stopped(monkeypatch):
     assert executor_calls["n"] == 2     # both distinct calls executed
     assert "none" not in choices        # never force-stopped
     assert r["text"] == '{"ok": true}'
+
+
+# ---- tool event contract (call identity, outcome, full evidence) -------------
+
+
+def _progress_sink():
+    events: list[dict] = []
+    return events, events.append
+
+
+def test_repeated_provider_ids_still_pair_uniquely(monkeypatch):
+    """A provider reuses the same call id across rounds; the events must carry
+    ids this loop minted, so each result pairs with ITS OWN call."""
+    client = _client()
+    events, progress = _progress_sink()
+
+    def fake_stream(body, on_delta=None):
+        rnd = body["_meta_ctx"]["round"]
+        if rnd < 2:
+            return {"role": "assistant", "content": None, "finish_reason": "tool_calls",
+                    "tool_calls": [{"id": "call_1", "type": "function",  # SAME id twice
+                                    "function": {"name": "lookup_footprint",
+                                                 "arguments": json.dumps({"footprint": f"F{rnd}"})}}]}, 0.0
+        return _text_msg(), 0.0
+
+    monkeypatch.setattr(client, "_stream", fake_stream)
+    client.chat_with_tools(messages=[{"role": "user", "content": "go"}], tools=[],
+                           executor=lambda n, a: f"result for {a['footprint']}",
+                           max_rounds=20, progress=progress)
+
+    calls = [e for e in events if e["kind"] == "tool"]
+    results = [e for e in events if e["kind"] == "tool_result"]
+    assert [c["name"] for c in calls] == ["lookup_footprint"] * 2
+    assert len({c["call_id"] for c in calls}) == 2      # minted locally, unique
+    assert [r["call_id"] for r in results] == [c["call_id"] for c in calls]
+    assert [r["output"] for r in results] == ["result for F0", "result for F1"]
+
+
+def test_result_carries_outcome_duration_and_complete_evidence(monkeypatch):
+    """A 2,000-character result keeps the evidence past character 600, and an
+    explicit error contract is classified as a failure."""
+    client = _client()
+    events, progress = _progress_sink()
+    long_evidence = "x" * 700 + "IMPORTANT-EVIDENCE"
+
+    def executor(name, args):
+        return long_evidence if name == "read_all" else "lookup_footprint exit=7"
+
+    def fake_stream(body, on_delta=None):
+        rnd = body["_meta_ctx"]["round"]
+        if rnd < 2:
+            name = "read_all" if rnd == 0 else "lookup_footprint"
+            return {"role": "assistant", "content": None, "finish_reason": "tool_calls",
+                    "tool_calls": [{"id": f"t{rnd}", "type": "function",
+                                    "function": {"name": name, "arguments": "{}"}}]}, 0.0
+        return _text_msg(), 0.0
+
+    monkeypatch.setattr(client, "_stream", fake_stream)
+    client.chat_with_tools(messages=[{"role": "user", "content": "go"}], tools=[],
+                           executor=executor, max_rounds=20, progress=progress)
+
+    first, second = [e for e in events if e["kind"] == "tool_result"]
+    assert "IMPORTANT-EVIDENCE" in first["output"]   # nothing silently dropped
+    assert first["output_chars"] == len(long_evidence)
+    assert first["output_truncated"] is False
+    assert first["ok"] is None                        # plain text is unverified
+    assert first["cached"] is False
+    assert first["duration_ms"] >= 0
+    assert second["ok"] is False                      # nonzero exit marker
+    # The model still sees the bounded message it always did.
+    assert len(second["output"]) > 0
+
+
+def test_over_limit_output_is_bounded_and_marked(monkeypatch):
+    from kicraft.server.client import _MAX_TOOL_OUTPUT_CHARS
+
+    client = _client()
+    events, progress = _progress_sink()
+    huge = "y" * (_MAX_TOOL_OUTPUT_CHARS + 500)
+
+    def fake_stream(body, on_delta=None):
+        rnd = body["_meta_ctx"]["round"]
+        if rnd == 0:
+            return _tool_msg(), 0.0
+        return _text_msg(), 0.0
+
+    monkeypatch.setattr(client, "_stream", fake_stream)
+    client.chat_with_tools(messages=[{"role": "user", "content": "go"}], tools=[],
+                           executor=lambda n, a: huge, max_rounds=5, progress=progress)
+
+    result = next(e for e in events if e["kind"] == "tool_result")
+    assert len(result["output"]) == _MAX_TOOL_OUTPUT_CHARS
+    assert result["output_truncated"] is True
+    assert result["output_chars"] == len(huge)
+
+
+def test_cached_result_keeps_its_classification(monkeypatch):
+    """A repeated identical call reuses the cached outcome -- including whether it
+    failed -- and is marked as cached."""
+    client = _client()
+    events, progress = _progress_sink()
+
+    def fake_stream(body, on_delta=None):
+        if body["tool_choice"] == "none":
+            return _text_msg(), 0.0
+        return _tool_msg(), 0.0  # always the same call
+
+    monkeypatch.setattr(client, "_stream", fake_stream)
+    client.chat_with_tools(messages=[{"role": "user", "content": "go"}], tools=[],
+                           executor=lambda n, a: "unknown tool: list_parts",
+                           max_rounds=20, progress=progress)
+
+    results = [e for e in events if e["kind"] == "tool_result"]
+    assert len(results) >= 2
+    assert all(e["ok"] is False for e in results)      # error survives the cache
+    assert results[0]["cached"] is False and results[1]["cached"] is True
+
+
+def test_consumer_side_sanitization_redacts_and_bounds(monkeypatch):
+    """What the workspace persists and shows: credentials are redacted, URLs lose
+    their userinfo/secret query, the project path becomes <project>, and oversized
+    text is bounded with an explicit marker. The model message policy is untouched
+    (asserted separately by the 4,000-character contract tests)."""
+    from kicraft.server import activity
+
+    client = _client()
+    events, progress = _progress_sink()
+    payload = (
+        '{"api_key": "sk-live-abcdefghijklmnop", "cookie": "session=abc", '
+        '"note": "see https://user:pw@example.com/x?token=secret123 and '
+        'Bearer sk-abcdefghijklmnop"}'
+    )
+
+    def fake_stream(body, on_delta=None):
+        rnd = body["_meta_ctx"]["round"]
+        if rnd == 0:
+            return _tool_msg(), 0.0
+        return _text_msg(), 0.0
+
+    monkeypatch.setattr(client, "_stream", fake_stream)
+    client.chat_with_tools(messages=[{"role": "user", "content": "go"}], tools=[],
+                           executor=lambda n, a: payload, max_rounds=5, progress=progress)
+
+    result = next(e for e in events if e["kind"] == "tool_result")
+    assert "sk-live-abcdefghijklmnop" in result["output"]      # raw is the transport's
+    safe = activity.sanitize_activity_event(result, workspace="/tmp/run/ws")
+    text = json.dumps(safe)
+    assert "sk-live-abcdefghijklmnop" not in text
+    assert "secret123" not in text
+    assert "user:pw@" not in text
+    assert "Bearer sk-abcdefghijklmnop" not in text
+    assert "[redacted]" in text
+    # Oversized technical text is bounded, and it SAYS so instead of clipping.
+    bounded = activity.sanitize_activity_event(
+        {"kind": "tool_result", "output": "z" * (activity.MAX_TECHNICAL_TEXT + 900)})
+    assert len(bounded["output"]) < activity.MAX_TECHNICAL_TEXT + 120
+    assert "truncated 900 characters" in bounded["output"]
+    # A workspace path never leaks into a persisted event.
+    pathy = activity.sanitize_activity_event(
+        {"kind": "run_error", "message": "failed in /tmp/run/ws/generated/X"},
+        workspace="/tmp/run/ws")
+    assert pathy["message"] == "failed in <project>/generated/X"

@@ -19,6 +19,7 @@ Pure store + module-function tests (no NiceGUI client, no network, no build).
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sqlite3
 import time
 
@@ -192,42 +193,199 @@ def test_reconcile_leaves_live_recent_and_build_stage_runs(store, user_id, live_
     assert store.get_project(build_stage).status == "running"
 
 
-# ---- projects-row status/colour (_row_status_display) ------------------------
+# ---- project presentation (web._project_presentation) ------------------------
 
 
-def test_row_status_running_live_is_green():
-    """A 'running' row with a live worker shows 'running' and paints green."""
-    assert web._row_status_display("running", {"running": True}) == ("running", True)
+def _mk_project(store, user_id, *, status="running", brief="usb battery bank"):
+    pid = store.create_project(user_id, brief)
+    if status != "running":
+        store.finish_project(pid, status)
+    return store.get_project(pid)
 
 
-def test_row_status_running_no_worker_reads_interrupted_and_grey():
-    """A 'running' row the server lost (no live dict) relabels to 'interrupted'
-    and must NOT be green -- 'interrupted' is never a live state."""
-    assert web._row_status_display("running", None) == ("interrupted", False)
+def _with_root(store, project, *, state=None, zip_bytes=b"zip"):
+    """Give a project a real durable root: state.json, optionally a fab zip."""
+    root = store.projects_dir / str(project.user_id) / str(project.id)
+    if isinstance(state, dict):
+        (root / ".kicraft").mkdir(parents=True, exist_ok=True)
+        (root / ".kicraft" / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    store.finish_project(project.id, project.status, stem=project.project_stem,
+                         dir_path=str(root),
+                         zip_path=(str(root / "kicraft_project.zip")
+                                   if zip_bytes else None))
+    if zip_bytes:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "kicraft_project.zip").write_bytes(zip_bytes)
+    return store.get_project(project.id)
 
 
-def test_row_status_durable_interrupted_with_live_dict_stays_grey():
-    """The reported bug: a durable 'interrupted' row that briefly coexists with a
-    live run dict (e.g. mid-rebuild, before the status flips back to 'running')
-    must render grey, never the live-green colour."""
-    assert web._row_status_display("interrupted", {"running": True}) \
-        == ("interrupted", False)
+def test_presentation_running_attempt_owns_its_activity(store, user_id):
+    p = _mk_project(store, user_id)
+    live = {"running": True, "activity": {
+        "stage": "bom", "phase_status": "running", "started_at": "2026-01-01T00:00:00+00:00",
+        "last_activity": "Using lookup_lcsc"}}
+    pres = web._project_presentation(p, live=live)
+    assert pres["status"] == "running"
+    assert pres["stage"] == "bom"
+    assert pres["headline"] == "Choosing components"
+    assert pres["action"] is None  # nothing to ask of the user while it runs
+    assert pres["download_ready"] is False
 
 
-def test_row_status_failed_or_ok_with_live_dict_stays_grey():
-    """Defence in depth: no terminal status is ever painted live-green even if a
-    transient live dict exists for that id."""
-    assert web._row_status_display("failed", {"x": 1}) == ("failed", False)
-    assert web._row_status_display("ok", {"x": 1}) == ("ok", False)
+def test_presentation_running_row_with_no_work_is_interrupted(store, user_id):
+    """Rule 4: a running row with neither a live attempt nor a build job is lost."""
+    p = _mk_project(store, user_id)
+    pres = web._project_presentation(p, live=None, job=None)
+    assert pres["status"] == "interrupted"
+    assert pres["headline"] == "Run was interrupted"
 
 
-def test_row_status_awaiting_input_live_is_green_but_grey_when_lost():
-    """A parked run is genuinely live while its dict survives (green); once lost
-    to a restart it falls back to grey."""
-    assert web._row_status_display("awaiting_input", {"x": 1}) \
-        == ("awaiting_input", True)
-    assert web._row_status_display("awaiting_input", None) \
-        == ("awaiting_input", False)
+def test_presentation_queued_and_running_jobs_are_not_interrupted(store, user_id):
+    """A build the worker drives outlives the web process: without _LIVE_RUNS it
+    must still read as genuine work, never as an interrupted run."""
+    p = _mk_project(store, user_id)
+    _with_root(store, p)
+    ws = str(store.projects_dir / str(user_id) / str(p.id))
+    job_id = store.enqueue_build(workspace=ws, project_id=p.id, user_id=user_id)
+    job = store.get_build_job(job_id)
+
+    pres = web._project_presentation(store.get_project(p.id), job=job)
+    assert pres["status"] == "queued"
+    assert pres["headline"] == "Queued for board build"
+    assert pres["detail"]  # position / approximate ETA
+    assert pres["download_ready"] is False
+
+    store.claim_build(job_id, "pid:1")
+    pres = web._project_presentation(store.get_project(p.id), job=store.get_build_job(job_id))
+    assert pres["status"] == "running"
+
+    store.finish_build(job_id, rc=0)
+    pres = web._project_presentation(store.get_project(p.id), job=store.get_build_job(job_id))
+    assert pres["status"] == "finalizing"
+
+
+def test_presentation_blocks_duplicate_execution_from_a_surviving_job(store, user_id):
+    """`_project_run_live` must refuse a second rebuild while this project's
+    newest job is queued/running, even with an empty live registry."""
+    p = _mk_project(store, user_id)
+    ws = str(store.projects_dir / str(user_id) / str(p.id))
+    store.enqueue_build(workspace=ws, project_id=p.id, user_id=user_id)
+    state = web._fresh_run_state()
+    state.update(project_id=p.id, user_id=user_id)
+    assert web._project_run_live(state) is True
+
+
+def test_presentation_ok_row_without_a_package_is_unavailable(store, user_id):
+    """Never a false Download: an `ok` row whose package is gone says so."""
+    p = _mk_project(store, user_id, status="ok")
+    pres = web._project_presentation(p)
+    assert pres["status"] == "unavailable"
+    assert pres["headline"] == "Files unavailable"
+    assert pres["download_ready"] is False
+    assert pres["zip_path"] is None
+
+
+def test_presentation_complete_offers_only_the_current_package(store, user_id):
+    p = _mk_project(store, user_id, status="ok")
+    state = {"project_stem": "USB_BANK",
+             "stage_status": {k: {"ok": True} for k in web.DESIGN_STAGES},
+             "artifacts": {"build_warnings": ["minor courtyard clip"]}}
+    p = _with_root(store, p, state=state)
+    root = store.projects_dir / str(user_id) / str(p.id)
+    gen = root / "generated" / "USB_BANK"
+    (gen / "fab").mkdir(parents=True, exist_ok=True)
+    (gen / "USB_BANK.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
+    (gen / "USB_BANK.kicad_pcb").write_text("(kicad_pcb)", encoding="utf-8")
+
+    pres = web._project_presentation(store.get_project(p.id))
+    # The fab package exists but was never produced by a recorded ok attempt with
+    # zip_path pointing at it -> still no download.
+    assert pres["status"] in ("complete", "complete_with_warnings")
+    assert pres["download_ready"] is True
+    assert pres["zip_path"] == str(root / "kicraft_project.zip")
+    assert pres["title"] == "USB_BANK"
+    assert any(i["severity"] == "warning" for i in pres["issues"])
+
+
+def test_presentation_failed_row_never_offers_an_old_package(store, user_id):
+    p = _mk_project(store, user_id, status="failed")
+    p = _with_root(store, p, zip_bytes=b"old package")
+    pres = web._project_presentation(p)
+    assert pres["status"] == "failed"
+    assert pres["download_ready"] is False
+    assert pres["zip_path"] is None
+
+
+def test_presentation_parked_live_run_is_not_running(store, user_id):
+    p = _mk_project(store, user_id, status="awaiting_input")
+    live = {"awaiting_input": True, "running": False,
+            "questions": [{"stage": "wiring", "text": "which connector?"}]}
+    pres = web._project_presentation(p, live=live)
+    assert pres["status"] == "awaiting_input"
+    assert pres["stage"] == "wiring"
+    assert pres["headline"] == "Waiting for your answer"
+    assert pres["action"] == "answer"
+
+
+def test_presentation_actions_follow_real_prerequisites(store, user_id):
+    """Continue only while design stages remain; Rebuild once they are committed;
+    start-over only when there is no recoverable workspace."""
+    p = _mk_project(store, user_id, status="failed")
+    untouched = web._project_presentation(p)
+    assert untouched["action"] == "new_from_brief"
+
+    partial = _with_root(
+        store, _mk_project(store, user_id, status="failed"),
+        state={"project_stem": "PARTIAL", "stage_status": {"intent": {"ok": True}}})
+    assert web._project_presentation(partial)["action"] == "continue"
+
+    committed = _with_root(
+        store, _mk_project(store, user_id, status="failed"),
+        state={"project_stem": "COMMITTED",
+               "stage_status": {k: {"ok": True} for k in web.DESIGN_STAGES}})
+    assert web._project_presentation(committed)["action"] == "rebuild"
+
+
+def test_presentation_names_a_null_stem_project_from_its_brief(store, user_id):
+    p = _mk_project(store, user_id, brief="USB-C temperature logger")
+    pres = web._project_presentation(p)
+    assert pres["title"] == "USB-C temperature logger"
+
+
+def test_every_presentation_uses_the_documented_vocabulary(store, user_id):
+    """Status and action are a closed vocabulary: a new value must be added to
+    activity.PRESENTATION_STATUSES / ACTIONS, not invented ad hoc."""
+    from kicraft.server import activity
+
+    rows = [
+        web._project_presentation(_mk_project(store, user_id)),
+        web._project_presentation(_mk_project(store, user_id, status="ok")),
+        web._project_presentation(_mk_project(store, user_id, status="failed")),
+        web._project_presentation(
+            _mk_project(store, user_id), live={"running": True, "activity": {}}),
+        web._project_presentation(
+            _mk_project(store, user_id), live={"awaiting_input": True, "running": False,
+                                               "questions": [{"stage": "wiring"}]}),
+    ]
+    for pres in rows:
+        assert pres["status"] in activity.PRESENTATION_STATUSES
+        assert pres["action"] in (*activity.ACTIONS, None)
+
+
+def test_presentation_recovers_a_workspace_a_legacy_row_forgot(store, user_id):
+    """A row with no dir_path still presents its committed name when the owned
+    directory survives; the directory is never created on read."""
+    p = _mk_project(store, user_id, status="failed")
+    root = store.projects_dir / str(user_id) / str(p.id)
+    (root / ".kicraft").mkdir(parents=True, exist_ok=True)
+    (root / ".kicraft" / "state.json").write_text(
+        json.dumps({"project_stem": "RECOVERED"}), encoding="utf-8")
+    assert web._project_presentation(store.get_project(p.id))["title"] == "RECOVERED"
+
+    missing = store.create_project(user_id, "never built")
+    row = store.get_project(missing)
+    assert web._project_presentation(row)["title"] == "never built"
+    assert not (store.projects_dir / str(user_id) / str(missing)).exists()
 
 
 # ---- live-run registry around _run_design ------------------------------------

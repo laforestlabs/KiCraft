@@ -120,7 +120,9 @@ def _persist_durable(store, user_id, brief, stem):
     gen = base / "generated" / stem
     gen.mkdir(parents=True)
     (gen / f"{stem}.kicad_sch").write_text("(kicad_sch)", encoding="utf-8")
-    store.finish_project(pid, "ok", stem=stem, dir_path=str(base))
+    (base / "kicraft_project.zip").write_bytes(b"package")
+    store.finish_project(pid, "ok", stem=stem, dir_path=str(base),
+                         zip_path=str(base / "kicraft_project.zip"))
     return pid
 
 
@@ -139,8 +141,25 @@ async def test_reopen_reads_durable_and_makes_no_workspace(reopen_harness):
     await _login(u)
     await u.open(f"/?project={pid}")          # reopen the finished project
     await u.should_see("USB_BMP280_READER")   # header/stem rendered from durable
-    await u.should_see("Done. Your KiCad project is ready.")
+    await u.should_see("Design complete")
     await u.should_see("Parts")               # BOM inspector populated from durable state.json
 
     # The headline acceptance: no scratch workspace was minted to view it.
     assert list(work_dir.iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_ok_row_without_a_package_offers_no_download(reopen_harness):
+    """An `ok` legacy row whose package is gone says so, and never offers a
+    Download of something that is not on disk."""
+    u, web_mod, store, acct, work_dir = reopen_harness
+    pid = _persist_durable(store, acct.id, "bmp280 reader", "USB_BMP280_READER")
+    base = store.projects_dir / str(acct.id) / str(pid)
+    store.finish_project(pid, "ok", stem="USB_BMP280_READER", dir_path=str(base),
+                         zip_path=None)  # the package is gone
+
+    await _login(u)
+    await u.open(f"/?project={pid}")
+    await u.should_see("Files unavailable")
+    await u.should_not_see("Download KiCad project (.zip)")
+    await u.should_see("Rebuild board")

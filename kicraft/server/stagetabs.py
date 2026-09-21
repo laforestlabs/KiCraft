@@ -3,38 +3,37 @@
 The web app streams one event per token/tool/stage from the agent loop (see
 ``stage_driver``/``client``). The old ``FeedView`` rendered them all into one
 long scrolling column. ``StageTabs`` instead gives every pipeline phase its own
-tab, and inside each tab lays out three windows:
+tab, and inside each tab lays out a stage body:
 
   * PROJECT STATE - the structured data this stage committed (the parts
     list, the nets, the sheets, ...), rebuilt from ``state.json`` for inspection,
-    plus the native KiCad view / download for the build phases.
-  * THINKING - the model's reasoning stream for the stage, in
-    collapsible runs that auto-fold as the stage moves on.
-  * EXECUTION / LOG - recipe selection, deterministic/LLM work-unit provenance,
-    tool calls, retries, diagnostics, and build-log lines.
+    plus the native KiCad view / download for the build phases. This is what the
+    user came to inspect, so it leads and gets the full width.
+  * A concise OUTCOME / current-activity line under it, always on screen.
+  * TECHNICAL DETAILS - collapsed by default, holding the EXECUTION / LOG pane
+    (tool cards, retries, diagnostics, work-unit provenance, build log) and, in
+    its own further-collapsed expansion, the model's REASONING stream.
 
-The arrangement depends on the phase. The LLM design stages have no KiCad view
-and lead with the reasoning stream, so they keep the inspector-left /
-stream-right split with Thinking as the large pane. The build phases render the
-native KiCad artifact (the schematic on Synthesize, the board on Place/Route)
-as their project state, and that artifact is what the user came to inspect: it
-gets the full width at nearly the viewport height, with Thinking and
-Activity/log demoted to a short side-by-side band underneath.
+Collapsing the streams by default is deliberate: the previous fixed 42%/58%
+inspector/thinking split left half the screen empty whenever a stage had nothing
+to stream, and buried the artifact under a thinking pane before it existed.
 
-The caller drives it from the page's 0.2s timer exactly like before:
-``push(event)`` per new event, then ``flush()`` once. The committed slot data is
-supplied separately via ``set_inspector(stage, spec)`` (the page reads
-``state.json`` and builds the spec; this module only renders it).
+The caller drives it from the page's timer exactly like before: ``push(event)``
+per new event, then ``flush()`` once. The committed slot data is supplied
+separately via ``set_inspector(stage, spec)`` (the page reads ``state.json`` and
+builds the spec; this module only renders it).
 
 Event kinds handled include:
-  stage_start{stage} reasoning_delta{text} answer_delta{text} tool{name,args}
-  tool_result{output} retry{stage,errors} stage_done{stage,ok,cost}
+  stage_start{stage} reasoning_delta{text} answer_delta{text}
+  tool{call_id,name,args} tool_result{call_id,name,output,duration_ms,cached,ok}
+  retry{stage,errors,failure_kind} stage_diagnostic{code,message,evidence}
+  run_error{failure_kind,exception_type,message}
   recipe_selected work_unit_plan work_unit_attempt work_unit_done
   build_start queue{position,depth,eta_s} build_log{text} build_done{ok}
 Both ``reasoning_delta`` (the model's reasoning channel) and ``answer_delta`` (its
-content draft) stream into the Thinking window so it fills live even for models /
-tool-free stages that only emit content; the committed result still lands,
-structured, in the Project State window.
+content draft) fill the reasoning pane; the committed result still lands,
+structured, in the Project State window. An unknown kind is ignored rather than
+being attributed to whichever stage happened to run last.
 """
 
 from __future__ import annotations
@@ -44,6 +43,8 @@ import time
 from html import escape
 
 from nicegui import app, ui
+
+from . import activity as _activity
 
 # Phase identity: (key, label, Material icon, accent hex). Order is the pipeline
 # order and drives both the tab row and each panel's accenting. The first five
@@ -71,9 +72,23 @@ _STATUS_COLOR = {
     "pending": "#64748b",
     "active": "#fbbf24",
     "parked": "#fbbf24",  # waiting on the user's answer (amber, like active)
+    "queued": "#fbbf24",  # waiting for a host build slot
     "done": "#34d399",
     "warning": _WARN,  # build succeeded but carries a non-blocking warning
     "failed": "#f87171",
+    "interrupted": _DIMMER,  # lost to a restart: neither failed nor live
+}
+# Status is never colour-only: every tab also carries this icon and an accessible
+# name containing the phase and its status (see StageTabs._set_tab_status).
+_STATUS_ICON = {
+    "pending": "radio_button_unchecked",
+    "active": "autorenew",
+    "parked": "help",
+    "queued": "hourglass_top",
+    "done": "check_circle",
+    "warning": "warning",
+    "failed": "cancel",
+    "interrupted": "link_off",
 }
 _RESULT_FOLD_OVER = 300  # tool results longer than this fold into an expansion
 _PROVENANCE_SOURCE = {
@@ -83,14 +98,84 @@ _PROVENANCE_SOURCE = {
     "recipe_plus_llm": ("Recipe + LLM", "schema", "#c084fc"),
     "llm": ("LLM", "smart_toy", "#fbbf24"),
 }
-_PROVENANCE_EVENT_KINDS = frozenset(
-    {"recipe_selected", "work_unit_plan", "work_unit_attempt", "work_unit_done"}
-)
 
 
 def _provenance_source(source: object) -> tuple[str, str, str]:
     """Stable user-facing label, icon, and color for an execution source."""
     return _PROVENANCE_SOURCE.get(str(source), (str(source or "Unknown"), "help", _DIM))
+
+
+_MAX_ERROR_ITEM = 2000
+
+
+def _error_text(entry) -> str:
+    """One readable error item from whatever shape the producer used."""
+    if isinstance(entry, dict):
+        parts = [
+            str(entry.get(key)) for key in
+            ("message", "error", "reason", "detail", "code", "ref", "pin", "net")
+            if entry.get(key)
+        ]
+        text = " · ".join(parts) or json.dumps(entry, ensure_ascii=False, default=str)
+    else:
+        text = str(entry)
+    text = " ".join(text.split())
+    if len(text) > _MAX_ERROR_ITEM:
+        text = text[:_MAX_ERROR_ITEM] + f" …[truncated {len(text) - _MAX_ERROR_ITEM} characters]"
+    return text
+
+
+def _error_items(event: dict) -> list[str]:
+    """Every readable error item on a retry event, in a stable order."""
+    items: list[str] = []
+    for key in ("errors", "offenders"):
+        value = event.get(key)
+        if isinstance(value, (list, tuple)):
+            items.extend(_error_text(entry) for entry in value if entry is not None)
+        elif value:
+            items.append(_error_text(value))
+    for key in ("commit_gate_codes", "work_unit_ids", "declared_identities"):
+        value = event.get(key)
+        if isinstance(value, (list, tuple)) and value:
+            items.append(f"{key.replace('_', ' ')}: " + ", ".join(str(v) for v in value))
+    if not items and event.get("message"):
+        items.append(_error_text(event["message"]))
+    return items
+
+
+def _render_error_item(text: str) -> None:
+    """A complete, bounded error item: short ones inline, long ones expandable."""
+    if len(text) <= 200:
+        ui.label(text).classes("text-xs whitespace-pre-wrap break-all") \
+            .style(f"color:{_DIM}")
+        return
+    with ui.expansion(f"Error detail · {len(text):,} chars", icon="report") \
+            .classes("w-full").props('dense header-class="text-xs text-grey-5"'):
+        ui.label(text).classes("text-xs font-mono whitespace-pre-wrap break-all") \
+            .style(f"color:{_DIM}")
+
+
+def _render_tool_output(output: str, event: dict) -> None:
+    """A tool result: wrapped, folded when long, and NEVER silently clipped --
+    an over-limit result states how much was withheld."""
+    chars = event.get("output_chars")
+    total = int(chars) if isinstance(chars, int) and chars >= len(output) else len(output)
+    truncated = bool(event.get("output_truncated")) or total > len(output)
+    note = (f"Showing first {len(output):,} of {total:,} characters"
+            if truncated else "")
+    if len(output) > _RESULT_FOLD_OVER or note:
+        exp = ui.expansion(f"Result · {total:,} chars",
+                           icon="subdirectory_arrow_right") \
+            .classes("w-full").props('dense header-class="text-xs text-grey-5"')
+        with exp:
+            if note:
+                ui.label(note).classes("text-xs").style(f"color:{_WARN}")
+            ui.label(output).classes(
+                "text-xs font-mono whitespace-pre-wrap break-all") \
+                .style(f"color:{_DIM}")
+        return
+    ui.label(output).classes("text-xs font-mono whitespace-pre-wrap break-all") \
+        .style(f"color:{_DIM}")
 
 
 def _follow_head() -> None:
@@ -166,11 +251,11 @@ class StagePanel:
                 )
                 self._status_slot = ui.row().classes("items-center gap-2")
 
-            # The three windows, arranged per phase (see the module docstring).
-            # Thinking / Activity are plain overflow containers (not
-            # ui.scroll_area) so native scroll events fire only on real position
-            # changes; tail-follow to the bottom is handled client-side by
-            # kc_follow.js (.kc-follow).
+            # The stage body: the artifact / project state first (it is what the
+            # user came to inspect), then a concise outcome line, then the
+            # reasoning + execution streams folded under "Technical details".
+            # Collapsed by default: a quiet stage must not leave half the screen
+            # empty the way the old fixed 42%/58% Thinking-first split did.
             def _inspector() -> None:
                 ui.label("Project state").classes(
                     "text-xs font-bold uppercase tracking-wide"
@@ -184,17 +269,20 @@ class StagePanel:
                 )
                 with insp:
                     self.view_slot = ui.column().classes("w-full p-2 gap-2")
+                    # Persistent issues for THIS stage (severity, message, code,
+                    # evidence, jump-to-stage). Kept out of _insp so rebuilding the
+                    # committed project state never wipes the findings.
+                    self.issues_slot = ui.column().classes("w-full p-2 gap-2")
+                    self.issues_slot.set_visibility(False)
+                    self._issues_sig: tuple = ()
                     self._insp = ui.column().classes("w-full p-2 gap-3")
 
-            def _thinking(box_style: str) -> None:
-                ui.label("Thinking").classes("text-xs font-bold uppercase tracking-wide").style(
-                    f"color:{_DIM}"
-                )
+            def _thinking() -> None:
                 with (
                     ui.element("div")
                     .classes("w-full rounded kc-follow kc-stage-think")
                     .style(
-                        f"{box_style};overflow-y:auto;"
+                        "min-height:120px;max-height:320px;overflow-y:auto;"
                         "background:var(--kc-surface);border:1px solid var(--kc-border)"
                     )
                 ):
@@ -202,75 +290,43 @@ class StagePanel:
 
             def _activity() -> None:
                 ui.label("Execution / log").classes(
-                    "text-xs font-bold uppercase tracking-wide mt-1"
+                    "text-xs font-bold uppercase tracking-wide"
                 ).style(f"color:{_DIM}")
                 with (
                     ui.element("div")
                     .classes("w-full rounded kc-follow kc-stage-act")
                     .style(
-                        "flex:1;min-height:0;overflow-y:auto;"
+                        "min-height:120px;max-height:360px;overflow-y:auto;"
                         "background:var(--kc-surface);border:1px solid var(--kc-border)"
                     )
                 ):
                     self._act = ui.column().classes("w-full p-2 gap-1")
 
-            if self.key in _BUILD_STAGES:
-                # Build phase: the KiCad artifact (schematic / board) on top at
-                # full width and nearly the viewport height — it is the thing
-                # the user came to inspect — with Thinking + Activity in a
-                # short side-by-side band underneath.
-                with ui.column().classes("w-full gap-2 kc-stage-body"):
-                    with (
-                        ui.column()
-                        .classes("w-full gap-1 kc-stage-left")
-                        .style("height:calc(100vh - 170px);min-height:620px")
-                    ):
-                        _inspector()
-                    with (
-                        ui.row()
-                        .classes("w-full no-wrap gap-3 kc-stage-under")
-                        .style("height:280px")
-                    ):
-                        with (
-                            ui.column()
-                            .classes("gap-1 kc-stage-right")
-                            .style("flex:1;min-width:0;height:100%")
-                        ):
-                            _thinking("flex:1;min-height:0")
-                        with (
-                            ui.column()
-                            .classes("gap-1 kc-stage-right")
-                            .style("flex:1;min-width:0;height:100%")
-                        ):
-                            _activity()
-            else:
-                # LLM stage: inspector left, Thinking (the star of the show)
-                # over Activity right. Fill the viewport under the tab row;
-                # min-height keeps the band usable on short screens.
+            with ui.column().classes("w-full gap-2 kc-stage-body"):
                 with (
-                    ui.row()
-                    .classes("w-full no-wrap gap-3 kc-stage-body")
-                    .style("height:calc(100vh - 320px);min-height:540px")
+                    ui.column()
+                    .classes("w-full gap-1 kc-stage-left")
+                    .style("height:calc(100vh - 330px);min-height:520px")
                 ):
-                    with (
-                        ui.column()
-                        .classes("gap-1 kc-stage-left")
-                        .style("width:42%;min-width:300px;height:100%")
-                    ):
-                        _inspector()
-                    with (
-                        ui.column()
-                        .classes("gap-1 kc-stage-right")
-                        .style("flex:1;min-width:0;height:100%")
-                    ):
-                        _thinking("height:58%")
+                    _inspector()
+                # The concise stage outcome / current activity, always on screen.
+                self._outcome = ui.label("").classes("text-xs font-mono") \
+                    .style(f"color:{_DIM}")
+                with ui.expansion("Technical details", icon="terminal") \
+                        .classes("w-full") \
+                        .props('dense header-class="text-xs text-grey-5"'):
+                    with ui.column().classes("w-full gap-2 p-1"):
                         _activity()
+                        with ui.expansion("Model reasoning", icon="psychology") \
+                                .classes("w-full") \
+                                .props('dense header-class="text-xs text-grey-5"'):
+                            _thinking()
 
         self.clear()
 
     # ---- lifecycle ----------------------------------------------------------
     def clear(self) -> None:
-        """Reset all three windows to idle placeholders for a fresh run."""
+        """Reset the stage body to idle placeholders for a fresh run."""
         self._active_run = None
         self._open_run = None
         self._build_log = None
@@ -288,7 +344,16 @@ class StagePanel:
         self._chars = 0
         self._tools = 0
         self._model = None
+        # Tool cards keyed by their LOCAL call id (minted by the client), so a
+        # call and its result become one card instead of two anonymous lines.
+        self._tool_cards: dict[str, dict] = {}
+        self._last_unpaired: list[dict] = []
         self._status_slot.clear()
+        self._outcome.set_text("")
+        self._outcome.style(f"color:{_DIM}")
+        self.issues_slot.clear()
+        self.issues_slot.set_visibility(False)
+        self._issues_sig = ()
         self.view_slot.clear()
         self._insp.clear()
         self._think.clear()
@@ -313,21 +378,26 @@ class StagePanel:
     def push(self, e: dict) -> None:
         k = e.get("kind")
         if k == "reasoning_delta":
-            # The model's reasoning channel -> Thinking window.
+            # The model's reasoning channel -> the (collapsed) reasoning pane.
             self._on_reasoning(e.get("text", ""))
         elif k == "answer_delta":
             # The model's content draft = the slot JSON it is writing -> a live
-            # preview in Project state (and Thinking too for content-only models
-            # that emit no reasoning, so that window never stays empty).
+            # preview in Project state (and the reasoning pane too for
+            # content-only models that emit no reasoning).
             self._on_answer(e.get("text", ""))
         elif k == "tool":
-            self._on_tool(e.get("name", ""), e.get("args") or {})
+            self._on_tool(e)
         elif k == "tool_result":
-            self._on_tool_result(str(e.get("output", "")))
+            self._on_tool_result(e)
         elif k == "retry":
-            self._on_retry(e.get("errors"))
+            self._on_retry(e)
         elif k == "stage_diagnostic":
             self._on_stage_diagnostic(e)
+        elif k == "run_error":
+            self._on_run_error(e)
+        elif k in ("provider_fallback", "escalation", "serialization_recovery",
+                   "candidate_decoded"):
+            self._on_activity_note(e)
         elif k == "recipe_selected":
             self._on_recipe_selected(e)
         elif k == "work_unit_plan":
@@ -338,12 +408,14 @@ class StagePanel:
             self._on_work_unit_done(e)
         elif k == "build_log":
             self._on_build_log(e.get("text", ""))
-        # stage_start/stage_done/build_* are handled by StageTabs (tab status).
+        # stage_start/stage_done/build_start/queue/build_done/run_finished are
+        # handled by StageTabs (tab status); an unknown kind is ignored here
+        # rather than being attributed to some other stage.
 
     def flush(self) -> None:
         """Write coalesced streamed text once per tick (one DOM update per growing
         block instead of one per token), refresh the live project-state draft, and
-        tick the activity diagnostic line."""
+        tick the concise outcome line."""
         for run in self._dirty:
             run.label.set_text(run.buf)
             n = run.buf.count("\n") if run.mode == "lines" else len(run.buf)
@@ -354,32 +426,50 @@ class StagePanel:
             self._draft_dirty = False
             self._render_draft()
         if self._live is not None and not self._live_done:
-            self._live.set_text(self._live_text())
+            text = self._live_text()
+            self._live.set_text(text)
+            self._outcome.set_text(text)
 
     # ---- status -------------------------------------------------------------
     def mark_running(self, model: str | None = None) -> None:
         self._status_slot.clear()
         with self._status_slot:
             ui.spinner(size="sm").style(f"color:{self.accent}")
-        # Build sub-phases stream a build log instead of per-token diagnostics.
-        if self.key in _BUILD_STAGES:
-            return
-        # Seed the activity diagnostic so the (tool-free) early stages are never an
-        # empty pane: a start line + a live "streaming ..." line updated each flush.
+        # Seed the concise outcome line (and, for LLM stages, the activity pane) so
+        # even a tool-free stage is never blank.
         self._model = model
         self._t0 = time.monotonic()
         self._chars = 0
         self._tools = 0
         self._live_done = False
+        head = f"▶ {self.label} started"
+        if model:
+            head += f"  ·  {model}"
+        self._outcome.set_text(head)
+        self._outcome.style(f"color:{self.accent}")
+        # Build sub-phases stream a build log instead of per-token diagnostics.
+        if self.key in _BUILD_STAGES:
+            return
         self._act_ready()
         with self._act:
-            head = f"▶ {self.label} started"
-            if model:
-                head += f"  ·  {model}"
             ui.label(head).classes("text-xs font-mono").style(f"color:{self.accent}")
             self._live = (
                 ui.label("streaming…").classes("text-xs font-mono").style(f"color:{_DIMMER}")
             )
+
+    def set_outcome(self, text: str, color: str | None = None) -> None:
+        """Set the always-visible outcome/current-activity line."""
+        self._outcome.set_text(text)
+        self._outcome.style(f"color:{color or _DIM}")
+
+    def set_queued_note(self, note: str) -> None:
+        """Queue pill from an already-written sentence (a build this page only
+        observes: it has no queue EVENT to react to)."""
+        self._status_slot.clear()
+        with self._status_slot:
+            ui.spinner("hourglass_top", size="sm").style(f"color:{_DIM}")
+            ui.label(note or "Queued").classes("text-xs").style(f"color:{_DIM}")
+        self.set_outcome(note or "Queued for board build", _DIM)
 
     def set_queued(self, position: int, depth: int, eta_s=None) -> None:
         """Queue pill: the run's deterministic build is waiting for a host build
@@ -387,7 +477,7 @@ class StagePanel:
         spinner as soon as the first build log line lands."""
         self._status_slot.clear()
         with self._status_slot:
-            ui.spinner("hourglass", size="sm").style(f"color:{_DIM}")
+            ui.spinner("hourglass_top", size="sm").style(f"color:{_DIM}")
             msg = (
                 "Queued: next up"
                 if position <= 0
@@ -396,6 +486,8 @@ class StagePanel:
             if isinstance(eta_s, (int, float)) and eta_s > 0:
                 msg += f" · est. ~{max(1, round(eta_s / 60))} min"
             ui.label(msg).classes("text-xs").style(f"color:{_DIM}")
+        self._outcome.set_text(msg)
+        self._outcome.style(f"color:{_DIM}")
 
     def set_status(
         self,
@@ -431,9 +523,30 @@ class StagePanel:
             else:
                 ui.icon("cancel").style(f"color:{_FAIL};font-size:1.1rem")
                 ui.label("failed").classes("text-xs").style(f"color:{_FAIL}")
-        if self._live is not None and not self._live_done:
-            self._live_done = True
-            self._live.set_text(self._live_text(done=True, ok=ok, cost=cost, attempts=attempts))
+        if ok:
+            self._outcome.set_text(
+                f"{self.label} committed with findings" if warning
+                else f"{self.label} committed")
+        elif retryable and failure_kind == "provider_rate_limited":
+            self._outcome.set_text(f"{self.label}: provider busy — retry")
+        else:
+            self._outcome.set_text(f"{self.label} failed")
+        self._outcome.style(f"color:{color}")
+        self._settle_live(self._live_text(done=True, ok=ok, cost=cost, attempts=attempts),
+                          color)
+        # A call that never returned is not still running: say so instead of
+        # leaving an eternal spinner behind.
+        self._close_open_tool_cards()
+
+    def _settle_live(self, text: str, color: str) -> None:
+        """Finish the activity pane's live line.
+
+        Repainting a stage's outcome (a corrected commit after a retry) must also
+        settle the line the FIRST outcome wrote -- otherwise a stale "✗ failed"
+        stays on screen behind a successful result."""
+        self._live_done = True
+        if self._live is not None:
+            self._live.set_text(text)
             self._live.style(f"color:{color}")
 
     def set_parked(self) -> None:
@@ -443,11 +556,20 @@ class StagePanel:
         with self._status_slot:
             ui.icon("help").style("color:#fbbf24;font-size:1.1rem")
             ui.label("waiting for your answer").classes("text-xs").style("color:#fbbf24")
+        self._outcome.set_text("Waiting for your answer")
+        self._outcome.style("color:#fbbf24")
+        self._settle_live("waiting for your answer", "#fbbf24")
+        self._close_open_tool_cards()
 
     def set_pending(self) -> None:
         """Drop any result pill: the stage's outcome was invalidated (an upstream
         edit cleared its slot) and it has not run again yet."""
         self._status_slot.clear()
+        self._outcome.set_text("")
+        self._outcome.style(f"color:{_DIM}")
+        # Nothing is streaming: an old stage_start from a lost attempt must not
+        # leave a stage looking like it is running.
+        self._settle_live("", _DIMMER)
 
     def _live_text(self, done=False, ok=True, cost=None, attempts=None) -> str:
         elapsed = (time.monotonic() - self._t0) if self._t0 else 0.0
@@ -524,57 +646,214 @@ class StagePanel:
             self._act_ph.delete()
             self._act_ph = None
 
-    def _on_tool(self, name: str, args: dict) -> None:
-        self._active_run = None  # a tool ends the current thinking run
+    def _on_tool(self, event: dict) -> None:
+        """One card per tool CALL: name, state, elapsed, cache marker, then its
+        arguments and result expandable beneath it (paired by the client's local
+        call id -- never by the provider's id, which can repeat across rounds)."""
+        self._active_run = None  # a tool ends the current reasoning run
         self._tools += 1
         self._act_ready()
-        preview = json.dumps(args)[:140] if args else ""
-        with self._act:
-            with ui.row().classes("items-center gap-2 flex-nowrap min-w-0 pt-0.5"):
-                ui.icon("terminal").style(f"color:{_DIMMER};font-size:1rem")
-                ui.label(name).classes("text-xs font-mono px-1.5 py-0.5 rounded shrink-0").style(
-                    "background:rgba(56,189,248,0.14);color:#7dd3fc"
-                )
-                if preview:
-                    ui.label(preview).classes("text-xs font-mono truncate min-w-0").style(
-                        f"color:{_DIMMER}"
-                    )
-
-    def _on_tool_result(self, output: str) -> None:
-        self._active_run = None
-        self._act_ready()
-        with self._act:
-            if len(output) > _RESULT_FOLD_OVER:
-                exp = (
-                    ui.expansion(f"result · {len(output):,} chars", icon="subdirectory_arrow_right")
-                    .classes("w-full")
-                    .props('dense header-class="text-xs text-grey-5"')
-                )
-                with exp:
-                    ui.label(output).classes("text-xs font-mono whitespace-pre-wrap").style(
-                        f"color:{_DIM}"
-                    )
-            else:
-                with ui.row().classes("items-start gap-1 flex-nowrap min-w-0"):
-                    ui.icon("subdirectory_arrow_right").style(f"color:{_DIMMER};font-size:0.95rem")
-                    ui.label(output).classes("text-xs font-mono whitespace-pre-wrap min-w-0").style(
-                        f"color:{_DIM}"
-                    )
-
-    def _on_retry(self, errors) -> None:
-        self._active_run = None
-        self._act_ready()
-        msg = json.dumps(errors)[:200] if errors is not None else ""
+        name = str(event.get("name") or "tool")
+        call_id = str(event.get("call_id") or "")
+        args = event.get("args") if isinstance(event.get("args"), dict) else {}
+        card: dict = {}
         with self._act:
             with (
-                ui.row()
-                .classes("items-center gap-2 flex-nowrap min-w-0 px-2 py-1 rounded")
+                ui.column()
+                .classes("w-full gap-1 px-2 py-1 rounded")
+                .style("background:rgba(56,189,248,0.08);"
+                       "border:1px solid rgba(56,189,248,0.28)")
+            ):
+                header = ui.row().classes("items-center gap-2 flex-nowrap min-w-0")
+                with header:
+                    card["icon"] = ui.icon("progress_activity") \
+                        .style(f"color:{_DIMMER};font-size:1rem")
+                    ui.label(name).classes(
+                        "text-xs font-mono px-1.5 py-0.5 rounded shrink-0").style(
+                        "background:rgba(56,189,248,0.14);color:#7dd3fc")
+                    card["state_label"] = ui.label("Running").classes("text-xs shrink-0") \
+                        .style(f"color:{_DIMMER}")
+                    card["meta"] = ui.label("").classes("text-xs font-mono").style(
+                        f"color:{_DIMMER}")
+                if args:
+                    with ui.expansion("Arguments", icon="data_object") \
+                            .classes("w-full") \
+                            .props('dense header-class="text-xs text-grey-5"'):
+                        ui.label(json.dumps(args, indent=2, ensure_ascii=False)) \
+                            .classes("text-xs font-mono whitespace-pre-wrap") \
+                            .style(f"color:{_DIM}")
+                card["result_slot"] = ui.column().classes("w-full gap-0")
+        card["name"] = name
+        card["state"] = "Running"
+        card["started"] = time.monotonic()
+        card["args"] = args
+        if call_id:
+            self._tool_cards[call_id] = card
+        self._last_unpaired.append(card)
+
+    def _on_tool_result(self, event: dict) -> None:
+        """Attach a result to its call's card, or render a standalone named card
+        when the call itself was never recorded (a result whose call predates the
+        durable window) -- the evidence is never dropped."""
+        self._active_run = None
+        self._act_ready()
+        name = str(event.get("name") or "")
+        call_id = str(event.get("call_id") or "")
+        card = self._tool_cards.pop(call_id, None) if call_id else None
+        if card is None:
+            card = next((c for c in self._last_unpaired
+                         if c.get("name") == name and c.get("state") == "Running"), None) \
+                if name else None
+            if card is not None:
+                self._last_unpaired.remove(card)
+        if card is None:
+            card = self._orphan_card(name)
+        ok = event.get("ok")
+        self._last_unpaired = [c for c in self._last_unpaired if c is not card]
+        duration = event.get("duration_ms")
+        cached = bool(event.get("cached"))
+        if ok is False:
+            state, color, icon = "Failed", _FAIL, "error"
+        else:
+            state, color, icon = "Returned", _OK, "check_circle"
+        card["state"] = state
+        card["state_label"].text = state
+        card["icon"].name = icon
+        card["icon"].style(f"color:{color};font-size:1rem")
+        card["state_label"].style(f"color:{color}")
+        bits = []
+        if isinstance(duration, (int, float)):
+            bits.append(f"{float(duration) / 1000:.2f}s")
+        if cached:
+            bits.append("cached")
+        if ok is None:
+            bits.append("unverified")
+        card["meta"].text = "  ·  ".join(bits)
+        output = str(event.get("output") or "")
+        with card["result_slot"]:
+            _render_tool_output(output, event)
+
+    def _orphan_card(self, name: str) -> dict:
+        """A named card for a result whose call was never recorded."""
+        card: dict = {}
+        with self._act:
+            with (
+                ui.column()
+                .classes("w-full gap-1 px-2 py-1 rounded")
+                .style("background:rgba(148,163,184,0.08);"
+                       "border:1px solid rgba(148,163,184,0.28)")
+            ):
+                with ui.row().classes("items-center gap-2 flex-nowrap min-w-0"):
+                    card["icon"] = ui.icon("help").style(
+                        f"color:{_DIMMER};font-size:1rem")
+                    ui.label(name or "tool").classes(
+                        "text-xs font-mono px-1.5 py-0.5 rounded shrink-0").style(
+                        "background:rgba(148,163,184,0.14);color:#cbd5e1")
+                    card["state_label"] = ui.label("Call details unavailable").classes(
+                        "text-xs shrink-0").style(f"color:{_DIMMER}")
+                    card["meta"] = ui.label("").classes("text-xs font-mono").style(
+                        f"color:{_DIMMER}")
+                card["result_slot"] = ui.column().classes("w-full gap-0")
+        return card
+
+    def _close_open_tool_cards(self) -> None:
+        """A call with no result at termination says so, instead of spinning."""
+        for card in list(self._last_unpaired):
+            if card.get("state") == "Running":
+                card["state"] = "No result recorded"
+                card["icon"].name = "help"
+                card["icon"].style(f"color:{_DIMMER};font-size:1rem")
+                card["state_label"].text = "No result recorded"
+                card["state_label"].style(f"color:{_DIMMER}")
+        self._last_unpaired = []
+
+    def _on_retry(self, event: dict) -> None:
+        """A retry is a human sentence plus the complete (bounded, expandable)
+        error items -- never a clipped JSON blob."""
+        self._active_run = None
+        self._act_ready()
+        stage = _activity.stage_label(event.get("stage")) or self.label
+        kind = str(event.get("failure_kind") or "")
+        summary = f"Retrying {stage}" + (f" after {kind.replace('_', ' ')}" if kind else "")
+        items = _error_items(event)
+        with self._act:
+            with (
+                ui.column()
+                .classes("w-full gap-1 px-2 py-1 rounded")
                 .style("background:rgba(251,191,36,0.10)")
             ):
-                ui.icon("warning").style("color:#fbbf24;font-size:1rem")
-                ui.label(f"retry: {msg}").classes("text-xs font-mono truncate min-w-0").style(
-                    "color:#fcd34d"
-                )
+                with ui.row().classes("items-center gap-2 flex-nowrap min-w-0"):
+                    ui.icon("warning").style("color:#fbbf24;font-size:1rem")
+                    ui.label(summary).classes("text-xs min-w-0").style("color:#fcd34d")
+                for item in items[:20]:
+                    _render_error_item(item)
+                if len(items) > 20:
+                    ui.label(f"…and {len(items) - 20} more").classes("text-xs") \
+                        .style(f"color:{_DIMMER}")
+
+    def _on_run_error(self, event: dict) -> None:
+        """The terminal technical record of a failed run, on its stage."""
+        self._active_run = None
+        self._act_ready()
+        kind = str(event.get("failure_kind") or "run_error")
+        with self._act:
+            with (
+                ui.column()
+                .classes("w-full gap-1 px-2 py-1 rounded")
+                .style("background:rgba(248,113,113,0.10);"
+                       "border:1px solid rgba(248,113,113,0.35)")
+            ):
+                with ui.row().classes("items-center gap-2 flex-nowrap min-w-0"):
+                    ui.icon("cancel").style(f"color:{_FAIL};font-size:1rem")
+                    ui.label(kind.replace("_", " ")).classes("text-xs font-bold") \
+                        .style(f"color:{_FAIL}")
+                    if event.get("exception_type"):
+                        ui.label(str(event["exception_type"])).classes(
+                            "text-xs font-mono").style(f"color:{_DIMMER}")
+                if event.get("message"):
+                    ui.label(str(event["message"])).classes(
+                        "text-xs whitespace-pre-wrap").style(f"color:{_DIM}")
+                if event.get("retryable"):
+                    ui.label("This failure is retryable.").classes("text-xs") \
+                        .style(f"color:{_DIM}")
+
+    def _on_activity_note(self, event: dict) -> None:
+        """A short, plain-language line for a lifecycle event that has no richer
+        card of its own (provider fallback, escalation, format recovery, decode)."""
+        kind = str(event.get("kind") or "")
+        if kind == "provider_fallback":
+            summary = (f"Falling back to {event.get('to') or 'another provider'}"
+                       + (f" (from {event['from']})" if event.get("from") else ""))
+        elif kind == "escalation":
+            summary = (f"Escalating to {event.get('to') or 'a stronger model'}"
+                       + (f" after {event['reason']}" if event.get("reason") else ""))
+        elif kind == "serialization_recovery":
+            summary = ("Recovered the model's response format"
+                       + (f" ({event['failure_kind']})"
+                          if event.get("failure_kind") else ""))
+        else:
+            summary = ("Candidate decoded"
+                       + (f" (attempt {event['attempt']})"
+                          if event.get("attempt") else ""))
+        self._active_run = None
+        self._act_ready()
+        with self._act:
+            with ui.row().classes("items-center gap-2 flex-nowrap min-w-0 pt-0.5"):
+                ui.icon("bolt").style(f"color:{_DIMMER};font-size:1rem")
+                ui.label(summary).classes("text-xs min-w-0 whitespace-normal") \
+                    .style(f"color:{_DIM}")
+
+    def set_interrupted(self) -> None:
+        """Pill for a run that was lost (a restart mid-run), which is neither a
+        failure of the design nor a live run."""
+        self._status_slot.clear()
+        with self._status_slot:
+            ui.icon("link_off").style(f"color:{_DIM};font-size:1.1rem")
+            ui.label("interrupted").classes("text-xs").style(f"color:{_DIM}")
+        self._outcome.set_text("Run was interrupted")
+        self._outcome.style(f"color:{_DIM}")
+        self._settle_live("✗ interrupted", _DIM)
+        self._close_open_tool_cards()
 
     def _on_stage_diagnostic(self, diagnostic: dict) -> None:
         self._active_run = None
@@ -717,6 +996,25 @@ class StagePanel:
             self._build_log = _Run(exp, lab, head="Build log", mode="lines")
         self._build_log.buf += text + "\n"
         self._dirty.add(self._build_log)
+
+    # ---- issues -------------------------------------------------------------
+    def set_issues(self, items: list[dict], *, on_view=None) -> None:
+        """Render (or clear) this stage's own outstanding issues.
+
+        Rebuilt only when the issue set actually changes, so a per-second poll
+        does not churn the DOM."""
+        items = list(items or [])
+        sig = tuple((i.get("severity"), i.get("code"), i.get("message"),
+                     tuple(i.get("evidence") or [])) for i in items)
+        if sig == self._issues_sig:
+            return
+        self._issues_sig = sig
+        self.issues_slot.clear()
+        self.issues_slot.set_visibility(bool(items))
+        if items:
+            with self.issues_slot:
+                _render_issues(issues_section(items, title="Needs attention",
+                                              on_view=on_view))
 
     # ---- inspector (structured project-state) -------------------------------
     def set_inspector(self, sections: list[dict]) -> None:
@@ -921,6 +1219,9 @@ def _render_section(sec: dict, accent: str) -> None:
                             f"color:{_DIMMER}"
                         )
 
+    elif kind == "issues":
+        _render_issues(sec)
+
     elif kind == "progress":
         pct = max(0, min(100, int(float(sec.get("percent", 0)))))
         phase = sec.get("phase", "")
@@ -975,6 +1276,75 @@ def _render_section(sec: dict, accent: str) -> None:
                     ui.label(label).classes("text-xs px-1.5 py-0.5 rounded").style(
                         f"color:{chip_color};background:{bg}"
                     )
+
+
+_SEV_STYLE = {
+    "error": (_FAIL, "rgba(248,113,113,0.12)", "rgba(248,113,113,0.45)", "cancel"),
+    "warning": (_WARN, "rgba(234,179,8,0.10)", "rgba(234,179,8,0.40)", "warning"),
+    "info": (_DIMMER, "rgba(100,116,139,0.08)", "rgba(100,116,139,0.30)", "info"),
+}
+
+
+def issues_section(items: list[dict], *, title: str = "Issues",
+                   on_view=None) -> dict:
+    """Spec for one bounded, deduplicated issue list.
+
+    `on_view(stage)` is what the "View stage" control calls (the page selects
+    that stage's tab); pass None where there is nowhere to jump to.
+    """
+    return {"type": "issues", "title": title, "items": list(items or []),
+            "on_view": on_view}
+
+
+def _render_issues(sec: dict) -> None:
+    """Severity, stage, readable message, code, evidence, and a jump to the stage."""
+    items = sec.get("items") or []
+    if not items:
+        ui.label("No current issues.").classes("text-xs italic").style(f"color:{_DIMMER}")
+        return
+    on_view = sec.get("on_view")
+    with ui.column().classes("w-full gap-2"):
+        for issue in items:
+            sev = str(issue.get("severity") or "warning")
+            color, bg, border, icon = _SEV_STYLE.get(sev, _SEV_STYLE["warning"])
+            with (
+                ui.element("div")
+                .classes("w-full rounded p-2")
+                .style(f"border-left:3px solid {border};background:{bg}")
+            ):
+                stage = issue.get("stage")
+                with ui.row().classes("w-full no-wrap gap-2 items-center"):
+                    ui.icon(icon).style(f"color:{color};font-size:1rem")
+                    ui.label(sev.upper()).classes(
+                        "text-xs font-bold px-1.5 py-0.5 rounded"
+                    ).style(f"color:{color};background:rgba(0,0,0,0.2)")
+                    if stage:
+                        ui.label(_activity.stage_label(stage)).classes(
+                            "text-xs font-mono").style(f"color:{_DIMMER}")
+                    if issue.get("code"):
+                        ui.label(str(issue["code"])).classes("text-xs font-mono") \
+                            .style(f"color:{_DIMMER}")
+                    ui.space()
+                    if stage and on_view is not None:
+                        ui.button("View stage", icon="arrow_forward",
+                                  on_click=lambda s=stage: on_view(s)) \
+                            .props("flat dense no-caps").classes("text-xs")
+                if issue.get("message"):
+                    ui.label(str(issue["message"])).classes(
+                        "text-xs whitespace-pre-wrap break-all").style(f"color:{_DIM}")
+                for item in issue.get("evidence") or []:
+                    text = str(item)
+                    if len(text) <= 200:
+                        ui.label(text).classes(
+                            "text-xs font-mono whitespace-pre-wrap break-all") \
+                            .style(f"color:{_DIMMER}")
+                    else:
+                        with ui.expansion(f"Evidence · {len(text):,} chars",
+                                          icon="notes").classes("w-full") \
+                                .props('dense header-class="text-xs text-grey-5"'):
+                            ui.label(text).classes(
+                                "text-xs font-mono whitespace-pre-wrap break-all") \
+                                .style(f"color:{_DIMMER}")
 
 
 def _cell_html(cell) -> str:
@@ -1094,9 +1464,31 @@ class StageTabs:
         self.show_cost = show_cost
         self.panels: dict[str, StagePanel] = {}
         self._tab_el: dict[str, ui.tab] = {}
+        self._tab_tip: dict[str, object] = {}
         self._current: str | None = None
         self._auto_follow = True
+        # While replaying persisted history the selection must not chase events;
+        # `end_replay` then selects the authoritative stage exactly once.
+        self._replaying = False
+        self._pending_select: str | None = None
+        self._select_attempts = 0
+        # Which state a build driven OUTSIDE this page last painted (so the per
+        # second observer does not churn the DOM).
+        self._foreign_state: str | None = None
+        # True while the open design is genuinely running (so the follow control
+        # is only offered when there is something to follow).
+        self._something_live = False
         self._on_show: dict[str, object] = {}
+
+        # Explicit escape hatch back to live following, shown only while the user
+        # is looking at a stage other than the live one.
+        with ui.row().classes("w-full items-center justify-end gap-2") as _follow_row:
+            self._follow_btn = ui.button(
+                "Follow live stage", icon="my_location",
+                on_click=lambda: self.follow_live()) \
+                .props("flat dense no-caps").classes("text-xs") \
+                .tooltip("Jump back to the stage that is running and follow it")
+            self._follow_btn.set_visibility(False)
 
         with (
             ui.tabs()
@@ -1107,27 +1499,147 @@ class StageTabs:
                 t = ui.tab(key, label=label, icon=icon)
                 t.style(f"color:{_STATUS_COLOR['pending']}")
                 self._tab_el[key] = t
+                # ONE tooltip per tab, updated in place: Element.tooltip() appends a
+                # new QTooltip on every call, so repeated status changes used to
+                # leave every earlier status' tooltip attached to the same tab.
+                with t:
+                    self._tab_tip[key] = ui.tooltip(f"{label}: pending")
+                self._set_tab_status(key, "pending")
         self.tabs.on_value_change(self._on_tab_change)
 
         with (
             ui.tab_panels(self.tabs, value=PHASES[0][0])
             .classes("w-full")
-            .style("background:transparent")
+            .style("background:transparent") as self._tab_panels
         ):
             for key, label, icon, accent in PHASES:
                 with ui.tab_panel(key).classes("p-0"):
                     self.panels[key] = StagePanel(key, label, icon, accent, show_cost, draft_spec)
 
+    # ---- selection ----------------------------------------------------------
+    def _show(self, key: str) -> None:
+        """Select a tab AND the panel it drives.
+
+        The tab row is bound to the panels element, so the PANELS are what the
+        client actually renders: setting only the tabs value is silently ignored
+        (measured live -- a 'View stage' click left the old tab on screen)."""
+        if key not in self.panels:
+            return
+        self.tabs.set_value(key)
+        if self._tab_panels.value != key:
+            self._tab_panels.set_value(key)
+
+    def _shown(self) -> str | None:
+        """The tab the client is showing (the tabs element is the value the client
+        reports back; the panels element is what renders)."""
+        return self.tabs.value or self._tab_panels.value
+
+    def set_live(self, live: bool) -> None:
+        """Whether anything is actually running right now.
+
+        The follow control is only meaningful while something is live, so a
+        finished project does not offer to 'follow' a run that has ended."""
+        if self._something_live != live:
+            self._something_live = live
+            self._set_follow_ui()
+
+    # ---- follow / replay ----------------------------------------------------
+    def _set_follow_ui(self) -> None:
+        off_live = bool(self._current) and self._shown() != self._current
+        self._follow_btn.set_visibility(
+            off_live and self._something_live and not self._auto_follow
+            and not self._replaying)
+
+    def begin_replay(self) -> None:
+        """Filling historical panels: suspend auto-follow so the tab row is not
+        yanked around by events that are already over."""
+        self._replaying = True
+        self._auto_follow = False
+        self._set_follow_ui()
+
+    def end_replay(self, select: str | None = None) -> None:
+        """Leave replay, selecting the authoritative stage exactly once.
+
+        The selection is RE-ASSERTED for a few render ticks (`settle`): the
+        browser echoes the tab panels' initial value back, and that echo must not
+        win over the stage the user needs to see."""
+        self._replaying = False
+        if select:
+            self._pending_select = select
+            self._select_attempts = 0
+            self._assert_selection()
+        else:
+            self._auto_follow = True
+            self._set_follow_ui()
+
+    def _assert_selection(self) -> None:
+        if self._pending_select and self._shown() != self._pending_select:
+            self._show(self._pending_select)
+        self._set_follow_ui()
+
+    def settle(self) -> None:
+        """One render tick's worth of follow bookkeeping (cheap, no-op when done).
+
+        The pending selection is re-asserted for a short window rather than until
+        it first appears applied: the browser's own initial value for the tab
+        panels arrives a moment AFTER the page is built and would otherwise
+        silently restore the first tab (measured live)."""
+        if not self._pending_select:
+            return
+        self._select_attempts += 1
+        if self._select_attempts <= 8:
+            self._show(self._pending_select)
+            return
+        self._auto_follow = self._pending_select == self._current
+        self._pending_select = None
+        self._set_follow_ui()
+
+    def select(self, key: str | None) -> None:
+        """Show `key`'s tab; auto-follow resumes only if it IS the live stage."""
+        if key and key in self.panels:
+            self._show(key)
+            self._auto_follow = key == self._current
+        self._set_follow_ui()
+
+    def follow_live(self) -> None:
+        """Resume auto-follow and jump back to the live stage."""
+        self._auto_follow = True
+        if self._current:
+            self._show(self._current)
+        self._set_follow_ui()
+
     # ---- tab status / follow ------------------------------------------------
     def _set_tab_status(self, key: str, status: str) -> None:
         t = self._tab_el.get(key)
-        if t is not None:
-            t.style(f"color:{_STATUS_COLOR[status]}")
+        if t is None:
+            return
+        t.style(f"color:{_STATUS_COLOR.get(status, _DIMMER)}")
+        # Status is not colour-only: the tab carries an icon and an accessible
+        # name containing the phase AND its status (for screen readers and for the
+        # phone layout, which hides the tab labels).
+        label = next((lbl for k, lbl, _i, _a in PHASES if k == key), key)
+        word = status.replace("_", " ")
+        icon = _STATUS_ICON.get(status)
+        if icon and t._props.get("icon") != icon:
+            t._props["icon"] = icon
+            t.update()
+        aria = f"{label}: {word}"
+        if t._props.get("aria-label") != aria:
+            t._props["aria-label"] = aria
+            t.update()
+        tip = self._tab_tip.get(key)
+        if tip is not None:
+            tip.text = f"{label} — {word}"
 
     def _on_tab_change(self, e) -> None:
         val = getattr(e, "value", None)
-        # Resume auto-follow only while the user is parked on the live stage.
-        self._auto_follow = val == self._current
+        # Resume auto-follow only while the user is parked on the live stage. With
+        # no live stage yet there is nothing to follow: the client's initial panel
+        # value (and any other echo) must not switch following off before the run
+        # has even announced a stage.
+        if self._current is not None and not self._replaying:
+            self._auto_follow = val == self._current
+        self._set_follow_ui()
         # Re-fit any view built while this tab was hidden: a hidden KiCanvas WebGL
         # canvas sizes to zero and never repaints, so it would show blank otherwise.
         cb = self._on_show.get(val)
@@ -1143,8 +1655,9 @@ class StageTabs:
         self._current = key
         self._set_tab_status(key, "active")
         self.panels[key].mark_running(model)
-        if self._auto_follow:
-            self.tabs.set_value(key)
+        if self._auto_follow and not self._replaying:
+            self._show(key)
+        self._set_follow_ui()
 
     # ---- event routing ------------------------------------------------------
     def push(self, e: dict) -> None:
@@ -1172,7 +1685,7 @@ class StageTabs:
                 p.end_runs()
                 p.set_parked()
                 self._set_tab_status(stg, "parked")
-        elif k in _PROVENANCE_EVENT_KINDS:
+        elif k in _activity.PROVENANCE_EVENT_KINDS:
             # Crash-journal events can be replayed without their in-memory
             # stage_start. Route by the event's durable stage identity instead
             # of whichever historical tab happened to finish last.
@@ -1186,6 +1699,7 @@ class StageTabs:
             # The whole deterministic build is parked in the host build queue;
             # surface position/ETA on the tab build_start just activated.
             self._set_current("synthesize")
+            self._set_tab_status("synthesize", "queued")
             self.panels["synthesize"].set_queued(
                 int(e.get("position") or 0), int(e.get("depth") or 0), e.get("eta_s")
             )
@@ -1201,10 +1715,55 @@ class StageTabs:
         elif k == "build_done":
             cur = self._current if self._current in _BUILD_STAGES else "fab"
             self._finish(cur, bool(e.get("ok")), None)
-        else:  # reasoning_delta / tool / tool_result / retry: implicit current stage
-            if self._current is None:
-                self._set_current("intent")
-            self.panels[self._current].push(e)
+        elif k == "run_finished":
+            self._on_run_finished(e)
+        elif k == "run_error":
+            # The terminal technical record of an unexpected exception: show it on
+            # its stage AND settle that stage's status, so a failure is never left
+            # looking like a run that is still streaming.
+            stg = e.get("stage") or self._current
+            panel = self.panels.get(stg) if stg else None
+            if panel is not None:
+                panel.push(e)
+            self._finish(stg, False, None, failure_kind=e.get("failure_kind"),
+                         retryable=bool(e.get("retryable")))
+        else:
+            # Deltas / tool cards / retries / diagnostics: route by the event's OWN
+            # stage (stamped when it was recorded from the most recent announced
+            # stage), else the current one. An unattributed event is DROPPED rather
+            # than blamed on whichever stage happened to be selected.
+            stg = e.get("stage") or self._current
+            panel = self.panels.get(stg) if stg else None
+            if panel is not None:
+                panel.push(e)
+
+    def _on_run_finished(self, event: dict) -> None:
+        """The attempt's terminal event: stop whatever was running and paint the
+        attempt's outcome on the stage it reached."""
+        status = str(event.get("status") or "")
+        stage = event.get("stage") or self._current
+        panel = self.panels.get(stage) if stage else None
+        if panel is None:
+            return
+        if status == "ok":
+            panel.end_runs()
+            if stage in _BUILD_STAGES:
+                self._finish(stage, True, None)
+            return
+        if status == "awaiting_input":
+            panel.end_runs()
+            panel.set_parked()
+            self._set_tab_status(stage, "parked")
+            return
+        if status == "interrupted":
+            panel.end_runs()
+            panel.set_interrupted()
+            self._set_tab_status(stage, "interrupted")
+            return
+        self._finish(
+            stage, False, None,
+            failure_kind=event.get("failure_kind"),
+            retryable=bool(event.get("retryable")))
 
     def _finish(
         self,
@@ -1247,6 +1806,57 @@ class StageTabs:
         if p is not None:
             p.set_inspector(sections)
 
+    def set_issues(self, key: str, items: list[dict], *, on_view=None) -> None:
+        """Paint one stage's outstanding issues into its own panel."""
+        p = self.panels.get(key)
+        if p is not None:
+            p.set_issues(items, on_view=on_view)
+
+    def mark_parked(self, key: str | None) -> None:
+        """Show `key` as the stage that is waiting on the user.
+
+        A durable parked run may already have COMMITTED the stage it raised the
+        question in (the artifact-derived status then says 'done'), so the parked
+        presentation is layered on top: the distinct help icon and the violet
+        accent, never a green 'done' that hides an unanswered question."""
+        p = self.panels.get(key) if key else None
+        if p is None:
+            return
+        p.end_runs()
+        p.set_parked()
+        self._set_tab_status(key, "parked")
+
+    def mark_queued(self, note: str = "") -> None:
+        """Reflect a build waiting in the host queue that THIS page does not drive.
+
+        Display only: nothing is enqueued, registered, or persisted."""
+        if self._foreign_state == "queued":
+            if note:
+                panel = self.panels.get("synthesize")
+                if panel is not None:
+                    panel.set_outcome(note, _STATUS_COLOR["queued"])
+            return
+        self._foreign_state = "queued"
+        panel = self.panels.get("synthesize")
+        if panel is not None:
+            panel.set_queued_note(note)
+        self._set_tab_status("synthesize", "queued")
+
+    def mark_building(self, stage: str, note: str = "") -> None:
+        """A build another process is driving has reached `stage` (observed from
+        its log tail). Display only -- no live driver is registered."""
+        if not stage or stage not in self.panels:
+            return
+        key = f"active:{stage}"
+        if self._foreign_state == key:
+            if note:
+                self.panels[stage].set_outcome(note, _STATUS_COLOR["active"])
+            return
+        self._foreign_state = key
+        self.panels[stage].set_outcome(
+            note or f"▶ {_activity.stage_label(stage)} running", _STATUS_COLOR["active"])
+        self._set_tab_status(stage, "active")
+
     def view_slot(self, key: str):
         """The empty column at the top of a panel's inspector for KiCanvas/download."""
         return self.panels[key].view_slot
@@ -1257,7 +1867,7 @@ class StageTabs:
 
     def active(self) -> str | None:
         """The currently selected tab key."""
-        return self.tabs.value
+        return self._shown()
 
     def set_statuses(self, statuses: dict[str, str], stage_status: dict | None = None) -> None:
         """Paint each tab's durable status on a reopened (or edited) project:
@@ -1311,10 +1921,12 @@ class StageTabs:
     def reset(self) -> None:
         self._current = None
         self._auto_follow = True
+        self._replaying = False
         for key in self.panels:
             self.panels[key].clear()
             self._set_tab_status(key, "pending")
-        self.tabs.set_value(PHASES[0][0])
+        self._show(PHASES[0][0])
+        self._set_follow_ui()
 
 
 def _build_substage(text: str) -> str | None:

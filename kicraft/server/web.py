@@ -27,6 +27,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
@@ -83,12 +84,20 @@ from .session import (
 from .spend_guard import SpendGuard
 from kicraft import __version__ as KICRAFT_VERSION
 from kicraft.build_slots import ACQUIRED_MARKER, slot_count
+from kicraft.fsutil import atomic_write_text
 
+from . import activity as _activity
 from . import billing, notify
 from . import pipeline
 from .build_worker import JOB_KIND_COMMANDS, _kill_build
 from .stage_driver import DESIGN_STAGES
-from .stagetabs import StageTabs, _build_substage, demo_events
+from .stagetabs import (
+    StageTabs,
+    _build_substage,
+    _render_section,
+    demo_events,
+    issues_section,
+)
 from . import stage_diagram
 from .storage import (
     _discover_generated_dir,
@@ -150,6 +159,10 @@ _theme.install()
 # the floor keeps it usable on short screens. One constant so the two views
 # never drift apart.
 _BUILD_VIEW_STYLE = "height:calc(100vh - 250px);min-height:540px"
+# How much of an OBSERVED build log (a build this page does not drive and which
+# recorded no start offset) is tailed on attach: enough for the current phase,
+# bounded so a huge legacy log cannot flood the pane in one tick.
+_OBSERVED_LOG_TAIL_BYTES = 20000
 
 # Shown in the reset email; derived from the token TTL so the two never drift.
 _RESET_TTL_MINUTES = _RESET_TTL_SECONDS // 60
@@ -203,20 +216,35 @@ def _finalize_orphan(job) -> None:
     """Finalize a project whose driving web thread died (a restart): persist
     whatever the build produced, close the project row, and email the owner.
     The LLM-stage transcript is gone with the old process; the artifacts and the
-    outcome are what the user actually needs back."""
+    outcome are what the user actually needs back.
+
+    Identity is recovered on FAILURE as well as success: a stem committed before
+    the crash is still this project's name, and dropping it is what left a
+    finished-but-failed run showing "(building...)" on every surface."""
     store = _store()
     p = store.get_project(job.project_id)
     if p is None or p.status != "running":
         return
-    ws = Path(job.workspace)
+    ws = Path(job.workspace) if job.workspace else None
     st: dict = {"project_id": job.project_id, "user_id": job.user_id,
                 "brief": p.brief or "", "events": [], "status": None,
                 "ok": (job.status == "done" and job.rc == 0),
-                "spend": _project_spend_usd(job.project_id), "notify_force": True}
-    if st["ok"] and ws.is_dir():
-        st["stem"] = _read_project_stem(ws)
-        st["zip"] = _zip_generated(ws)
-        st["ok"] = bool(st["zip"])
+                "spend": _project_spend_usd(job.project_id), "notify_force": True,
+                "dir_path": str(ws) if ws is not None else p.dir_path}
+    if ws is not None and ws.is_dir():
+        st["stem"] = _read_project_stem(ws) or p.project_stem
+        if st["ok"]:
+            st["zip"] = _zip_generated(ws)
+            st["ok"] = bool(st["zip"])
+    else:
+        st["stem"] = p.project_stem
+    if not st["ok"]:
+        st["failure_kind"] = "orphaned_build"
+    _record_reconciliation(
+        st, status="ok" if st["ok"] else "failed",
+        message=("The build finished after the web process restarted."
+                 if st["ok"] else
+                 "The build was interrupted when the web process restarted."))
     _persist_project(st)
 
 
@@ -229,17 +257,30 @@ def _reconcile_orphan_projects() -> None:
     build-job reaper above never sees it (no build_jobs row was ever enqueued),
     it renders as a phantom 'interrupted' with no way back, and it keeps burning
     a quota slot. Mark such rows 'interrupted' (durable, frees the slot),
-    preserving any spend already incurred on the lost stages. The _LIVE_RUNS
-    guard protects a healthy run live in THIS process; the query's NOT IN
-    build_jobs filter leaves every build-stage orphan to _finalize_orphan, which
-    can still recover artifacts. No email: an infra restart is not a design
-    failure, and the row + its Retry button are enough."""
+    preserving whatever identity the workspace committed (stem, dir, pipeline) so
+    the row keeps its name and a rebuilt/continued run has somewhere to go. The
+    _LIVE_RUNS guard protects a healthy run live in THIS process; the query's
+    NOT IN build_jobs filter leaves every build-stage orphan to _finalize_orphan,
+    which can still recover artifacts. No email: an infra restart is not a design
+    failure, and the row + its action button are enough."""
     store = _store()
     for p in store.list_orphaned_running_projects():
         if p.id in _LIVE_RUNS:  # live in this process -> not an orphan
             continue
-        store.finish_project(p.id, "interrupted",
-                             cost_usd=_project_spend_usd(p.id))
+        root = _project_root_for(p, p.id)
+        stem = (_project_signals(root)["stem"] if root is not None else None) \
+            or p.project_stem
+        dir_path = str(root) if root is not None else p.dir_path
+        state: dict = {"project_id": p.id, "user_id": p.user_id,
+                       "brief": p.brief or "", "events": [], "dir_path": dir_path,
+                       "stem": stem}
+        _record_reconciliation(
+            state, status="interrupted",
+            message="The run was interrupted before it reached the board build.")
+        store.finish_project(
+            p.id, "interrupted", cost_usd=_project_spend_usd(p.id), stem=stem,
+            dir_path=dir_path,
+            pipeline=(pipeline.project_pipeline(dir_path) if dir_path else p.pipeline))
 
 
 def _orphan_reaper() -> None:
@@ -1566,10 +1607,11 @@ def _draft_sections(stage: str, parsed, *, prices: dict | None = None) -> list[d
 
 def _collect_support_diagnostics(state: dict) -> dict:
     """Snapshot a run's troubleshooting context for a support report: what was
-    asked, how far the run got, and the concrete failure evidence (build-log
-    tail, failed synthesis checks, ERC offenders). Deliberately a bounded
-    summary, not the full event stream (which _persist_project already saves
-    per project): this payload is what automated review reads first."""
+    asked, how far the run got, the current attempt/stage/failure, and the
+    concrete failure evidence (build-log tail, failed synthesis checks, ERC
+    offenders, the same bounded issue list the screen shows). Deliberately a
+    bounded summary, not the full event stream (which _persist_project already
+    saves per project): this payload is what automated review reads first."""
     events = state.get("events") or []
     # Read root: the scratch workspace, or (on a reopen) the durable project
     # root -- so a reopened FAILED project still yields its synth-check / ERC
@@ -1577,19 +1619,35 @@ def _collect_support_diagnostics(state: dict) -> dict:
     read_root = Path(state["ws"]) if state.get("ws") else None
     build_tail = [e.get("text", "") for e in events
                   if e.get("kind") == "build_log"][-60:]
+    sj = read_state(read_root) if read_root else {}
     # Durable per-stage outcomes first (they cover stages run before a resume);
     # the in-memory event scan remains as the legacy fallback.
-    ss = (read_state(read_root) if read_root else {}).get("stage_status") or {}
+    ss = sj.get("stage_status") or {}
     stages_done = ([s for s in DESIGN_STAGES
                     if isinstance(ss.get(s), dict) and ss[s].get("ok")]
                    or [e.get("stage") for e in events if e.get("kind") == "stage_done"])
     ws = read_root
     if state.get("status"):
         run_status = state["status"]
+    elif state.get("failed"):
+        # A REOPENED failed project carries ok=None (only a live run sets
+        # ok=False). Reporting it as "running" made a dead run look alive to
+        # automated review.
+        run_status = "failed"
     elif state.get("ok") is None:
-        run_status = "running"
+        run_status = "running" if state.get("running") else "unknown"
     else:
         run_status = "ok" if state.get("ok") else "failed"
+    act = state.get("activity") or {}
+    signals = _project_signals(read_root) if read_root is not None else dict(_EMPTY_SIGNALS)
+    generated = signals.get("generated")
+    issues = _merge_issues(
+        _durable_issues(
+            signals,
+            _derived_statuses(read_root, sj, run_status, bool(state.get("zip")),
+                              signals=signals)),
+        act.get("issues") or [],
+    )
     return {
         "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "app_version": KICRAFT_VERSION,
@@ -1597,8 +1655,19 @@ def _collect_support_diagnostics(state: dict) -> dict:
         "project_id": state.get("project_id"),
         "user_id": state.get("user_id"),
         "brief": (state.get("brief") or "")[:2000],
-        "stem": state.get("stem"),
+        "stem": state.get("stem") or signals.get("stem"),
         "run_status": run_status,
+        "run_id": state.get("run_id"),
+        "stage": act.get("stage") or _attempt_stage(state),
+        # The exception classification and a bounded message only: a provider
+        # exception's text can carry a response body or request headers.
+        "failure": act.get("failure") or (
+            {"kind": state.get("failure_kind"),
+             "stage": act.get("stage") or _attempt_stage(state),
+             "retryable": bool(state.get("retryable")),
+             "retry_action": state.get("retry_action"), "message": None}
+            if state.get("failure_kind") else None),
+        "issues": issues[:20],
         "stages_done": stages_done,
         "awaiting_input": bool(state.get("awaiting_input")),
         "pcb_ready": bool(state.get("pcb_ready")),
@@ -1606,6 +1675,7 @@ def _collect_support_diagnostics(state: dict) -> dict:
         "build_log_tail": build_tail,
         "failed_checks": _synth_check_failures(ws),
         "erc_errors": (_erc_offenders(ws) if ws else []),
+        "generated_dir": generated,
     }
 
 
@@ -1720,22 +1790,30 @@ def _persist_project(state: dict) -> None:
         # Never truncate an existing transcript with an empty snapshot: a
         # restart-recovery finalize (_finalize_orphan) has no in-memory events,
         # and the file on disk is the project's only persisted design timeline.
-        events = state.get("events", [])
+        # Otherwise merge the on-disk transcript with the in-memory feed (one
+        # copy per event) and write it atomically -- a torn write here would cost
+        # the whole timeline.
+        events = list(state.get("_earlier_events") or []) + list(state.get("events") or [])
         if events or not (base / "events.jsonl").exists():
-            with (base / "events.jsonl").open("w", encoding="utf-8") as f:
-                for ev in events:
-                    f.write(json.dumps(ev, ensure_ascii=False, default=str) + "\n")
+            merged = _merge_event_history(
+                _read_event_jsonl(base / "events.jsonl"), events)
+            atomic_write_text(base / "events.jsonl",
+                              _serialize_events(merged, workspace=str(base)))
         # Build-in-place: this project's .kicraft/, generated/ and kicraft_project.zip
         # are already under `base` (the build dir IS the durable dir) -- nothing to
-        # copy. Point the row at the zip if the build produced one.
-        z = base / "kicraft_project.zip"
-        if z.is_file():
-            zip_path = str(z)
-            state["zip"] = zip_path
+        # copy. Adopt the zip ONLY for a CURRENT successful, validated package: a
+        # leftover kicraft_project.zip from an earlier build must never be
+        # re-offered as this run's download (the file itself is kept as evidence).
+        if status == "ok" and state.get("zip"):
+            z = Path(str(state["zip"]))
+            if z.is_file():
+                zip_path = str(z)
+                state["zip"] = zip_path
     except Exception as e:  # never crash the worker on persistence
         state.setdefault("events", []).append(
             {"kind": "build_log", "text": f"persist error: {e}"})
     finally:
+        _close_journal(state)
         try:
             store.finish_project(
                 pid, status, stem=stem, cost_usd=state.get("spend"),
@@ -1773,24 +1851,27 @@ def _persist_project(state: dict) -> None:
 
 
 def _derived_statuses(ws: Path | None, sj: dict, project_status: str | None,
-                      zip_ok: bool) -> dict[str, str]:
+                      zip_ok: bool, *, signals: dict | None = None) -> dict[str, str]:
     """Every tab's durable status for a (re)opened project (the pure mapping is
     session.derive_stage_statuses; this reads the filesystem signals it needs
     from the workspace: generated sheets, synth-check failures, the routed
     board). Feeds StageTabs.set_statuses so a reopened project's stage icons
-    reflect the stages that actually completed."""
-    sheets = pcb = False
-    checks_failed = False
-    if ws is not None:
-        pd = _discover_generated_dir(ws)
-        if pd is not None:
-            sheets = any(pd.glob("*.kicad_sch"))
-            pcb = (pd / f"{pd.name}.kicad_pcb").is_file()
-        checks_failed = bool(_synth_check_failures(ws))
+    reflect the stages that actually completed.
+
+    Pass `signals` (from :func:`_project_signals`) to reuse an already-read,
+    mtime-cached reading instead of touching the filesystem again."""
+    if signals is None and ws is not None:
+        signals = _project_signals(ws)
+    if signals is not None:
+        return derive_stage_statuses(
+            sj or signals["state"], project_status=project_status,
+            sheets_exist=signals["sheets"],
+            synth_checks_failed=signals["checks_failed"],
+            pcb_ready=signals["pcb"], zip_ok=zip_ok)
     return derive_stage_statuses(sj, project_status=project_status,
-                                 sheets_exist=sheets,
-                                 synth_checks_failed=checks_failed,
-                                 pcb_ready=pcb, zip_ok=zip_ok)
+                                 sheets_exist=False,
+                                 synth_checks_failed=False,
+                                 pcb_ready=False, zip_ok=zip_ok)
 
 
 # Live design runs, keyed by project id. A run's worker registers its state dict
@@ -1804,20 +1885,39 @@ def _derived_statuses(ws: Path | None, sj: dict, project_status: str | None,
 _LIVE_RUNS: dict[int, dict] = {}
 
 
+def _newest_project_job(pid, uid):
+    """This project's newest build job (any status), or None.
+
+    Owner-scoped through ``project_build_jobs`` so a page can never look up
+    another user's job, and NULL when the pair is incomplete."""
+    if not pid or not uid:
+        return None
+    try:
+        return _store().project_build_jobs(int(uid)).get(int(pid))
+    except Exception:  # never block a write action on a read hiccup
+        return None
+
+
 def _project_run_live(state: dict) -> bool:
-    """True when a run for this page's project is already live anywhere in this
-    process. The rebuild/resume guards must check _LIVE_RUNS as well as the
-    page-local dict: two tabs opened on the same FINISHED project each hold an
-    independent state dict (open_project's non-live branch), so guarding only
-    state['running'] lets both start a build in the same build-in-place
-    project dir -- two cli_app processes racing on one state.json."""
+    """True when a run for this page's project is already under way.
+
+    The rebuild/resume guards must check three signals, not just the page-local
+    dict. Two tabs opened on the same FINISHED project each hold an independent
+    state dict, so guarding only state['running'] lets both start a build in the
+    same build-in-place project dir -- two cli_app processes racing on one
+    state.json. And a build SURVIVES the web process through the host queue, so
+    after a restart `_LIVE_RUNS` is empty while this project's newest job is
+    still queued/running: duplicate execution has to be refused then too."""
     if state.get("running"):
         return True
     pid = state.get("project_id")
     if not pid:
         return False
     live = _LIVE_RUNS.get(pid)
-    return live is not None and live is not state and bool(live.get("running"))
+    if live is not None and live is not state and live.get("running"):
+        return True
+    job = _newest_project_job(pid, state.get("user_id"))
+    return job is not None and job.status in ("queued", "running")
 
 
 def _fresh_run_state() -> dict:
@@ -1837,46 +1937,288 @@ def _fresh_run_state() -> dict:
         "failed": False,
         "user_id": None, "project_id": None, "brief": "",
         "status": None, "awaiting_input": False, "questions": [],
-        "prices_rev": 0, "run_id": None, "_provenance_seq": 0,
+        "prices_rev": 0, "run_id": None, "_event_seq": 0,
+        # The reduced activity of the CURRENT attempt (activity.reduce_activity),
+        # folded event by event as the stream arrives; None until the first event.
+        "activity": None,
+        # Failure facts a terminal stage hands off (stage_runtime -> run_session),
+        # reused by the presentation instead of re-deriving them from prose.
+        "failure_kind": None, "retryable": False, "retry_action": None,
+        # The attempt's durability writer (see _EventJournal) and whether it ever
+        # failed, so the page can say once that history was not saved.
+        "journal": None, "journal_failed": False,
         # Support: the project's human-quotable id, and the auto-filed error
         # report's row id once a failure has been logged (see _file_failure_report).
         "board_code": None, "support_report_id": None,
     }
 
 
-_PROVENANCE_EVENT_KINDS = frozenset(
-    {"recipe_selected", "work_unit_plan", "work_unit_attempt", "work_unit_done"}
-)
+class _EventJournal:
+    """Append-only journal for ONE attempt's durable activity.
+
+    The writer belongs to the run (never to a page widget), so a second tab
+    cannot close or double-write it. Structural and terminal records are flushed
+    and fsynced as they happen -- a crash mid-stage then still leaves an ordered,
+    attributable history. Build-log lines are fsynced at most once a second (and
+    always at attempt exit) so a chatty build does not pay a disk barrier per
+    line. A failed append is latched: the live activity stays in memory, the page
+    says once that history could not be saved, and the ordinary final atomic
+    snapshot still happens.
+    """
+
+    _BUILD_LOG_FSYNC_S = 1.0
+
+    __slots__ = ("path", "stream", "last_fsync", "failed")
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.stream = None
+        self.last_fsync = 0.0
+        self.failed = False
+
+    def append(self, record: dict, *, kind: str) -> None:
+        if self.failed:
+            return
+        try:
+            if self.stream is None:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.stream = self.path.open("a", encoding="utf-8")
+            self.stream.write(
+                json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            self.stream.flush()
+            now = time.monotonic()
+            if kind != "build_log" or now - self.last_fsync >= self._BUILD_LOG_FSYNC_S:
+                os.fsync(self.stream.fileno())
+                self.last_fsync = now
+        except OSError:
+            self.failed = True
+
+    def close(self) -> None:
+        stream, self.stream = self.stream, None
+        if stream is None:
+            return
+        try:
+            stream.flush()
+            os.fsync(stream.fileno())
+        except OSError:
+            pass
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _journal_for(state: dict) -> _EventJournal | None:
+    """This attempt's journal writer, opened on first use. None for a run with no
+    durable project dir (an id-less admin/self-eval scratch run) or once an
+    append has failed."""
+    journal = state.get("journal")
+    if journal is not None:
+        return None if journal.failed else journal
+    try:
+        project_dir = _project_dir(state)
+    except OSError:  # a storage failure must not break the run itself
+        return None
+    if project_dir is None:
+        return None
+    journal = _EventJournal(project_dir / "provenance.jsonl")
+    state["journal"] = journal
+    return journal
+
+
+def _close_journal(state: dict) -> None:
+    """Flush and close the attempt's journal (attempt exit)."""
+    journal = state.get("journal")
+    if isinstance(journal, _EventJournal):
+        journal.close()
+    state["journal"] = None
 
 
 def _record_progress_event(state: dict, event: dict, *, run_id: str | None = None) -> dict:
-    """Append progress in memory and durably journal redacted execution provenance."""
+    """Append progress in memory and journal the structural subset durably.
+
+    Every event -- including token deltas -- gets an envelope (``version``,
+    ``run_id``, ``seq``, UTC ISO ``ts``, ``event_id``), so the final transcript
+    snapshot and the crash journal merge deterministically. Only the explicit
+    structural kinds in :data:`activity.DURABLE_ACTIVITY_KINDS` are appended to
+    ``provenance.jsonl`` while the run is in flight; the sanitized copy is what
+    both the journal and the live UI see, so a credential can never reach either.
+    """
     recorded = dict(event)
-    if recorded.get("kind") in _PROVENANCE_EVENT_KINDS:
-        active_run_id = run_id or state.get("run_id")
-        state["_provenance_seq"] = int(state.get("_provenance_seq") or 0) + 1
-        recorded.setdefault("version", 1)
-        recorded.setdefault("run_id", active_run_id)
-        recorded.setdefault("ts", dt.datetime.now(dt.timezone.utc).isoformat())
-        recorded.setdefault(
-            "event_id",
-            f"{active_run_id or 'local'}:{state['_provenance_seq']}",
-        )
-        try:
-            project_dir = _project_dir(state)
-            if project_dir is not None:
-                with (project_dir / "provenance.jsonl").open("a", encoding="utf-8") as stream:
-                    stream.write(
-                        json.dumps(recorded, ensure_ascii=False, default=str) + "\n"
-                    )
-                    stream.flush()
-                    os.fsync(stream.fileno())
-        except OSError:
-            # The live in-memory event remains available; final persistence still
-            # writes the complete event transcript.
-            pass
+    active_run_id = run_id or state.get("run_id")
+    state["_event_seq"] = int(state.get("_event_seq") or 0) + 1
+    recorded.setdefault("version", 1)
+    recorded.setdefault("run_id", active_run_id)
+    recorded.setdefault("seq", state["_event_seq"])
+    recorded.setdefault("ts", _activity.now_iso())
+    recorded.setdefault(
+        "event_id", f"{recorded.get('run_id') or 'local'}:{recorded['seq']}")
+    # Attribute an implicit event (tool call, retry, delta, build log) to the
+    # most recently announced stage before anything reads it.
+    act = state.get("activity")
+    _activity.attribute_stage(recorded, act.get("stage") if act else None)
+    kind = recorded.get("kind")
+    if kind in _activity.DURABLE_ACTIVITY_KINDS:
+        recorded = _activity.sanitize_activity_event(
+            recorded, workspace=state.get("ws"))
+        journal = _journal_for(state)
+        if journal is not None:
+            journal.append(recorded, kind=str(kind))
+            if journal.failed:
+                state["journal_failed"] = True
+    state["activity"] = _activity.reduce_activity(state.get("activity"), recorded)
     state.setdefault("events", []).append(recorded)
     return recorded
+
+
+def _start_attempt(state: dict, *, mode: str) -> str:
+    """Begin ONE attempt of a project's design/build run.
+
+    Mints a distinct run id (``p<project_id>-<uuid4 hex>``; also the spend
+    ledger's attribution key), resets the per-attempt event sequence and reduced
+    activity, opens a fresh journal, and emits ``run_started``. A continuation
+    reusing the same process or a reopened page thus starts a NEW attempt whose
+    older events stay history rather than current status.
+    """
+    _close_journal(state)
+    run_id = f"p{state.get('project_id')}-{uuid.uuid4().hex}"
+    state["run_id"] = run_id
+    state["_event_seq"] = 0
+    state["activity"] = None
+    state["journal_failed"] = False
+    # Keep the earlier attempts out of the live cursor: every attempt persists on
+    # exit, so those events are already on disk, and replaying them here could let
+    # an old failure overwrite the newer attempt's status.
+    earlier = state.get("events")
+    if earlier:
+        state["_earlier_events"] = list(earlier)
+        state["events"] = []
+    _record_progress_event(
+        state, {"kind": "run_started", "run_id": run_id, "mode": mode})
+    return run_id
+
+
+def _finish_attempt(state: dict) -> None:
+    """Emit the attempt's single terminal event, then close its journal.
+
+    Emitted before the final transcript snapshot so the durable terminal record
+    exists even if the snapshot never lands. The auto-filed support report's id
+    is included only when the report was actually created.
+    """
+    if state.get("status") == "awaiting_input":
+        status = "awaiting_input"
+    elif state.get("ok") is False:
+        status = "failed"
+    elif state.get("ok"):
+        status = "ok"
+    else:
+        status = "interrupted"
+    event = {
+        "kind": "run_finished",
+        "status": status,
+        "stage": _attempt_stage(state),
+    }
+    for key in ("failure_kind", "retryable", "retry_action"):
+        if state.get(key) is not None:
+            event[key] = state.get(key)
+    if status == "failed" and state.get("support_report_id") is not None:
+        event["support_report_id"] = state.get("support_report_id")
+    _record_progress_event(state, event)
+    _close_journal(state)
+
+
+def _attempt_stage(state: dict) -> str | None:
+    """The stage this attempt last reached: its reduced activity's stage, else
+    the last stage it announced an event for."""
+    act = state.get("activity") or {}
+    if act.get("stage"):
+        return act["stage"]
+    for event in reversed(state.get("events") or []):
+        if isinstance(event, dict) and event.get("run_id") == state.get("run_id"):
+            if event.get("stage"):
+                return event["stage"]
+    return None
+
+
+def _record_reconciliation(state: dict, *, status: str, message: str) -> None:
+    """Record a restart-reconciliation outcome on a project's timeline.
+
+    Uses the project's EXISTING/latest run id (recovered from its durable
+    history) so an infrastructure restart never mints a fictitious design
+    attempt, and continues that run's sequence so the new record sorts after
+    everything already on disk. Written through the ordinary journal path and
+    merged into the transcript by :func:`_persist_project`."""
+    history = _load_events(state.get("dir_path"))
+    run_id = None
+    seq = 0
+    for event in history:
+        if not isinstance(event, dict):
+            continue
+        if event.get("run_id"):
+            run_id = event["run_id"]
+        raw = event.get("seq")
+        if isinstance(raw, int) and raw > seq:
+            seq = raw
+        else:
+            derived = _activity.seq_from_event_id(event.get("event_id"))
+            if derived is not None and derived > seq:
+                seq = derived
+    if run_id:
+        state["run_id"] = run_id
+    state["_event_seq"] = seq
+    _record_progress_event(
+        state,
+        {"kind": "run_finished", "status": status, "message": message,
+         "reconciled": True},
+    )
+    _close_journal(state)
+
+
+def _merge_event_history(disk_events, memory_events) -> list[dict]:
+    """Merge the on-disk transcript with the in-memory feed, one copy per event.
+
+    Versioned events are identified by ``event_id`` and the in-memory copy wins
+    (it is the current writer's). Metadata-free legacy rows are preserved from
+    disk unless the in-memory feed already carries metadata-free rows of its own
+    -- a reopened project's events were loaded from that very file, so re-adding
+    them would duplicate the whole history."""
+    disk = [e for e in (disk_events or []) if isinstance(e, dict)]
+    memory = [e for e in (memory_events or []) if isinstance(e, dict)]
+    if not memory:
+        return disk
+    out: list[dict] = []
+    seen: set[str] = set()
+    if not any(not e.get("event_id") for e in memory):
+        out.extend(e for e in disk if not e.get("event_id"))
+    for event in memory:
+        event_id = event.get("event_id")
+        if event_id is not None:
+            key = str(event_id)
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(event)
+    for event in disk:
+        event_id = event.get("event_id")
+        if event_id is None:
+            continue
+        key = str(event_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(event)
+    return out
+
+
+def _serialize_events(events, *, workspace: str | None) -> str:
+    """The ``events.jsonl`` payload: sanitized, attempt-ordered, one line each."""
+    lines: list[str] = []
+    for group in _activity.group_attempts(events):
+        for event in group["events"]:
+            safe = _activity.sanitize_activity_event(event, workspace=workspace)
+            lines.append(
+                json.dumps(safe, ensure_ascii=False, default=str) + "\n")
+    return "".join(lines)
 
 
 def _read_event_jsonl(path: Path) -> list[dict]:
@@ -1899,7 +2241,17 @@ def _read_event_jsonl(path: Path) -> list[dict]:
 
 
 def _load_events(dir_path) -> list[dict]:
-    """Restore the transcript plus crash-durable provenance for investigation."""
+    """Restore the project's full event history in deterministic attempt order.
+
+    The transcript (the complete record, written at finalize) and the crash
+    journal (written as the run went) are merged and deduplicated by
+    ``event_id``, then grouped back into attempts: metadata-free legacy rows as
+    one older-history group first, then every versioned attempt oldest-first,
+    each attempt ordered by its numeric ``seq`` (timestamp fallback for the older
+    provenance rows that predate ``seq``). A journal-only event therefore lands
+    inside its own attempt instead of being appended after the newest one, so an
+    old failure can never masquerade as the current outcome.
+    """
     if not dir_path:
         return []
     root = Path(dir_path)
@@ -1916,7 +2268,64 @@ def _load_events(dir_path) -> list[dict]:
         events.append(event)
         if event_id is not None:
             seen.add(str(event_id))
-    return events
+    out: list[dict] = []
+    for group in _activity.group_attempts(events):
+        out.extend(group["events"])
+    return out
+
+
+def _load_attempts(dir_path) -> list[dict]:
+    """`_load_events` grouped into attempts (see :func:`activity.group_attempts`)."""
+    return _activity.group_attempts(_load_events(dir_path))
+
+
+def _reduce_attempt_activity(events) -> dict | None:
+    """Fold a persisted attempt's events into an activity.
+
+    Reading history, not replaying it as a state change: nothing is journaled,
+    re-emitted, or written back."""
+    act = None
+    for event in events or []:
+        if isinstance(event, dict):
+            act = _activity.reduce_activity(act, event)
+    return act
+
+
+def _select_stage(pres: dict, derived: dict) -> str | None:
+    """The one stage the workspace should show once history has been replayed.
+
+    Priority: the stage that asked a question, then the active/queued stage, then
+    the actual failing stage, then the first current warning, then Fab when a
+    download is ready, else the first incomplete stage (or the last completed
+    one, so a finished project does not land on a blank tab).
+    """
+    order = _activity.stage_order()
+    if pres.get("status") == "awaiting_input" and pres.get("stage"):
+        return pres["stage"]
+    if pres.get("status") in ("running", "queued", "retrying", "finalizing",
+                              "starting") and pres.get("stage"):
+        return pres["stage"]
+    if pres.get("status") in ("failed", "unavailable") and pres.get("stage"):
+        return pres["stage"]
+    if pres.get("status") == "interrupted" and pres.get("stage"):
+        # An interrupted attempt's own last stage is what the user was watching.
+        return pres["stage"]
+    for key in order:
+        if derived.get(key) == "failed":
+            return key
+    for key in order:
+        if derived.get(key) == "warning":
+            return key
+    if pres.get("download_ready"):
+        return "fab"
+    last_done = None
+    for key in order:
+        if derived.get(key) in ("done", "warning"):
+            last_done = key
+    for key in order:
+        if derived.get(key) == "pending":
+            return key
+    return last_done
 
 
 def _pick_default_project(user_id: int):
@@ -1937,25 +2346,580 @@ def _pick_default_project(user_id: int):
     return None
 
 
-def _row_status_display(status, live) -> tuple[str, bool]:
-    """The status text + live-colour flag for one 'My Projects' row.
+# --------------------------------------------------------------------------- #
+# Presentation contract (one reading of a project, shared by every surface)
+# --------------------------------------------------------------------------- #
 
-    A row paints from two independent signals -- the durable DB `status` (text)
-    and whether a live run dict exists in this process (`live`, the colour) --
-    which must never contradict. Rules:
-      * a 'running' row with no live worker reads as 'interrupted' (the run was
-        lost to a restart/crash), and
-      * the green "this is an active design" colour is granted only to a status
-        that is genuinely live ('running'/'awaiting_input'); a stale
-        'interrupted'/'failed'/'ok' row that briefly coexists with a live dict
-        (e.g. during a rebuild, before its status flips back to 'running') must
-        stay grey rather than masquerade as live.
-    Returns (shown_text, is_live)."""
-    shown = status
-    if status == "running" and live is None:
-        shown = "interrupted"
-    is_live = live is not None and shown in ("running", "awaiting_input")
-    return shown, is_live
+_EMPTY_SIGNALS: dict = {
+    "state": {}, "stem": None, "generated": None, "sheets": False, "pcb": False,
+    "checks_failed": False, "synth_failures": [], "zip_ok": False, "history": False,
+    "build_warnings": [], "pcb_errors": [], "review_findings": [],
+    "stage_status": {}, "state_mtime": None,
+}
+
+# Disk-derived readings keyed by project root: the My-projects list polls every
+# 2 s, so re-reading state.json and globbing generated/ per row per poll would be
+# pure waste. The cache key is a signature of the files a presentation reads.
+_DISK_SIGNALS: dict[str, tuple[tuple, dict]] = {}
+
+
+def _project_signals(root: Path | None) -> dict:
+    """The durable facts a presentation needs for one project root.
+
+    Cached by (state.json, generated/, zip, board) mtimes, so a poll that
+    changed nothing does no file reading. A mid-write state.json keeps the
+    previous reading rather than blanking the row."""
+    if root is None:
+        return dict(_EMPTY_SIGNALS)
+    key = str(root)
+    prior = _DISK_SIGNALS.get(key)
+    gen_root = root / "generated"
+    zip_path = root / "kicraft_project.zip"
+    prior_gen = prior[1]["generated"] if prior else None
+    probe = (Path(prior_gen) / f"{Path(prior_gen).name}.kicad_pcb") if prior_gen else None
+    sig = (_mtime(_state_path(root)), _mtime(gen_root), _mtime(zip_path),
+           _mtime(probe) if probe is not None else None,
+           _mtime(root / "events.jsonl"))
+    if prior is not None and prior[0] == sig:
+        return prior[1]
+    sj = _read_state_json(root)
+    if not sj and prior is not None:
+        return prior[1]  # caught mid-write: keep the last good reading
+    stem = sj.get("project_stem") or _read_project_stem(root)
+    generated: Path | None = None
+    if stem and (gen_root / stem).is_dir():
+        candidate = gen_root / stem
+        if (candidate / f"{stem}.kicad_pcb").is_file() \
+                or any(candidate.glob("*.kicad_sch")):
+            generated = candidate
+    if generated is None:
+        generated = _discover_generated_dir(root)
+    artifacts = sj.get("artifacts") or {}
+    info = {
+        "state": sj,
+        "stem": stem or (generated.name if generated else None),
+        "generated": str(generated) if generated else None,
+        "sheets": bool(generated) and any(generated.glob("*.kicad_sch")),
+        "pcb": bool(generated) and (generated / f"{generated.name}.kicad_pcb").is_file(),
+        "checks_failed": bool(_synth_check_failures(root)),
+        "synth_failures": _synth_check_failures(root),
+        "zip_ok": zip_path.is_file(),
+        "history": (root / "events.jsonl").is_file()
+        or (root / "provenance.jsonl").is_file(),
+        "build_warnings": list(artifacts.get("build_warnings") or []),
+        "pcb_errors": list(artifacts.get("pcb_errors") or []),
+        "review_findings": list(
+            sj.get("review_findings") or artifacts.get("review_findings") or []),
+        "stage_status": sj.get("stage_status") or {},
+        "state_mtime": sig[0],
+    }
+    _DISK_SIGNALS[key] = (sig, info)
+    return info
+
+
+def _project_field(p, name: str, default=None):
+    """One project attribute, from a `Project` row or a plain dict (the public
+    browse/search rows are dicts)."""
+    if isinstance(p, dict):
+        return p.get(name, default)
+    return getattr(p, name, default)
+
+
+def _project_display_name(p, stem: str | None = None) -> str:
+    """The presentation name of a project row (see activity.project_title).
+
+    `stem` lets a caller pass a more current identity (the live run's stem or the
+    committed on-disk one) than the database column holds.
+    """
+    return _activity.project_title(
+        _project_field(p, "brief"),
+        stem if stem is not None else _project_field(p, "project_stem"),
+        board_code=_project_field(p, "board_code"),
+        project_id=_project_field(p, "id"),
+    )
+
+
+def _project_root_for(p, pid) -> Path | None:
+    """A project's durable root: its recorded dir_path, else the owned directory
+    `projects_dir/<uid>/<pid>` when that exists (a legacy row can lose dir_path
+    while the directory survives). Never created on read."""
+    dir_path = getattr(p, "dir_path", None)
+    if dir_path:
+        return Path(dir_path)
+    uid = getattr(p, "user_id", None)
+    if uid and pid:
+        candidate = _store().projects_dir / str(uid) / str(pid)
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _resolve_stem(p, live, signals: dict) -> str | None:
+    """The project's identity, most-current source first: the live run's stem,
+    then the committed on-disk stem, then the database row's."""
+    if live is not None and live.get("stem"):
+        return str(live["stem"])
+    if signals.get("stem"):
+        return str(signals["stem"])
+    stem = getattr(p, "project_stem", None)
+    return str(stem) if stem else None
+
+
+def _issue(*, severity, stage, code, message, evidence=()) -> dict:
+    return {
+        "severity": severity,
+        "stage": stage,
+        "code": str(code or ""),
+        "message": str(message or ""),
+        "evidence": [str(item) for item in evidence],
+    }
+
+
+def _merge_issues(*groups) -> list[dict]:
+    """Deduplicate issues by stage+code+evidence, newest group last."""
+    out: list[dict] = []
+    index: dict[tuple, int] = {}
+    for group in groups:
+        for issue in group or []:
+            if not isinstance(issue, dict):
+                continue
+            key = (issue.get("stage"), issue.get("code"),
+                   tuple(issue.get("evidence") or []))
+            if key in index:
+                out[index[key]] = issue
+            else:
+                index[key] = len(out)
+                out.append(issue)
+    return out
+
+
+def _durable_issues(signals: dict, derived: dict) -> list[dict]:
+    """Findings a project's durable artifacts still carry, most specific first.
+
+    Committed-with-findings is a warning, not a failed design; a fabrication
+    blocker or a failed verification is an error. Deduplicated by
+    stage+code+evidence, and scoped to what the CURRENT artifacts say -- an
+    earlier rejected candidate is history, not an open blocker. A stage that
+    already carries a concrete finding does not also get the generic "did not
+    complete" marker."""
+    concrete: list[dict] = []
+    stages_with_concrete_error: set[str] = set()
+    for stage, entry in (signals.get("stage_status") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        for diagnostic in entry.get("diagnostics") or []:
+            if not isinstance(diagnostic, dict):
+                continue
+            raw_sev = str(diagnostic.get("severity") or "").lower()
+            severity = "error" if raw_sev in ("fab_gate", "error", "blocker") else "warning"
+            if severity == "error":
+                stages_with_concrete_error.add(str(stage))
+            concrete.append(_issue(
+                severity=severity,
+                stage=stage,
+                code=diagnostic.get("code") or raw_sev or "semantic_finding",
+                message=diagnostic.get("message") or diagnostic.get("code")
+                or "diagnostic finding",
+                evidence=diagnostic.get("evidence") or [],
+            ))
+        if entry.get("repair_required") or entry.get("semantic_clean") is False:
+            concrete.append(_issue(
+                severity="warning", stage=stage, code="committed_with_findings",
+                message=f"{_activity.stage_label(stage) or stage} committed with findings",
+            ))
+    for failure in signals.get("synth_failures") or []:
+        stages_with_concrete_error.add("synthesize")
+        concrete.append(_issue(
+            severity="error", stage="synthesize", code="synthesis_check",
+            message=str(failure)))
+    for error in signals.get("pcb_errors") or []:
+        if not isinstance(error, dict):
+            continue
+        stage = str(error.get("stage") or "place_route")
+        stages_with_concrete_error.add(stage)
+        concrete.append(_issue(
+            severity="error" if error.get("severity") != "warning" else "warning",
+            stage=stage,
+            code=error.get("code") or error.get("kind") or "pcb_error",
+            message=error.get("message") or error.get("explanation") or "PCB error",
+            evidence=error.get("refs") or error.get("nets") or [],
+        ))
+    for finding in signals.get("review_findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        raw_sev = str(finding.get("severity") or "note").lower()
+        concrete.append(_issue(
+            severity="error" if raw_sev == "blocker" else
+            "warning" if raw_sev == "warning" else "info",
+            stage="electrical_review",
+            code=f"review_{raw_sev}",
+            message=finding.get("issue") or finding.get("area") or "review finding",
+            evidence=[finding.get("suggestion")] if finding.get("suggestion") else [],
+        ))
+    for warning in signals.get("build_warnings") or []:
+        concrete.append(_issue(
+            severity="warning", stage="fab",
+            code="build_warning", message=str(warning)))
+    generic = [
+        _issue(severity="error", stage=stage, code="stage_failed",
+               message=f"{_activity.stage_label(stage) or stage} did not complete")
+        for stage, state in (derived or {}).items()
+        if state == "failed" and str(stage) not in stages_with_concrete_error
+    ]
+    return concrete + generic
+
+
+def _relevant_stage(derived: dict, act: dict, *, failing: bool = False) -> str | None:
+    """The stage a presentation should foreground: the failure's stage when there
+    is one, else the failed stage, else the last completed one, else the next
+    pending one."""
+    failure = act.get("failure") or {}
+    if failing and failure.get("stage"):
+        return failure["stage"]
+    if act.get("stage"):
+        return act["stage"]
+    order = _activity.stage_order()
+    for key in order:
+        if derived.get(key) == "failed":
+            return key
+    last_done = None
+    for key in order:
+        if derived.get(key) in ("done", "warning"):
+            last_done = key
+    if last_done:
+        return last_done
+    for key in order:
+        if derived.get(key) == "pending":
+            return key
+    return None
+
+
+def _headline_for(status: str, stage: str | None, act: dict) -> str:
+    """The one-line statement of what is happening / what happened."""
+    label = _activity.stage_label(stage)
+    if status in ("running", "starting"):
+        return _activity.stage_activity(stage) if stage else "Starting the design run"
+    if status == "retrying":
+        return f"Retrying {label}" if label else "Retrying the current stage"
+    if status == "queued":
+        return "Queued for board build"
+    if status == "awaiting_input":
+        return "Waiting for your answer"
+    if status == "finalizing":
+        return "Finalizing the board build"
+    if status == "complete":
+        return "Design complete"
+    if status == "complete_with_warnings":
+        return "Complete, with cautions"
+    if status == "failed":
+        failure = act.get("failure") or {}
+        if failure.get("message"):
+            return str(failure["message"])
+        return f"Build stopped during {label}" if label else "The run stopped"
+    if status == "interrupted":
+        return "Run was interrupted"
+    if status == "unavailable":
+        return "Files unavailable"
+    return "No saved activity is available for this run"
+
+
+def _plan_from(status: str, derived: dict, signals: dict) -> str | None:
+    """The single action a surface should offer, from actual prerequisites.
+
+    "Recoverable" means the workspace holds something to resume or rebuild from --
+    a committed state, produced artifacts, a package, or a recorded attempt. A
+    directory that exists but was never written to is NOT recoverable: the honest
+    action there is to start over from the brief."""
+    recoverable = bool(signals.get("state")) or bool(signals.get("generated")) \
+        or bool(signals.get("zip_ok")) or bool(signals.get("history"))
+    design_left = any(derived.get(key) == "pending" for key in DESIGN_STAGES)
+    if status == "awaiting_input":
+        return "answer"
+    if status in ("complete", "complete_with_warnings"):
+        return "download"
+    if status in ("failed", "interrupted"):
+        if recoverable:
+            return "continue" if design_left else "rebuild"
+        return "new_from_brief"
+    if status == "unavailable":
+        return "rebuild" if recoverable else "new_from_brief"
+    if status in ("running", "queued", "finalizing", "starting", "retrying"):
+        return None
+    return "support"
+
+
+def _project_presentation(p, *, live=None, job=None, activity=None,
+                          state_json=None, signals=None) -> dict:
+    """One truthful reading of a project, for the list and the workspace.
+
+    Precedence, in order:
+      1. A genuinely running live attempt owns its activity; an active queue job
+         is genuine work too. A NEW attempt resets an old terminal presentation,
+         and a stale (non-running) live dict never overrides a terminal DB
+         outcome.
+      2. A parked live/DB run with outstanding questions is `awaiting_input` --
+         never running, never green. A queued job is `queued`; a running job is
+         running; a finished job whose project row has not caught up is
+         `finalizing`.
+      3. Otherwise the durable DB/run outcome and the artifact-derived stage
+         facts win over historical events: `ok` plus a valid current package is
+         Complete (with warnings when the current build carries them); a missing
+         package on an `ok` legacy row is "Files unavailable" with Rebuild,
+         never a false Download.
+      4. A `running` row with neither a live attempt nor an unfinished build job
+         is Interrupted. An interrupted historical event never defeats a newer
+         active attempt.
+      5. Completion is never inferred from silence, elapsed time, a created PCB
+         file, or the mere existence of a zip.
+
+    `status` is presentation-only (see :data:`activity.PRESENTATION_STATUSES`);
+    the durable DB status is untouched. `action` names the single affordance to
+    offer -- `answer|continue|rebuild|download|open|new_from_brief|support|None`
+    -- and the handlers stay in this module.
+    """
+    pid = getattr(p, "id", None)
+    root = _project_root_for(p, pid)
+    sig = signals if signals is not None else (
+        _project_signals(root) if root is not None else dict(_EMPTY_SIGNALS))
+    sj = state_json if state_json is not None else (sig.get("state") or {})
+    db_status = getattr(p, "status", None) or "unavailable"
+    live = live if isinstance(live, dict) else None
+    act = activity if activity is not None else (
+        (live.get("activity") if live else None) or {})
+    if not isinstance(act, dict):
+        act = {}
+    live_running = bool(live and live.get("running"))
+    live_parked = bool(live and live.get("awaiting_input"))
+    live_failed = bool(live and live.get("ok") is False and live.get("done"))
+    job_status = getattr(job, "status", None)
+    job_active = job_status in ("queued", "running")
+    zip_ref = getattr(p, "zip_path", None)
+
+    derived = _derived_statuses(
+        root, sj, db_status,
+        zip_ref if (zip_ref and not live_running and not job_active) else None,
+        signals=sig)
+
+    status = db_status
+    detail = act.get("last_activity") or ""
+    issues = _merge_issues(_durable_issues(sig, derived), act.get("issues") or [])
+    last_event_at = act.get("last_event_at")
+    stage = act.get("stage")
+    download_ready = False
+
+    if live_running:
+        # 1. Real work in this process: report the attempt as it actually is.
+        phase = act.get("phase_status")
+        if phase == "starting" and not act.get("started_at"):
+            status = "starting"
+        elif phase in ("queued", "awaiting_input", "failed"):
+            status = phase
+        else:
+            status = "retrying" if _retrying(act) else "running"
+        if status == "failed":
+            stage = _relevant_stage(derived, act, failing=True)
+    elif live_parked:
+        status = "awaiting_input"
+        stage = stage or _question_stage(live)
+    elif job_active:
+        status = "queued" if job_status == "queued" else "running"
+        stage = stage or ("fab" if job_status == "running" else None)
+    elif job_status == "done" and db_status == "running":
+        status = "finalizing"
+        stage = stage or "fab"
+    elif job_status == "failed" and db_status == "running":
+        status = "failed"
+        stage = stage or _relevant_stage(derived, act, failing=True)
+    elif db_status == "awaiting_input":
+        status = "awaiting_input"
+        stage = stage or _question_stage(live) or _relevant_stage(derived, act)
+    elif db_status == "ok":
+        package_ok = bool(zip_ref) and Path(zip_ref).is_file()
+        if not package_ok:
+            status = "unavailable"
+            stage = stage or _relevant_stage(derived, act)
+            detail = detail or ("This project's finished package is no longer on "
+                                "disk.")
+        else:
+            has_warnings = bool(derived.get("fab") == "warning"
+                                or derived.get("place_route") == "warning"
+                                or derived.get("electrical_review") == "warning"
+                                or sig.get("build_warnings"))
+            status = "complete_with_warnings" if has_warnings else "complete"
+            stage = stage or "fab"
+    elif db_status == "failed" or live_failed:
+        status = "failed"
+        stage = _relevant_stage(derived, act, failing=True)
+    elif db_status == "interrupted":
+        status = "interrupted"
+        stage = _relevant_stage(derived, act)
+    elif db_status == "running":
+        # 4. A running row with no live attempt and no unfinished job at all was
+        # lost (a restart before it could reach the queue, or after it finished).
+        status = "interrupted"
+        stage = _relevant_stage(derived, act)
+    else:
+        status = "unavailable"
+
+    if not detail:
+        detail = _fallback_detail(status, sig, act, issues)
+    # A queued job's real position and (approximate) ETA, when a host queue
+    # exists: the label says "approximate" and an unavailable average omits it.
+    queue_note = ""
+    if status == "queued" and job is not None:
+        try:
+            ahead, _depth, _running = _store().build_queue_position(job.id)
+            avg = _store().avg_build_seconds()
+            queue_note = "Next in queue" if ahead <= 0 else f"{ahead} ahead in queue"
+            if avg:
+                queue_note += f" · est. ~{_fmt_eta(avg * (ahead + 1))}"
+        except Exception:  # a queue read must never break the presentation
+            queue_note = ""
+    if not detail:
+        detail = queue_note
+
+    headline = _headline_for(status, stage, act)
+    action = _plan_from(status, derived, sig)
+
+    if status in ("complete", "complete_with_warnings"):
+        # A download is offered only for the CURRENT validated package: the
+        # attempt's own zip, no work in flight, and a fab stage that actually
+        # produced it. Never a leftover filename discovered on disk.
+        if live_running or job_active:
+            zip_ref = None
+        elif live is not None and live.get("zip"):
+            zip_ref = str(live["zip"])
+        download_ready = bool(
+            zip_ref and Path(zip_ref).is_file() and derived.get("fab") in ("done", "warning"))
+    else:
+        zip_ref = None
+
+    return {
+        "title": _project_display_name(p, _resolve_stem(p, live, sig)),
+        "status": status,
+        "stage": stage,
+        "headline": headline,
+        "detail": detail,
+        "last_event_at": last_event_at,
+        "issues": issues,
+        "action": action,
+        "download_ready": download_ready,
+        "zip_path": zip_ref if download_ready else None,
+        "queue_note": queue_note,
+        # The artifact-derived per-stage outcomes this reading was based on, so a
+        # caller (the workspace's replay selection) can reuse it instead of
+        # re-deriving.
+        "derived": derived,
+    }
+
+
+def _retrying(act: dict) -> bool:
+    """Whether the last structural thing this attempt did was a retry."""
+    return (act.get("phase_status") == "running"
+            and bool(act.get("last_activity"))
+            and str(act.get("last_activity")).startswith("Retrying "))
+
+
+def _question_stage(live) -> str | None:
+    if not live:
+        return None
+    for question in live.get("questions") or []:
+        if isinstance(question, dict) and question.get("stage"):
+            return str(question["stage"])
+    return None
+
+
+def _fallback_detail(status: str, sig: dict, act: dict, issues=()) -> str:
+    """What to say when the attempt left no activity line of its own."""
+    failure = act.get("failure") or {}
+    if failure.get("message"):
+        return str(failure["message"])
+    if status in ("failed", "interrupted"):
+        # Prefer the concrete recorded evidence over a generic sentence -- and
+        # never invent a cause when there is none.
+        concrete = _first_evidence_issue(issues)
+        if concrete:
+            return concrete
+    if status == "interrupted":
+        if not sig.get("state") and not sig.get("generated") and not sig.get("zip_ok") \
+                and not sig.get("history"):
+            return "No saved activity is available for this run."
+        return "The run stopped before it could report progress."
+    if status == "failed":
+        return "Run stopped; no detailed cause was saved."
+    if status in ("complete", "complete_with_warnings"):
+        return "Design complete."
+    return ""
+
+
+# Presentation status -> (Material icon, colour, accessible text). One table so
+# the list and the workspace badge the same state the same way; a waiting run is
+# never green, a queued one is never a failure.
+_STATUS_BADGE: dict[str, tuple[str, str, str]] = {
+    "starting": ("hourglass_empty", "#94a3b8", "Starting"),
+    "running": ("autorenew", "#4ade80", "Running"),
+    "retrying": ("restart_alt", "#fbbf24", "Retrying"),
+    "queued": ("hourglass_top", "#fbbf24", "Queued for board build"),
+    "awaiting_input": ("help", "#a78bfa", "Waiting for your answer"),
+    "finalizing": ("hourglass_bottom", "#94a3b8", "Finalizing"),
+    "complete": ("check_circle", "#4ade80", "Complete"),
+    "complete_with_warnings": ("warning", "#eab308", "Complete with cautions"),
+    "failed": ("cancel", "#f87171", "Failed"),
+    "interrupted": ("link_off", "#94a3b8", "Interrupted"),
+    "unavailable": ("folder_off", "#94a3b8", "Files unavailable"),
+}
+_SEVERITY_COLOR = {"error": "#f87171", "warning": "#eab308", "info": "#94a3b8"}
+
+
+def _status_badge(status: str) -> tuple[str, str, str]:
+    return _STATUS_BADGE.get(status, _STATUS_BADGE["unavailable"])
+
+
+def _relative_age(iso: str | None) -> str:
+    """A short 'how long ago' for a timestamp, '' when there is none."""
+    if not iso:
+        return ""
+    seconds = _iso_age_s(iso)
+    if seconds < 45:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
+
+
+def _issue_summary(issues: list[dict]) -> str:
+    """One short line for a set of issues, counted by severity."""
+    if not issues:
+        return ""
+    errors = sum(1 for i in issues if i.get("severity") == "error")
+    warnings = sum(1 for i in issues if i.get("severity") == "warning")
+    notes = len(issues) - errors - warnings
+    parts = []
+    if errors:
+        parts.append(f"{errors} error{'s' if errors != 1 else ''}")
+    if warnings:
+        parts.append(f"{warnings} warning{'s' if warnings != 1 else ''}")
+    if notes:
+        parts.append(f"{notes} note{'s' if notes != 1 else ''}")
+    return " · ".join(parts)
+
+
+def _first_evidence_issue(issues) -> str:
+    """The most concrete error message among a project's issues.
+
+    A specific finding (a route failure, a DRC violation, a diagnostic) says far
+    more than the generic "this stage did not complete" marker, so it wins."""
+    generic = {"stage_failed", "build_failed"}
+    for issue in issues or []:
+        if issue.get("severity") == "error" and issue.get("code") not in generic \
+                and issue.get("message"):
+            return str(issue["message"])
+    for issue in issues or []:
+        if issue.get("severity") == "error" and issue.get("message"):
+            return str(issue["message"])
+    return ""
 
 
 def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
@@ -2020,7 +2984,6 @@ def _drive_build_queue(ws: Path, state: dict, progress, *,
     tails the job's log file into the live event stream. A worker death
     mid-build surfaces here as the row going back to 'queued' (the
     reaper requeues it), which this loop simply handles again."""
-    progress({"kind": "build_start"})
     store = _store()
     log_path = ws / ".kicraft" / "build.log"
     # The worker APPENDS to build.log, so start tailing at the current end
@@ -2034,6 +2997,10 @@ def _drive_build_queue(ws: Path, state: dict, progress, *,
     job_id = store.enqueue_build(
         workspace=str(ws), project_id=state.get("project_id"),
         user_id=state.get("user_id"), log_path=str(log_path), kind=kind)
+    # Announce the build WITH its job identity and log origin, so a reopened page
+    # can tail the right job and never attribute an earlier build's log lines to
+    # this attempt.
+    progress({"kind": "build_start", "job_id": job_id, "log_offset": offset})
     _ACTIVE_JOBS.add(job_id)
     try:
         last_pos = None
@@ -2093,9 +3060,15 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
         _store().update_project_status(pid, "running")
         _LIVE_RUNS[pid] = state
 
-    def progress(ev):
-        _record_progress_event(state, ev)
     try:
+        # The attempt (run id, fresh journal, reduced activity) starts INSIDE the
+        # protected scope, so a setup failure still reaches the terminal path.
+        run_id = _start_attempt(
+            state, mode="manual_route" if kind == "manual_route" else "build")
+
+        def progress(ev):
+            _record_progress_event(state, ev, run_id=run_id)
+
         rc = _drive_build_queue(ws, state, progress, kind=kind)
         # Surface whatever board the build left behind -- on a failed verify
         # the promote tail keeps the failed candidate, and inspecting it is
@@ -2110,7 +3083,7 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
         state["zip"] = _zip_generated(ws)
         state["ok"] = bool(state["zip"])
     except Exception as e:  # surface, never crash the UI thread
-        progress({"kind": "build_log", "text": f"error: {e}"})
+        _record_run_error(state, e)
         state["ok"] = False
     finally:
         if not state.get("ok"):
@@ -2118,7 +3091,8 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
             # the persisted row offers no download that mismatches the board.
             state["zip"] = None
             state["failed"] = True
-            _file_failure_report(state)
+            _file_failure_report(state)  # filed before the terminal event
+        _finish_attempt(state)
         _persist_project(state)
         state["done"] = True
         state["running"] = False
@@ -2148,7 +3122,7 @@ def _ensure_workspace(state: dict) -> Path | None:
     return pd
 
 
-def _run_design(state: dict, stages, answers=None) -> None:
+def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> None:
     """Drive `stages` for this page's session, streaming progress into `state`,
     then (on success) run the deterministic build. Shared by the initial design,
     resume/continue, and answering a parked question.
@@ -2165,25 +3139,28 @@ def _run_design(state: dict, stages, answers=None) -> None:
     pid = state.get("project_id")
     if pid:
         _LIVE_RUNS[pid] = state
-    # Stamp every model call of this run with a stable id so the spend ledger can
-    # attribute cost per run/stage (see kicraft.cli.web_cost_report).
-    run_id = f"p{state.get('project_id')}-{int(time.time())}"
-    state["run_id"] = run_id
-
-    # Core-components registry rows for the architecture/bom prompts, fetched
-    # fresh each run so admin edits apply to reruns. Registry trouble must never
-    # block a design run; it degrades to "no defaults block".
-    core_defaults = None
-    if Settings.from_env().enable_core_defaults:
-        try:
-            core_defaults = _store().list_core_components(include_disabled=False)
-        except Exception:
-            core_defaults = None
-
-    def progress(ev):
-        _record_progress_event(state, ev, run_id=run_id)
 
     try:
+        # Mint this attempt inside the protected scope: a configuration/session
+        # setup failure must still reach the terminal path (a run_finished event
+        # plus a persisted row), not strand the project at 'running' forever.
+        # The run id also stamps every model call so the spend ledger can
+        # attribute cost per run/stage (see kicraft.cli.web_cost_report).
+        run_id = _start_attempt(state, mode=mode)
+
+        # Core-components registry rows for the architecture/bom prompts, fetched
+        # fresh each run so admin edits apply to reruns. Registry trouble must never
+        # block a design run; it degrades to "no defaults block".
+        core_defaults = None
+        if Settings.from_env().enable_core_defaults:
+            try:
+                core_defaults = _store().list_core_components(include_disabled=False)
+            except Exception:
+                core_defaults = None
+
+        def progress(ev):
+            _record_progress_event(state, ev, run_id=run_id)
+
         res = run_session(ws, state.get("brief", ""), stages, answers=answers,
                           progress=progress, run_id=run_id,
                           core_defaults=core_defaults)
@@ -2331,12 +3308,16 @@ def _run_design(state: dict, stages, answers=None) -> None:
         state["zip"] = _zip_generated(ws)
         state["ok"] = bool(state["zip"])
     except Exception as e:  # surface, never crash the UI thread
-        progress({"kind": "build_log", "text": f"error: {e}"})
+        _record_run_error(state, e)
         state["ok"] = False
     finally:
-        _persist_project(state)
         if state.get("ok") is False:  # terminal failure (parked runs have ok=None)
+            # Filed BEFORE the terminal event: its report id rides along on
+            # run_finished, and a persistence/support hiccup can never replace the
+            # pipeline's own cause (each step is independently best-effort).
             _file_failure_report(state)
+        _finish_attempt(state)
+        _persist_project(state)
         state["done"] = True
         state["running"] = False
         # Terminal runs leave the live registry (their persisted project row,
@@ -2346,6 +3327,31 @@ def _run_design(state: dict, stages, answers=None) -> None:
         if (pid and state.get("status") != "awaiting_input"
                 and _LIVE_RUNS.get(pid) is state):
             _LIVE_RUNS.pop(pid, None)
+
+
+def _record_run_error(state: dict, exc: BaseException) -> None:
+    """The terminal technical record for an unexpected exception.
+
+    Persisted as its classification plus the exception TYPE and one bounded,
+    sanitized line -- a provider exception's text can carry a response body or
+    request headers, which are not a public summary."""
+    state.setdefault("failure_kind", "unexpected_error")
+    _record_progress_event(state, {
+        "kind": "run_error",
+        "stage": _attempt_stage(state),
+        "failure_kind": state.get("failure_kind"),
+        "exception_type": type(exc).__name__,
+        "message": _run_error_message(exc),
+        "retryable": bool(state.get("retryable")),
+        "retry_action": state.get("retry_action"),
+    })
+
+
+def _run_error_message(exc: BaseException) -> str:
+    text = " ".join(str(exc).split())
+    if not text:
+        return type(exc).__name__
+    return f"{type(exc).__name__}: {text[:400]}"
 
 
 def _design_worker(brief: str, state: dict) -> None:
@@ -3082,7 +4088,7 @@ def projects_page():
         rows_box = ui.column().classes("w-full gap-2")
 
         # One reusable confirm dialog, built once OUTSIDE the rebuildable rows so a
-        # render_rows() refresh never deletes it mid-handler. A row's Delete button
+        # row refresh never deletes it mid-handler. A row's Delete button
         # parks its target here, then opens it.
         del_target = {"pid": None, "stem": None}
         with ui.dialog() as del_dialog, ui.card().classes("gap-2") \
@@ -3100,7 +4106,7 @@ def projects_page():
                     .mark("confirm-delete")
 
         def _ask_delete(p):
-            del_target.update(pid=p.id, stem=p.project_stem or f"project {p.id}")
+            del_target.update(pid=p.id, stem=_project_display_name(p))
             del_msg.text = f'"{del_target["stem"]}" will be deleted.'
             del_dialog.open()
 
@@ -3132,111 +4138,247 @@ def projects_page():
             # Notify + refresh BEFORE closing the dialog: closing first drops the
             # slot ui.notify resolves through, so the toast is lost (and the list
             # never repaints). The clicked button lives in the dialog, not in
-            # rows_box, so render_rows() does not delete it.
+            # rows_box, so the refresh does not delete it.
             ui.notify(f'Deleted "{del_target["stem"]}".', color="positive")
-            render_rows()
+            _refresh_rows(force=True)
             del_dialog.close()
 
-        def render_rows():
-            rows_box.clear()
-            with rows_box:
-                # Self-eval runs are NOT user projects -- they live on their own
-                # page (/admin/self-eval), browsable to full depth there, and never
-                # in a board list. Defensively drop any stray EV- row so a leftover
-                # from before the decoupling never resurfaces here.
-                shown = [p for p in _store().list_projects(user.id)
-                         if not (p.board_code or "").startswith("EV-")]
-                if not shown:
-                    ui.label("No projects yet. Describe a board in the workspace "
-                             "to begin.").classes("text-sm").style("color:#64748b")
-                    return
-                for p in shown:
-                    _render_row(p)
+        # Each row is built ONCE and then updated in place, so a 2 s poll cannot
+        # steal focus, collapse a disclosure, or reset a switch. A row is rebuilt
+        # only when its action set changes (a new button would otherwise land
+        # under the cursor), and the roster is rebuilt only when projects are
+        # added or removed -- never merely to reorder.
+        rows: dict[int, dict] = {}
+        row_order: list[int] = []
 
-        def _render_row(p):
-            live = _LIVE_RUNS.get(p.id)
+        def _roster() -> list:
+            # Self-eval runs are NOT user projects -- they live on their own page
+            # (/admin/self-eval), browsable to full depth there, and never in a
+            # board list. Defensively drop any stray EV- row so a leftover from
+            # before the decoupling never resurfaces here.
+            return [p for p in _store().list_projects(user.id)
+                    if not (p.board_code or "").startswith("EV-")]
+
+        def _actions_sig(p, pres, live) -> tuple:
+            return (
+                pres["action"], pres["download_ready"], pres["status"],
+                bool(p.dir_path or live is not None), bool(p.brief),
+                live is None, bool(p.dir_path) and is_admin(user),
+            )
+
+        def _build_row(p, pres, live) -> dict:
+            handles: dict = {}
             with ui.card().classes("w-full gap-2") \
-                    .style("background:var(--kc-surface);border:1px solid var(--kc-border)"):
+                    .style("background:var(--kc-surface);"
+                           "border:1px solid var(--kc-border)"):
                 with ui.row().classes("w-full items-center gap-3"):
-                    ui.label(p.project_stem or "(building…)") \
-                        .classes("text-sm font-semibold").style("color:#e2e8f0")
-                    if p.board_code:
-                        ui.label(p.board_code).classes("text-xs font-mono") \
-                            .style("color:#64748b") \
-                            .tooltip("Board ID. Quote it when reporting an issue.")
-                    # A 'running' row with no live worker is a run the server lost
-                    # (restart/crash mid-run): say so instead of a phantom run.
-                    shown, is_live = _row_status_display(p.status, live)
-                    ui.label(shown).classes("text-xs").style(
-                        "color:#4ade80" if is_live else "color:#94a3b8")
-                    ui.label(p.created_at[:19].replace("T", " ")) \
-                        .classes("text-xs").style("color:#64748b")
+                    handles["title"] = ui.label().classes("text-sm font-semibold") \
+                        .style("color:#e2e8f0")
+                    handles["code"] = ui.label().classes("text-xs font-mono") \
+                        .style("color:#64748b") \
+                        .tooltip("Board ID. Quote it when reporting an issue.")
+                    with ui.row().classes("items-center gap-1"):
+                        handles["badge_icon"] = ui.icon("radio_button_unchecked").style("font-size:1rem")
+                        handles["badge"] = ui.label().classes("text-xs")
+                    handles["when"] = ui.label().classes("text-xs") \
+                        .style("color:#64748b")
                     ui.space()
-                    # Open deep-links into the workspace, which attaches to the
-                    # live run when there is one (see index()'s ?project= branch).
-                    if p.dir_path or live is not None:
-                        ui.button("Open", icon="folder_open",
-                                  on_click=lambda pp=p: ui.navigate.to(
-                                      f"/?project={pp.id}")) \
-                            .props("flat dense no-caps")
-                    # A lost ('interrupted', incl. the dynamic running+no-live
-                    # window) or failed run can be restarted in one click from its
-                    # saved brief: deep-link it into the composer (no run starts
-                    # until the user clicks Design, so no quota slot is spent here).
-                    if live is None and shown in ("interrupted", "failed") and p.brief:
-                        ui.button("Retry", icon="replay",
-                                  on_click=lambda pp=p: ui.navigate.to(
-                                      f"/?prompt={quote(pp.brief or '')}")) \
-                            .props("flat dense no-caps")
-                    if p.zip_path and Path(p.zip_path).is_file():
-                        ui.button("Download", icon="download",
-                                  on_click=lambda zp=p.zip_path: ui.download(zp)) \
-                            .props("flat dense no-caps")
-                    if p.dir_path and is_admin(user):
-                        ui.button("Evaluate", icon="fact_check",
-                                  on_click=lambda pp=p: open_eval_dialog(
-                                      pp.dir_path,
-                                      pp.project_stem or f"project {pp.id}")) \
-                            .props("flat dense no-caps").style("color:#a78bfa")
-                    # Delete is offered only for a project with no live worker, so
-                    # an in-flight run can't be purged from under itself; the
-                    # handler re-checks liveness + ownership before deleting.
-                    if live is None:
-                        ui.button("Delete", icon="delete",
-                                  on_click=lambda pp=p: _ask_delete(pp)) \
-                            .props("flat dense no-caps").style("color:#f87171") \
-                            .mark("row-delete")
+                    handles["actions"] = ui.row().classes("items-center gap-1")
+                    handles["actions_sig"] = None
+                with ui.row().classes("w-full items-start gap-2 min-w-0"):
+                    handles["stage"] = ui.label().classes("text-xs shrink-0") \
+                        .style("color:#94a3b8")
+                    handles["headline"] = ui.label().classes("text-xs min-w-0") \
+                        .style("color:#e2e8f0")
+                handles["detail"] = ui.label().classes("text-xs min-w-0 w-full") \
+                    .style("color:#64748b;white-space:normal")
+                handles["issues"] = ui.row().classes("w-full items-center gap-2")
+                handles["issues_sig"] = None
                 # Visibility is only meaningful for a completed board -- the
                 # community browser lists status=='ok' only. Paid plans get a real
                 # toggle; free plans see the always-public note.
+                handles["visibility"] = ui.column().classes("w-full gap-1")
+                handles["vis_sig"] = None
+            handles["key"] = None
+            return handles
+
+        def _paint_row(handles, p, pres, live) -> None:
+            key = (pres["title"], pres["status"], pres["stage"], pres["headline"],
+                   pres["detail"], pres["last_event_at"], pres["action"],
+                   pres["download_ready"], len(pres["issues"]),
+                   tuple(i.get("message") for i in pres["issues"]))
+            if key == handles["key"]:
+                return  # nothing observable changed: leave the widgets alone
+            handles["key"] = key
+
+            icon, color, text = _status_badge(pres["status"])
+            badge = text
+            if pres["stage"] and pres["status"] in ("running", "retrying", "queued"):
+                badge = f"{text} · {_activity.stage_label(pres['stage'])}"
+            handles["title"].text = pres["title"]
+            handles["code"].text = p.board_code or ""
+            handles["code"].set_visibility(bool(p.board_code))
+            handles["badge_icon"].name = icon
+            handles["badge_icon"].style(f"color:{color}")
+            handles["badge"].text = badge
+            handles["badge"].style(f"color:{color}")
+            stamp = pres["last_event_at"] or p.finished_at or p.created_at
+            handles["when"].text = _relative_age(stamp)
+            handles["when"].tooltip(f"Last update {stamp}" if stamp else "")
+            handles["stage"].text = _activity.stage_label(pres["stage"])
+            handles["stage"].set_visibility(bool(pres["stage"]))
+            handles["headline"].text = pres["headline"]
+            detail = pres["detail"] if pres["detail"] != pres["headline"] else ""
+            handles["detail"].text = detail
+            handles["detail"].set_visibility(bool(detail))
+
+            sig = _actions_sig(p, pres, live)
+            if sig != handles["actions_sig"]:
+                handles["actions_sig"] = sig
+                handles["actions"].clear()
+                with handles["actions"]:
+                    _render_actions(p, pres, live)
+
+            issues = pres["issues"]
+            if handles["issues_sig"] != _issue_summary(issues):
+                handles["issues_sig"] = _issue_summary(issues)
+                handles["issues"].clear()
+                handles["issues"].set_visibility(bool(issues))
+                if issues:
+                    with handles["issues"]:
+                        worst = "error" if any(i["severity"] == "error" for i in issues) \
+                            else "warning"
+                        ui.icon("report_problem").style(
+                            f"color:{_SEVERITY_COLOR[worst]};font-size:1rem")
+                        ui.label(_issue_summary(issues)).classes("text-xs") \
+                            .style(f"color:{_SEVERITY_COLOR[worst]}") \
+                            .tooltip("\n".join(
+                                f"{i['severity']}: {i['message']}" for i in issues[:8]))
+
+            vis_sig = (p.status, p.is_public, can_private)
+            if vis_sig != handles["vis_sig"]:
+                handles["vis_sig"] = vis_sig
+                handles["visibility"].clear()
+                handles["visibility"].set_visibility(p.status == "ok")
                 if p.status == "ok":
-                    with ui.row().classes("w-full items-center gap-2"):
-                        if can_private:
-                            sw = ui.switch("Public in the community",
-                                           value=p.is_public)
+                    with handles["visibility"]:
+                        _render_visibility(p)
 
-                            def _flip(e, pid=p.id):
-                                # Re-check tier server-side: a downgraded/forged
-                                # session must not move a project in the catalog.
-                                if not _can_make_private(_current_user()):
-                                    ui.notify("Only paid plans can change "
-                                              "visibility.", color="warning")
-                                    return
-                                _store().set_visibility(pid, bool(e.value))
-                                _store().reindex_search(pid)
-                                ui.notify(
-                                    "Now public in the community."
-                                    if e.value else "Now private.",
-                                    color="positive")
+        def _render_actions(p, pres, live) -> None:
+            # Open deep-links into the workspace, which attaches to the live run
+            # when there is one (see index()'s ?project= branch).
+            if p.dir_path or live is not None:
+                ui.button("Open", icon="folder_open",
+                          on_click=lambda pp=p: ui.navigate.to(
+                              f"/?project={pp.id}")) \
+                    .props("flat dense no-caps")
+            action = pres["action"]
+            if action == "answer":
+                ui.button("Answer questions", icon="help",
+                          on_click=lambda pp=p: ui.navigate.to(f"/?project={pp.id}")) \
+                    .props("flat dense no-caps").style("color:#a78bfa") \
+                    .tooltip("Open the design and answer its questions")
+            elif action == "continue":
+                ui.button("Continue design", icon="play_arrow",
+                          on_click=lambda pp=p: ui.navigate.to(f"/?project={pp.id}")) \
+                    .props("flat dense no-caps color=primary")
+            elif action == "rebuild":
+                ui.button("Rebuild board", icon="restart_alt",
+                          on_click=lambda pp=p: ui.navigate.to(f"/?project={pp.id}")) \
+                    .props("flat dense no-caps")
+            elif action == "support":
+                ui.button("Get help", icon="support_agent",
+                          on_click=lambda pp=p: ui.navigate.to(f"/?project={pp.id}")) \
+                    .props("flat dense no-caps")
+            elif action == "new_from_brief" and p.brief:
+                # No recoverable workspace: start over from the saved brief. No run
+                # starts until the user clicks Design, so no quota slot is spent.
+                ui.button("Start a new design from this brief", icon="replay",
+                          on_click=lambda pp=p: ui.navigate.to(
+                              f"/?prompt={quote(pp.brief or '')}")) \
+                    .props("flat dense no-caps")
+            if pres["download_ready"] and pres["zip_path"]:
+                ui.button("Download", icon="download",
+                          on_click=lambda zp=pres["zip_path"]: ui.download(zp)) \
+                    .props("flat dense no-caps")
+            if p.dir_path and is_admin(user):
+                ui.button("Evaluate", icon="fact_check",
+                          on_click=lambda pp=p: open_eval_dialog(
+                              pp.dir_path, _project_display_name(pp))) \
+                    .props("flat dense no-caps").style("color:#a78bfa")
+            # Delete is offered only for a project with no live worker, so an
+            # in-flight run can't be purged from under itself; the handler
+            # re-checks liveness + ownership before deleting.
+            if live is None:
+                ui.button("Delete", icon="delete",
+                          on_click=lambda pp=p: _ask_delete(pp)) \
+                    .props("flat dense no-caps").style("color:#f87171") \
+                    .mark("row-delete")
 
-                            sw.on_value_change(_flip)
-                        else:
-                            ui.icon("public").classes("text-sm") \
-                                .style("color:#34d399")
-                            ui.label("Public in the community browser") \
-                                .classes("text-xs").style("color:#94a3b8")
+        def _render_visibility(p) -> None:
+            if can_private:
+                sw = ui.switch("Public in the community", value=p.is_public)
 
-        render_rows()
+                def _flip(e, pid=p.id):
+                    # Re-check tier server-side: a downgraded/forged session must
+                    # not move a project in the catalog.
+                    if not _can_make_private(_current_user()):
+                        ui.notify("Only paid plans can change visibility.",
+                                  color="warning")
+                        return
+                    _store().set_visibility(pid, bool(e.value))
+                    _store().reindex_search(pid)
+                    ui.notify("Now public in the community." if e.value
+                              else "Now private.", color="positive")
+
+                sw.on_value_change(_flip)
+            else:
+                with ui.row().classes("items-center gap-1"):
+                    ui.icon("public").classes("text-sm").style("color:#34d399")
+                    ui.label("Public in the community browser") \
+                        .classes("text-xs").style("color:#94a3b8")
+
+        def _refresh_rows(*, force: bool = False) -> None:
+            """Repaint the list: one projects query + one build-job query per
+            refresh, disk reads cached by mtime, rows updated in place."""
+            shown = _roster()
+            jobs = {}
+            try:
+                jobs = _store().project_build_jobs(user.id)
+            except Exception:
+                jobs = {}
+            ids = [p.id for p in shown]
+            if force or ids != row_order or (rows and not shown):
+                rows_box.clear()
+                rows.clear()
+                row_order[:] = ids
+                with rows_box:
+                    if not shown:
+                        ui.label("No projects yet. Describe a board in the "
+                                 "workspace to begin.") \
+                            .classes("text-sm").style("color:#64748b")
+                        return
+                    for p in shown:
+                        live = _LIVE_RUNS.get(p.id)
+                        pres = _project_presentation(
+                            p, live=live, job=jobs.get(p.id),
+                            activity=(live or {}).get("activity"))
+                        handles = _build_row(p, pres, live)
+                        rows[p.id] = handles
+                        _paint_row(handles, p, pres, live)
+                return
+            for p in shown:
+                live = _LIVE_RUNS.get(p.id)
+                pres = _project_presentation(
+                    p, live=live, job=jobs.get(p.id),
+                    activity=(live or {}).get("activity"))
+                _paint_row(rows[p.id], p, pres, live)
+
+        _refresh_rows(force=True)
+        # Poll while the page is connected (the timer stops with the websocket), so
+        # a run that starts, queues, or finishes anywhere shows up here without a
+        # manual reload.
+        ui.timer(2.0, _refresh_rows)
 
 
 # --------------------------------------------------------------------------- #
@@ -3650,7 +4792,7 @@ def _clone_project(source, cloner, make_private: bool):
 
 def _project_card(r: dict) -> None:
     """One browse-grid card for a public project dict (from list_public_projects)."""
-    stem = r.get("project_stem") or "Untitled board"
+    stem = _project_display_name(r)
     thumb = _board_thumb_url(r.get("dir_path"), r.get("project_stem"))
     card = ui.card().classes("w-72 gap-1 cursor-pointer") \
         .style("background:var(--kc-surface);border:1px solid var(--kc-border)")
@@ -3829,7 +4971,7 @@ def public_project_page(project_id: str):
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1200px"):
         with ui.row().classes("w-full items-center justify-between gap-2"):
-            ui.label(p.project_stem or "Untitled board") \
+            ui.label(_project_display_name(p)) \
                 .classes("text-2xl font-bold text-white")
             _quality_chip(p.quality)
         if (p.brief or "").strip():
@@ -4655,6 +5797,12 @@ def index(prompt: str = "", project: str = ""):
                     prices_rev_seen=0, prices_loaded_ws=None,
                     account_refreshed=False, viewed_marked=False,
                     support_prompted=False, live_sig=live_sig,
+                    # ---- summary / failure / replay bookkeeping ----
+                    # True while the first render tick is still replaying the
+                    # loaded history; the selection is applied exactly once after.
+                    replay_pending=False, summary_sig=None, failure_sig=None,
+                    failure_shown=False, announced_alert=None,
+                    question_inputs=[], place_route_detail=None,
                     # Manual layout editor: while True the place/route
                     # view slot belongs to the editor and the timer must
                     # not repaint the gallery/board over it.
@@ -4704,7 +5852,7 @@ def index(prompt: str = "", project: str = ""):
                 .props("flat dense no-caps color=white").classes("text-xs") \
                 .tooltip("Plans and upgrades")
             ui.button("Support", icon="support_agent",
-                      on_click=lambda: open_support_dialog(auto=False)) \
+                      on_click=lambda: open_support_dialog()) \
                 .props("flat dense no-caps color=white").classes("text-xs") \
                 .tooltip("Report a problem (the open board's ID and error "
                          "details are attached automatically)")
@@ -4731,7 +5879,7 @@ def index(prompt: str = "", project: str = ""):
                     ui.menu_item("Part library", lambda: ui.navigate.to("/parts"))
                     ui.menu_item("Browse", lambda: ui.navigate.to("/browse"))
                     ui.menu_item("Pricing", lambda: ui.navigate.to("/pricing"))
-                    ui.menu_item("Support", lambda: open_support_dialog(auto=False))
+                    ui.menu_item("Support", lambda: open_support_dialog())
                     if is_admin(user):
                         ui.menu_item("Admin", lambda: ui.navigate.to("/admin"))
                     ui.separator()
@@ -4881,7 +6029,7 @@ def index(prompt: str = "", project: str = ""):
             prompt_label.text = (prompt_text or "").strip()
             prompt_display.set_visibility(True)
             for el in (welcome_card, brief, chips_row, notify_chk,
-                       design_btn, new_btn, arrow_hint):
+                       design_btn, new_btn, arrow_hint, continue_btn):
                 if el is not None:
                     el.set_visibility(False)
 
@@ -4926,31 +6074,25 @@ def index(prompt: str = "", project: str = ""):
 
         support_dialog = ui.dialog()
 
-        def open_support_dialog(auto: bool = False):
+        def open_support_dialog() -> None:
             """(Re)build and open the support dialog over the open design.
 
-            auto=True is the post-error flavor: the failure was ALREADY filed
-            for automated review by the run worker (_file_failure_report), so
-            submitting only attaches the user's optional feedback to that row.
-            The manual flavor (the header's Support button) files a fresh
-            report with the same diagnostics snapshot."""
+            Reuses the run's already auto-filed error report when there is one, so
+            the user's optional note joins that row instead of filing a duplicate;
+            otherwise it files a fresh report with the same bounded diagnostics
+            snapshot shown on screen."""
             diag = _collect_support_diagnostics(state)
             code = state.get("board_code")
+            existing_report_id = state.get("support_report_id")
             support_dialog.clear()
             with support_dialog, ui.card().classes("w-[680px] max-w-[95vw] gap-2") \
                     .style("background:var(--kc-surface);border:1px solid var(--kc-border-strong)"):
-                ui.label("Something went wrong" if auto else "Contact support") \
+                ui.label("Contact support") \
                     .classes("text-lg font-bold text-white")
-                if auto:
-                    ui.label("This run failed. The technical details below were "
-                             "logged for review. Anything you can add about what "
-                             "you were trying to build helps us fix it faster.") \
-                        .classes("text-sm").style("color:#94a3b8")
-                else:
-                    ui.label("Report a problem with the open design or the app. "
-                             "The technical details below are attached "
-                             "automatically.") \
-                        .classes("text-sm").style("color:#94a3b8")
+                ui.label("Report a problem with the open design or the app. "
+                         "The technical details below are attached "
+                         "automatically.") \
+                    .classes("text-sm").style("color:#94a3b8")
                 with ui.row().classes("items-center gap-2"):
                     ui.label("Board ID").classes("text-xs").style("color:#64748b")
                     ui.label(code or "(no design open)") \
@@ -4969,26 +6111,29 @@ def index(prompt: str = "", project: str = ""):
 
                 def submit():
                     msg = (feedback.value or "").strip()
-                    rid = state.get("support_report_id") if auto else None
+                    rid = existing_report_id
                     try:
                         if rid is None:
                             rid = _store().create_support_report(
                                 user_id=user.id,
                                 project_id=state.get("project_id"),
                                 board_code=code,
-                                kind=("error_auto" if auto else "user"),
+                                kind="user",
                                 message=(msg or None), diagnostics=diag)
+                            # Remembered so a second submission attaches to the
+                            # same row rather than filing another report.
+                            state["support_report_id"] = rid
                         elif msg:
                             _store().set_support_report_message(rid, msg)
                     except Exception:
+                        # Never claim a report that was not recorded.
                         ui.notify("Could not record the report. Please try "
                                   "again.", color="negative")
                         return
-                    # A user just engaged (manual report, or feedback on a
-                    # failure) -- auto-investigate if the admin toggle is on. The
-                    # bare per-failure auto-file (auto=True, no message) is left
-                    # alone so we don't investigate every failed build.
-                    if rid is not None and (not auto or msg):
+                    # A user just engaged -- auto-investigate if the admin toggle
+                    # is on. A bare per-failure auto-file is left alone so we don't
+                    # investigate every failed build.
+                    if rid is not None and msg:
                         _auto_investigate_if_enabled(rid)
                     support_dialog.close()
                     ref = code or f"report #{rid}"
@@ -5001,6 +6146,78 @@ def index(prompt: str = "", project: str = ""):
                     ui.button("Send report", icon="send", on_click=submit) \
                         .props("color=primary")
             support_dialog.open()
+
+        # ---- workspace summary (always on screen, above the stage tabs) ------
+        # One truthful reading of the open design: who it is, what is happening,
+        # what needs attention, and the single action that makes sense next.
+        # Technical detail stays in the stage tabs; this is the summary.
+        summary_card = ui.column().classes("w-full gap-1") \
+            .style("background:var(--kc-surface);border:1px solid var(--kc-border);"
+                   "border-radius:8px;padding:10px 12px")
+        summary_card.set_visibility(False)
+        with summary_card:
+            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                summary_title = ui.label().classes("text-sm font-semibold text-white")
+                summary_code = ui.label().classes("text-xs font-mono cursor-pointer") \
+                    .style("color:#94a3b8;border:1px solid var(--kc-border-strong);"
+                           "border-radius:4px;padding:1px 6px") \
+                    .tooltip("This board's unique ID. Click to copy; quote it "
+                             "when reporting an issue.")
+                with ui.row().classes("items-center gap-1"):
+                    summary_badge_icon = ui.icon("radio_button_unchecked").style("font-size:1rem")
+                    summary_badge = ui.label().classes("text-xs")
+                summary_age = ui.label().classes("text-xs").style("color:#64748b")
+            summary_headline = ui.label().classes("text-sm").style("color:#e2e8f0")
+            summary_detail = ui.label().classes("text-xs w-full") \
+                .style("color:#94a3b8;white-space:normal")
+            with ui.row().classes("w-full items-center gap-3 flex-wrap"):
+                summary_stage = ui.label().classes("text-xs").style("color:#94a3b8")
+                summary_activity = ui.label().classes("text-xs font-mono") \
+                    .style("color:#94a3b8")
+                summary_issues = ui.label().classes("text-xs")
+            summary_actions = ui.row().classes("items-center gap-2 flex-wrap")
+            summary_actions_sig = [None]
+            issues_box = ui.column().classes("w-full gap-2")
+            issues_box_sig = [None]
+
+            def _copy_summary_code():
+                code = state.get("board_code")
+                if code:
+                    ui.run_javascript(
+                        f"navigator.clipboard.writeText({json.dumps(code)})")
+                    ui.notify(f"Copied {code}.", color="positive")
+
+            summary_code.on("click", _copy_summary_code)
+
+            # The original brief, collapsed: the workspace shows a derived title,
+            # so the exact words the user typed must stay inspectable.
+            with ui.expansion("Original brief", icon="notes").classes("w-full") \
+                    .props('dense header-class="text-xs text-grey-5"'):
+                summary_brief = ui.label().classes("text-xs w-full") \
+                    .style("color:#cbd5e1;white-space:pre-wrap")
+
+            # Earlier attempts of the SAME project, collapsed: a continuation keeps
+            # its history, but history never overrides the current outcome.
+            earlier_exp = ui.expansion("Earlier attempts", icon="history") \
+                .classes("w-full").props('dense header-class="text-xs text-grey-5"')
+            earlier_exp.set_visibility(False)
+            earlier_box = ui.column().classes("w-full gap-1")
+
+            # Screen-reader regions: ordinary state changes are announced politely;
+            # a terminal failure or a question that needs the user is announced
+            # ONCE (never on every token or timer tick).
+            _sr_only = ("position:absolute;width:1px;height:1px;padding:0;margin:-1px;"
+                        "overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0")
+            summary_live = ui.label("").style(_sr_only).props("aria-live=polite role=status")
+            summary_alert = ui.label("").style(_sr_only).props("aria-live=assertive role=alert")
+
+        # Inline failure card: the cause, what survived, and what can be done --
+        # in the page, instead of a modal that hijacks the screen on every failure.
+        failure_card = ui.column().classes("w-full gap-2")
+        with failure_card:
+            failure_box = ui.column().classes("w-full gap-2 p-3") \
+                .style("border:1px solid #b91c1c;background:#450a0a;border-radius:8px")
+        failure_card.set_visibility(False)
 
         # Per-stage tabs: each phase gets its own tab with a project-state
         # inspector plus the LLM thinking + activity/log windows (LLM stages:
@@ -5040,6 +6257,7 @@ def index(prompt: str = "", project: str = ""):
             text is always accepted; chips are just shortcuts."""
             question_box.clear()
             view["questions_rendered"] = state.get("questions")
+            view["question_inputs"] = []
             qs = state.get("questions") or []
             if not (state.get("awaiting_input") and qs):
                 return
@@ -5079,6 +6297,7 @@ def index(prompt: str = "", project: str = ""):
                                         .props("flat dense no-caps") \
                                         .classes("kc-qchip text-xs")
                         widgets.append((q, ans))
+                    view["question_inputs"] = [a for _q, a in widgets]
 
                     def submit_answers():
                         answers = [{"text": q.get("text", ""),
@@ -5120,9 +6339,9 @@ def index(prompt: str = "", project: str = ""):
             question_box.clear()
             continue_btn.set_visibility(False)
             design_btn.disable()
-            status.text = f"Got it. Continuing from {stage} with your answer..."
             threading.Thread(target=_run_design, args=(state, runs),
-                             kwargs={"answers": answers}, daemon=True).start()
+                             kwargs={"answers": answers, "mode": "continue"},
+                             daemon=True).start()
 
         def _continue():
             """Run the stages still missing from the current (reopened) design."""
@@ -5142,7 +6361,8 @@ def index(prompt: str = "", project: str = ""):
             continue_btn.set_visibility(False)
             design_btn.disable()
             status.text = "Continuing: " + " -> ".join(rem) + " ..."
-            threading.Thread(target=_run_design, args=(state, rem), daemon=True).start()
+            threading.Thread(target=_run_design, args=(state, rem),
+                             kwargs={"mode": "continue"}, daemon=True).start()
 
         continue_btn.on_click(_continue)
 
@@ -5161,6 +6381,11 @@ def index(prompt: str = "", project: str = ""):
                 state = live
                 _reset_view()
                 tabs.reset()
+                # Replaying the attempt's stream must not drag the tab selection
+                # around; the authoritative stage is selected once the backlog is
+                # drained (see render()).
+                tabs.begin_replay()
+                view["replay_pending"] = True
                 # Restore the durable stage statuses first: a live run resumed
                 # after a reopen only streams events for the stages it re-runs,
                 # so the replay below cannot repaint the earlier, already-
@@ -5171,32 +6396,38 @@ def index(prompt: str = "", project: str = ""):
                     _derived_statuses(live_ws, live_sj, p.status,
                                       bool(state.get("zip"))),
                     live_sj.get("stage_status"))
+                _render_earlier_attempts(_activity.group_attempts(
+                    state.get("_earlier_events") or []))
                 continue_btn.set_visibility(False)
                 new_btn.set_visibility(False)  # "New design" lives in the header now
                 if state.get("running"):
                     design_btn.disable()
-                    what = p.project_stem or (p.brief or "design")[:60]
-                    status.text = (f'Designing "{what}" -- live progress is in '
-                                   "the tabs below.")
                 elif state.get("awaiting_input"):
                     view["account_refreshed"] = True
-                    status.text = "Reopened. This design is waiting for your answer below."
+                pres = _workspace_presentation()
+                view["presentation"] = pres
+                if pres is not None:
+                    _paint_summary(pres)
+                    _paint_failure_card(pres)
                 # Notify BEFORE refresh_account_ui: rebuilding the projects list
                 # deletes the clicked Open button's slot, and ui.notify resolves
                 # the client through that slot -- notifying after the rebuild
                 # raises "parent element ... has been deleted" (seen live).
                 if notify:
-                    ui.notify(f"Attached to {p.project_stem or 'your running design'}.",
+                    ui.notify(f"Attached to {_project_display_name(p, state.get('stem'))}.",
                               color="positive")
                 refresh_account_ui()
                 return
             # Build-in-place: the durable project dir IS the workspace -- reads AND any
             # later writes (continue/edit/rebuild) happen here, no scratch, no copytree.
-            # (A listed project always has dir_path.)
-            read_root = Path(p.dir_path) if p.dir_path else None
-            ws_str = str(p.dir_path) if p.dir_path else None
-            project_dir = (_persisted_generated_dir(p.dir_path, p.project_stem)
-                           if p.dir_path else None)
+            # A row whose dir_path was never recorded (an attempt lost before it
+            # persisted) still gets its owned directory back when that directory
+            # exists, so its journaled history is not thrown away on reopen.
+            root = _project_root_for(p, p.id)
+            read_root = root
+            ws_str = str(root) if root is not None else None
+            project_dir = (_persisted_generated_dir(root, p.project_stem)
+                           if root is not None else None)
             sj = read_state(read_root) if read_root else {}
             zip_ok = bool(p.zip_path and Path(p.zip_path).is_file())
             completed = p.status == "ok"
@@ -5212,12 +6443,20 @@ def index(prompt: str = "", project: str = ""):
                          questions=[q for q in (sj.get("open_questions") or [])
                                     if not q.get("answer")])
             # Reopen the build timeline + LLM reasoning: events.jsonl is persisted at
-            # finalize but was never read back, so the timeline rendered blank. The
-            # render loop replays these into the tabs (display-only: tabs.push paints).
-            state["events"] = _load_events(p.dir_path)
+            # finalize but was never read back, so the timeline rendered blank. Each
+            # attempt is replayed in order into the tabs (display-only: tabs.push
+            # paints), with the current attempt in the live cursor and the earlier
+            # ones in a collapsed list.
+            attempts = _load_attempts(read_root)
+            current = _activity.current_attempt(attempts)
+            state["events"] = list(current.get("events") or []) if current else []
+            state["_earlier_events"] = [
+                event for group in attempts[:-1] for event in group.get("events") or []]
             _reset_view()
             view["account_refreshed"] = True
             tabs.reset()
+            tabs.begin_replay()
+            view["replay_pending"] = True
             new_btn.set_visibility(False)  # "New design" lives in the header now
             # project_dir resolved above (durable or rehydrated workspace); restored
             # artifacts -> schematic / PCB render, even if the run FAILED.
@@ -5230,38 +6469,29 @@ def index(prompt: str = "", project: str = ""):
             # without this every reopened project showed all-pending tabs.
             tabs.set_statuses(_derived_statuses(read_root, sj, p.status, zip_ok),
                               sj.get("stage_status"))
+            # The current attempt's activity (folded from its own events) drives the
+            # summary; the durable stage state still shows what a continuation
+            # completed earlier.
+            state["activity"] = _reduce_attempt_activity(state["events"])
             if state["failed"] and state["pcb_ready"]:
                 _mark_fab_invalid()
-            rem = remaining_stages(sj)
-            continue_btn.set_visibility(bool(rem) and not state["awaiting_input"])
-            if state["awaiting_input"]:
-                status.text = "Reopened. This design is waiting for your answer below."
-            elif rem:
-                status.text = ("Reopened. Remaining: " + " -> ".join(rem)
-                               + ". Click Continue design when ready.")
-            elif state["failed"]:
-                # All LLM stages done but the build (place/route) failed or was
-                # killed -- there is no routed/fab board. Do NOT call this
-                # "Design complete": that mislabels a timed-out build and offers
-                # a download of an unrouted board (KC-NZXXEE).
-                status.text = ("Reopened. The PCB place/route did not finish "
-                               "(it failed or timed out), so there is no routed "
-                               "board to download. The schematic stages are "
-                               "complete -- use Rebuild board (Place/Route tab) "
-                               "to retry.")
-            elif not zip_ok:
-                status.text = ("Reopened. Routing finished but no fab package "
-                               "was produced (not fab-ready). Rebuild, or adjust "
-                               "the layout yourself in the Place/Route tab.")
-            else:
-                status.text = ("Reopened. Design complete: download below, or "
-                               "adjust the board layout in the Place/Route tab.")
+            _render_earlier_attempts(attempts[:-1])
+            # No composer "Continue design": the summary (and the failure card)
+            # own that action now, so the same button is not offered twice with
+            # two different guards.
+            continue_btn.set_visibility(False)
             if p.status in ("ok", "failed"):
                 view["viewed_marked"] = True
                 _store().mark_viewed(p.id)
+            pres = _workspace_presentation()
+            view["presentation"] = pres
+            if pres is not None:
+                _paint_summary(pres)
+                _paint_failure_card(pres)
             # Notify BEFORE refresh_account_ui (see the attach branch above).
             if notify:
-                ui.notify(f"Opened {p.project_stem or 'project'}.", color="positive")
+                ui.notify(f"Opened {_project_display_name(p, state.get('stem'))}.",
+                          color="positive")
             refresh_account_ui()
 
         def refresh_account_ui():
@@ -5309,6 +6539,8 @@ def index(prompt: str = "", project: str = ""):
             state = _fresh_run_state()
             _reset_view()
             tabs.reset()
+            summary_card.set_visibility(False)
+            failure_card.set_visibility(False)
             status.text = ""
             spend.text = ""
             board_label.set_visibility(False)
@@ -5351,8 +6583,8 @@ def index(prompt: str = "", project: str = ""):
             continue_btn.set_visibility(False)
             new_btn.set_visibility(False)  # "New design" lives in the header now
             tabs.reset()
-            status.text = ("Designing... (intent -> functional_spec -> architecture -> bom -> "
-                           "wiring -> synthesize -> place/route -> fab)")
+            summary_card.set_visibility(False)
+            failure_card.set_visibility(False)
             design_btn.disable()
             design_btn.classes(remove="kc-pulse")
             # Collapse the compose chrome -- only the user's prompt stays at the top.
@@ -5602,6 +6834,361 @@ def index(prompt: str = "", project: str = ""):
                         ui.label(chip).classes("text-xs ml-auto") \
                             .style("color:#94a3b8")
 
+        def _workspace_signals() -> dict:
+            ws = Path(state["ws"]) if state.get("ws") else None
+            return _project_signals(ws) if ws is not None else dict(_EMPTY_SIGNALS)
+
+        def _workspace_presentation() -> dict | None:
+            """The shared presentation for the OPEN design, or None when nothing is
+            open (the blank composer keeps no summary)."""
+            pid = state.get("project_id")
+            if not pid:
+                return None
+            p = _store().get_project(pid)
+            if p is None:
+                return None
+            live = _LIVE_RUNS.get(pid)
+            if live is None:
+                live = state  # this page owns the run (or rehydrated its history)
+            act = dict(state.get("activity") or {})
+            observed = view.get("observed_job_stage")
+            if observed and not state.get("running"):
+                # A build this page only OBSERVES: its log is the truth about
+                # which sub-phase is running, not a guess about the last one.
+                act["stage"] = observed
+            return _project_presentation(
+                p, live=live, job=_newest_project_job(pid, state.get("user_id")),
+                activity=act or None, signals=_workspace_signals())
+
+        def _render_earlier_attempts(groups) -> None:
+            """The collapsed list of attempts before the current one.
+
+            History stays inspectable (outcome + age + event count) without ever
+            being replayed into the live panels, where it could overwrite the
+            current attempt's status.
+            """
+            earlier_box.clear()
+            earlier_exp.set_visibility(bool(groups))
+            if not groups:
+                return
+            earlier_exp.text = f"Earlier attempts ({len(groups)})"
+            with earlier_box:
+                for group in groups:
+                    events = group.get("events") or []
+                    act = _reduce_attempt_activity(events) or {}
+                    headline = act.get("last_activity") or (
+                        "No saved activity is available for this run.")
+                    when = _relative_age(group.get("started_at") or None)
+                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                        ui.label(_activity.stage_label(act.get("stage")) or
+                                 (group.get("run_id") or "earlier history")) \
+                            .classes("text-xs font-mono shrink-0") \
+                            .style("color:#94a3b8")
+                        ui.label(str(headline)).classes("text-xs min-w-0") \
+                            .style("color:#64748b")
+                        ui.space()
+                        if when:
+                            ui.label(when).classes("text-xs shrink-0") \
+                                .style("color:#64748b")
+                        ui.label(f"{len(events)} events").classes("text-xs shrink-0") \
+                            .style("color:#475569")
+
+        def _view_stage(stage: str) -> None:
+            """Jump to a stage's tab (the issues list's 'View stage')."""
+            tabs.select(stage)
+
+        def _render_presentation_actions(pres: dict) -> None:
+            """The single affordance a presentation calls for, reusing the existing
+            handlers (and their guards) -- never a second execution path."""
+            action = pres.get("action")
+            if action == "answer":
+                def _focus_questions():
+                    inputs = view.get("question_inputs") or []
+                    if inputs:
+                        inputs[0].run_method("focus")
+                    question_box.run_method(
+                        "scrollIntoView", {"behavior": "smooth", "block": "center"})
+
+                ui.button("Answer questions", icon="help", on_click=_focus_questions) \
+                    .props("dense no-caps color=primary")
+            elif action == "continue":
+                # "Retry stage" only when the failure metadata says it is retryable.
+                label = "Retry stage" if state.get("retryable") else "Continue design"
+                ui.button(label, icon="play_arrow", on_click=lambda: _continue()) \
+                    .props("dense no-caps color=primary")
+            elif action == "rebuild":
+                ui.button("Rebuild board", icon="restart_alt",
+                          on_click=lambda: _start_rebuild()) \
+                    .props("dense outline no-caps")
+            elif action == "download":
+                if pres.get("zip_path"):
+                    ui.button("Download KiCad project (.zip)", icon="download",
+                              on_click=lambda z=pres["zip_path"]: ui.download(z)) \
+                        .props("dense no-caps color=positive")
+            elif action == "new_from_brief":
+                brief_text = state.get("brief") or ""
+                if brief_text:
+                    ui.button("Start a new design from this brief", icon="replay",
+                              on_click=lambda t=brief_text: ui.navigate.to(
+                                  f"/?prompt={quote(t)}")) \
+                        .props("dense outline no-caps")
+            elif action == "support":
+                ui.button("Contact support", icon="support_agent",
+                          on_click=lambda: open_support_dialog()) \
+                    .props("dense outline no-caps")
+            # A stopped run can always be asked about, whatever the cause: the
+            # report carries the same bounded diagnostics shown on screen.
+            if action in ("continue", "rebuild", "new_from_brief", "support"):
+                ui.button("Contact support", icon="support_agent",
+                          on_click=lambda: open_support_dialog()) \
+                    .props("flat dense no-caps")
+
+        def _paint_summary(pres: dict) -> None:
+            """Repaint the always-on summary -- only when a fact actually changed."""
+            act = state.get("activity") or {}
+            planned = set(act.get("planned_units") or ())
+            units = (f"{len(set(act.get('completed_units') or ()) & planned)}/"
+                     f"{len(planned)} units") if planned else ""
+            detail = view.get("place_route_detail") or {}
+            sig = (pres["title"], pres["status"], pres["stage"], pres["headline"],
+                   pres["detail"], pres["last_event_at"], pres["action"],
+                   pres["download_ready"], len(pres["issues"]), units,
+                   detail.get("percent"), detail.get("phase"),
+                   state.get("journal_failed"), state.get("board_code"))
+            if sig == view.get("summary_sig"):
+                return
+            previous_sig = view.get("summary_sig")
+            view["summary_sig"] = sig
+            icon, color, text = _status_badge(pres["status"])
+            summary_badge_icon.name = icon
+            summary_badge_icon.style(f"color:{color}")
+            summary_badge.text = text
+            summary_badge.style(f"color:{color}")
+            summary_title.text = pres["title"]
+            code = state.get("board_code")
+            summary_code.text = code or ""
+            summary_code.set_visibility(bool(code))
+            # Elapsed (from the attempt's own start) + the actual age of the last
+            # event -- never an inferred failure for a quiet period.
+            elapsed = ""
+            if act.get("started_at"):
+                elapsed = f"elapsed {_fmt_duration(_iso_age_s(act['started_at']))}"
+            age = _relative_age(pres["last_event_at"])
+            summary_age.text = "  ·  ".join(
+                part for part in (elapsed, f"updated {age}" if age else "") if part)
+            summary_headline.text = pres["headline"]
+            summary_detail.text = pres["detail"]
+            summary_detail.set_visibility(bool(pres["detail"]))
+            # The page's status line is the same shared headline, so no surface
+            # can claim something the artifacts do not support.
+            status.text = pres["headline"]
+            stage = _activity.stage_label(pres["stage"])
+            summary_stage.text = f"Stage: {stage}" if stage else ""
+            summary_stage.set_visibility(bool(stage))
+            activity_bits = []
+            if detail.get("percent") is not None and pres["stage"] == "place_route":
+                activity_bits.append(
+                    f"{detail.get('phase') or 'Layout'} {int(detail['percent'])}%")
+            if units:
+                activity_bits.append(units)
+            if state.get("journal_failed"):
+                activity_bits.append("Activity history could not be saved")
+            summary_activity.text = "  ·  ".join(activity_bits)
+            summary_activity.style(
+                "color:#eab308" if state.get("journal_failed") else "color:#94a3b8")
+
+            actions_sig = (pres["action"], pres["download_ready"],
+                           bool(state.get("retryable")), bool(state.get("brief")))
+            if actions_sig != summary_actions_sig[0]:
+                summary_actions_sig[0] = actions_sig
+                summary_actions.clear()
+                with summary_actions:
+                    _render_presentation_actions(pres)
+
+            issues = pres["issues"]
+            issues_sig = tuple((i.get("stage"), i.get("code"), i.get("message"))
+                               for i in issues)
+            if issues_sig != issues_box_sig[0]:
+                issues_box_sig[0] = issues_sig
+                issues_box.clear()
+                issues_box.set_visibility(bool(issues))
+                if issues:
+                    with issues_box:
+                        _render_section(issues_section(issues, on_view=_view_stage),
+                                        "#94a3b8")
+            summary_live.text = f"{pres['title']}: {pres['headline']}"
+            # Announce a terminal failure or an outstanding question ONCE.
+            alert = ""
+            if pres["status"] == "failed":
+                alert = f"Design stopped: {pres['headline']}"
+            elif pres["status"] == "awaiting_input":
+                alert = "The design needs your answer to continue."
+            if alert and view.get("announced_alert") != alert:
+                view["announced_alert"] = alert
+                summary_alert.text = alert
+            summary_brief.text = state.get("brief") or ""
+
+        def _paint_stage_issues(pres: dict) -> None:
+            """Each stage inspector also carries ITS OWN outstanding issues, so a
+            warning is visible where the work happened as well as in the summary."""
+            by_stage: dict[str, list[dict]] = {}
+            for issue in pres["issues"]:
+                stage = issue.get("stage")
+                if stage:
+                    by_stage.setdefault(stage, []).append(issue)
+            for stage in _activity.stage_order():
+                tabs.set_issues(stage, by_stage.get(stage, []), on_view=_view_stage)
+
+        def _paint_failure_card(pres: dict) -> None:
+            """The inline failure/interruption card: cause, what survived, and the
+            actions that are actually possible -- no modal, no false claims."""
+            show = pres["status"] in ("failed", "interrupted") and bool(state.get("project_id"))
+            if not show:
+                if view.get("failure_shown"):
+                    view["failure_shown"] = False
+                    failure_box.clear()
+                    failure_card.set_visibility(False)
+                return
+            sig = (pres["headline"], pres["detail"], pres["stage"], pres["action"],
+                   pres["title"], bool(state.get("support_report_id")),
+                   bool(view.get("pcb_ready_seen")))
+            if view.get("failure_sig") == sig:
+                return
+            view["failure_sig"] = sig
+            view["failure_shown"] = True
+            failure_card.set_visibility(True)
+            signals = _workspace_signals()
+            failure_box.clear()
+            with failure_box:
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.icon("cancel").style("color:#fecaca;font-size:1.2rem")
+                    ui.label(pres["headline"]).classes("text-sm font-medium") \
+                        .style("color:#fecaca")
+                    stage = _activity.stage_label(pres["stage"])
+                    if stage:
+                        ui.label(stage).classes("text-xs font-mono") \
+                            .style("color:#fca5a5")
+                if pres["detail"] and pres["detail"] != pres["headline"]:
+                    ui.label(pres["detail"]).classes("text-xs whitespace-pre-wrap") \
+                        .style("color:#fca5a5")
+                # What actually survived on disk -- never a claimed artifact that
+                # is not there.
+                kept = []
+                if signals["sheets"]:
+                    kept.append("the schematic")
+                if signals["pcb"]:
+                    kept.append("the board (for inspection)")
+                if signals["zip_ok"]:
+                    kept.append("an older fab package that does not match this board")
+                ui.label(
+                    ("Still on disk: " + ", ".join(kept) + ".") if kept
+                    else "No artifacts were produced for this run.") \
+                    .classes("text-xs").style("color:#fca5a5")
+                if state.get("board_code"):
+                    ui.label(f"Board ID: {state['board_code']}") \
+                        .classes("text-xs font-mono").style("color:#fecaca")
+                if state.get("support_report_id"):
+                    ui.label("Details recorded for support.") \
+                        .classes("text-xs").style("color:#fca5a5")
+                with ui.row().classes("items-center gap-2 flex-wrap"):
+                    _render_presentation_actions(pres)
+
+        def _recorded_log_offset(job_id) -> int | None:
+            """The build-log byte offset this job's own build_start recorded.
+
+            Without it (a legacy attempt) the observer starts at the end of the
+            file and labels the pane "Earlier build log" rather than attributing
+            a previous build's lines to the current attempt."""
+            for event in list(state.get("events") or []) + list(
+                    state.get("_earlier_events") or []):
+                if not isinstance(event, dict) or event.get("kind") != "build_start":
+                    continue
+                if event.get("job_id") != job_id:
+                    continue
+                offset = event.get("log_offset")
+                if isinstance(offset, int):
+                    return offset
+            return None
+
+        def _observe_foreign_job() -> None:
+            """Read-only tail of a build this page does not drive.
+
+            A build outlives the web process through the host queue (and can be
+            driven by the standalone worker), so a page opened after a restart
+            must still be able to WATCH it. The job's log lines are pushed into
+            the stage tabs as display events only -- never journaled, persisted,
+            or re-emitted as durable activity -- and nothing here enqueues a job,
+            registers a live run, or writes project state."""
+            pid = state.get("project_id")
+            if not pid or state.get("running") or _LIVE_RUNS.get(pid) is not None:
+                return
+            job = _newest_project_job(pid, state.get("user_id"))
+            if job is None or job.status != "running" or not job.log_path:
+                return
+            log = Path(job.log_path)
+            if view.get("observed_job") != job.id:
+                view["observed_job"] = job.id
+                offset = _recorded_log_offset(job.id)
+                view["observed_job_legacy"] = offset is None
+                if offset is None:
+                    # This job never recorded where its log began (a legacy attempt
+                    # or a page opened after the build started). Tail the last part
+                    # of the file and SAY it may include earlier output, rather
+                    # than skipping the current build's first lines or silently
+                    # attributing an older build's log to this attempt.
+                    try:
+                        size = log.stat().st_size
+                    except OSError:
+                        size = 0
+                    offset = max(0, size - _OBSERVED_LOG_TAIL_BYTES)
+                view["observed_job_offset"] = offset
+                view["observed_job_remainder"] = ""
+                view["observed_job_stage"] = None
+                view["observed_job_line"] = ""
+                if view["observed_job_legacy"]:
+                    tabs.push({"kind": "build_log",
+                               "text": "[earlier build log] this build did not "
+                                       "record where it started; output above may "
+                                       "come from before this page attached\n"})
+
+            def _display(ev: dict) -> None:
+                view["build_lines"].append(ev.get("text", ""))
+                sub = _build_substage(ev.get("text", ""))
+                if sub:
+                    view["observed_job_stage"] = sub
+                view["observed_job_line"] = ev.get("text", "").strip()
+                tabs.push(ev)
+
+            try:
+                offset, remainder = _drain_build_log(
+                    log, view.get("observed_job_offset") or 0,
+                    view.get("observed_job_remainder") or "", _display)
+            except OSError:
+                # A missing/rotated log resets this page's byte cursor only --
+                # never the execution state, which is the job row's business.
+                view["observed_job_offset"] = 0
+                view["observed_job_remainder"] = ""
+                return
+            view["observed_job_offset"] = offset
+            view["observed_job_remainder"] = remainder
+
+        def _paint_observed_build(pres: dict) -> None:
+            """Show a build THIS page does not drive on its stage tabs: the queued
+            hourglass while it waits for a host slot, then the sub-stage its log
+            actually reached. Display only -- no driver, no enqueue, no writes."""
+            pid = state.get("project_id")
+            if not pid or state.get("running") or _LIVE_RUNS.get(pid) is not None:
+                return
+            job = _newest_project_job(pid, state.get("user_id"))
+            if job is None:
+                return
+            if job.status == "queued":
+                tabs.mark_queued(pres.get("queue_note") or "")
+            elif job.status == "running":
+                stage = view.get("observed_job_stage")
+                if stage:
+                    tabs.mark_building(stage, view.get("observed_job_line") or "")
+
         def _live_sig():
             # Includes the running flag so a run parking on a question (it stays
             # registered) still refreshes the list's status label. list() first:
@@ -5629,6 +7216,62 @@ def index(prompt: str = "", project: str = ""):
                 tabs.flush()
             if is_admin(user) and state["spend"] is not None:
                 spend.text = f"Spent this design: ${state['spend']:.4f}"
+
+            # ---- workspace summary + failure card ---------------------------
+            # The in-memory stream is ticked at 0.2 s, but the disk + queue
+            # observers (which cost file stats and a database query) run at 1 s,
+            # and the summary text is only rewritten when a fact actually changed.
+            now = time.monotonic()
+            if now - view.get("observed_at", 0.0) >= 1.0:
+                view["observed_at"] = now
+                pres = _workspace_presentation()
+                view["presentation"] = pres
+                summary_card.set_visibility(pres is not None)
+                if pres is not None:
+                    _paint_summary(pres)
+                    _paint_stage_issues(pres)
+                    _paint_failure_card(pres)
+                    tabs.set_live(pres["status"] in (
+                        "running", "retrying", "queued", "finalizing", "starting",
+                        "awaiting_input"))
+                    # A durable parked run keeps its question's stage marked even
+                    # though that stage's artifact already committed.
+                    if pres["status"] == "awaiting_input":
+                        tabs.mark_parked(pres["stage"])
+                    # A build running outside this page (the standalone worker, or
+                    # another process after a restart) is watched READ-ONLY.
+                    _observe_foreign_job()
+                    _paint_observed_build(pres)
+                elif view.get("failure_shown"):
+                    view["failure_shown"] = False
+                    failure_box.clear()
+                    failure_card.set_visibility(False)
+
+            # ---- replay finished: make the ONE authoritative selection ------
+            # Replay is rendering history, not a state transition: once the loaded
+            # backlog is drained, apply the current derived statuses and pick the
+            # stage that needs attention exactly once. Afterwards a manual tab
+            # choice is respected (the follow control brings you back).
+            if view.get("replay_pending") and view["rendered"] >= len(evs):
+                view["replay_pending"] = False
+                pres = view.get("presentation")
+                # Replay is rendering HISTORY: re-apply the authoritative
+                # artifact-derived statuses so an old stage_start from a lost
+                # attempt cannot leave a stage looking like it is still running.
+                # A genuinely live attempt keeps the status the stream set.
+                if pres and pres["status"] not in (
+                        "running", "retrying", "queued", "finalizing", "starting",
+                        "awaiting_input"):
+                    sj_now = (_read_state_json(Path(state["ws"]))
+                              if state.get("ws") else {})
+                    tabs.set_statuses(pres.get("derived") or {},
+                                      sj_now.get("stage_status"))
+                tabs.end_replay(
+                    _select_stage(pres, pres.get("derived") or {}) if pres else None)
+            else:
+                # Re-assert a selection the browser's initial tab value may have
+                # echoed over (see StageTabs.settle).
+                tabs.settle()
 
             # Board ID chip: tracks the open design (state rebinding included).
             code = state.get("board_code")
@@ -5740,6 +7383,10 @@ def index(prompt: str = "", project: str = ""):
                         rs["_live_leaf_source"] = urls["leaf"]
                         rs["_live_parent_source"] = urls["parent"]
                         rs["_leaf_progress"] = _leaf_layout_progress(project_dir, state["token"])
+                    # The MEASURED layout progress, for the summary's activity line
+                    # (never a fabricated overall percentage).
+                    view["place_route_detail"] = _build_place_route_progress(
+                        rs, rs.get("_leaf_progress") or [])
                     tabs.set_inspector("place_route", _inspector_spec(
                         "place_route", {}, rs, project_dir, view["build_lines"]))
                     if (not state["pcb_ready"] and state["token"]
@@ -5830,11 +7477,6 @@ def index(prompt: str = "", project: str = ""):
                     except Exception:
                         pass
                 if state["ok"]:
-                    status.text = (
-                        "Done (with a caution). Your KiCad project is ready."
-                        if view.get("fab_caution")
-                        else "Done. Your KiCad project is ready."
-                    )
                     if not view["fab_done"]:
                         view["fab_done"] = True
                         sj = _read_state_json(read_root) if read_root else {}
@@ -5846,8 +7488,6 @@ def index(prompt: str = "", project: str = ""):
                             (sj.get("artifacts") or {}).get("build_warnings") or []
                         )
                         view["fab_caution"] = bool(build_warnings)
-                        if build_warnings:
-                            status.text = "Done (with a caution). Your KiCad project is ready."
                         for stg in ("synthesize", "place_route", "electrical_review", "fab"):  # finalize build logs
                             tabs.set_inspector(stg, _inspector_spec(
                                 stg, sj, rs, project_dir, view["build_lines"]))
@@ -5878,17 +7518,13 @@ def index(prompt: str = "", project: str = ""):
                                           on_click=lambda: ui.download(state["zip"])) \
                                     .props("color=positive")
                 elif state["ok"] is False:
-                    status.text = ("Build failed. The synthesized schematic is shown in "
-                                   "the Synthesize tab (red) for review."
-                                   + (f" Board ID: {code}." if code else ""))
+                    # The failure is reported by the shared presentation: an inline
+                    # card with the cause, what survived, and the actions that are
+                    # actually possible. The failure itself is auto-filed for
+                    # support by the worker; opening a modal over the page is not
+                    # how a user finds out, so nothing is opened automatically.
                     if state.get("pcb_ready"):
                         _mark_fab_invalid()
-                    # Surface the support dialog ONCE per failed run on this page
-                    # (the failure itself is already auto-filed by the worker);
-                    # closing it without sending stays closed.
-                    if not view.get("support_prompted"):
-                        view["support_prompted"] = True
-                        open_support_dialog(auto=True)
 
         refresh_account_ui()
         view["live_sig"] = _live_sig()
