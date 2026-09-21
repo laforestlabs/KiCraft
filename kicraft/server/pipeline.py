@@ -142,6 +142,20 @@ def project_pipeline(ws) -> str:
     return read_marker(ws) or selected()
 
 
+def current_tree_owns_tail(ws) -> bool:
+    """Whether CURRENT-tree code may write this workspace's ``state.json``.
+
+    False for a legacy workspace, and that is not a style choice: the legacy tree's part model
+    has none of the current tree's fields (`assembly`, `recipe_id`, `resolution_*`,
+    `lowering_*`), so any current-tree stage that re-serializes the state adds them and the
+    legacy build then rejects the file — measured 2026-09-21 on project 878, 171 schema errors,
+    after the current tree's post-wiring lifecycle had run on a legacy design. Everything that
+    writes a legacy workspace (its own design driver, its own build) must be legacy code; the
+    current tree may only read the delivered artifacts.
+    """
+    return project_pipeline(ws) != PIPELINE_LEGACY
+
+
 def provenance_fields(pipeline: str) -> dict:
     """The pipeline stamp a project row / promote provenance carries."""
     name = normalise(pipeline)

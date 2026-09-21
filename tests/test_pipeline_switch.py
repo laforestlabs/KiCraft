@@ -191,3 +191,65 @@ def test_promote_provenance_carries_the_pipeline(tmp_path):
     assert payload["pipeline_legacy_commit"] == pipeline.LEGACY_COMMIT
     assert payload["advisories"] == ["unreviewed_exact_part"]
     assert provenance_path(pcb).is_file()
+
+
+def test_current_tree_never_owns_a_legacy_workspace_tail(tmp_path):
+    """B1: the current tree may not write a legacy workspace's state (measured 2026-09-21).
+
+    A legacy design committed, then the current tree's post-wiring lifecycle re-serialized
+    state.json through the current models (adding `assembly`, `recipe_id`, `resolution_*`,
+    `lowering_*`), and the legacy build then rejected its own file with 171 schema errors. The
+    decision the web worker makes before running its tail is therefore pipeline-aware.
+    """
+    ws = tmp_path / "ws"
+    pipeline.write_marker(ws, pipeline.PIPELINE_CURRENT)
+    assert pipeline.current_tree_owns_tail(ws) is True
+    pipeline.write_marker(ws, pipeline.PIPELINE_LEGACY)
+    assert pipeline.current_tree_owns_tail(ws) is False
+
+
+def test_parked_legacy_run_surfaces_its_question(monkeypatch, tmp_path):
+    """B2: a legacy park is a question for the user, not a failure.
+
+    Projects 876 and 877 (2026-09-21) committed every design stage and then parked in wiring
+    on a programming-header question; the dispatch reported `failed`, so the question never
+    reached the user. The park is translated from the workspace's own open_questions.
+    """
+    import json
+
+    from kicraft.server import session as session_mod
+
+    ws = tmp_path / "ws"
+    (ws / ".kicraft").mkdir(parents=True)
+
+    answered: dict = {"value": None}
+
+    def fake_run(ws_, brief, stages, *, budget_usd, **kw):
+        # Like the real park: the stages before wiring committed; wiring itself did not.
+        state = {
+            "stage_status": {s: {"ok": True} for s in stages[:-1]},
+            "open_questions": [
+                {
+                    "stage": "wiring",
+                    "text": "Add a 1x05 SWD programming header, then re-run wiring.",
+                    "blocking": True,
+                    "options": [],
+                    "answer": answered["value"],
+                }
+            ],
+        }
+        (ws_ / ".kicraft" / "state.json").write_text(json.dumps(state))
+        return 1, "parked: awaiting input", ""
+
+    monkeypatch.setattr(session_mod.pipeline_dispatch, "run_legacy_design", fake_run)
+    out = session_mod._run_legacy_session(ws, "a brief", ["intent", "bom", "wiring"])
+    assert out["status"] == "awaiting_input"
+    assert out["last_stage"] == "wiring"
+    assert "SWD programming header" in out["questions"][0]["text"]
+
+    # The same workspace with the question answered keeps the ordinary failure mapping: the
+    # driver still exited nonzero (nothing left to commit), and no question is pending.
+    answered["value"] = "done"
+    out = session_mod._run_legacy_session(ws, "a brief", ["intent", "bom", "wiring"])
+    assert out["status"] == "failed"
+    assert out["questions"] is None

@@ -358,8 +358,39 @@ def _run_legacy_session(ws, brief: str, stages, *, progress=None, instruction=No
                 "pipeline": pipeline_dispatch.PIPELINE_LEGACY,
             }
         )
+    # A parked legacy run is a question for the user, not a failure. The legacy driver stops on
+    # a blocking question and records it in the workspace's own `open_questions` (with the stage,
+    # the text and the options), which is exactly what the current driver's park leaves behind —
+    # so translate it instead of reporting `failed`, or the user never sees the question and the
+    # project looks broken (measured 2026-09-21: projects 876 and 877 both parked on a
+    # programming-header question and were reported as failures). A question counts only when it
+    # is unanswered AND its stage is one this run drove and did not commit, so a stale question
+    # from an earlier park cannot masquerade as this run's outcome.
+    parked = [
+        dict(row)
+        for row in state.get("open_questions") or ()
+        if isinstance(row, dict)
+        and row.get("stage") in set(stages)
+        and row.get("answer") in (None, "")
+        and (status_block.get(str(row.get("stage"))) or {}).get("ok") is not True
+    ]
     committed = bool(results) and all(row["commit_ok"] for row in results)
     last = results[-1] if results else None
+    if parked:
+        return {
+            "status": "awaiting_input",
+            "results": results,
+            "guard": None,
+            "state_path": str(_state_path(Path(ws))),
+            "questions": parked,
+            "last_stage": str(parked[0].get("stage")),
+            "failure_kind": None,
+            "retryable": False,
+            "retry_action": None,
+            "pipeline": pipeline_dispatch.PIPELINE_LEGACY,
+            "stdout_tail": (stdout or "")[-2000:],
+            "stderr_tail": (stderr or "")[-2000:],
+        }
     return {
         "status": "ok" if committed and rc == 0 else "failed",
         "results": results,

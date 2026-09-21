@@ -2200,8 +2200,14 @@ def _run_design(state: dict, stages, answers=None) -> None:
         # CHAINS still resolve (fix-plan N3); if it still can't resolve, the
         # user is asked as a last resort. Shared with the self-eval driver
         # (kicraft.server.session).
+        # A legacy design's workspace belongs to the legacy tree from here on: the current
+        # tree's stages would re-serialize a state its models do not own (measured: 171 schema
+        # errors at the legacy build, 2026-09-21). The legacy driver's own build runs whatever
+        # tail that tree has; this process only reads the delivered artifacts.
+        current_owns_tail = pipeline.current_tree_owns_tail(ws)
         _bom_passes = int(state.get("bom_reconcile_passes") or 0)
-        while (res.get("status") == "awaiting_input"
+        while (current_owns_tail
+               and res.get("status") == "awaiting_input"
                and bom_reconcile_deficits(res)):
             _prev = _bom_passes
             res, _bom_passes = maybe_bom_reconcile(
@@ -2235,6 +2241,16 @@ def _run_design(state: dict, stages, answers=None) -> None:
         # Advisory post-wiring review/repair and silkscreen authoring run through
         # the same lifecycle as batch self-evaluation. They intentionally remain
         # fail-soft: neither a review nor a cosmetic plan can fulfill a delivery.
+        if not current_owns_tail:
+            progress(
+                {
+                    "kind": "build_log",
+                    "text": "legacy pipeline: the current tree does not run the post-wiring "
+                    "lifecycle on this workspace (its state schema is the legacy tree's); the "
+                    "legacy build runs its own tail\n",
+                }
+            )
+            return
         try:
             from kicraft.design.cli_app import run_post_wiring_lifecycle
 
