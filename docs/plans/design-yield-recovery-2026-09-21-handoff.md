@@ -31,8 +31,8 @@ daily ceiling is shared with the live site (a runner-side guard aborts at $13).
 | **Free gate ($0)** | `--reference-replay` **31/34** rows reproduce their own boundary, 2 recorded blocks (floor ≥31). Green; red at the start of the session. |
 | **Unit suite** | **4301 passed**, 15 skipped, 1 xfailed, **2 failed** — both pre-existing and environmental (`test_vendored_bundles_are_not_prototype`: `ams1117-5v0-fixed` still defaults to prototype; `test_krt_preflight_uses_environment_defaults`: `No module named 'py_router.startup_checks'`). |
 | **First paid screen (design-only, 34×3)** | **102/102 runs, $1.78, 50 min.** Committed designs **7** (A1 baseline: 7). Briefs committing at all **3** (A1: 4); briefs committing in ≥2 repeats **2** (A1: 3). **Headline flat** — but the failures moved one stage downstream: architecture deaths **69 → 51**, BOM deaths **23 → 41**. §2 reads this. |
-| **A/B attribution** | First attempt (batches `ab_move1a_before` / `ab_move1a_after`) was **contaminated and discarded**: the "after" tree contains the option-3 switch, so it honoured the production routing file — and that file has said `pipeline: legacy` since 2026-09-21 00:55. Re-run with the pipeline pinned to `current` for both arms (`ab_move1a_pinned_*`); result in §2.3. |
-| **Production switch state** | `~/.kicraft/routing.json` (written 2026-09-21 00:55) selects **`pipeline: legacy`**. Every design run started since then — including anything a user starts on kicraft.io — is driven by the August tree, so **options 1–2's fixes are not in play for those runs**. Put it back to `current` when the point is to test the fixes; either choice is legitimate, but it must be deliberate. §5.7 has the trap this exposed. |
+| **A/B attribution** | First attempt (batches `ab_move1a_before` / `ab_move1a_after`) was **contaminated and discarded** (the "after" tree contains the option-3 switch, so it honoured the production routing file, which said `legacy`). Re-run pinned to `current` for both arms (`ab_move1a_pinned_*`): **before 7/15 vs after 9/15** — mildly positive, inside the ±2/3-per-brief noise, so moves 1a–1b stay (§2.3). |
+| **Production switch state** | **Reverted to `current` on 2026-09-21 03:0x UTC by operator decision**, after three live `legacy` projects failed (defects B1/B2, §4b). Both defects are now **fixed, unit-guarded and accepted end to end** (`logs/self_eval/legacy_acceptance_20260921.log`: five stages committed, no current-tree contamination, then a legacy build that finished `BUILD COMPLETE` — 0 shorts, 0 unconnected, full fab package). Re-enabling is one select on `/admin/routing`; the two operator decisions behind that are §8.2. |
 | **Spend** | 2026-09-20: $4.24 (session-1 arm $2.02 + this session's screen $1.78 + smokes). 2026-09-21: $0.11 at the time of writing. Daily ceiling $20. |
 | **The ladder** | current tree **4/34** fab-ready briefs (A1) · 09-15 tree **13/34** (A3) · August tree **21/34** (A2) · best recorded July batch **25/34** · target **34/34** (never achieved). |
 
@@ -107,11 +107,32 @@ on *identical* inputs, so a single arm cannot attribute those. A/B run (both arm
 session, 3 repeats, only the 1a derives differing): `logs/self_eval/ab_move1a_20260921.log`,
 batches `ab_move1a_before` / `ab_move1a_after`, ~$0.55.
 
-> **Result:** see the appended §2.3 result. The method note that matters more than the numbers:
-> with 3 repeats, a single brief's commit count swings by **±2 of 3** on the same tree — measured
-> this session, on five briefs, two arms, including one arm that was later re-run pinned. Individual
-> brief deltas are therefore noise; only the *sum over briefs*, the *stage split* and the *refusal
-> composition* carry signal. This is the plan's §7.1 warning, quantified.
+**Result** (pinned A/B, both arms `pipeline=current`, same session, same box, 3 repeats each,
+~$0.42 total — `logs/self_eval/ab_move1a_pinned_20260921.log`):
+
+| brief | before (no 1a derives) | after (with them) | delta |
+|---|---|---|---|
+| audio-jack-buffer | 0/3 | 2/3 | +2 |
+| fpc-breakout | 1/3 | 1/3 | 0 |
+| proto-shield | 3/3 | 2/3 | −1 |
+| r2r-dac | 1/3 | 2/3 | +1 |
+| rc-lowpass-bnc | 2/3 | 2/3 | 0 |
+| **total** | **7/15** | **9/15** | **+2** |
+
+**Verdict: keep moves 1a–1b.** The sum moved +2 in their favour while individual briefs moved ±2 in
+both directions, which is exactly the noise the same session measured elsewhere (two separate
+"before" runs of the same tree on the same five briefs came out 7/15 and 9/15). Combined with the
+deterministic draft corpus (3 → 5 of 26 commit, `declared_signal_port_tied` 90 → 20,
+`unreviewed_exact_part` 43 → 0) the derives do what they were built to do and are not harmful. The
+headline did not move because the wall is one stage later (§2.2), and the two briefs that appeared to
+regress in the M1 screen were noise: `audio-jack-buffer` is 2/3 here and `r2r-dac` 2/3 here, against
+0/3 for both in the screen.
+
+> **Method note, measured, that outlives this session:** with 3 repeats a single brief's commit count
+> swings by **±2 of 3** on the same tree. Individual brief deltas are noise; only the *sum over
+> briefs*, the *stage split* and the *refusal composition* carry signal. This quantifies the plan's
+> §7.1 warning and it is why the plan's brief-level kill criteria need ≥8-brief slices to mean
+> anything.
 
 ---
 
@@ -230,22 +251,41 @@ legacy tree never ran its own tail — **the pipeline was split mid-tail**, whic
 hazard the plan's §3.3 named ("the legacy tree writes a different state schema") and which the
 marker only mitigated on the *reading* side.
 
-*Fix shape (next session, ~1 h):* for a legacy workspace **no current-tree code may write
+**FIXED and accepted end to end (commits `b24f17e` + the tests below).** The web worker now asks
+`pipeline.current_tree_owns_tail(ws)` and skips both the BOM reconcile loop and the post-wiring
+lifecycle for a legacy workspace, logging the skip instead of doing it silently; the legacy build
+runs the tail its own tree has. Acceptance, pinned so production's `current` was untouched
+(`logs/self_eval/legacy_acceptance_20260921.log`, ~$0.01 + one build):
+
+```
+1/3 design through the legacy dispatch   → status: ok | pipeline: legacy
+                                           stages: intent, functional_spec, architecture, bom,
+                                           wiring = ALL True
+2/3 B1 check                             → parts: 4 | current-only fields present: none
+                                           marker: {'pipeline': 'legacy', 'legacy_commit': 'bc6a2f8'}
+3/3 build through the legacy interpreter → BUILD COMPLETE: BNC_RC_FILTER
+                                           DRC: 0 shorts, 0 unconnected (14 traces, 2 vias)
+                                           fab: BNC_RC_FILTER_fab_20260921.zip (+ STEP, 3D render)
+```
+
+Original defect record, kept because the failure mode is instructive:
+
+*Fix shape (as implemented):* for a legacy workspace **no current-tree code may write
 `state.json`**. Two changes: let the legacy driver run its own tail (drop `--no-build`, so
 design+build happen in one legacy process), and guard the BOM-reconcile / post-wiring-lifecycle
 paths so they skip a legacy workspace entirely. Then retry project 878 as the acceptance test — the
 artifact is already on disk. **Until that lands, `pipeline: legacy` is a broken configuration for
 users** (see §8.2).
 
-**Defect B2 — a legacy run that parks on a question is reported as a failure.** Projects 876 and 877
-(legacy) had every design stage commit and then `wiring` **parked**: the legacy driver asked a
-clarifying question (`-> parked: awaiting input`), and my `_run_legacy_session` maps anything short of
-"all stages committed" to `status: failed`. The question never reaches the user, and the project row
-says `failed`. *Fix shape:* the legacy driver must surface its park the way the current driver does
-(`status: awaiting_input` + the question attached), or the dispatch must detect the parked stage from
-the workspace's own `open_questions` and translate it.
+**Defect B2 — a legacy run that parks on a question is reported as a failure. FIXED.** Projects 876
+and 877 (legacy) had every design stage commit and then `wiring` **parked**: the legacy driver asked
+a clarifying question (`-> parked: awaiting input`), and my `_run_legacy_session` mapped anything
+short of "all stages committed" to `status: failed`. The question never reached the user and the
+project row said `failed`. Now the dispatch translates a pending blocking question (unanswered, on a
+stage this run drove and did not commit) into `status: awaiting_input` with the question attached, so
+the web parks the project and the question surfaces in the UI as it does for the current pipeline.
 
-**Parallel track B — the legacy switch (deployed; needs the two fixes above before it is usable).**
+**Parallel track B — the legacy switch (deployed, fixed, accepted; currently OFF by operator decision).**
 `~$0.10` + one build: drive one brief with `pipeline=legacy` end to end (five stages **and** a
 finished board), switch back, confirm `current`, and check the pipeline is named in the project row,
 the provenance file and the summary. This is the only untested path in the whole session and it is
@@ -309,7 +349,11 @@ env -i HOME=/home/kicraft PATH="$PATH" TERM=xterm PYTHONUNBUFFERED=1 \
   package wins over the venv's editable install, and `cli_app` subprocesses inherit it.
 - **Legacy tree**: everything is in `kicraft/server/pipeline.py` (`LEGACY_ENV`, paths, pinned
   commit); `pipeline.describe()` prints the state. Its venv resolves its own checkout from any
-  directory without a `kicraft/` package; the `PYTHONPATH` pin is belt-and-braces.
+  directory without a `kicraft/` package; the `PYTHONPATH` pin is belt-and-braces. **A legacy
+  BUILD needs the router environment too** (`KICRAFT_KICAD_ROUTING_TOOLS_PATH` and
+  `..._PYTHON`); the worker has them from the production `.env`, and a stripped (`env -i`) launch
+  does not — measured: the build refused with "KiCadRoutingTools is selected but
+  kicraft_routing_tools_path is unset" until the acceptance script loaded `.env`.
 - **Deploy**: `deploy/restart-build-worker.sh && deploy/restart-web.sh` — both services, because
   the build dispatch lives in the worker. No `pip install` unless dependencies changed.
 - **The harness follows the admin switch.** `kicraft.eval.self_eval` drives designs through
