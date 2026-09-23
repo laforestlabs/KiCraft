@@ -141,6 +141,66 @@ cd ~/KiCraft
 **Note.** `config.py` / `stage_runtime.py` / `tests/test_stage_driver_retry.py`
 were modified but **uncommitted** when this plan was written; that is another
 session's in-flight work. Check `git status` and coordinate before editing them.
+(2026-09-23, second session: that work is now reviewed and committed — `aa3193d`,
+`a811624` — and the tree is clean, so A2 can be edited freely.)
+
+**Status 2026-09-23 (second session): two contract defects fixed and measured;
+the rest of A2 stands.**
+
+The A/B in section C reproduced two of these classes on the *current* engine,
+which is what made them fixable (`stage_driver run`, `--no-build`, reasoning
+4096, three unseen briefs).
+
+1. **A board-wide functional block no requirement can implement — fixed.**
+   `validation._functional_block_sheets` demanded an implementing requirement
+   from every functional block, while the sibling obligation-retention gate
+   already exempted board-wide rows (`quantity` / `fabrication` / `negative`, and
+   `quantitative` only when it measures the board outline). A brief whose "two
+   mounting holes" arrives as a `quantity` row (no part) declared a `MOUNTING`
+   block that *nothing* could implement, so every architecture attempt was
+   refused with `functional block 'MOUNTING' has no implementation requirement on
+   a sheet` and the design died at the stage. The gate now reads the same
+   predicate (`obligation_requires_requirement_owner`); a block with no
+   obligations at all, or citing a row the architecture does not carry, is still
+   refused — the gate cannot be cleared by declaring a block and leaving the work
+   out.
+   *Measured* on the frozen beacon-brief state (`/tmp/ab/ws/curR-b3/.kicraft/state.json`,
+   current tree, reasoning 4096): before, the mapping refusal was terminal (3
+   attempts); after, `stage_driver replay` N-of-3 → **2/3 committed** (3 and 2
+   attempts, $0.022/$0.013), and the single failure died on a *different*
+   contract (`multiple_intent_contracts`).
+
+2. **A saved commit rejection could not be re-read — fixed** (this is what
+   blocked the A2 method itself). `_commit_rejection_diagnostics` wrote
+   `gate_codes` and no `detector_version`, but `StageDiagnostic` forbids extra
+   keys and required that field, so `ConversationState.model_validate` refused
+   *every* state saved after a deterministic commit gate rejected a candidate —
+   precisely the states `replay` exists to reopen. The first replay attempt died
+   with `stage_status.architecture.diagnostics.1.detector_version Field required`
+   and `gate_codes Extra inputs are not permitted`. The row now carries
+   `DETECTOR_VERSION`, and `StageDiagnostic` reads additively (an unrecorded
+   version is `None`, like `StageStatus`), so historical states load.
+
+**Remaining A2 classes, measured and unfixed:**
+
+- `multiple_intent_contracts` — a port-binding conflict the architecture keeps
+  re-emitting (rail `+5V`: port `vbus` of `usb` already bound to `VBUS`); one of
+  the three post-fix replays above.
+- BOM work-unit refusals (`physical-obligation-unfulfilled`: the typed work unit
+  demands a class-tagged real part — *"requires 1 real coupling-capacitor"* —
+  while the model emits a generic `Device:C`). The stage reports `attempts=0`, so
+  it never re-drives the unit with that feedback; one bounded retry is the
+  candidate fix.
+- The upstream identity-`conversion` modelling oddity (`I2C bus` → `I2C bus`)
+  that the architecture stage is then asked to own. No deterministic rule
+  separates that from a real conversion (level shifting, filtering), so the
+  documented remedy is the stage-auditor's *rewriting auditor*
+  (`docs/plans/stage-auditor-luna-2026-09-23.md`, workstream B), not a gate.
+- The pinned engine's wiring **deficit park** — unchanged, and only
+  production-visible while `pipeline: legacy`.
+
+`config.py`, `stage_runtime.py` and `tests/test_stage_driver_retry.py` are now
+committed, so the "coordinate before touching" caveat above is spent.
 
 ### A3. Then re-run the live flow (section B)
 
