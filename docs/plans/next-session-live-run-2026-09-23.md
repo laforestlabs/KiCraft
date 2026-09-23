@@ -376,20 +376,42 @@ So B6's success criterion is met for the first time in this stretch: a real
 Surprise-me request produced a fab package, and the terminal datum shipped in
 this session was in the deployed build that ran it.
 
-**One thing that run exposed, for the next session.** That board's `J1` is the
+**One thing that run exposed — and a correction.** That board's `J1` is the
 *other* vendored Kangnex family — `CONN-TH_WJ126V-5.0-2P`, not the WJ128V this
 session reviewed. It is edge-zoned `left` and the fab gate certified it
-`status=ok, opening_board_deg=180`. That verdict is a **heuristic guess, not a
-reviewed datum**: `detect_opening_direction` fell through to the body-overhang
-rule because nothing about that name is reviewed. The placer and the gate share
-that same detection, so a *wrong* guess is self-consistent — the gate can never
-catch it, which is exactly the KC-DZQ76R failure mode the reviewed table exists
-to prevent. Reviewing the rest of the vendored families is therefore the next
-terminal-datum task: WJ126V-2P/3P and WJ127-5P have meshes, but the WJ126V-2P
-mesh is authored **rotated 90 deg** against its own footprint (mesh y-extent
-7.8 mm == the footprint's x-extent 7.8 mm; mesh pin centres x ±2.5 vs footprint
-pads y ±2.5), so each needs its own registration check, and the WJ126V-4P/5P
-bundles ship no 3D model at all.
+`status=ok, opening_board_deg=180`, which is the **reviewed** datum, not a
+heuristic guess: both the repo bundle (`kicraft/parts_library/
+screw-terminal-5mm-2p`) and the pinned tree's copy carry a vendor-style
+`PCB Edge` marker at footprint-local `(-3.8, 0)`, added with the KC-YJ7Q69 fix
+(`7c82a8d`) — and the leaf board's J1 carries exactly that marker (local
+`-3.8, 0`), so the placer and the gate both read it. The same holds for the 3P
+(`CONN-TH_3P-P5.00_WJ126V-5.0-3P`, marker at `(0, 4.13)` → 90°).
+
+What *is* true, and is only a documentation risk: the **home-tier fetch cache**
+(`~/.kicraft/parts/screw-terminal-5mm-{2p,3p}`) holds older copies of those two
+bundles with **no marker** — same manifest `version`, different content. That is
+harmless because the loader's tier order prefers curated over cache
+(`loader.py`: "curated repo content beats auto-fetched caches"), so those copies
+never reach a board; do not "fix" them by editing the cache, and do not read a
+`detect_opening_direction` result taken directly from that tier as evidence
+(it returns `None` there — which is what made this session mis-read the shipped
+board's verdict at first).
+
+Terminal-datum inventory after this session (the vendored 5.00 mm families the
+legacy backend can pick):
+
+| footprint | datum | evidence |
+|---|---|---|
+| `CONN-TH_4P-P5.00_WJ128V-4P-5.0-14-00A` | **90°**, marker `(0, 5.27)` | reviewed this session (mesh + drawing), `_REVIEWED_OPENINGS` |
+| `CONN-TH_5P-P5.00_WJ128V-5P-5.0-14-00A` | **90°**, marker `(0, 5.27)` | same family; 5P mesh corroborates |
+| `CONN-TH_WJ126V-5.0-2P` | **180°**, marker `(-3.8, 0)` | footprint marker, `7c82a8d` (the shipped `KC-MQNE7R` J1) |
+| `CONN-TH_3P-P5.00_WJ126V-5.0-3P` | **90°**, marker `(0, 4.13)` | footprint marker, `7c82a8d` |
+| `CONN-TH_4P-P5.00_WJ126V-5.0-4P-1` | **none** | no marker in-repo, no 3D model → unmeasured, blocked at compose (honest) |
+| `CONN-TH_5P-P5.00_WJ126V-5.0-5P` | **none** | same |
+| `CONN-TH_5P-P5.00_WJ127-5.0-5P` | **none** | no marker anywhere; mesh does not register cleanly on its own outline |
+
+So the remaining terminal work is the last three rows (a reviewed family for them
+— the terminal doc's fix 2 — or a per-part drawing review), not the 2P/3P.
 
 ### C. Backend A/B — results (9 runs, $0.1501, no build, no production change)
 

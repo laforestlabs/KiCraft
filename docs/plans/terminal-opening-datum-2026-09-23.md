@@ -134,16 +134,36 @@ are re-solved: `cli_app replay` (or **Rebuild board**) with a cold
 `.experiments`. Evidence for the fix is therefore the replay of this workspace
 plus `detect_opening_direction` on the shipped footprint.
 
-Fix 2 (emit a reviewed family from the design path) is still open, and the
-live run in the same session showed why it matters: `KC-MQNE7R` shipped a board
-whose `J1` is `CONN-TH_WJ126V-5.0-2P` — the *other* vendored Kangnex family —
-with `connector_facings` reporting `status=ok, opening_board_deg=180` from a
-**heuristic guess**, not a reviewed datum (the placer and the gate share that
-detection, so a wrong guess is self-consistent and the gate cannot catch it;
-the render shows the openings off-board, so it is at least plausible here).
-Reviewing the rest of the vendored set is the next terminal task: WJ126V-2P/3P
-and WJ127-5P have meshes, but the WJ126V-2P mesh is authored **rotated 90°
-against its own footprint** (mesh y-extent 7.8 mm == the footprint's x-extent
-7.8 mm; mesh pin centres x ±2.5 against footprint pads y ±2.5) and does not
-register cleanly even after rotating it, so each needs its own registration
-check first; the WJ126V-4P/5P bundles ship no 3D model at all.
+Fix 2 (emit a reviewed family from the design path) is still open. The live run
+in the same session shipped a `KC-MQNE7R` whose `J1` is
+`CONN-TH_WJ126V-5.0-2P` — the *other* vendored Kangnex family — and it was
+correctly certified: both the repo bundle and the pinned tree's copy carry a
+`PCB Edge` marker at footprint-local `(-3.8, 0)` (→ 180°) added with the
+KC-YJ7Q69 fix `7c82a8d`, and the leaf board carries that same marker, so the
+placer and the gate read reviewed data, not a heuristic.
+
+The gap is narrower than "the vendored set": after this session the reviewed
+datums are the two WJ128V rows above, `CONN-TH_WJ126V-5.0-2P` (180°) and
+`CONN-TH_3P-P5.00_WJ126V-5.0-3P` (90°, marker `(0, 4.13)`) — and these three
+footprints stay **unmeasured** (blocked at compose, honestly, rather than
+guessed):
+
+- `CONN-TH_4P-P5.00_WJ126V-5.0-4P-1` and `CONN-TH_5P-P5.00_WJ126V-5.0-5P` — no
+  marker in-repo and no 3D model at all, so a datum needs the vendor drawing;
+- `CONN-TH_5P-P5.00_WJ127-5.0-5P` — no marker anywhere, and its mesh does not
+  register cleanly on its own outline.
+
+Two traps found while checking this, both worth knowing before the next review:
+
+1. The **home-tier fetch cache** (`~/.kicraft/parts/screw-terminal-5mm-{2p,3p}`)
+   holds older copies of those bundles with no marker (same manifest `version`,
+   different content). Harmless — the loader prefers curated over cache
+   (`loader.py`: "curated repo content beats auto-fetched caches") — but a
+   `detect_opening_direction` result taken directly from that tier is `None`
+   and is *not* evidence about what a board runs.
+2. Models may be authored rotated against their own footprint: the WJ126V-2P's
+   `.kicad_mod` declares `(rotate (xyz 0 0 270))` for its `.wrl`, so any
+   mesh-based review must apply the declared transform (my first pass did not,
+   which is why its spans looked muddled). Compare the WJ128V-4P, whose
+   footprint declares no rotation — that is why the 4P review registered on a
+   bare Y-flip.
