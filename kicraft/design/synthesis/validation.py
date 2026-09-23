@@ -16,6 +16,7 @@ import re
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from collections.abc import Callable, Iterable
 
@@ -4127,6 +4128,20 @@ def check_breakout_connectivity(intent, bom) -> CheckResult:
 _LIB_ID_RE = re.compile(r'\(lib_id\s+"([^"]+)"')
 
 
+@lru_cache(maxsize=512)
+def _symbol_pin_count(symbol: str) -> int | None:
+    """How many electrical pins a library symbol declares, or None if unresolved.
+
+    None is deliberately NOT 0: a symbol this checkout cannot resolve has not
+    been shown to be pinless, so it must not earn the exemption below."""
+    from .symbol_pinout import lookup_pins
+
+    try:
+        return len(lookup_pins(symbol)["pins"])
+    except Exception:  # noqa: BLE001 - any lookup failure means "unknown"
+        return None
+
+
 def check_connectivity(
     project_dir: Path, project_stem: str, *, board_fabricated: frozenset[str] = frozenset()
 ) -> CheckResult:
@@ -4136,12 +4151,18 @@ def check_connectivity(
     Stage-B regression (or a Stage-A pre-wiring snapshot, which is gated
     out by the caller).
 
+    Two structural exemptions, both narrower than the rule they silence:
+
     ``board_fabricated`` lists the symbols of parts the BOM marks as board-fabricated
     (``assembly=False``): a leaf built only from those — the prototyping pad field — has no
     wires by design, because its pads ARE the user's own wiring surface. The exemption
     reads the BOM's own flag, never a name or a library prefix, so a leaf that is merely
     unwired is still reported.
-    """
+
+    A leaf whose parts all declare **zero pins** (mounting holes and the like) is exempt
+    for the same reason from the other direction: a part with no pin cannot be wired, so
+    "0 wires" is that leaf's correct state rather than lost connectivity. The count comes
+    from the symbol library, so it is a property of the part, not of its name."""
     bad: list[str] = []
     root_name = f"{project_stem}.kicad_sch"
     for sch in sorted(project_dir.glob("*.kicad_sch")):
@@ -4160,6 +4181,8 @@ def check_connectivity(
             continue
         if components and all(symbol in board_fabricated for symbol in components):
             continue  # a bare board-fabricated field, wired by the user
+        if components and all(_symbol_pin_count(symbol) == 0 for symbol in components):
+            continue  # pinless mechanical parts: nothing to wire
         # Wire count (top-level only is fine — wires never appear inside
         # lib_symbols).
         wire_count = text.count("(wire")

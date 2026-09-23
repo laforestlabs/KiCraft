@@ -26,6 +26,7 @@ are; this module is display-only.
 """
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import json
 import re
@@ -378,12 +379,22 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
             act["stage"] = event.get("stage")
         failure_kind = event.get("failure_kind")
         if (status and status != "ok") or failure_kind:
+            # The cause a structured event already recorded ("BOM failed")
+            # outranks whatever the activity line holds at that moment: the last
+            # line can be a driver's raw stdout dump, which is not a cause. Only
+            # text that may be shown to a person is carried into the fact.
+            prior = act.get("failure") or {}
+            message = (human_failure_text(prior.get("message"))
+                       or human_failure_text(act.get("last_activity")))
             act["failure"] = _failure_fact(
-                kind=failure_kind,
-                stage=event.get("stage") or act.get("stage"),
-                retryable=event.get("retryable"),
-                retry_action=event.get("retry_action"),
-                message=act.get("last_activity"),
+                kind=failure_kind or prior.get("kind"),
+                stage=event.get("stage") or act.get("stage") or prior.get("stage"),
+                retryable=(prior.get("retryable") if event.get("retryable") is None
+                           else event.get("retryable")),
+                retry_action=(prior.get("retry_action")
+                              if event.get("retry_action") is None
+                              else event.get("retry_action")),
+                message=message,
             )
         act["last_activity"] = {
             "ok": "Run finished",
@@ -616,6 +627,106 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
         return act
 
     return act
+
+
+_FAILURE_SENTENCE_LIMIT = 400
+_FAILURE_TEXT_KEYS = ("errors", "offenders", "message", "error")
+# Mapping-opening character + mapping-punctuation: a dump, not a log line. A
+# bracketed sentence ("[3/5] verify: clean") is ordinary activity text.
+_DUMP_MARKERS = ("': ", '": ', "', '", '", "')
+
+
+def _mapping_text(value) -> str | None:
+    """The user-readable sentences a machine mapping carries, or None.
+
+    Pipeline stdout can print a result mapping (``{'ok': False, 'errors': [...]}``,
+    with nested ``offenders``). Those inner sentences ARE the cause; the mapping
+    is only its envelope. The first field that says something wins, and a mapping
+    that says nothing yields None."""
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        for key in _FAILURE_TEXT_KEYS:
+            if key in value:
+                text = _mapping_text(value[key])
+                if text:
+                    return text
+        return None
+    if isinstance(value, (list, tuple)):
+        sentences = [s for s in (_mapping_text(item) for item in value) if s]
+        return "; ".join(sentences) or None
+    return None
+
+
+def _parse_mapping(text: str):
+    """Parse a Python/JSON mapping repr, or None when it is not one."""
+    if not text.startswith("{"):
+        return None
+    for parse in (ast.literal_eval, json.loads):
+        try:
+            parsed = parse(text)
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _strip_arrow(text: str) -> str:
+    """Drop one leading pipeline marker ('->', '=>', '-', '=') and trim."""
+    for prefix in ("->", "=>", "-", "="):
+        if text.startswith(prefix):
+            return text[len(prefix):].strip()
+    return text
+
+
+# A driver's own status prefixes, and a Traceback: never the cause itself.
+_NOISE_PREFIXES = ("[legacy]", "[ok  ]", "[FAIL]", "[err", "[warn", "Traceback")
+# A printed value with no prose in it ("-> None"): not a sentence.
+_BARE_LITERALS = ("None", "True", "False", "null", "{}", "[]")
+
+
+def _is_dump_or_noise(body: str) -> bool:
+    """Whether a line is machine output that must never be quoted as a cause."""
+    if not body:
+        return True
+    if body in _BARE_LITERALS:
+        return True
+    if body.startswith(_NOISE_PREFIXES):
+        return True
+    if body.startswith(("{", "[")) and any(m in body for m in _DUMP_MARKERS):
+        return True
+    return False
+
+
+def human_failure_text(value) -> str | None:
+    """A user-quotable failure sentence from a run's raw text, or None.
+
+    This is the ONE place that decides whether a run's last words may be shown
+    to a person. A design driver's stdout can leave a machine repr on the
+    activity line (``-> {'ok': False, 'errors': ['9.11 net coverage: ...']}``) --
+    quoting that repr is what made a live failure read as unreadable Python. The
+    sentences inside it are lifted out instead, and a dump with nothing to say is
+    refused rather than displayed. Ordinary prose passes through unchanged, so a
+    structured statement (``Wiring failed``) is untouched."""
+    if value is None:
+        return None
+    lines = [" ".join(line.split()) for line in str(value).splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return None
+    # A mapping on any line says the most -- even inside a multi-line log block.
+    for line in lines:
+        parsed = _parse_mapping(_strip_arrow(line))
+        if parsed is not None:
+            sentences = _mapping_text(parsed)
+            if sentences:
+                return sentences[:_FAILURE_SENTENCE_LIMIT]
+    for line in lines:
+        body = _strip_arrow(line)
+        if not _is_dump_or_noise(body):
+            return body[:_FAILURE_SENTENCE_LIMIT]
+    return None
 
 
 def _failure_fact(*, kind, stage, retryable=None, retry_action=None, message=None,

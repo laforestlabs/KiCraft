@@ -1284,6 +1284,27 @@ class AccountStore:
                 (status, stem, cost_usd, dir_path, zip_path, pipeline, _utcnow_iso(),
                  project_id))
 
+    def finish_project_if_running(self, project_id: int, status: str,
+                                  stem: str | None = None,
+                                  cost_usd: float | None = None,
+                                  dir_path: str | None = None,
+                                  zip_path: str | None = None,
+                                  pipeline: str | None = None) -> bool:
+        """`finish_project`, but only while the row is still 'running'.
+
+        Returns whether the terminal write landed. A janitor (the orphan reaper)
+        may decide to close a row and then lose the race to the run's own worker,
+        which writes the REAL outcome; an unconditional UPDATE would let the
+        janitor's guess overwrite a finished result."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE projects SET status=?, project_stem=?, cost_usd=?, "
+                "dir_path=?, zip_path=?, pipeline=?, finished_at=? "
+                "WHERE id=? AND status='running'",
+                (status, stem, cost_usd, dir_path, zip_path, pipeline,
+                 _utcnow_iso(), project_id))
+            return cur.rowcount > 0
+
     def update_project_status(self, project_id: int, status: str) -> None:
         """Set just the status (e.g. 'awaiting_input' when a run parks on a
         question, or back to 'running' when it resumes). Leaves artifacts intact.

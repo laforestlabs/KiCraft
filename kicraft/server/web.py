@@ -248,6 +248,54 @@ def _finalize_orphan(job) -> None:
     _persist_project(st)
 
 
+# A live run appends to its journal (`provenance.jsonl`) continuously, so a
+# workspace untouched for this long is proof its worker is gone. The widest quiet
+# gap observed on a healthy run is under two minutes (a stage retrying between
+# state writes), so this leaves real headroom on top of the 120 s query floor.
+_ORPHAN_ACTIVITY_GRACE_S = 300.0
+
+
+def _workspace_is_producing(root: Path | None, grace_s: float) -> bool:
+    """Whether a project's workspace has been written to within `grace_s`.
+
+    The in-process registry is the primary liveness signal, but it is not the
+    only one a reaper may rely on: a run that is still producing rewrites its
+    journal/state continuously, so a workspace that went quiet is the durable
+    proof that its worker is gone. Reaping on the registry alone risks ending a
+    healthy run's row while its stages are still running."""
+    if root is None:
+        return False
+    cutoff = time.time() - grace_s
+    for candidate in (
+        root / "events.jsonl",
+        root / "provenance.jsonl",
+        root / ".kicraft" / "state.json",
+        root / ".kicraft" / "build.log",
+        root / ".kicraft" / "bom_prices.json",
+    ):
+        try:
+            if candidate.stat().st_mtime >= cutoff:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _build_target(state: dict, ws: Path) -> Path | None:
+    """The ``generated/<stem>`` directory a build should populate for an open
+    design, or None when the workspace has no committed design to build.
+
+    A design that committed its stages but never produced a board has no
+    ``generated/`` directory yet -- the BUILD creates it. Requiring one first
+    made "Rebuild board" a dead end for exactly the design that needed a first
+    build, and it is the state every legacy-owned design lands in (this tree
+    manufactures legacy designs from their committed state)."""
+    if state.get("project_dir"):
+        return Path(state["project_dir"])
+    stem = _read_project_stem(ws)
+    return (ws / "generated" / stem) if stem else None
+
+
 def _reconcile_orphan_projects() -> None:
     """Close runs lost to a web restart BEFORE they reached the build queue.
 
@@ -268,19 +316,30 @@ def _reconcile_orphan_projects() -> None:
         if p.id in _LIVE_RUNS:  # live in this process -> not an orphan
             continue
         root = _project_root_for(p, p.id)
+        if _workspace_is_producing(root, _ORPHAN_ACTIVITY_GRACE_S):
+            continue  # still writing: its worker is alive, whatever the registry says
         stem = (_project_signals(root)["stem"] if root is not None else None) \
             or p.project_stem
         dir_path = str(root) if root is not None else p.dir_path
         state: dict = {"project_id": p.id, "user_id": p.user_id,
                        "brief": p.brief or "", "events": [], "dir_path": dir_path,
                        "stem": stem}
-        _record_reconciliation(
-            state, status="interrupted",
-            message="The run was interrupted before it reached the board build.")
-        store.finish_project(
+        # Conditional: the run's own worker may have written its real outcome
+        # between the query above and this write. A janitor must never overwrite
+        # a terminal result with its own guess.
+        landed = store.finish_project_if_running(
             p.id, "interrupted", cost_usd=_project_spend_usd(p.id), stem=stem,
             dir_path=dir_path,
             pipeline=(pipeline.project_pipeline(dir_path) if dir_path else p.pipeline))
+        if not landed:
+            continue
+        # Only journal the reconciliation for a row this sweep actually closed:
+        # an event describing a write that did not land would be a phantom cause.
+        _record_reconciliation(
+            state, status="interrupted",
+            message="The run was interrupted before it reached the board build.")
+        print(f"[reap] project {p.id} marked interrupted: no live run in this "
+              f"process and its workspace is idle", flush=True)
 
 
 def _orphan_reaper() -> None:
@@ -2355,13 +2414,117 @@ _EMPTY_SIGNALS: dict = {
     "state": {}, "stem": None, "generated": None, "sheets": False, "pcb": False,
     "checks_failed": False, "synth_failures": [], "zip_ok": False, "history": False,
     "build_warnings": [], "pcb_errors": [], "review_findings": [],
-    "stage_status": {}, "state_mtime": None,
+    "stage_status": {}, "state_mtime": None, "attempt_outcome": {},
 }
 
 # Disk-derived readings keyed by project root: the My-projects list polls every
 # 2 s, so re-reading state.json and globbing generated/ per row per poll would be
 # pure waste. The cache key is a signature of the files a presentation reads.
 _DISK_SIGNALS: dict[str, tuple[tuple, dict]] = {}
+
+
+_GATE_ID_RE = re.compile(r"\b9\.\d+\b")
+
+
+def _gate_cause(text) -> str | None:
+    """The failure sentence a driver's output line is allowed to supply, or None.
+
+    Design gates identify themselves by number ("9.11 net coverage: ..."), so a
+    durable cause is quoted only when the line carries one. Drivers also print
+    ordinary prose ("native design: keeping post-wiring authorship ...") that
+    describes what the pipeline is DOING, and reporting that as the reason a run
+    stopped is worse than reporting nothing."""
+    sentence = _activity.human_failure_text(text)
+    return sentence if sentence and _GATE_ID_RE.search(sentence) else None
+
+
+def _read_event_tail(path: Path, limit_bytes: int = 65536) -> list[dict]:
+    """The parseable tail of an event transcript, bounded.
+
+    Only the end of the file is needed (a run's terminal record is its last
+    event) and a project's transcript can be tens of MB, so the read is capped to
+    the last few dozen events -- enough for a terminal `run_finished`, the
+    `stage_done` before it and the driver's output line -- and the first
+    (possibly partial) line is dropped. This runs on a cache miss while a run is
+    live, so the bound is what keeps the poll cheap."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - limit_bytes))
+            chunk = f.read()
+    except OSError:
+        return []
+    lines = chunk.decode("utf-8", "replace").splitlines()
+    if size > limit_bytes and lines:
+        lines = lines[1:]
+    out: list[dict] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            out.append(event)
+    return out
+
+
+def _durable_attempt_outcome(root: Path | None) -> dict:
+    """What a project's durable transcript says its newest attempt ended on.
+
+    A reopened project has no live activity, and its `state.json` is not enough:
+    a legacy run records no entry for a stage that failed to commit, so the row
+    reads as "stopped during BOM" with "no detailed cause was saved" while the
+    project's own transcript names the failing stage and the offending net. This
+    returns the terminal `run_finished` (stage + kind) plus the most specific
+    cause the attempt left -- the human sentences inside the driver's last output
+    line, else the failing stage's own statement. Empty when the newest attempt
+    has not ended."""
+    if root is None:
+        return {}
+    events = _read_event_tail(root / "events.jsonl")
+    if not events:
+        return {}
+    outcome: dict = {}
+    cause_text: str | None = None
+    stage_statement: str | None = None
+    for event in events:
+        kind = event.get("kind")
+        if kind == "run_started":
+            outcome, cause_text, stage_statement = {}, None, None
+        elif kind == "stage_done" and event.get("ok") is False:
+            stage_statement = f"{_activity.stage_label(event.get('stage')) or 'Stage'} failed"
+        elif kind == "build_log":
+            text = _gate_cause(event.get("text"))
+            if text:
+                cause_text = text
+        elif kind == "run_finished":
+            outcome = {
+                "stage": event.get("stage"),
+                "status": str(event.get("status") or ""),
+                "failure_kind": event.get("failure_kind"),
+                "retryable": event.get("retryable"),
+                "retry_action": event.get("retry_action"),
+            }
+    if outcome.get("status") not in ("failed", "interrupted"):
+        return {}
+    message = cause_text or stage_statement
+    if not message:
+        return {}
+    stage = outcome.get("stage")
+    return {
+        "stage": stage,
+        "failure": {
+            "kind": outcome.get("failure_kind") or "stage_failed",
+            "stage": stage,
+            "retryable": bool(outcome.get("retryable")),
+            "retry_action": outcome.get("retry_action"),
+            "message": message,
+        },
+    }
 
 
 def _project_signals(root: Path | None) -> dict:
@@ -2413,6 +2576,9 @@ def _project_signals(root: Path | None) -> dict:
             sj.get("review_findings") or artifacts.get("review_findings") or []),
         "stage_status": sj.get("stage_status") or {},
         "state_mtime": sig[0],
+        # Why the newest attempt ended, from its own transcript: the only durable
+        # statement of a stage that never committed (see _durable_attempt_outcome).
+        "attempt_outcome": _durable_attempt_outcome(root),
     }
     _DISK_SIGNALS[key] = (sig, info)
     return info
@@ -2595,7 +2761,24 @@ def _relevant_stage(derived: dict, act: dict, *, failing: bool = False) -> str |
     return None
 
 
-def _headline_for(status: str, stage: str | None, act: dict) -> str:
+# The activity reducer's own terminal markers (activity.reduce_activity): they say
+# THAT a run ended, never why, so they are not a cause for the detail line.
+_GENERIC_TERMINAL_LINES = ("Run stopped", "Run was interrupted", "Run finished")
+
+
+def _is_bare_stage_statement(text) -> bool:
+    """Whether the text is just ``<Stage> failed``: it names the stage but says
+    nothing about why, so a specific recorded offender should outrank it."""
+    body = str(text or "").strip()
+    if not body:
+        return True
+    if body == "Stage failed":
+        return True
+    return any(body == f"{_activity.stage_label(stage)} failed"
+               for stage in _activity.stage_order())
+
+
+def _headline_for(status: str, stage: str | None, act: dict, issues=()) -> str:
     """The one-line statement of what is happening / what happened."""
     label = _activity.stage_label(stage)
     if status in ("running", "starting"):
@@ -2616,6 +2799,12 @@ def _headline_for(status: str, stage: str | None, act: dict) -> str:
         failure = act.get("failure") or {}
         if failure.get("message"):
             return str(failure["message"])
+        # No statement of its own: the concrete finding names the cause far better
+        # than "this stage did not complete" does.
+        concrete = _first_evidence_issue([i for i in issues or ()
+                                          if i.get("severity") == "error"])
+        if concrete and concrete != f"Build stopped during {label}":
+            return concrete
         return f"Build stopped during {label}" if label else "The run stopped"
     if status == "interrupted":
         return "Run was interrupted"
@@ -2633,7 +2822,13 @@ def _plan_from(status: str, derived: dict, signals: dict) -> str | None:
     action there is to start over from the brief."""
     recoverable = bool(signals.get("state")) or bool(signals.get("generated")) \
         or bool(signals.get("zip_ok")) or bool(signals.get("history"))
-    design_left = any(derived.get(key) == "pending" for key in DESIGN_STAGES)
+    # A design stage that FAILED -- or one still parked on an unanswered question
+    # -- is design work still owed: re-driving it is the one action that can
+    # finish the design. Counting only never-started stages made the LAST stage
+    # (wiring) failing read as "design finished", which offered Rebuild board for
+    # a design that was never committed to be built.
+    design_left = any(derived.get(key) in ("pending", "failed", "parked")
+                      for key in DESIGN_STAGES)
     if status == "awaiting_input":
         return "answer"
     if status in ("complete", "complete_with_warnings"):
@@ -2689,6 +2884,29 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
         (live.get("activity") if live else None) or {})
     if not isinstance(act, dict):
         act = {}
+    # A stopped run's cause must survive two degradations: a driver's raw stdout
+    # dump on the activity line, and a reopened project whose live activity is
+    # gone while its transcript still names the failing stage. The durable
+    # reading fills what the live one lacks, and only text a person may be shown
+    # is carried into the headline, the detail, and the announcement.
+    act = dict(act)
+    durable = sig.get("attempt_outcome") or {}
+    if durable:
+        if not act.get("stage") and durable.get("stage"):
+            act["stage"] = durable["stage"]
+        durable_failure = durable.get("failure") or {}
+        if not (act.get("failure") or {}).get("message") and durable_failure:
+            act["failure"] = durable_failure
+        elif durable_failure.get("message") and _is_bare_stage_statement(
+                (act.get("failure") or {}).get("message")):
+            # "BOM failed" says WHICH stage stopped, not which rule refused it:
+            # the offender sentence the transcript recorded is the actionable one.
+            act["failure"] = {**act["failure"], "message": durable_failure["message"]}
+    failure = dict(act.get("failure") or {})
+    if failure:
+        failure["message"] = _activity.human_failure_text(failure.get("message"))
+        act["failure"] = failure
+    act["last_activity"] = _activity.human_failure_text(act.get("last_activity"))
     live_running = bool(live and live.get("running"))
     live_parked = bool(live and live.get("awaiting_input"))
     live_failed = bool(live and live.get("ok") is False and live.get("done"))
@@ -2703,6 +2921,8 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
 
     status = db_status
     detail = act.get("last_activity") or ""
+    if detail in _GENERIC_TERMINAL_LINES:
+        detail = ""  # a terminal marker is not a cause: fall through to the finding
     issues = _merge_issues(_durable_issues(sig, derived), act.get("issues") or [])
     last_event_at = act.get("last_event_at")
     stage = act.get("stage")
@@ -2779,7 +2999,7 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
     if not detail:
         detail = queue_note
 
-    headline = _headline_for(status, stage, act)
+    headline = _headline_for(status, stage, act, issues)
     action = _plan_from(status, derived, sig)
 
     if status in ("complete", "complete_with_warnings"):
@@ -3276,6 +3496,13 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
         # Advisory post-wiring review/repair and silkscreen authoring run through
         # the same lifecycle as batch self-evaluation. They intentionally remain
         # fail-soft: neither a review nor a cosmetic plan can fulfill a delivery.
+        # The native design tree owns the post-wiring SCHEMA, so this tree skips
+        # that authorship step for its workspaces -- but it never skips the build:
+        # manufacturing is this tree's job for every backend, and _drive_build_queue
+        # routes a legacy workspace through the isolated-snapshot runner. Returning
+        # here instead (as this branch used to) left every fully committed legacy
+        # design with no board and an "interrupted" verdict.
+        pending_post_wiring_result: dict | None = None
         if not current_owns_design:
             progress(
                 {
@@ -3284,51 +3511,50 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
                     "current manufacturing will build an isolated snapshot\n",
                 }
             )
-            return
-        pending_post_wiring_result: dict | None = None
-        try:
-            from kicraft.design.cli_app import run_post_wiring_lifecycle
+        else:
+            try:
+                from kicraft.design.cli_app import run_post_wiring_lifecycle
 
-            def _rewire(instr: str) -> None:
-                nonlocal pending_post_wiring_result
-                rr = run_session(
+                def _rewire(instr: str) -> None:
+                    nonlocal pending_post_wiring_result
+                    rr = run_session(
+                        ws,
+                        state.get("brief", ""),
+                        ["wiring"],
+                        instruction=instr,
+                        progress=progress,
+                        run_id=run_id,
+                        auto_default_questions=auto_default_questions,
+                    )
+                    if rr.get("guard"):
+                        state["spend"] = _project_spend_usd(state.get("project_id"))
+                    if rr.get("status") == "awaiting_input":
+                        pending_post_wiring_result = rr
+                        raise _AwaitingInputDuringLifecycle(rr)
+
+                board_code = None
+                if pid:
+                    try:
+                        proj = _store().get_project(pid)
+                        board_code = getattr(proj, "board_code", None)
+                    except Exception:  # noqa: BLE001
+                        board_code = None
+                state["post_wiring_lifecycle"] = run_post_wiring_lifecycle(
+                    ws / ".kicraft" / "state.json",
                     ws,
-                    state.get("brief", ""),
-                    ["wiring"],
-                    instruction=instr,
-                    progress=progress,
+                    progress,
+                    _rewire,
+                    board_code=board_code,
                     run_id=run_id,
-                    auto_default_questions=auto_default_questions,
+                    execution_mode="web",
                 )
-                if rr.get("guard"):
-                    state["spend"] = _project_spend_usd(state.get("project_id"))
-                if rr.get("status") == "awaiting_input":
-                    pending_post_wiring_result = rr
-                    raise _AwaitingInputDuringLifecycle(rr)
-
-            board_code = None
-            if pid:
-                try:
-                    proj = _store().get_project(pid)
-                    board_code = getattr(proj, "board_code", None)
-                except Exception:  # noqa: BLE001
-                    board_code = None
-            state["post_wiring_lifecycle"] = run_post_wiring_lifecycle(
-                ws / ".kicraft" / "state.json",
-                ws,
-                progress,
-                _rewire,
-                board_code=board_code,
-                run_id=run_id,
-                execution_mode="web",
-            )
-        except _AwaitingInputDuringLifecycle as pause:
-            pending_post_wiring_result = pause.result
-        except Exception:  # noqa: BLE001
-            pass  # advisory lifecycle must never block a sound build
-        if pending_post_wiring_result is not None:
-            _adopt_awaiting_input(pending_post_wiring_result)
-            return
+            except _AwaitingInputDuringLifecycle as pause:
+                pending_post_wiring_result = pause.result
+            except Exception:  # noqa: BLE001
+                pass  # advisory lifecycle must never block a sound build
+            if pending_post_wiring_result is not None:
+                _adopt_awaiting_input(pending_post_wiring_result)
+                return
 
         # Deterministic (zero-LLM) build: synthesize -> place -> route -> verify ->
         # fab. `build` re-runs synthesize first, so the schematic appears as soon
@@ -6833,8 +7059,20 @@ def index(prompt: str = "", project: str = ""):
                 ui.notify("A run is already in progress.", color="warning")
                 return
             _ensure_workspace(state)  # rehydrate the durable project before the build enqueue
-            if not state.get("ws") or not state.get("project_dir"):
+            ws_dir = state.get("ws")
+            if not ws_dir:
+                ui.notify("No open design.", color="warning")
                 return
+            target = _build_target(state, Path(ws_dir))
+            if target is None:
+                ui.notify("This design has no committed schematic to build yet. "
+                          "Finish the design stages first (Continue design).",
+                          color="warning")
+                return
+            if not state.get("project_dir"):
+                state["stem"] = target.name
+                state["project_dir"] = str(target)
+                state["token"] = _register_project_dir(target)
             state.update(running=True, done=False, ok=None, status=None)
             status.text = message
             design_btn.disable()
@@ -7066,8 +7304,11 @@ def index(prompt: str = "", project: str = ""):
             summary_age.text = "  ·  ".join(
                 part for part in (elapsed, f"updated {age}" if age else "") if part)
             summary_headline.text = pres["headline"]
-            summary_detail.text = pres["detail"]
-            summary_detail.set_visibility(bool(pres["detail"]))
+            # The detail earns its line only when it adds something: repeating the
+            # headline (a failure's own cause often IS both) prints noise.
+            repeats = not pres["detail"] or pres["detail"] == pres["headline"]
+            summary_detail.text = "" if repeats else pres["detail"]
+            summary_detail.set_visibility(not repeats)
             # The page's status line is the same shared headline, so no surface
             # can claim something the artifacts do not support.
             status.text = pres["headline"]
@@ -7106,13 +7347,20 @@ def index(prompt: str = "", project: str = ""):
                         _render_section(issues_section(issues, on_view=_view_stage),
                                         "#94a3b8")
             summary_live.text = f"{pres['title']}: {pres['headline']}"
-            # Announce a terminal failure or an outstanding question ONCE.
+            # Announce a terminal failure or an outstanding question ONCE, in the
+            # same words the visible card uses -- never a raw internal dump, and
+            # never a stale sentence from the previous attempt (a cleared alert
+            # lets the next failure announce itself).
             alert = ""
             if pres["status"] == "failed":
                 alert = f"Design stopped: {pres['headline']}"
             elif pres["status"] == "awaiting_input":
                 alert = "The design needs your answer to continue."
-            if alert and view.get("announced_alert") != alert:
+            if not alert:
+                view["announced_alert"] = None
+                if summary_alert.text:
+                    summary_alert.text = ""  # a live run must not leave a stale cause on screen
+            elif view.get("announced_alert") != alert:
                 view["announced_alert"] = alert
                 summary_alert.text = alert
             summary_brief.text = state.get("brief") or ""

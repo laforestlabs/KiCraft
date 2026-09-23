@@ -2314,6 +2314,47 @@ def test_typed_led_guard_does_not_reverse_negative_rail_indicator():
     assert check_typed_led_current_paths(architecture, bom).ok
 
 
+def test_pinless_mechanical_leaf_is_not_an_unwired_sheet(tmp_path: Path) -> None:
+    """§9.9 exempts a leaf whose parts declare no pins at all.
+
+    A mounting-hole sheet has no nets to carry, so "0 wires" is its correct state —
+    flagging it stopped every design whose mechanical sheet was drawn properly. The
+    exemption is read from the symbol library (a property of the part), never from a
+    name or a library prefix."""
+    from kicraft.design.synthesis.validation import check_connectivity
+
+    stem = "MECH"
+    (tmp_path / f"{stem}.kicad_sch").write_text("(kicad_sch (version 20250114) (lib_symbols))\n")
+    holes = "".join(
+        '\t(symbol (lib_id "Mechanical:MountingHole") (at 10 10 0)\n'
+        f'\t\t(uuid "0000000{i}-0000-0000-0000-000000000000")\n'
+        f'\t\t(property "Reference" "H{i}" (at 0 0 0))\n'
+        "\t)\n"
+        for i in range(1, 4)
+    )
+    (tmp_path / "PCB_MECHANICAL.kicad_sch").write_text(
+        f"(kicad_sch (version 20250114) (lib_symbols)\n{holes})\n"
+    )
+
+    assert check_connectivity(tmp_path, stem).ok, \
+        "a mounting-hole sheet cannot be wired and must not be reported as lost"
+
+    # A genuinely lost leaf on the same board is still reported.
+    (tmp_path / "LOST.kicad_sch").write_text(
+        "(kicad_sch (version 20250114) (lib_symbols)\n"
+        '\t(symbol (lib_id "Device:R") (at 10 10 0)\n'
+        '\t\t(uuid "99999999-0000-0000-0000-000000000001")\n'
+        '\t\t(property "Reference" "R1" (at 0 0 0))\n\t)\n'
+        '\t(symbol (lib_id "Device:C") (at 20 10 0)\n'
+        '\t\t(uuid "99999999-0000-0000-0000-000000000002")\n'
+        '\t\t(property "Reference" "C1" (at 0 0 0))\n\t)\n'
+        ")\n"
+    )
+    result = check_connectivity(tmp_path, stem)
+    assert not result.ok
+    assert len(result.offenders) == 1 and "LOST.kicad_sch" in result.offenders[0]
+
+
 def test_board_fabricated_leaf_is_not_an_unwired_sheet(tmp_path: Path) -> None:
     """§9.9 exempts a leaf built only from board-fabricated parts.
 

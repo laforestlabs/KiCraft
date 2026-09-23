@@ -131,6 +131,43 @@ def test_failed_manufacturing_publishes_artifact_diagnostics_and_rc(tmp_path, mo
     assert published["budget"] == original["budget"]
 
 
+def test_build_synthesizes_with_current_manufacturing(tmp_path, monkeypatch):
+    """`build` compiles the snapshot with THIS tree, not the pinned one.
+
+    One design's manufacture must validate with one check set. Compiling a legacy
+    snapshot in the pinned tree ran bc6a2f8's older synthesis gates on a design the
+    current tree had just accepted -- its §9.9 has no pinless-part exemption, so a
+    correct mounting-hole sheet failed and NO legacy design could ever reach
+    placement (KC-CG58R4, 2026-09-23)."""
+    import sys
+
+    from kicraft.server import pipeline
+
+    state_path = tmp_path / "state.json"
+    _write(state_path, _canonical_state())
+    seen: dict = {}
+
+    class _Completed:
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        seen["cwd"] = kwargs.get("cwd")
+        _persist_current_manufacturing_state(Path(argv[4]), _current_artifacts())
+        return _Completed()
+
+    monkeypatch.setattr(native_build_runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_app, "main", lambda argv: 0)
+
+    assert native_build_runner.main(
+        ["build", str(state_path), "generated", "--quality", "good"]) == 0
+
+    assert seen["argv"][0] == sys.executable, "synthesis must run on this tree's interpreter"
+    assert "kicraft.design.cli_app" in seen["argv"]
+    assert str(pipeline.legacy_root()) not in seen["argv"][0]
+    assert not str(seen["cwd"]).startswith(str(pipeline.legacy_root()))
+
+
 def test_concurrent_native_edit_is_never_overwritten(tmp_path, monkeypatch):
     state_path = tmp_path / "state.json"
     original = _canonical_state()

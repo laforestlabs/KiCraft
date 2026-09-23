@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import sqlite3
 import time
 
@@ -191,6 +192,51 @@ def test_reconcile_leaves_live_recent_and_build_stage_runs(store, user_id, live_
     assert store.get_project(live).status == "running"
     assert store.get_project(recent).status == "running"
     assert store.get_project(build_stage).status == "running"
+
+
+def test_reconcile_leaves_a_run_that_is_still_producing(store, user_id, live_runs):
+    """A run missing from the in-process registry is not proof it is dead: while
+    its workspace is still being written, its row must stay 'running'. Reaping it
+    ends a healthy design's row mid-flight (and hands the slot back while the run
+    keeps spending)."""
+    pid = store.create_project(user_id, "still writing")
+    _backdate_secs(store, pid, 600)
+    root = store.projects_dir / str(user_id) / str(pid)
+    (root / ".kicraft").mkdir(parents=True, exist_ok=True)
+    (root / ".kicraft" / "state.json").write_text("{}")
+    (root / "provenance.jsonl").write_text("{}\n")  # just written: the live journal
+
+    web._reconcile_orphan_projects()
+
+    assert store.get_project(pid).status == "running"
+
+
+def test_reconcile_closes_a_run_whose_workspace_went_quiet(store, user_id, live_runs):
+    """The complement: the same row IS reaped once its journal has been silent
+    past the activity grace, so a genuinely lost run still frees its slot."""
+    pid = store.create_project(user_id, "lost to a restart")
+    _backdate_secs(store, pid, 600)
+    root = store.projects_dir / str(user_id) / str(pid)
+    (root / ".kicraft").mkdir(parents=True, exist_ok=True)
+    (root / "provenance.jsonl").write_text("{}\n")
+    quiet = time.time() - web._ORPHAN_ACTIVITY_GRACE_S - 60
+    os.utime(root / "provenance.jsonl", (quiet, quiet))
+
+    web._reconcile_orphan_projects()
+
+    assert store.get_project(pid).status == "interrupted"
+
+
+def test_reconcile_never_overwrites_a_terminal_outcome(store, user_id, live_runs):
+    """The janitor loses the race to the run's own worker: the terminal write is
+    conditional, so a finished result is never replaced by a guess."""
+    pid = store.create_project(user_id, "finished while the sweep ran")
+    store.finish_project(pid, "ok", stem="BANK", dir_path="/tmp/bank")
+
+    landed = store.finish_project_if_running(pid, "interrupted")
+
+    assert landed is False
+    assert store.get_project(pid).status == "ok"
 
 
 # ---- project presentation (web._project_presentation) ------------------------
@@ -486,6 +532,52 @@ def test_recovery_question_stops_manufacturing(tmp_path, live_runs, monkeypatch,
     assert state["ok"] is None
     assert builds == (["build"] if path == "erc" else [])
     assert all(call["auto_default_questions"] is False for call in calls)
+
+
+def test_legacy_design_still_reaches_the_build(tmp_path, live_runs, monkeypatch):
+    """A legacy-owned workspace must still be MANUFACTURED here.
+
+    The post-wiring authorship step belongs to the native tree, so this tree skips
+    it for legacy designs -- but it used to `return` there, before the build. Every
+    fully committed legacy design then ended with no board and an 'interrupted'
+    verdict (state["ok"] left unset), which is what the live Surprise-me walkthrough
+    hit after all five stages had committed."""
+    (tmp_path / ".kicraft").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".kicraft" / "pipeline.json").write_text(
+        json.dumps({"pipeline": "legacy", "legacy_commit": "bc6a2f8"}))
+    state = web._fresh_run_state()
+    state.update(project_id=11, user_id=1, ws=str(tmp_path))
+    builds = []
+
+    monkeypatch.setattr(web, "run_session",
+                        lambda ws, brief, stages, **kw: {"status": "ok"})
+    monkeypatch.setattr(web, "_drive_build_queue",
+                        lambda *a, **kw: builds.append("build") or 0)
+    monkeypatch.setattr(web, "_persist_project", lambda st: None)
+
+    web._run_design(state, ["intent"])
+
+    assert builds == ["build"], "a committed legacy design was never built"
+    assert state["ok"] is False, \
+        "the run must reach a real verdict, not fall through with ok unset"
+
+
+def test_build_target_derives_the_first_build_from_a_committed_design(tmp_path):
+    """The generated/ directory belongs to the BUILD: a design that committed its
+    stages but never built has none yet, and demanding one first made the only
+    offered action a no-op."""
+    (tmp_path / ".kicraft").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".kicraft" / "state.json").write_text(
+        json.dumps({"project_stem": "COMMITTED_BOARD"}))
+
+    target = web._build_target({}, tmp_path)
+    assert target == tmp_path / "generated" / "COMMITTED_BOARD"
+    assert not target.exists(), "resolving a target never creates the directory"
+
+    existing = tmp_path / "generated" / "OLDER"
+    assert web._build_target({"project_dir": str(existing)}, tmp_path) == existing
+    assert web._build_target({}, tmp_path / "empty") is None, \
+        "no committed design -> nothing to build"
 
 
 # ---- BOM price fetch actually starts (dead-thread regression) -----------------

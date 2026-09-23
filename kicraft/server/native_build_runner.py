@@ -91,14 +91,23 @@ def _publish_snapshot_artifacts(
 
 
 def _synthesize_native(snapshot_path: Path, out_dir: Path) -> int:
-    """Compile against the symbol library that validated the native design."""
-    from kicraft.cli.artifact_paths import provenance_path
-    from kicraft.server.pipeline import legacy_python, legacy_root
+    """Compile the snapshot into a schematic with CURRENT manufacturing.
 
-    root = legacy_root()
+    One design's manufacture must validate with one library, and manufacturing is
+    this tree's job for every backend (see pipeline.build_command). Compiling the
+    snapshot with the PINNED tree instead ran its older check set on a design the
+    current tree had just accepted: bc6a2f8's §9.9 has no pinless-part exemption,
+    so a correct mounting-hole sheet failed synthesis outright and no legacy
+    design could ever reach placement (2026-09-23, KC-CG58R4: "9.9 connectivity:
+    PCB_MECHANICAL.kicad_sch: 4 components, 0 wires, 0 power symbols" -- the same
+    snapshot synthesizes clean here, ERC included). The snapshot still isolates
+    the canonical state schema; only the interpreter and the check set change."""
+    from kicraft.cli.artifact_paths import provenance_path
+
+    repo_root = Path(__file__).resolve().parents[2]
     completed = subprocess.run(
         [
-            str(legacy_python(root)),
+            sys.executable,
             "-m",
             "kicraft.design.cli_app",
             "synthesize",
@@ -106,8 +115,8 @@ def _synthesize_native(snapshot_path: Path, out_dir: Path) -> int:
             str(out_dir.resolve()),
             "--no-archive",
         ],
-        cwd=root,
-        env={**os.environ, "PYTHONPATH": str(root)},
+        cwd=str(repo_root),
+        env={**os.environ, "PYTHONPATH": str(repo_root)},
     )
     if completed.returncode:
         return completed.returncode
