@@ -9,9 +9,15 @@ brief asked for.
 """
 from __future__ import annotations
 
+import pytest
+
 from kicraft.design.models import Architecture, FunctionalSpec
 from kicraft.design.synthesis.validation import check_every_block_has_sheet
-from kicraft.server.stage_contracts import _derive_intent_payload, _normalize_stage_response
+from kicraft.server.stage_contracts import (
+    StageSchemaError,
+    _derive_intent_payload,
+    _normalize_stage_response,
+)
 
 _PROTOTYPING_AREA_OBLIGATION = {
     "kind": "fabrication",
@@ -79,3 +85,70 @@ def test_architecture_normalization_hands_the_committed_spec_to_the_derivation()
         "architecture", _intent_shaped_slot(), {"intent": _intent_shaped_slot()}
     )
     assert _prototyping_requirement(without_spec).functional_blocks == []
+
+
+def test_ordinary_question_options_are_normalized_and_require_two_choices():
+    payload, _expanded = _normalize_stage_response(
+        "intent",
+        {
+            "questions": [
+                {
+                    "text": "Which enclosure style should the board use?",
+                    "stage": "intent",
+                    "options": [
+                        "  Use the compact enclosure  ",
+                        "Use the larger enclosure",
+                        "Use the compact enclosure",
+                        "Use a panel-mount enclosure",
+                        "Use a custom enclosure",
+                        "Ignored after the fourth choice",
+                    ],
+                }
+            ]
+        },
+        {},
+    )
+
+    assert payload["questions"][0]["options"] == [
+        "Use the compact enclosure",
+        "Use the larger enclosure",
+        "Use a panel-mount enclosure",
+        "Use a custom enclosure",
+    ]
+
+    with pytest.raises(
+        StageSchemaError,
+        match="Clarification questions require at least two distinct options.",
+    ):
+        _normalize_stage_response(
+            "intent",
+            {
+                "questions": [
+                    {
+                        "text": "Which enclosure style should the board use?",
+                        "stage": "intent",
+                        "options": ["Only one choice"],
+                    }
+                ]
+            },
+            {},
+        )
+
+
+def test_bom_reconciliation_question_does_not_require_user_options():
+    payload, _expanded = _normalize_stage_response(
+        "wiring",
+        {
+            "questions": [
+                {
+                    "text": "Add the required decoupling capacitor.",
+                    "stage": "wiring",
+                    "reconcile_target": "bom",
+                    "options": [],
+                }
+            ]
+        },
+        {},
+    )
+
+    assert payload["questions"][0]["options"] == []

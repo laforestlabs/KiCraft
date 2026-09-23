@@ -932,6 +932,19 @@ def test_migration_adds_project_columns_to_legacy_db(tmp_path):
     assert free_proj.view_count == 0 and free_proj.quality is None  # defaults backfilled
     reopened = AccountStore(db, tmp_path / "projects")  # idempotent
     assert reopened.list_projects(2)[0].is_public is False
+    assert reopened.list_projects(1)[0].brief == "free board"
+    assert reopened.list_projects(1)[0].auto_default_questions is True
+    assert reopened.list_projects(2)[0].auto_default_questions is True
+
+
+def test_interactive_project_policy_survives_reopen(store):
+    user = store.create_user("questions@e.st", "pw")
+    pid = store.create_project(user.id, "interactive board", auto_default_questions=False)
+    store.update_project_status(pid, "awaiting_input")
+    reopened = AccountStore(store.path, store.projects_dir)
+    project = reopened.get_project(pid)
+    assert project.auto_default_questions is False
+    assert project.status == "awaiting_input"
 
 
 def test_delete_user_purges_likes_and_keeps_others(store):

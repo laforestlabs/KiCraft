@@ -277,6 +277,7 @@ class Project:
     # Which design pipeline built this board: 'current' or 'legacy'. Recorded on the row so a
     # pipeline swap is never invisible (design-yield-recovery plan option 3, decision D2).
     pipeline: str | None = None
+    auto_default_questions: bool = True
 
 
 @dataclass
@@ -700,6 +701,9 @@ class AccountStore:
         Idempotent: a re-open finds the column present and skips the whole block.
         """
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(projects)")}
+        if "auto_default_questions" not in cols:
+            conn.execute(
+                "ALTER TABLE projects ADD COLUMN auto_default_questions INTEGER NOT NULL DEFAULT 1")
         if "is_public" not in cols:
             conn.execute(
                 "ALTER TABLE projects ADD COLUMN is_public INTEGER NOT NULL DEFAULT 1")
@@ -1236,13 +1240,15 @@ class AccountStore:
                        cost_usd=row["cost_usd"], dir_path=row["dir_path"],
                        zip_path=row["zip_path"], viewed_at=row["viewed_at"],
                        is_public=bool(row["is_public"]),
+                       auto_default_questions=bool(row["auto_default_questions"]),
                        cloned_from_id=row["cloned_from_id"],
                        view_count=row["view_count"], clone_count=row["clone_count"],
                        like_count=row["like_count"], quality=row["quality"],
                        board_code=row["board_code"], pipeline=row["pipeline"])
 
     def create_project(self, user_id: int, brief: str, *,
-                       is_public: bool | None = None) -> int:
+                       is_public: bool | None = None,
+                       auto_default_questions: bool = True) -> int:
         """Reserve a project row at status 'running' (consumes a quota slot).
 
         Visibility follows the owner's tier when not given explicitly: free users'
@@ -1260,9 +1266,9 @@ class AccountStore:
                 try:
                     cur = conn.execute(
                         "INSERT INTO projects (user_id, brief, status, created_at, "
-                        "is_public, board_code) VALUES (?, ?, 'running', ?, ?, ?)",
+                        "is_public, board_code, auto_default_questions) VALUES (?, ?, 'running', ?, ?, ?, ?)",
                         (user_id, brief, _utcnow_iso(), 1 if is_public else 0,
-                         new_board_code()))
+                         new_board_code(), int(auto_default_questions)))
                     return int(cur.lastrowid)
                 except sqlite3.IntegrityError:
                     continue

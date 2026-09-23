@@ -38,6 +38,7 @@ def drive_chain(
     run_id=None,
     core_defaults=None,
     attempt_observer=None,
+    auto_default_questions: bool | None = None,
 ):
     ws = Path(workspace)
     (ws / ".kicraft").mkdir(parents=True, exist_ok=True)
@@ -68,6 +69,7 @@ def drive_chain(
             meta_ctx=base_ctx,
             core_defaults=core_defaults,
             attempt_observer=attempt_observer,
+            auto_default_questions=auto_default_questions,
         )
         results.append(r)
         if on_stage:

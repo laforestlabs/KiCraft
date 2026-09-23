@@ -15,6 +15,26 @@ KiCraft is a multi-layer pipeline. Top-down:
    and fab export are Python CLIs. See [KiCraft](#kicraft-chat--kicad-files).
 2. **placement + routing + scoring** (Python, this repo) -- everything below.
 
+## Web clarification policy
+
+The board composer places **Auto default questions?** below the brief, checked
+by default. Uncheck it to answer design ambiguities yourself. The choice belongs
+to the project: reopening, answering, recovery re-drives, and cloning retain it;
+**New design** resets it to checked.
+
+Interactive questions offer ordered choices with the first labeled
+**Recommended default**, plus a freeform answer field. Recommendations are not
+preselected: every blocking question needs an answer before continuing. Older
+saved questions without recorded choices remain answerable as freeform text.
+Automatic handling does not waive electrical gates or invent missing physical
+requirements; unresolved internal BOM repair fails rather than asking the user
+to choose a fabricated recommendation.
+
+Stage tabs reflect streamed native/current stage events while the run is active:
+amber for active or parked, green for complete, red for failure, and yellow for
+warning. Icons and accessible status names distinguish states independently of
+color, including on mobile.
+
 ## Installation
 
 ```bash

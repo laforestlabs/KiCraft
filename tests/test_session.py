@@ -204,6 +204,31 @@ def test_run_session_defaults_direct_question_without_parking(tmp_path):
     assert state["stage_status"]["intent"]["ok"] is True
 
 
+def test_run_session_preserves_explicit_interactive_question_policy(tmp_path):
+    question = json.dumps(
+        {
+            "questions": [
+                {
+                    "text": "Which battery chemistry?",
+                    "options": ["LiPo", "Alkaline"],
+                    "blocking": True,
+                }
+            ]
+        }
+    )
+
+    result = run_session(
+        tmp_path,
+        "a USB-powered LED",
+        ["intent"],
+        client=_FakeClient([question]),
+        auto_default_questions=False,
+    )
+
+    assert result["status"] == "awaiting_input"
+    assert result["questions"][0]["options"] == ["LiPo", "Alkaline"]
+
+
 # ---- derive_stage_statuses: electrical_review tab -----------------------------
 
 from kicraft.server.session import derive_stage_statuses

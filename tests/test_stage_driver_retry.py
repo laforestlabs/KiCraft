@@ -26,11 +26,12 @@ from kicraft.server.stage_contracts import (
 )
 from kicraft.server.stage_prompts import build_system as _build_system
 from kicraft.server.stage_runtime import (
+    EXTERNAL_LOAD_CURRENT_QUESTION,
     _classify_parse_failure,
     _commit_rejection_signature,
-    _redacted_rejection_facts,
     _design_reasoning,
     _normalize_questions,
+    _redacted_rejection_facts,
     _retry_feedback,
     _stage_max_retries,
     _stage_max_tokens,
@@ -455,7 +456,7 @@ def test_bom_has_a_footprint_search_tool():
 # ---- clarifying questions -------------------------------------------------
 
 
-def test_normalize_questions_shapes_and_drops_junk():
+def test_normalize_questions_preserves_recommended_choices_and_drops_junk():
     qs = _normalize_questions(
         [
             {"text": "Battery chemistry?", "options": ["LiPo", "18650"], "blocking": True},
@@ -468,7 +469,7 @@ def test_normalize_questions_shapes_and_drops_junk():
     q = qs[0]
     assert q["stage"] == "intent" and q["blocking"] is True
     assert q["options"] == ["LiPo", "18650"] and q["answer"] is None
-    demoted = _normalize_questions(
+    normalized = _normalize_questions(
         [
             {"text": "Supply voltage?", "blocking": True},
             {
@@ -479,7 +480,17 @@ def test_normalize_questions_shapes_and_drops_junk():
         ],
         "architecture",
     )
-    assert [question["blocking"] for question in demoted] == [False, False]
+    assert [question["blocking"] for question in normalized] == [False, True]
+    from kicraft.server.stage_runtime import _questions_need_input
+
+    assert _questions_need_input(
+        [normalized[1]],
+        "architecture",
+        auto_default=False,
+        answers=None,
+        instruction=None,
+        auto_default_questions=False,
+    )
     capped = _normalize_questions(
         [
             {
@@ -518,52 +529,90 @@ def test_normalize_questions_carries_and_whitelists_reconcile_target():
         Question.model_validate(q)
 
 
-def test_debug_harness_keeps_production_question_auto_default():
-    """A debug draft must reach the same stage outcome a live run reaches.
-
-    Production auto-defaults a blocking question at intent/functional_spec/
-    architecture/bom: the driver re-prompts the model to apply defaults instead
-    of parking (stage_runtime._AUTO_DEFAULT_QUESTION_STAGES). The debug harness
-    pauses before COMMIT, but if that also disabled auto-default a walkthrough
-    would park on a question kicraft.io never asks — so debug must mirror
-    production while still parking where production genuinely parks (wiring, and
-    any reconcile escalation).
-    """
+def test_explicit_question_policy_overrides_legacy_stage_and_answer_rules():
+    """The persisted bool, unlike legacy None, controls all ordinary questions."""
     from kicraft.server.stage_runtime import (
         _auto_default_questions_enabled as auto_enabled,
         _questions_need_input as parks,
     )
+
     blocking = [{"text": "Which LoRa band?", "blocking": True}]
 
-    def needs_input(stage, *, review_before_commit, auto_default_questions):
-        return parks(
-            blocking,
-            stage,
-            auto_default=auto_enabled(
-                stage,
-                review_before_commit=review_before_commit,
-                auto_default_questions=auto_default_questions,
-            ),
-            answers=None,
-            instruction=None,
-        )
+    # Legacy callers retain production's early-stage-only defaulting behavior.
+    assert not parks(
+        blocking,
+        "architecture",
+        auto_default=auto_enabled(
+            "architecture", review_before_commit=False, auto_default_questions=None
+        ),
+        answers=None,
+        instruction=None,
+    )
+    assert parks(
+        blocking,
+        "wiring",
+        auto_default=auto_enabled("wiring", review_before_commit=False, auto_default_questions=None),
+        answers=None,
+        instruction=None,
+    )
 
-    # Production never parks at architecture.
-    assert not needs_input("architecture", review_before_commit=False, auto_default_questions=None)
-    # A debug draft that mirrors production does not park either, despite pausing
-    # before commit. (Before the fix this returned True and diverged from live.)
-    assert not needs_input("architecture", review_before_commit=True, auto_default_questions=True)
-    # The old review-only behaviour still parks, so the difference stays explicit.
-    assert needs_input("architecture", review_before_commit=True, auto_default_questions=None)
-    # Wiring parks in both paths; a reconcile escalation always stays visible.
-    assert needs_input("wiring", review_before_commit=False, auto_default_questions=None)
-    assert needs_input("wiring", review_before_commit=True, auto_default_questions=True)
+    # Explicit settings apply to every stage and do not lose False after a resume.
+    assert not parks(
+        blocking,
+        "wiring",
+        auto_default=True,
+        answers=[{"text": "prior", "answer": "yes"}],
+        instruction="Re-drive this stage.",
+        auto_default_questions=True,
+    )
+    assert parks(
+        blocking,
+        "intent",
+        auto_default=False,
+        answers=[{"text": "prior", "answer": "yes"}],
+        instruction="Re-drive this stage.",
+        auto_default_questions=False,
+    )
+
+    # Reconciliation is internal pipeline control and always wins over either
+    # ordinary-question policy.
     assert parks(
         [{"text": "add caps", "blocking": True, "reconcile_target": "bom"}],
         "architecture",
         auto_default=True,
         answers=None,
         instruction=None,
+        auto_default_questions=True,
+    )
+
+
+def test_external_current_question_recommends_finding_the_fact_before_a_rating():
+    questions = _normalize_questions([EXTERNAL_LOAD_CURRENT_QUESTION], "architecture")
+    assert questions[0]["options"] == [
+        "Determine the load current from the load datasheets first",
+        "Up to 1 A",
+        "Up to 2 A",
+        "Another current requirement (enter amperes)",
+    ]
+    from kicraft.server.stage_runtime import _questions_need_input
+
+    assert not _questions_need_input(
+        questions,
+        "architecture",
+        auto_default=True,
+        answers=None,
+        instruction=None,
+        auto_default_questions=True,
+    )
+    # This policy gate is intentionally pure: a missing user-owned physical fact
+    # parks an interactive run before another provider call can invent a rating.
+    assert _questions_need_input(
+        questions,
+        "architecture",
+        auto_default=False,
+        answers=None,
+        instruction=None,
+        auto_default_questions=False,
     )
 
 
@@ -2427,6 +2476,40 @@ def test_early_design_question_defaults_without_parking(tmp_path):
     assert not json.loads((tmp_path / ".kicraft" / "state.json").read_text())["open_questions"]
 
 
+def test_explicit_false_parks_an_early_stage_despite_a_redrive_instruction(tmp_path):
+    question = {
+        "text": json.dumps(
+            {
+                "questions": [
+                    {
+                        "text": "Which op amp?",
+                        "options": ["Rail-to-rail", "Dual supply"],
+                        "blocking": True,
+                    }
+                ]
+            }
+        ),
+        "reasoning": "",
+        "finish_reason": "stop",
+        "cost_usd": 0.0,
+    }
+    client = _ScriptedClient([question])
+
+    result = run_session(
+        tmp_path,
+        "an op-amp board",
+        ["intent"],
+        client=client,
+        answers=[{"text": "Earlier decision", "answer": "retained"}],
+        instruction="Re-drive the stage.",
+        auto_default_questions=False,
+    )
+
+    assert result["status"] == "awaiting_input"
+    assert result["questions"][0]["text"] == "Which op amp?"
+    assert len(client.calls) == 1
+
+
 def test_complete_instruction_suppresses_repeated_blocking_question(tmp_path):
     question = {
         "text": json.dumps(
@@ -2988,6 +3071,72 @@ def test_empty_escalation_profile_never_switches_models(tmp_path, monkeypatch):
         str(DESIGN_PROFILES["deepseek"]["model"])
     }
 
+def test_explicit_false_allows_bom_work_units_to_park_on_a_question(tmp_path, monkeypatch):
+    state = {
+        "architecture": {
+            "sheets": [{"name": "ANALOG"}],
+            "recipe_selections": [],
+            "requirements": [
+                {
+                    "id": "sensor_front_end",
+                    "sheet": "ANALOG",
+                    "role": "sensor",
+                    "family": "novel_sensor",
+                    "ports": {"out": "SENSE"},
+                }
+            ],
+        }
+    }
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state))
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc",
+            (),
+            {"returncode": 0, "stdout": json.dumps({"state": state, "extras": {}}), "stderr": ""},
+        )(),
+    )
+    client = _unit_client(
+        [
+            {
+                "text": json.dumps(
+                    {
+                        "questions": [
+                            {
+                                "text": "Which input connector style?",
+                                "options": ["Screw terminal", "Barrel jack"],
+                                "blocking": True,
+                            }
+                        ]
+                    }
+                ),
+                "finish_reason": "stop",
+                "cost_usd": 0.0,
+            }
+        ]
+    )
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "commit_stage",
+        lambda *args, **kwargs: pytest.fail("interactive BOM question must park before commit"),
+    )
+
+    result = stage_driver_mod.drive_stage(
+        client,
+        "bom",
+        "adjustable power board",
+        state_path,
+        tmp_path,
+        auto_default_questions=False,
+    )
+
+    assert result["needs_input"] is True
+    assert result["questions"][0]["options"] == ["Screw terminal", "Barrel jack"]
+    properties = client.calls[0]["response_format"]["json_schema"]["schema"]["properties"]
+    assert "questions" in properties
+
 
 def test_rate_limited_escalated_unit_returns_to_primary_profile(tmp_path, monkeypatch):
     state_path = _work_unit_state(tmp_path, monkeypatch)
@@ -3220,6 +3369,43 @@ def test_work_unit_question_discards_checkpoint_but_provider_failure_retains_it(
     assert list(saved["candidates"]) == ["wiring-u000"]
 
 
+def test_explicit_true_defaults_an_ordinary_wiring_question_but_not_reconciliation(
+    tmp_path, monkeypatch
+):
+    state_path = _work_unit_state(tmp_path, monkeypatch)
+    question = {
+        "text": json.dumps(
+            {
+                "questions": [
+                    {
+                        "text": "Choose?",
+                        "options": ["Recommended route", "Alternative route"],
+                        "blocking": True,
+                    }
+                ]
+            }
+        ),
+        "finish_reason": "stop",
+        "cost_usd": 0.0,
+    }
+    client = _unit_client([_unit_reply("U1"), question, _unit_reply("R1")])
+    monkeypatch.setattr(
+        stage_driver_mod, "commit_stage", lambda *args, **kwargs: (True, {"ok": True})
+    )
+
+    result = stage_driver_mod.drive_stage(
+        client,
+        "wiring",
+        "test",
+        state_path,
+        tmp_path,
+        auto_default_questions=True,
+    )
+
+    assert result["commit_ok"] is True
+    assert "Do not ask more questions" in client.calls[2]["messages"][-1]["content"]
+
+
 def test_work_unit_debug_review_and_observer_v2_are_redacted(tmp_path, monkeypatch):
     state_path = _work_unit_state(tmp_path, monkeypatch)
     client = _unit_client([_unit_reply("U1"), _unit_reply("R1")])
@@ -3426,6 +3612,7 @@ def test_work_unit_bom_reconcile_question_keeps_pipeline_park_shape(tmp_path, mo
         state_path,
         tmp_path,
         answers=[{"text": "prior", "answer": "yes"}],
+        auto_default_questions=True,
     )
 
     assert result["needs_input"] is True

@@ -174,6 +174,11 @@ a {{ color: var(--kc-brand); }}
   color: var(--kc-muted);
   background: var(--kc-raised);
 }}
+.kc-qcard .kc-qchip-recommended.q-btn {{
+  border-color: var(--kc-brand);
+  background: rgba(74, 222, 128, 0.12);
+  color: var(--kc-text);
+}}
 .kc-qchip.q-btn:hover {{
   border-color: var(--kc-brand);
   color: var(--kc-brand);

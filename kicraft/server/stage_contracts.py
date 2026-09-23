@@ -22,6 +22,8 @@ from .config import (
     STAGE_COLLECTION_BOUNDS,
     CollectionBound,
 )
+from .question_policy import normalize_question_options
+
 
 # Canonical stage -> slot model, mirroring cli_app._apply_slot's owned-field map.
 SLOT_MODEL = {
@@ -91,6 +93,18 @@ class StageQuestionResponse(BaseModel):
 
     questions: list[models.Question] = Field(min_length=1, max_length=5)
 
+    @model_validator(mode="after")
+    def _normalize_ordinary_question_options(self):
+        self.questions = [
+            question
+            if question.reconcile_target == "bom"
+            else question.model_copy(
+                update={"options": normalize_question_options(question.options)}
+            )
+            for question in self.questions
+        ]
+        return self
+
 
 class BomComponentGroup(BaseModel):
     """One component type expanded into deterministic references."""
@@ -112,12 +126,19 @@ class BomComponentGroup(BaseModel):
 
 
 def _requirement_owns_protected_group(group: BomComponentGroup, requirements) -> bool:
-    """Match an implementing component to its typed requirement, not just its label."""
+    """Match an implementing component to its typed requirement, not just its label.
 
-    def value(requirement, field: str):
-        if isinstance(requirement, dict):
-            return requirement.get(field)
-        return getattr(requirement, field, None)
+    BOM groups are model-facing and therefore cannot carry provenance.  Canonical
+    :class:`~kicraft.design.models.BomPart` rows can: when a deterministic lowerer
+    made such a row, re-derive that lowerer's artifact before treating its ownership
+    stamp as evidence.  This makes a stamped FPC owner visible without allowing a
+    model-authored ``recipe_id`` or ``resolution_id`` to waive physical identity.
+    """
+
+    def value(row, field: str):
+        if isinstance(row, dict):
+            return row.get(field)
+        return getattr(row, field, None)
 
     def token(raw: object) -> str:
         return re.sub(r"[^a-z0-9]+", "", str(raw).lower())
@@ -136,6 +157,83 @@ def _requirement_owns_protected_group(group: BomComponentGroup, requirements) ->
             if len(word) >= 2
         }
 
+    def has_verified_lowerer_provenance(requirement) -> bool:
+        if value(group, "resolution_source") != "lowerer":
+            return False
+        if value(group, "lowering_requirement_id") != value(requirement, "id"):
+            return False
+        lowerer_id = value(group, "resolution_id")
+        if not lowerer_id:
+            return False
+        try:
+            from kicraft.design.lowering import lower_requirement
+            from kicraft.design.models import CircuitRequirement
+
+            artifact = lower_requirement(CircuitRequirement.model_validate(requirement))
+        except (TypeError, ValueError):
+            return False
+        if artifact is None or artifact.lowerer_id != lowerer_id:
+            return False
+        prefix = re.match(r"[A-Z]+", str(value(group, "ref") or ""))
+        index = value(group, "lowering_index")
+        if prefix is None or not isinstance(index, int):
+            return False
+        return any(
+            candidate.reference_prefix == prefix.group()
+            and value(group, "lowering_role") == candidate.role
+            and 0 <= index < candidate.quantity
+            and candidate.value == value(group, "value")
+            and candidate.symbol == value(group, "symbol")
+            and candidate.footprint == value(group, "footprint")
+            and candidate.mpn == value(group, "mpn")
+            for candidate in artifact.groups
+        )
+
+    def has_verified_recipe_provenance(requirement) -> bool:
+        if value(group, "resolution_source") != "recipe":
+            return False
+        recipe_id = value(group, "recipe_id")
+        if not recipe_id or value(group, "resolution_id") != recipe_id:
+            return False
+        try:
+            from kicraft.design.recipes.registry import get_recipe
+
+            definition = get_recipe(str(recipe_id))
+        except (KeyError, ValueError):
+            return False
+        role = value(group, "recipe_role")
+        ref = str(value(group, "ref") or "")
+        prefix = re.match(r"[A-Z]+", ref)
+        if (
+            not role
+            or prefix is None
+            or not any(
+                candidate.role == role
+                and candidate.reference_prefix == prefix.group()
+                and candidate.value == value(group, "value")
+                and candidate.symbol == value(group, "symbol")
+                and candidate.footprint == value(group, "footprint")
+                and candidate.mpn == value(group, "mpn")
+                for candidate in definition.parts
+            )
+        ):
+            return False
+        exact_part = value(requirement, "exact_part")
+        if exact_part:
+            return bool(
+                definition.exact_part
+                and matches_part_identity(str(exact_part), definition.exact_part)
+            )
+        family = str(value(requirement, "family") or "")
+        return bool(
+            definition.family
+            and family
+            and (
+                matches_part_identity(family, definition.exact_part or "")
+                or token(family) == token(definition.family)
+            )
+        )
+
     from kicraft.design.recipes import registered_recipes
 
     physical_identity = group.mpn or group.value
@@ -146,6 +244,10 @@ def _requirement_owns_protected_group(group: BomComponentGroup, requirements) ->
         if token(registered.definition.exact_part) in component_tokens
     ]
     for requirement in requirements or ():
+        if has_verified_lowerer_provenance(requirement) or has_verified_recipe_provenance(
+            requirement
+        ):
+            return True
         exact_part = value(requirement, "exact_part")
         if exact_part:
             if matches_part_identity(str(exact_part), physical_identity):
@@ -461,9 +563,7 @@ def _strict_provider_schema(node):
             # OpenAI strict structured outputs accept `anyOf` and reject `oneOf`.
             # Merge rather than overwrite so a node carrying both keys keeps every
             # branch (Pydantic never emits both; this only guards the merge).
-            out.setdefault("anyOf", []).extend(
-                _strict_provider_schema(item) for item in value
-            )
+            out.setdefault("anyOf", []).extend(_strict_provider_schema(item) for item in value)
         elif key in ("allOf", "prefixItems") and isinstance(value, list):
             out[key] = [_strict_provider_schema(item) for item in value]
         else:
@@ -724,13 +824,59 @@ class StageSchemaError(ValueError):
         super().__init__(message)
 
 
+def _normalize_board_outline_obligation_rows(rows) -> list:
+    """Retype only semantically proven board-outline pseudo-parts as fabrication facts."""
+    from kicraft.design.part_identity import board_outline_fabrication_feature
+
+    normalized = []
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get("kind") != "physical":
+            normalized.append(row)
+            continue
+        feature = board_outline_fabrication_feature(str(row.get("component_class") or ""))
+        normalized.append(
+            {
+                "kind": "fabrication",
+                "original_obligation_id": row.get("original_obligation_id"),
+                "feature": feature,
+            }
+            if feature is not None
+            else row
+        )
+    return normalized
+
+
+def normalize_board_outline_obligations(payload: dict) -> dict:
+    """Normalize board-outline facts in source and requirement rows before ownership checks."""
+    normalized = dict(payload)
+    if "obligations" in normalized:
+        normalized["obligations"] = _normalize_board_outline_obligation_rows(
+            normalized["obligations"]
+        )
+    requirements = normalized.get("requirements")
+    if isinstance(requirements, list):
+        normalized["requirements"] = [
+            {
+                **requirement,
+                "obligations": _normalize_board_outline_obligation_rows(
+                    requirement.get("obligations")
+                ),
+            }
+            if isinstance(requirement, dict) and "obligations" in requirement
+            else requirement
+            for requirement in requirements
+        ]
+    return normalized
+
+
 def _canonical_obligations(rows) -> list[dict]:
     """Validate obligation rows and normalise them for comparison."""
     from pydantic import TypeAdapter
 
     adapter = TypeAdapter(list[models.RequirementObligation])
     return [
-        row.model_dump(mode="json", exclude_none=True) for row in adapter.validate_python(rows or [])
+        row.model_dump(mode="json", exclude_none=True)
+        for row in adapter.validate_python(_normalize_board_outline_obligation_rows(rows))
     ]
 
 
@@ -778,6 +924,111 @@ def restore_source_obligations(payload: dict, prompt_state: dict) -> dict:
     return {**payload, "obligations": rows}
 
 
+def _requirement_proves_physical_obligation(requirement: dict, component_class: str) -> bool:
+    """Whether reviewed compiler evidence proves this requirement realizes one class."""
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.part_identity import (
+        canonical_physical_features,
+        physical_inventory_record,
+        reviewed_part,
+    )
+    from kicraft.design.recipes import registered_recipes
+
+    wanted = canonical_physical_features(component_class)
+    if not wanted:
+        return False
+
+    def realizes(*, mpn=None, symbol=None, footprint=None) -> bool:
+        record = physical_inventory_record(mpn=mpn, symbol=symbol, footprint=footprint)
+        return record is not None and bool(wanted & record.physical_features)
+
+    exact_part = str(requirement.get("exact_part") or "").strip()
+    exact_record = reviewed_part(exact_part) if exact_part else None
+    if exact_record is not None and wanted & exact_record.physical_features:
+        return True
+
+    family = str(requirement.get("family") or "")
+    for registered in registered_recipes():
+        definition = registered.definition
+        if definition.family != family or (
+            exact_part
+            and definition.exact_part
+            and definition.exact_part.casefold() != exact_part.casefold()
+        ):
+            continue
+        if exact_part and definition.exact_part and realizes(mpn=definition.exact_part):
+            return True
+        if any(
+            realizes(mpn=part.mpn, symbol=part.symbol, footprint=part.footprint)
+            for part in definition.parts
+        ):
+            return True
+
+    try:
+        artifact = lower_requirement(requirement)
+    except (TypeError, ValueError):
+        return False
+    return artifact is not None and any(
+        realizes(mpn=group.mpn, symbol=group.symbol, footprint=group.footprint)
+        for group in artifact.groups
+    )
+
+
+def physical_obligation_candidate_requirement_ids(payload: dict, row: dict) -> list[str]:
+    """Sorted requirements whose reviewed recipe/lowerer evidence realizes one physical row."""
+    component_class = str(row.get("component_class") or "")
+    if row.get("kind") != "physical" or not component_class:
+        return []
+    return sorted(
+        str(requirement.get("id"))
+        for requirement in payload.get("requirements") or []
+        if isinstance(requirement, dict)
+        and _requirement_proves_physical_obligation(requirement, component_class)
+    )
+
+
+def attach_uniquely_provable_physical_obligations(payload: dict, prompt_state: dict) -> dict:
+    """Attach an omitted physical row only when one reviewed implementation proves it."""
+    try:
+        source_rows = source_obligation_rows(prompt_state, slots=("intent", "functional_spec"))
+    except (StageSchemaError, ValueError):
+        return payload
+    normalized = dict(payload)
+    requirements = list(normalized.get("requirements") or [])
+    owned = {
+        (row["kind"], row["original_obligation_id"])
+        for requirement in requirements
+        if isinstance(requirement, dict)
+        for row in _canonical_obligations(requirement.get("obligations"))
+    }
+    derived_notes: list[str] = []
+    for row in source_rows:
+        key = (row["kind"], row["original_obligation_id"])
+        if row["kind"] != "physical" or key in owned:
+            continue
+        candidate_ids = physical_obligation_candidate_requirement_ids(normalized, row)
+        if len(candidate_ids) != 1:
+            continue
+        requirement_id = candidate_ids[0]
+        for index, requirement in enumerate(requirements):
+            if isinstance(requirement, dict) and requirement.get("id") == requirement_id:
+                requirements[index] = {
+                    **requirement,
+                    "obligations": [*(requirement.get("obligations") or []), row],
+                }
+                owned.add(key)
+                derived_notes.append(
+                    f"{requirement_id}: physical obligation {row['original_obligation_id']!r} "
+                    "attached from unique reviewed recipe/lowerer evidence (derived)"
+                )
+                break
+    if not derived_notes:
+        return normalized
+    normalized["requirements"] = requirements
+    normalized["assumptions"] = [*(normalized.get("assumptions") or []), *derived_notes]
+    return normalized
+
+
 def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict) -> None:
     """Reject a slot that drops or misplaces the obligations the committed stages carry.
 
@@ -805,16 +1056,13 @@ def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict)
             for row in _canonical_obligations(requirement.get("obligations")):
                 key = (row["kind"], row["original_obligation_id"])
                 owned[key] = owned.get(key, 0) + 1
-        # A `quantity` obligation counts a class across the design and is not an implementation
-        # claim, so it may live only at the top level; every other committed obligation must name at
-        # least one requirement that implements it (several requirements may carry the same row when
-        # the design implements it in more than one place). `fabrication` and `negative` are exempt
-        # like `quantity`: a printed board feature and an absent class are board-level facts no
-        # requirement implements.
+        # Only board-wide facts may remain ownerless. Quantitative rows qualify only when their
+        # subject and unit prove they are board-outline geometry; electrical and part limits stay
+        # on their realizing requirement.
         unowned = [
             row
             for key, row in expected.items()
-            if key not in owned and key[0] not in models.OWNERSHIP_EXEMPT_OBLIGATION_KINDS
+            if key not in owned and models.obligation_requires_requirement_owner(row)
         ]
         if unowned:
             raise StageSchemaError(
@@ -826,11 +1074,19 @@ def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict)
                         "it through `requirements[].obligations`; the architecture's top-level "
                         "`obligations` list is written from the committed intent and functional "
                         "spec, and a paraphrased copy is restored from the committed row. A "
-                        "`quantity` obligation may stay at the top level: it counts a class across "
-                        "the design. A `fabrication` feature and a `negative` absent class may stay "
-                        "there too: neither is a part a requirement implements."
+                        "`quantity`, `fabrication`, or `negative` board-wide fact may stay at the "
+                        "top level. A `quantitative` row may do so only when it explicitly measures "
+                        "a board/PCB outline in a geometric unit; electrical and part limits need "
+                        "their realizing requirement."
                     ),
                     "evidence": unowned,
+                    "candidate_requirement_ids": {
+                        row[
+                            "original_obligation_id"
+                        ]: physical_obligation_candidate_requirement_ids(payload, row)
+                        for row in unowned
+                        if row["kind"] == "physical"
+                    },
                 },
             )
         return
@@ -1017,8 +1273,10 @@ def _normalize_stage_response(
             # The strict provider envelope requires the key on every answer, so a
             # slot response carries `questions: []`. It is not part of the slot.
             payload = {key: value for key, value in payload.items() if key != "questions"}
+        payload = normalize_board_outline_obligations(payload)
         if stage == "architecture":
             payload = _apply_authoritative_standard_form_factor(payload, prompt_state)
+            payload = attach_uniquely_provable_physical_obligations(payload, prompt_state)
             payload = restore_source_obligations(payload, prompt_state)
         validate_obligation_retention(stage, payload, prompt_state)
         if stage == "intent":

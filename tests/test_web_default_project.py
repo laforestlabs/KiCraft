@@ -445,6 +445,49 @@ def test_old_worker_cannot_evict_newer_run(tmp_path, live_runs, monkeypatch):
     assert web._LIVE_RUNS.get(9) is newer
 
 
+@pytest.mark.parametrize("path", ["review", "swallowed_review", "erc"])
+def test_recovery_question_stops_manufacturing(tmp_path, live_runs, monkeypatch, path):
+    from kicraft.design import cli_app
+
+    state = web._fresh_run_state()
+    state.update(ws=str(tmp_path), auto_default_questions=False)
+    calls = []
+    builds = []
+    question = {"text": "Confirm the interface?", "stage": "wiring",
+                "options": ["Obtain the interface specification", "Use the supplied specification"],
+                "blocking": True}
+
+    def run_session(ws, brief, stages, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return {"status": "ok"}
+        return {"status": "awaiting_input", "last_stage": "wiring", "questions": [question]}
+
+    def lifecycle(state_path, ws, progress, rewire, **kwargs):
+        if path == "erc":
+            return {}
+        if path == "swallowed_review":
+            try:
+                rewire("Repair wiring")
+            except Exception:
+                return {}
+        else:
+            rewire("Repair wiring")
+
+    monkeypatch.setattr(web, "run_session", run_session)
+    monkeypatch.setattr(web.pipeline, "current_tree_owns_design_state", lambda ws: True)
+    monkeypatch.setattr(cli_app, "run_post_wiring_lifecycle", lifecycle)
+    monkeypatch.setattr(web, "_drive_build_queue", lambda *a: builds.append("build") or 5)
+    monkeypatch.setattr(web, "_erc_offenders", lambda ws: ["Unconnected power pin"])
+    monkeypatch.setattr(web, "_persist_project", lambda state: None)
+    web._run_design(state, ["wiring"])
+    assert state["awaiting_input"] is True
+    assert state["questions"] == [question]
+    assert state["ok"] is None
+    assert builds == (["build"] if path == "erc" else [])
+    assert all(call["auto_default_questions"] is False for call in calls)
+
+
 # ---- BOM price fetch actually starts (dead-thread regression) -----------------
 
 

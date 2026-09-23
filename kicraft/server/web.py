@@ -47,6 +47,7 @@ from .accounts import (
 )
 from .config import LEGAL_VERSION, Settings, default_legal_dir
 from .examples import EXAMPLE_PROMPTS
+from .question_policy import normalize_question_options
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
 from .layout_panel import (
     LayoutEditorPanel,
@@ -1937,6 +1938,7 @@ def _fresh_run_state() -> dict:
         "failed": False,
         "user_id": None, "project_id": None, "brief": "",
         "status": None, "awaiting_input": False, "questions": [],
+        "auto_default_questions": True,
         "prices_rev": 0, "run_id": None, "_event_seq": 0,
         # The reduced activity of the CURRENT attempt (activity.reduce_activity),
         # folded event by event as the stream arrives; None until the first event.
@@ -2929,7 +2931,7 @@ def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
     clock restarts at the slot-acquired marker so time spent queued for a host
     build slot is not billed against the job."""
     timeout_s = 1800.0
-    cmd = list(JOB_KIND_COMMANDS[kind])
+    cmd = pipeline.build_command(JOB_KIND_COMMANDS[kind], pipeline.project_pipeline(ws))
     if kind == "build":
         quality = _store().build_quality_for_user(state.get("user_id"))
         if quality:  # tier override (free tier -> draft); None = default
@@ -3122,6 +3124,14 @@ def _ensure_workspace(state: dict) -> Path | None:
     return pd
 
 
+class _AwaitingInputDuringLifecycle(Exception):
+    """Stop an advisory lifecycle when its re-drive needs a user answer."""
+
+    def __init__(self, result: dict) -> None:
+        super().__init__("The wiring re-drive is awaiting user input.")
+        self.result = result
+
+
 def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> None:
     """Drive `stages` for this page's session, streaming progress into `state`,
     then (on success) run the deterministic build. Shared by the initial design,
@@ -3161,9 +3171,12 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
         def progress(ev):
             _record_progress_event(state, ev, run_id=run_id)
 
-        res = run_session(ws, state.get("brief", ""), stages, answers=answers,
-                          progress=progress, run_id=run_id,
-                          core_defaults=core_defaults)
+        auto_default_questions = state.get("auto_default_questions", True)
+        res = run_session(
+            ws, state.get("brief", ""), stages, answers=answers,
+            progress=progress, run_id=run_id, core_defaults=core_defaults,
+            auto_default_questions=auto_default_questions,
+        )
         if res.get("guard"):
             state["spend"] = _project_spend_usd(state.get("project_id"))
 
@@ -3174,16 +3187,62 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
         # concrete shortfall so the parts get added and wiring re-checks, then
         # adopt that outcome. Budgeted (BOM_RECONCILE_MAX_PASSES, with a
         # no-change cutoff) so it can never run away on cost while real deficit
-        # CHAINS still resolve (fix-plan N3); if it still can't resolve, the
-        # user is asked as a last resort. Shared with the self-eval driver
-        # (kicraft.server.session).
-        # A legacy design's workspace belongs to the legacy tree from here on: the current
-        # tree's stages would re-serialize a state its models do not own (measured: 171 schema
-        # errors at the legacy build, 2026-09-21). The legacy driver's own build runs whatever
-        # tail that tree has; this process only reads the delivered artifacts.
-        current_owns_tail = pipeline.current_tree_owns_tail(ws)
+        # CHAINS still resolve (fix-plan N3); an exhausted internal deficit is an
+        # honest design failure, never a question for the user. Shared with the
+        # self-eval driver (kicraft.server.session).
+        # Native sessions own their canonical design schema. Current manufacturing
+        # runs separately on a snapshot, without reserializing authored stages here.
+        current_owns_design = pipeline.current_tree_owns_design_state(ws)
+
+        def _adopt_awaiting_input(result: dict) -> None:
+            """Park with the same durable/live fields as the initial session."""
+            state["status"] = "awaiting_input"
+            state["awaiting_input"] = True
+            state["questions"] = result.get("questions") or []
+            state["ok"] = None
+
+        def _bom_reconcile_exhausted(result: dict) -> dict:
+            """Turn an internal exhausted BOM repair into an honest failure."""
+            deficits = bom_reconcile_deficits(result)
+            error = "\n".join(
+                str(question.get("text") or "").strip()
+                for question in deficits
+                if str(question.get("text") or "").strip()
+            ) or "BOM reconciliation exhausted before the wiring deficit was resolved."
+            stage = result.get("last_stage") or "wiring"
+            state_path = ws / ".kicraft" / "state.json"
+            try:
+                from .stage_state_io import stamp_stage_status
+
+                stamp_stage_status(
+                    state_path, stage, False, error=error,
+                    failure_kind="bom_reconcile_exhausted",
+                )
+                saved = json.loads(state_path.read_text(encoding="utf-8"))
+                saved["open_questions"] = []
+                atomic_write_text(state_path, json.dumps(saved, indent=2) + "\n")
+            except (OSError, json.JSONDecodeError):
+                pass
+            progress(
+                {
+                    "kind": "stage_done",
+                    "stage": stage,
+                    "ok": False,
+                    "failure_kind": "bom_reconcile_exhausted",
+                    "errors": [error],
+                }
+            )
+            state["error"] = error
+            return {
+                **result,
+                "status": "failed",
+                "questions": [],
+                "failure_kind": "bom_reconcile_exhausted",
+                "error": error,
+            }
+
         _bom_passes = int(state.get("bom_reconcile_passes") or 0)
-        while (current_owns_tail
+        while (current_owns_design
                and res.get("status") == "awaiting_input"
                and bom_reconcile_deficits(res)):
             _prev = _bom_passes
@@ -3191,20 +3250,20 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
                 ws, state.get("brief", ""), res, progress=progress,
                 run_id=run_id, core_defaults=core_defaults,
                 reconcile_passes=_bom_passes,
+                auto_default_questions=auto_default_questions,
             )
-            if _bom_passes == _prev:
-                break  # budget exhausted -> the park surfaces to the user
-            state["bom_reconcile_passes"] = _bom_passes
             if res.get("guard"):
                 state["spend"] = _project_spend_usd(state.get("project_id"))
+            if _bom_passes == _prev:
+                if res.get("status") == "awaiting_input" and bom_reconcile_deficits(res):
+                    res = _bom_reconcile_exhausted(res)
+                break
+            state["bom_reconcile_passes"] = _bom_passes
 
         if res["status"] == "awaiting_input":
             # Park: the run is saved as awaiting_input and the question surfaces in
             # the UI; the user can answer now or reopen the project later.
-            state["status"] = "awaiting_input"
-            state["awaiting_input"] = True
-            state["questions"] = res.get("questions") or []
-            state["ok"] = None
+            _adopt_awaiting_input(res)
             return
 
         state["awaiting_input"] = False
@@ -3218,20 +3277,21 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
         # Advisory post-wiring review/repair and silkscreen authoring run through
         # the same lifecycle as batch self-evaluation. They intentionally remain
         # fail-soft: neither a review nor a cosmetic plan can fulfill a delivery.
-        if not current_owns_tail:
+        if not current_owns_design:
             progress(
                 {
                     "kind": "build_log",
-                    "text": "legacy pipeline: the current tree does not run the post-wiring "
-                    "lifecycle on this workspace (its state schema is the legacy tree's); the "
-                    "legacy build runs its own tail\n",
+                    "text": "native design: keeping post-wiring authorship in its own schema; "
+                    "current manufacturing will build an isolated snapshot\n",
                 }
             )
             return
+        pending_post_wiring_result: dict | None = None
         try:
             from kicraft.design.cli_app import run_post_wiring_lifecycle
 
             def _rewire(instr: str) -> None:
+                nonlocal pending_post_wiring_result
                 rr = run_session(
                     ws,
                     state.get("brief", ""),
@@ -3239,9 +3299,13 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
                     instruction=instr,
                     progress=progress,
                     run_id=run_id,
+                    auto_default_questions=auto_default_questions,
                 )
                 if rr.get("guard"):
                     state["spend"] = _project_spend_usd(state.get("project_id"))
+                if rr.get("status") == "awaiting_input":
+                    pending_post_wiring_result = rr
+                    raise _AwaitingInputDuringLifecycle(rr)
 
             board_code = None
             if pid:
@@ -3259,8 +3323,13 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
                 run_id=run_id,
                 execution_mode="web",
             )
+        except _AwaitingInputDuringLifecycle as pause:
+            pending_post_wiring_result = pause.result
         except Exception:  # noqa: BLE001
             pass  # advisory lifecycle must never block a sound build
+        if pending_post_wiring_result is not None:
+            _adopt_awaiting_input(pending_post_wiring_result)
+            return
 
         # Deterministic (zero-LLM) build: synthesize -> place -> route -> verify ->
         # fab. `build` re-runs synthesize first, so the schematic appears as soon
@@ -3290,10 +3359,16 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
                 instr = ("The synthesized board failed KiCad ERC with the errors below. "
                          "Adjust connections / no_connect_pins to resolve them, keeping "
                          "every other net consistent:\n- " + "\n- ".join(offenders[:20]))
-                rr = run_session(ws, state.get("brief", ""), ["wiring"],
-                                 instruction=instr, progress=progress, run_id=run_id)
+                rr = run_session(
+                    ws, state.get("brief", ""), ["wiring"],
+                    instruction=instr, progress=progress, run_id=run_id,
+                    auto_default_questions=auto_default_questions,
+                )
                 if rr.get("guard"):
                     state["spend"] = _project_spend_usd(state.get("project_id"))
+                if rr.get("status") == "awaiting_input":
+                    _adopt_awaiting_input(rr)
+                    return
                 if rr.get("status") == "ok":
                     rc = _run_build()
         # Surface whatever board the build left behind: on a failed verify the
@@ -4757,7 +4832,8 @@ def _clone_project(source, cloner, make_private: bool):
     src = Path(source.dir_path) if source.dir_path else None
     if src is None or not src.is_dir():
         return None, "missing"
-    pid = store.create_project(cloner.id, source.brief or "", is_public=not make_private)
+    pid = store.create_project(cloner.id, source.brief or "", is_public=not make_private,
+                               auto_default_questions=source.auto_default_questions)
     dst = store.projects_dir / str(cloner.id) / str(pid)
     zip_path = None
     try:
@@ -5972,6 +6048,9 @@ def index(prompt: str = "", project: str = ""):
             "Describe your board",
             placeholder="Describe your board, big or small. Be bold.") \
             .props("rows=4 stack-label").classes("w-full kc-brief")
+        auto_default_chk = ui.checkbox("Auto default questions?", value=True) \
+            .props("dense size=xs").classes("text-xs").style("color:#94a3b8") \
+            .tooltip("Use recommended defaults for ambiguity. Uncheck to answer clarification questions yourself.")
 
 
         # One-click inspiration: "Surprise me" streams the vetted self-eval corpus
@@ -6028,7 +6107,7 @@ def index(prompt: str = "", project: str = ""):
             header's "New design" button now."""
             prompt_label.text = (prompt_text or "").strip()
             prompt_display.set_visibility(True)
-            for el in (welcome_card, brief, chips_row, notify_chk,
+            for el in (welcome_card, brief, auto_default_chk, chips_row, notify_chk,
                        design_btn, new_btn, arrow_hint, continue_btn):
                 if el is not None:
                     el.set_visibility(False)
@@ -6037,7 +6116,7 @@ def index(prompt: str = "", project: str = ""):
             """Back to a blank composer: restore the prompt box and its chrome."""
             prompt_display.set_visibility(False)
             prompt_label.text = ""
-            for el in (brief, chips_row, notify_chk, design_btn):
+            for el in (brief, auto_default_chk, chips_row, notify_chk, design_btn):
                 if el is not None:
                     el.set_visibility(True)
 
@@ -6284,27 +6363,35 @@ def index(prompt: str = "", project: str = ""):
                         ans = ui.input(placeholder="Type your answer…") \
                             .props("outlined dense") \
                             .classes("w-full").style("max-width:640px")
-                        opts = q.get("options") or []
+                        try:
+                            opts = normalize_question_options(q.get("options"))
+                        except ValueError:
+                            opts = []
                         if opts:
                             with ui.row().classes("items-center gap-2 flex-wrap"):
                                 ui.label("Quick pick").classes("text-xs") \
                                     .style("color:var(--kc-dim)")
-                                for opt in opts:
+                                for index, opt in enumerate(opts):
                                     ui.button(
-                                        opt,
+                                        f"{opt} (Recommended default)" if index == 0 else opt,
                                         on_click=lambda o=opt, a=ans: (
                                             a.set_value(o), a.run_method("focus"))) \
                                         .props("flat dense no-caps") \
-                                        .classes("kc-qchip text-xs")
+                                        .classes("kc-qchip text-xs" + (
+                                            " kc-qchip-recommended" if index == 0 else ""))
+                        else:
+                            ui.label("No recommendation was recorded for this older question.") \
+                                .classes("text-xs").style("color:var(--kc-dim)")
                         widgets.append((q, ans))
                     view["question_inputs"] = [a for _q, a in widgets]
 
                     def submit_answers():
                         answers = [{"text": q.get("text", ""),
                                     "answer": (a.value or "").strip()}
-                                   for q, a in widgets]
-                        if not any(x["answer"] for x in answers):
-                            ui.notify("Type or pick at least one answer.",
+                                   for q, a in widgets if (a.value or "").strip()]
+                        if any(q.get("blocking", True) and not (a.value or "").strip()
+                               for q, a in widgets) or not answers:
+                            ui.notify("Answer each required question before continuing.",
                                       color="warning")
                             return
                         _answer_and_resume(stage, answers)
@@ -6434,6 +6521,7 @@ def index(prompt: str = "", project: str = ""):
             state = _fresh_run_state()
             state.update(done=completed, ok=(True if completed else None),
                          failed=(p.status == "failed"),
+                         auto_default_questions=p.auto_default_questions,
                          spend=p.cost_usd, zip=(p.zip_path if zip_ok else None),
                          ws=ws_str, stem=p.project_stem,
                          user_id=user.id, project_id=p.id, brief=p.brief or "",
@@ -6537,6 +6625,7 @@ def index(prompt: str = "", project: str = ""):
             this is how a second design gets started in parallel."""
             nonlocal state
             state = _fresh_run_state()
+            auto_default_chk.value = True
             _reset_view()
             tabs.reset()
             summary_card.set_visibility(False)
@@ -6574,10 +6663,13 @@ def index(prompt: str = "", project: str = ""):
                 ui.notify(f"You've used your {q['limit']} design(s) this {period}. "
                           "See Pricing to upgrade.", color="warning")
                 return
-            pid = _store().create_project(u.id, brief.value)
+            auto_default_questions = bool(auto_default_chk.value)
+            pid = _store().create_project(u.id, brief.value,
+                                          auto_default_questions=auto_default_questions)
             proj = _store().get_project(pid)
             state = _fresh_run_state()
             state.update(running=True, user_id=u.id, project_id=pid,
+                         auto_default_questions=auto_default_questions,
                          board_code=(proj.board_code if proj else None))
             _reset_view()
             continue_btn.set_visibility(False)

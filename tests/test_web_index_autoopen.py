@@ -60,11 +60,11 @@ async def harness(tmp_path):
             web._LIVE_RUNS.clear()
 
 
-def _persisted_project(store, user_id: int, brief: str, stem: str) -> int:
+def _persisted_project(store, user_id: int, brief: str, stem: str, *, auto_default_questions=True) -> int:
     """Lay a finished project on disk the way build-in-place does (brief +
     .kicraft/state.json + the fab package) and record its row, so open/clone flows
     run against the real artifact layout."""
-    pid = store.create_project(user_id, brief)
+    pid = store.create_project(user_id, brief, auto_default_questions=auto_default_questions)
     base = store.projects_dir / str(user_id) / str(pid)
     (base / ".kicraft").mkdir(parents=True)
     (base / "brief.txt").write_text(brief, encoding="utf-8")
@@ -147,11 +147,13 @@ async def test_cloned_project_opens_with_bom(harness):
     u, web, store, acct = harness
 
     owner = store.create_user("owner@example.com", "ownerpw12345")
-    src_id = _persisted_project(store, owner.id, "bmp280 reader", "BMP280_READER")
+    src_id = _persisted_project(store, owner.id, "bmp280 reader", "BMP280_READER",
+                                auto_default_questions=False)
 
     pid, err = web._clone_project(store.get_project(src_id), acct,
                                   make_private=False)
     assert err is None and pid is not None
+    assert store.get_project(pid).auto_default_questions is False
 
     await _login(u)  # the post-clone ui.navigate.to("/")
     await u.should_see("BMP280_READER")  # auto-opened the clone
@@ -180,3 +182,63 @@ async def test_clone_deep_link_outranks_parked_default(harness):
 
     await u.open(f"/?project={pid}")  # what do_clone navigates to
     await u.should_see("Design complete")
+
+
+async def test_interactive_policy_reopens_and_requires_every_blocker(harness, monkeypatch):
+    from nicegui import ui
+    from nicegui.testing.user_interaction import UserInteraction
+    from kicraft.server.stage_state_io import attach_questions
+
+    u, web, store, acct = harness
+    calls = []
+
+    def scenario(ws, brief, stages, **kwargs):
+        calls.append(kwargs.get("answers"))
+        questions = [
+            {"stage": "intent", "text": "Which connector?", "blocking": True,
+             "options": ["USB-C", "Terminal block"]},
+            {"stage": "intent", "text": "Which mounting style?", "blocking": True,
+             "options": ["Mounting holes", "No mounting holes"]},
+        ] if len(calls) == 1 else [
+            {"stage": "intent", "text": "What enclosure clearance?", "blocking": True,
+             "options": ["Measure the enclosure", "Use supplied dimensions"]},
+        ]
+        if kwargs["auto_default_questions"]:
+            return {"status": "failed"}
+        attach_questions(Path(ws) / ".kicraft" / "state.json", "intent", questions)
+        kwargs["progress"]({"kind": "question", "stage": "intent", "questions": questions})
+        return {"status": "awaiting_input", "last_stage": "intent", "questions": questions}
+
+    monkeypatch.setattr(web, "run_session", scenario)
+    await _login(u)
+    checkbox = next(iter(u.find("Auto default questions?").elements))
+    assert checkbox.value is True
+    u.find("Auto default questions?").click()
+    u.find("Describe your board").type("A connector board")
+    u.find("Design").click()
+    await u.should_see("Which mounting style?")
+    project = store.list_projects(acct.id)[0]
+    assert project.auto_default_questions is False
+    web._LIVE_RUNS.pop(project.id, None)
+    await u.open(f"/?project={project.id}")
+    await u.should_see("Which connector?")
+    fields = sorted(
+        (e for e in u.find(ui.input).elements if e._props.get("placeholder") == "Type your answer…"),
+        key=lambda e: e.id,
+    )
+    assert [e.value for e in fields] == ["", ""]
+    UserInteraction(u, {fields[0]}, None).type("A custom locking connector")
+    u.find("Submit & continue").click()
+    await u.should_see("Answer each required question before continuing.")
+    assert calls == [None]
+    u.find("Mounting holes (Recommended default)").click()
+    u.find("Submit & continue").click()
+    await u.should_see("What enclosure clearance?")
+    assert calls[-1] == [
+        {"text": "Which connector?", "answer": "A custom locking connector"},
+        {"text": "Which mounting style?", "answer": "Mounting holes"},
+    ]
+    u.find("New design").click()
+    await u.should_see("Auto default questions?")
+    assert next(iter(u.find("Auto default questions?").elements)).value is True
+    assert store.get_project(project.id).auto_default_questions is False

@@ -32,6 +32,7 @@ from .config import (
     StageResponsePolicy,
 )
 from .client import classify_provider_exception
+from .question_policy import normalize_question_options
 from .stage_bom_tools import BOM_TOOLS, build_bom_executor
 from .stage_contracts import (
     StageResponseContract,
@@ -715,35 +716,29 @@ def _reasoning_failure_kind(facts) -> str | None:
 
 _AUTO_DEFAULT_QUESTION_STAGES = frozenset({"intent", "functional_spec", "architecture", "bom"})
 
-# The one question the driver asks on the user's behalf: the external 5 V load
-# current is a fact only the brief or the user holds (next-steps plan §4 B2), so
-# it is asked instead of repaired. Options are current ranges, not decisions.
+# The external 5 V load current is a physical fact only the brief or the user can
+# supply. The first option is deliberately an action, not an invented rating.
 EXTERNAL_LOAD_CURRENT_QUESTION = {
     "text": (
         "How much current must the board supply to the external 5 V loads "
         "(the display and the LED string, for example)?"
     ),
     "blocking": True,
-    "options": ["Up to 1 A", "Up to 2 A", "Up to 4 A", "More than 4 A"],
+    "options": [
+        "Determine the load current from the load datasheets first",
+        "Up to 1 A",
+        "Up to 2 A",
+        "Another current requirement (enter amperes)",
+    ],
 }
-_SAFE_DEFAULT_QUESTION_MARKERS = (
-    "default:",
-    "(default",
-    "i'll default",
-    "i will default",
-    "if you don't have a strong preference",
-    "if you do not have a strong preference",
-)
 
 
 def _normalize_questions(raw_list, stage: str) -> list[dict]:
     """Return bounded, actionable questions safe to expose to a user.
 
-    A user-facing blocker needs at least two distinct suggested answers and
-    cannot simultaneously advertise a safe default. Malformed or self-defaulting
-    questions are demoted so the stage retries with its own default instead of
-    parking the project. Internal BOM reconciliation remains blocking because it
-    is pipeline control, not a user decision.
+    Ordinary questions have already passed the stage response contract. Preserve
+    their option order—the first option is the provider's recommendation—while
+    retaining the state bounds and only allowing the internal BOM reconcile route.
     """
     out = []
     for q in raw_list:
@@ -754,19 +749,21 @@ def _normalize_questions(raw_list, stage: str) -> list[dict]:
             continue
         target = q.get("reconcile_target")
         reconcile_target = target if target in ("bom",) else None
-        options: list[str] = []
-        for raw_option in q.get("options") or []:
-            option = str(raw_option).strip()[:200]
-            if option and option not in options:
-                options.append(option)
-            if len(options) == 4:
-                break
         blocking = bool(q.get("blocking", False))
-        if reconcile_target is None and (
-            len(options) < 2
-            or any(marker in text.lower() for marker in _SAFE_DEFAULT_QUESTION_MARKERS)
-        ):
-            blocking = False
+        if reconcile_target is None:
+            try:
+                options = normalize_question_options(q.get("options"))
+            except ValueError:
+                options = []
+                blocking = False
+        else:
+            options = []
+            for raw_option in q.get("options") or []:
+                option = str(raw_option).strip()[:200]
+                if option and option not in options:
+                    options.append(option)
+                if len(options) == 4:
+                    break
         out.append(
             {
                 "text": text[:500],
@@ -787,20 +784,11 @@ def _auto_default_questions_enabled(
     review_before_commit: bool,
     auto_default_questions: bool | None,
 ) -> bool:
-    """Whether the driver may answer a blocking question itself instead of parking.
-
-    Auto-defaulting is the production behaviour: a blocking question at
-    intent/functional_spec/architecture/bom does not stop the run — the driver
-    re-prompts the model to apply sensible defaults and continue. Parking is
-    reserved for wiring (and any ``reconcile_target`` escalation).
-
-    ``review_before_commit`` alone would force ``False``, which is why the debug
-    harness used to diverge from a live run. Callers that must mirror production
-    while still pausing before commit pass ``auto_default_questions=True``.
-    """
+    """Whether the driver may resolve an ordinary question without parking."""
     if auto_default_questions is None:
         auto_default_questions = not review_before_commit
-    return bool(auto_default_questions) and stage in _AUTO_DEFAULT_QUESTION_STAGES
+        return bool(auto_default_questions) and stage in _AUTO_DEFAULT_QUESTION_STAGES
+    return auto_default_questions
 
 
 def _questions_need_input(
@@ -810,13 +798,20 @@ def _questions_need_input(
     auto_default: bool,
     answers,
     instruction,
+    auto_default_questions: bool | None = None,
 ) -> bool:
-    # BOM reconciliation is a pipeline escalation, not a user decision. It must
-    # remain visible even after answers or a noninteractive defaults instruction.
-    reconcile = any(question.get("reconcile_target") for question in questions)
-    return any(question["blocking"] for question in questions) and (
-        reconcile or (not auto_default and not answers and not instruction)
-    )
+    """Whether blocking questions pause this stage under the chosen policy."""
+    if not any(question["blocking"] for question in questions):
+        return False
+    # BOM reconciliation is pipeline control, never an ordinary user decision.
+    if any(question.get("reconcile_target") for question in questions):
+        return True
+    if auto_default_questions is True:
+        return False
+    if auto_default_questions is False:
+        return True
+    # Preserve legacy callers' one-round noninteractive behavior.
+    return not auto_default and not answers and not instruction
 
 
 def _client_model(client) -> str | None:
@@ -1990,6 +1985,7 @@ def _drive_work_unit_stage(
     review_before_commit: bool,
     attempt_observer: Callable[[dict], None] | None,
     auto_default: bool,
+    auto_default_questions: bool | None = None,
     t0: float,
     cpu0: float,
 ) -> dict:
@@ -2011,12 +2007,10 @@ def _drive_work_unit_stage(
             prompt_state,
             bom_sheet=unit.sheet if stage == "bom" else None,
             wiring_refs=unit.refs if stage == "wiring" else None,
-            # BOM work units can never park on a question (`_questions_need_input`
-            # auto-defaults the whole stage) and the loop's own feedback says
-            # "do not ask", so the affordance only burns repair attempts on turns
-            # the loop discards. Wiring keeps it: a missing support part must be
-            # able to request one BOM reconcile round.
-            allow_questions=stage != "bom",
+            # Explicit interactive runs may park on ordinary BOM questions. Wiring
+            # always retains this affordance so it can request internal BOM
+            # reconciliation even while ordinary questions auto-default.
+            allow_questions=stage == "wiring" or auto_default_questions is False,
         )
         for unit in units
     }
@@ -2718,6 +2712,7 @@ def _drive_work_unit_stage(
                     auto_default=auto_default,
                     answers=answers,
                     instruction=instruction,
+                    auto_default_questions=auto_default_questions,
                 ):
                     return kind, {"questions": questions}
                 if stage == "bom":
@@ -3506,9 +3501,8 @@ def drive_stage(
     active_client = client
     t0 = time.monotonic()
     cpu0 = _child_cpu_s()
-    # Production never parks on an intent/functional_spec/architecture/bom question;
-    # it re-prompts the model to default. A debug harness that wants to pause before
-    # commit must pass auto_default_questions=True to keep that behaviour.
+    # Explicit policy applies uniformly across all five stages. Legacy callers
+    # retain their historical early-stage-only automatic behavior.
     auto_default = _auto_default_questions_enabled(
         stage,
         review_before_commit=review_before_commit,
@@ -3670,6 +3664,7 @@ def drive_stage(
                 review_before_commit=review_before_commit,
                 attempt_observer=attempt_observer,
                 auto_default=auto_default,
+                auto_default_questions=auto_default_questions,
                 t0=t0,
                 cpu0=cpu0,
             )
@@ -3705,10 +3700,14 @@ def drive_stage(
         )
     user += f"\n\nProduce the {stage} slot JSON now."
 
-    # A non-interactive drive (the self-eval corpus, a CLI batch) asks no
-    # questions and takes today's defaults; everything else may ask the user.
+    # Explicit automatic runs use the no-questions contract for early stages;
+    # interactive runs and legacy noninteractive instruction behavior stay intact.
     questions_allowed = not (
-        stage == "architecture" and instruction == NONINTERACTIVE_DEFAULTS_INSTRUCTION
+        (stage == "architecture" and instruction == NONINTERACTIVE_DEFAULTS_INSTRUCTION)
+        or (
+            auto_default_questions is True
+            and stage in {"intent", "functional_spec", "architecture"}
+        )
     )
     try:
         contract = build_stage_response_contract(
@@ -4498,9 +4497,9 @@ def drive_stage(
             current_facts = sfacts
             current_call_mode = "serialization"
 
-        # A clarifying-question payload parks the stage (no slot this turn). No slot
-        # model has a top-level "questions" key, so the shape is unambiguous. Never
-        # re-park right after an answer (caps the back-and-forth at one round/stage).
+        # A clarifying-question payload has no slot this turn. The persisted
+        # policy decides whether an ordinary question parks or receives the
+        # bounded sensible-default retry; reconciliation always parks.
         qpayload = obj.get("questions") if isinstance(obj, dict) else None
         if isinstance(qpayload, list) and qpayload:
             qs = _normalize_questions(qpayload, stage)
@@ -4524,6 +4523,7 @@ def drive_stage(
                 auto_default=auto_default,
                 answers=answers,
                 instruction=instruction,
+                auto_default_questions=auto_default_questions,
             ):
                 if not review_before_commit:
                     attach_questions(state_path, stage, qs)
@@ -4597,46 +4597,101 @@ def drive_stage(
                     candidate=obj,
                 )
         severe = [d for d in diagnostics if d.severity in {"repair_required", "fab_gate"}]
-        # The external-load current is the user's fact: the brief or their answers
-        # carry it, or nobody does. Ask once instead of spending a repair call on
-        # a number the model cannot source (next-steps plan §4 B2); the repair
-        # stays the fallback when questions are disabled, and a drive that
-        # already has the user's answers never asks twice.
+        # The external-load current is a physical fact. Interactive policy parks
+        # immediately; automatic policy must fail honestly rather than inventing a
+        # current or spending another provider call trying to manufacture one.
         if (
             severe
             and stage == "architecture"
             and semantic_mode in {"repair", "enforce"}
-            and questions_allowed
-            and not answers
             and not external_load_budget_stated(brief)
             and any(d.code == EXTERNAL_LOAD_CURRENT_CODE for d in severe)
         ):
             questions = _normalize_questions([EXTERNAL_LOAD_CURRENT_QUESTION], stage)
-            if not review_before_commit:
-                attach_questions(state_path, stage, questions)
-            if progress:
-                progress({"kind": "question", "stage": stage, "questions": questions})
-            parked = {
-                "stage": stage,
-                "commit_ok": False,
-                "needs_input": True,
-                "questions": questions,
-                "cost_usd": total_cost,
-                "attempts": attempts,
-            }
-            if review_before_commit:
-                parked.update(
-                    {
+            if questions_allowed and (
+                _questions_need_input(
+                    questions,
+                    stage,
+                    auto_default=auto_default,
+                    answers=answers,
+                    instruction=instruction,
+                    auto_default_questions=auto_default_questions,
+                )
+                # The special missing-current path historically parked legacy
+                # callers before semantic repair, even in production.
+                or (auto_default_questions is None and not answers)
+            ):
+                if not review_before_commit:
+                    attach_questions(state_path, stage, questions)
+                if progress:
+                    progress({"kind": "question", "stage": stage, "questions": questions})
+                parked = {
+                    "stage": stage,
+                    "commit_ok": False,
+                    "needs_input": True,
+                    "questions": questions,
+                    "cost_usd": total_cost,
+                    "attempts": attempts,
+                }
+                if review_before_commit:
+                    parked.update(
+                        {
+                            "rounds": rounds,
+                            "tool_calls": tool_calls_ct,
+                            "wall_s": round(time.monotonic() - t0, 3),
+                            "cpu_s": round(_child_cpu_s() - cpu0, 3),
+                            "provider_ok": provider_ok,
+                            "schema_ok": schema_ok,
+                            "debug_context": _debug_context(raw),
+                        }
+                    )
+                return parked
+            if auto_default_questions is True:
+                diagnostic_rows = [d.model_dump(exclude_none=True) for d in diagnostics]
+                failure_outcome = {
+                    "failure_kind": EXTERNAL_LOAD_CURRENT_CODE,
+                    "error": next(
+                        d.message for d in severe if d.code == EXTERNAL_LOAD_CURRENT_CODE
+                    ),
+                    "provider_ok": provider_ok,
+                    "schema_ok": schema_ok,
+                    "semantic_clean": False,
+                    "repair_required": True,
+                    "fab_safe": not any(d.severity == "fab_gate" for d in diagnostics),
+                    "diagnostics": diagnostic_rows,
+                }
+                if review_before_commit:
+                    return {
+                        "stage": stage,
+                        "commit_ok": False,
+                        "cost_usd": total_cost,
+                        "attempts": attempts,
                         "rounds": rounds,
                         "tool_calls": tool_calls_ct,
                         "wall_s": round(time.monotonic() - t0, 3),
                         "cpu_s": round(_child_cpu_s() - cpu0, 3),
-                        "provider_ok": provider_ok,
-                        "schema_ok": schema_ok,
-                        "debug_context": _debug_context(raw),
+                        **failure_outcome,
                     }
+                return finalize_stage(
+                    active_client,
+                    run_id=run_id,
+                    stage=stage,
+                    state_path=state_path,
+                    progress=progress,
+                    ok=False,
+                    t0=t0,
+                    cpu0=cpu0,
+                    cost_usd=total_cost,
+                    attempts=attempts,
+                    rounds=rounds,
+                    tool_calls=tool_calls_ct,
+                    emitted_collection_count=emitted_collection_count,
+                    expanded_component_count=expanded_component_count,
+                    defect_codes=tuple(defect_codes),
+                    contract_rejections=contract_rejections,
+                    semantic_repair_rounds=semantic_repair_rounds,
+                    outcome=failure_outcome,
                 )
-            return parked
         repair_source_raw = raw
         while (
             severe
@@ -4723,6 +4778,7 @@ def drive_stage(
                         auto_default=auto_default,
                         answers=answers,
                         instruction=instruction,
+                        auto_default_questions=auto_default_questions,
                     ):
                         if not review_before_commit:
                             attach_questions(state_path, stage, qs)

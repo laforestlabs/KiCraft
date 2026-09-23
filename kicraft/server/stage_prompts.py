@@ -11,7 +11,9 @@ from kicraft.parts_library import jlcparts, lcsc_retail
 
 from .config import STAGE_COLLECTION_BOUNDS, CollectionBound
 from .pricing import _stock_floor
+from .question_policy import QUESTION_OPTIONS_INSTRUCTION
 from .stage_contracts import StageResponseContract
+
 
 
 def _bundle_sourcing_lcsc(bundle: str) -> str:
@@ -94,10 +96,12 @@ def _stage_extra(stage: str) -> str:
             "obligation in more than one place). The architecture's top-level `obligations` list is "
             "written for you from the committed intent and functional spec, so do NOT copy the rows "
             "into it: an obligation attached to no requirement is refused, and a paraphrased or "
-            "trimmed copy is restored from the committed row. A `quantity`, `fabrication` or "
-            "`negative` obligation needs no owner — a quantity counts a class across the design, a "
-            "fabrication feature is a printed-board property the PCB side owns rather than any "
-            "part, and a negative forbids a class. "
+            "trimmed copy is restored from the committed row. A `quantity`, `fabrication`, or "
+            "`negative` board-wide fact needs no owner. A `quantitative` row needs an owner unless "
+            "it explicitly measures the board/PCB outline with a geometric unit (for example board "
+            "width in mm); voltage, current, frequency, pitch, and component values remain on the "
+            "realizing requirement. A board/PCB outline is `fabrication`, never `physical`; a "
+            "mounting hole remains a realizable physical obligation. "
             "Use the published finite lowerer interfaces and supported parameters; "
             "a failed supported lowerer is a contract defect, not permission to invent "
             "an alternate interface. For uncurated hardware, declare actual numbered "
@@ -478,8 +482,8 @@ def _clarifying_questions_block(allow_questions: bool) -> str:
         "engineering defaults; a question never replaces the slot. Ask only when "
         "no safe default exists and a wrong answer would materially change the "
         "manufactured board. Never ask to confirm a default or a fact already "
-        "present in the brief/state. Ask one decision per question, at most 3 "
-        "questions. Every question MUST provide 2-4 concise suggested answers in "
+        "present in the brief/state. "
+        f"{QUESTION_OPTIONS_INSTRUCTION} Provide 2-4 concise suggested answers in "
         "`options`. Set `questions` to `[]` unless you are asking; a non-empty "
         "`questions` array must carry actionable questions."
     )
