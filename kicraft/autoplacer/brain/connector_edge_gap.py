@@ -57,6 +57,17 @@ _PROG_DEBUG_HEADER_RE = re.compile(
     re.I,
 )
 
+# Edge-zoned parts whose zone is an access/field-of-view hint rather than an
+# off-board mating mouth: a trim pot the user turns (RES-ADJ/Potentiometer
+# footprints, value "3296W-...") and a photo device that must see light (value
+# "Phototransistor"/"Photodiode"). Identity, not geometry: the body-overhang
+# heuristic cannot tell a SOT-23 phototransistor from a connector, which is how
+# Q2 on board 892 was aimed 180 deg into the board.
+_ACCESS_ONLY_PART_RE = re.compile(
+    r"res[-_ ]?adj|potentiometer|trimmer|phototransistor|photodiode|photo[-_ ]?transistor",
+    re.IGNORECASE,
+)
+
 
 def _access_only_ref(ref: str) -> bool:
     """True for refs whose edge zone is an accessibility hint, not a mating
@@ -79,12 +90,29 @@ def _prog_debug_header(fp) -> bool:
     return False
 
 
+def _access_only_footprint(fp) -> bool:
+    """True when the footprint is an access / field-of-view part rather than a
+    connector: a trim pot the user turns, a photo device that must see light
+    (see ``_ACCESS_ONLY_PART_RE``). Read from the same board-available Value
+    and library name as ``_prog_debug_header``, and never raises on a
+    getter-less object."""
+    for getter in ("GetValue", "GetFPIDAsString"):
+        try:
+            text = getattr(fp, getter)()
+        except Exception:
+            continue
+        if text and _ACCESS_ONLY_PART_RE.search(str(text)):
+            return True
+    return False
+
+
 def _access_only_connector(ref: str, fp) -> bool:
     """True for edge-zoned parts whose zone is an accessibility hint, not an
-    off-board mating contract: coin cells (by ref) and debug/programming
-    headers (by footprint Value/name). The flush/stranded and mouth-facing
-    gates are skipped for these -- placement still biases them edgeward."""
-    return _access_only_ref(ref) or _prog_debug_header(fp)
+    off-board mating contract: coin cells (by ref), debug/programming headers,
+    and access/field-of-view parts (by footprint identity). The flush/stranded
+    and mouth-facing gates are skipped for these -- placement still biases them
+    edgeward."""
+    return _access_only_ref(ref) or _prog_debug_header(fp) or _access_only_footprint(fp)
 
 
 @dataclass(frozen=True)

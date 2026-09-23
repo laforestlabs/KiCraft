@@ -17,7 +17,7 @@ import pytest
 from nicegui.testing.user_simulation import user_simulation
 
 from kicraft.server.accounts import AccountStore
-from kicraft.server.config import LEGAL_VERSION
+from kicraft.server.config import DESIGN_PROFILES, LEGAL_VERSION
 
 pytestmark = pytest.mark.anyio
 
@@ -63,7 +63,7 @@ async def test_admin_page_renders_profiles_and_effective_settings(harness):
     await _login(u, ADMIN_EMAIL)
     await u.open("/admin/routing")
     await u.should_see("Design-model routing")
-    await u.should_see("openai/gpt-5.6-luna")      # the luna profile summary
+    await u.should_see(DESIGN_PROFILES["luna"]["model"])  # the luna profile summary
     await u.should_see("deepseek-flash")           # the deepseek profile summary
     await u.should_see("Effective settings")
     await u.should_see("Max tokens per call")

@@ -2204,13 +2204,31 @@ def _validate_wiring_unit(
 
 
 def validate_unit_candidate(
-    unit: StageWorkUnit, payload: dict, prompt_state: dict, extras: dict
+    unit: StageWorkUnit,
+    payload: dict,
+    prompt_state: dict,
+    extras: dict,
+    *,
+    allow_deterministic_fallback: bool = True,
 ) -> dict:
-    """Validate one complete unit replacement before it can enter the aggregate."""
+    """Validate one complete unit replacement before it can enter the aggregate.
+
+    ``allow_deterministic_fallback=False`` makes a BOM unit's answer stand on
+    its own: the "determinism wins" adoption is skipped. The driver passes it
+    for a unit whose own lowering was already refused -- adopting that lowering
+    again can only re-raise its known defect and hide the model's, which is what
+    the repair feedback has to name.
+    """
     if not isinstance(payload, dict):
         raise TypeError("work-unit payload must be an object")
     if unit.stage == "bom":
-        return _validate_bom_unit(unit, payload, prompt_state, extras)
+        return _validate_bom_unit(
+            unit,
+            payload,
+            prompt_state,
+            extras,
+            _allow_deterministic_fallback=allow_deterministic_fallback,
+        )
     return _validate_wiring_unit(unit, payload, prompt_state, extras)
 
 

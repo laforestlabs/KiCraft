@@ -146,6 +146,50 @@ _WJ126V_OPENINGS: dict[str, tuple[float, tuple[float, float]]] = {
 
 _REVIEWED_OPENINGS.update(_WJ126V_OPENINGS)
 
+# --- Kangnex WJ126V/WJ127 5.00 mm members measured 2026-09-23 ---------------
+# The three shipped unreviewed and had no usable mesh: the WJ126V 4P's
+# `.kicad_mod` points at a stock Phoenix MKDS step, the WJ126V 5P ships no 3D
+# at all, and the WJ127 5P's own WRL/STEP does not register on its outline.
+# Each datum below is therefore read off the vendor customer drawing, the
+# evidence class the WJ128V rows cross-checked their meshes against. The LCSC
+# product pages resolve the drawings (JSON-LD `subjectOf.url`, fetched
+# 2026-09-23): C2931152 -> the WJ126V-5.0-XXP-1Y-00A customer drawing,
+# C42377756 -> the same drawing for the 5P, C192780 -> the WJ127 drawing.
+#
+# WJ126V (``CONN-TH_4P-P5.00_WJ126V-5.0-4P-1``, LCSC C2931152, and
+# ``CONN-TH_5P-P5.00_WJ126V-5.0-5P``, LCSC C42377756). Third-angle drawing,
+# mm, 1:1. Its side view gives the 7.90 mm body depth; its PCB LAYOUT view
+# puts the pin row 4.10 mm below the outline's wire-entry edge and 3.80 mm
+# above the other (measured on the render at 63.5 px/mm: 260 px vs 242 px,
+# and the side view's pin blade 266 px vs 240 px from the same two faces).
+# The wire enters through that deeper edge, not the 3.80 mm one: the side
+# view draws the wire way as a narrow chamber 1.0..1.5 mm inside the 4.10 mm
+# wall, and the mesh-measured WJ128V rows carry the same structure (entry
+# wall 5.27 mm vs back wall 5.03 mm from the pin row). The vendored members
+# put the F.Fab value text on +Y and the F.SilkS reference text on -Y, the
+# side the mesh-verified WJ128V rows and the reviewed 3P marker (0, 4.13)
+# put the entry on, so the local mouth is +Y = 90 deg. Both footprints centre
+# their pad row on x=0; their symmetric F.SilkS boxes (+-3.90 and -4.00/+3.80)
+# approximate the true 4.10 mm deep entry face, which the 3P sibling's own
+# courtyard (4.13) and the WJ127's silk/courtyard pair below confirm.
+_WJ126V_WIRE_ENTRY_MM = (0.0, 4.10)
+
+# WJ127 (``CONN-TH_5P-P5.00_WJ127-5.0-5P``, LCSC C192780). Its PCB LAYOUT view
+# carries the same dims as the WJ126V family plus an explicit ``4.20`` from the
+# outline's wire-entry edge down to the pin row (260 px at 63.5 px/mm against
+# the outline's 520 px = 8.19 mm depth), and the vendored footprint's own
+# F.SilkS (+4.16) and F.CrtYd (+4.29) bracket that 4.20 face on +Y, the side
+# its F.Fab value text names. Local mouth is +Y = 90 deg; the pad row centres
+# on x=0.
+_WJ127_WIRE_ENTRY_MM = (0.0, 4.20)
+
+for _measured_name, _measured_entry in (
+    ("CONN-TH_4P-P5.00_WJ126V-5.0-4P-1", _WJ126V_WIRE_ENTRY_MM),
+    ("CONN-TH_5P-P5.00_WJ126V-5.0-5P", _WJ126V_WIRE_ENTRY_MM),
+    ("CONN-TH_5P-P5.00_WJ127-5.0-5P", _WJ127_WIRE_ENTRY_MM),
+):
+    _REVIEWED_OPENINGS[_measured_name] = (90.0, _measured_entry)
+
 
 def _bare_name(footprint_name: str) -> str:
     """``"Lib:Name"`` -> ``"Name"``; already-bare names pass through."""

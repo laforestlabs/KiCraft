@@ -2122,6 +2122,10 @@ def _drive_work_unit_stage(
                     ],
                 }
             )
+    # Deterministic lowerings that fail their own unit's validation: the unit is
+    # re-driven by the model with the refusal as its first feedback, instead of
+    # aborting the stage at attempts=0 before any provider call.
+    refused_deterministic: dict[str, str] = {}
     for unit in units:
         if unit.unit_id in candidates:
             if progress:
@@ -2186,12 +2190,22 @@ def _drive_work_unit_stage(
                 }
             )
         deterministic["_trusted_deterministic_candidate"] = True
-        candidates[unit.unit_id] = validate_unit_candidate(
-            unit,
-            deterministic,
-            prompt_state,
-            extras,
-        )
+        try:
+            candidates[unit.unit_id] = validate_unit_candidate(
+                unit,
+                deterministic,
+                prompt_state,
+                extras,
+            )
+        except (WorkUnitValidationError, TypeError, ValueError) as exc:
+            # The lowering could not satisfy its own reviewed obligations (a real
+            # refusal — see _validate_bom_unit's defect text). The unit is handed to
+            # the model with that refusal as its first feedback, so the stage spends
+            # its bounded unit attempts instead of failing the whole stage at
+            # attempts=0. The work_unit_plan event above stays; work_unit_done is
+            # emitted only by the path that actually produced the unit.
+            refused_deterministic[unit.unit_id] = str(exc)
+            continue
         unit_sources[unit.unit_id] = "lowerer"
         if progress:
             progress(
@@ -2611,7 +2625,18 @@ def _drive_work_unit_stage(
                 # not part of the unit payload.
                 parsed = {key: value for key, value in parsed.items() if key != "questions"}
             try:
-                validated = validate_unit_candidate(unit, parsed, prompt_state, extras)
+                validated = validate_unit_candidate(
+                    unit,
+                    parsed,
+                    prompt_state,
+                    extras,
+                    # A unit whose own lowering was already refused gets its
+                    # answer judged on its own merits: adopting the refused
+                    # lowering could only re-raise that lowering's defect and
+                    # hide the model's, so the repair feedback would repeat
+                    # itself instead of naming what to fix.
+                    allow_deterministic_fallback=unit.unit_id not in refused_deterministic,
+                )
             except (WorkUnitValidationError, TypeError, ValueError) as exc:
                 record(
                     active_client,
@@ -2953,7 +2978,7 @@ def _drive_work_unit_stage(
     for unit in units:
         if unit.unit_id in candidates:
             continue
-        kind, payload = draft(unit)
+        kind, payload = draft(unit, feedback=refused_deterministic.get(unit.unit_id))
         if kind == "questions":
             return stop_for_question(payload)
         if kind != "candidate":

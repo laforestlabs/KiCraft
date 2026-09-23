@@ -1352,6 +1352,81 @@ def test_obligation_ownership_refusal_names_the_fix():
     assert "union of the requirements" in message
 
 
+def test_two_rails_from_one_source_port_merge_into_one_node():
+    """`VBUS` and `+5V` declared from one port are one rail, not a conflict.
+
+    The beacon draft (frozen replay `curR-b3`) declared both from `usb.vbus`. A port carries one
+    net, so the second rail's bind refused `conflicting_port_binding` and the model re-emitted the
+    same draft on every attempt. One node declared twice is normalized instead.
+    """
+    intent = _hub75_intent()
+    intent["power"]["rails"]["+5V"] = {"voltage": 5.0, "from": "usb_power.vbus"}
+    next(row for row in intent["requirements"] if row["id"] == "hub75")["supply"] = "+5V"
+    next(row for row in intent["requirements"] if row["id"] == "led")["supply_bindings"] = {
+        "vdd": "+5V"
+    }
+
+    architecture = derive_architecture(intent)
+
+    assert architecture.power_nets == ["GND", "+3V3", "VBUS"]
+    assert _requirement(architecture, "hub75").ports["vdd_5v"] == "VBUS"
+    assert _requirement(architecture, "led").ports["vdd"] == "VBUS"
+    assert [row.message for row in architecture.advisories if row.code == "rail_alias_merged"] == [
+        "rail '+5V' is the same node as 'VBUS' (both declared from 'usb_power.vbus'); "
+        "the design carries one rail"
+    ]
+
+
+def test_declared_supply_rail_named_by_the_alias_is_rewritten():
+    """An alias reachable through a declared port's `supply_rail` is rewritten too.
+
+    `supply_rail` on a declared port feeds the same supply-binding table as `supply_bindings`;
+    leaving the alias there would swap the merge for an `unknown_supply_rail` refusal.
+    """
+    intent = _declared_port_misuse_intent(vdd_both=False, sig_reference=False)
+    intent["power"]["rails"]["+5V"] = {"voltage": 5.0, "from": "usb_power.vbus"}
+    csb = next(
+        port
+        for port in intent["requirements"][-1]["declared_ports"]
+        if port["key"] == "csb"
+    )
+    csb["supply_rail"] = "+5V"
+
+    architecture = derive_architecture(intent)
+
+    assert next(row for row in architecture.requirements if row.id == "sensor_af").ports[
+        "csb"
+    ] == "VBUS"
+
+
+def test_two_rails_from_one_port_at_different_voltages_still_refuse():
+    """Voltage is the merge's boundary: 5 V and 3.3 V off one port are two different nodes."""
+    intent = _hub75_intent()
+    intent["power"]["rails"]["+5V"] = {"voltage": 3.3, "from": "usb_power.vbus"}
+
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(intent)
+
+    row = next(d for d in excinfo.value.diagnostics if d.code == "conflicting_port_binding")
+    assert "rail '+5V'" in row.message
+
+
+def test_a_signal_named_after_the_alias_keeps_the_rail_declaration():
+    """A rail a signal carries the name of is never collapsed: that conflict is its own refusal."""
+    intent = _hub75_intent()
+    intent["power"]["rails"]["+5V"] = {"voltage": 5.0, "from": "usb_power.vbus"}
+    intent["signals"] = [
+        {**row, "name": "+5V"} if row["name"] == "USB_D_P" else row for row in intent["signals"]
+    ]
+
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(intent)
+
+    codes = {row.code for row in excinfo.value.diagnostics}
+    assert "conflicting_port_binding" in codes  # the duplicate rail bind is untouched
+    assert "signal_names_rail" in codes
+
+
 def test_one_port_carries_one_net_and_the_refusal_names_the_menu():
     """Two signals on one port must name the alternatives (the top live failure).
 

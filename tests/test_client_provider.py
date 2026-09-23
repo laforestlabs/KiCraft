@@ -1655,11 +1655,11 @@ def test_stage_output_ceiling_admits_bounded_call_without_raising_project_budget
     monkeypatch.setenv("KICRAFT_STAGE_OUTPUT_LIMITS", '{"architecture":8192}')
     settings = Settings.from_env(dotenv=False)
     settings.ledger_path = tmp_path / "ledger.db"
-    # A project budget that sits between the two call ceilings under the active
-    # profile's price caps (ceilings for 60k chars + 16384/8192 out are
-    # $0.02266 / $0.01283): the caller's unbounded 16384 request must be refused,
-    # the policy-bounded (8192) call must still fit.
-    settings.project_llm_budget_usd = 0.025
+    # A project budget whose remaining room sits between the two call ceilings
+    # under the active profile's price caps (ceilings for 60k chars +
+    # 16384/8192 out are $0.00969 / $0.00560): the caller's unbounded 16384
+    # request must be refused, the policy-bounded (8192) call must still fit.
+    settings.project_llm_budget_usd = 0.0145
     guard = SpendGuard(settings)
     guard.record(settings.model, 100, 100, 0.007, meta={"run_id": "bounded", "stage": "intent"})
     client = CappedOpenRouterClient(settings, guard=guard)
@@ -1683,7 +1683,7 @@ def test_stage_output_ceiling_admits_bounded_call_without_raising_project_budget
     assert guard.spent_for_run("bounded") == pytest.approx(0.008)
     with pytest.raises(BudgetExceeded) as refused:
         guard.preflight(call_ceiling_usd=0.02, run_id="bounded")
-    assert refused.value.limit_usd == 0.025
+    assert refused.value.limit_usd == 0.0145
 
 
 @pytest.mark.parametrize(
@@ -1796,7 +1796,7 @@ def test_luna_profile_is_the_default_openrouter_route(monkeypatch):
     assert settings.design_profile == "luna"
     assert settings.backend == "openrouter"
     assert settings.base_url == "https://openrouter.ai/api/v1"
-    assert settings.model == "openai/gpt-5.6-luna"
+    assert settings.model == "openai/gpt-6-luna"
     assert settings.provider_order == ["openai"]
 
 
@@ -1964,7 +1964,7 @@ def test_json_schema_is_translated_only_for_the_deepseek_backend(monkeypatch, ba
                 if backend == "deepseek"
                 else "https://openrouter.ai/api/v1"
             ),
-            model="deepseek-flash" if backend == "deepseek" else "openai/gpt-5.6-luna",
+            model="deepseek-flash" if backend == "deepseek" else "openai/gpt-6-luna",
             max_price_prompt=0.30,
             max_price_completion=1.20,
         ),

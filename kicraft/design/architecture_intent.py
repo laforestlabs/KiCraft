@@ -713,6 +713,103 @@ def _edge_label(target: str) -> str | None:
     return label or None
 
 
+#: Two rails sourced from one port are the same node when their voltages agree this closely; the
+#: module already reads the USB 5 V rail with this tolerance.
+_RAIL_ALIAS_TOLERANCE_V = 0.5
+
+
+def _merge_alias_rails(
+    intent: ArchitectureIntent,
+) -> tuple[ArchitectureIntent, list[tuple[str, str, str]]]:
+    """Collapse rails that name one node twice: same normalized source port, same voltage.
+
+    ``{"VBUS": {"from": "usb.vbus", "voltage": 5.0}, "+5V": {"from": "usb.vbus", ...}}`` is one
+    node declared twice, and a port carries one net: the second rail's bind is refused
+    (`conflicting_port_binding`), so a model that keeps re-emitting the same draft never gets a
+    different answer. The first-declared key wins, every alias key is dropped, and every rail
+    reference is rewritten to it. Returns the merged intent plus one ``(alias, canonical,
+    from_ref)`` row per collapsed alias, for the caller's advisory.
+
+    Deliberately narrow: only rails that declare a source port are considered, their voltages
+    must agree within `_RAIL_ALIAS_TOLERANCE_V`, and an alias a signal names is left alone (that
+    conflict is the separate `signal_conflicts_with_rail` refusal). A rail-vs-signal conflict, a
+    voltage conflict, and two genuinely different source ports refuse exactly as before.
+    """
+    by_source: dict[str, list[str]] = {}
+    for name, rail in intent.power.rails.items():
+        if rail.from_ref is None:
+            continue
+        by_source.setdefault(_net_identity(rail.from_ref), []).append(name)
+    signal_names = {_net_identity(signal.name) for signal in intent.signals}
+    aliases: dict[str, str] = {}
+    merges: list[tuple[str, str, str]] = []
+    for names in by_source.values():
+        canonical = names[0]
+        for alias in names[1:]:
+            if _net_identity(alias) in signal_names:
+                continue
+            if (
+                abs(intent.power.rails[alias].voltage - intent.power.rails[canonical].voltage)
+                > _RAIL_ALIAS_TOLERANCE_V
+            ):
+                continue
+            aliases[alias] = canonical
+            merges.append(
+                (alias, canonical, str(intent.power.rails[canonical].from_ref))
+            )
+    if not aliases:
+        return intent, []
+
+    def canonical(name: str | None) -> str | None:
+        return aliases.get(name, name)
+
+    def rewrite(mapping: dict[str, str]) -> dict[str, str]:
+        return {key: canonical(value) for key, value in mapping.items()}
+
+    requirements = [
+        row.model_copy(
+            update={
+                "supply": canonical(row.supply),
+                "supply_bindings": rewrite(row.supply_bindings),
+                "reference_bindings": rewrite(row.reference_bindings),
+                "ties": rewrite(row.ties),
+                "declared_ports": [
+                    port.model_copy(
+                        update={
+                            "supply_rail": canonical(port.supply_rail),
+                            "reference_domain": canonical(port.reference_domain),
+                        }
+                    )
+                    for port in row.declared_ports
+                ],
+            }
+        )
+        for row in intent.requirements
+    ]
+    signals = [
+        signal.model_copy(update={"rails": [canonical(name) for name in signal.rails]})
+        for signal in intent.signals
+    ]
+    return (
+        intent.model_copy(
+            update={
+                "requirements": requirements,
+                "signals": signals,
+                "power": intent.power.model_copy(
+                    update={
+                        "rails": {
+                            name: rail
+                            for name, rail in intent.power.rails.items()
+                            if name not in aliases
+                        }
+                    }
+                ),
+            }
+        ),
+        merges,
+    )
+
+
 def derive_architecture(
     intent: ArchitectureIntent | dict,
     functional_spec: object | None = None,
@@ -750,6 +847,17 @@ def derive_architecture(
     # rail that owns a pin forced: both are carried into the review's assumptions.
     renamed: list[str] = []
     derived_notes: list[str] = []
+
+    # One node declared twice (two rails from one source port) is normalized before anything
+    # reads `intent.power.rails`, so the draft designs the board it described instead of being
+    # refused for saying the same thing twice.
+    intent, rail_merges = _merge_alias_rails(intent)
+    for alias, canonical_rail, from_ref in rail_merges:
+        _advise(
+            "rail_alias_merged",
+            f"rail {alias!r} is the same node as {canonical_rail!r} "
+            f"(both declared from {from_ref!r}); the design carries one rail",
+        )
 
     sheets = [
         Sheet(

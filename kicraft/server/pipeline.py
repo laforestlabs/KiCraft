@@ -38,8 +38,8 @@ TRADE_OFF = (
 #: so *every* call failed in under a second at zero cost until these were set per process.
 LEGACY_ENV = {
     "KICRAFT_PROVIDER_ORDER": "openai",
-    "KICRAFT_MAX_PRICE_PROMPT": "0.20",
-    "KICRAFT_MAX_PRICE_COMPLETION": "1.20",
+    "KICRAFT_MAX_PRICE_PROMPT": "0.10",
+    "KICRAFT_MAX_PRICE_COMPLETION": "0.50",
     "KICRAFT_DESIGN_REASONING_TOKENS": "0",
 }
 

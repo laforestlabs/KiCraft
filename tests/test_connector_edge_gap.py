@@ -85,6 +85,126 @@ def test_prog_debug_header_survives_missing_getters():
     # Never raises even when the footprint lacks the getters entirely.
     assert _prog_debug_header(_Bare()) is False
 
+
+@pytest.mark.parametrize(
+    "value, fpid, expected",
+    [
+        # Access / field-of-view parts -> access-only (skip mating gates).
+        # Board 892's RT1/Q2: a trim pot the user turns, a phototransistor
+        # that must see light.
+        ("3296W-1-103LF", "easyeda2kicad:RES-ADJ-TH_3296W", True),
+        ("Phototransistor", "Package_TO_SOT_SMD:SOT-23", True),
+        ("Photodiode", "x:SOT-23", True),
+        ("", "x:RES_ADJ_3296W", True),  # identity only in the FPID
+        ("10k trimmer", "x:Potentiometer_3296W", True),
+        # Real off-board mating connectors and unrelated passives -> NOT exempt.
+        ("USB-C", "x:USB-C_SMD-TYPE-C-31-M-12", False),
+        ("WJ128V-4P", "x:CONN-TH_4P-P5.00_WJ128V-4P-5.0-14-00A", False),
+        ("", "TerminalBlock_Phoenix_MKDS-1,5-2_1x02_P5.00mm_Horizontal", False),
+        ("100nF", "Device:C", False),
+    ],
+)
+def test_access_only_footprint_classifier(value, fpid, expected):
+    from kicraft.autoplacer.brain.connector_edge_gap import _access_only_footprint
+
+    assert _access_only_footprint(_FakeFP(value, fpid)) is expected
+
+
+def test_access_only_footprint_survives_missing_getters():
+    class _Bare:
+        pass
+
+    from kicraft.autoplacer.brain.connector_edge_gap import _access_only_footprint
+
+    assert _access_only_footprint(_Bare()) is False
+
+
+def test_access_only_connector_covers_access_and_fov_parts():
+    # Coin cell by ref and a debug header by Value (existing behavior) ...
+    assert _access_only_connector("BT1", _FakeFP("CR2032 holder", "x:BS-CR2032")) is True
+    # ... plus the access/FOV identities: the trim pot a hand turns and the
+    # photo device that must see light.
+    assert (
+        _access_only_connector(
+            "RT1", _FakeFP("3296W-1-103LF", "easyeda2kicad:RES-ADJ-TH_3296W")
+        )
+        is True
+    )
+    assert (
+        _access_only_connector("Q2", _FakeFP("Phototransistor", "x:SOT-23")) is True
+    )
+    # A real edge connector stays subject to the stranding/facing gates.
+    assert (
+        _access_only_connector(
+            "J2", _FakeFP("WJ128V-4P", "x:CONN-TH_4P-P5.00_WJ128V-4P-5.0-14-00A")
+        )
+        is False
+    )
+
+
+def test_facing_and_stranding_skip_trim_pot_and_phototransistor(tmp_path):
+    """An edge-zoned trim pot and phototransistor are never gated as connectors.
+
+    Board 892 shipped RT1 as ``connector_orientation_unmeasured:RT1`` and Q2 as
+    ``connector_misoriented:Q2`` (the body-overhang heuristic aimed the SOT-23
+    phototransistor 180 deg into the board). Their edge zone is an access /
+    field-of-view hint: nothing plugs into either one from off the board. A real
+    connector on the same board keeps its verdict, so the gates are not simply
+    switched off.
+    """
+    pcbnew = pytest.importorskip("pcbnew")
+    from kicraft.autoplacer.brain.connector_edge_gap import (
+        connector_edge_gaps,
+        connector_facings,
+    )
+
+    sot_lib = Path("/usr/share/kicad/footprints/Package_TO_SOT_SMD.pretty")
+    if not (sot_lib / "SOT-23.kicad_mod").is_file():
+        pytest.skip("stock KiCad Package_TO_SOT_SMD library not installed")
+
+    board = pcbnew.CreateEmptyBoard()
+    rt = pcbnew.FootprintLoad(
+        "kicraft/parts_library/trim-pot-3296w-10k/trim-pot-3296w-10k.pretty",
+        "RES-ADJ-TH_3296W",
+    )
+    assert rt is not None
+    rt.SetReference("RT1")
+    rt.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(4), pcbnew.FromMM(14)))
+    board.Add(rt)
+
+    q2 = pcbnew.FootprintLoad(str(sot_lib), "SOT-23")
+    assert q2 is not None
+    q2.SetReference("Q2")
+    q2.SetValue("Phototransistor")
+    q2.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(14), pcbnew.FromMM(4)))
+    board.Add(q2)
+
+    j1 = pcbnew.FootprintLoad(
+        "kicraft/parts_library/bnc-pcb-jack/bnc-pcb-jack.pretty",
+        "ANT-TH_KH-BNC50-3511",
+    )
+    assert j1 is not None
+    j1.SetReference("J1")
+    j1.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(30), pcbnew.FromMM(15)))
+    board.Add(j1)
+
+    rect = pcbnew.PCB_SHAPE(board)
+    rect.SetShape(pcbnew.SHAPE_T_RECT)
+    rect.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(0), pcbnew.FromMM(0)))
+    rect.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(40), pcbnew.FromMM(30)))
+    rect.SetLayer(pcbnew.Edge_Cuts)
+    board.Add(rect)
+    path = tmp_path / "access_fov.kicad_pcb"
+    pcbnew.SaveBoard(str(path), board)
+
+    zones = {
+        "RT1": {"edge": "left"},
+        "Q2": {"edge": "bottom"},
+        "J1": {"edge": "right"},
+    }
+    assert [v.ref for v in connector_facings(str(path), zones)] == ["J1"]
+    assert [g.ref for g in connector_edge_gaps(str(path), zones)] == ["J1"]
+
 FIXTURE = (
     Path(__file__).parent / "fixtures" / "replay_workspace" / "USB_PD_TRIGGER"
 )

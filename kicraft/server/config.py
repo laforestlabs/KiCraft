@@ -217,13 +217,14 @@ def _resolved_stage_output_limits() -> dict[str, int]:
 # (OPENROUTER_API_KEY). Exactly two profiles exist and the active one is final
 # -- there is no escalation tier and no provider-fallback route.
 #
-# ``luna`` (default) is OpenAI's GPT-5.6 Luna on OpenRouter, which implements
+# ``luna`` (default) is OpenAI's GPT-6 Luna on OpenRouter, which implements
 # native structured outputs (`response_format: json_schema`, strict) that the
 # complex nested design slots depend on. It is pinned to OpenAI's standard
-# endpoint (`openai`, probed live 2026-09-11 for structured outputs + tools +
-# streaming + reasoning) and capped at that endpoint's price. The cheaper
-# `openai/flex` tier was rejected: flex is lower-priority traffic and a deploy
-# path must not trade reliability for the $0.10/Mtok difference.
+# endpoint (`openai`, price verified 2026-09-23: $0.10/$0.50 per Mtok) and
+# capped at that endpoint's price, which is what keeps the `openai/fast` tier
+# ($0.20/$1.00) out of the eligible set. The cheaper `openai/flex` tier was
+# rejected: flex is lower-priority traffic and a deploy path must not trade
+# reliability for the $0.05/Mtok difference.
 #
 # ``deepseek`` runs DeepSeek-V4.1-Flash (`deepseek-flash`) direct on DeepSeek.
 # DeepSeek has NO `json_schema` mode: the client sends `json_object` instead
@@ -236,12 +237,12 @@ def _resolved_stage_output_limits() -> dict[str, int]:
 # the guard errs high and never under-counts off-peak spend.
 DESIGN_PROFILES: dict[str, dict[str, object]] = {
     "luna": {
-        "model": "openai/gpt-5.6-luna",
+        "model": "openai/gpt-6-luna",
         "backend": "openrouter",
         "base_url": "https://openrouter.ai/api/v1",
         "provider_order": ["openai"],
-        "max_price_prompt": 0.20,
-        "max_price_completion": 1.20,
+        "max_price_prompt": 0.10,
+        "max_price_completion": 0.50,
     },
     "deepseek": {
         "model": "deepseek-flash",
@@ -375,7 +376,7 @@ class Settings:
     """Resolved server configuration. Build with `Settings.from_env()`."""
 
     api_key: str
-    model: str = "openai/gpt-5.6-luna"
+    model: str = "openai/gpt-6-luna"
     design_profile: str = "custom"
     escalation_profile: str = ""
     provider_fallback_profile: str = ""
@@ -537,7 +538,7 @@ class Settings:
     # docs/electrical_review_model_bakeoff.md and
     # docs/plans/stage-auditor-luna-2026-09-23.md (A4 keeps the harness as an
     # optional post-ship regression tool, not a gate).
-    review_model: str | None = "openai/gpt-5.6-luna"
+    review_model: str | None = "openai/gpt-6-luna"
     review_reasoning_tokens: int = 8000
     # Reasoning effort for the review (OpenRouter; portable across the slate --
     # minimax/glm prefer effort and some models 400 on the token form). When
@@ -552,7 +553,7 @@ class Settings:
     review_max_tokens: int = 24000
     # Provider routing for role calls is independent from the designer profile.
     # The reviewer now rides the designer's own provider because it runs the
-    # designer's own model (openai/gpt-5.6-luna). The judge keeps its own route and
+    # designer's own model (openai/gpt-6-luna). The judge keeps its own route and
     # its own model. Keep the fields separate so either can be promoted
     # independently. NOTE: the from_env fallback below carries this same default
     # as a separate literal -- change both, or a box reading env silently keeps

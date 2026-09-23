@@ -32,11 +32,15 @@ CFG_ON = {"connector_perp_orientation": True}
 
 LIB_3P = Path("kicraft/parts_library/screw-terminal-5mm-3p")
 FP_3P = "CONN-TH_3P-P5.00_WJ126V-5.0-3P"
-# The 4P member is the unreviewed sibling: no `PCB Edge` marker in-repo, no
-# datum in the reviewed table, and no 3D model to review from -- so it is the
-# fixture for "a directional connector with no mouth evidence must block".
+# The 4P member WAS the unreviewed sibling ("no marker, no table datum, no
+# usable mesh") until the 2026-09-23 handoff queue measured it from its vendor
+# drawing, so the fixtures for "a directional connector with no mouth evidence
+# must block" copy the bundle under a name the reviewed table does not cover:
+# the unreviewed-name contract is what they test, and the geometry (a deep
+# through-hole body whose mouth no heuristic can read) is the real one.
 LIB_4P = Path("kicraft/parts_library/screw-terminal-5mm-4p")
 FP_4P = "CONN-TH_4P-P5.00_WJ126V-5.0-4P-1"
+FP_4P_ALT = f"{FP_4P}-X"  # deliberately not a reviewed footprint name
 
 
 def _screw_terminal_3p() -> Component:
@@ -165,6 +169,29 @@ def _make_board(
 ZONES = {"J2": {"edge": "right"}}
 
 
+def _unreviewed_4p_copy(tmp_path: Path) -> tuple[Path, str]:
+    """The 4P bundle under a footprint name the reviewed table omits.
+
+    `CONN-TH_4P-P5.00_WJ126V-5.0-4P-1` carries a measured datum now, so the
+    still-real case the old 4P stood for -- a deep directional connector with
+    no mouth evidence, because its name is not in the table and no marker
+    exists -- needs a name the table does not cover. Everything else is the
+    shipped bundle: real manifest, real symbol, real footprint geometry.
+    """
+    bundle = tmp_path / LIB_4P.name
+    if bundle.exists():
+        shutil.rmtree(bundle)
+    shutil.copytree(LIB_4P, bundle)
+    pretty = bundle / f"{LIB_4P.name}.pretty"
+    (pretty / f"{FP_4P}.kicad_mod").rename(pretty / f"{FP_4P_ALT}.kicad_mod")
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    manifest["footprint_name"] = FP_4P_ALT
+    (bundle / "manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+    return bundle, FP_4P_ALT
+
+
 def test_facing_flags_mouth_parallel_to_edge(tmp_path):
     from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
 
@@ -229,13 +256,12 @@ def test_facing_omits_verified_vertical_header_strip(tmp_path):
 
 def test_facing_blocks_unknown_mouth(tmp_path):
     # No vertical identity and no mouth datum must block rather than disappear.
-    # (The unreviewed 4P sibling, not the reviewed 3P whose datum the table now
-    # carries even without its footprint marker.)
+    # (The 4P geometry under a name the reviewed table does not cover, not the
+    # reviewed 3P whose datum the table carries even without its marker.)
     from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
 
-    pcb = _make_board(
-        tmp_path, rotation=0.0, strip_marker=True, lib=LIB_4P, name=FP_4P
-    )
+    bundle, name = _unreviewed_4p_copy(tmp_path)
+    pcb = _make_board(tmp_path, rotation=0.0, strip_marker=True, lib=bundle, name=name)
     (v,) = connector_facings(str(pcb), ZONES)
     assert v.status == "unverified_directional"
 
@@ -268,9 +294,8 @@ def test_fab_gate_blocks_misoriented_connector(tmp_path):
 def test_fab_gate_blocks_unverifiable_connector(tmp_path):
     from kicraft.design.cli_app import _connector_misoriented
 
-    pcb = _make_board(
-        tmp_path, rotation=0.0, strip_marker=True, lib=LIB_4P, name=FP_4P
-    )
+    bundle, name = _unreviewed_4p_copy(tmp_path)
+    pcb = _make_board(tmp_path, rotation=0.0, strip_marker=True, lib=bundle, name=name)
     (tmp_path / "X_autoplacer.json").write_text(
         json.dumps({"component_zones": ZONES})
     )
@@ -314,8 +339,7 @@ def test_validate_part_warns_on_markerless_directional_connector(tmp_path, capsy
     pytest.importorskip("pcbnew")
     from kicraft.design.cli_app import _cmd_validate_part
 
-    bundle = tmp_path / LIB_4P.name
-    shutil.copytree(LIB_4P, bundle)
+    bundle, _name = _unreviewed_4p_copy(tmp_path)
 
     import argparse
 
@@ -539,6 +563,59 @@ def test_wj126v_reviewed_rows_survive_a_markerless_copy():
         if markers:
             continue  # a copy that already declares its edge: not this test's case
         assert detect_opening_direction(fp) == expected[name][0], bundle
+
+
+# The three members measured 2026-09-23 from their vendor customer drawings
+# (LCSC C2931152/C42377756 for the WJ126V pair, C192780 for the WJ127): the
+# drawing's PCB LAYOUT view puts the pin row 4.10 mm (WJ126V) / 4.20 mm (WJ127)
+# from the wire-entry long edge and 3.80 mm / 3.97 mm from the other, and the
+# wire enters through the deeper edge. Each name now carries that datum, so the
+# mouth is measured instead of blocked. The two 5P bundles are vendored in the
+# loader's parts dir rather than in-repo; absent, their rows are skipped.
+MEASURED_TERMINALS = {
+    FP_4P: (Path("kicraft/parts_library/screw-terminal-5mm-4p"), (0.0, 4.10)),
+    "CONN-TH_5P-P5.00_WJ126V-5.0-5P": (
+        Path.home() / ".kicraft" / "parts" / "screw-terminal-5mm-5p",
+        (0.0, 4.10),
+    ),
+    "CONN-TH_5P-P5.00_WJ127-5.0-5P": (
+        Path.home() / ".kicraft" / "parts" / "screw-terminal-5mm-5p-wj127",
+        (0.0, 4.20),
+    ),
+}
+
+
+def test_measured_terminal_rows_carry_the_drawing_datum():
+    from kicraft.parts_library.footprint_opening import (
+        is_horizontal_terminal,
+        reviewed_connector_opening,
+    )
+
+    for name, (_lib, marker) in MEASURED_TERMINALS.items():
+        assert reviewed_connector_opening(name) == (90.0, marker)
+        # Reviewed horizontal terminals skip the body-overhang heuristic, which
+        # is what read these three as "unverified_directional".
+        assert is_horizontal_terminal(name)
+
+
+def test_measured_terminals_measure_instead_of_blocking(tmp_path):
+    from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
+    from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+
+    pcbnew = pytest.importorskip("pcbnew")
+    for name, (lib, marker) in MEASURED_TERMINALS.items():
+        pretty = lib / f"{lib.name}.pretty"
+        if not (pretty / f"{name}.kicad_mod").is_file():
+            pytest.skip(f"vendored bundle for {name} not present")
+        fp = pcbnew.FootprintLoad(str(pretty), name)
+        assert fp is not None
+        assert detect_opening_direction(fp) == 90.0
+
+        pcb = _make_board(tmp_path, rotation=0.0, strip_marker=True, lib=lib, name=name)
+        (v,) = connector_facings(str(pcb), ZONES)
+        assert v.status == "misoriented", name  # mouth +Y (90) vs right outward (0)
+        assert v.opening_board_deg == 90.0
+        assert marker[1] > 3.0  # the datum is a point on the entry wall
 
 
 def test_wj128v_family_opening_is_the_wire_face():

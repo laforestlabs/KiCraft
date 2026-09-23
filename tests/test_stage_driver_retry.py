@@ -1865,6 +1865,225 @@ def test_invalid_bom_architecture_fails_before_provider_call(tmp_path, monkeypat
     assert result["error"].startswith("stage contract failed:")
 
 
+# ---- a refused deterministic lowering is re-driven, not fatal (§4 item 1) ----
+
+
+def _refused_lowering_architecture():
+    """One unit whose demand its own deterministic lowering cannot satisfy.
+
+    ``input_condition`` (family ``rc-lowpass``) demands a reviewed
+    ``coupling-capacitor`` and ``input-protection``, but the lowerer emits a bare
+    R/C pair with no orderable identity, so ``_validate_bom_unit`` refuses the
+    lowering with ``physical-obligation-unfulfilled``.
+    """
+    return {
+        "architecture": {
+            "topologies": {},
+            "rail_voltages": {},
+            "sheets": [
+                {
+                    "name": "INPUT",
+                    "stem": "INPUT",
+                    "function": "Line-level input conditioning",
+                }
+            ],
+            "power_nets": ["GND"],
+            "inter_sheet_nets": [],
+            "recipe_selections": [],
+            "requirements": [
+                {
+                    "id": "input_condition",
+                    "sheet": "INPUT",
+                    "role": "analog_block",
+                    "family": "rc-lowpass",
+                    "parameters": {
+                        "cutoff_hz": 20000.0,
+                        "resistance_ohm": 1000.0,
+                        "max_error_percent": 5.0,
+                    },
+                    "obligations": [
+                        {
+                            "kind": "physical",
+                            "original_obligation_id": "ac_coupling",
+                            "component_class": "coupling-capacitor",
+                        },
+                        {
+                            "kind": "physical",
+                            "original_obligation_id": "input_protection",
+                            "component_class": "input-protection",
+                        },
+                    ],
+                    "ports": {"gnd": "GND", "input": "AUDIO_IN", "output": "CONDITIONED"},
+                }
+            ],
+        }
+    }
+
+
+def _generic_unit_payload():
+    """What the lowering (and so a model that just repeats it) emits: a bare R/C pair."""
+    return {
+        "groups": [
+            {
+                "id": "resistor",
+                "reference_prefix": "R",
+                "quantity": 1,
+                "value": "1k",
+                "symbol": "Device:R",
+                "footprint": "Resistor_SMD:R_0603_1608Metric",
+                "sheet": "INPUT",
+            },
+            {
+                "id": "capacitor",
+                "reference_prefix": "C",
+                "quantity": 1,
+                "value": "8.2nF",
+                "symbol": "Device:C",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+                "sheet": "INPUT",
+            },
+        ],
+        "arrays": [],
+        "assumptions": [],
+        "substitutions": [],
+    }
+
+
+def _satisfying_unit_payload():
+    """The same unit with each demanded class carried by an orderable real part."""
+    return {
+        "groups": [
+            {
+                "id": "ac_coupling",
+                "reference_prefix": "C",
+                "quantity": 1,
+                "value": "1uF",
+                "symbol": "Device:C",
+                "footprint": "Capacitor_SMD:C_0603_1608Metric",
+                "mpn": "CL10B105KB8NNNC",
+                "sheet": "INPUT",
+            },
+            {
+                "id": "input_protection",
+                "reference_prefix": "D",
+                "quantity": 2,
+                "value": "BAV99",
+                "symbol": "Diode:BAV99",
+                "footprint": "Package_TO_SOT_SMD:SOT-363_SC-70-6",
+                "mpn": "BAV99,215",
+                "sheet": "INPUT",
+            },
+            {
+                "id": "filter_series",
+                "reference_prefix": "R",
+                "quantity": 1,
+                "value": "1k",
+                "symbol": "Device:R",
+                "footprint": "Resistor_SMD:R_0603_1608Metric",
+                "mpn": "RC0603FR-071KL",
+                "sheet": "INPUT",
+            },
+        ],
+        "arrays": [],
+        "assumptions": [],
+        "substitutions": [],
+    }
+
+
+def _bom_unit_reply(payload):
+    return {
+        "text": json.dumps(payload),
+        "reasoning": "",
+        "finish_reason": "stop",
+        "cost_usd": 0.001,
+    }
+
+
+def _bom_prep(monkeypatch, state):
+    prep = {"state": state, "extras": {}}
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc", (), {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""}
+        )(),
+    )
+
+
+def test_refused_deterministic_lowering_is_redriven_with_the_refusal_as_feedback(
+    tmp_path, monkeypatch
+):
+    _bom_prep(monkeypatch, _refused_lowering_architecture())
+    commits = []
+    monkeypatch.setattr(
+        stage_driver_mod,
+        "commit_stage",
+        lambda stage, slot, *args, **kwargs: (commits.append(slot) or True, {"ok": True}),
+    )
+    client = _unit_client([_bom_unit_reply(_satisfying_unit_payload())])
+
+    result = stage_driver_mod.drive_stage(
+        client, "bom", "a line-level input stage", tmp_path / "state.json", tmp_path
+    )
+
+    assert result["commit_ok"] is True, result
+    assert len(client.calls) == 1
+    prompt = client.calls[0]["messages"][1]["content"]
+    assert "AGGREGATE OR LOCAL DEFECTS TO REPAIR" in prompt
+    assert "requires 1 real coupling-capacitor" in prompt
+    assert "requires 1 real input-protection" in prompt
+    assert "the unit emitted: resistor=Device:R mpn=1k | capacitor=Device:C mpn=8.2nF" in prompt
+    # The committed BOM carries the model's real parts, not the refused lowering.
+    assert {part["mpn"] for part in commits[0]["parts"]} == {
+        "CL10B105KB8NNNC",
+        "BAV99,215",
+        "RC0603FR-071KL",
+    }
+
+
+def _wrong_sheet_unit_payload():
+    """The satisfying answer emitted on the wrong sheet: defective for the model's own reason."""
+    payload = _satisfying_unit_payload()
+    payload["groups"][0]["sheet"] = "POWER"
+    return payload
+
+
+def test_refused_deterministic_lowering_ends_in_unit_repair_exhausted(tmp_path, monkeypatch):
+    _bom_prep(monkeypatch, _refused_lowering_architecture())
+    client = _unit_client([_bom_unit_reply(_generic_unit_payload())] * 8)
+
+    result = stage_driver_mod.drive_stage(
+        client, "bom", "a line-level input stage", tmp_path / "state.json", tmp_path
+    )
+
+    assert result["failure_kind"] == "unit_repair_exhausted"
+    assert result["attempts"] == len(client.calls) == 3
+    assert not result["error"].startswith("stage contract failed:")
+
+
+def test_refused_deterministic_lowering_reports_the_models_own_defect(tmp_path, monkeypatch):
+    """The repair loop must learn what *it* got wrong, not what the lowering got wrong.
+
+    A unit whose lowering is already refused must not fall back to that lowering:
+    the adoption can only re-raise the lowering's defect, which hides the model's
+    and makes every repair round repeat the same text (the bounded identical
+    signature then ends the unit). Measured on the frozen line receiver: the
+    power-LED unit failed three times with the lowering's leftover, never with
+    the model's own defect.
+    """
+    _bom_prep(monkeypatch, _refused_lowering_architecture())
+    client = _unit_client([_bom_unit_reply(_wrong_sheet_unit_payload())] * 4)
+
+    result = stage_driver_mod.drive_stage(
+        client, "bom", "a line-level input stage", tmp_path / "state.json", tmp_path
+    )
+
+    assert result["failure_kind"] == "unit_repair_exhausted"
+    assert "wrong-sheet" in result["error"]
+    assert "physical-obligation-unfulfilled" not in result["error"]
+    assert "wrong-sheet" in client.calls[1]["messages"][1]["content"]
+
+
 def test_empty_length_takes_reasoning_recovery_not_invalid_json(tmp_path):
     # finish=length with NO content is provider exhaustion (even without the
     # client loop detector firing): reasoning is disabled for the retry, and

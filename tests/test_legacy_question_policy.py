@@ -379,6 +379,222 @@ def test_native_policy_decorator_preserves_tool_metadata_and_internal_reconcile(
     assert json.loads(output["reconcile"]["text"])["questions"][0]["blocking"] is True
 
 
+def test_native_spent_reconcile_budget_drops_the_deficit_park_only_when_automatic(
+    native_python, tmp_path
+):
+    """A spent pinned reconcile budget stops the deficit item from blocking.
+
+    ``main()`` sets ``reconcile_spent`` after the pinned ``BOM_RECONCILE_MAX_PASSES``
+    budget is spent and wiring re-parks on the same deficit; the runner's own
+    re-drive then proceeds the stage on the model's answer. An interactive run
+    (``auto_default_questions`` false) still parks, and an untouched policy is
+    unchanged.
+    """
+    probe = tmp_path / "reconcile-spent-probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            f"""
+            import importlib.util
+            import json
+            import sys
+
+            sys.path.insert(0, {str(_RUNNER.parent)!r})
+            spec = importlib.util.spec_from_file_location("runner_under_test", {str(_RUNNER)!r})
+            runner = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(runner)
+
+            DEFICIT = ("The LM358 amplifier has unused second-channel pins 5, 6, and 7, "
+                       "but the BOM provides no defined bias/feedback network.")
+            RECONCILE = {{"questions": [{{"text": DEFICIT, "blocking": True, "reconcile_target": "bom"}}]}}
+            MIXED = {{"questions": [
+                {{"text": "Which rail powers the status LED?", "options": ["+5V", "+3V3"], "blocking": True}},
+                {{"text": DEFICIT, "blocking": True, "reconcile_target": "bom"}},
+            ]}}
+
+            class Guard:
+                def status(self):
+                    return {{"spent_total_usd": 0.0}}
+
+            class Client:
+                s = object()
+                guard = Guard()
+                payload = RECONCILE
+
+                def chat(self, messages, **kwargs):
+                    return {{"text": json.dumps(self.payload), "cost_usd": 0.0, "finish_reason": "stop"}}
+
+            def ask(auto_default, reconcile_spent, payload):
+                client = Client()
+                client.payload = payload
+                policy = runner._QuestionPolicyClient(client, auto_default)
+                policy.reconcile_spent = reconcile_spent
+                response = policy.chat(
+                    [{{"role": "system", "content": "base"}}], meta_ctx={{"stage": "wiring"}}
+                )
+                return json.loads(response["text"])["questions"]
+
+            print(json.dumps({{
+                "untouched": ask(True, False, RECONCILE),
+                "spent": ask(True, True, RECONCILE),
+                "interactive": ask(False, True, RECONCILE),
+                "mixed": ask(True, True, MIXED),
+            }}))
+            """
+        ),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [str(native_python), str(probe)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=tmp_path,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(tmp_path),
+            "PYTHONPATH": str(_LEGACY_ROOT),
+        },
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    output = json.loads(completed.stdout)
+    assert output["untouched"][0]["blocking"] is True
+    assert output["spent"][0]["blocking"] is False
+    assert output["interactive"][0]["blocking"] is True
+    assert [question["blocking"] for question in output["mixed"]] == [False, False]
+    assert [question["text"] for question in output["mixed"]][1].startswith("The LM358 amplifier")
+
+
+DEFICIT_FRAGMENT = "unused second-channel pins 5, 6, and 7"
+
+
+def test_native_spent_reconcile_redrives_the_parked_stage_once(
+    native_python, tmp_path
+):
+    """main() spends one bounded re-drive on a parked wiring deficit.
+
+    Real wiring drives no longer park after the model swap (the 897 replay ends
+    in a wiring ``commit_rejected``), so this pins the orchestration itself with
+    the pinned session faked: the parked result, a non-advancing reconcile pass,
+    then the re-drive. The re-drive must fire with ``reconcile_spent`` already
+    set (the flag is what stops the deficit blocking), pass ``["wiring"]``, and
+    leave ``bom_reconcile_exhausted`` to the case where that re-drive parks too.
+    """
+    probe = tmp_path / "redrive-probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            f"""
+            import importlib.util
+            import json
+            import sys
+
+            sys.path.insert(0, {str(_RUNNER.parent)!r})
+            spec = importlib.util.spec_from_file_location("runner_under_test", {str(_RUNNER)!r})
+            runner = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(runner)
+
+            DEFICIT = ("The LM358 amplifier has unused second-channel pins 5, 6, and 7, "
+                       "but the BOM provides no defined bias/feedback network.")
+            PARKED = {{
+                "status": "awaiting_input",
+                "last_stage": "wiring",
+                "questions": [{{"text": DEFICIT, "stage": "wiring", "blocking": True,
+                                "reconcile_target": "bom"}}],
+                "results": [{{"stage": "wiring", "commit_ok": False, "attempts": 1}}],
+            }}
+
+            class Guard:
+                def status(self):
+                    return {{"spent_total_usd": 0.0}}
+
+            class Native:
+                s = object()
+                guard = Guard()
+
+            calls = []
+
+            def fake_run_session(ws, brief, stages, **kwargs):
+                calls.append({{
+                    "stages": [str(stage) for stage in stages],
+                    "reconcile_spent": getattr(kwargs.get("client"), "reconcile_spent", None),
+                }})
+                if len(calls) == 1:
+                    return json.loads(json.dumps(PARKED))
+                return {{
+                    "status": "failed",
+                    "last_stage": "wiring",
+                    "questions": None,
+                    "results": [{{"stage": "wiring", "commit_ok": False,
+                                 "failure_kind": "commit_rejected"}}],
+                }}
+
+            runner.session.run_session = fake_run_session
+            runner.session.maybe_bom_reconcile = lambda ws, brief, res, **kw: (res, 0)
+            runner.make_budget_client = lambda budget: Native()
+            try:
+                rc = runner.main()
+            except SystemExit as exc:
+                rc = exc.code
+            print("PROBE_CALLS=" + json.dumps(calls))
+            print("PROBE_RC=" + str(rc))
+            """
+        ),
+        encoding="utf-8",
+    )
+    request = _request(tmp_path / "redrive-workspace", True)
+    request["stages"] = ["wiring"]
+    completed = subprocess.run(
+        [str(native_python), "-u", str(probe)],
+        input=json.dumps(request),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path),
+             "PYTHONPATH": str(_LEGACY_ROOT)},
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    events = [
+        json.loads(line[len(_EVENT_PREFIX) :])
+        for line in completed.stdout.splitlines()
+        if line.startswith(_EVENT_PREFIX)
+    ]
+    packet = next(
+        json.loads(line[len(_RESULT_PREFIX) :])
+        for line in completed.stdout.splitlines()
+        if line.startswith(_RESULT_PREFIX)
+    )
+    result = packet["result"]
+    calls = json.loads(
+        next(
+            line.split("=", 1)[1]
+            for line in completed.stdout.splitlines()
+            if line.startswith("PROBE_CALLS=")
+        )
+    )
+
+    # The parked stage: then one re-drive, with the reconcile flag already spent.
+    assert calls == [
+        {"stages": ["wiring"], "reconcile_spent": False},
+        {"stages": ["wiring"], "reconcile_spent": True},
+    ]
+    log = [
+        event["text"]
+        for event in events
+        if event.get("kind") == "build_log" and "reconcile" in event.get("text", "")
+    ]
+    assert any("re-driving the stage without another reconcile" in text for text in log)
+    assert any(DEFICIT_FRAGMENT in text for text in log)
+    # The stage's own outcome survives: not a reconcile park.
+    assert result["status"] == "failed"
+    assert result["questions"] is None
+    assert [row["failure_kind"] for row in result["results"]] == ["commit_rejected"]
+    assert packet["reconcile_passes"] == 0
+
+
 def test_native_pause_retains_completed_stages_and_total_spend(native_python, tmp_path):
     question = {
         "questions": [

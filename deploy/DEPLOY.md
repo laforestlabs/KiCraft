@@ -58,8 +58,8 @@ umask 077
 cat > .env <<'ENV'
 OPENROUTER_API_KEY=sk-or-...your key...
 KICRAFT_DESIGN_PROFILE=luna
-KICRAFT_MODEL=openai/gpt-5.6-luna
-KICRAFT_REVIEW_MODEL=minimax/minimax-m3
+KICRAFT_MODEL=openai/gpt-6-luna
+KICRAFT_REVIEW_MODEL=openai/gpt-6-luna
 KICRAFT_EVAL_JUDGE_MODEL=minimax/minimax-m3
 KICRAFT_DAILY_USD_CEILING=5
 KICRAFT_TOTAL_USD_CEILING=50

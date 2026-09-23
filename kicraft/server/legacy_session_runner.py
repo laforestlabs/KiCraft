@@ -510,6 +510,10 @@ class _QuestionPolicyClient:
     def __init__(self, client, auto_default_questions: bool):
         self._client = client
         self.auto_default_questions = auto_default_questions
+        # Set by main() once the pinned BOM-reconcile budget is spent and wiring
+        # still parks on the same deficit: another reconcile cannot fix it, so the
+        # deficit question loses its blocking power (see _apply_question_policy).
+        self.reconcile_spent = False
         self._stage_stats: dict[str, dict] = {}
         self._completed_rows: list[dict] = []
 
@@ -611,6 +615,22 @@ class _QuestionPolicyClient:
                 and question.get("reconcile_target") != "bom"
             )
         ]
+        if self.reconcile_spent:
+            # The reconcile budget is spent (main()) and wiring re-parked on the
+            # same deficit: a second BOM pass cannot fix it, so the deficit item
+            # joins the ordinary set. In automatic mode that drops its blocking
+            # power and the stage proceeds on its own answer; an explicit
+            # interactive run still parks (the branch below returns the payload
+            # untouched whenever it carries a reconcile item).
+            ordinary.extend(
+                question
+                for question in raw_questions
+                if (
+                    isinstance(question, dict)
+                    and str(question.get("text", "")).strip()
+                    and question.get("reconcile_target") == "bom"
+                )
+            )
         if not ordinary:
             return response
 
@@ -982,6 +1002,53 @@ def main() -> int:
             break
         if reconcile_passes == previous_passes:
             break
+
+    if result.get("status") == "awaiting_input" and session.bom_reconcile_deficits(result):
+        # The pinned reconcile budget is spent and wiring still parks on the same
+        # deficit. An LM358-class ask ("unused second-channel pins need a bias
+        # network") names a part the deterministic adder cannot provision, so
+        # every further BOM pass changes nothing and the run used to be stamped
+        # bom_reconcile_exhausted without the stage ever trying to proceed. Spend
+        # one re-drive instead: the deficit question stops blocking and the stage
+        # commits or fails on its own contract. A policy-less run (no answer
+        # affordance at all) skips straight to the fallback -- nothing could
+        # consume the flag there. `bom_reconcile_exhausted` stays the outcome when
+        # this re-drive still parks.
+        if isinstance(client, _QuestionPolicyClient):
+            deficits = session.bom_reconcile_deficits(result)
+            client.reconcile_spent = True
+            progress(
+                {
+                    "kind": "build_log",
+                    "text": (
+                        "[bom-reconcile] wiring still parks on an unresolved BOM "
+                        f"deficit after {reconcile_passes} reconcile pass(es): "
+                        + " | ".join(
+                            str(question.get("text", "")).strip()
+                            for question in deficits
+                            if isinstance(question, dict)
+                        )
+                        + " -- re-driving the stage without another reconcile"
+                    ),
+                }
+            )
+            try:
+                result = session.run_session(
+                    workspace,
+                    str(request["brief"]),
+                    [str(result.get("last_stage") or "wiring")],
+                    client=client,
+                    run_id=run_id,
+                    progress=progress,
+                )
+            except _UserQuestionPause as pause:
+                result = _pause_result(workspace, client, pause)
+            except _InvalidClarification as invalid:
+                result = _invalid_result(workspace, client, invalid)
+            except BudgetExceeded as exceeded:
+                result = refusal(exceeded, "budget_exceeded")
+            except KillSwitchEngaged as engaged:
+                result = refusal(engaged, "kill_switch")
 
     if result.get("status") == "awaiting_input" and session.bom_reconcile_deficits(result):
         result = _reconcile_exhausted_result(workspace, result, client, progress)
