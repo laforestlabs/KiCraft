@@ -128,7 +128,7 @@ inspect-solved-subcircuits = "kicraft.cli.inspect_solved_subcircuits:main"
 include = ["kicraft*"]
 
 [tool.setuptools.package-data]
-"kicraft.eval" = ["rubric.yaml"]
+"kicraft.eval" = ["rubric.yaml", "corpora/*/*.json"]
 "kicraft.layout_editor" = ["static/*.js"]
 "kicraft.parts_library" = ["core_blocks.json"]
 

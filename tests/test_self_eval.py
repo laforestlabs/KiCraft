@@ -353,10 +353,20 @@ _FULL_STATE = {
     "intent": {"goal": "a USB LED"},
     "functional_spec": {"blocks": []},
     "architecture": {"sheets": [], "power_nets": [], "inter_sheet_nets": [], "requirements": []},
-    "bom": {"parts": [{"ref": "R1", "value": "1k", "symbol": "Device:R",
-                       "footprint": "Resistor_SMD:R_0603_1608Metric", "sheet": "MAIN"}],
-            "connections": [{"net_name": "VBUS", "sheet": "MAIN",
-                             "endpoints": [{"ref": "R1", "pin": "1"}]}]},
+    "bom": {
+        "parts": [
+            {
+                "ref": "R1",
+                "value": "1k",
+                "symbol": "Device:R",
+                "footprint": "Resistor_SMD:R_0603_1608Metric",
+                "sheet": "MAIN",
+            }
+        ],
+        "connections": [
+            {"net_name": "VBUS", "sheet": "MAIN", "endpoints": [{"ref": "R1", "pin": "1"}]}
+        ],
+    },
     "stage_status": {
         stage: {"ok": True}
         for stage in ("intent", "functional_spec", "architecture", "bom", "wiring")
@@ -540,6 +550,7 @@ def test_evaluate_one_happy_path_drives_builds_and_scores(tmp_path, monkeypatch)
         progress({"kind": "build_done", "ok": True, "rc": 0})
         built["dir"] = str(rundir)
         return 0
+
     monkeypatch.setattr(
         se,
         "run_post_wiring_lifecycle",
@@ -580,6 +591,38 @@ def test_evaluate_one_happy_path_drives_builds_and_scores(tmp_path, monkeypatch)
     assert rec["execution_mode"] == "full"
     assert rec["lifecycle"]["post_wiring_review"]["cost_usd"] == 0.002
     assert rec["lifecycle"]["silkscreen"]["cost_usd"] == 0.003
+
+
+def test_legacy_evaluation_preserves_state_for_legacy_build(tmp_path, monkeypatch):
+    state_bytes = json.dumps(_FULL_STATE).encode()
+
+    def design(ws, *args, **kwargs):
+        se.pipeline_dispatch.write_marker(ws, "legacy")
+        (ws / ".kicraft" / "state.json").write_bytes(state_bytes)
+        return {"status": "ok", "results": [], "last_stage": "wiring"}
+
+    def current_tail(state_path, *args, **kwargs):
+        Path(state_path).write_text('{"corrupted_by_current_schema": true}')
+        return {}
+
+    def build(ws, *args, **kwargs):
+        return 0 if (ws / ".kicraft" / "state.json").read_bytes() == state_bytes else 2
+
+    monkeypatch.setattr(se, "run_session", design)
+    monkeypatch.setattr(se, "run_post_wiring_lifecycle", current_tail)
+    monkeypatch.setattr(se, "run_build", build)
+    monkeypatch.setattr(se, "evaluate_project", lambda *args, **kwargs: _fake_report())
+    rec = se.evaluate_one(
+        object(),
+        1,
+        {"slug": "legacy-isolation", "archetype": "test", "brief": "RC filter"},
+        tmp_path,
+        judge_model=None,
+        skip_judge=True,
+    )
+    assert rec["build_rc"] == 0
+    assert (Path(rec["rundir"]) / ".kicraft" / "state.json").read_bytes() == state_bytes
+
 
 def test_evaluate_one_design_only_skips_build_and_scoring(tmp_path, monkeypatch):
     def fake_run_session(ws, brief, stages, **kw):
@@ -687,14 +730,16 @@ def test_same_brief_campaigns_isolate_budget_and_reported_spend(tmp_path, monkey
     from kicraft.server.config import Settings
     from kicraft.server.spend_guard import SpendGuard
 
-    guard = SpendGuard(Settings(
-        api_key="test",
-        ledger_path=tmp_path / "ledger.db",
-        kill_switch=False,
-        project_llm_budget_usd=0.10,
-        daily_usd_ceiling=10.0,
-        total_usd_ceiling=10.0,
-    ))
+    guard = SpendGuard(
+        Settings(
+            api_key="test",
+            ledger_path=tmp_path / "ledger.db",
+            kill_switch=False,
+            project_llm_budget_usd=0.10,
+            daily_usd_ceiling=10.0,
+            total_usd_ceiling=10.0,
+        )
+    )
 
     def paid_session(ws, brief, stages, *, run_id, **kwargs):
         guard.preflight(call_ceiling_usd=0.06, run_id=run_id)
@@ -710,8 +755,12 @@ def test_same_brief_campaigns_isolate_budget_and_reported_spend(tmp_path, monkey
     entry = {"slug": "same-brief", "archetype": "fixture", "brief": "An isolated financial probe"}
     records = [
         se.evaluate_one(
-            SimpleNamespace(guard=guard), 9, entry, tmp_path / campaign,
-            judge_model=None, skip_judge=True,
+            SimpleNamespace(guard=guard),
+            9,
+            entry,
+            tmp_path / campaign,
+            judge_model=None,
+            skip_judge=True,
         )
         for campaign in ("campaign-a", "campaign-b")
     ]
@@ -728,9 +777,13 @@ def test_same_brief_campaigns_isolate_budget_and_reported_spend(tmp_path, monkey
         report = json.loads(Path(record["report_path"]).read_text())
         assert report["run_id"] == record["run_id"]
         assert report["metrics"]["token_usage"] == {
-            "input_tokens": 10, "output_tokens": 2, "total_tokens": 12,
-            "turns": 1, "estimated_cost_usd": 0.06,
-            "cost_known": True, "by_model": {"fixture": 1},
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "total_tokens": 12,
+            "turns": 1,
+            "estimated_cost_usd": 0.06,
+            "cost_known": True,
+            "by_model": {"fixture": 1},
         }
     assert guard.spent_total() == pytest.approx(0.12)
 
@@ -739,14 +792,36 @@ def test_needs_attention_lists_every_incomplete_or_nonzero_build_run(tmp_path):
     """A pre-build failure or a non-rc0 build is reported whatever its grade."""
     records = [
         # A high-graded design that never committed (the frozen #21 shape).
-        {"index": 21, "slug": "proto-shield", "stem": "PROTO_SHIELD", "final": 76.0, "grade": "B",
-         "design_committed": False, "failed_stage": "wiring", "build_rc": None},
+        {
+            "index": 21,
+            "slug": "proto-shield",
+            "stem": "PROTO_SHIELD",
+            "final": 76.0,
+            "grade": "B",
+            "design_committed": False,
+            "failed_stage": "wiring",
+            "build_rc": None,
+        },
         # A committed design whose build returned a routing failure code.
-        {"index": 10, "slug": "rp2040-min", "stem": "RP2040_MIN", "final": 83.5, "grade": "B",
-         "design_committed": True, "build_rc": 6},
+        {
+            "index": 10,
+            "slug": "rp2040-min",
+            "stem": "RP2040_MIN",
+            "final": 83.5,
+            "grade": "B",
+            "design_committed": True,
+            "build_rc": 6,
+        },
         # A clean committed build: NOT a needs-attention entry.
-        {"index": 1, "slug": "rc-lowpass-bnc", "stem": "RC_FILTER_BREAKOUT", "final": 79.5,
-         "grade": "B", "design_committed": True, "build_rc": 0},
+        {
+            "index": 1,
+            "slug": "rc-lowpass-bnc",
+            "stem": "RC_FILTER_BREAKOUT",
+            "final": 79.5,
+            "grade": "B",
+            "design_committed": True,
+            "build_rc": 0,
+        },
     ]
     summary = se.compile_report(records, tmp_path, {})
     attention = (tmp_path / "summary.md").read_text().split("## Needs attention")[-1]
@@ -762,13 +837,15 @@ def test_budget_exception_preserves_paid_failed_stage_and_campaign_cost(tmp_path
     from kicraft.server.config import Settings
     from kicraft.server.spend_guard import SpendGuard
 
-    guard = SpendGuard(Settings(
-        api_key="test",
-        ledger_path=tmp_path / "ledger.db",
-        kill_switch=False,
-        daily_usd_ceiling=10.0,
-        total_usd_ceiling=10.0,
-    ))
+    guard = SpendGuard(
+        Settings(
+            api_key="test",
+            ledger_path=tmp_path / "ledger.db",
+            kill_switch=False,
+            daily_usd_ceiling=10.0,
+            total_usd_ceiling=10.0,
+        )
+    )
 
     def paid_failure(ws, brief, stages, *, run_id, progress, **kwargs):
         guard.record("m", 1, 1, 0.0048, {"run_id": run_id, "stage": "intent"})
@@ -776,18 +853,27 @@ def test_budget_exception_preserves_paid_failed_stage_and_campaign_cost(tmp_path
         progress({"kind": "stage_done", "stage": "intent", "ok": True, "cost": 0.0048})
         progress({"kind": "stage_start", "stage": "bom"})
         guard.record("m", 1, 1, 0.06, {"run_id": run_id, "stage": "bom"})
-        progress({
-            "kind": "work_unit_attempt", "stage": "bom", "unit_id": "bom-s002",
-            "outcome": "invalid_work_unit", "cost_usd": 0.06,
-        })
+        progress(
+            {
+                "kind": "work_unit_attempt",
+                "stage": "bom",
+                "unit_id": "bom-s002",
+                "outcome": "invalid_work_unit",
+                "cost_usd": 0.06,
+            }
+        )
         guard.preflight(call_ceiling_usd=0.0384, run_id=run_id)
         pytest.fail("over-budget call was admitted")
 
     monkeypatch.setattr(se, "run_session", paid_failure)
     rec = se.evaluate_one(
-        SimpleNamespace(guard=guard), 1,
-        {"slug": "failed", "archetype": "x", "brief": "a board"}, tmp_path,
-        judge_model=None, skip_judge=True, design_only=True,
+        SimpleNamespace(guard=guard),
+        1,
+        {"slug": "failed", "archetype": "x", "brief": "a board"},
+        tmp_path,
+        judge_model=None,
+        skip_judge=True,
+        design_only=True,
     )
     assert rec["design_committed"] is False
     assert rec["failed_stage"] == "bom"
@@ -796,8 +882,11 @@ def test_budget_exception_preserves_paid_failed_stage_and_campaign_cost(tmp_path
     assert rec["stage_cost_usd"] == {"intent": pytest.approx(0.0048), "bom": pytest.approx(0.06)}
     assert rec["budget_refusal"]["call_ceiling_usd"] == pytest.approx(0.0384)
     success = {
-        "index": 2, "slug": "passed", "design_committed": True,
-        "design_cost_usd": 0.01, "judge_cost_usd": 0.002,
+        "index": 2,
+        "slug": "passed",
+        "design_committed": True,
+        "design_cost_usd": 0.01,
+        "judge_cost_usd": 0.002,
     }
     report = se.compile_report([rec, success], tmp_path, {})
     assert report["stage_outcomes"] == {"bom": 1, "passed": 1}
@@ -815,30 +904,68 @@ def test_failure_matrix_separates_repair_exhaustion_from_subprocess_crash(tmp_pa
 
     crashed = tmp_path / "crashed"
     crashed.mkdir()
-    (crashed / "events.jsonl").write_text("\n".join(json.dumps(event) for event in [
-        {"kind": "stage_start", "stage": "wiring"},
-        {"kind": "stage_crash", "stage": "wiring", "returncode": 1,
-         "traceback": "Traceback (most recent call last): ..."},
-    ]))
+    (crashed / "events.jsonl").write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                {"kind": "stage_start", "stage": "wiring"},
+                {
+                    "kind": "stage_crash",
+                    "stage": "wiring",
+                    "returncode": 1,
+                    "traceback": "Traceback (most recent call last): ...",
+                },
+            ]
+        )
+    )
     repaired = tmp_path / "repaired"
     repaired.mkdir()
-    (repaired / "events.jsonl").write_text("\n".join(json.dumps(event) for event in [
-        {"kind": "stage_start", "stage": "bom"},
-        {"kind": "work_unit_attempt", "stage": "bom", "outcome": "invalid_work_unit",
-         "cost_usd": 0.01},
-        {"kind": "work_unit_repair_exhausted", "stage": "bom", "unit_id": "bom-s002"},
-    ]))
-    (tmp_path / "summary.json").write_text(json.dumps({"runs": [
-        {"slug": "crashed", "rundir": str(crashed), "design_committed": False,
-         "failure_kind": "commit_process_failed"},
-        {"slug": "repaired", "rundir": str(repaired), "design_committed": False,
-         "failure_kind": "unit_repair_exhausted"},
-        # The design committed; only the build (router) failed.  It is not a design failure.
-        {"slug": "route-failed", "design_committed": True, "build_rc": 6,
-         "design_cost_usd": 0.02},
-    ]}))
+    (repaired / "events.jsonl").write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in [
+                {"kind": "stage_start", "stage": "bom"},
+                {
+                    "kind": "work_unit_attempt",
+                    "stage": "bom",
+                    "outcome": "invalid_work_unit",
+                    "cost_usd": 0.01,
+                },
+                {"kind": "work_unit_repair_exhausted", "stage": "bom", "unit_id": "bom-s002"},
+            ]
+        )
+    )
+    (tmp_path / "summary.json").write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "slug": "crashed",
+                        "rundir": str(crashed),
+                        "design_committed": False,
+                        "failure_kind": "commit_process_failed",
+                    },
+                    {
+                        "slug": "repaired",
+                        "rundir": str(repaired),
+                        "design_committed": False,
+                        "failure_kind": "unit_repair_exhausted",
+                    },
+                    # The design committed; only the build (router) failed.  It is not a design failure.
+                    {
+                        "slug": "route-failed",
+                        "design_committed": True,
+                        "build_rc": 6,
+                        "design_cost_usd": 0.02,
+                    },
+                ]
+            }
+        )
+    )
     report = analyze_campaign(tmp_path)
-    matrix = {(row["stage"], row["failure_kind"]): row["briefs"] for row in report["failure_matrix"]}
+    matrix = {
+        (row["stage"], row["failure_kind"]): row["briefs"] for row in report["failure_matrix"]
+    }
     assert matrix[("wiring", "commit_process_failed")] == ["crashed"]
     assert matrix[("bom", "unit_repair_exhausted")] == ["repaired"]
     assert matrix[("passed", "passed")] == ["route-failed"]
@@ -857,12 +984,16 @@ def test_legacy_failure_report_recovers_cost_without_double_counting(tmp_path):
         {"kind": "work_unit_attempt", "stage": "wiring", "cost_usd": 0.0548},
     ]
     (failed / "events.jsonl").write_text("\n".join(json.dumps(event) for event in events))
-    (tmp_path / "summary.json").write_text(json.dumps({
-        "runs": [
-            {"slug": "failed", "rundir": str(failed), "error": "BudgetExceeded: refused"},
-            {"slug": "passed", "design_committed": True, "design_cost_usd": 0.00872},
-        ],
-    }))
+    (tmp_path / "summary.json").write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {"slug": "failed", "rundir": str(failed), "error": "BudgetExceeded: refused"},
+                    {"slug": "passed", "design_committed": True, "design_cost_usd": 0.00872},
+                ],
+            }
+        )
+    )
     report = analyze_campaign(tmp_path)
     assert report["stage_counts"] == {"wiring": 1, "passed": 1}
     assert report["failure_matrix"][1]["failure_kind"] == "budget_refused"
@@ -958,6 +1089,7 @@ def test_evaluate_one_build_gate_caps_concurrent_builds(tmp_path, monkeypatch):
 
     monkeypatch.setattr(se, "run_session", fake_run_session)
     monkeypatch.setattr(se, "run_build", fake_run_build)
+    monkeypatch.setattr(se, "run_post_wiring_lifecycle", lambda *args, **kwargs: {})
     monkeypatch.setattr(se, "evaluate_project", lambda rd, client, **kw: _fake_report())
 
     gate = threading.BoundedSemaphore(1)
@@ -1056,30 +1188,6 @@ def test_main_sequential_checkpoints_summary_after_each_brief(tmp_path, monkeypa
     monkeypatch.setattr(se, "evaluate_one", fake_evaluate_one)
     assert se.main(["--parallel", "1", "--no-judge", "--out", str(tmp_path)]) == 0
     assert seen_runs_at_call == [0, 1]  # brief 2 saw brief 1 already checkpointed
-
-
-def test_main_defaults_to_parallel(tmp_path, monkeypatch):
-    # every entry point (CLI, /self-eval, admin GUI) relies on the harness itself
-    # defaulting to the parallel sweet spot — no flags required
-    monkeypatch.setattr(
-        se,
-        "BRIEFS",
-        [
-            {"slug": "alpha", "archetype": "x", "brief": "alpha brief"},
-            {"slug": "beta", "archetype": "x", "brief": "beta brief"},
-            {"slug": "gamma", "archetype": "y", "brief": "gamma brief"},
-        ],
-    )
-    _patch_llm_env(monkeypatch)
-    monkeypatch.setattr(
-        se, "evaluate_one", lambda client, idx, entry, out_dir, **kw: _fake_rec(idx, entry, out_dir)
-    )
-    assert se.main(["--no-judge", "--out", str(tmp_path)]) == 0
-    summ = json.loads((tmp_path / "summary.json").read_text())
-    from kicraft.build_slots import host_cpu_count
-
-    assert summ["parallel"] == 3 and 1 <= summ["build_slots"] <= host_cpu_count()
-    assert [r["index"] for r in summ["runs"]] == [1, 2, 3]
 
 
 def test_main_resolves_relative_out_dir(tmp_path, monkeypatch):

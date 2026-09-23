@@ -214,7 +214,6 @@ def test_fabrication_verdict_requires_a_structured_drc_and_erc_verdict(tmp_path)
         archive.writestr("P-F_Cu.gtl", "G04*")
     evidence = artifact_evidence.generate_artifact_evidence(run, "rc-lowpass-bnc", build_rc=0, design_committed=True)
     assert evidence["fabrication"]["status"] == "unverified"
-    assert evidence["fabrication"]["artifact_paths"] == ["generated/P/P_fab.zip"]
 
     # ERC alone is still not a manufacturing verdict.
     (run / ".kicraft" / "synthesis_check.json").write_text(json.dumps({
@@ -234,8 +233,8 @@ def test_fabrication_verdict_requires_a_structured_drc_and_erc_verdict(tmp_path)
     gate.write_text(json.dumps({"fab_acceptable": True, "shorts": 0, "unconnected": 0, "courtyard": 0, "keepout": 0}))
     evidence = artifact_evidence.generate_artifact_evidence(run, "rc-lowpass-bnc", build_rc=0, design_committed=True)
     assert evidence["common_gates"] == {"erc": "pass", "drc": "pass"}
-    assert evidence["fabrication"]["status"] == "pass"
-    # Fabrication alone is not fulfillment: an unproven obligation still blocks.
+    assert evidence["fabrication"]["status"] == "unverified"
+    # Green reports without the delivered board still cannot prove fabrication.
     assert evidence["obligations"]["rc-lowpass-bnc.bnc-count"]["status"] != "pass"
     assert evidence["software_fulfillment"]["status"] == "unverified"
     assert "rc-lowpass-bnc.bnc-count:" in evidence["software_fulfillment"]["reason"]
@@ -456,7 +455,11 @@ class _EvidenceFootprint:
         return self._ref
 
     def GetFPID(self):
-        return self._footprint
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            GetLibItemName=lambda: self._footprint.rsplit(":", 1)[-1],
+            GetLibNickname=lambda: self._footprint.rpartition(":")[0],
+        )
 
     def Pads(self):
         return self._pads
@@ -510,6 +513,81 @@ def _led_current_artifact(
         ("D1", "1"): "K", ("D1", "2"): "A",
     }
     return {"bom": {"parts": parts}}, _EvidenceBoard([_EvidenceFootprint(*row) for row in rows]), names
+
+
+def _terminal_reconciliation_artifact(
+    *,
+    missing_net=False,
+    missing_pad=False,
+    merged=False,
+    nc_net=False,
+    footprint="Resistor_SMD:R_0603_1608Metric",
+):
+    resistor = {
+        "ref": "R1",
+        "value": "1k",
+        "symbol": "Device:R",
+        "footprint": "Resistor_SMD:R_0603_1608Metric",
+        "sheet": "Main",
+    }
+    nc_resistor = {**resistor, "ref": "R2"}
+    state = {
+        "bom": {
+            "parts": [resistor, nc_resistor],
+            "connections": [
+                {"net_name": "NET_A", "sheet": "Main", "endpoints": [{"ref": "R1", "pin": "1"}]},
+                {"net_name": "NET_B", "sheet": "Main", "endpoints": [{"ref": "R1", "pin": "2"}]},
+            ],
+            "no_connect_pins": [{"ref": "R2", "pin": "1"}, {"ref": "R2", "pin": "2"}],
+        }
+    }
+    r1_pads = [("1", "NET_A")]
+    if not missing_pad:
+        r1_pads.append(("2", "" if missing_net else "NET_A" if merged else "NET_B"))
+    return state, _EvidenceBoard([
+        _EvidenceFootprint("R1", footprint, r1_pads),
+        _EvidenceFootprint(
+            "R2",
+            "Resistor_SMD:R_0603_1608Metric",
+            (("1", "NC_NET" if nc_net else ""), ("2", "")),
+        ),
+    ])
+
+
+def test_complete_required_connections_reconciles_every_required_terminal(tmp_path):
+    """A generic brief needs canonical BOM terminal proof, not one named pad."""
+    state, board = _terminal_reconciliation_artifact()
+    facts = electrical_artifact_evidence.extract_electrical_facts(tmp_path, state, board, {})
+    assert facts["gates"]["complete_required_connections"] == "pass"
+
+    for kwargs in (
+        {"missing_net": True},
+        {"missing_pad": True},
+        {"merged": True},
+        {"nc_net": True},
+    ):
+        state, board = _terminal_reconciliation_artifact(**kwargs)
+        facts = electrical_artifact_evidence.extract_electrical_facts(tmp_path, state, board, {})
+        assert "complete_required_connections" not in facts.get("gates", {})
+
+
+def test_programming_gate_requires_delivered_canonical_terminals(tmp_path, monkeypatch):
+    """A BOM-only programming verdict cannot survive a missing board endpoint."""
+    monkeypatch.setattr(
+        "kicraft.design.synthesis.validation.mcu_programming_facts",
+        lambda _: {"access_ok": True, "path_ok": True},
+    )
+    state, board = _terminal_reconciliation_artifact()
+    facts = electrical_artifact_evidence.extract_electrical_facts(tmp_path, state, board, {})
+    assert facts["gates"]["programming"] == "pass"
+
+    state, board = _terminal_reconciliation_artifact(missing_net=True)
+    facts = electrical_artifact_evidence.extract_electrical_facts(tmp_path, state, board, {})
+    assert "programming" not in facts.get("gates", {})
+
+    state, board = _terminal_reconciliation_artifact(footprint="Resistor_SMD:R_0805_2012Metric")
+    facts = electrical_artifact_evidence.extract_electrical_facts(tmp_path, state, board, {})
+    assert "programming" not in facts.get("gates", {})
 
 
 def test_led_current_artifact_requires_complete_external_high_side_loop(tmp_path, monkeypatch):

@@ -1,0 +1,1043 @@
+{
+  "schema_version": 1,
+  "corpus_id": "general-development-synthetic-2026-09-22",
+  "sampling": {
+    "kind": "synthetic",
+    "description": "Assistant-authored development sample: ten sensor/acquisition, controller/interface, display/LED, low-voltage power, analog, and actuator briefs each, interleaved across families. Not independent user traffic and not release evidence."
+  },
+  "capability_envelope": {
+    "purpose": "non-safety-critical low-voltage prototype boards",
+    "max_input_v_dc": 24,
+    "max_board_current_a": 3,
+    "max_width_mm": 100,
+    "max_height_mm": 100,
+    "copper_layers": [
+      2,
+      4
+    ],
+    "modules_allowed": true,
+    "excluded": [
+      "mains",
+      "safety-critical",
+      "custom RF",
+      "high-speed memory",
+      "BGA"
+    ]
+  },
+  "policy": {
+    "max_cost_usd": 0.6,
+    "max_duration_s": 3600,
+    "max_park_rounds": 12,
+    "build_timeout_s": 2400
+  },
+  "briefs": [
+    {
+      "slug": "dev-c-greenhouse-sensor-hub",
+      "brief": "Build a 5 V greenhouse sensor hub that accepts four analog probes on screw terminals and passes an I2C expansion bus through two Qwiic receptacles. Include a controller, a power LED, a fault LED, and four mounting holes for a plastic enclosure.",
+      "archetype": "sensor_acquisition",
+      "families": [
+        "sensor",
+        "analog-acquisition",
+        "i2c",
+        "mcu"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-irrigation-valve-panel",
+      "brief": "Build a 12 V irrigation controller with four low-voltage valve outputs on screw terminals and four independently controlled output channels. Include a controller, a USB service connector, and one status LED per zone.",
+      "archetype": "mcu_interface_control",
+      "families": [
+        "mcu",
+        "control",
+        "terminal",
+        "usb",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-six-lamp-annunciator",
+      "brief": "Build a 5 V six-lamp annunciator with six independent current-limited LED channels, six associated pushbuttons, and a controller. Include a USB service connector and four mounting holes for a front panel.",
+      "archetype": "display_led_interface",
+      "families": [
+        "led",
+        "mcu",
+        "usb",
+        "user-interface",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-p-fused-12v-distribution",
+      "brief": "Make a 12 V distribution board for a small test bench, accepting up to 3 A through a two-pin input terminal. Provide four individually fused two-pin output terminals and one power indicator LED.",
+      "archetype": "power_distribution",
+      "families": [
+        "power",
+        "protection",
+        "connector-distribution"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-bridge-sensor-front-end",
+      "brief": "Create a 5 V strain-gauge bridge interface with a four-pin bridge terminal and a three-pin single-ended analog output header referenced to ground. Include an instrumentation amplifier, adjustable zero trim, and scale the output from 0 to 3.3 V.",
+      "archetype": "analog_conditioning",
+      "families": [
+        "analog",
+        "instrumentation",
+        "sensor-interface"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-dual-brushed-motor-driver",
+      "brief": "Create a dual brushed-DC motor controller for a 6 to 12 V supply and 1 A per motor. Use separate two-pin motor terminals, a five-pin logic header with ground and four drive inputs, reverse-input protection, and a power LED.",
+      "archetype": "motor_driver",
+      "families": [
+        "motor-control",
+        "power",
+        "mixed-control"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-c-ph-electrode-conditioner",
+      "brief": "Create a 5 V pH-electrode conditioner with a BNC input, a buffered BNC output, and an adjustable calibration control. Add a power LED and keep the board free of microcontrollers.",
+      "archetype": "sensor_acquisition",
+      "families": [
+        "sensor",
+        "analog",
+        "signal-conditioning",
+        "connector"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-dual-fan-controller",
+      "brief": "Make a 12 V dual-fan controller with two PWM control outputs, two tachometer inputs, and a Qwiic temperature-sensor port. Provide a controller, two fan-status LEDs, and two mounting holes.",
+      "archetype": "mcu_interface_control",
+      "families": [
+        "mcu",
+        "control",
+        "sensor",
+        "i2c",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-machine-state-display",
+      "brief": "Create a machine-state display with a Qwiic host connector, a small I2C display, and four current-limited alert LEDs. Add a controller, two buttons, and two mounting holes.",
+      "archetype": "display_led_interface",
+      "families": [
+        "display",
+        "i2c",
+        "mcu",
+        "led",
+        "user-interface"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-p-usbc-5v-field-split",
+      "brief": "Build a USB-C-powered 5 V field supply board with a 2 A maximum input rating. Route the supply to three locking two-pin outputs, each with a resettable fuse, and add a power LED.",
+      "archetype": "usb_power_distribution",
+      "families": [
+        "power",
+        "protection",
+        "usb-c"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-4to20ma-receiver",
+      "brief": "Build a 4 to 20 mA receiver for a 24 V field loop, with a two-pin loop terminal and a 0 to 3.3 V analog output header. Include input transient protection, a precision sense resistor, and an output status LED.",
+      "archetype": "analog_conditioning",
+      "families": [
+        "analog",
+        "industrial-interface",
+        "protection"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-pwm-fan-controller",
+      "brief": "Make a 12 V PWM fan controller for two 4-wire fans, rated for 1 A total fan current. Provide two four-pin fan headers, a three-pin control header, tachometer outputs for both fans, and a power LED.",
+      "archetype": "fan_controller",
+      "families": [
+        "actuator-control",
+        "motor-control",
+        "mixed-control"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-c-vibration-sensor-bridge",
+      "brief": "Make a 3.3 V vibration-sensor bridge with one Qwiic sensor port, one Qwiic host port, and a controller that counts motion events. Provide separate activity and fault LEDs plus two mounting holes.",
+      "archetype": "sensor_acquisition",
+      "families": [
+        "sensor",
+        "i2c",
+        "mcu",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-rs485-wall-controller",
+      "brief": "Design a 5 V wall controller with a differential field bus on a three-position screw terminal, a local controller, and two buttons for operation. Include a bus-activity LED, a fault LED, and four mounting holes.",
+      "archetype": "mcu_interface_control",
+      "families": [
+        "mcu",
+        "serial-interface",
+        "control",
+        "terminal",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-twelve-pixel-grid",
+      "brief": "Design a 5 V twelve-pixel indicator grid in a 3 by 4 rectangle, with a controller and a complete serial LED data chain. Include a USB service connector and two status LEDs.",
+      "archetype": "display_led_interface",
+      "families": [
+        "led",
+        "mcu",
+        "usb",
+        "display"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-p-24v-reverse-input",
+      "brief": "Create a protected 24 V DC input board for laboratory fixtures at up to 2 A. Include reverse-polarity protection, a replaceable input fuse, a power-good LED, and a two-pin output terminal.",
+      "archetype": "protected_power_entry",
+      "families": [
+        "power",
+        "protection"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-dual-mic-preamp",
+      "brief": "Make a two-channel electret microphone preamplifier powered from 5 V. Each channel needs a three-pin microphone header, adjustable gain, AC-coupled line output on a four-pin header, and a shared power LED.",
+      "archetype": "audio_preamp",
+      "families": [
+        "analog",
+        "audio",
+        "signal-conditioning"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-solenoid-low-side-quad",
+      "brief": "Build a four-channel low-side solenoid driver for 12 V coils drawing up to 500 mA per channel. Use four two-pin coil terminals, a six-pin logic header, flyback protection on every channel, and individual channel LEDs.",
+      "archetype": "actuator_driver",
+      "families": [
+        "actuator-control",
+        "power",
+        "multi-channel"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-c-duct-temperature-panel",
+      "brief": "Design a 5 V duct-temperature panel with three thermistor inputs on screw terminals and a small I2C display for local readings. Include a controller, two buttons, and one status LED.",
+      "archetype": "sensor_acquisition",
+      "families": [
+        "sensor",
+        "analog-acquisition",
+        "display",
+        "mcu"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-can-service-adapter",
+      "brief": "Create a 5 V CAN service adapter with a CAN connector, a switchable terminator, and a USB configuration interface. Include a controller plus transmit and receive status LEDs.",
+      "archetype": "mcu_interface_control",
+      "families": [
+        "mcu",
+        "can",
+        "usb",
+        "control",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-round-status-beacon",
+      "brief": "Make a 42 mm circular status beacon with four current-limited LED channels, a controller, and two mode buttons. Power it from 5 V through a USB connector and provide two mounting holes.",
+      "archetype": "display_led_interface",
+      "families": [
+        "led",
+        "mcu",
+        "usb",
+        "user-interface",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-p-12v-5v-buck-terminal",
+      "brief": "Design a 12 V to 5 V converter for a sensor enclosure, rated for 1.5 A at the output. Use separate two-pin input and output terminals, include an input fuse, and show output presence with an LED.",
+      "archetype": "dc_dc_converter",
+      "families": [
+        "power",
+        "conversion",
+        "protection"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-line-level-dual-buffer",
+      "brief": "Produce a dual-channel unity-gain line receiver for 5 V operation, with stereo 3.5 mm input and output jacks. Add AC coupling, input protection, and a power LED; do not include a microcontroller.",
+      "archetype": "audio_buffer",
+      "families": [
+        "analog",
+        "audio",
+        "connector-interface"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-linear-actuator-hbridge",
+      "brief": "Design a 12 V linear-actuator H-bridge board for a 2 A actuator. Provide a two-pin actuator terminal, a three-pin limit-switch header, a four-pin logic-control header, reverse-polarity protection, and a fault LED.",
+      "archetype": "actuator_driver",
+      "families": [
+        "actuator-control",
+        "motor-control",
+        "protection"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-c-isolated-pulse-reader",
+      "brief": "Build a 12 V isolated pulse reader with two field inputs on screw terminals and two isolated counting channels delivered to a logic controller. Fit one activity LED per channel and two mounting holes.",
+      "archetype": "sensor_acquisition",
+      "families": [
+        "sensor",
+        "isolation",
+        "digital-input",
+        "mcu"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-two-motor-test-jig",
+      "brief": "Build a 12 V two-motor test jig with two independently controlled low-voltage motor outputs and screw terminals for power and motors. Add a controller, two direction buttons, and two activity LEDs.",
+      "archetype": "mcu_interface_control",
+      "families": [
+        "mcu",
+        "motor-control",
+        "terminal",
+        "user-interface",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-qwiic-alarm-display",
+      "brief": "Build a Qwiic alarm display with two Qwiic connectors, a small I2C display, three buttons, and three current-limited alarm LEDs. Add a controller and four mounting holes for a wall enclosure.",
+      "archetype": "display_led_interface",
+      "families": [
+        "display",
+        "i2c",
+        "mcu",
+        "led",
+        "user-interface"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-p-18v-3v3-logic-supply",
+      "brief": "Make an 18 V DC to 3.3 V logic supply board for up to 800 mA output. Provide a keyed two-pin input, a three-pin output header carrying 3.3 V and ground, reverse-input protection, and a status LED.",
+      "archetype": "dc_dc_converter",
+      "families": [
+        "power",
+        "conversion",
+        "logic-interface"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-thermistor-quad-interface",
+      "brief": "Design a four-channel 3.3 V thermistor interface with four two-pin sensor terminals and a five-pin analog output header. Each channel must provide a bias resistor and RC filtering, with a separate channel label at each terminal.",
+      "archetype": "sensor_conditioning",
+      "families": [
+        "analog",
+        "sensor-interface",
+        "multi-channel"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-stepper-module-carrier",
+      "brief": "Create a 12 V stepper-driver module carrier for a plug-in driver module and one four-wire motor. Include a four-pin motor terminal, a six-pin logic header, three microstep-select jumpers, and a power LED.",
+      "archetype": "stepper_controller",
+      "families": [
+        "motor-control",
+        "module-carrier",
+        "mixed-control"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-c-solar-irradiance-reader",
+      "brief": "Create a solar-irradiance reader for a 0 to 10 V sensor, with the sensor on a BNC connector and a controller reporting the acquisition over a Qwiic port. Run it from 5 V and include a power LED.",
+      "archetype": "sensor_acquisition",
+      "families": [
+        "sensor",
+        "analog-acquisition",
+        "i2c",
+        "mcu"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-eight-output-i2c-module",
+      "brief": "Make a 5 V I2C output module with two Qwiic connectors and eight independently controlled low-voltage outputs on screw terminals. Include a controller or GPIO expander, eight output LEDs, and four mounting holes.",
+      "archetype": "mcu_interface_control",
+      "families": [
+        "i2c",
+        "gpio",
+        "control",
+        "terminal",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-eight-cue-led-bar",
+      "brief": "Create an eight-cue LED bar with eight current-limited indicator channels, a controller, and four cue-select buttons. Include a USB service connector and two mounting holes.",
+      "archetype": "display_led_interface",
+      "families": [
+        "led",
+        "mcu",
+        "usb",
+        "user-interface",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-p-dual-5v-fuse-panel",
+      "brief": "Produce a 5 V distribution panel for two USB-powered instruments with a 2 A total input limit. Give each instrument its own fused two-pin output and independent output-present LED, using a common two-pin input terminal.",
+      "archetype": "power_distribution",
+      "families": [
+        "power",
+        "protection",
+        "instrumentation"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-piezo-impact-interface",
+      "brief": "Build a 3.3 V piezo impact-sensor interface with a two-pin piezo terminal and one analog output header. Protect the amplifier input against positive and negative piezo excursions, provide an adjustable gain trimmer, and add a trigger LED.",
+      "archetype": "sensor_conditioning",
+      "families": [
+        "analog",
+        "sensor-interface",
+        "protection"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-servo-power-injector",
+      "brief": "Make a 6 V servo-power injector for four hobby servos with a 3 A input rating. Provide four three-pin servo headers, a two-pin power terminal, one resettable fuse per servo output, and a power LED.",
+      "archetype": "servo_power_distribution",
+      "families": [
+        "actuator-control",
+        "power",
+        "protection"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-c-hall-tachometer",
+      "brief": "Make a 5 V hall-effect tachometer board with two screw-terminal sensor inputs and two independent pulse-count channels. Add a controller, two status LEDs, and a USB service connector.",
+      "archetype": "sensor_acquisition",
+      "families": [
+        "sensor",
+        "digital-input",
+        "mcu",
+        "usb"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-four-pulse-generator",
+      "brief": "Design a 5 V four-channel pulse generator with four logic outputs on a header and four independently adjustable output channels. Provide a controller, two buttons, a USB service connector, and a power LED.",
+      "archetype": "mcu_interface_control",
+      "families": [
+        "mcu",
+        "control",
+        "digital-output",
+        "usb",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-serial-front-desk-display",
+      "brief": "Design a 5 V serial front-desk display with a differential serial input on a three-position screw terminal, a small local display, and a controller. Include receive and fault LEDs plus two buttons for acknowledgement.",
+      "archetype": "display_led_interface",
+      "families": [
+        "display",
+        "serial-interface",
+        "mcu",
+        "terminal",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-p-9v-load-switch",
+      "brief": "Build a 9 V load-switch board for a 1 A accessory, with a two-pin input and two-pin load output. A three-pin logic header must enable the load, and the board needs reverse-polarity protection plus an enabled indicator LED.",
+      "archetype": "protected_load_switch",
+      "families": [
+        "power",
+        "protection",
+        "logic-control"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-10v-process-input",
+      "brief": "Create a 0 to 10 V process-input conditioner that runs from a 12 V supply and produces a 0 to 3.3 V output. Use a two-pin field terminal, a three-pin power header, input protection, and a filtered analog output header.",
+      "archetype": "analog_conditioning",
+      "families": [
+        "analog",
+        "industrial-interface",
+        "protection"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-24v-valve-pulse-driver",
+      "brief": "Build a two-channel 24 V valve pulse driver for coils drawing up to 750 mA each. Use separate two-pin valve terminals, a four-pin trigger header, flyback protection, and a visible LED for each active valve channel.",
+      "archetype": "actuator_driver",
+      "families": [
+        "actuator-control",
+        "industrial-interface",
+        "multi-channel"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-c-rain-gauge-logger",
+      "brief": "Build a rain-gauge logger with a 5 V supply, one screw-terminal tipping-bucket input, and a Qwiic connector for an external display or logger. Include a controller, a pulse LED, and a reset button.",
+      "archetype": "sensor_acquisition",
+      "families": [
+        "sensor",
+        "digital-input",
+        "i2c",
+        "mcu"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-usb-macro-keypad",
+      "brief": "Build a USB macro keypad with twelve buttons, a controller, and twelve independently scanned key channels. Include three status LEDs and four mounting holes for a desktop shell.",
+      "archetype": "mcu_interface_control",
+      "families": [
+        "mcu",
+        "usb",
+        "user-interface",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-four-zone-scoreboard",
+      "brief": "Make a four-zone tabletop scoreboard with four independent display zones, four mode buttons, and a controller. Use four current-limited status LEDs for zone markers, add a USB service connector, and provide four mounting holes.",
+      "archetype": "display_led_interface",
+      "families": [
+        "display",
+        "led",
+        "mcu",
+        "usb",
+        "user-interface"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-p-12v-sequenced-outputs",
+      "brief": "Create a 12 V, 2 A distribution board with two switched two-pin outputs for a camera rig. The second output must be held off until the first is enabled, both outputs need resettable fuses, and each output needs its own LED.",
+      "archetype": "sequenced_power_distribution",
+      "families": [
+        "power",
+        "protection",
+        "timing-control"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-photodiode-transimpedance",
+      "brief": "Make a 5 V photodiode transimpedance amplifier board with a two-pin detector connector and a buffered analog output header. Include a switchable feedback-gain jumper, a 10 kHz low-pass filter, and a power LED.",
+      "archetype": "analog_conditioning",
+      "families": [
+        "analog",
+        "instrumentation",
+        "sensor-interface"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-dc-pump-controller",
+      "brief": "Produce a 12 V DC pump controller for a 2 A pump with a two-pin pump terminal and a three-pin command header. Add a current-sense analog output, reverse-polarity protection, a flyback path, and a running indicator LED.",
+      "archetype": "motor_controller",
+      "families": [
+        "motor-control",
+        "analog",
+        "protection"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-c-load-cell-front-end",
+      "brief": "Design a 5 V load-cell front end with a four-wire screw-terminal bridge input, an analog buffered output, and a Qwiic digital readout port. Fit a calibration button and a power LED.",
+      "archetype": "sensor_acquisition",
+      "families": [
+        "sensor",
+        "analog",
+        "signal-conditioning",
+        "i2c"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-timed-valve-controller",
+      "brief": "Create a 12 V timed-valve controller with two screw-terminal outputs, two independently timed control channels, and a Qwiic port for a display. Fit a controller, two buttons, and two zone LEDs.",
+      "archetype": "mcu_interface_control",
+      "families": [
+        "mcu",
+        "control",
+        "terminal",
+        "i2c",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-hexagonal-alert-tile",
+      "brief": "Build a hexagonal alert tile with six current-limited LED channels, a controller, and one Qwiic connector for upstream commands. Include one button, a power LED, and two mounting holes.",
+      "archetype": "display_led_interface",
+      "families": [
+        "led",
+        "mcu",
+        "i2c",
+        "user-interface",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-p-24v-isolated-5v-module",
+      "brief": "Make a 24 V input to isolated 5 V output interface supply using a DC-DC module, with 500 mA output capacity. Use separate two-pin terminals for input and output, retain isolated returns, and provide an output-present LED.",
+      "archetype": "isolated_power_converter",
+      "families": [
+        "power",
+        "isolation",
+        "conversion"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-guitar-input-buffer",
+      "brief": "Build a 9 V high-impedance guitar input buffer with one 6.35 mm input jack and one 6.35 mm output jack. The circuit must be unity gain, AC-coupled at the output, and include reverse-polarity protection with a power LED.",
+      "archetype": "audio_buffer",
+      "families": [
+        "analog",
+        "audio",
+        "protection"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-encoder-motor-interface",
+      "brief": "Create a 5 V encoder interface for one quadrature motor encoder, with a six-pin encoder input and a six-pin buffered output header. Include 3.3 V-compatible output levels, RC input filtering, and a power LED.",
+      "archetype": "motion_sensor_interface",
+      "families": [
+        "motor-control",
+        "signal-conditioning",
+        "mixed-control"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-c-current-loop-monitor",
+      "brief": "Create a four-channel 4 to 20 mA loop monitor powered from 12 V, with four screw-terminal sensor inputs and four digitized acquisition channels. Include a controller, two status LEDs, and four mounting holes.",
+      "archetype": "sensor_acquisition",
+      "families": [
+        "sensor",
+        "analog-acquisition",
+        "mcu",
+        "industrial-interface"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-addressable-sign-controller",
+      "brief": "Make a 5 V addressable-sign controller with a Qwiic host port, one digital LED-strip output connector, and a controller driving sixteen LED data positions. Include a USB service connector and two status LEDs.",
+      "archetype": "mcu_interface_control",
+      "families": [
+        "mcu",
+        "led-control",
+        "i2c",
+        "usb",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-c-panel-label-reader",
+      "brief": "Create a panel-label reader with a small I2C display, a controller, a rotary encoder, and two navigation buttons. Add a Qwiic host connector, two status LEDs, and four mounting holes on a rounded-rectangle board.",
+      "archetype": "display_led_interface",
+      "families": [
+        "display",
+        "i2c",
+        "mcu",
+        "user-interface",
+        "indicator"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "control"
+      }
+    },
+    {
+      "slug": "dev-p-12v-aux-rail-board",
+      "brief": "Design a 12 V accessory power board that supplies one regulated 5 V, 1 A output and one protected raw 12 V, 1 A output. Use a common screw-terminal input, separate two-pin output terminals, a master fuse, and LEDs for both rails.",
+      "archetype": "multi_rail_power_distribution",
+      "families": [
+        "power",
+        "conversion",
+        "protection",
+        "distribution"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-anti-alias-dual-channel",
+      "brief": "Produce a two-channel analog anti-alias interface for 3.3 V data loggers. Put each input on a two-pin terminal and each filtered output on a shared five-pin header, with a 1 kHz low-pass corner and a power LED.",
+      "archetype": "analog_filter",
+      "families": [
+        "analog",
+        "signal-conditioning",
+        "multi-channel"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    },
+    {
+      "slug": "dev-p-vibration-motor-driver",
+      "brief": "Build a four-channel 5 V vibration-motor driver for motors drawing up to 150 mA each. Use four two-pin motor headers, a six-pin logic header, flyback protection, and one activity LED per motor channel.",
+      "archetype": "motor_driver",
+      "families": [
+        "motor-control",
+        "actuator-control",
+        "multi-channel"
+      ],
+      "eligible": true,
+      "provenance": {
+        "kind": "synthetic",
+        "author": "assistant",
+        "slice": "power"
+      }
+    }
+  ]
+}

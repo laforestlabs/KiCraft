@@ -17,10 +17,13 @@ all collected under ``<out_dir>/fab/`` and zipped to
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -107,7 +110,7 @@ def _write_bom_csv(path: Path, parts: list[dict[str, Any]]) -> None:
             )
 
 
-def export_fab(
+def _export_fab(
     pcb_path: str,
     out_dir: str,
     stem: str,
@@ -128,6 +131,7 @@ def export_fab(
     RuntimeError if any non-3D kicad-cli step fails.
     """
     pcb_path = str(pcb_path)
+    pcb_sha256 = hashlib.sha256(Path(pcb_path).read_bytes()).hexdigest()
     out = Path(out_dir)
     fab = out / "fab"
     fab.mkdir(parents=True, exist_ok=True)
@@ -250,6 +254,22 @@ def export_fab(
                 zf.write(f, f.name)
 
     files = [f.name for f in sorted(fab.iterdir()) if f.is_file()]
+    if hashlib.sha256(Path(pcb_path).read_bytes()).hexdigest() != pcb_sha256:
+        raise RuntimeError("PCB changed during fabrication export; package is not certified")
+    receipt = {
+        "schema_version": 1,
+        "board": Path(pcb_path).name,
+        "board_sha256": pcb_sha256,
+        "archive": zip_path.name,
+        "archive_sha256": hashlib.sha256(zip_path.read_bytes()).hexdigest(),
+        "layers": fab_layers.split(","),
+        "files": {
+            name: hashlib.sha256((fab / name).read_bytes()).hexdigest()
+            for name in files
+        },
+    }
+    receipt_path = zip_path.with_suffix(".receipt.json")
+    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return {
         "fab_dir": str(fab),
         "zip": str(zip_path),
@@ -258,3 +278,35 @@ def export_fab(
         "step": str(step_path) if step_path else None,
         "board_3d_png": str(render_path) if render_path else None,
     }
+
+
+def export_fab(
+    pcb_path: str,
+    out_dir: str,
+    stem: str,
+    *,
+    bom_parts: list[dict[str, Any]] | None = None,
+    fab_layers: str = _FAB_LAYERS,
+    include_3d: bool = True,
+) -> dict[str, Any]:
+    """Publish a fresh package; never certify stale files from an earlier export."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".fab-export-", dir=out) as temporary:
+        staging = Path(temporary)
+        result = _export_fab(
+            pcb_path, str(staging), stem, bom_parts=bom_parts,
+            fab_layers=fab_layers, include_3d=include_3d,
+        )
+        # This is generated output, not an input tree. Replace it only after all
+        # required exports succeeded, so old drills/images cannot reappear.
+        if (out / "fab").exists():
+            shutil.rmtree(out / "fab")
+        (staging / "fab").replace(out / "fab")
+        for source in sorted(staging.iterdir()):
+            if source.is_file():
+                source.replace(out / source.relative_to(staging))
+        for key in ("fab_dir", "zip", "bom_csv", "step", "board_3d_png"):
+            if result[key] is not None:
+                result[key] = str(out / Path(result[key]).relative_to(staging))
+        return result

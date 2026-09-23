@@ -18,8 +18,11 @@ from kicraft.design.part_identity import physical_inventory_record
 from kicraft.design.synthesis.symbol_pinout import lookup_pins
 from kicraft.design.synthesis.validation import (
     _capacitance_farads,
+    _compare_netlist_to_bom,
     _resistance_ohms,
     _reviewed_high_side_led_loop_contract,
+    check_net_coverage,
+    check_pin_existence,
     regulator_vout_facts,
 )
 
@@ -34,27 +37,109 @@ def _is_rail(net: str | None) -> bool:
     return bool(net and _RAIL.search(net.lstrip("/"))) and not _is_ground(net)
 
 
-def _board_graph(board: object) -> tuple[dict[tuple[str, str], str], dict[str, set[str]], dict[str, str]]:
-    """Return ``(pad->net, net->pads, ref->actual footprint id)`` from the board."""
+def _footprint_id(fp: object) -> str:
+    """Return the KiCad library identity without serializing a SWIG proxy."""
+    try:
+        fpid = fp.GetFPID()
+        item = str(fpid.GetLibItemName())
+        nickname = str(fpid.GetLibNickname())
+    except Exception:
+        return ""
+    return f"{nickname}:{item}" if nickname and item else item
+
+
+def _board_graph(
+    board: object,
+) -> tuple[
+    dict[tuple[str, str], str],
+    dict[str, set[str]],
+    dict[str, str],
+    set[tuple[str, str]],
+]:
+    """Return named nets, net members, footprint identities, and all delivered pads."""
     pad_nets: dict[tuple[str, str], str] = {}
     members: dict[str, set[str]] = defaultdict(set)
     footprints: dict[str, str] = {}
+    pads: set[tuple[str, str]] = set()
     try:
         footprints_iter = board.GetFootprints()
     except Exception:
-        return pad_nets, members, footprints
+        return pad_nets, members, footprints, pads
     for fp in footprints_iter:
         try:
             ref = fp.GetReferenceAsString()
-            footprints[ref] = str(fp.GetFPID())
+            footprints[ref] = _footprint_id(fp)
         except Exception:
             continue
         for pad in fp.Pads():
-            number, net = str(pad.GetNumber()), str(pad.GetNetname())
-            if number and net:
-                pad_nets[(ref, number)] = net
+            number, net = str(pad.GetNumber()), str(pad.GetNetname() or "")
+            if not number:
+                continue
+            endpoint = (ref, number)
+            pads.add(endpoint)
+            if net:
+                pad_nets[endpoint] = net
                 members[net].add(f"{ref}.{number}")
-    return pad_nets, members, footprints
+    return pad_nets, members, footprints, pads
+
+
+def _reconcile_connection_terminals(
+    bom: object,
+    pad_nets: dict[tuple[str, str], str],
+    board_groups: Iterable[set[tuple[str, str]]],
+    footprints: dict[str, str],
+    delivered_pads: set[tuple[str, str]],
+) -> tuple[bool, list[str]]:
+    """Prove the canonical BOM terminal contract against delivered PCB pads.
+
+    The synthesis validator owns connection semantics.  This observer only
+    substitutes the delivered-board net groups for its netlist input, then adds
+    the physical facts the netlist cannot establish: exact footprint identity,
+    pad survival, and intentionally netless NC terminals.
+    """
+    reasons: list[str] = []
+    parts = {part.ref: part for part in bom.parts}
+    required = {
+        (endpoint.ref, str(endpoint.pin))
+        for connection in bom.connections
+        for endpoint in connection.endpoints
+    }
+    deliberate_nc = {(endpoint.ref, str(endpoint.pin)) for endpoint in bom.no_connect_pins}
+    if not required:
+        return False, ["BOM has no required connected terminals"]
+
+    for ref, pin in sorted(required | deliberate_nc):
+        part = parts.get(ref)
+        expected_footprint = str(part.footprint) if part is not None else ""
+        if not expected_footprint or footprints.get(ref) != expected_footprint:
+            reasons.append(f"{ref}: delivered footprint identity does not match BOM")
+            continue
+        endpoint = (ref, pin)
+        if endpoint not in delivered_pads:
+            reasons.append(f"{ref}.{pin}: required delivered pad is missing")
+        elif endpoint in deliberate_nc:
+            if endpoint in pad_nets:
+                reasons.append(f"{ref}.{pin}: deliberate NC has a delivered net")
+        elif endpoint not in pad_nets:
+            reasons.append(f"{ref}.{pin}: required pad has no delivered net")
+
+    # These are the canonical source of terminal semantics, pin validity, and
+    # expected-net equivalence.  A missing or unresolvable semantic remains
+    # unverified here instead of being converted into a generic positive claim.
+    pin_check = check_pin_existence(bom)
+    if not pin_check.ok:
+        reasons.append("BOM connection pins are not symbol-verified")
+    coverage = check_net_coverage(bom)
+    if not coverage.ok:
+        reasons.append("BOM terminal coverage is incomplete")
+    merges, splits, lost = _compare_netlist_to_bom(list(board_groups), bom)
+    if merges:
+        reasons.append("delivered board merges required nets")
+    if splits:
+        reasons.append("delivered board splits required nets")
+    if lost:
+        reasons.append("required terminals are absent from delivered nets")
+    return not reasons, reasons
 
 
 def _parts(state: dict[str, Any], footprints: dict[str, str]) -> list[dict[str, Any]]:
@@ -752,9 +837,7 @@ def extract_electrical_facts(rundir: Path, state: dict, board: object, contract:
     unavailable this returns no positive claim for it rather than copying any
     reference/candidate evidence from state.
     """
-    pad_nets, members, footprints = _board_graph(board)
-    if not pad_nets:
-        return {"electrical_diagnostics": ["saved board has no observable pad/net graph"]}
+    pad_nets, members, footprints, delivered_pads = _board_graph(board)
     parts = _parts(state, footprints)
     names = _pin_names(parts, rundir)
     maps, map_counts = _connector_maps(parts, names, pad_nets)
@@ -766,14 +849,40 @@ def extract_electrical_facts(rundir: Path, state: dict, board: object, contract:
         f"observed {len(parts)} realized BOM footprints and {len(pad_nets)} named pads",
         f"resolved pin semantics for {len(names)} actual pads",
     ]
-    # Programming is an established BOM semantic check, but only publish it after
-    # every recorded endpoint survived the actual-board reconciliation above.
+    board_groups: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for endpoint, net in pad_nets.items():
+        board_groups[net].add(endpoint)
+    bom = None
+    connections_complete = False
     try:
         from kicraft.design.models import BOM
-        from kicraft.design.synthesis.validation import mcu_programming_facts
+
         bom_data = state.get("bom") if isinstance(state.get("bom"), dict) else None
         if bom_data:
-            program = mcu_programming_facts(BOM.model_validate(bom_data))
+            bom = BOM.model_validate(bom_data)
+            connections_complete, reconciliation = _reconcile_connection_terminals(
+                bom, pad_nets, board_groups.values(), footprints, delivered_pads
+            )
+            if not connections_complete:
+                functional["electrical_diagnostics"].append(
+                    "required terminal reconciliation unverified: "
+                    + "; ".join(reconciliation[:3])
+                )
+        else:
+            functional["electrical_diagnostics"].append(
+                "required terminal reconciliation unverified: BOM unavailable"
+            )
+    except Exception as exc:  # noqa: BLE001 - unavailable BOM semantics cannot fabricate a gate
+        functional["electrical_diagnostics"].append(
+            f"required terminal reconciliation unavailable: {type(exc).__name__}: {exc}"
+        )
+    # Programming is an established BOM semantic check, but its BOM-only result
+    # cannot outlive a missing, netless, or substituted delivered endpoint.
+    try:
+        from kicraft.design.synthesis.validation import mcu_programming_facts
+
+        if bom is not None and connections_complete:
+            program = mcu_programming_facts(bom)
             if program and program["access_ok"] and program["path_ok"]:
                 functional["gates"] = {"programming": "pass"}
     except Exception as exc:  # noqa: BLE001 - an unavailable semantic check must not fabricate a programming pass
@@ -811,6 +920,10 @@ def extract_electrical_facts(rundir: Path, state: dict, board: object, contract:
     }
     slug = str(contract.get("slug") or "") if isinstance(contract, dict) else ""
     standalone_ok = not standalone.get(slug) or functional["net_paths"].get(standalone[slug]) is True
-    if (required_paths or required_maps or slug in standalone) and paths_ok and maps_ok and standalone_ok:
+    # A generic external brief has no corpus slug from which to infer named
+    # semantic paths.  It still needs the same canonical, terminal-by-terminal
+    # BOM-to-board reconciliation as a named circuit before it can publish a
+    # complete-connection pass.
+    if connections_complete and paths_ok and maps_ok and standalone_ok:
         functional.setdefault("gates", {})["complete_required_connections"] = "pass"
     return functional

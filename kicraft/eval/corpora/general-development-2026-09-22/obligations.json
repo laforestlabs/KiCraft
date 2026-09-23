@@ -1,0 +1,2997 @@
+{
+  "schema_version": 1,
+  "corpus_id": "general-development-synthetic-2026-09-22",
+  "briefs": {
+    "dev-c-greenhouse-sensor-hub": [
+      {
+        "id": "dev-c-greenhouse-sensor-hub-power",
+        "statement": "The hub operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-greenhouse-sensor-hub-analog",
+        "statement": "Four analog probe acquisition channels reach screw-terminal inputs.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "analog_input",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-greenhouse-sensor-hub-i2c",
+        "statement": "The I2C expansion bus reaches two Qwiic receptacles.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "qwiic_sensor_bus"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-greenhouse-sensor-hub-controller",
+        "statement": "A controller owns the acquisition functions.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "microcontroller",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-greenhouse-sensor-hub-leds",
+        "statement": "Power and fault LED circuits are current limited.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-greenhouse-sensor-hub-holes",
+        "statement": "Four mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 4
+        }
+      }
+    ],
+    "dev-c-ph-electrode-conditioner": [
+      {
+        "id": "dev-c-ph-electrode-conditioner-power",
+        "statement": "The conditioner operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-ph-electrode-conditioner-path",
+        "statement": "The BNC input is buffered to the BNC output with adjustable calibration.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "adjustable_analog_buffer"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-ph-electrode-conditioner-bnc",
+        "statement": "Input and output use two BNC connectors.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "bnc_connector",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-ph-electrode-conditioner-led",
+        "statement": "The power LED has a current-limited circuit.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-ph-electrode-conditioner-no-mcu",
+        "statement": "No microcontroller is fitted.",
+        "check": {
+          "kind": "part_class_exact",
+          "part_class": "microcontroller",
+          "value": 0
+        }
+      }
+    ],
+    "dev-c-vibration-sensor-bridge": [
+      {
+        "id": "dev-c-vibration-sensor-bridge-power",
+        "statement": "The bridge operates from 3.3 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 3.3,
+          "maximum": 3.3
+        }
+      },
+      {
+        "id": "dev-c-vibration-sensor-bridge-i2c",
+        "statement": "The sensor and host Qwiic ports share the required I2C bridge path.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "qwiic_sensor_bus",
+            "qwiic_host_bus"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-vibration-sensor-bridge-count",
+        "statement": "One motion-event counting channel is present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "motion_event",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-vibration-sensor-bridge-controller",
+        "statement": "A controller is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "microcontroller",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-vibration-sensor-bridge-leds",
+        "statement": "Activity and fault LED circuits are current limited.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-vibration-sensor-bridge-holes",
+        "statement": "Two mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-duct-temperature-panel": [
+      {
+        "id": "dev-c-duct-temperature-panel-power",
+        "statement": "The panel operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-duct-temperature-panel-inputs",
+        "statement": "Three thermistor acquisition channels reach screw terminals.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "thermistor_input",
+          "minimum": 3
+        }
+      },
+      {
+        "id": "dev-c-duct-temperature-panel-display",
+        "statement": "The controller publishes local readings on the I2C display path.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "temperature_display_i2c"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-duct-temperature-panel-controller",
+        "statement": "A controller is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "microcontroller",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-duct-temperature-panel-buttons",
+        "statement": "Two buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-duct-temperature-panel-led",
+        "statement": "A current-limited status LED circuit is present.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "status_led"
+          ]
+        }
+      }
+    ],
+    "dev-c-isolated-pulse-reader": [
+      {
+        "id": "dev-c-isolated-pulse-reader-power",
+        "statement": "The reader operates from 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-c-isolated-pulse-reader-inputs",
+        "statement": "Two isolated field pulse channels reach the logic controller.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "isolated_pulse_input",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-isolated-pulse-reader-isolation",
+        "statement": "The field inputs preserve isolation on their delivered signal paths.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "isolated_signal_path"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-isolated-pulse-reader-terminals",
+        "statement": "Two screw-terminal field inputs are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "screw_terminal",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-isolated-pulse-reader-leds",
+        "statement": "Two activity LED circuits are current limited.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-isolated-pulse-reader-holes",
+        "statement": "Two mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-solar-irradiance-reader": [
+      {
+        "id": "dev-c-solar-irradiance-reader-range",
+        "statement": "The sensor input accepts 0 to 10 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "sensor_input_max_v",
+          "minimum": 10,
+          "maximum": 10
+        }
+      },
+      {
+        "id": "dev-c-solar-irradiance-reader-power",
+        "statement": "The reader operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-solar-irradiance-reader-path",
+        "statement": "The BNC sensor input is acquired and reported on the Qwiic path.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "analog_acquisition",
+            "qwiic_host_bus"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-solar-irradiance-reader-bnc",
+        "statement": "A BNC sensor connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "bnc_connector",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-solar-irradiance-reader-controller",
+        "statement": "A controller is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "microcontroller",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-solar-irradiance-reader-led",
+        "statement": "A current-limited power LED is present.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-c-hall-tachometer": [
+      {
+        "id": "dev-c-hall-tachometer-power",
+        "statement": "The tachometer operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-hall-tachometer-channels",
+        "statement": "Two sensor pulse-count channels are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "tachometer_input",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-hall-tachometer-path",
+        "statement": "Both hall inputs reach the controller.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "hall_sensor_inputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-hall-tachometer-terminals",
+        "statement": "Two screw-terminal sensor connectors are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "screw_terminal",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-hall-tachometer-usb",
+        "statement": "A USB service connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "usb_c_receptacle",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-hall-tachometer-leds",
+        "statement": "Two current-limited status LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-rain-gauge-logger": [
+      {
+        "id": "dev-c-rain-gauge-logger-power",
+        "statement": "The logger operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-rain-gauge-logger-input",
+        "statement": "The tipping-bucket screw terminal reaches one pulse-input channel.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "rain_gauge_input",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-rain-gauge-logger-path",
+        "statement": "The pulse input reaches the controller and the Qwiic reporting port.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "rain_gauge_pulse",
+            "qwiic_host_bus"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-rain-gauge-logger-terminal",
+        "statement": "A screw-terminal input is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "screw_terminal",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-rain-gauge-logger-button",
+        "statement": "A reset button is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-rain-gauge-logger-led",
+        "statement": "A current-limited pulse LED is present.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "status_led"
+          ]
+        }
+      }
+    ],
+    "dev-c-load-cell-front-end": [
+      {
+        "id": "dev-c-load-cell-front-end-power",
+        "statement": "The front end operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-load-cell-front-end-bridge",
+        "statement": "The four-wire bridge input is conditioned to the analog output.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "load_cell_conditioning",
+            "analog_buffer"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-load-cell-front-end-terminal",
+        "statement": "A screw-terminal bridge connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "screw_terminal",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-load-cell-front-end-qwiic",
+        "statement": "A Qwiic digital-readout path is present.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "qwiic_host_bus"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-load-cell-front-end-button",
+        "statement": "A calibration button is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-load-cell-front-end-led",
+        "statement": "A current-limited power LED is present.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-c-current-loop-monitor": [
+      {
+        "id": "dev-c-current-loop-monitor-power",
+        "statement": "The monitor operates from 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-c-current-loop-monitor-range",
+        "statement": "Each input accepts a 4 to 20 mA current loop.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "current_loop_max_ma",
+          "minimum": 20,
+          "maximum": 20
+        }
+      },
+      {
+        "id": "dev-c-current-loop-monitor-channels",
+        "statement": "Four digitized loop acquisition channels are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "current_loop_input",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-current-loop-monitor-path",
+        "statement": "All loop channels reach the controller.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "current_loop_acquisition"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-current-loop-monitor-terminals",
+        "statement": "Four screw-terminal sensor inputs are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "screw_terminal",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-current-loop-monitor-leds",
+        "statement": "Two current-limited status LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-current-loop-monitor-holes",
+        "statement": "Four mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 4
+        }
+      }
+    ],
+    "dev-c-irrigation-valve-panel": [
+      {
+        "id": "dev-c-irrigation-valve-panel-power",
+        "statement": "The controller operates from 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-c-irrigation-valve-panel-channels",
+        "statement": "Four independently controlled valve channels are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "valve_output",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-irrigation-valve-panel-path",
+        "statement": "The controller reaches all valve outputs.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "valve_control_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-irrigation-valve-panel-terminals",
+        "statement": "Four screw-terminal valve outputs are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "screw_terminal",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-irrigation-valve-panel-usb",
+        "statement": "A USB service connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "usb_c_receptacle",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-irrigation-valve-panel-leds",
+        "statement": "Four current-limited zone LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 4
+        }
+      }
+    ],
+    "dev-c-dual-fan-controller": [
+      {
+        "id": "dev-c-dual-fan-controller-power",
+        "statement": "The controller operates from 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-c-dual-fan-controller-channels",
+        "statement": "Two PWM outputs and two tachometer inputs are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "fan_control",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-dual-fan-controller-path",
+        "statement": "Fan PWM, tachometer, and Qwiic temperature-sensor paths reach the controller.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "fan_pwm_outputs",
+            "fan_tach_inputs",
+            "qwiic_sensor_bus"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-dual-fan-controller-leds",
+        "statement": "Two current-limited fan-status LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-dual-fan-controller-holes",
+        "statement": "Two mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-rs485-wall-controller": [
+      {
+        "id": "dev-c-rs485-wall-controller-power",
+        "statement": "The controller operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-rs485-wall-controller-bus",
+        "statement": "The differential field bus reaches the local controller.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "rs485_bus"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-rs485-wall-controller-terminal",
+        "statement": "A three-position screw terminal is fitted for the field bus.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "screw_terminal",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-rs485-wall-controller-buttons",
+        "statement": "Two buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-rs485-wall-controller-leds",
+        "statement": "Bus-activity and fault LED circuits are current limited.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-rs485-wall-controller-holes",
+        "statement": "Four mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 4
+        }
+      }
+    ],
+    "dev-c-can-service-adapter": [
+      {
+        "id": "dev-c-can-service-adapter-power",
+        "statement": "The adapter operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-can-service-adapter-path",
+        "statement": "CAN reaches the USB configuration interface through a switchable terminator.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "can_bus",
+            "switchable_can_termination",
+            "usb_configuration"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-can-service-adapter-usb",
+        "statement": "A USB connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "usb_c_receptacle",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-can-service-adapter-leds",
+        "statement": "Transmit and receive LED circuits are current limited.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-two-motor-test-jig": [
+      {
+        "id": "dev-c-two-motor-test-jig-power",
+        "statement": "The jig operates from 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-c-two-motor-test-jig-channels",
+        "statement": "Two independently controlled motor channels are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "motor_channel",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-two-motor-test-jig-path",
+        "statement": "The controller reaches both motor outputs.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "motor_control_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-two-motor-test-jig-terminals",
+        "statement": "Screw terminals are fitted for power and motors.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "screw_terminal",
+          "minimum": 3
+        }
+      },
+      {
+        "id": "dev-c-two-motor-test-jig-buttons",
+        "statement": "Two direction buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-two-motor-test-jig-leds",
+        "statement": "Two current-limited activity LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-eight-output-i2c-module": [
+      {
+        "id": "dev-c-eight-output-i2c-module-power",
+        "statement": "The module operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-eight-output-i2c-module-channels",
+        "statement": "Eight independently controlled outputs are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "gpio_output",
+          "minimum": 8
+        }
+      },
+      {
+        "id": "dev-c-eight-output-i2c-module-path",
+        "statement": "Both Qwiic ports reach all output control paths.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "chainable_i2c",
+            "gpio_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-eight-output-i2c-module-qwiic",
+        "statement": "Two Qwiic connectors are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "qwiic_connector",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-eight-output-i2c-module-terminals",
+        "statement": "Eight screw-terminal outputs are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "screw_terminal",
+          "minimum": 8
+        }
+      },
+      {
+        "id": "dev-c-eight-output-i2c-module-leds",
+        "statement": "Eight current-limited output LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 8
+        }
+      },
+      {
+        "id": "dev-c-eight-output-i2c-module-holes",
+        "statement": "Four mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 4
+        }
+      }
+    ],
+    "dev-c-four-pulse-generator": [
+      {
+        "id": "dev-c-four-pulse-generator-power",
+        "statement": "The generator operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-four-pulse-generator-channels",
+        "statement": "Four independently adjustable pulse-output channels are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "pulse_output",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-four-pulse-generator-path",
+        "statement": "All pulse channels reach the output header.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "pulse_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-four-pulse-generator-buttons",
+        "statement": "Two buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-four-pulse-generator-usb",
+        "statement": "A USB service connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "usb_c_receptacle",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-four-pulse-generator-led",
+        "statement": "A current-limited power LED is present.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-c-usb-macro-keypad": [
+      {
+        "id": "dev-c-usb-macro-keypad-keys",
+        "statement": "Twelve independently scanned key channels are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "key_input",
+          "minimum": 12
+        }
+      },
+      {
+        "id": "dev-c-usb-macro-keypad-path",
+        "statement": "All twelve buttons reach the controller and USB interface.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "key_matrix",
+            "usb_hid"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-usb-macro-keypad-buttons",
+        "statement": "Twelve buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 12
+        }
+      },
+      {
+        "id": "dev-c-usb-macro-keypad-controller",
+        "statement": "A controller is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "microcontroller",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-usb-macro-keypad-leds",
+        "statement": "Three current-limited status LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 3
+        }
+      },
+      {
+        "id": "dev-c-usb-macro-keypad-holes",
+        "statement": "Four mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 4
+        }
+      }
+    ],
+    "dev-c-timed-valve-controller": [
+      {
+        "id": "dev-c-timed-valve-controller-power",
+        "statement": "The controller operates from 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-c-timed-valve-controller-channels",
+        "statement": "Two independently timed valve channels are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "valve_output",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-timed-valve-controller-path",
+        "statement": "Both timed outputs and the Qwiic display path reach the controller.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "valve_control_outputs",
+            "qwiic_host_bus"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-timed-valve-controller-terminals",
+        "statement": "Two screw-terminal outputs are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "screw_terminal",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-timed-valve-controller-buttons",
+        "statement": "Two buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-timed-valve-controller-leds",
+        "statement": "Two current-limited zone LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-addressable-sign-controller": [
+      {
+        "id": "dev-c-addressable-sign-controller-power",
+        "statement": "The controller operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-addressable-sign-controller-leds",
+        "statement": "Sixteen LED data positions are present in one complete chain.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "ws2812b",
+          "minimum": 16
+        }
+      },
+      {
+        "id": "dev-c-addressable-sign-controller-path",
+        "statement": "The Qwiic host, LED-strip connector, and serial LED data chain reach the controller.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "qwiic_host_bus",
+            "led_strip_data",
+            "ws2812b_data_chain"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-addressable-sign-controller-usb",
+        "statement": "A USB service connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "usb_c_receptacle",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-addressable-sign-controller-status",
+        "statement": "Two current-limited status LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-six-lamp-annunciator": [
+      {
+        "id": "dev-c-six-lamp-annunciator-power",
+        "statement": "The annunciator operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-six-lamp-annunciator-channels",
+        "statement": "Six independent LED channels and their six button inputs are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "annunciator_channel",
+          "minimum": 6
+        }
+      },
+      {
+        "id": "dev-c-six-lamp-annunciator-path",
+        "statement": "Each pushbutton and LED channel reaches the controller.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "annunciator_inputs",
+            "annunciator_led_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-six-lamp-annunciator-buttons",
+        "statement": "Six buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 6
+        }
+      },
+      {
+        "id": "dev-c-six-lamp-annunciator-leds",
+        "statement": "Six current-limited LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 6
+        }
+      },
+      {
+        "id": "dev-c-six-lamp-annunciator-usb",
+        "statement": "A USB service connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "usb_c_receptacle",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-six-lamp-annunciator-holes",
+        "statement": "Four mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 4
+        }
+      }
+    ],
+    "dev-c-machine-state-display": [
+      {
+        "id": "dev-c-machine-state-display-path",
+        "statement": "Qwiic host data reaches the I2C display and four alert outputs through the controller.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "qwiic_host_bus",
+            "machine_state_display_i2c",
+            "alert_led_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-machine-state-display-leds",
+        "statement": "Four current-limited alert LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-machine-state-display-buttons",
+        "statement": "Two buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-machine-state-display-controller",
+        "statement": "A controller is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "microcontroller",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-machine-state-display-holes",
+        "statement": "Two mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-twelve-pixel-grid": [
+      {
+        "id": "dev-c-twelve-pixel-grid-power",
+        "statement": "The grid operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-twelve-pixel-grid-count",
+        "statement": "Twelve LED data positions form a complete serial chain.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "ws2812b",
+          "minimum": 12
+        }
+      },
+      {
+        "id": "dev-c-twelve-pixel-grid-chain",
+        "statement": "The serial LED chain is electrically complete.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "ws2812b_data_chain"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-twelve-pixel-grid-layout",
+        "statement": "The twelve pixels occupy a 3 by 4 rectangular grid.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "led_grid_3x4"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-twelve-pixel-grid-usb",
+        "statement": "A USB service connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "usb_c_receptacle",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-twelve-pixel-grid-status",
+        "statement": "Two current-limited status LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-round-status-beacon": [
+      {
+        "id": "dev-c-round-status-beacon-size",
+        "statement": "The beacon has a 42 mm circular outline.",
+        "check": {
+          "kind": "outline",
+          "shape": "circle",
+          "diameter_mm": 42
+        }
+      },
+      {
+        "id": "dev-c-round-status-beacon-power",
+        "statement": "The beacon operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-round-status-beacon-leds",
+        "statement": "Four current-limited LED channels are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-round-status-beacon-buttons",
+        "statement": "Two mode buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-round-status-beacon-path",
+        "statement": "The controller drives all beacon LED channels.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "beacon_led_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-round-status-beacon-usb",
+        "statement": "A USB connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "usb_c_receptacle",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-round-status-beacon-holes",
+        "statement": "Two mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-qwiic-alarm-display": [
+      {
+        "id": "dev-c-qwiic-alarm-display-path",
+        "statement": "Both Qwiic ports reach the display, alarm LEDs, and controller.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "chainable_i2c",
+            "alarm_display_i2c",
+            "alarm_led_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-qwiic-alarm-display-qwiic",
+        "statement": "Two Qwiic connectors are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "qwiic_connector",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-qwiic-alarm-display-buttons",
+        "statement": "Three buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 3
+        }
+      },
+      {
+        "id": "dev-c-qwiic-alarm-display-leds",
+        "statement": "Three current-limited alarm LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 3
+        }
+      },
+      {
+        "id": "dev-c-qwiic-alarm-display-holes",
+        "statement": "Four mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 4
+        }
+      }
+    ],
+    "dev-c-eight-cue-led-bar": [
+      {
+        "id": "dev-c-eight-cue-led-bar-channels",
+        "statement": "Eight cue LED channels are independently controlled.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "cue_led_output",
+          "minimum": 8
+        }
+      },
+      {
+        "id": "dev-c-eight-cue-led-bar-path",
+        "statement": "The controller reaches all cue LED outputs.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "cue_led_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-eight-cue-led-bar-leds",
+        "statement": "Eight current-limited indicator LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 8
+        }
+      },
+      {
+        "id": "dev-c-eight-cue-led-bar-buttons",
+        "statement": "Four cue-select buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-eight-cue-led-bar-usb",
+        "statement": "A USB service connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "usb_c_receptacle",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-eight-cue-led-bar-holes",
+        "statement": "Two mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-serial-front-desk-display": [
+      {
+        "id": "dev-c-serial-front-desk-display-power",
+        "statement": "The display operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-c-serial-front-desk-display-path",
+        "statement": "The differential serial input reaches the controller and local display.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "rs485_bus",
+            "serial_display_i2c"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-serial-front-desk-display-terminal",
+        "statement": "A three-position screw terminal is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "screw_terminal",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-serial-front-desk-display-leds",
+        "statement": "Receive and fault LED circuits are current limited.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-serial-front-desk-display-buttons",
+        "statement": "Two acknowledgement buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-four-zone-scoreboard": [
+      {
+        "id": "dev-c-four-zone-scoreboard-zones",
+        "statement": "Four independent display zones are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "scoreboard_zone",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-four-zone-scoreboard-path",
+        "statement": "The controller reaches every display zone and mode input.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "scoreboard_display_zones",
+            "scoreboard_mode_inputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-four-zone-scoreboard-leds",
+        "statement": "Four current-limited zone-marker LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-four-zone-scoreboard-buttons",
+        "statement": "Four mode buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-four-zone-scoreboard-usb",
+        "statement": "A USB service connector is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "usb_c_receptacle",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-four-zone-scoreboard-holes",
+        "statement": "Four mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 4
+        }
+      }
+    ],
+    "dev-c-hexagonal-alert-tile": [
+      {
+        "id": "dev-c-hexagonal-alert-tile-outline",
+        "statement": "The tile has a hexagonal outline.",
+        "check": {
+          "kind": "outline",
+          "shape": "hexagon"
+        }
+      },
+      {
+        "id": "dev-c-hexagonal-alert-tile-channels",
+        "statement": "Six LED channels are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "alert_led_output",
+          "minimum": 6
+        }
+      },
+      {
+        "id": "dev-c-hexagonal-alert-tile-path",
+        "statement": "The Qwiic command path reaches the controller and all alert outputs.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "qwiic_host_bus",
+            "alert_led_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-hexagonal-alert-tile-leds",
+        "statement": "Six current-limited alert LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 6
+        }
+      },
+      {
+        "id": "dev-c-hexagonal-alert-tile-button",
+        "statement": "A button is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-hexagonal-alert-tile-power-led",
+        "statement": "A current-limited power LED is present.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-hexagonal-alert-tile-holes",
+        "statement": "Two mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-c-panel-label-reader": [
+      {
+        "id": "dev-c-panel-label-reader-path",
+        "statement": "The controller connects the Qwiic host, I2C display, encoder, and navigation inputs.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "qwiic_host_bus",
+            "label_display_i2c",
+            "rotary_encoder_input",
+            "navigation_buttons"
+          ]
+        }
+      },
+      {
+        "id": "dev-c-panel-label-reader-encoder",
+        "statement": "A rotary encoder is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "through_hole_rotary_encoder",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-c-panel-label-reader-buttons",
+        "statement": "Two navigation buttons are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "button",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-panel-label-reader-leds",
+        "statement": "Two current-limited status LED circuits are present.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-c-panel-label-reader-holes",
+        "statement": "Four mounting holes are present.",
+        "check": {
+          "kind": "geometry_count",
+          "feature": "mounting_hole",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-c-panel-label-reader-outline",
+        "statement": "The board has a rounded-rectangle outline.",
+        "check": {
+          "kind": "outline",
+          "shape": "rounded_rect"
+        }
+      }
+    ],
+    "dev-p-fused-12v-distribution": [
+      {
+        "id": "dev-p-fused-12v-distribution-input",
+        "statement": "The board accepts a 12 V DC input.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-p-fused-12v-distribution-current",
+        "statement": "The input path supports 3 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_current_rating_a",
+          "minimum": 3
+        }
+      },
+      {
+        "id": "dev-p-fused-12v-distribution-outputs",
+        "statement": "Four individually fused two-pin outputs are provided.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "four_fused_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-fused-12v-distribution-led",
+        "statement": "A power indicator LED is wired as a complete circuit.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-usbc-5v-field-split": [
+      {
+        "id": "dev-p-usbc-5v-field-split-usbc",
+        "statement": "A USB-C receptacle provides the 5 V input.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "usb_c_receptacle",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-p-usbc-5v-field-split-current",
+        "statement": "The input is rated for 2 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_current_rating_a",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-usbc-5v-field-split-outputs",
+        "statement": "Three locking outputs each have resettable-fuse protection.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "three_resettable_fused_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-usbc-5v-field-split-led",
+        "statement": "A power LED is wired.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-24v-reverse-input": [
+      {
+        "id": "dev-p-24v-reverse-input-voltage",
+        "statement": "The board accepts 24 V DC.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 24,
+          "maximum": 24
+        }
+      },
+      {
+        "id": "dev-p-24v-reverse-input-current",
+        "statement": "The protected input path supports 2 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_current_rating_a",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-24v-reverse-input-protection",
+        "statement": "Reverse-polarity protection and a replaceable input fuse protect the input.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "reverse_protected_fused_input"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-24v-reverse-input-output",
+        "statement": "A two-pin output terminal and power-good LED are provided.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "protected_output",
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-12v-5v-buck-terminal": [
+      {
+        "id": "dev-p-12v-5v-buck-terminal-input",
+        "statement": "The converter accepts 12 V input.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-p-12v-5v-buck-terminal-output",
+        "statement": "The converter supplies 5 V at 1.5 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "output_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-p-12v-5v-buck-terminal-current",
+        "statement": "The output is rated for at least 1.5 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "output_current_rating_a",
+          "minimum": 1.5
+        }
+      },
+      {
+        "id": "dev-p-12v-5v-buck-terminal-terminals",
+        "statement": "Separate input and output terminals, an input fuse, and a power LED are provided.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "fused_input",
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-18v-3v3-logic-supply": [
+      {
+        "id": "dev-p-18v-3v3-logic-supply-input",
+        "statement": "The board accepts 18 V DC input.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 18,
+          "maximum": 18
+        }
+      },
+      {
+        "id": "dev-p-18v-3v3-logic-supply-output",
+        "statement": "The regulated output is 3.3 V and rated for 800 mA.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "output_voltage_v",
+          "minimum": 3.3,
+          "maximum": 3.3
+        }
+      },
+      {
+        "id": "dev-p-18v-3v3-logic-supply-current",
+        "statement": "The 3.3 V rail supports at least 800 mA.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "output_current_rating_a",
+          "minimum": 0.8
+        }
+      },
+      {
+        "id": "dev-p-18v-3v3-logic-supply-interface",
+        "statement": "A keyed input, 3.3 V output header, reverse-input protection, and status LED are provided.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "reverse_protected_input",
+            "logic_power_header",
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-dual-5v-fuse-panel": [
+      {
+        "id": "dev-p-dual-5v-fuse-panel-voltage",
+        "statement": "The panel distributes 5 V input power.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-p-dual-5v-fuse-panel-current",
+        "statement": "The common input supports 2 A total.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_current_rating_a",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-dual-5v-fuse-panel-outputs",
+        "statement": "Two separately fused instrument outputs are provided.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "two_fused_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-dual-5v-fuse-panel-leds",
+        "statement": "Each output has an independent output-present LED.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "status_led_circuit",
+          "minimum": 2
+        }
+      }
+    ],
+    "dev-p-9v-load-switch": [
+      {
+        "id": "dev-p-9v-load-switch-voltage",
+        "statement": "The board accepts a 9 V supply.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 9,
+          "maximum": 9
+        }
+      },
+      {
+        "id": "dev-p-9v-load-switch-current",
+        "statement": "The switched load path supports 1 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "output_current_rating_a",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-p-9v-load-switch-control",
+        "statement": "A three-pin logic header controls the load output.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "logic_enable_to_load"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-9v-load-switch-protection",
+        "statement": "The input is reverse protected and an enabled indicator LED is wired.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "reverse_protected_input",
+            "status_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-12v-sequenced-outputs": [
+      {
+        "id": "dev-p-12v-sequenced-outputs-voltage",
+        "statement": "The distribution board accepts 12 V at 2 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-p-12v-sequenced-outputs-current",
+        "statement": "The input path supports 2 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_current_rating_a",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-12v-sequenced-outputs-sequence",
+        "statement": "The second switched output remains off until the first output is enabled.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "sequenced_output_two"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-12v-sequenced-outputs-protection",
+        "statement": "Both outputs are resettable-fuse protected and have separate LEDs.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "two_resettable_fused_outputs"
+          ]
+        }
+      }
+    ],
+    "dev-p-24v-isolated-5v-module": [
+      {
+        "id": "dev-p-24v-isolated-5v-module-input",
+        "statement": "The module accepts 24 V input.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 24,
+          "maximum": 24
+        }
+      },
+      {
+        "id": "dev-p-24v-isolated-5v-module-output",
+        "statement": "The isolated output is 5 V and supports 500 mA.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "output_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-p-24v-isolated-5v-module-current",
+        "statement": "The output is rated for at least 500 mA.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "output_current_rating_a",
+          "minimum": 0.5
+        }
+      },
+      {
+        "id": "dev-p-24v-isolated-5v-module-isolation",
+        "statement": "Input and output returns remain isolated and an output-present LED is wired.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "isolated_power_path",
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-12v-aux-rail-board": [
+      {
+        "id": "dev-p-12v-aux-rail-board-input",
+        "statement": "The board accepts 12 V through a common terminal.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-p-12v-aux-rail-board-5v",
+        "statement": "One output is regulated to 5 V at 1 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "output_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-p-12v-aux-rail-board-12v",
+        "statement": "One protected raw 12 V output supports 1 A.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "protected_raw_12v_output"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-12v-aux-rail-board-protection",
+        "statement": "A master fuse and rail-presence LEDs protect and indicate both outputs.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "master_fuse",
+            "two_rail_leds"
+          ]
+        }
+      }
+    ],
+    "dev-p-bridge-sensor-front-end": [
+      {
+        "id": "dev-p-bridge-sensor-front-end-supply",
+        "statement": "The bridge interface operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-p-bridge-sensor-front-end-bridge",
+        "statement": "A four-pin bridge terminal reaches the instrumentation amplifier.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "bridge_to_instrumentation_amplifier"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-bridge-sensor-front-end-zero",
+        "statement": "An adjustable zero trim is provided.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "trim_potentiometer",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-p-bridge-sensor-front-end-output",
+        "statement": "A ground-referenced single-ended analog output spans 0 to 3.3 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "analog_output_voltage_v",
+          "minimum": 0,
+          "maximum": 3.3
+        }
+      }
+    ],
+    "dev-p-4to20ma-receiver": [
+      {
+        "id": "dev-p-4to20ma-receiver-loop",
+        "statement": "The board receives a 4 to 20 mA loop at 24 V.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "four_to_twenty_ma_loop"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-4to20ma-receiver-voltage",
+        "statement": "The field loop accepts 24 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 24,
+          "maximum": 24
+        }
+      },
+      {
+        "id": "dev-p-4to20ma-receiver-output",
+        "statement": "The analog output spans 0 to 3.3 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "analog_output_voltage_v",
+          "minimum": 0,
+          "maximum": 3.3
+        }
+      },
+      {
+        "id": "dev-p-4to20ma-receiver-protection",
+        "statement": "Input transient protection, a precision sense resistor, and an output status LED are fitted.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "protected_current_input",
+            "status_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-dual-mic-preamp": [
+      {
+        "id": "dev-p-dual-mic-preamp-supply",
+        "statement": "The preamplifier operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-p-dual-mic-preamp-channels",
+        "statement": "Two microphone preamplifier channels have microphone headers and adjustable gain.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "microphone_preamp",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-dual-mic-preamp-output",
+        "statement": "Both channels reach the AC-coupled line-output header.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "dual_ac_coupled_line_output"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-dual-mic-preamp-led",
+        "statement": "A shared power LED is wired.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-line-level-dual-buffer": [
+      {
+        "id": "dev-p-line-level-dual-buffer-supply",
+        "statement": "The line receiver operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-p-line-level-dual-buffer-jacks",
+        "statement": "Stereo 3.5 mm input and output jacks are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "audio_jack_3p5mm",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-line-level-dual-buffer-function",
+        "statement": "Two unity-gain buffered audio channels connect input to output.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "audio_buffer_channel",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-line-level-dual-buffer-protection",
+        "statement": "The inputs are protected, outputs are AC coupled, and a power LED is wired.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "protected_audio_inputs",
+            "ac_coupled_outputs",
+            "power_led"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-line-level-dual-buffer-no-mcu",
+        "statement": "No microcontroller is fitted.",
+        "check": {
+          "kind": "part_class_exact",
+          "part_class": "microcontroller",
+          "value": 0
+        }
+      }
+    ],
+    "dev-p-thermistor-quad-interface": [
+      {
+        "id": "dev-p-thermistor-quad-interface-supply",
+        "statement": "The thermistor interface operates from 3.3 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 3.3,
+          "maximum": 3.3
+        }
+      },
+      {
+        "id": "dev-p-thermistor-quad-interface-channels",
+        "statement": "Four labelled thermistor channels connect sensor terminals to the analog output header.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "thermistor_input",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-p-thermistor-quad-interface-bias",
+        "statement": "Every thermistor channel has a bias resistor and RC filter.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "four_thermistor_bias_filters"
+          ]
+        }
+      }
+    ],
+    "dev-p-piezo-impact-interface": [
+      {
+        "id": "dev-p-piezo-impact-interface-supply",
+        "statement": "The piezo interface operates from 3.3 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 3.3,
+          "maximum": 3.3
+        }
+      },
+      {
+        "id": "dev-p-piezo-impact-interface-input",
+        "statement": "A two-pin piezo terminal reaches the amplifier input with bipolar excursion protection.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "protected_piezo_input"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-piezo-impact-interface-gain",
+        "statement": "An adjustable gain trimmer is fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "trim_potentiometer",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-p-piezo-impact-interface-output",
+        "statement": "An analog output header and trigger LED are provided.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "piezo_analog_output",
+            "status_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-10v-process-input": [
+      {
+        "id": "dev-p-10v-process-input-supply",
+        "statement": "The conditioner operates from 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-p-10v-process-input-range",
+        "statement": "A 0 to 10 V field input is conditioned to a 0 to 3.3 V output.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "analog_output_voltage_v",
+          "minimum": 0,
+          "maximum": 3.3
+        }
+      },
+      {
+        "id": "dev-p-10v-process-input-protection",
+        "statement": "The field terminal input is protected and the output is filtered.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "protected_10v_input",
+            "filtered_analog_output"
+          ]
+        }
+      }
+    ],
+    "dev-p-photodiode-transimpedance": [
+      {
+        "id": "dev-p-photodiode-transimpedance-supply",
+        "statement": "The transimpedance amplifier operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-p-photodiode-transimpedance-path",
+        "statement": "The two-pin detector connector reaches a buffered analog output.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "photodiode_to_buffered_output"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-photodiode-transimpedance-gain",
+        "statement": "A jumper selects feedback gain.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "switchable_transimpedance_gain"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-photodiode-transimpedance-filter",
+        "statement": "The output includes a 10 kHz low-pass filter.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "cutoff_hz",
+          "minimum": 9000,
+          "maximum": 11000
+        }
+      },
+      {
+        "id": "dev-p-photodiode-transimpedance-led",
+        "statement": "A power LED is wired.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-guitar-input-buffer": [
+      {
+        "id": "dev-p-guitar-input-buffer-supply",
+        "statement": "The buffer operates from 9 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 9,
+          "maximum": 9
+        }
+      },
+      {
+        "id": "dev-p-guitar-input-buffer-jacks",
+        "statement": "One 6.35 mm input jack and one 6.35 mm output jack are fitted.",
+        "check": {
+          "kind": "part_class_count",
+          "part_class": "audio_jack_6p35mm",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-guitar-input-buffer-function",
+        "statement": "The signal path is high impedance, unity gain, and AC coupled at the output.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "high_impedance_unity_audio_buffer",
+            "ac_coupled_output"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-guitar-input-buffer-protection",
+        "statement": "Reverse-polarity protection and a power LED are included.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "reverse_protected_input",
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-anti-alias-dual-channel": [
+      {
+        "id": "dev-p-anti-alias-dual-channel-supply",
+        "statement": "The anti-alias interface operates from 3.3 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 3.3,
+          "maximum": 3.3
+        }
+      },
+      {
+        "id": "dev-p-anti-alias-dual-channel-channels",
+        "statement": "Two input channels reach the shared filtered output header.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "analog_filter_channel",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-anti-alias-dual-channel-corner",
+        "statement": "Each channel has a 1 kHz low-pass corner.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "cutoff_hz",
+          "minimum": 900,
+          "maximum": 1100
+        }
+      },
+      {
+        "id": "dev-p-anti-alias-dual-channel-led",
+        "statement": "A power LED is wired.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-dual-brushed-motor-driver": [
+      {
+        "id": "dev-p-dual-brushed-motor-driver-voltage",
+        "statement": "The motor controller accepts 6 to 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 6,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-p-dual-brushed-motor-driver-current",
+        "statement": "Each motor channel supports 1 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "motor_channel_current_a",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-p-dual-brushed-motor-driver-channels",
+        "statement": "Two motor terminals are driven from the logic control header.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "brushed_motor",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-dual-brushed-motor-driver-protection",
+        "statement": "The input is reverse protected and a power LED is wired.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "reverse_protected_input",
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-pwm-fan-controller": [
+      {
+        "id": "dev-p-pwm-fan-controller-voltage",
+        "statement": "The fan controller accepts 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-p-pwm-fan-controller-current",
+        "statement": "The two fan outputs support 1 A total.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "output_current_rating_a",
+          "minimum": 1
+        }
+      },
+      {
+        "id": "dev-p-pwm-fan-controller-headers",
+        "statement": "Two four-wire fan headers are controlled from the three-pin control header.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "pwm_fan",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-pwm-fan-controller-tach",
+        "statement": "Tachometer outputs for both fans and a power LED are provided.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "dual_fan_tach_outputs",
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-solenoid-low-side-quad": [
+      {
+        "id": "dev-p-solenoid-low-side-quad-voltage",
+        "statement": "The solenoid driver accepts 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-p-solenoid-low-side-quad-current",
+        "statement": "Each coil channel supports 500 mA.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "actuator_channel_current_a",
+          "minimum": 0.5
+        }
+      },
+      {
+        "id": "dev-p-solenoid-low-side-quad-channels",
+        "statement": "Four two-pin coil terminals are controlled from the logic header.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "solenoid_driver",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-p-solenoid-low-side-quad-protection",
+        "statement": "Every coil channel has flyback protection and its own LED.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "four_flyback_paths",
+            "four_status_leds"
+          ]
+        }
+      }
+    ],
+    "dev-p-linear-actuator-hbridge": [
+      {
+        "id": "dev-p-linear-actuator-hbridge-voltage",
+        "statement": "The actuator board accepts 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-p-linear-actuator-hbridge-current",
+        "statement": "The H-bridge supports a 2 A actuator.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "motor_channel_current_a",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-linear-actuator-hbridge-control",
+        "statement": "The actuator terminal, limit-switch header, and logic-control header are connected for reversible drive.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "reversible_actuator_drive",
+            "limit_switch_inputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-linear-actuator-hbridge-protection",
+        "statement": "Reverse-input protection and a fault LED are provided.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "reverse_protected_input",
+            "fault_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-stepper-module-carrier": [
+      {
+        "id": "dev-p-stepper-module-carrier-voltage",
+        "statement": "The carrier accepts a 12 V supply.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-p-stepper-module-carrier-module",
+        "statement": "A plug-in stepper driver module reaches the four-wire motor terminal and logic header.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "stepper_module_motor_path",
+            "stepper_module_logic_path"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-stepper-module-carrier-select",
+        "statement": "Three microstep-select jumpers are provided.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "microstep_select",
+          "minimum": 3
+        }
+      },
+      {
+        "id": "dev-p-stepper-module-carrier-led",
+        "statement": "A power LED is wired.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-servo-power-injector": [
+      {
+        "id": "dev-p-servo-power-injector-voltage",
+        "statement": "The injector distributes 6 V servo power.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 6,
+          "maximum": 6
+        }
+      },
+      {
+        "id": "dev-p-servo-power-injector-current",
+        "statement": "The input supports 3 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_current_rating_a",
+          "minimum": 3
+        }
+      },
+      {
+        "id": "dev-p-servo-power-injector-outputs",
+        "statement": "Four three-pin servo outputs each have resettable-fuse protection.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "four_resettable_fused_servo_outputs"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-servo-power-injector-led",
+        "statement": "A power LED is wired.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-24v-valve-pulse-driver": [
+      {
+        "id": "dev-p-24v-valve-pulse-driver-voltage",
+        "statement": "The valve driver accepts 24 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 24,
+          "maximum": 24
+        }
+      },
+      {
+        "id": "dev-p-24v-valve-pulse-driver-current",
+        "statement": "Each valve channel supports 750 mA.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "actuator_channel_current_a",
+          "minimum": 0.75
+        }
+      },
+      {
+        "id": "dev-p-24v-valve-pulse-driver-channels",
+        "statement": "Two valve terminals are controlled from the trigger header.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "valve_driver",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-24v-valve-pulse-driver-protection",
+        "statement": "Both channels have flyback protection and visible active-channel LEDs.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "two_flyback_paths",
+            "two_status_leds"
+          ]
+        }
+      }
+    ],
+    "dev-p-dc-pump-controller": [
+      {
+        "id": "dev-p-dc-pump-controller-voltage",
+        "statement": "The pump controller accepts 12 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 12,
+          "maximum": 12
+        }
+      },
+      {
+        "id": "dev-p-dc-pump-controller-current",
+        "statement": "The pump output supports 2 A.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "motor_channel_current_a",
+          "minimum": 2
+        }
+      },
+      {
+        "id": "dev-p-dc-pump-controller-control",
+        "statement": "A command header controls the two-pin pump output.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "command_to_pump_drive"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-dc-pump-controller-sense",
+        "statement": "A current-sense analog output, reverse protection, flyback path, and running LED are included.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "pump_current_sense_output",
+            "reverse_protected_input",
+            "pump_flyback",
+            "status_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-encoder-motor-interface": [
+      {
+        "id": "dev-p-encoder-motor-interface-supply",
+        "statement": "The encoder interface operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-p-encoder-motor-interface-encoder",
+        "statement": "The six-pin quadrature encoder input reaches the six-pin buffered output header.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "quadrature_encoder_buffered_output"
+          ]
+        }
+      },
+      {
+        "id": "dev-p-encoder-motor-interface-levels",
+        "statement": "The output signals are 3.3 V compatible.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "logic_output_voltage_v",
+          "minimum": 0,
+          "maximum": 3.3
+        }
+      },
+      {
+        "id": "dev-p-encoder-motor-interface-filter",
+        "statement": "RC filtering and a power LED are included.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "quadrature_rc_filter",
+            "power_led"
+          ]
+        }
+      }
+    ],
+    "dev-p-vibration-motor-driver": [
+      {
+        "id": "dev-p-vibration-motor-driver-voltage",
+        "statement": "The vibration-motor driver operates from 5 V.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "input_voltage_v",
+          "minimum": 5,
+          "maximum": 5
+        }
+      },
+      {
+        "id": "dev-p-vibration-motor-driver-current",
+        "statement": "Each motor channel supports 150 mA.",
+        "check": {
+          "kind": "numeric_range",
+          "fact": "motor_channel_current_a",
+          "minimum": 0.15
+        }
+      },
+      {
+        "id": "dev-p-vibration-motor-driver-channels",
+        "statement": "Four motor headers are controlled from the logic header.",
+        "check": {
+          "kind": "channel_count",
+          "channel": "vibration_motor",
+          "minimum": 4
+        }
+      },
+      {
+        "id": "dev-p-vibration-motor-driver-protection",
+        "statement": "Every motor channel has flyback protection and an activity LED.",
+        "check": {
+          "kind": "net_paths",
+          "paths": [
+            "four_flyback_paths",
+            "four_status_leds"
+          ]
+        }
+      }
+    ]
+  }
+}

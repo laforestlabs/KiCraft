@@ -146,7 +146,7 @@ def _board_facts(board_path: Path, facts: dict[str, Any]) -> Any | None:
             footprint_item, footprint_library = "", ""
         board_footprints[ref] = (
             f"{footprint_library}:{footprint_item}" if footprint_library and footprint_item
-            else footprint_item or str(fp.GetFPID())
+            else footprint_item
         )
         for pad in fp.Pads():
             number = pad.GetNumber()
@@ -157,7 +157,7 @@ def _board_facts(board_path: Path, facts: dict[str, Any]) -> Any | None:
             if net and number:
                 net_members.setdefault(net, []).append(pad_id)
             drill = pad.GetDrillSize()
-            fpid = str(fp.GetFPID().GetLibItemName()).lower()
+            fpid = footprint_item.lower()
             if ref.upper().startswith("H") or "mountinghole" in fpid or "mounting_hole" in fpid:
                 if drill.x > 0 or drill.y > 0:
                     mounting_holes += 1
@@ -298,6 +298,32 @@ def _verified_export_paths(rundir: Path, archives: list[Path]) -> list[str]:
     return verified
 
 
+def _delivered_board_path(rundir: Path, state: Mapping[str, Any], generated: Path) -> Path | None:
+    """Select exactly one promoted ``generated/<stem>/<stem>.kicad_pcb`` board."""
+    if not generated.is_dir():
+        return None
+    canonical = sorted(
+        directory / f"{directory.name}.kicad_pcb"
+        for directory in generated.iterdir()
+        if directory.is_dir() and (directory / f"{directory.name}.kicad_pcb").is_file()
+    )
+    if len(canonical) != 1:
+        return None
+    artifacts = state.get("artifacts") if isinstance(state.get("artifacts"), Mapping) else {}
+    declared = artifacts.get("routed_pcb") if isinstance(artifacts, Mapping) else None
+    if declared is None:
+        return canonical[0]
+    if not isinstance(declared, str):
+        return None
+    candidate = Path(declared)
+    if not candidate.is_absolute():
+        candidate = rundir / candidate
+    try:
+        return canonical[0] if candidate.resolve() == canonical[0].resolve() else None
+    except OSError:
+        return None
+
+
 def _specialized_fact_deltas(rundir: Path, state: dict[str, Any], board: Any, contract: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     """Extract electrical and geometry facts from one already-loaded board."""
     return (
@@ -402,11 +428,12 @@ def extract_artifact_facts(rundir: Path, contract: dict[str, Any] | None = None)
         facts["sourcing_validation"] = receipt
         artifacts.extend(_existing(rundir, receipt_path))
     generated = rundir / "generated"
-    boards = [path for path in generated.glob("*/*.kicad_pcb") if ".experiments" not in path.parts] if generated.is_dir() else []
+    board_path = _delivered_board_path(rundir, state, generated)
     board = None
-    if boards:
-        board = _board_facts(boards[0], facts)
-        artifacts.extend(_existing(rundir, boards[0]))
+    if board_path is not None:
+        facts["delivered_board_path"] = _relative(rundir, board_path)
+        board = _board_facts(board_path, facts)
+        artifacts.extend(_existing(rundir, board_path))
     # Board-backed obligations are only evaluable when the saved board actually
     # loaded; recording the flag here is what lets them pass or fail honestly.
     facts["board_loaded"] = board is not None
@@ -416,7 +443,10 @@ def extract_artifact_facts(rundir: Path, contract: dict[str, Any] | None = None)
                 raise TypeError("specialized artifact extractor must return a mapping")
             _merge_fact_delta(facts, delta)
     _reconcile_inventory(facts)
-    archives = [path for path in generated.glob("*/*.zip") if path.is_file()] if generated.is_dir() else []
+    archives = (
+        [path for path in board_path.parent.glob("*.zip") if path.is_file()]
+        if board_path is not None else []
+    )
     artifacts.extend(_existing(rundir, *archives))
     facts["fab_archive_paths"] = [_relative(rundir, path) for path in archives]
     facts["verified_export_paths"] = _verified_export_paths(rundir, archives)

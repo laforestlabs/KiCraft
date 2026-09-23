@@ -48,6 +48,7 @@ import contextlib
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import shutil
 import statistics
@@ -73,6 +74,7 @@ from kicraft.server.session import (
     run_session,
 )
 from kicraft.server.stage_runtime import NONINTERACTIVE_DEFAULTS_INSTRUCTION
+from kicraft.server.budget_exposure import strict_budget_exposure_status
 from kicraft.server.spend_guard import BudgetExceeded, KillSwitchEngaged
 from kicraft.tuning.benchmark import BENCHMARK_PROMPTS as BRIEFS
 from kicraft.tuning.benchmark import SHAPED_OUTLINE_PROMPTS
@@ -86,6 +88,8 @@ from .acceptance_contracts import (
     ORIGINAL_CORPUS_VERSION,
     contract_for,
 )
+from .external_briefs import load_external_manifest, validate_external_bundle
+from .product_acceptance import evaluate_product, summarize_product, verify_product_audit
 
 
 def _find_parent_board(rundir: Path) -> Path | None:
@@ -175,6 +179,12 @@ _EVENT_KINDS = frozenset(
 )
 
 _DESIGN_STAGES = ("intent", "functional_spec", "architecture", "bom", "wiring")
+_GENERAL_DEFAULTS_INSTRUCTION = (
+    "Preserve every explicit requirement in this brief. Use documented safe defaults "
+    "only for nonessential omissions and record them as assumptions. If a critical "
+    "electrical or safety requirement cannot be inferred safely, return a blocking "
+    "question; never remove a feature, change a constraint, or invent consent."
+)
 
 # kicraft.design.cli_app._cmd_build exit code -> a short human label, so the report
 # shows routing/fab-readiness distinctly from the rubric grade (which judges the
@@ -243,9 +253,9 @@ def _code_revision() -> str:
         return "unknown"
 
 
-def _source_fingerprint() -> str:
+def _source_fingerprint(root: Path | None = None) -> str:
     """Include inherited dirty source, not just the committed revision."""
-    root = Path(__file__).resolve().parents[2]
+    root = root or Path(__file__).resolve().parents[2]
     try:
         digest = hashlib.sha256()
         for args in (["rev-parse", "HEAD"], ["diff", "--binary", "HEAD", "--"]):
@@ -266,6 +276,33 @@ def _source_fingerprint() -> str:
     except (OSError, subprocess.SubprocessError):
         return "unknown"
 
+
+def _external_runtime_identity(settings) -> dict:
+    from dataclasses import asdict
+    from kicraft.server import routing_config
+
+    root = Path(__file__).resolve().parents[2]
+    pipeline = pipeline_dispatch.describe()
+    config_paths = [root / ".env"]
+    native_source = None
+    if pipeline.get("selected") == pipeline_dispatch.PIPELINE_LEGACY:
+        native_root = pipeline_dispatch.legacy_root()
+        native_source = _source_fingerprint(native_root)
+        if native_source == "unknown":
+            raise ValueError("cannot fingerprint native design engine")
+        config_paths.append(native_root / ".env")
+    return {
+        "settings": settings.redacted(),
+        "routing": asdict(routing_config.load()),
+        "pipeline": pipeline,
+        "native_source": native_source,
+        "native_overrides": dict(pipeline_dispatch.LEGACY_ENV),
+        "ledger_path": str(Path(settings.ledger_path).resolve()),
+        "config_hashes": {
+            str(path): hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+            for path in config_paths
+        },
+    }
 
 
 def _contract_or_placeholder(slug: str, contract_version: str) -> dict:
@@ -296,6 +333,8 @@ def _write_campaign_manifest(
     selected: list[tuple[int, dict]],
     repeats: int,
     contract_version: str,
+    external_bundle: dict | None = None,
+    execution_policy: dict | None = None,
 ) -> Path:
     corpus = [
         {"index": index, "slug": entry["slug"], "brief_hash": _stable_hash(entry["brief"])}
@@ -306,12 +345,22 @@ def _write_campaign_manifest(
             "index": index,
             "slug": entry["slug"],
             "original_brief_hash": _stable_hash(entry["brief"]),
-            "execution_brief": _contract_or_placeholder(entry["slug"], contract_version)["execution_brief"],
-            "execution_brief_hash": _stable_hash(
-                _contract_or_placeholder(entry["slug"], contract_version)["execution_brief"]
-                or entry["brief"]
+            "execution_brief": (
+                entry["brief"]
+                if external_bundle
+                else _contract_or_placeholder(entry["slug"], contract_version)["execution_brief"]
             ),
-            "consent": _contract_or_placeholder(entry["slug"], contract_version)["consent"],
+            "execution_brief_hash": _stable_hash(
+                entry["brief"]
+                if external_bundle
+                else (
+                    _contract_or_placeholder(entry["slug"], contract_version)["execution_brief"]
+                    or entry["brief"]
+                )
+            ),
+            "consent": []
+            if external_bundle
+            else _contract_or_placeholder(entry["slug"], contract_version)["consent"],
         }
         for index, entry in selected
     ]
@@ -352,6 +401,11 @@ def _write_campaign_manifest(
         "execution_corpus_hash": _stable_hash(execution_corpus),
         "execution_corpus": execution_corpus,
     }
+    if external_bundle is not None:
+        immutable["external_bundle"] = external_bundle
+        immutable["execution_policy"] = execution_policy
+        immutable["pipeline"] = pipeline_dispatch.describe()
+        immutable["runtime_identity"] = _external_runtime_identity(settings)
     payload = {
         "schema_version": 1,
         "created_at": _now_iso(),
@@ -451,6 +505,7 @@ def run_design(
     run_id: str | None = None,
     max_provider_retries: int = 5,
     provider_retry_delay_s: float = 60.0,
+    auto_answer_questions: bool = True,
 ) -> dict:
     """Drive the five design stages to completion over ``rundir``, auto-answering
     any parked clarifying question. Returns
@@ -469,11 +524,16 @@ def run_design(
     provider_retries = 0
 
     def _add_cost(r_dict: dict) -> None:
-        nonlocal cost
+        nonlocal cost, bom_passes
         for r in r_dict.get("results") or []:
             c = r.get("cost_usd")
             if isinstance(c, (int, float)):
                 cost += c
+
+        if not pipeline_dispatch.current_tree_owns_design_state(rundir):
+            passes = r_dict.get("reconcile_passes", 0)
+            if isinstance(passes, int) and not isinstance(passes, bool) and passes >= 0:
+                bom_passes += passes
 
     def _retry_provider_busy(result: dict, last: dict) -> bool:
         nonlocal provider_retries
@@ -501,6 +561,8 @@ def run_design(
                 "cost_usd": cost,
                 "questions": n_questions,
                 "rounds": round_no,
+                "reconcile_passes": bom_passes,
+                "provider_retries": provider_retries,
                 "error": None,
             }
         res = run_session(
@@ -508,10 +570,15 @@ def run_design(
             brief,
             rem,
             answers=pending,
-            instruction=NONINTERACTIVE_DEFAULTS_INSTRUCTION,
+            instruction=(
+                NONINTERACTIVE_DEFAULTS_INSTRUCTION
+                if auto_answer_questions
+                else _GENERAL_DEFAULTS_INSTRUCTION
+            ),
             client=client,
             progress=progress,
             run_id=run_id,
+            **({"auto_default_questions": False} if not auto_answer_questions else {}),
         )
         _add_cost(res)
         status = res.get("status")
@@ -521,6 +588,8 @@ def run_design(
                 "cost_usd": cost,
                 "questions": n_questions,
                 "rounds": round_no + 1,
+                "reconcile_passes": bom_passes,
+                "provider_retries": provider_retries,
                 "error": None,
             }
         if status == "awaiting_input":
@@ -532,7 +601,11 @@ def run_design(
             # (WS6). Deficit CHAINS are real (each pass can surface the next
             # genuine shortfall -- fix-plan N3), so keep reconciling while the
             # pass budget advances. Never plain-answer a reconcile park.
-            while res.get("status") == "awaiting_input" and bom_reconcile_deficits(res):
+            while (
+                pipeline_dispatch.current_tree_owns_design_state(rundir)
+                and res.get("status") == "awaiting_input"
+                and bom_reconcile_deficits(res)
+            ):
                 prev = bom_passes
                 res, bom_passes = maybe_bom_reconcile(
                     rundir,
@@ -542,6 +615,7 @@ def run_design(
                     run_id=run_id,
                     client=client,
                     reconcile_passes=bom_passes,
+                    **({"auto_default_questions": False} if not auto_answer_questions else {}),
                 )
                 if bom_passes == prev:
                     break  # budget exhausted; fail honestly below
@@ -553,6 +627,8 @@ def run_design(
                     "cost_usd": cost,
                     "questions": n_questions,
                     "rounds": round_no + 1,
+                    "reconcile_passes": bom_passes,
+                    "provider_retries": provider_retries,
                     "error": None,
                 }
             qs = res.get("questions") or []
@@ -566,6 +642,9 @@ def run_design(
                     "cost_usd": cost,
                     "questions": n_questions,
                     "rounds": round_no + 1,
+                    "reconcile_passes": bom_passes,
+                    "provider_retries": provider_retries,
+                    "failure_kind": "unresolved_bom_deficit",
                     "error": f"unresolved BOM deficit after "
                     f"{bom_passes} reconcile pass(es): {unresolved}",
                 }
@@ -581,10 +660,23 @@ def run_design(
                     "cost_usd": cost,
                     "questions": n_questions,
                     "rounds": round_no + 1,
+                    "reconcile_passes": bom_passes,
+                    "provider_retries": provider_retries,
                     "error": str(err)[:500],
                     "failure_kind": res.get("failure_kind") or last.get("failure_kind"),
                 }
             n_questions += len(qs)
+            if not auto_answer_questions:
+                return {
+                    "status": "parked",
+                    "cost_usd": cost,
+                    "questions": n_questions,
+                    "rounds": round_no + 1,
+                    "reconcile_passes": bom_passes,
+                    "provider_retries": provider_retries,
+                    "failure_kind": "clarification_required",
+                    "error": "User clarification required; no benchmark answer substituted",
+                }
             pending = _auto_answers(qs)
             record_answers(rundir, res.get("last_stage"), pending)
             continue
@@ -598,6 +690,8 @@ def run_design(
             "cost_usd": cost,
             "questions": n_questions,
             "rounds": round_no + 1,
+            "reconcile_passes": bom_passes,
+            "provider_retries": provider_retries,
             "failure_kind": res.get("failure_kind") or last.get("failure_kind"),
             "error": str(err)[:500],
         }
@@ -606,6 +700,8 @@ def run_design(
         "cost_usd": cost,
         "questions": n_questions,
         "rounds": max_park_rounds,
+        "reconcile_passes": bom_passes,
+        "provider_retries": provider_retries,
         "error": "exceeded max park/resume rounds",
     }
 
@@ -623,11 +719,13 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
     # graded rc=6/7 partial instead of the empty rc=-9 the watchdog leaves. 90% of
     # the watchdog leaves headroom to finalize + export.
     build_env = _build_env()
+    pipeline = pipeline_dispatch.project_pipeline(rundir)
+    build_cmd = pipeline_dispatch.build_command(_BUILD_CMD, pipeline)
     build_env.setdefault("KICRAFT_BUILD_MAX_WALL_S", f"{max(60.0, timeout_s * 0.9):.0f}")
     # start_new_session + kill_tree (not proc.kill): builds fan out to leaf,
     # router, and pcbnew subprocess groups that an outer watchdog must reap.
     proc = subprocess.Popen(
-        _BUILD_CMD,
+        build_cmd,
         cwd=str(rundir),
         text=True,
         stdout=subprocess.PIPE,
@@ -750,9 +848,7 @@ def _stage_failure_attribution(state_doc: dict, events_path: Path) -> dict:
         "stage_subprocess_crash": bool(
             failure_kind
             and (
-                "process" in failure_kind
-                or "subprocess" in failure_kind
-                or "crash" in failure_kind
+                "process" in failure_kind or "subprocess" in failure_kind or "crash" in failure_kind
             )
         ),
     }
@@ -825,6 +921,8 @@ def evaluate_one(
     full_events: bool = True,
     design_only: bool = False,
     contract_version: str = ORIGINAL_CORPUS_VERSION,
+    product_obligations: list[dict] | None = None,
+    product_policy: dict | None = None,
 ) -> dict:
     """Drive + build + score one benchmark brief into ``out_dir/<stem>/``.
 
@@ -834,7 +932,11 @@ def evaluate_one(
     t0 = time.time()
     started_at = _now_iso()
     original_prompt = entry["brief"]
-    contract = _contract_or_placeholder(entry["slug"], contract_version)
+    contract = (
+        {"execution_brief": original_prompt, "consent": []}
+        if product_policy is not None
+        else _contract_or_placeholder(entry["slug"], contract_version)
+    )
     prompt = contract["execution_brief"] or original_prompt
     stem = _stem_for(idx, entry) + (f"__r{rep}" if rep else "")
     rundir = out_dir / stem
@@ -862,12 +964,25 @@ def evaluate_one(
             "silkscreen": {"status": "not-run", "cost_usd": 0.0},
             "judge": {"status": "not-run", "cost_usd": 0.0},
         },
+        "manual_intervention": False,
+        "clarification_assisted": False,
     }
+    if product_policy is not None:
+        (rundir / "attempt_started.json").write_text(
+            json.dumps({"slug": entry["slug"], "run_id": run_id, "started_at": started_at}) + "\n",
+            encoding="utf-8",
+        )
     guard = getattr(client, "guard", None)
     try:
         try:
             d = run_design(
-                client, prompt, rundir, progress, max_park_rounds=max_park_rounds, run_id=run_id
+                client,
+                prompt,
+                rundir,
+                progress,
+                max_park_rounds=max_park_rounds,
+                run_id=run_id,
+                **({"auto_answer_questions": False} if product_policy is not None else {}),
             )
             rec.update(
                 design_status=d["status"],
@@ -875,12 +990,18 @@ def evaluate_one(
                 questions=d["questions"],
                 design_error=d["error"],
                 design_failure_kind=d.get("failure_kind"),
+                park_rounds=d.get("rounds"),
+                reconcile_passes=d.get("reconcile_passes"),
+                top_level_provider_retries=d.get("provider_retries"),
+                clarification_assisted=product_policy is None and d["questions"] > 0,
             )
         finally:
             if guard is not None and hasattr(guard, "spent_by_stage_for_run"):
                 raw_stage_costs = guard.spent_by_stage_for_run(run_id)
                 stage_costs = {
-                    stage: cost for stage, cost in raw_stage_costs.items() if stage in _DESIGN_STAGES
+                    stage: cost
+                    for stage, cost in raw_stage_costs.items()
+                    if stage in _DESIGN_STAGES
                 }
                 rec["design_cost_usd"] = round(sum(stage_costs.values()), 6)
                 rec["design_cost_source"] = "spend_ledger"
@@ -891,7 +1012,12 @@ def evaluate_one(
                 )
                 rec["design_cost_source"] = "stage_results_and_events"
             rec["stage_cost_usd"] = stage_costs
-        if not design_only and d["status"] == "ok":
+        if (
+            not design_only
+            and d["status"] == "ok"
+            and pipeline_dispatch.current_tree_owns_design_state(rundir)
+        ):
+
             def _rewire(instruction: str) -> None:
                 run_session(
                     rundir,
@@ -1033,18 +1159,26 @@ def evaluate_one(
                 }
             elif isinstance(e, KillSwitchEngaged):
                 rec["failure_kind"] = rec["design_failure_kind"] = "kill_switch"
-    try:
-        acceptance = generate_artifact_evidence(
-            rundir,
-            entry["slug"],
-            build_rc=rec.get("build_rc"),
-            contract_version=contract_version,
-            design_committed=rec.get("design_committed") is True,
-        )
-        rec["acceptance_evidence_path"] = str(write_acceptance_evidence(rundir, acceptance))
-    except Exception as exc:  # Artifact evidence is fail-closed, never inferred.
-        rec["acceptance_evidence_error"] = f"{type(exc).__name__}: {exc}"[:600]
+    if product_policy is None:
+        try:
+            acceptance = generate_artifact_evidence(
+                rundir,
+                entry["slug"],
+                build_rc=rec.get("build_rc"),
+                contract_version=contract_version,
+                design_committed=rec.get("design_committed") is True,
+            )
+            rec["acceptance_evidence_path"] = str(write_acceptance_evidence(rundir, acceptance))
+        except Exception as exc:  # Artifact evidence is fail-closed, never inferred.
+            rec["acceptance_evidence_error"] = f"{type(exc).__name__}: {exc}"[:600]
+    if guard is not None and hasattr(guard, "spent_by_stage_for_run"):
+        rec["ledger_cost_usd"] = round(sum(guard.spent_by_stage_for_run(run_id).values()), 6)
     rec["duration_s"] = round(time.time() - t0, 1)
+    if product_policy is not None:
+        if guard is not None and getattr(guard, "path", None):
+            rec["budget_exposure"] = strict_budget_exposure_status(guard.path, run_id=run_id)
+        rec.update(evaluate_product(rundir, rec, product_obligations or [], product_policy))
+        rec["attempt_completed"] = True
     return rec
 
 
@@ -1087,9 +1221,7 @@ def _campaign_costs(records: list[dict]) -> dict:
         ),
         "cost_per_committed_design_usd": round(total / committed, 6) if committed else None,
         "stage_cost_usd": {stage: round(cost, 6) for stage, cost in sorted(stage_costs.items())},
-        "lifecycle_cost_usd": {
-            phase: round(cost, 6) for phase, cost in lifecycle_costs.items()
-        },
+        "lifecycle_cost_usd": {phase: round(cost, 6) for phase, cost in lifecycle_costs.items()},
     }
 
 
@@ -1203,13 +1335,16 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
     for record in records:
         for code in record.get("advisories") or ():
             advisory_codes[code] = advisory_codes.get(code, 0) + 1
+
     def _lifecycle_status(phase: str) -> str:
         statuses = [
-            ((record.get("lifecycle") or {}).get(phase) or {}).get("status")
-            for record in records
+            ((record.get("lifecycle") or {}).get(phase) or {}).get("status") for record in records
         ]
-        return "completed" if statuses and all(status == "completed" for status in statuses) else "not-recorded"
-
+        return (
+            "completed"
+            if statuses and all(status == "completed" for status in statuses)
+            else "not-recorded"
+        )
 
     summary = {
         **meta,
@@ -1271,6 +1406,28 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         **cost_summary,
         "runs": records,
     }
+    if meta.get("external_entries") is not None:
+        summary["product"] = summarize_product(
+            records, meta["external_entries"], meta.get("external_obligations")
+        )
+        summary["product_success"] = summary["product"]["product_success_n"]
+        summary["product_denominator"] = summary["product"]["eligible_n"]
+        summary["product_failure_families"] = summary["product"]["failure_pareto"]
+        summary["product_cost_usd"] = round(sum(r.get("ledger_cost_usd", 0.0) for r in records), 6)
+        summary["product_latency_s"] = {
+            "median": statistics.median([r["duration_s"] for r in records if "duration_s" in r])
+            if any("duration_s" in r for r in records)
+            else None,
+            "maximum": max((r.get("duration_s", 0.0) for r in records), default=None),
+        }
+        summary["campaign_valid"] = (
+            meta.get("source_unchanged") is True
+            and meta.get("runtime_unchanged") is True
+            and meta.get("campaign_complete") is True
+            and not summary["product"]["missing_slugs"]
+            and not summary["product"]["pending_slugs"]
+            and not summary["product"]["duplicate_slugs"]
+        )
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     (out_dir / "summary.md").write_text(_render_md(summary), encoding="utf-8")
     return summary
@@ -1308,6 +1465,48 @@ def _outline_stats(records) -> dict | None:
 
 def _render_md(s: dict) -> str:
     L: list[str] = [f"# KiCraft self-eval — {s.get('started_at', '')}", ""]
+    if s.get("product") is not None:
+        product = s["product"]
+        L.extend(
+            [
+                f"- product success: **{product['product_success_n']}/{product['eligible_n']} eligible briefs**",
+                f"- sample: **{s.get('sampling', {}).get('kind', 'unknown')}**; build success is not product success",
+                f"- excluded before execution: **{len(s.get('excluded_slugs', []))}**",
+                f"- missing: **{len(product['missing_slugs'])}**; pending: **{len(product['pending_slugs'])}**",
+                "- product failures: "
+                + ", ".join(
+                    f"{kind}: {count}" for kind, count in product["failure_pareto"].items()
+                ),
+                f"- shared ledger delta: **${s.get('shared_ledger_delta_usd', 'pending')}**",
+                "",
+                "| Family | Product successes | Eligible briefs |",
+                "|---|---:|---:|",
+                *[
+                    f"| {family} | {row['product_success_n']} | {row['eligible_n']} |"
+                    for family, row in product["family_stats"].items()
+                ],
+                "",
+            ]
+        )
+        gaps = product.get("capability_gaps") or {}
+        if gaps:
+            L.extend(
+                [
+                    "## Missing capabilities (ranked)",
+                    "",
+                    "`defect` = delivered board violated the requirement; "
+                    "`unverified` = no evidence either way (evaluator gap or absent fact).",
+                    "",
+                    "| Capability | defect runs | unverified runs | proven runs |",
+                    "|---|---:|---:|---:|",
+                    *[
+                        f"| {capability} | {row['defect_runs']} | {row['unverified_runs']} | "
+                        f"{row['passed_runs']} |"
+                        for capability, row in list(gaps.items())[:25]
+                    ],
+                    "",
+                ]
+            )
     repeats = s.get("repeats", 1)
     rep_note = f" ({repeats} repeats, {s['n']} runs)" if repeats > 1 else ""
     L.append(
@@ -1436,9 +1635,7 @@ def _render_md(s: dict) -> str:
     L.append("| # | slug | archetype | grade | final | verdict | build | Q | $ |")
     L.append("|---|------|-----------|-------|-------|---------|-------|---|---|")
     for r in s["runs"]:
-        mode = r.get("execution_mode") or (
-            "design-only" if s.get("design_only") else "full"
-        )
+        mode = r.get("execution_mode") or ("design-only" if s.get("design_only") else "full")
         if mode == "design-only":
             build = (
                 "design-only (committed)"
@@ -1583,10 +1780,84 @@ def _reusable(rec: dict | None, *, design_only: bool = False) -> bool:
     return bool(report) and Path(report).exists()
 
 
+def audit_external_campaign(root: Path) -> dict:
+    """Recheck saved artifact integrity and the full denominator without paid calls."""
+    root = root.resolve()
+    immutable = json.loads((root / "campaign_manifest.json").read_text(encoding="utf-8"))[
+        "immutable"
+    ]
+    bundle = validate_external_bundle(immutable["external_bundle"])
+    summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+    records = summary["runs"]
+    if not isinstance(records, list):
+        raise ValueError("campaign runs must be a list")
+    entries = {entry["slug"]: entry for entry in bundle["entries"]}
+    errors = []
+    checked = []
+    for record in records:
+        if not isinstance(record, dict) or record.get("slug") not in entries:
+            errors.append("unknown or invalid run in campaign summary")
+            continue
+        entry = entries[record["slug"]]
+        run_errors = []
+        if record.get("index") != entry["index"] or record.get("repeat") is not None:
+            run_errors.append("run index/repetition differs from frozen manifest")
+        if record.get("product_success") is True:
+            run_errors.extend(
+                verify_product_audit(
+                    root / _stem_for(entry["index"], entry),
+                    record=record,
+                    obligations=bundle["obligations"]["briefs"][entry["slug"]],
+                    policy=bundle["manifest"]["policy"],
+                )
+            )
+            expected = _stable_hash(entry["brief"])
+            if any(
+                record.get(key) != expected
+                for key in ("original_brief_hash", "execution_brief_hash")
+            ):
+                run_errors.append("brief identity differs from frozen manifest")
+        if run_errors:
+            errors.extend(f"{entry['slug']}: {error}" for error in run_errors)
+            record = {
+                **record,
+                "product_success": False,
+                "product_failure_kind": "unverified_evidence",
+            }
+        checked.append(record)
+    product = summarize_product(checked, bundle["entries"])
+    if product["missing_slugs"] or product["duplicate_slugs"] or product["pending_slugs"]:
+        errors.append("campaign has missing, duplicate or pending observations")
+    if summary.get("campaign_valid") is not True:
+        errors.append("campaign is incomplete or execution identity was not stable")
+    return {
+        "corpus_hash": bundle["hash"],
+        "sampling": bundle["manifest"]["sampling"],
+        "artifact_integrity_ok": not errors,
+        "errors": errors,
+        "product": product,
+    }
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Drive every benchmark brief end to end and grade it "
         "(the self-eval skill's regression loop over the 28-brief corpus)."
+    )
+    ap.add_argument(
+        "--brief-manifest", type=Path, help="external corpus JSON; never sent to design"
+    )
+    ap.add_argument("--obligations", type=Path, help="separate evaluator-only obligations JSON")
+    ap.add_argument(
+        "--validate-manifest",
+        action="store_true",
+        help="validate external inputs without model calls",
+    )
+    ap.add_argument(
+        "--campaign-budget-usd", type=float, help="explicit external campaign spend allowance"
+    )
+    ap.add_argument(
+        "--audit-campaign", type=Path, help="audit external campaign artifacts without paid calls"
     )
     ap.add_argument("--limit", type=int, default=None, help="run only the first N benchmark briefs")
     ap.add_argument(
@@ -1669,9 +1940,8 @@ def main(argv=None) -> int:
         "--resume",
         default=None,
         metavar="BATCH_DIR",
-        help="finish an existing batch dir: reuse completed briefs from its "
-        "summary.json, wipe + re-run only errored/missing ones. Combine "
-        "with --only/--limit to restrict the considered set.",
+        help="finish an existing batch. External campaigns preserve failed/interrupted first "
+        "attempts; built-in diagnostic campaigns may retry errored/missing runs.",
     )
     ap.add_argument(
         "--no-shaped",
@@ -1693,6 +1963,73 @@ def main(argv=None) -> int:
         "default corpus now (kept so older invocations still run)",
     )
     args = ap.parse_args(argv)
+    if args.audit_campaign is not None:
+        try:
+            audit = audit_external_campaign(args.audit_campaign)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            ap.error(f"cannot audit campaign: {exc}")
+        print(json.dumps(audit, indent=2))
+        return 0 if audit["artifact_integrity_ok"] else 2
+    external_bundle = None
+    saved_immutable = {}
+    try:
+        if args.resume:
+            saved = Path(args.resume) / "campaign_manifest.json"
+            if saved.is_file():
+                saved_immutable = json.loads(saved.read_text(encoding="utf-8"))["immutable"]
+                if saved_immutable.get("external_bundle") is not None:
+                    external_bundle = validate_external_bundle(saved_immutable["external_bundle"])
+        if bool(args.brief_manifest) != bool(args.obligations):
+            raise ValueError("--brief-manifest and --obligations must be supplied together")
+        if args.brief_manifest:
+            supplied = load_external_manifest(args.brief_manifest, args.obligations)
+            if external_bundle and supplied != external_bundle:
+                raise ValueError("external corpus differs from frozen resume manifest")
+            external_bundle = supplied
+        if args.validate_manifest:
+            if external_bundle is None:
+                raise ValueError("--validate-manifest requires an external corpus")
+            print(
+                json.dumps(
+                    {
+                        "hash": external_bundle["hash"],
+                        "briefs": len(external_bundle["entries"]),
+                        "sampling": external_bundle["manifest"]["sampling"],
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        if external_bundle:
+            if (
+                args.only
+                or args.limit is not None
+                or args.repeats != 1
+                or args.design_only
+                or args.no_shaped
+                or args.shaped_only
+                or args.contract_version != ORIGINAL_CORPUS_VERSION
+            ):
+                raise ValueError(
+                    "external campaigns require the entire frozen corpus, one full attempt, and original briefs"
+                )
+            frozen_policy = external_bundle["manifest"]["policy"]
+            args.max_park_rounds = frozen_policy["max_park_rounds"]
+            args.build_timeout = frozen_policy["build_timeout_s"]
+            if args.campaign_budget_usd is None:
+                args.campaign_budget_usd = (saved_immutable.get("execution_policy") or {}).get(
+                    "campaign_budget_usd"
+                )
+            if (
+                args.campaign_budget_usd is None
+                or not math.isfinite(args.campaign_budget_usd)
+                or args.campaign_budget_usd <= 0
+            ):
+                raise ValueError("external campaigns require a positive --campaign-budget-usd")
+        elif args.campaign_budget_usd is not None:
+            raise ValueError("--campaign-budget-usd requires an external corpus")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        ap.error(str(exc))
 
     # Resolve --build-slots to a host-aware, clamped value BEFORE any work: a
     # contended config (build_slots > cores) trips the build watchdog, so reject
@@ -1703,8 +2040,10 @@ def main(argv=None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    corpus = list(BRIEFS)  # the shaped-outline group is included by default now
-    if args.shaped_only:
+    corpus = list(BRIEFS)
+    if external_bundle:
+        corpus = external_bundle["entries"]
+    elif args.shaped_only:
         corpus = list(SHAPED_OUTLINE_PROMPTS)
     elif args.no_shaped:
         corpus = [e for e in BRIEFS if not e.get("outline_shape")]
@@ -1717,6 +2056,38 @@ def main(argv=None) -> int:
     from kicraft.server.config import Settings
 
     s = Settings.from_env()
+    execution_policy = None
+    campaign_guard = None
+    if external_bundle:
+        from dataclasses import replace
+        from kicraft.server.spend_guard import SpendGuard
+
+        campaign_guard = SpendGuard(s)
+        saved_policy = saved_immutable.get("execution_policy")
+        ledger_start = (
+            saved_policy["ledger_start_usd"] if saved_policy else campaign_guard.spent_total()
+        )
+        if campaign_guard.spent_total() + 1e-9 < ledger_start:
+            ap.error("shared spend ledger moved backwards; cannot resume the frozen allowance")
+        total_cap = min(s.total_usd_ceiling, ledger_start + args.campaign_budget_usd)
+        project_cap = min(s.project_llm_budget_usd, frozen_policy["max_cost_usd"])
+        if project_cap != frozen_policy["max_cost_usd"]:
+            ap.error("manifest per-run cost limit exceeds production project cap")
+        execution_policy = {
+            "campaign_budget_usd": args.campaign_budget_usd,
+            "ledger_start_usd": ledger_start,
+            "total_cap_usd": total_cap,
+            "parallel": args.parallel,
+            "build_slots": build_slots,
+            "auto_answer_questions": False,
+            "full_events": not args.lean_events,
+        }
+        # Process-local limits also reach the pinned interpreter and lifecycle clients.
+        # The production .env and live service settings remain untouched.
+        os.environ["KICRAFT_TOTAL_USD_CEILING"] = str(total_cap)
+        os.environ["KICRAFT_PROJECT_LLM_BUDGET_USD"] = str(project_cap)
+        os.environ["KICRAFT_EVAL_STRICT_BUDGET"] = "1"
+        s = replace(s, total_usd_ceiling=total_cap, project_llm_budget_usd=project_cap)
     client = make_client(s)
     # Judge identity is an independent role setting. It never inherits the
     # electrical-review model implicitly.
@@ -1735,13 +2106,32 @@ def main(argv=None) -> int:
         resume_dir if resume_dir else (Path(args.out) if args.out else _default_out_dir())
     ).resolve()
     fresh_output_directory = not out_dir.exists() or not any(out_dir.iterdir())
+    if external_bundle and not resume_dir and not fresh_output_directory:
+        ap.error("external campaigns require a fresh output directory")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     repeats = max(1, args.repeats)
     reps = [None] if repeats == 1 else list(range(1, repeats + 1))
 
     prior = _load_prior_records(out_dir) if resume_dir else {}
-    if resume_dir and not args.only and args.limit is None:
+    if external_bundle and resume_dir and (out_dir / "summary.json").is_file():
+        try:
+            rows = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))["runs"]
+            expected_indices = {entry["slug"]: index for index, entry in selected}
+            if (
+                not isinstance(rows, list)
+                or len(rows) != len(prior)
+                or any(
+                    row.get("repeat") is not None
+                    or row.get("index") != expected_indices.get(row.get("slug"))
+                    or row.get("slug") not in expected_indices
+                    for row in rows
+                )
+            ):
+                raise ValueError("external checkpoint has duplicate, substituted or repeated runs")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            ap.error(f"cannot reuse external checkpoint: {exc}")
+    if resume_dir and not external_bundle and not args.only and args.limit is None:
         # The checkpoint may be partial. Recover the complete frozen manifest
         # corpus rather than silently shrinking the resumed campaign.
         resume_slugs = _resume_corpus_slugs(out_dir, prior)
@@ -1753,20 +2143,56 @@ def main(argv=None) -> int:
         selected=selected,
         repeats=repeats,
         contract_version=args.contract_version,
+        external_bundle=external_bundle,
+        execution_policy=execution_policy,
     )
-    source_fingerprint_start = json.loads(manifest_path.read_text(encoding="utf-8"))["immutable"][
-        "source_fingerprint"
-    ]
+    frozen_immutable = json.loads(manifest_path.read_text(encoding="utf-8"))["immutable"]
+    source_fingerprint_start = frozen_immutable["source_fingerprint"]
+    frozen_runtime = frozen_immutable.get("runtime_identity")
     # Expand to one (idx, entry, rep) per run; reuse / re-run is decided per run.
     all_runs = [(i, e, rep) for i, e in selected for rep in reps]
     reused = {
         _run_key(e["slug"], rep): prior[_run_key(e["slug"], rep)]
         for _, e, rep in all_runs
-        if _reusable(
-            prior.get(_run_key(e["slug"], rep)),
-            design_only=args.design_only,
+        if (
+            _run_key(e["slug"], rep) in prior
+            if external_bundle
+            else _reusable(prior.get(_run_key(e["slug"], rep)), design_only=args.design_only)
         )
     }
+
+    def _verify_reused(record, entry, rundir):
+        if record.get("product_success") is True:
+            errors = verify_product_audit(
+                rundir,
+                record=record,
+                obligations=external_bundle["obligations"]["briefs"][entry["slug"]],
+                policy=frozen_policy,
+            )
+            expected = _stable_hash(entry["brief"])
+            if (
+                record.get("original_brief_hash") != expected
+                or record.get("execution_brief_hash") != expected
+            ):
+                errors.append("saved run brief differs from the frozen corpus")
+            if errors:
+                return {
+                    **record,
+                    "product_success": False,
+                    "product_failure_kind": "unverified_evidence",
+                    "product_errors": errors,
+                }
+        return record
+
+    if external_bundle:
+        reused = {
+            key: _verify_reused(
+                row,
+                next(e for _, e in selected if e["slug"] == key),
+                out_dir / _stem_for(row["index"], row),
+            )
+            for key, row in reused.items()
+        }
     todo = [(i, e, rep) for i, e, rep in all_runs if _run_key(e["slug"], rep) not in reused]
     parallel = max(1, min(args.parallel, len(todo) or 1))
 
@@ -1794,6 +2220,13 @@ def main(argv=None) -> int:
         "requested_only": args.only,
         "requested_limit": args.limit,
     }
+    if external_bundle:
+        meta["external_entries"] = external_bundle["entries"]
+        meta["external_obligations"] = external_bundle["obligations"]["briefs"]
+        meta["external_corpus_hash"] = external_bundle["hash"]
+        meta["sampling"] = external_bundle["manifest"]["sampling"]
+        meta["execution_policy"] = execution_policy
+        meta["excluded_slugs"] = [e["slug"] for e in corpus if not e["eligible"]]
     try:
         from .rubric import load_rubric
 
@@ -1816,7 +2249,7 @@ def main(argv=None) -> int:
 
     # A re-run must start from a clean slate: stale .kicraft state would make
     # run_design resume mid-chain and stale events.jsonl would skew the Class-C scorers.
-    if resume_dir:
+    if resume_dir and not external_bundle:
         for idx, entry, rep in todo:
             stale = out_dir / (_stem_for(idx, entry) + (f"__r{rep}" if rep else ""))
             if stale.exists():
@@ -1825,6 +2258,98 @@ def main(argv=None) -> int:
     t_mono = time.monotonic()
     by_run: dict[str, dict] = dict(reused)
     ckpt_lock = threading.Lock()
+    admission = threading.Condition()
+    reserved_usd = 0.0
+
+    def _evaluate(run_client, idx, entry, **kwargs):
+        nonlocal reserved_usd
+        if external_bundle is None:
+            return evaluate_one(run_client, idx, entry, out_dir, **kwargs)
+        rundir = out_dir / _stem_for(idx, entry)
+        record_path = rundir / "attempt.json"
+        if record_path.is_file():
+            return _verify_reused(
+                json.loads(record_path.read_text(encoding="utf-8")), entry, rundir
+            )
+        base = {
+            "index": idx,
+            "slug": entry["slug"],
+            "repeat": None,
+            "archetype": entry["archetype"],
+            "prompt": entry["brief"],
+            "rundir": str(rundir),
+            "product_success": False,
+            "attempt_completed": True,
+        }
+        if not entry["eligible"]:
+            return {**base, "product_failure_kind": "out_of_envelope"}
+        if (
+            _external_runtime_identity(s) != frozen_runtime
+            or _source_fingerprint() != source_fingerprint_start
+        ):
+            return {
+                **base,
+                "product_failure_kind": "campaign_identity_changed",
+                "error": "Source, pipeline or runtime policy changed during the campaign",
+            }
+        if rundir.exists():
+            # An interrupted attempt remains a failed observation; never delete and restart it.
+            try:
+                started = json.loads((rundir / "attempt_started.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                started = {}
+            if started.get("run_id") and campaign_guard is not None:
+                base["run_id"] = started["run_id"]
+                base["ledger_cost_usd"] = campaign_guard.spent_for_run(started["run_id"])
+            return {
+                **base,
+                "product_failure_kind": "interrupted_attempt",
+                "error": "Prior attempt has artifacts but no terminal record; preserved without retry",
+            }
+        reservation = frozen_policy["max_cost_usd"]
+        assert campaign_guard is not None and execution_policy is not None
+        with admission:
+            while True:
+                spent = max(
+                    0.0, campaign_guard.spent_total() - execution_policy["ledger_start_usd"]
+                )
+                exposure = strict_budget_exposure_status(campaign_guard.path)
+                spent += exposure["active_exposure_usd"]
+                if spent + reserved_usd + reservation <= args.campaign_budget_usd + 1e-9:
+                    reserved_usd += reservation
+                    break
+                if reserved_usd == 0:
+                    return {
+                        **base,
+                        "product_failure_kind": "campaign_budget_exhausted",
+                        "error": "Campaign allowance cannot reserve another full per-run budget",
+                    }
+                admission.wait()
+        try:
+            rundir.mkdir(parents=True)
+            (rundir / "attempt_started.json").write_text(
+                json.dumps({"slug": entry["slug"], "started_at": _now_iso()}) + "\n",
+                encoding="utf-8",
+            )
+            rec = evaluate_one(
+                run_client,
+                idx,
+                entry,
+                out_dir,
+                **kwargs,
+                product_obligations=external_bundle["obligations"]["briefs"][entry["slug"]],
+                product_policy=frozen_policy,
+            )
+            temporary = record_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(record_path)
+            return rec
+        finally:
+            with admission:
+                reserved_usd -= reservation
+                if abs(reserved_usd) < 1e-9:
+                    reserved_usd = 0.0
+                admission.notify_all()
 
     def _checkpoint() -> None:
         # Live partial summary after every run: what --resume reads back when a
@@ -1838,11 +2363,10 @@ def main(argv=None) -> int:
         for n, (idx, entry, rep) in enumerate(todo, start=1):
             label = entry["slug"] + (f" r{rep}" if rep else "")
             print(f"\n[{n}/{len(todo)}] #{idx} {label}: {entry['brief']}", flush=True)
-            rec = evaluate_one(
+            rec = _evaluate(
                 client,
                 idx,
                 entry,
-                out_dir,
                 judge_model=judge_model,
                 skip_judge=args.no_judge,
                 judge_client=judge_client,
@@ -1880,11 +2404,10 @@ def main(argv=None) -> int:
             stem = _stem_for(idx, entry) + (f"__r{rep}" if rep else "")
             with print_lock:
                 print(f"[{stem}] start: {entry['brief']}", flush=True)
-            rec = evaluate_one(
+            rec = _evaluate(
                 wclient,
                 idx,
                 entry,
-                out_dir,
                 judge_model=judge_model,
                 skip_judge=args.no_judge,
                 judge_client=wjudge,
@@ -1924,6 +2447,17 @@ def main(argv=None) -> int:
         source_fingerprint_start != "unknown"
         and source_fingerprint_start == meta["source_fingerprint_end"]
     )
+    if external_bundle and campaign_guard is not None:
+        meta["shared_ledger_delta_usd"] = round(
+            campaign_guard.spent_total() - execution_policy["ledger_start_usd"], 6
+        )
+        meta["budget_exposure"] = strict_budget_exposure_status(campaign_guard.path)
+        meta["runtime_unchanged"] = _external_runtime_identity(s) == frozen_runtime
+        meta["campaign_complete"] = not any(
+            row.get("product_failure_kind")
+            in {"campaign_budget_exhausted", "interrupted_attempt", "campaign_identity_changed"}
+            for row in by_run.values()
+        )
     meta["wall_s"] = round(time.monotonic() - t_mono, 1)
     records = [by_run[k] for _, e, rep in all_runs if (k := _run_key(e["slug"], rep)) in by_run]
     summary = compile_report(records, out_dir, meta)
@@ -1937,6 +2471,12 @@ def main(argv=None) -> int:
         print("    gates: " + ", ".join(f"{k}×{v}" for k, v in summary["gate_counts"].items()))
     print(f"report: {out_dir / 'summary.md'}")
     print(f"        {out_dir / 'summary.json'}")
+    if external_bundle:
+        print(
+            f"product success: {summary['product_success']}/{summary['product_denominator']} · "
+            f"sampling={meta['sampling']['kind']} · valid_campaign={summary['campaign_valid']}"
+        )
+        return 0 if summary["campaign_valid"] else 2
     return 0
 
 
