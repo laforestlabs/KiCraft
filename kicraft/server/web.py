@@ -46,7 +46,7 @@ from .accounts import (
     is_admin,
 )
 from .config import LEGAL_VERSION, Settings, default_legal_dir
-from .examples import EXAMPLE_PROMPTS
+from .examples import BRIEF_SEED_MODULO, EXAMPLE_PROMPTS, generate_brief
 from .question_policy import normalize_question_options
 from .kicanvas import KICANVAS_ASSET, KiCanvasSource, KiCanvasView, kicanvas_head
 from .layout_panel import (
@@ -59,7 +59,6 @@ from .rules_panel import PlacementRulesPanel
 from .mailer import send_reset_email, send_verification_email
 from ..parts_library import Tier
 from ..parts_library import jlcparts, lcsc_retail
-from ..tuning.benchmark import briefs as _selfeval_briefs
 from .parts_catalog import (
     _content_hash_key,
     catalog,
@@ -6053,10 +6052,11 @@ def index(prompt: str = "", project: str = ""):
             .tooltip("Use recommended defaults for ambiguity. Uncheck to answer clarification questions yourself.")
 
 
-        # One-click inspiration: "Surprise me" streams the vetted self-eval corpus
-        # (the cycling placeholder in kc_onboarding.js supplies passive ideas).
-        # Created here for position; its click handler is wired below once `start`
-        # exists so it can both load the next brief AND launch the run.
+        # One-click inspiration: "Surprise me" composes a fresh random brief
+        # (kicraft.server.examples.generate_brief; the cycling placeholder in
+        # kc_onboarding.js supplies passive ideas). Created here for position; its
+        # click handler is wired below once `start` exists so it can both load the
+        # next brief AND launch the run.
         chips_row = ui.row().classes("items-center gap-2 kc-chips")
 
         with ui.row().classes("items-center gap-2"):
@@ -6093,12 +6093,12 @@ def index(prompt: str = "", project: str = ""):
             design_btn.classes(add="kc-pulse")  # draw the eye to the next click
 
         with chips_row:
-            # Streams the vetted self-eval corpus in order and runs each one
-            # (handler wired below, once `start` is defined).
+            # Generates a fresh random brief and runs it (handler wired below,
+            # once `start` is defined).
             surprise_btn = ui.button("Surprise me", icon="casino") \
                 .props("flat rounded dense no-caps").classes("kc-chip") \
-                .tooltip("Run the next vetted self-eval brief — a known-good "
-                         "design. Click again for the next one.")
+                .tooltip("Generate a fresh random brief and run it — a different "
+                         "design every click, never one of the saved examples.")
 
         def _enter_run_view(prompt_text: str) -> None:
             """A design is open (started / attached / reopened): collapse the
@@ -6686,19 +6686,16 @@ def index(prompt: str = "", project: str = ""):
         design_btn.on_click(start)
 
         def surprise():
-            """Load the next vetted self-eval brief and launch it. The corpus
-            (kicraft.tuning.benchmark) is walked in order via a persistent global
-            counter, so repeated clicks stream the whole set one at a time — a
-            continuous feed of known-good designs. `start` enforces the usual
+            """Compose a fresh random brief and launch it. The seed comes from a
+            persistent counter (never the same number twice), so every click is a
+            new request and any single brief is reproducible from its seed via
+            ``kicraft.server.examples.generate_brief``. `start` enforces the usual
             quota / verification gates."""
             if state["running"]:
                 return
-            briefs = _selfeval_briefs()
-            if not briefs:
-                ui.notify("No self-eval briefs are configured.", color="warning")
-                return
-            idx = _store().next_cycle_index("surprise_me_idx", len(briefs))
-            brief.value = briefs[idx]
+            seed = _store().next_cycle_index("surprise_me_seed", BRIEF_SEED_MODULO)
+            brief.value = generate_brief(seed)
+            print(f"[surprise] seed={seed} brief={brief.value!r}", flush=True)
             start()
 
         surprise_btn.on_click(surprise)

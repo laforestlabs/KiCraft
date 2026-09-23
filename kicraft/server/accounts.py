@@ -2194,8 +2194,8 @@ class AccountStore:
 
         Atomic read-modify-write in one transaction (SQLite serializes writers),
         so concurrent clicks from any session/user never hand out the same index.
-        Backs the "Surprise me" button, which streams the self-eval corpus in
-        order one brief per click. Returns 0 when ``modulo`` is non-positive."""
+        Backs the "Surprise me" button, which draws a fresh brief seed per click.
+        Returns 0 when ``modulo`` is non-positive."""
         if modulo <= 0:
             return 0
         with self._conn() as conn:

@@ -1,13 +1,14 @@
 """The shared KiCraft brief corpus — self-eval + tuning-corpus synthesis.
 
-``BENCHMARK_PROMPTS`` is the one growing corpus three consumers walk: the
-self-eval regression loop (``kicraft.eval.self_eval``), the admin self-eval
-runner (``kicraft.server.routes_admin``), and the landing-page "Surprise me"
-button (``kicraft.server.web``). It maximizes the **placement/routing** stress
-dimensions we care about — part count, connector density + edge constraints,
-fine-pitch IC escape, RF keepouts, power/thermal planes, through-hole vs SMT
-mix, hierarchy depth — and, as of the shaped-group fold-in, non-rectangular
-board outlines (``archetype == "shaped_outline"``, graded by outline_check).
+``BENCHMARK_PROMPTS`` is the one growing corpus two consumers walk: the
+self-eval regression loop (``kicraft.eval.self_eval``) and the admin self-eval
+runner (``kicraft.server.routes_admin``). It maximizes the **placement/routing**
+stress dimensions we care about — part count, connector density + edge
+constraints, fine-pitch IC escape, RF keepouts, power/thermal planes,
+through-hole vs SMT mix, hierarchy depth — and, as of the shaped-group fold-in,
+non-rectangular board outlines (``archetype == "shaped_outline"``, graded by
+outline_check). (The landing page's "Surprise me" button does NOT draw from it:
+it composes a fresh random brief, see ``kicraft.server.examples``.)
 
 The corpus is meant to GROW over time as new use cases surface: add an entry to
 the matching archetype section (or open a new archetype in ``ARCHETYPE_TRAITS``).
