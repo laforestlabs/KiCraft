@@ -346,6 +346,35 @@ def test_bom_unknown_thermal_ref_rejected() -> None:
 # ---------- ConversationState slot-scoped question replacement ----------
 
 
+def test_stage_status_diagnostic_rows_read_additively() -> None:
+    """A commit-gate rejection row from the historical writer must not poison the state.
+
+    That writer recorded `gate_codes` and no `detector_version`, so
+    ``ConversationState.model_validate`` refused every state saved after a deterministic commit
+    gate refused a candidate (a block-sheet mapping failure, a wiring gate) -- exactly the states
+    ``stage_driver replay`` exists to reopen. The row now reads with an unrecorded version
+    instead of making the whole state unloadable.
+    """
+    historical = {
+        "code": "commit_gate_rejected",
+        "severity": "fab_gate",
+        "message": (
+            "block-sheet mapping: functional block 'MOUNTING' has no implementation "
+            "requirement on a sheet"
+        ),
+        "evidence": [
+            "functional block 'MOUNTING' has no implementation requirement on a sheet"
+        ],
+        "gate_codes": ["block-sheet mapping"],
+    }
+    state = ConversationState.model_validate(
+        {"stage_status": {"architecture": {"ok": False, "diagnostics": [historical]}}}
+    )
+    row = state.stage_status["architecture"].diagnostics[0]
+    assert row.detector_version is None
+    assert row.gate_codes == ["block-sheet mapping"]
+
+
 def test_replace_open_questions_for_stage() -> None:
     s = ConversationState(
         open_questions=[

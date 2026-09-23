@@ -1046,6 +1046,27 @@ def test_default_semantic_mode_repairs_explicit_intent_classification(tmp_path):
     assert len(client.calls) == 1
 
 
+def test_commit_rejection_rows_validate_as_durable_diagnostics():
+    """The row ``_commit_rejection_diagnostics`` writes must reload.
+
+    ``StageDiagnostic`` forbids extra keys and needs a detector version; a row that fails it makes
+    the saved state unloadable, so ``replay`` cannot reopen the very run the row was written for
+    (the block-sheet mapping failure reproduced on the beacon brief did exactly that).
+    """
+    rows = stage_driver_mod._commit_rejection_diagnostics(
+        {
+            "errors": ["9.11 net coverage: unconnected net USB_D+"],
+            "offenders": ["net USB_D+ has 1 pin(s)"],
+        }
+    )
+    assert len(rows) == 1
+    diag = StageDiagnostic.model_validate(rows[0])
+    assert diag.code == "commit_gate_rejected"
+    assert diag.severity == "fab_gate"
+    assert diag.gate_codes == ["9.11"]
+    assert diag.detector_version == stage_driver_mod.DETECTOR_VERSION
+
+
 def test_semantic_repair_is_bounded_to_one_correction(tmp_path):
     brief = "USB-C 5V controller with a speaker output"
     intent = {

@@ -14,6 +14,7 @@ import requests
 
 from kicraft.design import models
 from kicraft.design.stage_semantics import (
+    DETECTOR_VERSION,
     EXTERNAL_LOAD_CURRENT_CODE,
     complete_intent_classification,
     complete_unsourced_external_rails,
@@ -696,6 +697,9 @@ def _commit_rejection_diagnostics(commit_result: object) -> list[dict]:
             else "the deterministic commit gate refused the candidate",
             "evidence": [*errors[1:8], *offenders[:24]],
             "gate_codes": list(gate_codes),
+            # Required by StageDiagnostic: a row without it makes the saved state
+            # unloadable, so `replay` cannot reopen the run it was written for.
+            "detector_version": DETECTOR_VERSION,
         }
     ]
 

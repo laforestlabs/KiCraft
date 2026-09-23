@@ -1549,7 +1549,16 @@ class ArtifactPaths(BaseModel):
 
 
 class StageDiagnostic(BaseModel):
-    """Versioned, redacted deterministic finding for one committed stage."""
+    """Versioned, redacted deterministic finding for one committed stage.
+
+    Additive readability, like ``StageStatus``: a field a historical writer did
+    not record reads as ``None``/empty instead of making the whole state
+    unloadable. ``_commit_rejection_diagnostics`` wrote ``gate_codes`` without a
+    ``detector_version``, so *every* state saved after a deterministic commit
+    gate refused a candidate (a block-sheet mapping failure, a wiring gate)
+    failed ``ConversationState.model_validate`` -- which is exactly the state
+    ``stage_driver replay`` exists to iterate on.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -1557,8 +1566,12 @@ class StageDiagnostic(BaseModel):
     severity: Literal["advisory", "repair_required", "fab_gate"]
     message: str
     evidence: list[str] = Field(default_factory=list)
-    detector_version: int = Field(ge=1)
+    # None = the writer that produced this row did not record a detector version.
+    detector_version: int | None = Field(default=None, ge=1)
     attempt: int | None = Field(default=None, ge=1)
+    # The stable gate ids (``§9.9``, ``9.15``, ...) a commit rejection names, so the durable
+    # status names every reason a candidate was refused and not just the first error line.
+    gate_codes: list[str] = Field(default_factory=list)
 
 
 class StageStatus(BaseModel):
