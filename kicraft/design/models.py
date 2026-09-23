@@ -49,7 +49,7 @@ GND_NET_PATTERNS = [
 
 
 PinDirection = Literal["input", "output", "bidirectional", "passive"]
-BlockCategory = Literal["sense", "process", "drive", "power", "interface"]
+BlockCategory = Literal["sense", "process", "drive", "power", "interface", "mechanical"]
 # How a 2-pin passive relates to the IC it serves — drives schematic placement
 # (which side of the anchor it sits on, which way it's rotated, and what its far
 # pin ties to). See PlacementHint and synthesis/placement.py.
@@ -412,6 +412,7 @@ class DeclaredInterfacePort(BaseModel):
     # declared interface against the actual component pin inventory.
     pin: str | None = Field(default=None, pattern=PIN_NUMBER_RE.pattern)
 
+
 class DeclaredInterfaceClaim(BaseModel):
     """Canonical persisted interface for hardware without a curated recipe."""
 
@@ -484,6 +485,7 @@ class ConversionObligation(BaseModel):
     input_kind: str = Field(min_length=1)
     output_kind: str = Field(min_length=1)
     behavior: str = Field(min_length=1)
+
 
 class QuantitativeObligation(BaseModel):
     """A numerical limit with its unit and comparison direction."""
@@ -575,16 +577,59 @@ class NegativeObligation(BaseModel):
         return value.strip().casefold().replace("_", "-") if isinstance(value, str) else value
 
 
-# Obligation kinds that state a board-level fact instead of naming the requirement that
-# implements it. A `quantity` counts a class across the design, a `fabrication` feature is a
-# printed-board property the PCB side owns rather than any part, and a `negative` forbids a
-# class: none of the three is an implementation claim, so none has to appear on a
-# requirement's own rows. `Architecture._obligations_are_owned_verbatim`,
+# Obligation kinds that can state a board-level fact instead of naming the requirement that
+# implements it. `quantitative` is only exempt when its *subject and unit* prove it measures the
+# board outline; electrical and component limits still require an implementing requirement (see
+# `obligation_requires_requirement_owner`). A `quantity` counts a class across the design, a
+# `fabrication` feature is a printed-board property the PCB side owns rather than any part, and a
+# `negative` forbids a class.
+# `Architecture._obligations_are_owned_verbatim`,
 # `ArchitectureIntent._obligations_are_owned_once` and
 # `stage_contracts.validate_obligation_retention` all read this one set.
 OWNERSHIP_EXEMPT_OBLIGATION_KINDS: frozenset[str] = frozenset(
-    {"quantity", "fabrication", "negative"}
+    {"quantity", "quantitative", "fabrication", "negative"}
 )
+
+_BOARD_DIMENSION_TERMS = frozenset(
+    {"width", "height", "length", "diameter", "radius", "perimeter", "area", "thickness"}
+)
+_BOARD_DIMENSION_UNITS = frozenset(
+    {"mm", "cm", "m", "in", "inch", "inches", "mil", "mm2", "cm2", "in2"}
+)
+
+
+def _obligation_field(obligation: object, field: str) -> object:
+    return (
+        obligation.get(field) if isinstance(obligation, dict) else getattr(obligation, field, None)
+    )
+
+
+def is_board_level_quantitative_obligation(obligation: object) -> bool:
+    """Whether a quantitative row is a board-outline measurement, not a part limit.
+
+    This deliberately requires all three pieces of semantic evidence: an explicit board/PCB
+    subject, an outline dimension, and a geometric unit. A current, voltage, frequency, contact
+    pitch, or component value must remain attached to the requirement whose realization proves it.
+    """
+    if _obligation_field(obligation, "kind") != "quantitative":
+        return False
+    quantity_terms = set(
+        re.findall(r"[a-z0-9]+", str(_obligation_field(obligation, "quantity") or "").casefold())
+    )
+    unit = re.sub(r"\s+", "", str(_obligation_field(obligation, "unit") or "").casefold())
+    return (
+        bool({"board", "pcb"} & quantity_terms)
+        and bool(_BOARD_DIMENSION_TERMS & quantity_terms)
+        and unit in _BOARD_DIMENSION_UNITS
+    )
+
+
+def obligation_requires_requirement_owner(obligation: object) -> bool:
+    """Whether an obligation must be attached to a realizable architecture requirement."""
+    kind = str(_obligation_field(obligation, "kind") or "")
+    if kind not in OWNERSHIP_EXEMPT_OBLIGATION_KINDS:
+        return True
+    return kind == "quantitative" and not is_board_level_quantitative_obligation(obligation)
 
 
 RequirementObligation = Annotated[
@@ -613,6 +658,10 @@ class CircuitRequirement(BaseModel):
     role: CircuitRole
     family: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]*$")
     exact_part: str | None = None
+    # Provenance written only by the deterministic architecture compiler.  It is
+    # intentionally absent from IntentRequirement, so an intent-declared physical
+    # connector cannot impersonate a compiler-generated board edge.
+    compiler_origin: Literal["edge_connector"] | None = None
     parameters: dict[str, JsonScalar] = Field(default_factory=dict)
     # Canonical fixed-connector role when this generic header is the explicitly
     # owned host stacking interface of an approved standard form factor.
@@ -821,23 +870,18 @@ class Architecture(BaseModel):
 
     @model_validator(mode="after")
     def _obligations_are_owned_verbatim(self):
-        expected = {
-            (row.kind, row.original_obligation_id): row for row in self.obligations
-        }
+        expected = {(row.kind, row.original_obligation_id): row for row in self.obligations}
         if len(expected) != len(self.obligations):
             raise ValueError("Architecture obligations have duplicate kind/source pairs")
-        owned_rows = [
-            row
-            for requirement in self.requirements
-            for row in requirement.obligations
-        ]
+        owned_rows = [row for requirement in self.requirements for row in requirement.obligations]
         owned = {(row.kind, row.original_obligation_id) for row in owned_rows}
-        # A `quantity` obligation counts a class across the design, so it may live only at the top
-        # level; every other obligation must name a requirement that implements it. `fabrication`
-        # and `negative` are exempt the same way: a printed board feature and an absent class are
-        # board-level facts, not implementation claims (OWNERSHIP_EXEMPT_OBLIGATION_KINDS).
+        # Board-wide counts, fabrication/negative facts, and evidence-backed board-outline
+        # measurements may stay at the top level. Every electrical or physical limit still needs
+        # a requirement that can realize it.
         unowned = sorted(
-            key for key in set(expected) - owned if key[0] not in OWNERSHIP_EXEMPT_OBLIGATION_KINDS
+            key
+            for key in set(expected) - owned
+            if obligation_requires_requirement_owner(expected[key])
         )
         if unowned:
             raise ValueError(
@@ -858,9 +902,7 @@ class Architecture(BaseModel):
                     if (row.kind, row.original_obligation_id) in set(invented)
                 ),
             ]
-            expected = {
-                (row.kind, row.original_obligation_id): row for row in self.obligations
-            }
+            expected = {(row.kind, row.original_obligation_id): row for row in self.obligations}
         for requirement in self.requirements:
             requirement.obligations = [
                 expected.get((row.kind, row.original_obligation_id), row)

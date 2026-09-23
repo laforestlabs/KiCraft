@@ -845,8 +845,10 @@ STM32F103C8T6_MINIMAL = _simple_programmed_mcu(
             role="hse_crystal",
             reference_prefix="Y",
             value="8MHz",
-            symbol="Device:Crystal_GND24",
-            footprint="Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm",
+            mpn="X32258MSB4SI",
+            symbol="crystal-8mhz-3225:X32258MSB4SI",
+            footprint="crystal-8mhz-3225:CRYSTAL-SMD_4P-L3.2-W2.5-BL",
+            datasheet="https://www.lcsc.com/datasheet/C2682774.pdf",
             sheet_role="mcu",
         ),
         Group(

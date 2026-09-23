@@ -36,7 +36,6 @@ from .lowering import (
     registered_lowerers,
 )
 from .models import (
-    OWNERSHIP_EXEMPT_OBLIGATION_KINDS,
     SHEET_NAME_RE,
     SHEET_STEM_RE,
     Architecture,
@@ -50,6 +49,7 @@ from .models import (
     Sheet,
     SheetPin,
     is_power_or_ground_name,
+    obligation_requires_requirement_owner,
 )
 from .recipes.models import RegisteredRecipe
 from .recipes.pin_allocator import FIXED_INTERFACES
@@ -170,6 +170,7 @@ def apply_authoritative_standard_form_factor(
             "user-approved intent.form_factor.standard"
         )
     return {**architecture_payload, "standard_form_factor": standard}
+
 
 _USB_DATA_PORTS = frozenset({"usb_dm", "usb_dp"})
 _USB_DEVICE_CONNECTOR_FAMILY = "usb-c-usb2-device"
@@ -401,15 +402,17 @@ class ArchitectureIntent(BaseModel):
             for row in requirement.obligations
         ]
         listed = {(row.kind, row.original_obligation_id) for row in self.obligations}
-        # A `quantity` obligation counts a class across the whole design (two binding posts, three
-        # stepper axes), so it is not an implementation claim and may live only at the top level.
-        # `fabrication` and `negative` are exempt the same way: a board fabrication feature and the
-        # absence of a class are board-level facts no requirement implements
-        # (OWNERSHIP_EXEMPT_OBLIGATION_KINDS).
+        # Board-wide counts, fabrication/negative facts, and evidence-backed board-outline
+        # measurements are top-level facts. A quantitative component or electrical limit must
+        # remain on the requirement that can prove it.
         unowned = sorted(
             key
             for key in listed - set(owned_keys)
-            if key[0] not in OWNERSHIP_EXEMPT_OBLIGATION_KINDS
+            if obligation_requires_requirement_owner(
+                next(
+                    row for row in self.obligations if (row.kind, row.original_obligation_id) == key
+                )
+            )
         )
         if unowned:
             raise ValueError(
@@ -845,12 +848,12 @@ def derive_architecture(
             # netlist with "cannot redistribute standard ports across distinct functional owners".
             # Normalising to the block they all implement keeps the interface coherent; when they
             # agree on none, the refusal stays and names the disagreement.
-            stacked = [
-                requirements[row.id] for row in actual.values() if row.id in requirements
-            ]
-            shared_blocks = set.intersection(
-                *(set(requirement.functional_blocks) for requirement in stacked)
-            ) if stacked else set()
+            stacked = [requirements[row.id] for row in actual.values() if row.id in requirements]
+            shared_blocks = (
+                set.intersection(*(set(requirement.functional_blocks) for requirement in stacked))
+                if stacked
+                else set()
+            )
             # Only an extra block that ANOTHER requirement still implements may be dropped:
             # a functional block with no implementation requirement is refused by the commit
             # ("functional block 'POWER_INPUT' has no implementation requirement on a sheet"),
@@ -867,9 +870,13 @@ def derive_architecture(
                     if other is not requirement
                 )
             }
-            if shared_blocks and not orphans and any(
-                sorted(requirement.functional_blocks) != sorted(shared_blocks)
-                for requirement in stacked
+            if (
+                shared_blocks
+                and not orphans
+                and any(
+                    sorted(requirement.functional_blocks) != sorted(shared_blocks)
+                    for requirement in stacked
+                )
             ):
                 for requirement in stacked:
                     requirement.functional_blocks = sorted(shared_blocks)
@@ -882,8 +889,7 @@ def derive_architecture(
                 if row is None:
                     continue
                 expected_ports = {
-                    f"pin{index}": net
-                    for index, net in enumerate(connector.net_by_pin, start=1)
+                    f"pin{index}": net for index, net in enumerate(connector.net_by_pin, start=1)
                 }
                 if (
                     row.id not in requirements
@@ -910,9 +916,7 @@ def derive_architecture(
                         f"stacking role {role!r} must use the template's exact pin/net map",
                         requirement_id=row.id,
                         sheet=row.sheet,
-                        evidence=[
-                            f"{pin}={net}" for pin, net in expected_ports.items()
-                        ],
+                        evidence=[f"{pin}={net}" for pin, net in expected_ports.items()],
                     )
                     refused_stacking.add(row.id)
                     continue
@@ -1049,6 +1053,7 @@ def derive_architecture(
                     "bidirectional",
                     context="standard stacking interface",
                 )
+
     def _lookup(reference: str, *, context: str) -> _SheetRef | None:
         """`<requirement_id>.<port>`, any accepted alias -> the canonical endpoint."""
         requirement_id, separator, port_name = reference.partition(".")
@@ -1493,9 +1498,7 @@ def derive_architecture(
             failed_edges.add(label)
             return None
         source_recipe = catalogs[source.requirement.id].recipe
-        source_recipe_name = (
-            source_recipe.definition.recipe if source_recipe is not None else None
-        )
+        source_recipe_name = source_recipe.definition.recipe if source_recipe is not None else None
         mode = (
             "usb"
             if source.port in _USB_DATA_PORTS and source_recipe_name in _NATIVE_USB_MCU_RECIPES
@@ -1544,6 +1547,7 @@ def derive_architecture(
                 sheet=sheet.name,
                 role="connector",
                 family=_HEADER_FAMILY,
+                compiler_origin="edge_connector",
                 parameters={"rows": 1, "gender": "male"},
                 functional_blocks=list(source.requirement.functional_blocks),
             )
@@ -2050,8 +2054,6 @@ def derive_architecture(
 
 
 def _usb_vbus_rail(intent: ArchitectureIntent) -> str | None:
-
-
     """The 5 V rail a USB socket exposes, never a guess.
 
     Preference: the rail the board's own input requirement generates (that is the

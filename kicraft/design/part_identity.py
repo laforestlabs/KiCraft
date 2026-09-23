@@ -4,6 +4,7 @@ Identity equivalence is deliberately narrow.  Physical selections are exposed
 separately so validators can require an exact, portable symbol/footprint pair
 instead of treating a matching product-family label as construction evidence.
 """
+
 from __future__ import annotations
 import re
 
@@ -81,9 +82,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="trim-pot-3296w-10k:RES-ADJ-TH_3296W",
         physical_features=frozenset({"trim-potentiometer", "adjustable-resistor"}),
         contacts=("1", "2", "3"),
-        manufacturer_sources=(
-            "https://www.bourns.com/docs/product-datasheets/3296.pdf",
-        ),
+        manufacturer_sources=("https://www.bourns.com/docs/product-datasheets/3296.pdf",),
         lcsc="C34846",
     ),
     ReviewedPart(
@@ -96,9 +95,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         physical_features=frozenset({"timing-capacitor", "c0g-capacitor"}),
         function_keys=frozenset({"c0g-timing-capacitor-10nf"}),
         contacts=("1", "2"),
-        manufacturer_sources=(
-            "https://search.kemet.com/download/specsheet/C0805C103J5GACTU",
-        ),
+        manufacturer_sources=("https://search.kemet.com/download/specsheet/C0805C103J5GACTU",),
         lcsc="C2167597",
         operating_limits={
             "capacitance_nf": 10.0,
@@ -165,9 +162,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="pj-320d:AUDIO-SMD_PJ-320D-1",
         physical_features=frozenset({"audio-jack-3-5mm", "trs-audio-jack"}),
         contacts=("1", "2", "3", "4"),
-        manufacturer_sources=(
-            "https://www.lcsc.com/datasheet/C431535.pdf",
-        ),
+        manufacturer_sources=("https://www.lcsc.com/datasheet/C431535.pdf",),
         lcsc="C431535",
     ),
     ReviewedPart(
@@ -313,7 +308,15 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "https://www.bosch-sensortec.com/media/boschsensortec/downloads/datasheets/bst-bme280-ds002.pdf",
         ),
         lcsc="C92489",
-        port_pins={"ground": "1", "chip_select": "2", "sda": "3", "scl": "4", "sdo": "5", "vddio": "6", "vdd": "8"},
+        port_pins={
+            "ground": "1",
+            "chip_select": "2",
+            "sda": "3",
+            "scl": "4",
+            "sdo": "5",
+            "vddio": "6",
+            "vdd": "8",
+        },
     ),
     ReviewedPart(
         identity="sm04b-srss-tb(lf)(sn)",
@@ -339,9 +342,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="mcp6004:SOIC-14_L8.7-W3.9-P1.27-LS6.0-BL",
         physical_features=frozenset({"quad-operational-amplifier"}),
         contacts=tuple(str(number) for number in range(1, 15)),
-        manufacturer_sources=(
-            "https://www.lcsc.com/datasheet/C1346056.pdf",
-        ),
+        manufacturer_sources=("https://www.lcsc.com/datasheet/C1346056.pdf",),
         lcsc="C1346056",
         port_pins={"vdd": "4", "vss": "11"},
     ),
@@ -371,7 +372,16 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "https://www.analog.com/media/en/technical-documentation/data-sheets/ADuM1300_1301.pdf",
         ),
         lcsc="C22261",
-        port_pins={"vdd1": "1", "gnd1": "2", "ve1": "7", "gnd1_return": "8", "gnd2": "9", "ve2": "10", "gnd2_return": "15", "vdd2": "16"},
+        port_pins={
+            "vdd1": "1",
+            "gnd1": "2",
+            "ve1": "7",
+            "gnd1_return": "8",
+            "gnd2": "9",
+            "ve2": "10",
+            "gnd2_return": "15",
+            "vdd2": "16",
+        },
     ),
     ReviewedPart(
         identity="b0509s-1wr3",
@@ -397,7 +407,12 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "output_power_w": 1.0,
             "isolation_vdc": 1500,
         },
-        port_pins={"input_negative": "1", "input_positive": "2", "output_negative": "3", "output_positive": "4"},
+        port_pins={
+            "input_negative": "1",
+            "input_positive": "2",
+            "output_negative": "3",
+            "output_positive": "4",
+        },
     ),
     ReviewedPart(
         identity="hs96l03w2c03",
@@ -421,9 +436,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="stm32f103c8t6:LQFP-48_L7.0-W7.0-P0.50-LS9.0-BL",
         physical_features=frozenset({"microcontroller", "stm32-mcu"}),
         contacts=tuple(str(number) for number in range(1, 49)),
-        manufacturer_sources=(
-            "https://www.st.com/resource/en/datasheet/stm32f103c8.pdf",
-        ),
+        manufacturer_sources=("https://www.st.com/resource/en/datasheet/stm32f103c8.pdf",),
         lcsc="C8734",
     ),
     ReviewedPart(
@@ -528,9 +541,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="aonr21357",
         symbol="aonr21357:AONR21357",
         footprint="aonr21357:DFN-8_L3.0-W3.0-P0.65-BL",
-        physical_features=frozenset(
-            {"p-channel-mosfet", "highside-switch", "thermal-pad"}
-        ),
+        physical_features=frozenset({"p-channel-mosfet", "highside-switch", "thermal-pad"}),
         contacts=tuple(str(number) for number in range(1, 10)),
         manufacturer_sources=(
             "https://www.lcsc.com/product-detail/MOSFETs_Alpha-Omega-Semicon-AONR21357_C431196.html",
@@ -559,9 +570,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="wra2412s-3wr2",
         symbol="wra2412s-3wr2:WRA2412S-3WR2",
         footprint="wra2412s-3wr2:Converter_DCDC_ReSine_WRAxxxxS-3WR2_THT",
-        physical_features=frozenset(
-            {"dual-output-dc-dc-converter", "isolated-dc-dc-converter"}
-        ),
+        physical_features=frozenset({"dual-output-dc-dc-converter", "isolated-dc-dc-converter"}),
         function_keys=frozenset({"24v-to-plus-minus-12v"}),
         contacts=("1", "2", "3", "5", "6", "7", "8"),
         manufacturer_sources=(
@@ -611,9 +620,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         physical_features=frozenset({"binding-post", "screw-clamp-terminal"}),
         function_keys=frozenset({"bare-wire-binding-post"}),
         contacts=("1",),
-        manufacturer_sources=(
-            "https://www.keyelco.com/product.cfm/product_id/14242",
-        ),
+        manufacturer_sources=("https://www.keyelco.com/product.cfm/product_id/14242",),
         operating_limits={"wire_awg_min": 14, "wire_awg_max": 22},
     ),
     ReviewedPart(
@@ -646,9 +653,16 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         physical_features=frozenset({"film-capacitor", "speaker-crossover-capacitor"}),
         function_keys=frozenset({"speaker-crossover-capacitor-6.8uf"}),
         contacts=("1", "2"),
-        manufacturer_sources=("https://datasheet.lcsc.com/datasheet/pdf/988445a2fd1023836a8a59546d7ba7fe.pdf?productCode=C521054",),
+        manufacturer_sources=(
+            "https://datasheet.lcsc.com/datasheet/pdf/988445a2fd1023836a8a59546d7ba7fe.pdf?productCode=C521054",
+        ),
         lcsc="C521054",
-        operating_limits={"capacitance_uf": 6.8, "tolerance_fraction": 0.05, "dc_voltage_v": 400, "dielectric": "metallized-polypropylene"},
+        operating_limits={
+            "capacitance_uf": 6.8,
+            "tolerance_fraction": 0.05,
+            "dc_voltage_v": 400,
+            "dielectric": "metallized-polypropylene",
+        },
     ),
     ReviewedPart(
         identity="mkp1848510924k2",
@@ -660,9 +674,16 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         physical_features=frozenset({"film-capacitor", "speaker-crossover-capacitor"}),
         function_keys=frozenset({"speaker-crossover-capacitor-1uf"}),
         contacts=("1", "2"),
-        manufacturer_sources=("https://datasheet.lcsc.com/datasheet/pdf/e1923bec7fca44547afd891a5eadb594.pdf?productCode=C3802212",),
+        manufacturer_sources=(
+            "https://datasheet.lcsc.com/datasheet/pdf/e1923bec7fca44547afd891a5eadb594.pdf?productCode=C3802212",
+        ),
         lcsc="C3802212",
-        operating_limits={"capacitance_uf": 1.0, "tolerance_fraction": 0.05, "dc_voltage_v": 1200, "dielectric": "metallized-polypropylene"},
+        operating_limits={
+            "capacitance_uf": 1.0,
+            "tolerance_fraction": 0.05,
+            "dc_voltage_v": 1200,
+            "dielectric": "metallized-polypropylene",
+        },
     ),
     ReviewedPart(
         identity="tps2553dbvr",
@@ -677,8 +698,19 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         manufacturer_sources=("https://www.ti.com/lit/ds/symlink/tps2553.pdf",),
         lcsc="C55266",
         operating_limits={"vin_min_v": 2.5, "vin_max_v": 6.5, "continuous_current_a": 1.5},
-        port_pins={"input": "IN", "ground": "GND", "enable": "EN", "fault": "FAULT", "limit": "ILIM", "output": "OUT"},
-        support_network={"ilim_resistor_ohm_min": 15000, "ilim_resistor_ohm_max": 232000, "input_decoupling_uf_min": 0.1},
+        port_pins={
+            "input": "IN",
+            "ground": "GND",
+            "enable": "EN",
+            "fault": "FAULT",
+            "limit": "ILIM",
+            "output": "OUT",
+        },
+        support_network={
+            "ilim_resistor_ohm_min": 15000,
+            "ilim_resistor_ohm_max": 232000,
+            "input_decoupling_uf_min": 0.1,
+        },
     ),
     ReviewedPart(
         identity="al8860mp-13",
@@ -690,9 +722,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         physical_features=frozenset({"constant-current-led-driver"}),
         function_keys=frozenset({"usb-led-current-regulator-1a"}),
         contacts=("1", "2", "3", "4", "5", "6", "7", "8", "9"),
-        manufacturer_sources=(
-            "https://www.diodes.com/datasheet/download/AL8860.pdf",
-        ),
+        manufacturer_sources=("https://www.diodes.com/datasheet/download/AL8860.pdf",),
         lcsc="C500782",
         current_feedback={
             "sense_pin": "SET",
@@ -737,9 +767,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         physical_features=frozenset({"buck-converter"}),
         function_keys=frozenset({"adjustable-buck"}),
         contacts=("1", "2", "3", "4", "5", "6", "7", "8", "9"),
-        manufacturer_sources=(
-            "https://www.ti.com/lit/ds/symlink/tps54331.pdf",
-        ),
+        manufacturer_sources=("https://www.ti.com/lit/ds/symlink/tps54331.pdf",),
         lcsc="C90761",
         operating_limits={
             "vin_min_v": 3.5,
@@ -766,9 +794,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle=None,
         symbol=None,
         footprint=None,
-        manufacturer_sources=(
-            "https://www.ti.com/lit/ds/symlink/tps5430.pdf",
-        ),
+        manufacturer_sources=("https://www.ti.com/lit/ds/symlink/tps5430.pdf",),
         operating_limits={
             "vin_min_v": 5.5,
             "vin_max_v": 36.0,
@@ -794,9 +820,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle=None,
         symbol=None,
         footprint=None,
-        manufacturer_sources=(
-            "https://www.ti.com/lit/ds/symlink/tps5430.pdf",
-        ),
+        manufacturer_sources=("https://www.ti.com/lit/ds/symlink/tps5430.pdf",),
         operating_limits={
             "vin_min_v": 5.5,
             "vin_max_v": 36.0,
@@ -831,9 +855,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="Package_SO:HSOP-8-1EP_3.9x4.9mm_P1.27mm_EP2.41x3.1mm",
         physical_features=frozenset({"buck-converter"}),
         contacts=("1", "2", "3", "4", "5", "6", "7", "8", "9"),
-        manufacturer_sources=(
-            "https://www.ti.com/lit/ds/symlink/tps5430.pdf",
-        ),
+        manufacturer_sources=("https://www.ti.com/lit/ds/symlink/tps5430.pdf",),
         lcsc="C9864",
         operating_limits={
             "vin_min_v": 5.5,
@@ -860,9 +882,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle=None,
         symbol=None,
         footprint=None,
-        manufacturer_sources=(
-            "https://www.st.com/resource/en/datasheet/stm32l072cz.pdf",
-        ),
+        manufacturer_sources=("https://www.st.com/resource/en/datasheet/stm32l072cz.pdf",),
     ),
     # --- LoRa node reference hardware (reviewed 2026-09-16) -------------------
     # The original lora-node brief names an unqualified "SX1276 module", an
@@ -1099,6 +1119,42 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         },
     ),
     ReviewedPart(
+        identity="abm8-272-t3",
+        family="crystal-3225",
+        package="Abracon ABM8-272-T3 12 MHz, 10 pF load, 3.2 x 2.5 mm four-pad crystal",
+        bundle="kicad-standard",
+        symbol="Device:Crystal_GND24",
+        footprint="Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm",
+        physical_features=frozenset({"crystal", "crystal-3225"}),
+        contacts=("1", "2", "3", "4"),
+        manufacturer_sources=("https://abracon.com/datasheets/ABM8-272-T3.pdf",),
+    ),
+    ReviewedPart(
+        identity="x32258msb4si",
+        family="crystal-3225",
+        package="YXC X32258MSB4SI 8 MHz, 3.2 x 2.5 mm four-pad crystal",
+        bundle="crystal-8mhz-3225",
+        symbol="crystal-8mhz-3225:X32258MSB4SI",
+        footprint="crystal-8mhz-3225:CRYSTAL-SMD_4P-L3.2-W2.5-BL",
+        physical_features=frozenset({"crystal", "crystal-3225"}),
+        contacts=("1", "2", "3", "4"),
+        manufacturer_sources=("https://www.lcsc.com/datasheet/C2682774.pdf",),
+        lcsc="C2682774",
+    ),
+    ReviewedPart(
+        identity="w25q16jvss",
+        family="spi-flash",
+        package="Winbond W25Q16JV, 16 Mbit, SS 208-mil SOIC-8, 5.3 x 5.3 mm",
+        bundle="kicad-standard",
+        symbol="Memory_Flash:W25Q16JVSS",
+        footprint="Package_SO:SOIC-8_5.3x5.3mm_P1.27mm",
+        physical_features=frozenset({"flash-memory"}),
+        contacts=tuple(str(number) for number in range(1, 9)),
+        manufacturer_sources=(
+            "https://www.winbond.com/hq/support/documentation/levelOne.jsp?__locale=en&DocNo=DA00-W25Q16JV.1",
+        ),
+    ),
+    ReviewedPart(
         identity="rp2040",
         family="rp2040",
         package="Raspberry Pi RP2040 QFN-56, 7 x 7 mm, 0.40 mm pitch, 3.2 x 3.2 mm exposed pad",
@@ -1107,9 +1163,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="Package_DFN_QFN:QFN-56-1EP_7x7mm_P0.4mm_EP3.2x3.2mm",
         physical_features=frozenset({"microcontroller"}),
         contacts=tuple(str(number) for number in range(1, 58)),
-        manufacturer_sources=(
-            "https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf",
-        ),
+        manufacturer_sources=("https://datasheets.raspberrypi.com/rp2040/rp2040-datasheet.pdf",),
         operating_limits={
             "io_supply_min_v": 1.8,
             "io_supply_max_v": 3.3,
@@ -1139,9 +1193,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
         physical_features=frozenset({"can-transceiver"}),
         contacts=tuple(str(number) for number in range(1, 9)),
-        manufacturer_sources=(
-            "https://www.ti.com/lit/ds/symlink/sn65hvd230.pdf",
-        ),
+        manufacturer_sources=("https://www.ti.com/lit/ds/symlink/sn65hvd230.pdf",),
         operating_limits={"supply_min_v": 3.0, "supply_max_v": 3.6, "data_rate_mbps": 1.0},
         port_pins={
             "txd": "1",
@@ -1165,9 +1217,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="esp32-s3-wroom-1",
         symbol="esp32-s3-wroom-1:ESP32-S3-WROOM-1",
         footprint="esp32-s3-wroom-1:WIRELM-SMD_ESP32-S3-WROOM-1",
-        physical_features=frozenset(
-            {"microcontroller", "wifi-module", "bluetooth-le-soc"}
-        ),
+        physical_features=frozenset({"microcontroller", "wifi-module", "bluetooth-le-soc"}),
         contacts=tuple(str(number) for number in range(1, 42)),
         manufacturer_sources=(
             "https://www.lcsc.com/datasheet/C2913201.pdf",
@@ -1198,9 +1248,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="esp32-s3-wroom-1-n16r8",
         symbol="esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1",
         footprint="esp32-s3-wroom-1-n16r8:WIRELM-SMD_ESP32-S3-WROOM-1",
-        physical_features=frozenset(
-            {"microcontroller", "wifi-module", "bluetooth-le-soc"}
-        ),
+        physical_features=frozenset({"microcontroller", "wifi-module", "bluetooth-le-soc"}),
         contacts=tuple(str(number) for number in range(1, 42)),
         manufacturer_sources=(
             "https://www.lcsc.com/datasheet/C2913202.pdf",
@@ -1231,9 +1279,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="esp32-c3-mini-1-n4",
         symbol="esp32-c3-mini-1-n4:ESP32-C3-MINI-1-N4",
         footprint="esp32-c3-mini-1-n4:WIFIM-SMD_ESP32-C3-MINI-1",
-        physical_features=frozenset(
-            {"microcontroller", "wifi-module", "bluetooth-le-soc"}
-        ),
+        physical_features=frozenset({"microcontroller", "wifi-module", "bluetooth-le-soc"}),
         contacts=tuple(str(number) for number in range(1, 54)),
         manufacturer_sources=(
             "https://www.espressif.com/sites/default/files/documentation/esp32-c3-mini-1_datasheet_en.pdf",
@@ -1450,13 +1496,9 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="me6211c33",
         symbol="me6211c33:ME6211C33M5G-N",
         footprint="me6211c33:SOT-23-5_L3.0-W1.7-P0.95-LS2.8-BL",
-        physical_features=frozenset(
-            {"smt-3v3-regulator", "voltage-regulator", "ldo-regulator"}
-        ),
+        physical_features=frozenset({"smt-3v3-regulator", "voltage-regulator", "ldo-regulator"}),
         contacts=("1", "2", "3", "4", "5"),
-        manufacturer_sources=(
-            "https://www.lcsc.com/datasheet/C82942.pdf",
-        ),
+        manufacturer_sources=("https://www.lcsc.com/datasheet/C82942.pdf",),
         lcsc="C82942",
         operating_limits={
             "input_voltage_min_v": 2.5,
@@ -1464,7 +1506,13 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "output_voltage_v": 3.3,
             "output_current_a": 0.5,
         },
-        port_pins={"input": "VIN", "ground": "VSS", "enable": "CE", "no_connect": "NC", "output": "VOUT"},
+        port_pins={
+            "input": "VIN",
+            "ground": "VSS",
+            "enable": "CE",
+            "no_connect": "NC",
+            "output": "VOUT",
+        },
         # The reviewed source-to-load path §9.39 proves: this linear regulator conducts
         # VIN to VOUT. Its siblings (`ap2112k-3.3trg1`, `ams1117-5.0`) already carry this
         # fact; without it a 5 V to 3.3 V shield has no transfer witness at all and the
@@ -1480,9 +1528,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="ap2112k-3v3",
         symbol="ap2112k-3v3:AP2112K-3.3TRG1",
         footprint="ap2112k-3v3:SOT-25-5_L2.9-W1.6-P0.95-LS2.8-BL",
-        physical_features=frozenset(
-            {"smt-3v3-regulator", "voltage-regulator", "ldo-regulator"}
-        ),
+        physical_features=frozenset({"smt-3v3-regulator", "voltage-regulator", "ldo-regulator"}),
         contacts=("1", "2", "3", "4", "5"),
         manufacturer_sources=(
             "https://www.diodes.com/assets/Datasheets/AP2112.pdf",
@@ -1495,7 +1541,13 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "output_voltage_v": 3.3,
             "output_current_a": 0.6,
         },
-        port_pins={"input": "VIN", "ground": "GND", "enable": "EN", "no_connect": "NC", "output": "VOUT"},
+        port_pins={
+            "input": "VIN",
+            "ground": "GND",
+            "enable": "EN",
+            "no_connect": "NC",
+            "output": "VOUT",
+        },
         # An LDO's source-to-load path is its own datasheet-documented VIN->VOUT
         # transfer; without it §9.39 has no reviewed path for a 5 V -> 3.3 V rail.
         power_transfer={"from_pin": "VIN", "to_pin": "VOUT"},
@@ -1507,9 +1559,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="tlv62569",
         symbol="tlv62569:TLV62569DBVR",
         footprint="tlv62569:SOT-23-5_L3.0-W1.7-P0.95-LS2.8-BR",
-        physical_features=frozenset(
-            {"smt-3v3-regulator", "voltage-regulator", "buck-regulator"}
-        ),
+        physical_features=frozenset({"smt-3v3-regulator", "voltage-regulator", "buck-regulator"}),
         contacts=("1", "2", "3", "4", "5"),
         manufacturer_sources=(
             "https://www.ti.com/lit/ds/symlink/tlv62569.pdf",
@@ -1616,9 +1666,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="Package_SO:SOIC-28W_7.5x17.9mm_P1.27mm",
         physical_features=frozenset({"io-expander", "i2c-gpio-expander"}),
         contacts=tuple(str(number) for number in range(1, 29)),
-        manufacturer_sources=(
-            "https://ww1.microchip.com/downloads/en/DeviceDoc/21952a.pdf",
-        ),
+        manufacturer_sources=("https://ww1.microchip.com/downloads/en/DeviceDoc/21952a.pdf",),
         operating_limits={"supply_min_v": 1.8, "supply_max_v": 5.5, "gpio_count": 16},
         port_pins={
             "gpio_b0": "1",
@@ -1648,8 +1696,30 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="Connector_USB:USB_C_Receptacle_Amphenol_12401610E4-2A",
         physical_features=frozenset({"usb-c-receptacle"}),
         contacts=(
-            "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10", "A11", "A12",
-            "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11", "B12",
+            "A1",
+            "A2",
+            "A3",
+            "A4",
+            "A5",
+            "A6",
+            "A7",
+            "A8",
+            "A9",
+            "A10",
+            "A11",
+            "A12",
+            "B1",
+            "B2",
+            "B3",
+            "B4",
+            "B5",
+            "B6",
+            "B7",
+            "B8",
+            "B9",
+            "B10",
+            "B11",
+            "B12",
             "S1",
         ),
         manufacturer_sources=(
@@ -1670,9 +1740,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="ams1117-5v0-fixed",
         symbol="ams1117-5v0-fixed:AMS1117-5.0",
         footprint="ams1117-5v0-fixed:SOT-223_L6.5-W3.5-P2.30-LS7.0-BR",
-        physical_features=frozenset(
-            {"voltage-regulator", "linear-regulator", "ldo-regulator"}
-        ),
+        physical_features=frozenset({"voltage-regulator", "linear-regulator", "ldo-regulator"}),
         contacts=("1", "2", "3"),
         manufacturer_sources=(
             "https://www.advanced-monolithic.com/pdf/ds1117.pdf",
@@ -1769,7 +1837,13 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "https://tech.alpsalpine.com/prod/e/html/encoder/incremental/ec11/ec11e15244g1.html",
         ),
         lcsc="C370970",
-        port_pins={"quadrature_a": "A", "quadrature_b": "B", "common": "C", "switch_1": "D", "switch_2": "E"},
+        port_pins={
+            "quadrature_a": "A",
+            "quadrature_b": "B",
+            "common": "C",
+            "switch_1": "D",
+            "switch_2": "E",
+        },
         # Pads 6/7 are the 4.0 x 2.3 mm oval frame/bushing tabs.  They are
         # mechanical: whether they are grounded is a board-level decision, so no
         # grounding claim is asserted here.
@@ -1805,9 +1879,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="ch224k:ESSOP-10_L4.9-W3.9-P1.0-LS6.0-TL-EP",
         physical_features=frozenset({"usb-pd-controller", "voltage-selector"}),
         contacts=("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"),
-        manufacturer_sources=(
-            "https://www.lcsc.com/datasheet/C970725.pdf",
-        ),
+        manufacturer_sources=("https://www.lcsc.com/datasheet/C970725.pdf",),
         lcsc="C970725",
         operating_limits={
             # §9.38 reads the canonical vin_* keys; the WCH CH224K datasheet
@@ -1840,9 +1912,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="esp32-s3-mini-1",
         symbol="esp32-s3-mini-1:ESP32-S3-MINI-1-N8",
         footprint="esp32-s3-mini-1:BULETM-SMD_ESP32-S3-MINI-1-N8",
-        physical_features=frozenset(
-            {"microcontroller", "wifi-module", "bluetooth-le-soc"}
-        ),
+        physical_features=frozenset({"microcontroller", "wifi-module", "bluetooth-le-soc"}),
         contacts=tuple(str(number) for number in range(1, 61)) + ("GND",),
         manufacturer_sources=("https://www.lcsc.com/datasheet/C2913206.pdf",),
         lcsc="C2913206",
@@ -1936,9 +2006,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         footprint="ch340c:SOP-16_L10.0-W3.9-P1.27-LS6.0-BL",
         physical_features=frozenset({"usb-uart-bridge"}),
         contacts=tuple(str(number) for number in range(1, 17)),
-        manufacturer_sources=(
-            "https://lcsc.com/product-detail/USB_CH340C_C84681.html",
-        ),
+        manufacturer_sources=("https://lcsc.com/product-detail/USB_CH340C_C84681.html",),
         lcsc="C84681",
         operating_limits={"supply_min_v": 3.3, "supply_max_v": 5.5, "data_rate_mbps": 2.0},
         port_pins={
@@ -1958,9 +2026,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="esp32-wroom-32e-n4",
         symbol="esp32-wroom-32e-n4:ESP32-WROOM-32E",
         footprint="esp32-wroom-32e-n4:WIFI-SMD_ESP32-WROOM-32E",
-        physical_features=frozenset(
-            {"microcontroller", "wifi-module", "bluetooth-le-soc"}
-        ),
+        physical_features=frozenset({"microcontroller", "wifi-module", "bluetooth-le-soc"}),
         contacts=tuple(str(number) for number in range(1, 40)),
         manufacturer_sources=(
             "https://lcsc.com/product-detail/WIFI-Modules_Espressif-Systems-ESP32-WROOM-32E-4MB_C701341.html",
@@ -1983,9 +2049,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="jst-ph-2p",
         symbol="jst-ph-2p:S2B-PH-SM4-TB",
         footprint="jst-ph-2p:CONN-SMD_P2.00_S2B-PH-SM4-TB-LF-SN",
-        physical_features=frozenset(
-            {"wire-to-board-connector", "power-connector", "jst-ph"}
-        ),
+        physical_features=frozenset({"wire-to-board-connector", "power-connector", "jst-ph"}),
         contacts=("1", "2"),
         manufacturer_sources=(
             "https://lcsc.com/product-detail/_JST-Sales-America_S2B-PH-SM4-TB-LF-SN_JST-Sales-America-S2B-PH-SM4-TB-LF-SN_C295747.html",
@@ -2006,6 +2070,22 @@ def reviewed_part(identity: str) -> ReviewedPart | None:
     return next((part for part in REVIEWED_PARTS if part.identity == key), None)
 
 
+# A small number of reviewed rows are selected by the manufacturer's bare order
+# code while the inventory identity retains its vendor-qualified name.  These
+# are explicit aliases, not normalization rules: physical_inventory_record()
+# still requires the reviewed symbol/footprint pair before accepting either
+# spelling, so a coincidental catalog code cannot bless another part.
+_REVIEWED_ORDER_CODE_IDENTITIES: dict[str, str] = {
+    "8734": "keystone-8734",
+}
+
+
+def reviewed_identity_for_order_code(identity: str) -> str:
+    """Resolve one explicitly reviewed manufacturer order-code spelling."""
+    key = identity.strip().casefold()
+    return _REVIEWED_ORDER_CODE_IDENTITIES.get(key, key)
+
+
 # These are the stock KiCad physical pairs emitted directly by the lowerers,
 # plus the reviewed order codes the validated reference rows assert on those
 # same stock pairs (the 2026-09-16 block at the end of the tuple, which also
@@ -2024,8 +2104,30 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
         footprint="Connector_USB:USB_C_Receptacle_Amphenol_12401610E4-2A",
         physical_features=frozenset({"usb-c-receptacle"}),
         contacts=(
-            "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10", "A11", "A12",
-            "B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9", "B10", "B11", "B12",
+            "A1",
+            "A2",
+            "A3",
+            "A4",
+            "A5",
+            "A6",
+            "A7",
+            "A8",
+            "A9",
+            "A10",
+            "A11",
+            "A12",
+            "B1",
+            "B2",
+            "B3",
+            "B4",
+            "B5",
+            "B6",
+            "B7",
+            "B8",
+            "B9",
+            "B10",
+            "B11",
+            "B12",
             "S1",
         ),
         manufacturer_sources=(
@@ -2053,13 +2155,24 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
         footprint="usb-c-16p:USB-C_SMD-TYPE-C-31-M-12_1",
         physical_features=frozenset({"usb-c-receptacle"}),
         contacts=(
-            "1", "2", "3", "4",
-            "A5", "A6", "A7", "A8", "B5", "B6", "B7", "B8",
-            "A4B9", "B4A9", "A1B12", "B1A12",
+            "1",
+            "2",
+            "3",
+            "4",
+            "A5",
+            "A6",
+            "A7",
+            "A8",
+            "B5",
+            "B6",
+            "B7",
+            "B8",
+            "A4B9",
+            "B4A9",
+            "A1B12",
+            "B1A12",
         ),
-        manufacturer_sources=(
-            "https://www.lcsc.com/datasheet/C165948.pdf",
-        ),
+        manufacturer_sources=("https://www.lcsc.com/datasheet/C165948.pdf",),
         lcsc="C165948",
         operating_limits={"voltage_v": 20, "current_a": 5},
     ),
@@ -2315,9 +2428,7 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
         bundle="kicad-standard",
         symbol="Device:C_Polarized",
         footprint="Capacitor_THT:CP_Radial_D6.3mm_P2.50mm",
-        physical_features=frozenset(
-            {"electrolytic-capacitor", "output-bulk-capacitor"}
-        ),
+        physical_features=frozenset({"electrolytic-capacitor", "output-bulk-capacitor"}),
         contacts=("1", "2"),
         manufacturer_sources=(
             "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8602919826839531520",
@@ -2410,9 +2521,7 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
         bundle="kicad-standard",
         symbol="Device:C_Polarized",
         footprint="Capacitor_SMD:CP_Elec_6.3x5.4",
-        physical_features=frozenset(
-            {"electrolytic-capacitor", "output-ripple-capacitor"}
-        ),
+        physical_features=frozenset({"electrolytic-capacitor", "output-ripple-capacitor"}),
         contacts=("1", "2"),
         manufacturer_sources=(
             "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8590164184962412544",
@@ -2439,9 +2548,7 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
         bundle="kicad-standard",
         symbol="Device:C_Polarized",
         footprint="Capacitor_SMD:CP_Elec_6.3x7.7",
-        physical_features=frozenset(
-            {"electrolytic-capacitor", "input-bulk-capacitor"}
-        ),
+        physical_features=frozenset({"electrolytic-capacitor", "input-bulk-capacitor"}),
         contacts=("1", "2"),
         manufacturer_sources=(
             "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8756924718023237632",
@@ -2463,9 +2570,7 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
         bundle="kicad-standard",
         symbol="Device:L",
         footprint="Inductor_SMD:L_12x12mm_H8mm",
-        physical_features=frozenset(
-            {"power-inductor", "buck-inductor", "shielded-inductor"}
-        ),
+        physical_features=frozenset({"power-inductor", "buck-inductor", "shielded-inductor"}),
         contacts=("1", "2"),
         manufacturer_sources=(
             "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588918807184756736",
@@ -2541,9 +2646,7 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
         bundle="kicad-standard",
         symbol="Switch:SW_Push",
         footprint="Button_Switch_SMD:SW_SPST_TL3342",
-        physical_features=frozenset(
-            {"momentary-button", "spst-switch", "tactile-switch"}
-        ),
+        physical_features=frozenset({"momentary-button", "spst-switch", "tactile-switch"}),
         contacts=("1", "2"),
         manufacturer_sources=("https://www.lcsc.com/datasheet/C2886894.pdf",),
         lcsc="C2886894",
@@ -2746,9 +2849,7 @@ _STOCK_COMMON_PARTS: tuple[ReviewedPart, ...] = (
         footprint="MountingHole:MountingHole_3.2mm_M3",
         physical_features=frozenset({"mounting-hole"}),
         contacts=(),
-        manufacturer_sources=(
-            "https://gitlab.com/kicad/libraries/kicad-footprints",
-        ),
+        manufacturer_sources=("https://gitlab.com/kicad/libraries/kicad-footprints",),
     ),
 )
 
@@ -2777,11 +2878,22 @@ _STOCK_HEADER_FOOTPRINT_RE = re.compile(
 # digital_low 1x08, power 1x08, analog 1x06).  A pin socket in that template IS
 # the stacking interface the shield brief asks for, so these three pairs carry
 # the reviewed stacking-header feature.  A generic 2.54 mm socket does not.
-_ARDUINO_SHIELD_STACKING_PAIRS = frozenset({
-    ("Connector_Generic:Conn_01x10", "Connector_PinSocket_2.54mm:PinSocket_1x10_P2.54mm_Vertical"),
-    ("Connector_Generic:Conn_01x08", "Connector_PinSocket_2.54mm:PinSocket_1x08_P2.54mm_Vertical"),
-    ("Connector_Generic:Conn_01x06", "Connector_PinSocket_2.54mm:PinSocket_1x06_P2.54mm_Vertical"),
-})
+_ARDUINO_SHIELD_STACKING_PAIRS = frozenset(
+    {
+        (
+            "Connector_Generic:Conn_01x10",
+            "Connector_PinSocket_2.54mm:PinSocket_1x10_P2.54mm_Vertical",
+        ),
+        (
+            "Connector_Generic:Conn_01x08",
+            "Connector_PinSocket_2.54mm:PinSocket_1x08_P2.54mm_Vertical",
+        ),
+        (
+            "Connector_Generic:Conn_01x06",
+            "Connector_PinSocket_2.54mm:PinSocket_1x06_P2.54mm_Vertical",
+        ),
+    }
+)
 
 
 # The physical features each stock pattern record below can carry. They live here, not
@@ -2889,13 +3001,16 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     "fpc": frozenset({"fpc-connector"}),
     "header": frozenset({"pin-header", "pin-socket"}),
     "button": frozenset({"momentary-button"}),
+    "pushbutton": frozenset({"momentary-button"}),
     "selector": frozenset({"three-position-selector", "sp3t-selector"}),
     "usb-c-connector": frozenset({"usb-c-receptacle"}),
     "usb-a-connector": frozenset({"usb-a-receptacle", "usb-connector"}),
+    "usb_c_receptacle": frozenset({"usb-c-receptacle"}),
     "fpc-ffc-connector": frozenset({"fpc-connector", "ffc-connector"}),
     "voltage-regulator-ic": frozenset({"voltage-regulator"}),
     "momentary-pushbutton": frozenset({"momentary-button"}),
     "status-led": frozenset({"indicator-led", "led-0603", "led-0805"}),
+    "led": frozenset({"indicator-led", "led-0603", "led-0805"}),
     "power-led": frozenset({"indicator-led", "led-0603", "led-0805"}),
     "power-screw-terminal": frozenset({"screw-terminal", "terminal-block", "screw-clamp-terminal"}),
     "binding-post-terminal": frozenset({"binding-post", "screw-clamp-terminal"}),
@@ -2917,6 +3032,27 @@ def canonical_physical_features(feature: str) -> frozenset[str]:
     """
     key = str(feature or "").strip().casefold()
     return _DEMANDED_CLASS_ALIASES.get(key, frozenset({key}))
+
+
+# A topology lowerer can prove only the physical class its independently
+# regenerated graph implements.  This vocabulary is shared by the bounded BOM
+# work-unit gate and canonical §9.42 commit validation; it is never inferred
+# from resistor count, reference prefix, or private payload metadata.
+_TRUSTED_LOWERER_PHYSICAL_WITNESSES = frozenset(
+    {
+        ("r2r-ladder@1", "resistorladder"),
+        ("r2r-ladder@1", "resistornetwork"),
+        ("screw-terminal@1", "thermocoupleinput"),
+    }
+)
+
+
+def lowerer_witnesses_physical_class(lowerer_id: str, component_class: str) -> bool:
+    """Whether a registered lowerer topology proves this exact physical class."""
+    return (
+        str(lowerer_id).strip().casefold(),
+        re.sub(r"[^a-z0-9]+", "", str(component_class).casefold()),
+    ) in _TRUSTED_LOWERER_PHYSICAL_WITNESSES
 
 
 # Every physical feature a reviewed record can carry. Both consumers of the reviewed
@@ -2956,9 +3092,7 @@ def has_reviewed_coverage(component_class: str) -> bool:
     return bool(realizable_physical_features(component_class))
 
 
-def resolved_part_evidence(
-    *, mpn: str | None, symbol: str | None, footprint: str | None
-) -> bool:
+def resolved_part_evidence(*, mpn: str | None, symbol: str | None, footprint: str | None) -> bool:
     """Whether a BOM group is a real part that resolves, with no reviewed record.
 
     The evidence a demanded class the library has never covered is allowed to accept: an
@@ -2967,7 +3101,11 @@ def resolved_part_evidence(
     category is then built from a real part — the same standard the pipeline already
     applies to a part's declared wiring — instead of being refused.
     """
-    if not str(mpn or "").strip() or not str(symbol or "").strip() or not str(footprint or "").strip():
+    if (
+        not str(mpn or "").strip()
+        or not str(symbol or "").strip()
+        or not str(footprint or "").strip()
+    ):
         return False
     # Local import: the symbol pinout layer sits above this one.
     from kicraft.design.synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
@@ -2987,15 +3125,46 @@ def _class_tokens(value: str) -> set[str]:
 # ("i2c-interface"), a board format ("arduino-uno-format-board"), a package style, or a
 # printed-copper feature ("thermal-via-copper-pour"). A demand carrying one belongs in
 # constraints, a `fabrication` row, or a `negative` row instead.
-_NOT_A_PART_CLASS_TOKENS = frozenset({
-    "interface", "bus", "protocol", "format", "outline", "layout", "shape",
-    "package", "footprint", "pour", "plane", "via", "vias", "net", "netlist",
-})
+_NOT_A_PART_CLASS_TOKENS = frozenset(
+    {
+        "interface",
+        "bus",
+        "protocol",
+        "format",
+        "outline",
+        "layout",
+        "shape",
+        "package",
+        "footprint",
+        "pour",
+        "plane",
+        "via",
+        "vias",
+        "net",
+        "netlist",
+    }
+)
 
 
 def class_is_not_a_part(component_class: str) -> tuple[str, ...]:
     """The tokens that mark a demanded class as a board/wiring fact, not a part class."""
     return tuple(sorted(_class_tokens(component_class) & _NOT_A_PART_CLASS_TOKENS))
+
+
+def board_outline_fabrication_feature(component_class: str) -> str | None:
+    """Return a physical row's board-outline feature only when that reading is proven.
+
+    `shape` alone is not enough: a part can have a shape. The class must explicitly name the
+    board/PCB and an outline or shaped-board relation, and no reviewed class or reviewed spelling
+    may realize it. This keeps `mounting-hole` and every realizable component demand physical.
+    """
+    canonical = str(component_class or "").strip().casefold().replace("_", "-")
+    tokens = _class_tokens(canonical)
+    if not ({"board", "pcb"} & tokens) or not ({"outline", "shaped"} & tokens):
+        return None
+    if realizable_physical_features(canonical) or reviewed_class_variants(canonical):
+        return None
+    return canonical
 
 
 def reviewed_class_variants(component_class: str) -> tuple[str, ...]:
@@ -3042,11 +3211,14 @@ def physical_inventory_record(
     if not exact_symbol or not exact_footprint:
         return None
     if normalized_mpn:
-        record = reviewed_part(normalized_mpn)
+        record = reviewed_part(reviewed_identity_for_order_code(normalized_mpn))
         if record is None:
             record = next(
-                (candidate for candidate in _STANDARD_LIBRARY_PARTS
-                 if candidate.identity == normalized_mpn),
+                (
+                    candidate
+                    for candidate in _STANDARD_LIBRARY_PARTS
+                    if candidate.identity == normalized_mpn
+                ),
                 None,
             )
         if record is None:
@@ -3232,4 +3404,3 @@ def matches_part_identity(requested: str, candidate: str) -> bool:
     if requested_key == candidate_key:
         return True
     return candidate_key in _DEVICE_MEMBERS.get(requested_key, ())
-

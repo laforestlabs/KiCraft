@@ -6,7 +6,12 @@ import copy
 import re
 from collections.abc import Iterable
 
-from kicraft.design.models import Architecture, BOM, StageDiagnostic, is_power_or_ground_name
+from kicraft.design.models import (
+    Architecture,
+    BOM,
+    StageDiagnostic,
+    is_power_or_ground_name,
+)
 from kicraft.design.synthesis.board_features import (
     PROTOTYPING_AREA_FEATURE,
     has_prototyping_area,
@@ -83,6 +88,8 @@ def _text(value) -> str:
 
 def complete_intent_classification(brief: str, candidate: dict) -> dict:
     """Fill omitted intent classifications from exact user text, without invention."""
+    from kicraft.design.part_identity import board_outline_fabrication_feature
+
     completed = dict(candidate)
     expected = named_part_tokens([brief])
     supplied = {_norm_token(part) for part in completed.get("named_parts") or []}
@@ -103,6 +110,24 @@ def complete_intent_classification(brief: str, candidate: dict) -> dict:
             if sentence.strip()
         ]
         completed["constraints"] = requirements
+
+    normalized_obligations = []
+    for obligation in completed.get("obligations") or []:
+        if not isinstance(obligation, dict) or obligation.get("kind") != "physical":
+            normalized_obligations.append(obligation)
+            continue
+        feature = board_outline_fabrication_feature(str(obligation.get("component_class") or ""))
+        normalized_obligations.append(
+            {
+                "kind": "fabrication",
+                "original_obligation_id": obligation.get("original_obligation_id"),
+                "feature": feature,
+            }
+            if feature is not None
+            else obligation
+        )
+    if normalized_obligations != completed.get("obligations"):
+        completed["obligations"] = normalized_obligations
     return completed
 
 
@@ -586,7 +611,6 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
     return diagnostics
 
 
-
 def architecture_power_requirement_diagnostics(
     upstream: dict, candidate: dict
 ) -> list[StageDiagnostic]:
@@ -708,9 +732,7 @@ def _rail_producers(candidate: dict, rails: dict) -> list[dict]:
     for requirement in candidate.get("requirements") or []:
         if not isinstance(requirement, dict):
             continue
-        ports = {
-            _norm_token(key): net for key, net in (requirement.get("ports") or {}).items()
-        }
+        ports = {_norm_token(key): net for key, net in (requirement.get("ports") or {}).items()}
         rail = ports.get("output") or ports.get("vout")
         if not isinstance(rail, str) or rail not in rails:
             continue
@@ -1003,9 +1025,7 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                 )
             )
     if re.search(r"esp32[- ]?s3", intent_text, re.I) and has_3v3_rail:
-        declared_sheets = {
-            str(sheet.get("name")) for sheet in sheets if isinstance(sheet, dict)
-        }
+        declared_sheets = {str(sheet.get("name")) for sheet in sheets if isinstance(sheet, dict)}
         producers = _rail_producers(
             candidate,
             {

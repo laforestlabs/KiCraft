@@ -20,7 +20,12 @@ from kicraft.design.models import (
     RecipeResolutionRecord,
     RecipeSelection,
 )
-from kicraft.design.part_identity import is_part_family, matches_part_identity
+from kicraft.design.part_identity import (
+    canonical_physical_features,
+    is_part_family,
+    matches_part_identity,
+    physical_inventory_record,
+)
 from kicraft.design.synthesis.validation import _net_voltage, named_part_tokens
 
 from .models import RecipeDefinition, RegisteredRecipe
@@ -96,6 +101,148 @@ def _recipe_requirement_choice(definition: RecipeDefinition) -> str:
         f"family={definition.family}; exact_part={definition.exact_part}; "
         "ports=" + ",".join(port.name for port in definition.ports)
     )
+
+
+def _recipe_edge_companion(
+    definition: RecipeDefinition,
+    requirement: CircuitRequirement,
+    requirements: list[CircuitRequirement],
+    existing_requirement_ids: frozenset[str],
+) -> tuple[str, CircuitRequirement] | None:
+    """Return the synthetic edge header physically covered by recipe pads.
+
+    An architecture edge opened from an MCU can initially appear as a generic
+    pin-header requirement.  A recipe that already declares matching
+    castellated pads is the physical implementation of that edge, not an
+    additional header.  The match is intentionally narrow: the recipe must
+    expose one edge sheet role, and the generated connector must carry only
+    those edge nets for the same functional block.
+    """
+    edge_roles = {edge.role for edge in definition.edges}
+    edge_sheet_roles = {part.sheet_role for part in definition.parts if part.role in edge_roles}
+    if len(edge_sheet_roles) != 1 or not edge_sheet_roles <= set(definition.required_sheet_roles):
+        return None
+    edge_nets = {_identity(pin.net) for pin in definition.pins if pin.role in edge_roles}
+    if not edge_nets:
+        return None
+    candidates = [
+        candidate
+        for candidate in requirements
+        if candidate.id != requirement.id
+        and candidate.id not in existing_requirement_ids
+        and candidate.compiler_origin == "edge_connector"
+        and candidate.role == "connector"
+        and candidate.family == "pin-header"
+        and candidate.sheet != requirement.sheet
+        and candidate.exact_part is None
+        and candidate.standard_stacking_role is None
+        and not candidate.obligations
+        and candidate.ports
+        and set(candidate.functional_blocks) & set(requirement.functional_blocks)
+        and {_identity(net) for net in candidate.ports.values()} <= edge_nets
+    ]
+    if len(candidates) != 1:
+        return None
+    return edge_sheet_roles.pop(), candidates[0]
+
+
+def _coalesce_mcu_support_requirements(
+    result: ResolutionResult,
+    requirements: list[CircuitRequirement],
+    recipes: tuple[RegisteredRecipe, ...],
+) -> None:
+    """Attach proven support obligations to one identically configured MCU.
+
+    A clock or flash requirement can describe a member of the MCU circuit,
+    not another complete MCU. Identity alone is insufficient: the selected
+    circuit, physical sheet map, parameters, external nets and pin allocation
+    must agree, and reviewed non-MCU groups must implement every physical
+    class. Ambiguous ownership remains an architecture error.
+    """
+    by_id = {requirement.id: requirement for requirement in requirements}
+    definitions = {recipe.definition.recipe: recipe.definition for recipe in recipes}
+
+    def core_ids(selection: RecipeSelection) -> list[str]:
+        return [
+            identity
+            for identity in selection.requirement_ids
+            if by_id[identity].role == "mcu_core"
+        ]
+
+    cores = [selection for selection in result.selections if core_ids(selection)]
+    retained = []
+    for selection in result.selections:
+        definition = definitions[selection.recipe]
+        if "mcu" not in definition.required_sheet_roles or core_ids(selection):
+            retained.append(selection)
+            continue
+        if len(selection.requirement_ids) != 1:
+            retained.append(selection)
+            continue
+        requirement = by_id[selection.requirement_ids[0]]
+        physical = [
+            obligation
+            for obligation in requirement.obligations
+            if obligation.kind == "physical"
+        ]
+        if not physical:
+            retained.append(selection)
+            continue
+        support_features: set[str] = set()
+        core_features: set[str] = set()
+        for group in definition.parts:
+            record = physical_inventory_record(
+                mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
+            )
+            if record is not None:
+                target = core_features if group.role == "mcu" else support_features
+                target.update(record.physical_features)
+        demands = [canonical_physical_features(row.component_class) for row in physical]
+        if any(demand & core_features for demand in demands):
+            # This requirement explicitly demands a processor, not merely
+            # one of its support parts; never erase a second physical MCU.
+            retained.append(selection)
+            continue
+        candidates = [
+            core
+            for core in cores
+            if len(core_ids(core)) == 1
+            and core.recipe == selection.recipe
+            and core.sheets == selection.sheets
+            and core.parameters == selection.parameters
+            and core.port_bindings == selection.port_bindings
+            and core.pin_allocations == selection.pin_allocations
+            and by_id[core_ids(core)[0]].sheet == requirement.sheet
+            and _identity(by_id[core_ids(core)[0]].exact_part)
+            == _identity(requirement.exact_part)
+        ]
+        if (
+            len(candidates) != 1
+            or not all(demand & support_features for demand in demands)
+            or requirement.interfaces
+            or requirement.declared_interface is not None
+            or requirement.standard_stacking_role is not None
+        ):
+            result.blocking.append(
+                ResolutionDiagnostic(
+                    code="mcu_support_owner_unproven",
+                    requirement_id=requirement.id,
+                    recipe=selection.recipe,
+                    message=(
+                        "MCU support hardware requires one matching physical core and "
+                        "reviewed support groups; do not expand another MCU to satisfy it"
+                    ),
+                    evidence=[core.instance for core in candidates],
+                )
+            )
+            result.unresolved_requirements.append(requirement.id)
+            continue
+        owner = candidates[0]
+        owner.requirement_ids.extend(selection.requirement_ids)
+        result.assumptions.append(
+            f"{requirement.id}: support hardware is owned by MCU instance {owner.instance}"
+        )
+    result.selections = retained
 
 
 def _recipe_for_exact(
@@ -241,14 +388,10 @@ def _registered_identity_choices(
         if not family or family in seen:
             continue
         if any(
-            len(selector) >= 5 and selector[:5] == stem
-            for selector in _protected_selectors(recipe)
+            len(selector) >= 5 and selector[:5] == stem for selector in _protected_selectors(recipe)
         ):
             seen[family] = recipe
-    return [
-        _recipe_requirement_choice(recipe.definition)
-        for recipe in list(seen.values())[:limit]
-    ]
+    return [_recipe_requirement_choice(recipe.definition) for recipe in list(seen.values())[:limit]]
 
 
 def _mcu_sheet(architecture: Architecture) -> str | None:
@@ -518,10 +661,7 @@ def _port_bindings(
         port_identity = _net_identity(port_name)
         aliases = {
             _net_identity(port_name),
-            *(
-                _net_identity(alias)
-                for alias in _PORT_ALIASES.get(port_name, ())
-            ),
+            *(_net_identity(alias) for alias in _PORT_ALIASES.get(port_name, ())),
         }
         exact_matches = [net for net in candidates if _net_identity(net) in aliases]
         matches = exact_matches or [
@@ -1005,7 +1145,6 @@ def _unowned_endpoint_diagnostics(
     ]
 
 
-
 def resolve_architecture_recipes(
     architecture: Architecture | dict,
     intent: dict | BaseModel | None = None,
@@ -1112,9 +1251,7 @@ def resolve_architecture_recipes(
         selected = _recipe_for_exact(named, recipes) or _recipe_for_unique_family_prefix(
             named, recipes
         )
-        sibling = (
-            _registered_variant_for(named, recipes) if selected is None else None
-        )
+        sibling = _registered_variant_for(named, recipes) if selected is None else None
         if (
             selected is None
             and sibling is None
@@ -1347,14 +1484,18 @@ def resolve_architecture_recipes(
                         message=(
                             f"protected variant {requirement.exact_part!r} has no verified recipe"
                         ),
-                        evidence=list(dict.fromkeys([
-                            requirement.exact_part,
-                            *(
-                                _recipe_requirement_choice(row.definition)
-                                for row in family_matches
-                            ),
-                            *_registered_identity_choices(requirement.exact_part, recipes),
-                        ])),
+                        evidence=list(
+                            dict.fromkeys(
+                                [
+                                    requirement.exact_part,
+                                    *(
+                                        _recipe_requirement_choice(row.definition)
+                                        for row in family_matches
+                                    ),
+                                    *_registered_identity_choices(requirement.exact_part, recipes),
+                                ]
+                            )
+                        ),
                     )
                 )
                 continue
@@ -1590,7 +1731,8 @@ def resolve_architecture_recipes(
                     code=exc.code,
                     requirement_id=requirement.id,
                     message=str(exc),
-                    evidence=exc.evidence + [
+                    evidence=exc.evidence
+                    + [
                         value
                         for value in (exc.capability, str(exc.count) if exc.count else None)
                         if value
@@ -1609,19 +1751,27 @@ def resolve_architecture_recipes(
         if endpoint_diagnostics:
             result.blocking.extend(endpoint_diagnostics)
             continue
+        edge_companion = _recipe_edge_companion(
+            definition,
+            requirement,
+            requirements,
+            frozenset(existing_by_requirement),
+        )
         sheet_map = {role: requirement.sheet for role in definition.required_sheet_roles}
+        selection_requirement_ids = [requirement.id]
+        if edge_companion is not None:
+            edge_sheet_role, companion = edge_companion
+            sheet_map[edge_sheet_role] = companion.sheet
+            selection_requirement_ids.append(companion.id)
         selection = RecipeSelection(
             recipe=definition.recipe,
             instance=(existing.instance if existing is not None else requirement.id),
             sheets=sheet_map,
             parameters=parameters,
             port_bindings=bindings,
-            requirement_ids=[requirement.id],
+            requirement_ids=selection_requirement_ids,
             pin_allocations=allocations,
         )
-        for port in definition.ports:
-            if port.direction == "output" and port.name in bindings:
-                output_nets[bindings[port.name]].append(requirement.id)
         result.selections.append(selection)
         exact_part = definition.exact_part or requirement.exact_part
         if exact_part is not None:
@@ -1640,6 +1790,12 @@ def resolve_architecture_recipes(
                 update={"exact_part": exact_part, "ports": {**requirement.ports, **bindings}}
             )
         )
+    _coalesce_mcu_support_requirements(result, requirements, recipes)
+    definitions = {recipe.definition.recipe: recipe.definition for recipe in recipes}
+    for selection in result.selections:
+        for port in definitions[selection.recipe].ports:
+            if port.direction == "output" and port.name in selection.port_bindings:
+                output_nets[selection.port_bindings[port.name]].append(selection.instance)
     for net, owners in sorted(output_nets.items()):
         if len(owners) > 1:
             result.blocking.append(
@@ -1653,7 +1809,14 @@ def resolve_architecture_recipes(
     resolved_requirements = {row.id: row for row in result.requirements}
     result.requirements = [resolved_requirements.get(row.id, row) for row in requirements]
     result.records.sort(key=lambda record: record.requirement_id)
-    result.unresolved_requirements.sort()
+    selected_requirement_ids = {
+        requirement_id
+        for selection in result.selections
+        for requirement_id in selection.requirement_ids
+    }
+    result.unresolved_requirements = sorted(
+        set(result.unresolved_requirements) - selected_requirement_ids
+    )
     # The same deviation note can be raised by the named-part pass and the
     # requirement pass; assumptions are a set-like ledger, not a log.
     result.assumptions = list(dict.fromkeys(result.assumptions))

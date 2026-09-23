@@ -10,6 +10,8 @@ from kicraft.design.part_identity import (
     reviewed_parts_for_feature,
     physical_inventory_record,
 )
+from kicraft.design.models import BomPart
+
 from kicraft.server.stage_contracts import (
     BomComponentGroup,
     _normalize_stage_response,
@@ -92,6 +94,45 @@ def test_family_requirement_needs_member_even_when_group_label_matches():
     assert not _requirement_owns_protected_group(_group(None), [requirement])
 
 
+def test_lowerer_provenance_requires_the_compiler_artifact_and_its_requirement():
+    """A canonical lowerer part is its requirement's owner, not any group's claim."""
+    requirement = {
+        "id": "fpc",
+        "sheet": "BREAKOUT",
+        "role": "connector",
+        "family": "fpc-connector",
+        "parameters": {"pitch_mm": 0.5},
+        "ports": {f"pin{index}": f"NET{index}" for index in range(1, 25)},
+    }
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.models import CircuitRequirement
+
+    artifact = lower_requirement(CircuitRequirement.model_validate(requirement))
+    assert artifact is not None
+    group = artifact.groups[0]
+    part = BomPart(
+        ref="J1",
+        value=group.value,
+        symbol=group.symbol,
+        footprint=group.footprint,
+        sheet="BREAKOUT",
+        mpn=group.mpn,
+        resolution_source="lowerer",
+        resolution_id=artifact.lowerer_id,
+        lowering_requirement_id="fpc",
+        lowering_role=group.role,
+        lowering_index=0,
+    )
+
+    assert _requirement_owns_protected_group(part, [requirement])
+    assert not _requirement_owns_protected_group(
+        part.model_copy(update={"lowering_requirement_id": "other"}), [requirement]
+    )
+    assert not _requirement_owns_protected_group(
+        part.model_copy(update={"symbol": "Connector_Generic:Conn_01x24"}), [requirement]
+    )
+
+
 def test_equality_keeps_case_insensitivity_but_not_order_code_punctuation_erasure():
     assert matches_part_identity(" Unknown-MPN/1 ", "unknown-mpn/1")
     assert not matches_part_identity("Unknown-MPN/1", "UnknownMPN1")
@@ -153,21 +194,56 @@ def test_physical_inventory_is_exact_and_never_text_classified():
     )
     assert header is not None
     assert header.contacts == ("1", "2", "3")
-    assert physical_inventory_record(
-        mpn=None,
-        symbol="Connector_Generic:Conn_01x03",
-        footprint="Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
-    ) is None
-    assert physical_inventory_record(
-        mpn="NOT-A-HEADER",
-        symbol="Connector_Generic:Conn_01x03",
-        footprint="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
-    ) is None
-    assert physical_inventory_record(
-        mpn="ATTINY402-SSNR",
-        symbol="attiny402-ssnr:ATTINY402-SSNR",
-        footprint="attiny402-ssnr:SOIC-8_L5.0-W4.0-P1.27-LS6.0-BL",
-    ).identity == "attiny402-ssnr"
+    assert (
+        physical_inventory_record(
+            mpn=None,
+            symbol="Connector_Generic:Conn_01x03",
+            footprint="Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+        )
+        is None
+    )
+    assert (
+        physical_inventory_record(
+            mpn="NOT-A-HEADER",
+            symbol="Connector_Generic:Conn_01x03",
+            footprint="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+        )
+        is None
+    )
+    assert (
+        physical_inventory_record(
+            mpn="ATTINY402-SSNR",
+            symbol="attiny402-ssnr:ATTINY402-SSNR",
+            footprint="attiny402-ssnr:SOIC-8_L5.0-W4.0-P1.27-LS6.0-BL",
+        ).identity
+        == "attiny402-ssnr"
+    )
+
+
+def test_binding_post_catalog_order_code_requires_the_reviewed_pair():
+    selected = physical_inventory_record(
+        mpn="8734",
+        symbol="keystone-8734-binding-post:Keystone_8734",
+        footprint="keystone-8734-binding-post:Keystone_8734",
+    )
+
+    assert selected is not None and selected.identity == "keystone-8734"
+    assert (
+        physical_inventory_record(
+            mpn="8734",
+            symbol="Connector_Generic:Conn_01x01",
+            footprint="Connector_PinSocket_2.54mm:PinSocket_1x01_P2.54mm_Vertical",
+        )
+        is None
+    )
+    assert (
+        physical_inventory_record(
+            mpn="not-keystone-8734",
+            symbol="keystone-8734-binding-post:Keystone_8734",
+            footprint="keystone-8734-binding-post:Keystone_8734",
+        )
+        is None
+    )
 
 
 def test_accepted_identities_are_explicit_and_package_bounded():
@@ -202,9 +278,10 @@ def test_stock_lowerer_pairs_are_bounded_exact_inventory(symbol, footprint, cont
     record = physical_inventory_record(mpn=None, symbol=symbol, footprint=footprint)
     assert record is not None
     assert record.contacts == contacts
-    assert physical_inventory_record(
-        mpn="contradictory-mpn", symbol=symbol, footprint=footprint
-    ) is None
+    assert (
+        physical_inventory_record(mpn="contradictory-mpn", symbol=symbol, footprint=footprint)
+        is None
+    )
 
 
 def test_source_qualified_terminals_and_selector_require_exact_mpn_and_asset_pair():
@@ -214,11 +291,14 @@ def test_source_qualified_terminals_and_selector_require_exact_mpn_and_asset_pai
         footprint="screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P",
     )
     assert two_pin is not None and two_pin.contacts == ("1", "2")
-    assert physical_inventory_record(
-        mpn="WJ126V-5.0-2P",
-        symbol="screw-terminal-5mm-2p:WJ126V-5.0-2P",
-        footprint="screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P",
-    ) is None
+    assert (
+        physical_inventory_record(
+            mpn="WJ126V-5.0-2P",
+            symbol="screw-terminal-5mm-2p:WJ126V-5.0-2P",
+            footprint="screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P",
+        )
+        is None
+    )
     selector = physical_inventory_record(
         mpn="SS13D07VG4",
         symbol="ss13d07vg4:SS13D07VG4",
@@ -227,11 +307,14 @@ def test_source_qualified_terminals_and_selector_require_exact_mpn_and_asset_pai
     assert selector is not None
     assert selector.contacts == ("1", "2", "3", "4")
     assert selector.port_pins["common"] == "2"
-    assert physical_inventory_record(
-        mpn="MSK13C02-SZ",
-        symbol="ss13d07vg4:SS13D07VG4",
-        footprint="ss13d07vg4:SW-TH_SS13D07VG4",
-    ) is None
+    assert (
+        physical_inventory_record(
+            mpn="MSK13C02-SZ",
+            symbol="ss13d07vg4:SS13D07VG4",
+            footprint="ss13d07vg4:SW-TH_SS13D07VG4",
+        )
+        is None
+    )
 
 
 def test_reviewed_isolation_assets_have_exact_package_and_pin_contracts():
@@ -272,11 +355,14 @@ def test_source_qualified_warm_led_and_nrf_reel_identity_are_exact_assets():
     assert nrf.port_pins["antenna"] == "H23"
     assert nrf.port_pins["swdio"] == "AC24"
     assert "0" in nrf.contacts
-    assert physical_inventory_record(
-        mpn="NRF52840-QIAA-R7",
-        symbol="e6c0805wway1uda-1-1t-m:E6C0805WWAY1UDA",
-        footprint="e6c0805wway1uda-1-1t-m:LED0805-RD_WHITE",
-    ) is None
+    assert (
+        physical_inventory_record(
+            mpn="NRF52840-QIAA-R7",
+            symbol="e6c0805wway1uda-1-1t-m:E6C0805WWAY1UDA",
+            footprint="e6c0805wway1uda-1-1t-m:LED0805-RD_WHITE",
+        )
+        is None
+    )
 
 
 def test_highside_pfet_requires_the_reviewed_thermal_package_and_all_power_pins():
@@ -290,8 +376,11 @@ def test_highside_pfet_requires_the_reviewed_thermal_package_and_all_power_pins(
     assert pfet.support_network["source_pins"] == ("1", "2", "3")
     assert pfet.support_network["drain_pins"] == ("5", "6", "7", "8", "9")
     assert pfet.support_network["thermal_pad"] == "9"
-    assert physical_inventory_record(
-        mpn="AONR21357",
-        symbol="aonr21357:AONR21357",
-        footprint="Package_SO:SO-8_3.9x4.9mm_P1.27mm",
-    ) is None
+    assert (
+        physical_inventory_record(
+            mpn="AONR21357",
+            symbol="aonr21357:AONR21357",
+            footprint="Package_SO:SO-8_3.9x4.9mm_P1.27mm",
+        )
+        is None
+    )

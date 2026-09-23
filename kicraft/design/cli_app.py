@@ -679,7 +679,9 @@ def _lcsc_identity_conflict(part, hit: dict) -> str | None:
     return None
 
 
-def _resolve_bom_mpn_sourcing(bom, project_root: Path, receipt: list[dict] | None = None) -> tuple[list[str], list[str]]:
+def _resolve_bom_mpn_sourcing(
+    bom, project_root: Path, receipt: list[dict] | None = None
+) -> tuple[list[str], list[str]]:
     """§9.26 — every BOM part must be a real, orderable part, in stock BOTH
     for JLCPCB assembly (the offline jlcparts dump) AND at the lcsc.com
     retail storefront (live check via ``lcsc_retail``). The two inventories
@@ -765,18 +767,28 @@ def _resolve_bom_mpn_sourcing(bom, project_root: Path, receipt: list[dict] | Non
             return "unverified", None
         need = max(info["min_buy"], lcsc_retail.retail_floor() if picky else 1)
         return ("ok" if info["stock"] >= need else "dry"), info
-    def _receipt(part, cid: str, hit: dict | None, verdict: str, info: dict | None, picky: bool) -> None:
+
+    def _receipt(
+        part, cid: str, hit: dict | None, verdict: str, info: dict | None, picky: bool
+    ) -> None:
         if receipt is None:
             return
-        receipt.append({
-            "ref": part.ref, "exact_lcsc": cid, "catalog_mpn": (hit or {}).get("model"),
-            "manufacturer": (hit or {}).get("manufacturer") or (hit or {}).get("mfr"),
-            "package": (hit or {}).get("package"), "description": (hit or {}).get("description"),
-            "assembly_stock": (hit or {}).get("stock"), "retail_stock": (info or {}).get("stock"),
-            "retail_min_buy": (info or {}).get("min_buy"), "retail_status": verdict,
-            "picky_selection": picky,
-            "verdict": "pass" if verdict == "ok" else "unverified",
-        })
+        receipt.append(
+            {
+                "ref": part.ref,
+                "exact_lcsc": cid,
+                "catalog_mpn": (hit or {}).get("model"),
+                "manufacturer": (hit or {}).get("manufacturer") or (hit or {}).get("mfr"),
+                "package": (hit or {}).get("package"),
+                "description": (hit or {}).get("description"),
+                "assembly_stock": (hit or {}).get("stock"),
+                "retail_stock": (info or {}).get("stock"),
+                "retail_min_buy": (info or {}).get("min_buy"),
+                "retail_status": verdict,
+                "picky_selection": picky,
+                "verdict": "pass" if verdict == "ok" else "unverified",
+            }
+        )
 
     def _alternates_note(part, cid: str, floor: int) -> str:
         """In-stock alternates for a retail-dry pick, embedded in the gate
@@ -3846,10 +3858,14 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         for c in fs.connections:
             if c.from_block == c.to_block:
                 errors.append(f"self-loop connection: {c.from_block!r} → {c.to_block!r}")
-        # Isolated block check
+        # Isolated block check. A mechanical block (mounting holes, fiducials)
+        # legitimately carries no electrical connection, so requiring one made
+        # every brief that asked for mounting holes fail the spec stage: the
+        # M1 baseline recorded 18 such rejections across 60 briefs.
         connected = {c.from_block for c in fs.connections} | {c.to_block for c in fs.connections}
+        mechanical = {b.name for b in fs.blocks if b.category == "mechanical"}
         block_names = {b.name for b in fs.blocks}
-        isolated = block_names - connected
+        isolated = block_names - connected - mechanical
         if isolated and len(fs.blocks) > 1:
             errors.append(f"isolated block(s) with no connections: {sorted(isolated)}")
         # Block count check
@@ -4278,19 +4294,24 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         ).hexdigest()
         atomic_write_text(
             state_path.parent / "sourcing_validation.json",
-            json.dumps({
-                "schema_version": 1,
-                "checked_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                "parts_digest": parts_digest,
-                "policy": {
-                    "jlc_floor": _bom_stock_floor(),
-                    "retail_automatic_floor": lcsc_retail.retail_floor(),
-                    "min_buy_rule": "max(retail_min_buy, retail_floor) for automatic picks",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "checked_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                    "parts_digest": parts_digest,
+                    "policy": {
+                        "jlc_floor": _bom_stock_floor(),
+                        "retail_automatic_floor": lcsc_retail.retail_floor(),
+                        "min_buy_rule": "max(retail_min_buy, retail_floor) for automatic picks",
+                    },
+                    "catalog_age_days": jlcparts.dump_age_days(),
+                    "parts": sourcing_receipt,
+                    "warnings": bom_warnings,
                 },
-                "catalog_age_days": jlcparts.dump_age_days(),
-                "parts": sourcing_receipt,
-                "warnings": bom_warnings,
-            }, indent=2, sort_keys=True) + "\n",
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
         )
 
     archive_warning: str | None = None
@@ -4744,16 +4765,13 @@ def _connector_stranded_refs(pcb: Path) -> list[str]:
 def _connector_misoriented(pcb: Path) -> tuple[list[str], list[str]]:
     """Edge-zoned connectors whose wire-entry mouth does not face off-board.
 
-    ``(blocking, warnings)``: *blocking* = the mouth direction is KNOWN and
-    points the wrong way (a 90-degree screw terminal facing along/into the board
-    is physically unusable -- KC-YJ7Q69 shipped fab_ready this way), or is a
-    recognized directional terminal / unrouted zoned ref whose mouth could not
-    be measured at all (``connector_orientation_unmeasured`` -- KC-DZQ76R's
-    J2/J3/J4 shipped because an unmeasurable mouth was only ever a warning);
-    *warnings* = deep-bodied TH connectors whose mouth cannot be detected
-    (footprint lacks a "PCB Edge" Dwgs.User marker). An empty, successfully
-    read zone set returns no findings. A failure to measure at all is blocking,
-    not silent success: the gate cannot certify what it could not read.
+    ``(blocking, warnings)``: *blocking* = a verified in-plane mouth points
+    wrong, or an edge-zoned connector is neither verified board-normal nor
+    measured in-plane. The latter is ``connector_orientation_unmeasured``:
+    absence of a mouth is not evidence that a connector mates from above.
+    An empty, successfully read zone set returns no findings. A failure to
+    measure at all is blocking, not silent success: the gate cannot certify
+    what it could not read.
     """
     try:
         from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
@@ -4771,21 +4789,10 @@ def _connector_misoriented(pcb: Path) -> tuple[list[str], list[str]]:
                     f"{v.outward_deg:.0f}deg)"
                 )
             elif v.status == "unverified_directional":
-                blocking.append(
-                    f"connector_orientation_unmeasured:{v.ref}"
-                )
-            elif v.status == "unknown_mouth":
-                warnings.append(
-                    f"connector mouth unverifiable {v.ref}@{v.edge} -- "
-                    "holed connector with a directional body but no detectable "
-                    "opening; add a 'PCB Edge' Dwgs.User marker to its "
-                    "footprint so orientation can be placed and verified"
-                )
+                blocking.append(f"connector_orientation_unmeasured:{v.ref}")
         return blocking, warnings
     except Exception as exc:  # noqa: BLE001 -- report the failure, never hide it
-        return [
-            f"connector_orientation_unmeasured:{type(exc).__name__}"
-        ], []
+        return [f"connector_orientation_unmeasured:{type(exc).__name__}"], []
 
 
 def _antenna_edge_contract_violations(pcb: Path) -> list[str]:
@@ -6038,6 +6045,7 @@ def run_silk_plan_authoring(
         )
         return skipped
 
+
 def run_post_wiring_lifecycle(
     state_path: Path,
     project_dir: Path,
@@ -6090,7 +6098,6 @@ def run_post_wiring_lifecycle(
             "cost_usd": round(float(silk.get("cost_usd") or 0.0), 6),
         },
     }
-
 
 
 def _surface_build_warnings(state, state_path: Path, artifacts, warnings: list[str]) -> None:
@@ -6355,21 +6362,16 @@ def _promote_verify_fab(
         # routability verdict, so "board not routable as placed" would claim
         # proof this run never obtained (the compose subprocess prints the
         # ``router_deadline:`` marker; cli/_compose_route.py sets it).
-        _deadline_rounds = _layout_failure_evidence_text(failure_summary).count(
-            "router_deadline:"
-        )
+        _deadline_rounds = _layout_failure_evidence_text(failure_summary).count("router_deadline:")
         if _deadline_rounds:
-            _rejections = sorted(
-                {str(r) for r in (failure_summary.get("reasons") or [])}
-            )
+            _rejections = sorted({str(r) for r in (failure_summary.get("reasons") or [])})
             print(
                 "error: the layout engine produced no routed parent board -- "
                 f"{_deadline_rounds} parent route attempt(s) were killed at the "
                 "router's wall-clock deadline (a deadline is NOT a routing "
                 "verdict: those placements were never tried to the end)"
                 + (
-                    "; the remaining attempt(s) were rejected: "
-                    + ", ".join(_rejections)
+                    "; the remaining attempt(s) were rejected: " + ", ".join(_rejections)
                     if _rejections
                     else ""
                 )
@@ -6942,6 +6944,20 @@ def _build_meta(args: argparse.Namespace) -> dict:
     }
 
 
+def _record_build_meta(args: argparse.Namespace, state_path: Path) -> None:
+    meta = _build_meta(args)
+    print(
+        f"[build] code={(meta.get('git_sha') or '?')[:12]} "
+        f"branch={meta.get('git_branch') or '?'} quality={meta.get('quality')}"
+    )
+    try:
+        (state_path.parent / "build_meta.json").write_text(
+            json.dumps(meta, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass  # stamp is diagnostics-only; never fail a build over it
+
+
 def _cmd_build_impl(args: argparse.Namespace) -> int:
     state_path = Path(args.state)
     out_dir = Path(args.out_dir)
@@ -6954,17 +6970,7 @@ def _cmd_build_impl(args: argparse.Namespace) -> int:
         print(f"could not read {state_path}: {e}", file=sys.stderr)
         return 2
 
-    meta = _build_meta(args)
-    print(
-        f"[build] code={(meta.get('git_sha') or '?')[:12]} "
-        f"branch={meta.get('git_branch') or '?'} quality={meta.get('quality')}"
-    )
-    try:
-        (state_path.parent / "build_meta.json").write_text(
-            json.dumps(meta, indent=2), encoding="utf-8"
-        )
-    except OSError:
-        pass  # stamp is diagnostics-only; never fail a build over it
+    _record_build_meta(args, state_path)
 
     if state.bom is None or not state.bom.connections:
         print(
@@ -7410,6 +7416,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     except _ReplayInputError as e:
         print(f"error: {e}", file=sys.stderr)
         return 3
+
+    if state_path is not None:
+        _record_build_meta(args, state_path)
 
     # Fail fast on a degenerate (0-leaf) hierarchy, as `build` does.
     degenerate = _degenerate_hierarchy_error(root_sch)
@@ -8112,6 +8121,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_false",
         default=True,
         help="archive a session snapshot (replay skips this by default)",
+    )
+    p_replay.add_argument(
+        "--no-archive",
+        dest="no_archive",
+        action="store_true",
+        help="skip the post-replay session archive (default)",
+    )
+    p_replay.add_argument(
+        "--archive-root",
+        default=None,
+        help=f"archive root for the session snapshot (default {_default_archive_root()})",
     )
     p_replay.set_defaults(func=_cmd_replay)
 

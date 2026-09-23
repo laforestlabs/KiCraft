@@ -244,6 +244,10 @@ def test_signal_endpoints_are_bound_and_directed_on_both_sheets():
         ("MCU", "bidirectional"),
         ("USB DATA", "bidirectional"),
     ]
+    assert {
+        _requirement(architecture, requirement_id).compiler_origin
+        for requirement_id in ("esp32_speaker", "led_led_string")
+    } == {"edge_connector"}
 
 
 def test_ranges_expand_to_one_net_per_index():
@@ -512,9 +516,7 @@ def test_optional_continuation_output_is_exposed_only_when_a_peer_exists():
     ]
 
     without_peer = _hub75_intent()
-    without_peer["signals"] = [
-        row for row in without_peer["signals"] if row["name"] != "LED_OUT"
-    ]
+    without_peer["signals"] = [row for row in without_peer["signals"] if row["name"] != "LED_OUT"]
     architecture = derive_architecture(without_peer)
     assert set(_requirement(architecture, "led").ports) == {"vdd", "gnd", "data_in"}
     # No connector is invented for an output the intent never declared.
@@ -1129,8 +1131,7 @@ def test_approved_uno_template_requires_and_constructs_each_explicit_stacking_ow
                 "parameters": {"rows": 1, "gender": "female"},
                 "standard_stacking_role": connector.role,
                 "ties": {
-                    f"pin{index}": net
-                    for index, net in enumerate(connector.net_by_pin, start=1)
+                    f"pin{index}": net for index, net in enumerate(connector.net_by_pin, start=1)
                 },
                 "functional_blocks": ["UNO_HOST_INTERFACE"],
             }
@@ -1192,9 +1193,11 @@ def test_unused_template_pin_names_become_no_connects_not_nets():
         if requirement.standard_stacking_role
     }
     # Host signal labels nobody on this board drives: no-connect, never a one-pin net.
-    for role, pins in (("digital_high", ("pin1", "pin2", "pin3", "pin5")),
-                       ("digital_low", ("pin1", "pin2")),
-                       ("analog", ("pin1", "pin6"))):
+    for role, pins in (
+        ("digital_high", ("pin1", "pin2", "pin3", "pin5")),
+        ("digital_low", ("pin1", "pin2")),
+        ("analog", ("pin1", "pin6")),
+    ):
         for pin in pins:
             assert owned[role].ports[pin] == "NC", (role, pin, owned[role].ports[pin])
     # The rails the shield draws from stay bound, and ground stays ground.
@@ -1240,8 +1243,18 @@ def _declared_port_misuse_intent(
             "family": "uncurated-sensor-frontend",
             "declared_ports": [
                 vdd,
-                {"key": "gnd", "direction": "power", "function": "ground", "reference_domain": "GND"},
-                {"key": "csb", "direction": "input", "function": "chip select, tied high", "supply_rail": "+3V3"},
+                {
+                    "key": "gnd",
+                    "direction": "power",
+                    "function": "ground",
+                    "reference_domain": "GND",
+                },
+                {
+                    "key": "csb",
+                    "direction": "input",
+                    "function": "chip select, tied high",
+                    "supply_rail": "+3V3",
+                },
                 sig,
                 *([spare] if spare_both else []),
             ],
@@ -1440,8 +1453,7 @@ def test_lowerer_supply_without_a_published_port_is_derived_not_refused():
 
     assert _requirement(architecture, "status").ports == {"drive": "STATUS", "gnd": "GND"}
     assert any(
-        "status" in note and "publishes no supply port" in note
-        for note in architecture.assumptions
+        "status" in note and "publishes no supply port" in note for note in architecture.assumptions
     )
 
 
@@ -1637,9 +1649,12 @@ def test_architecture_top_level_obligations_are_written_from_the_committed_set()
     # The parsed architecture the stage commits agrees with the payload it was built from.
     from kicraft.design.models import Architecture
 
-    assert Architecture.model_validate(payload).obligations[0].model_dump(
-        mode="json", exclude_none=True
-    ) == obligation
+    assert (
+        Architecture.model_validate(payload)
+        .obligations[0]
+        .model_dump(mode="json", exclude_none=True)
+        == obligation
+    )
 
 
 def test_committed_obligation_with_no_implementing_requirement_is_refused():
@@ -1805,9 +1820,12 @@ def test_board_fact_obligation_commits_with_no_owning_requirement(obligation, ca
     assert payload["obligations"] == [canonical]
     # No requirement implements it, and the architecture stage commits it that way.
     assert not any(row.get("obligations") for row in payload["requirements"])
-    assert Architecture.model_validate(payload).obligations[0].model_dump(
-        mode="json", exclude_none=True
-    ) == canonical
+    assert (
+        Architecture.model_validate(payload)
+        .obligations[0]
+        .model_dump(mode="json", exclude_none=True)
+        == canonical
+    )
 
 
 def test_board_fact_obligations_survive_intent_to_architecture_verbatim():
@@ -1900,6 +1918,162 @@ def test_ownership_exemption_is_per_row_and_does_not_shield_a_physical_row():
     with pytest.raises(StageSchemaError) as refused:
         _normalize_stage_response("architecture", intent, prompt_state)
     assert refused.value.diagnostic["evidence"] == [physical]
+
+
+def test_board_outline_measurement_may_stand_alone_but_electrical_limit_may_not():
+    """Only a geometric board fact is ownerless; V/A/Hz limits remain implementation claims."""
+    from kicraft.server.stage_contracts import StageSchemaError
+
+    board_diameter = {
+        "kind": "quantitative",
+        "original_obligation_id": "board_diameter",
+        "quantity": "board diameter",
+        "relation": "maximum",
+        "value": 60,
+        "unit": "mm",
+    }
+    prompt_state = {
+        "intent": {"goal": "reference board", "obligations": [board_diameter]},
+        "functional_spec": {"obligations": [board_diameter]},
+    }
+    payload, _expanded = _normalize_stage_response("architecture", _hub75_intent(), prompt_state)
+    assert payload["obligations"] == [board_diameter]
+    assert not any(row.get("obligations") for row in payload["requirements"])
+
+    output_voltage = {
+        "kind": "quantitative",
+        "original_obligation_id": "output_voltage",
+        "quantity": "output voltage",
+        "relation": "equal",
+        "value": 3.3,
+        "unit": "V",
+    }
+    with pytest.raises(StageSchemaError) as rejected:
+        _normalize_stage_response(
+            "architecture",
+            _hub75_intent(),
+            {
+                "intent": {"goal": "reference board", "obligations": [output_voltage]},
+                "functional_spec": {"obligations": [output_voltage]},
+            },
+        )
+    assert rejected.value.diagnostic["evidence"] == [output_voltage]
+
+    implementing_intent = _hub75_intent()
+    next(row for row in implementing_intent["requirements"] if row["id"] == "buck")[
+        "obligations"
+    ] = [output_voltage]
+    retained, _expanded = _normalize_stage_response(
+        "architecture",
+        implementing_intent,
+        {
+            "intent": {"goal": "reference board", "obligations": [output_voltage]},
+            "functional_spec": {"obligations": [output_voltage]},
+        },
+    )
+    assert next(row for row in retained["requirements"] if row["id"] == "buck")["obligations"] == [
+        output_voltage
+    ]
+
+
+def test_board_outline_is_normalized_from_semantic_evidence_not_shape_word():
+    """A board outline becomes fabrication; a realizable mounting hole remains physical."""
+    from kicraft.design.stage_semantics import complete_intent_classification
+    from kicraft.server.stage_contracts import normalize_board_outline_obligations
+
+    outline = {
+        "kind": "physical",
+        "original_obligation_id": "snowman_outline",
+        "component_class": "snowman-shaped-board",
+    }
+    mounting_hole = {
+        "kind": "physical",
+        "original_obligation_id": "mounting_hole",
+        "component_class": "mounting-hole",
+    }
+    normalized = complete_intent_classification(
+        "A snowman-shaped board.", {"obligations": [outline, mounting_hole]}
+    )
+    assert normalized["obligations"] == [
+        {
+            "kind": "fabrication",
+            "original_obligation_id": "snowman_outline",
+            "feature": "snowman-shaped-board",
+        },
+        mounting_hole,
+    ]
+    # The compiler also repairs legacy source rows before source comparison.
+    assert (
+        normalize_board_outline_obligations({"obligations": [outline, mounting_hole]})[
+            "obligations"
+        ]
+        == normalized["obligations"]
+    )
+
+
+def test_only_unique_reviewed_physical_owner_is_attached():
+    """Reviewed evidence can repair omitted ownership, but never chooses between candidates."""
+    from kicraft.server.stage_contracts import (
+        attach_uniquely_provable_physical_obligations,
+        physical_obligation_candidate_requirement_ids,
+    )
+
+    obligation = {
+        "kind": "physical",
+        "original_obligation_id": "warm_white_led",
+        "component_class": "warm-white-led",
+    }
+    source = {
+        "intent": {"obligations": [obligation]},
+        "functional_spec": {"obligations": [obligation]},
+    }
+    exact_led = "E6C0805WWAY1UDA(1.1T M)"
+    unique = attach_uniquely_provable_physical_obligations(
+        {"requirements": [{"id": "indicator", "exact_part": exact_led}]},
+        source,
+    )
+    assert unique["requirements"][0]["obligations"] == [obligation]
+    assert "unique reviewed recipe/lowerer evidence" in unique["assumptions"][0]
+
+    ambiguous = {
+        "requirements": [
+            {"id": "indicator_a", "exact_part": exact_led},
+            {"id": "indicator_b", "exact_part": exact_led},
+        ]
+    }
+    assert physical_obligation_candidate_requirement_ids(ambiguous, obligation) == [
+        "indicator_a",
+        "indicator_b",
+    ]
+    assert attach_uniquely_provable_physical_obligations(ambiguous, source) == ambiguous
+
+    from kicraft.server.stage_contracts import StageSchemaError, validate_obligation_retention
+
+    with pytest.raises(StageSchemaError) as rejected:
+        validate_obligation_retention("architecture", ambiguous, source)
+    assert rejected.value.diagnostic["candidate_requirement_ids"] == {
+        "warm_white_led": ["indicator_a", "indicator_b"]
+    }
+
+
+def test_unique_physical_owner_is_attached_before_architecture_commit():
+    """The architecture normalizer uses the same evidence-backed attachment path."""
+    obligation = {
+        "kind": "physical",
+        "original_obligation_id": "microcontroller",
+        "component_class": "microcontroller",
+    }
+    payload, _expanded = _normalize_stage_response(
+        "architecture",
+        _hub75_intent(),
+        {
+            "intent": {"obligations": [obligation]},
+            "functional_spec": {"obligations": [obligation]},
+        },
+    )
+    assert next(row for row in payload["requirements"] if row["id"] == "esp32")["obligations"] == [
+        obligation
+    ]
 
 
 _PROTOTYPING_AREA_OBLIGATION = {
@@ -2173,7 +2347,9 @@ def test_unreviewed_exact_part_for_a_covered_class_is_recorded_with_its_options(
     # The reviewed identity for the same class passes untouched, with nothing to record.
     buck["exact_part"] = "ME6211C33M5G-N"
     architecture = derive_architecture(intent)
-    assert next(r for r in architecture.requirements if r.id == "buck").exact_part == "ME6211C33M5G-N"
+    assert (
+        next(r for r in architecture.requirements if r.id == "buck").exact_part == "ME6211C33M5G-N"
+    )
     assert [a.code for a in architecture.advisories] == []
 
 
@@ -2227,8 +2403,12 @@ def test_stacking_owners_share_one_interface_block():
     intent = _hub75_intent()
     intent["standard_form_factor"] = template.key
     intent["sheets"].append(
-        {"name": "UNO HEADERS", "stem": "UNO_HEADERS", "role": "connector",
-         "function": "Arduino Uno shield stacking interface."}
+        {
+            "name": "UNO HEADERS",
+            "stem": "UNO_HEADERS",
+            "role": "connector",
+            "function": "Arduino Uno shield stacking interface.",
+        }
     )
     for connector in template.fixed_connectors:
         blocks = ["UNO_HOST_INTERFACE"]
@@ -2255,17 +2435,19 @@ def test_stacking_owners_share_one_interface_block():
         if requirement.standard_stacking_role
     }
     assert set(owned) == {c.role for c in template.fixed_connectors}
-    assert {tuple(sorted(r.functional_blocks)) for r in owned.values()} == {
-        ("UNO_HOST_INTERFACE",)
-    }
+    assert {tuple(sorted(r.functional_blocks)) for r in owned.values()} == {("UNO_HOST_INTERFACE",)}
 
     # A block NO other requirement implements must survive, or it would be left with no
     # implementation requirement at all -- which the architecture commit refuses.
     alone = _hub75_intent()
     alone["standard_form_factor"] = template.key
     alone["sheets"].append(
-        {"name": "UNO HEADERS", "stem": "UNO_HEADERS", "role": "connector",
-         "function": "Arduino Uno shield stacking interface."}
+        {
+            "name": "UNO HEADERS",
+            "stem": "UNO_HEADERS",
+            "role": "connector",
+            "function": "Arduino Uno shield stacking interface.",
+        }
     )
     for connector in template.fixed_connectors:
         blocks = ["UNO_HOST_INTERFACE"]

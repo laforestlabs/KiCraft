@@ -287,7 +287,9 @@ def test_architecture_exact_esp32_part_resolves_without_model_selection():
     mcu = next(row for row in canonical["requirements"] if row["role"] == "mcu_core")
     assert mcu["exact_part"] == "ESP32-S3-MINI-1-N8"
     selection = next(
-        row for row in canonical["recipe_selections"] if row["recipe"] == "esp32-s3-mini-1-minimal@1"
+        row
+        for row in canonical["recipe_selections"]
+        if row["recipe"] == "esp32-s3-mini-1-minimal@1"
     )
     assert selection["port_bindings"] == {
         "gnd": "GND",
@@ -552,9 +554,7 @@ _NATIVE_FIXTURE_FAMILIES = {
 
 def _add_native_usb(payload, *, dm="USB_D_N", dp="USB_D_P", vbus="VBUS"):
     """Append the mandatory USB data companion for a native-USB MCU fixture."""
-    payload["power_nets"] = list(
-        dict.fromkeys([*(payload.get("power_nets") or []), vbus, "GND"])
-    )
+    payload["power_nets"] = list(dict.fromkeys([*(payload.get("power_nets") or []), vbus, "GND"]))
     payload.setdefault("rail_voltages", {})[vbus] = 5.0
     payload["sheets"].append({"name": "USB", "stem": "USB", "function": "USB connector"})
     payload.setdefault("requirements", []).append(
@@ -673,7 +673,9 @@ def _c3_native_usb_architecture():
     )
     payload["sheets"][0]["function"] = "ESP32-C3 MCU"
     payload["topologies"] = {"MCU": "ESP32-C3"}
-    payload["sheets"].append({"name": "BRIDGE", "stem": "BRIDGE", "function": "external UART bridge"})
+    payload["sheets"].append(
+        {"name": "BRIDGE", "stem": "BRIDGE", "function": "external UART bridge"}
+    )
     payload["requirements"].append(
         {
             "id": "bridge",
@@ -852,9 +854,7 @@ def test_shared_connector_mpn_requires_one_explicit_reviewed_family(ambiguous_fa
     connector["exact_part"] = "TYPE-C-31-M-12"
     recipes = registered_recipes()
     if ambiguous_family:
-        original = next(
-            row for row in recipes if row.definition.family == "usb-c-usb2-device"
-        )
+        original = next(row for row in recipes if row.definition.family == "usb-c-usb2-device")
         duplicate = RegisteredRecipe(
             definition=original.definition.model_copy(
                 update={"recipe": "other-usb-device@1", "exact_part": "OTHER-USB-DEVICE"}
@@ -866,13 +866,10 @@ def test_shared_connector_mpn_requires_one_explicit_reviewed_family(ambiguous_fa
         connector["family"] = "unspecified-usb-connector"
     result = resolve_architecture_recipes(payload, registry=recipes)
     assert any(
-        row.code == "unsupported_protected_variant"
-        and row.requirement_id == "usb_c_connector"
+        row.code == "unsupported_protected_variant" and row.requirement_id == "usb_c_connector"
         for row in result.blocking
     )
-    assert not any(
-        row.requirement_ids == ["usb_c_connector"] for row in result.selections
-    )
+    assert not any(row.requirement_ids == ["usb_c_connector"] for row in result.selections)
 
 
 @pytest.mark.parametrize(
@@ -1784,15 +1781,11 @@ def test_unregistered_named_owner_accepts_only_reviewed_directional_identity(
 ):
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
-    payload = _typed_esp32_architecture(
-        family="unregistered-controller", exact_part=candidate
-    )
+    payload = _typed_esp32_architecture(family="unregistered-controller", exact_part=candidate)
     payload["topologies"] = {}
     payload["sheets"][0]["function"] = "Application processor"
     result = resolve_architecture_recipes(payload, {"named_parts": [requested]})
-    ownership_errors = [
-        row for row in result.blocking if row.code == "missing_recipe_requirement"
-    ]
+    ownership_errors = [row for row in result.blocking if row.code == "missing_recipe_requirement"]
     assert bool(ownership_errors) is not owned
     assert result.unresolved_requirements == ["mcu_core"]
     assert not result.selections
@@ -1807,9 +1800,7 @@ def test_named_family_owns_architecture_without_becoming_a_physical_sku(exact_pa
     payload["topologies"] = {}
     payload["sheets"][0]["function"] = "Low-power application processor"
     result = resolve_architecture_recipes(payload, {"named_parts": ["STM32L0"]})
-    ownership_errors = [
-        row for row in result.blocking if row.code == "missing_recipe_requirement"
-    ]
+    ownership_errors = [row for row in result.blocking if row.code == "missing_recipe_requirement"]
     assert bool(ownership_errors) is (exact_part is not None)
     assert result.requirements[0].exact_part == exact_part
     assert not result.selections
@@ -2088,7 +2079,10 @@ def test_advertised_interface_keys_allocate_their_bound_nets():
     summary = next(row for row in recipe_summaries() if row["recipe"] == definition.recipe)
     for interface, members in summary["interfaces"].items():
         requirement = CircuitRequirement(
-            id="core", sheet="MCU", role="mcu_core", family=definition.family,
+            id="core",
+            sheet="MCU",
+            role="mcu_core",
+            family=definition.family,
             interfaces=[interface],
             ports={key: member["capability"] for member in members for key in member["keys"]},
         )
@@ -2104,7 +2098,10 @@ def test_fixed_programming_uart_is_not_reallocated_as_an_application_interface()
 
     definition = get_recipe("esp32-c3-mini-1-minimal@1")
     requirement = CircuitRequirement(
-        id="core", sheet="MCU", role="mcu_core", family=definition.family,
+        id="core",
+        sheet="MCU",
+        role="mcu_core",
+        family=definition.family,
         interfaces=["uart"],
         ports={"uart_tx": "PROGRAM_TX", "uart_rx": "PROGRAM_RX"},
     )
@@ -2115,9 +2112,7 @@ def test_fixed_programming_uart_is_not_reallocated_as_an_application_interface()
     allocations = allocate_requirement_pins(definition, application)
     assert {row.net for row in allocations} == {"APP_TX", "APP_RX"}
     assert not {row.pin for row in allocations} & {"30", "31"}
-    incomplete = requirement.model_copy(
-        update={"ports": {**requirement.ports, "tx": "APP_TX"}}
-    )
+    incomplete = requirement.model_copy(update={"ports": {**requirement.ports, "tx": "APP_TX"}})
     with pytest.raises(PinAllocationError, match="missing_interface_port"):
         allocate_requirement_pins(definition, incomplete)
 
@@ -2465,9 +2460,12 @@ def test_old_intent_classification_cannot_hide_badge_phantom_endpoint():
     # The generic classification invents neither the MCU's supply nor an owner for the
     # conductor the design left dangling: the phantom endpoint is reported on the MCU.
     assert "vdd" not in core.ports
-    assert "LED_CTRL" in next(
-        row for row in result.blocking if row.code == "missing_mcu_application_contract"
-    ).evidence
+    assert (
+        "LED_CTRL"
+        in next(
+            row for row in result.blocking if row.code == "missing_mcu_application_contract"
+        ).evidence
+    )
     assert not result.selections
     payload["requirements"] = [core.model_copy(update={"ports": {"vdd": "VCC_3V0"}}).model_dump()]
     bound = resolve_architecture_recipes(payload, intent)
@@ -3211,8 +3209,11 @@ def test_native_usb_pair_uses_connector_owned_names_and_one_series_pair():
     # Independent CC pull-downs and host VBUS are not the MCU pair or +3V3.
     pulls = {part.ref for part in connector_expansion.parts if part.recipe_role == "cc_pulldown"}
     assert len(pulls) == 2
-    assert "USB_D_N" not in {net.net_name for net in connector_expansion.connections
-                             if any(ep.ref in pulls for net in [net] for ep in net.endpoints)}
+    assert "USB_D_N" not in {
+        net.net_name
+        for net in connector_expansion.connections
+        if any(ep.ref in pulls for net in [net] for ep in net.endpoints)
+    }
     connector_nets = {connection.net_name for connection in connector_expansion.connections}
     assert "VBUS" in connector_nets
     assert not {"+3V3", "VBAT"} & connector_nets
@@ -3286,9 +3287,248 @@ def test_rp2040_family_default_requires_and_binds_a_native_usb_connector():
     assert {"24", "25"} <= {pin.pin for pin in expansion.no_connect_pins}
 
 
+def _rp2040_support_architecture():
+    return {
+        "topologies": {"MCU": "RP2040 with external clock and QSPI flash"},
+        "rail_voltages": {"+3V3": 3.3},
+        "comms_protocols": [],
+        "mcu_present": True,
+        "sheets": [{"name": "MCU", "stem": "MCU", "function": "RP2040 controller"}],
+        "power_nets": ["+3V3", "GND"],
+        "inter_sheet_nets": [],
+        "requirements": [
+            {
+                "id": identity,
+                "sheet": "MCU",
+                "role": role,
+                "family": "rp2040",
+                "exact_part": "RP2040",
+                "ports": {
+                    "vdd": "+3V3",
+                    "gnd": "GND",
+                    "usb_dm": "USB_DM",
+                    "usb_dp": "USB_DP",
+                },
+                "obligations": [
+                    {
+                        "kind": "physical",
+                        "original_obligation_id": identity,
+                        "component_class": component_class,
+                    }
+                ],
+            }
+            for identity, role, component_class in (
+                ("processor", "mcu_core", "microcontroller"),
+                ("clock", "analog_block", "crystal"),
+                ("flash", "bus_interface", "flash-memory"),
+            )
+        ],
+    }
+
+
+def test_mcu_support_requirements_realize_one_complete_physical_circuit():
+    from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+    from kicraft.design.synthesis.validation import check_requirement_physical_realization
+
+    architecture = apply_architecture_recipe_resolution(_rp2040_support_architecture())
+    payload, _ = _normalize_stage_response(
+        "bom", {"groups": [], "arrays": []}, {"architecture": architecture.model_dump()}
+    )
+    bom = BOM.model_validate(payload)
+    verdict = check_requirement_physical_realization(architecture, bom)
+    assert verdict.ok, verdict.offenders
+    assert sum(part.mpn == "RP2040" for part in bom.parts) == 1
+    assert sum(part.mpn == "W25Q16JVSS" for part in bom.parts) == 1
+    assert sum(part.mpn == "ABM8-272-T3" for part in bom.parts) == 1
+
+    # SS is Winbond's 208-mil package, not the smaller 150-mil SN package.
+    # A resolvable but physically wrong footprint must fail realization.
+    flash = next(part for part in bom.parts if part.mpn == "W25Q16JVSS")
+    flash.footprint = "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
+    assert not check_requirement_physical_realization(architecture, bom).ok
+
+
+@pytest.mark.parametrize("conflict", ["second_core", "different_usb_net", "different_sheet"])
+def test_mcu_support_cannot_choose_an_ambiguous_or_different_core(conflict):
+    from copy import deepcopy
+
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = _rp2040_support_architecture()
+    if conflict == "second_core":
+        second = deepcopy(payload["requirements"][0])
+        second["id"] = "second_processor"
+        payload["requirements"].append(second)
+    elif conflict == "different_usb_net":
+        payload["requirements"][1]["ports"]["usb_dp"] = "OTHER_USB_DP"
+    else:
+        payload["sheets"].append(
+            {"name": "CLOCK", "stem": "CLOCK", "function": "External clock"}
+        )
+        payload["requirements"][1]["sheet"] = "CLOCK"
+    result = resolve_architecture_recipes(payload)
+    assert any(row.code == "mcu_support_owner_unproven" for row in result.blocking)
+
+
+def test_two_explicit_mcu_cores_are_not_coalesced():
+    from copy import deepcopy
+
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = _rp2040_support_architecture()
+    second = deepcopy(payload["requirements"][0])
+    second["id"] = "second_processor"
+    payload["requirements"] = [payload["requirements"][0], second]
+    result = resolve_architecture_recipes(payload)
+    assert not result.blocking
+    expansions = expand_selections(result.selections)
+    assert sum(part.mpn == "RP2040" for row in expansions for part in row.parts) == 2
+
+
+def test_stm32_recipe_crystal_has_realizable_reviewed_identity():
+    from kicraft.design.models import Architecture
+    from kicraft.design.synthesis.validation import check_requirement_physical_realization
+
+    payload = _rp2040_support_architecture()
+    core = payload["requirements"][0]
+    core.update(family="stm32f103c8", exact_part="STM32F103C8T6")
+    core["obligations"].append(
+        {"kind": "physical", "original_obligation_id": "hse", "component_class": "crystal"}
+    )
+    payload["requirements"] = [core]
+    payload["topologies"] = {"MCU": "STM32F103C8T6 with 8 MHz HSE"}
+    payload["sheets"][0]["function"] = "STM32F103C8T6 controller"
+    payload["recipe_selections"] = [
+        {
+            "recipe": "stm32f103c8t6-minimal@1",
+            "instance": "processor",
+            "sheets": {"mcu": "MCU"},
+            "requirement_ids": ["processor"],
+            "port_bindings": {"vdd": "+3V3", "gnd": "GND"},
+        }
+    ]
+    architecture = Architecture.model_validate(payload)
+    bom_payload, _ = _normalize_stage_response(
+        "bom", {"groups": [], "arrays": []}, {"architecture": architecture.model_dump()}
+    )
+    bom = BOM.model_validate(bom_payload)
+    verdict = check_requirement_physical_realization(architecture, bom)
+    assert verdict.ok, verdict.offenders
+
+
+def test_recipe_castellation_edges_replace_the_synthetic_header_unit():
+    """RP2040 recipe pads, not an assembly header, realize a declared edge."""
+    from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+    from kicraft.server.stage_work_units import plan_stage_work_units
+
+    architecture = {
+        "topologies": {"MCU": "RP2040 controller"},
+        "rail_voltages": {"+3V3": 3.3},
+        "comms_protocols": [],
+        "mcu_present": True,
+        "sheets": [
+            {"name": "MCU", "stem": "MCU", "function": "RP2040 controller"},
+            {"name": "CASTELLATED", "stem": "CASTELLATED", "function": "GPIO edge pads"},
+        ],
+        "power_nets": ["+3V3", "GND"],
+        "inter_sheet_nets": [],
+        "requirements": [
+            {
+                "id": "rp2040",
+                "sheet": "MCU",
+                "role": "mcu_core",
+                "family": "rp2040",
+                "exact_part": "RP2040",
+                "ports": {
+                    "vdd": "+3V3",
+                    "gnd": "GND",
+                    "usb_dm": "USB_DM",
+                    "usb_dp": "USB_DP",
+                },
+                "functional_blocks": ["RP2040_PROCESSOR", "CASTELLATED_GPIO"],
+            },
+            {
+                "id": "rp2040_castellated_gpio",
+                "sheet": "CASTELLATED",
+                "role": "connector",
+                "family": "pin-header",
+                "compiler_origin": "edge_connector",
+                "ports": {"pin1": "GPIO0", "pin2": "GPIO1", "pin3": "GND"},
+                "functional_blocks": ["RP2040_PROCESSOR", "CASTELLATED_GPIO"],
+            },
+        ],
+    }
+
+    resolved = apply_architecture_recipe_resolution(architecture)
+
+    (selection,) = resolved.recipe_selections
+    assert selection.requirement_ids == ["rp2040", "rp2040_castellated_gpio"]
+    assert selection.sheets["io"] == "CASTELLATED"
+    assert resolved.unresolved_requirement_ids == []
+    assert plan_stage_work_units("bom", {"architecture": resolved.model_dump()}, {}) == ()
+
+    bom, _ = _normalize_stage_response(
+        "bom",
+        {"groups": [], "arrays": []},
+        {"architecture": resolved.model_dump()},
+    )
+    edge_parts = [part for part in bom["parts"] if part["sheet"] == "CASTELLATED"]
+    assert len(edge_parts) == 34
+    assert all(part["value"] == "Castellated pad" and not part["assembly"] for part in edge_parts)
+    assert not any(part["ref"].startswith("J") for part in bom["parts"])
+
+
+def test_real_pin_header_is_not_consumed_by_matching_recipe_edges():
+    from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+    from kicraft.server.stage_work_units import deterministic_bom_candidate, plan_stage_work_units
+
+    architecture = {
+        "topologies": {"MCU": "RP2040 controller"},
+        "rail_voltages": {"+3V3": 3.3},
+        "comms_protocols": [],
+        "mcu_present": True,
+        "sheets": [
+            {"name": "MCU", "stem": "MCU", "function": "RP2040 controller"},
+            {"name": "HEADER", "stem": "HEADER", "function": "Physical GPIO header"},
+        ],
+        "power_nets": ["+3V3", "GND"],
+        "inter_sheet_nets": [],
+        "requirements": [
+            {
+                "id": "rp2040",
+                "sheet": "MCU",
+                "role": "mcu_core",
+                "family": "rp2040",
+                "exact_part": "RP2040",
+                "ports": {"vdd": "+3V3", "gnd": "GND"},
+                "functional_blocks": ["RP2040_PROCESSOR", "CASTELLATED_GPIO"],
+            },
+            {
+                "id": "physical_gpio_header",
+                "sheet": "HEADER",
+                "role": "connector",
+                "family": "pin-header",
+                "parameters": {"rows": 1, "gender": "male"},
+                "ports": {"pin1": "GPIO0", "pin2": "GPIO1", "pin3": "GND"},
+                "functional_blocks": ["RP2040_PROCESSOR", "CASTELLATED_GPIO"],
+            },
+        ],
+    }
+
+    resolved = apply_architecture_recipe_resolution(architecture)
+
+    (selection,) = resolved.recipe_selections
+    assert selection.requirement_ids == ["rp2040"]
+    (header_unit,) = plan_stage_work_units("bom", {"architecture": resolved.model_dump()}, {})
+    assert header_unit.requirement_ids == ("physical_gpio_header",)
+    header = deterministic_bom_candidate(header_unit, {"architecture": resolved.model_dump()})
+    assert header["groups"][0]["value"] == "PinHeader_1x03"
+
+
 # ---------------------------------------------------------------------------
 # order-code variants and semantic recipe ports (dfc1582 follow-ups)
 # ---------------------------------------------------------------------------
+
 
 def test_reviewed_order_code_variant_resolves_with_a_ledgered_substitution():
     """A brief naming an order code of a registered family must not hard-block.
@@ -3303,9 +3543,7 @@ def test_reviewed_order_code_variant_resolves_with_a_ledgered_substitution():
     payload = _typed_esp32_architecture(
         family="esp32-s3-wroom-1-module", exact_part="ESP32-S3-WROOM-1-N16R8"
     )
-    result = resolve_architecture_recipes(
-        payload, {"named_parts": ["ESP32-S3-WROOM-1-N16R8"]}
-    )
+    result = resolve_architecture_recipes(payload, {"named_parts": ["ESP32-S3-WROOM-1-N16R8"]})
 
     assert not result.blocking
     core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
@@ -3327,9 +3565,7 @@ def test_unreviewed_protected_variant_still_blocks_and_names_the_choice():
     payload = _typed_esp32_architecture(family="stm32f103c8", exact_part="STM32H743VIT6")
     result = resolve_architecture_recipes(payload, {"named_parts": ["STM32H743VIT6"]})
 
-    diagnostic = next(
-        row for row in result.blocking if row.code == "unsupported_protected_variant"
-    )
+    diagnostic = next(row for row in result.blocking if row.code == "unsupported_protected_variant")
     assert "STM32H743VIT6" in diagnostic.evidence
     assert any(row.startswith("canonical choice:") for row in diagnostic.evidence)
     assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
@@ -3367,15 +3603,22 @@ def test_ads1115_address_strap_is_selectable_per_instance():
 
     def adc_address_net(strap):
         selection = RecipeSelection(
-            recipe=definition.recipe, instance=f"adc_{strap}", sheets=sheets,
+            recipe=definition.recipe,
+            instance=f"adc_{strap}",
+            sheets=sheets,
             parameters={"address_strap": strap},
             port_bindings={"vdd": "+3V3", "gnd": "GND", "sda": "SDA", "scl": "SCL"},
             requirement_ids=["adc"],
         )
         expansion = expand_static_definition(
-            definition, ResolvedRecipeSelection(selection=selection, parameters={"address_strap": strap})
+            definition,
+            ResolvedRecipeSelection(selection=selection, parameters={"address_strap": strap}),
         )
-        return {own.net for own in expansion.ownership.pins if own.pin == "1" and own.ref.startswith("U")}
+        return {
+            own.net
+            for own in expansion.ownership.pins
+            if own.pin == "1" and own.ref.startswith("U")
+        }
 
     # ADDR (pin 1) follows the declared strap, which is exactly what decides the
     # part's I2C address; the default keeps the historic grounded behaviour.
@@ -3396,14 +3639,25 @@ def test_hub75_recipe_exposes_named_channels_including_oe_and_d():
 
     assert names[:2] == ["vdd_5v", "gnd"]
     assert names[2:] == [
-        "r0", "g0", "b0", "r1", "g1", "b1",
-        "addr_a", "addr_b", "addr_c", "addr_d", "clk", "lat", "oe",
+        "r0",
+        "g0",
+        "b0",
+        "r1",
+        "g1",
+        "b1",
+        "addr_a",
+        "addr_b",
+        "addr_c",
+        "addr_d",
+        "clk",
+        "lat",
+        "oe",
     ]
     assert not any(name.startswith("input") for name in names)
 
     connector = {pin.pin: pin.net for pin in definition.pins if pin.role == "connector"}
-    assert connector["15"] == "shifted12"          # OE is buffered, not direct
-    assert connector["12"] == "shifted9"           # D is a channel, not ground
+    assert connector["15"] == "shifted12"  # OE is buffered, not direct
+    assert connector["12"] == "shifted9"  # D is a channel, not ground
     assert {pin for pin, net in connector.items() if net == "gnd"} == {"4", "8", "16"}
     # Every logic channel has a distinct level-shifted net, and the spare '245
     # channels stay no-connects instead of floating.
@@ -3417,9 +3671,19 @@ def test_hub75_channels_bind_by_signal_name():
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
     signals = {
-        "R0": "r0", "G0": "g0", "B0": "b0", "R1": "r1", "G1": "g1", "B1": "b1",
-        "A": "addr_a", "B": "addr_b", "C": "addr_c", "D": "addr_d",
-        "CLK": "clk", "LAT": "lat", "OE": "oe",
+        "R0": "r0",
+        "G0": "g0",
+        "B0": "b0",
+        "R1": "r1",
+        "G1": "g1",
+        "B1": "b1",
+        "A": "addr_a",
+        "B": "addr_b",
+        "C": "addr_c",
+        "D": "addr_d",
+        "CLK": "clk",
+        "LAT": "lat",
+        "OE": "oe",
     }
     payload = {
         "sheets": [
@@ -3428,15 +3692,24 @@ def test_hub75_channels_bind_by_signal_name():
             {"name": "POWER", "stem": "POWER", "function": "5V input"},
         ],
         "requirements": [
-            {"id": "display", "sheet": "HUB75", "role": "connector",
-             "family": "hub75-level-shift-interface", "exact_part": "HUB75-SN74HCT245",
-             "ports": {"gnd": "GND", "vdd_5v": "+5V"}},
+            {
+                "id": "display",
+                "sheet": "HUB75",
+                "role": "connector",
+                "family": "hub75-level-shift-interface",
+                "exact_part": "HUB75-SN74HCT245",
+                "ports": {"gnd": "GND", "vdd_5v": "+5V"},
+            },
         ],
         "power_nets": ["GND", "+5V"],
         "inter_sheet_nets": [
-            {"name": f"HUB75_{signal}", "endpoints": [
-                {"sheet": "HUB75", "direction": "input"},
-                {"sheet": "MCU", "direction": "output"}]}
+            {
+                "name": f"HUB75_{signal}",
+                "endpoints": [
+                    {"sheet": "HUB75", "direction": "input"},
+                    {"sheet": "MCU", "direction": "output"},
+                ],
+            }
             for signal in signals
         ],
         "mcu_present": False,
@@ -3447,9 +3720,9 @@ def test_hub75_channels_bind_by_signal_name():
     assert not any(row.code == "unsupported_recipe_endpoint" for row in result.blocking)
     display = next(row for row in result.selections if row.requirement_ids == ["display"])
     assert display.recipe == "hub75-sn74hct245-interface@1"
-    assert {
-        port: display.port_bindings[port] for port in signals.values()
-    } == {port: f"HUB75_{signal}" for signal, port in signals.items()}
+    assert {port: display.port_bindings[port] for port in signals.values()} == {
+        port: f"HUB75_{signal}" for signal, port in signals.items()
+    }
 
 
 def test_unused_groundable_hub75_addr_d_is_tied_low_not_demanded():
@@ -3463,9 +3736,18 @@ def test_unused_groundable_hub75_addr_d_is_tied_low_not_demanded():
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
     channels = {
-        "R0": "r0", "G0": "g0", "B0": "b0", "R1": "r1", "G1": "g1", "B1": "b1",
-        "A": "addr_a", "B": "addr_b", "C": "addr_c",
-        "CLK": "clk", "LAT": "lat", "OE": "oe",
+        "R0": "r0",
+        "G0": "g0",
+        "B0": "b0",
+        "R1": "r1",
+        "G1": "g1",
+        "B1": "b1",
+        "A": "addr_a",
+        "B": "addr_b",
+        "C": "addr_c",
+        "CLK": "clk",
+        "LAT": "lat",
+        "OE": "oe",
     }
     architecture = derive_architecture(
         {
@@ -3622,9 +3904,7 @@ def test_ws2812_pixels_form_a_complete_cascade_with_optional_final_output(quanti
     other = expand_recipe(selection.model_copy(update={"instance": "other"}))
     assert not (
         {connection.net_name for connection in expanded.connections} - set(bindings.values())
-    ) & (
-        {connection.net_name for connection in other.connections} - set(bindings.values())
-    )
+    ) & ({connection.net_name for connection in other.connections} - set(bindings.values()))
 
 
 @pytest.mark.parametrize("quantity", [0, 501, True, 1.5])
@@ -3639,4 +3919,3 @@ def test_ws2812_rejects_unrealizable_pixel_quantities(quantity):
                 port_bindings={"vdd": "+5V", "gnd": "GND", "data_in": "DATA"},
             )
         )
-

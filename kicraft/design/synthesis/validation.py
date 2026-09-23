@@ -2152,6 +2152,7 @@ def check_family_wiring_contracts(bom) -> CheckResult:
         offenders=bad,
     )
 
+
 # ---------- §9.37 reviewed electrical realization ----------
 #
 # These checks intentionally consume only typed architecture claims, direct
@@ -2159,9 +2160,7 @@ def check_family_wiring_contracts(bom) -> CheckResult:
 # a capacitor on a nearby net, or graph reachability through a control pin is
 # not evidence that energy can reach a load.
 
-_CAP_VALUE_RE = re.compile(
-    r"^(\d+(?:\.\d+)?)\s*(p|n|u|µ|m)?(?:f|farad(?:s)?)?$", re.I
-)
+_CAP_VALUE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(p|n|u|µ|m)?(?:f|farad(?:s)?)?$", re.I)
 _INDUCTANCE_VALUE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(n|u|µ|m)?h$", re.I)
 _CAP_SCALE = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3, "": 1.0}
 _INDUCTANCE_SCALE = {"n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3, "": 1.0}
@@ -2272,8 +2271,12 @@ def check_reviewed_device_support_networks(bom) -> CheckResult:
         if fact is None:
             continue
         bootstrap = fact.get("bootstrap") or {}
-        boot = _fact_pin_name(fact, "boot") or str(bootstrap.get("positive_pin") or "").upper() or None
-        phase = _fact_pin_name(fact, "ph") or str(bootstrap.get("negative_pin") or "").upper() or None
+        boot = (
+            _fact_pin_name(fact, "boot") or str(bootstrap.get("positive_pin") or "").upper() or None
+        )
+        phase = (
+            _fact_pin_name(fact, "ph") or str(bootstrap.get("negative_pin") or "").upper() or None
+        )
         required_cap = _fact_number(fact, "bootstrap_capacitance_f")
         if required_cap is None:
             capacitance_uf = _fact_number(bootstrap, "capacitance_uf")
@@ -2333,8 +2336,9 @@ def check_reviewed_device_support_networks(bom) -> CheckResult:
     return CheckResult(
         "9.37 reviewed device support networks",
         not bad,
-        "reviewed device support networks are directly realized" if not bad else
-        f"{len(bad)} reviewed device support network(s) unproven",
+        "reviewed device support networks are directly realized"
+        if not bad
+        else f"{len(bad)} reviewed device support network(s) unproven",
         bad,
     )
 
@@ -2395,8 +2399,9 @@ def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
     return CheckResult(
         "9.38 reviewed input operating ranges",
         not bad,
-        "typed input rails are within reviewed operating ranges" if not bad else
-        f"{len(bad)} reviewed operating-range violation(s)",
+        "typed input rails are within reviewed operating ranges"
+        if not bad
+        else f"{len(bad)} reviewed operating-range violation(s)",
         bad,
     )
 
@@ -2521,7 +2526,11 @@ def check_reviewed_power_transfer(architecture, bom) -> CheckResult:
             for obligation in requirement.obligations
         )
         is_reviewed_pd = family in {"usb-pd-fixed-trigger", "usb-pd-selectable-trigger"}
-        if not (has_power_conversion or getattr(requirement, "role", None) == "regulator" or is_reviewed_pd):
+        if not (
+            has_power_conversion
+            or getattr(requirement, "role", None) == "regulator"
+            or is_reviewed_pd
+        ):
             continue
         if _claims_constant_current_led(architecture, requirement) and _constant_current_led_ports(
             architecture, requirement
@@ -2539,7 +2548,8 @@ def check_reviewed_power_transfer(architecture, bom) -> CheckResult:
             if net
             and key not in _OUTPUT_RETURN_PORT_KEYS
             and (
-                key in {"output", "vout", "positive", "negative", "positive_output", "negative_output"}
+                key
+                in {"output", "vout", "positive", "negative", "positive_output", "negative_output"}
                 or "output" in key
             )
         ]
@@ -2588,11 +2598,7 @@ def check_reviewed_power_transfer(architecture, bom) -> CheckResult:
                 requirement, output_key, returns=_OUTPUT_RETURN_PORT_KEYS
             )
             if isolated_transfer:
-                if (
-                    input_domain is None
-                    or output_domain is None
-                    or input_domain == output_domain
-                ):
+                if input_domain is None or output_domain is None or input_domain == output_domain:
                     bad.append(
                         f"E_REFERENCE_DOMAIN {requirement.id!r}: reviewed isolated "
                         "conversion requires distinct explicit input/output reference domains"
@@ -2618,10 +2624,12 @@ def check_reviewed_power_transfer(architecture, bom) -> CheckResult:
     return CheckResult(
         "9.39 reviewed source-to-load power transfer",
         not bad,
-        "every typed conversion has a reviewed source-to-load path" if not bad else
-        f"{len(bad)} conversion path/domain contract(s) unproven",
+        "every typed conversion has a reviewed source-to-load path"
+        if not bad
+        else f"{len(bad)} conversion path/domain contract(s) unproven",
         bad,
     )
+
 
 def _quantitative_obligation(requirement, *names: str):
     wanted = tuple(name.lower() for name in names)
@@ -2725,12 +2733,16 @@ def check_typed_passive_crossover_values(architecture, bom) -> CheckResult:
                 for part, pair, value in capacitors
                 if value is not None and set(pair) == {input_net, high_net}
             ]
-            equivalent_caps = [
-                (
-                    tuple(part for part, _ in direct_parallel),
-                    sum(value for _, value in direct_parallel),
-                )
-            ] if direct_parallel else []
+            equivalent_caps = (
+                [
+                    (
+                        tuple(part for part, _ in direct_parallel),
+                        sum(value for _, value in direct_parallel),
+                    )
+                ]
+                if direct_parallel
+                else []
+            )
             for first, first_pair, first_value in capacitors:
                 if first_value is None or input_net not in first_pair:
                     continue
@@ -2762,8 +2774,9 @@ def check_typed_passive_crossover_values(architecture, bom) -> CheckResult:
     return CheckResult(
         "9.40 typed passive crossover values",
         not bad,
-        "typed passive crossover low-pass values match their topology" if not bad else
-        f"{len(bad)} passive crossover value/topology violation(s)",
+        "typed passive crossover low-pass values match their topology"
+        if not bad
+        else f"{len(bad)} passive crossover value/topology violation(s)",
         bad,
     )
 
@@ -2888,8 +2901,7 @@ def _has_reviewed_local_led(part) -> bool:
     """Only exact physical LED evidence may make an on-board load an LED."""
     record = _reviewed_identity_for_bom_part(part)
     return record is not None and any(
-        "led" in feature.casefold()
-        for feature in getattr(record, "physical_features", ())
+        "led" in feature.casefold() for feature in getattr(record, "physical_features", ())
     )
 
 
@@ -2906,6 +2918,7 @@ def _reviewed_constant_current_led_loop_errors(
     has_conversion = any(obligation.kind == "conversion" for obligation in requirement.obligations)
     if ports is None:
         from types import SimpleNamespace
+
         ports = _constant_current_led_ports(
             SimpleNamespace(requirements=[requirement]), requirement
         )
@@ -2973,7 +2986,9 @@ def _reviewed_constant_current_led_loop_errors(
             f"E_LED_CURRENT_FEEDBACK {controller.ref}: reviewed switch pin inventory is absent"
         )
     switch_net = pin_nets.get(switch_pins[0]) if switch_pins else None
-    if switch_pins and (not switch_net or any(pin_nets.get(pin) != switch_net for pin in switch_pins)):
+    if switch_pins and (
+        not switch_net or any(pin_nets.get(pin) != switch_net for pin in switch_pins)
+    ):
         bad.append(
             f"E_LED_CURRENT_FEEDBACK {controller.ref}: all parallel {contract['switch_pin']} "
             "pins must share one wired switch net"
@@ -3010,8 +3025,7 @@ def _reviewed_constant_current_led_loop_errors(
         and set(_two_terminal_part_nets(part, nets) or ()) == {ports["led_cathode"], switch_net}
     ]
     if not any(
-        (value := _inductance_henries(part.value)) is not None and value > 0
-        for part in inductors
+        (value := _inductance_henries(part.value)) is not None and value > 0 for part in inductors
     ):
         bad.append(
             f"E_LED_CURRENT_FEEDBACK {requirement.id!r}: LED cathode {ports['led_cathode']!r} "
@@ -3098,17 +3112,17 @@ def check_reviewed_constant_current_led_feedback(architecture, bom) -> CheckResu
             )
             continue
         bad.extend(
-            _reviewed_constant_current_led_loop_errors(
-                requirement, bom, info, nets, ports=ports
-            )
+            _reviewed_constant_current_led_loop_errors(requirement, bom, info, nets, ports=ports)
         )
     return CheckResult(
         "9.41 reviewed constant-current LED feedback",
         not bad,
-        "typed constant-current LED power loops are completely realized" if not bad else
-        f"{len(bad)} constant-current LED feedback contract(s) unproven",
+        "typed constant-current LED power loops are completely realized"
+        if not bad
+        else f"{len(bad)} constant-current LED feedback contract(s) unproven",
         bad,
     )
+
 
 def _reviewed_identity_for_bom_part(part):
     """Resolve physical evidence through the canonical fail-closed inventory."""
@@ -3174,6 +3188,72 @@ def _part_names_exact_part(part, reviewed_record, exact_part: str | None) -> boo
     return str(getattr(part, "mpn", "") or "").casefold() == exact_part.casefold()
 
 
+def _physical_requirement_parts(requirement, bom, reviewed, recipe_refs: set[str]):
+    """Parts that can satisfy one requirement's physical obligations.
+
+    An exact_part pins the requirement's principal component, not every
+    supporting component a reviewed recipe emits.  Recipe ownership is the
+    narrow exception: only refs emitted by the committed recipe selection for
+    this requirement can supply its crystal, flash, connector, or other
+    support-part obligation.  Model parts remain bound to exact_part evidence.
+    """
+    return [
+        part
+        for part in bom.parts
+        if part.sheet == requirement.sheet
+        and (
+            part.ref in recipe_refs
+            or _part_names_exact_part(part, reviewed.get(part.ref), requirement.exact_part)
+        )
+    ]
+
+
+def _has_trusted_lowerer_topology_witness(requirement, bom, component_class: str) -> bool:
+    """Prove one complete topology from its canonical lowerer-owned BOM parts."""
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.part_identity import lowerer_witnesses_physical_class
+
+    owned = [
+        part
+        for part in bom.parts
+        if getattr(part, "resolution_source", None) == "lowerer"
+        and getattr(part, "lowering_requirement_id", None) == requirement.id
+    ]
+    lowerer_ids = {str(getattr(part, "resolution_id", "") or "") for part in owned}
+    if len(lowerer_ids) != 1:
+        return False
+    (lowerer_id,) = lowerer_ids
+    if not lowerer_witnesses_physical_class(lowerer_id, component_class):
+        return False
+    artifact = lower_requirement(requirement)
+    if artifact is None or artifact.lowerer_id != lowerer_id:
+        return False
+    expected = {
+        (group.role, index): group for group in artifact.groups for index in range(group.quantity)
+    }
+    seen: dict[tuple[str, int], object] = {}
+    for part in owned:
+        role = getattr(part, "lowering_role", None)
+        index = getattr(part, "lowering_index", None)
+        key = (role, index)
+        group = expected.get(key)
+        prefix = re.match(r"[A-Z]+", str(getattr(part, "ref", "") or ""))
+        if (
+            group is None
+            or not isinstance(index, int)
+            or prefix is None
+            or key in seen
+            or group.reference_prefix != prefix.group()
+            or group.value != getattr(part, "value", None)
+            or group.symbol != getattr(part, "symbol", None)
+            or group.footprint != getattr(part, "footprint", None)
+            or group.mpn != getattr(part, "mpn", None)
+        ):
+            return False
+        seen[key] = part
+    return set(seen) == set(expected)
+
+
 def _part_implements_physical_class(part, reviewed_record, component_class: str) -> bool:
     """Whether one BOM part implements a demanded physical class.
 
@@ -3228,15 +3308,22 @@ def check_requirement_physical_realization(
         for part in bom.parts
         if (record := _reviewed_identity_for_bom_part(part)) is not None
     }
+    recipe_refs_by_requirement: dict[str, set[str]] = defaultdict(set)
+    for manifest in getattr(bom, "recipe_ownership", ()) or ():
+        refs = {str(ref) for ref in (getattr(manifest, "refs", ()) or ())}
+        for requirement_id in getattr(manifest, "requirement_ids", ()) or ():
+            recipe_refs_by_requirement[str(requirement_id)].update(refs)
+    requirements_by_id = {requirement.id: requirement for requirement in architecture.requirements}
+
     bad: list[str] = []
     aggregate_demands: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
     for requirement in architecture.requirements:
-        requirement_parts = [
-            part
-            for part in bom.parts
-            if part.sheet == requirement.sheet
-            and _part_names_exact_part(part, reviewed.get(part.ref), requirement.exact_part)
-        ]
+        requirement_parts = _physical_requirement_parts(
+            requirement,
+            bom,
+            reviewed,
+            recipe_refs_by_requirement.get(requirement.id, set()),
+        )
         physical_classes = {
             obligation.component_class.casefold()
             for obligation in requirement.obligations
@@ -3252,11 +3339,17 @@ def check_requirement_physical_realization(
                     local_demands[component_class], obligation.minimum
                 )
         for component_class, minimum in local_demands.items():
-            matching = [
-                part
-                for part in requirement_parts
-                if _part_implements_physical_class(part, reviewed.get(part.ref), component_class)
-            ]
+            matching = (
+                [requirement]
+                if _has_trusted_lowerer_topology_witness(requirement, bom, component_class)
+                else [
+                    part
+                    for part in requirement_parts
+                    if _part_implements_physical_class(
+                        part, reviewed.get(part.ref), component_class
+                    )
+                ]
+            )
             if len(matching) < minimum:
                 # "reviewed" only where the library could answer; a class it has never
                 # covered is proven by a real resolved part instead.
@@ -3300,8 +3393,7 @@ def check_requirement_physical_realization(
         # symbol/footprint/mpn triples stays refused, as does an interface with
         # no matching instance at all.
         owners = {
-            (part.symbol, part.footprint, (part.mpn or "").casefold())
-            for part in interface_parts
+            (part.symbol, part.footprint, (part.mpn or "").casefold()) for part in interface_parts
         }
         if not interface_parts or len(owners) != 1:
             bad.append(
@@ -3341,27 +3433,45 @@ def check_requirement_physical_realization(
                 )
     for (sheet, component_class), demand_rows in sorted(aggregate_demands.items()):
         demanded = sum(minimum for _, minimum in demand_rows)
-        available = [
-            part
-            for part in bom.parts
-            if part.sheet == sheet
-            and _part_implements_physical_class(part, reviewed.get(part.ref), component_class)
-        ]
-        if len(available) < demanded:
-            owners = ", ".join(f"{requirement_id}×{minimum}" for requirement_id, minimum in demand_rows)
+        candidate_refs: set[str] = set()
+        topology_witnesses = 0
+        for requirement_id, _minimum in demand_rows:
+            requirement = requirements_by_id.get(requirement_id)
+            if requirement is None:
+                continue
+            if _has_trusted_lowerer_topology_witness(requirement, bom, component_class):
+                topology_witnesses += 1
+                continue
+            candidate_refs.update(
+                part.ref
+                for part in _physical_requirement_parts(
+                    requirement,
+                    bom,
+                    reviewed,
+                    recipe_refs_by_requirement.get(requirement_id, set()),
+                )
+                if _part_implements_physical_class(part, reviewed.get(part.ref), component_class)
+            )
+        available = len(candidate_refs) + topology_witnesses
+        if available < demanded:
+            owners = ", ".join(
+                f"{requirement_id}×{minimum}" for requirement_id, minimum in demand_rows
+            )
             evidence = "reviewed" if has_reviewed_coverage(component_class) else "real"
             bad.append(
                 f"E_PHYSICAL_REALIZATION {sheet!r}/{component_class!r}: {owners} demand "
-                f"{demanded} distinct part(s), but only {len(available)} exact {evidence} "
+                f"{demanded} distinct part(s), but only {available} exact {evidence} "
                 "MPN/symbol/footprint realization(s) exist"
             )
     return CheckResult(
         "9.42 requirement physical/interface realization",
         not bad,
-        "physical obligations and declared interfaces have exact realized evidence" if not bad else
-        f"{len(bad)} physical/interface realization contract(s) unproven",
+        "physical obligations and declared interfaces have exact realized evidence"
+        if not bad
+        else f"{len(bad)} physical/interface realization contract(s) unproven",
         bad,
     )
+
 
 # ---------- §9.21 MCU first-flash / programming path (advisory) ----------
 #
@@ -3779,12 +3889,8 @@ def _native_usb_programming_gaps(bom, mcus) -> list[str]:
                 )
             continue
         pins = info.get(part.ref) or {}
-        dm_pins = sorted(
-            num for num, pin in pins.items() if dm_fn in (pin["name"] or "").upper()
-        )
-        dp_pins = sorted(
-            num for num, pin in pins.items() if dp_fn in (pin["name"] or "").upper()
-        )
+        dm_pins = sorted(num for num, pin in pins.items() if dm_fn in (pin["name"] or "").upper())
+        dp_pins = sorted(num for num, pin in pins.items() if dp_fn in (pin["name"] or "").upper())
         if not dm_pins or not dp_pins:
             gaps.append(
                 f"{offender} ({ident}): the native USB {dm_fn}/{dp_fn} pins are "
@@ -4407,9 +4513,7 @@ def collect_validations(
             check_connectivity(
                 project_dir,
                 project_stem,
-                board_fabricated=frozenset(
-                    part.symbol for part in bom.parts if not part.assembly
-                ),
+                board_fabricated=frozenset(part.symbol for part in bom.parts if not part.assembly),
             )
         )
         results.append(check_erc(project_dir, project_stem))

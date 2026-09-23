@@ -34,6 +34,7 @@ RP2040_MINIMAL = RecipeDefinition(
             role="mcu",
             reference_prefix="U",
             value="RP2040",
+            mpn="RP2040",
             symbol="MCU_RaspberryPi:RP2040",
             footprint="Package_DFN_QFN:QFN-56-1EP_7x7mm_P0.4mm_EP3.2x3.2mm",
             sheet_role="mcu",
@@ -42,8 +43,9 @@ RP2040_MINIMAL = RecipeDefinition(
             role="flash",
             reference_prefix="U",
             value="W25Q16JVSS",
+            mpn="W25Q16JVSS",
             symbol="Memory_Flash:W25Q16JVSS",
-            footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+            footprint="Package_SO:SOIC-8_5.3x5.3mm_P1.27mm",
             sheet_role="mcu",
         ),
         Group(
