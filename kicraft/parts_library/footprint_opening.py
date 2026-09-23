@@ -104,6 +104,27 @@ def is_horizontal_terminal(footprint_name: str) -> bool:
     )
 
 
+def is_board_normal_header(footprint_name: str) -> bool:
+    """True only for header naming contracts that explicitly declare vertical.
+
+    ``PinHeader_*_Vertical`` is KiCad's stock mechanical identity. The
+    vendored ``HDR-TH_*`` family uses ``-V-`` for its vertical THT variant;
+    the frozen C492422 2x05 footprint is
+    ``HDR-TH_10P-P2.54-V-M-R2-C5-S2.54``. Both mate along board normal, not
+    through an in-plane opening. This deliberately excludes generic THT
+    connectors and all horizontal variants: absence of a direction remains
+    unverified rather than becoming evidence of vertical mating.
+    """
+    name = _bare_name(footprint_name)
+    return (
+        name.startswith("PinHeader_") and name.endswith("_Vertical")
+    ) or (
+        name.startswith("HDR-TH_") and "-V-" in name
+    )
+
+
+
+
 def _explicit_edge_marker_points(pcbnew_mod: Any, fp) -> list[tuple[float, float]]:
     """Board-coords positions of every ``'PCB Edge'``/``'Board Edge'`` fp text
     on Dwgs.User (the footprint author's declared board-edge line)."""
@@ -194,10 +215,10 @@ def annotate_connector_opening(
     fp.Add(text)
     return True
 
-
 __all__ = [
     "annotate_connector_opening",
     "explicit_edge_marker_direction",
     "is_horizontal_terminal",
+    "is_board_normal_header",
     "reviewed_connector_opening",
 ]

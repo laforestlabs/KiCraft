@@ -1449,15 +1449,12 @@ def _stamp_trivial_leaf(
     if not source_pcb.exists():
         source_pcb = Path(extraction.subcircuit.schematic_path).with_suffix(".kicad_pcb")
     if not source_pcb.exists():
-        # Without a source board we can't stamp; degrade to the original
-        # behaviour (no PCB on disk, validation accepted because there's
-        # nothing to fail). pin_best_leaves will report "no-snapshots"
-        # like before, which is honest in this configuration.
+        # No internal nets removes the need for routing, not for a real board.
         return (
             {
                 "enabled": True,
                 "skipped": True,
-                "reason": "no_internal_nets",
+                "reason": "missing_source_board",
                 "router": "kicad-routing-tools",
                 "traces": 0,
                 "vias": 0,
@@ -1467,14 +1464,11 @@ def _stamp_trivial_leaf(
                 "_trace_segments": [],
                 "_via_objects": [],
                 "validation": {
-                    "accepted": True,
-                    "reason": "no_internal_nets",
+                    "accepted": False,
+                    "reason": "missing_source_board",
                     "board_exists": False,
-                    "shorts": 0,
-                    "clearance_violations": 0,
-                    "track_summary": {"traces": 0, "vias": 0},
                 },
-                "failed": False,
+                "failed": True,
             },
             route_timing,
         )
@@ -1522,8 +1516,25 @@ def _stamp_trivial_leaf(
     )
     route_timing["stamp_pre_route_board_s"] = round(max(0.0, time.monotonic() - stamp_start), 3)
 
-    # No the autorouter to run; the placed board IS the routed board.
+    from kicraft.autoplacer.kicad_routing_tools import _propagate_sibling_project_rules
+
+    # No autorouter is needed, but unrouted copper still has to pass real DRC.
+    _propagate_sibling_project_rules(str(source_pcb), str(pre_route_board))
     shutil.copy2(pre_route_board, routed_board)
+    _propagate_sibling_project_rules(str(pre_route_board), str(routed_board))
+    validation_start = time.monotonic()
+    validation = validate_routed_board(
+        str(routed_board),
+        cfg=cfg,
+        expected_anchor_names=[port.name for port in extraction.interface_ports],
+        actual_anchor_names=[port.name for port in extraction.interface_ports],
+        required_anchor_names=[port.name for port in extraction.interface_ports if port.required],
+        timeout_s=int(cfg.get("subcircuit_validation_timeout_s", 30)),
+    )
+    validation["interface_port_names"] = [port.name for port in extraction.interface_ports]
+    route_timing["routed_validation_s"] = round(
+        max(0.0, time.monotonic() - validation_start), 3
+    )
 
     round_board_pre_route = ""
     round_board_routed = ""
@@ -1537,6 +1548,7 @@ def _stamp_trivial_leaf(
                 continue
             dst = src_path.parent / f"{round_prefix}_{suffix}{src_path.suffix}"
             shutil.copy2(src_path, dst)
+            _propagate_sibling_project_rules(str(src_path), str(dst))
             if suffix == "leaf_placed":
                 round_board_pre_route = str(dst)
             else:
@@ -1545,20 +1557,20 @@ def _stamp_trivial_leaf(
     diagnostics_payload: dict[str, Any]
     if generate_diagnostics and render_intermediate and not fast_smoke_mode:
         try:
-            _no_drc_opts = LeafStageOpts(
+            diagnostic_opts = LeafStageOpts(
                 render_board_views=True,
-                write_drc_json=False,
-                write_drc_report=False,
-                render_drc_overlay=False,
+                write_drc_json=True,
+                write_drc_report=True,
+                render_drc_overlay=True,
             )
             diagnostics_payload = generate_leaf_diagnostic_artifacts(
                 artifact_dir=artifact_paths.artifact_dir,
                 pre_route_board=str(pre_route_board),
                 routed_board=str(routed_board),
-                pre_route_validation={"accepted": True, "reason": "no_internal_nets"},
-                routed_validation={"accepted": True, "reason": "no_internal_nets"},
-                pre_route_opts=_no_drc_opts,
-                routed_opts=_no_drc_opts,
+                pre_route_validation=validation,
+                routed_validation=validation,
+                pre_route_opts=diagnostic_opts,
+                routed_opts=diagnostic_opts,
                 build_contact_sheet=False,
                 quiet_render=fast_smoke_mode,
             )
@@ -1587,19 +1599,12 @@ def _stamp_trivial_leaf(
             "failed_internal_nets": [],
             "_trace_segments": [],
             "_via_objects": [],
-            "validation": {
-                "accepted": True,
-                "reason": "no_internal_nets",
-                "board_exists": True,
-                "shorts": 0,
-                "clearance_violations": 0,
-                "track_summary": {"traces": 0, "vias": 0},
-            },
+            "validation": validation,
             "render_diagnostics": diagnostics_payload,
             "leaf_legality_repair": copy.deepcopy(legality_repair),
             "routed_board_path": str(routed_board),
             "leaf_placed_board": str(pre_route_board),
-            "failed": False,
+            "failed": not bool(validation.get("accepted", False)),
         },
         route_timing,
     )

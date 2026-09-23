@@ -200,6 +200,7 @@ def serialize_component(component: Component) -> dict[str, Any]:
             if component.opening_direction is not None
             else None
         ),
+        "mating_axis": component.mating_axis,
         "pads": [
             {
                 "ref": pad.ref,

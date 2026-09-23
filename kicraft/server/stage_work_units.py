@@ -632,6 +632,22 @@ def _bundled_reviewed_record(group: BomComponentGroup):
     return reviewed_part(mpn) if mpn else None
 
 
+def _group_matches_requirement_identity(group: BomComponentGroup, requirement: dict) -> bool:
+    """Match a reviewed exact_part through its complete physical record."""
+    from kicraft.design.part_identity import physical_inventory_record, reviewed_part
+
+    exact_part = str(requirement.get("exact_part") or "").strip()
+    exact_reviewed = reviewed_part(exact_part) if exact_part else None
+    if exact_reviewed is None:
+        return _requirement_owns_protected_group(group, (requirement,))
+    record = physical_inventory_record(
+        mpn=group.mpn,
+        symbol=group.symbol,
+        footprint=group.footprint,
+    ) or _bundled_reviewed_record(group)
+    return record is not None and record.identity == exact_reviewed.identity
+
+
 def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
     """Whether one BOM group implements a demanded physical class.
 
@@ -649,11 +665,11 @@ def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
     )
 
     if not has_reviewed_coverage(feature):
-        return resolved_part_evidence(
-            mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
-        )
+        return resolved_part_evidence(mpn=group.mpn, symbol=group.symbol, footprint=group.footprint)
     reviewed = physical_inventory_record(
-        mpn=group.mpn, symbol=group.symbol, footprint=group.footprint,
+        mpn=group.mpn,
+        symbol=group.symbol,
+        footprint=group.footprint,
     )
     if reviewed is None:
         reviewed = _bundled_reviewed_record(group)
@@ -681,7 +697,7 @@ def _group_implements_controller(group: BomComponentGroup, requirement: dict) ->
     if _identity_token(requirement.get("family")) == "pdtriggercontroller":
         requirement = {**requirement, "family": "usb-pd-trigger"}
     # A label or substitution rationale is not evidence of controller identity.
-    if _requirement_owns_protected_group(group.model_copy(update={"id": ""}), (requirement,)):
+    if _group_matches_requirement_identity(group.model_copy(update={"id": ""}), requirement):
         return True
     if requirement.get("exact_part"):
         return False
@@ -1206,7 +1222,11 @@ def _normalize_curated_group_identities(
                 ),
                 None,
             )
-        if loaded is None and not group.mpn and original_symbol.lower().startswith("potentiometer:"):
+        if (
+            loaded is None
+            and not group.mpn
+            and original_symbol.lower().startswith("potentiometer:")
+        ):
             loaded = by_name.get("trim-pot-3296w-10k")
         identity_text = " ".join(
             str(value or "") for value in (group.id, group.value, group.symbol, group.footprint)
@@ -1288,12 +1308,10 @@ def _normalize_bom_optional_metadata(raw_group: object) -> object:
             # `mpn` is the manufacturer part number, or null. Models frequently
             # put a value description here ("47uH power inductor"), which the
             # §9.26 sourcing gate then rejects as a non-orderable MPN and turns
-            # into a hard unit failure. A real MPN never contains whitespace, so
-            # drop one and let the part resolve by symbol/footprint/value (the
-            # same outcome as the gate's own "drop the MPN" repair guidance).
-            if value.strip().lower() == str(group.get("value") or "").strip().lower() or re.search(
-                r"\s", value.strip()
-            ):
+            # into a hard unit failure. A real order code may equal the value
+            # (for example, a connector's printed MPN), so equality is not
+            # descriptive evidence; whitespace is.
+            if re.search(r"\s", value.strip()):
                 group[field] = None
     return group
 
@@ -1417,9 +1435,63 @@ def _validate_bom_unit_sourcing(
     return validated, defects
 
 
-def _requirement_obligation_defects(requirements, groups: list[BomComponentGroup]) -> dict:
-    """Check physical obligations and claimed pins against implementing hardware."""
+def _compiler_lowerer_matches(group: BomComponentGroup, requirements) -> list[tuple[dict, object]]:
+    """Return compiler-produced lowerer artifacts exactly matching ``group``.
+
+    The candidate has no authority to name provenance.  Equality against an
+    artifact independently regenerated from the committed requirement is the
+    only bridge from a model group to lowerer ownership.
+    """
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.models import CircuitRequirement
+
+    matches: list[tuple[dict, object]] = []
+    for requirement in requirements:
+        try:
+            artifact = lower_requirement(CircuitRequirement.model_validate(requirement))
+        except (TypeError, ValueError):
+            continue
+        if artifact is None:
+            continue
+        if any(
+            candidate.reference_prefix == group.reference_prefix
+            and candidate.quantity == group.quantity
+            and candidate.value == group.value
+            and candidate.symbol == group.symbol
+            and candidate.footprint == group.footprint
+            and candidate.mpn == group.mpn
+            and str(requirement.get("sheet")) == group.sheet
+            for candidate in artifact.groups
+        ):
+            matches.append((requirement, artifact))
+    return matches
+
+
+def _requirement_obligation_defects(
+    requirements,
+    groups: list[BomComponentGroup],
+    *,
+    trusted_lowerer_id: str | None = None,
+    trusted_requirement_id: str | None = None,
+    compiler_requirements=(),
+) -> dict:
+    """Check physical obligations and claimed pins against implementing hardware.
+
+    A lowerer witness applies only to the exact requirement it compiled and only
+    to a registered physical class.  Model payload provenance is never supplied
+    here: callers derive these arguments from an artifact-equal candidate.
+    """
     from kicraft.design.synthesis.symbol_pinout import lookup_pins
+    from kicraft.design.part_identity import lowerer_witnesses_physical_class
+
+    def lowerer_witnesses(requirement: dict, obligation: dict) -> bool:
+        return (
+            trusted_lowerer_id is not None
+            and trusted_requirement_id == str(requirement.get("id"))
+            and lowerer_witnesses_physical_class(
+                trusted_lowerer_id, str(obligation.get("component_class") or "")
+            )
+        )
 
     defects = {"physical-obligation-unfulfilled": [], "declared-interface-unrealized": []}
     consumed: dict[str, int] = {}
@@ -1444,7 +1516,8 @@ def _requirement_obligation_defects(requirements, groups: list[BomComponentGroup
             actual = sum(
                 group.quantity for group in groups if _group_has_physical_feature(group, feature)
             ) - consumed.get(feature, 0)
-            if actual < minimum:
+            witnessed = minimum == 1 and lowerer_witnesses(requirement, obligation)
+            if actual < minimum and not witnessed:
                 # Name the groups the unit emitted, with the identity each one resolved to: the
                 # repair (and the next diagnosis) needs to tell "the draft picked an unreviewed
                 # part" from "the draft emitted no part at all".
@@ -1466,9 +1539,21 @@ def _requirement_obligation_defects(requirements, groups: list[BomComponentGroup
         if not claim:
             continue
         owners = [
-            group for group in groups
-            if _requirement_owns_protected_group(group.model_copy(update={"id": ""}), (requirement,))
+            group
+            for group in groups
+            if _group_matches_requirement_identity(group.model_copy(update={"id": ""}), requirement)
         ]
+        declared_nets = {str(net) for net in (requirement.get("ports") or {}).values() if str(net)}
+        for group in groups:
+            if group in owners:
+                continue
+            if any(
+                declared_nets and declared_nets <= {str(pin.net) for pin in artifact.pins}
+                for _owner_requirement, artifact in _compiler_lowerer_matches(
+                    group, compiler_requirements
+                )
+            ):
+                owners.append(group)
         # One owning hardware family per declared interface.  A bank of identical
         # instances (four relays, sixteen servo headers) is a single owned family:
         # every instance carries the same symbol, so the claimed port-to-pin map
@@ -1535,7 +1620,9 @@ def _validate_bom_unit(
     payload: dict,
     prompt_state: dict,
     extras: dict,
-) -> dict:
+    *,
+    _allow_deterministic_fallback: bool = True,
+):
     from kicraft.design.synthesis.validation import _resistance_ohms
 
     groups = _normalize_curated_group_identities(
@@ -1545,25 +1632,34 @@ def _validate_bom_unit(
         ]
     )
     assumptions = [str(value) for value in payload.get("assumptions") or []]
-    used_deterministic_candidate = payload.get("_trusted_deterministic_candidate") is True
+    deterministic = deterministic_bom_candidate(unit, prompt_state)
+    deterministic_groups = (
+        _normalize_curated_group_identities(
+            [
+                BomComponentGroup.model_validate(_normalize_bom_optional_metadata(group))
+                for group in deterministic["groups"]
+            ]
+        )
+        if deterministic is not None
+        else []
+    )
+    # Provenance is compiler-owned.  A model's private JSON keys cannot claim it;
+    # at most an exact copy of the independently generated artifact earns the
+    # artifact's evidence.
+    used_deterministic_candidate = deterministic is not None and groups == deterministic_groups
     deterministic_arrays: list[dict] = []
-    lowering_metadata = {
-        key: value
-        for key, value in payload.items()
-        if str(key).startswith("_") and key != "_trusted_deterministic_candidate"
-    }
-    if not groups:
-        deterministic = deterministic_bom_candidate(unit, prompt_state)
-        if deterministic is not None:
-            groups = [BomComponentGroup.model_validate(group) for group in deterministic["groups"]]
-            used_deterministic_candidate = True
-            assumptions.extend(str(value) for value in deterministic.get("assumptions") or [])
-            lowering_metadata = {
-                key: value
-                for key, value in deterministic.items()
-                if key.startswith("_") and key != "_trusted_deterministic_candidate"
-            }
-            deterministic_arrays = list(deterministic.get("arrays") or [])
+    lowering_metadata: dict[str, object] = {}
+    if not groups and deterministic is not None:
+        groups = deterministic_groups
+        used_deterministic_candidate = True
+        assumptions.extend(str(value) for value in deterministic.get("assumptions") or [])
+        deterministic_arrays = list(deterministic.get("arrays") or [])
+    if used_deterministic_candidate and deterministic is not None:
+        lowering_metadata = {
+            key: value
+            for key, value in deterministic.items()
+            if key.startswith("_") and key != "_trusted_deterministic_candidate"
+        }
     arrays = [BomArrayGroup.model_validate(array) for array in (payload.get("arrays") or [])]
     # A lowerer declares the pattern its own group is placed on (the pad field's
     # 2.54 mm grid) as part of the artifact. One array per group is the BOM
@@ -1679,7 +1775,10 @@ def _validate_bom_unit(
         if (
             protected_identity_matches(group.id, group.symbol, group.value, group.mpn)
             and not used_deterministic_candidate
-            and not _requirement_owns_protected_group(group, unit_requirements)
+            and not any(
+                _group_matches_requirement_identity(group, row) for row in unit_requirements
+            )
+            and not _compiler_lowerer_matches(group, architecture_requirements)
         )
         # A trusted pipeline candidate *is* this unit's implementation, so a
         # group that merely carries a sibling requirement's physical feature is
@@ -1690,8 +1789,7 @@ def _validate_bom_unit(
         or (
             not used_deterministic_candidate
             and any(
-                _group_has_physical_feature(group, feature)
-                for feature in sibling_physical_features
+                _group_has_physical_feature(group, feature) for feature in sibling_physical_features
             )
         )
     ]
@@ -1717,7 +1815,7 @@ def _validate_bom_unit(
                 (feature := _required_physical_feature(row)) is not None
                 and _group_has_physical_feature(group, feature)
             )
-            or _requirement_owns_protected_group(group.model_copy(update={"id": ""}), (row,))
+            or _group_matches_requirement_identity(group.model_copy(update={"id": ""}), row)
             for group in retained_groups
         )
         for row in unit_requirements
@@ -1777,7 +1875,7 @@ def _validate_bom_unit(
             or (
                 row.get("exact_part")
                 and lowering_metadata.get("_lowering_requirement_id") != row["id"]
-                and not any(_requirement_owns_protected_group(group, (row,)) for group in groups)
+                and not any(_group_matches_requirement_identity(group, row) for group in groups)
             )
         ],
         "empty-sheet": (
@@ -1786,7 +1884,24 @@ def _validate_bom_unit(
             else []
         ),
     }
-    defects.update(_requirement_obligation_defects(unit_requirements, groups))
+    defects.update(
+        _requirement_obligation_defects(
+            unit_requirements,
+            groups,
+            trusted_lowerer_id=(
+                str(lowering_metadata["_lowerer_id"])
+                if used_deterministic_candidate and lowering_metadata.get("_lowerer_id")
+                else None
+            ),
+            trusted_requirement_id=(
+                str(lowering_metadata["_lowering_requirement_id"])
+                if used_deterministic_candidate
+                and lowering_metadata.get("_lowering_requirement_id")
+                else None
+            ),
+            compiler_requirements=architecture_requirements,
+        )
+    )
     project_root = extras.get("_validation_project_root")
     if project_root:
         root = Path(str(project_root))
@@ -1800,14 +1915,15 @@ def _validate_bom_unit(
         # model's attempt is defective and a deterministic candidate exists,
         # determinism wins: adopt the lowered groups instead of burning repair
         # turns (or failing the stage) on a part the pipeline can build itself.
-        if not used_deterministic_candidate:
+        if not used_deterministic_candidate and _allow_deterministic_fallback:
             deterministic = deterministic_bom_candidate(unit, prompt_state)
             if deterministic is not None:
                 return _validate_bom_unit(
                     unit,
-                    {**deterministic, "_trusted_deterministic_candidate": True},
+                    deterministic,
                     prompt_state,
                     extras,
+                    _allow_deterministic_fallback=False,
                 )
         raise WorkUnitValidationError(unit.unit_id, defects)
     return {

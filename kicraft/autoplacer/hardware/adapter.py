@@ -398,6 +398,26 @@ def detect_opening_direction(fp) -> float | None:
     return (opening_board + rotation) % 360
 
 
+def connector_mating_evidence(fp) -> tuple[str, float | None]:
+    """Return the footprint's mating axis and any verified in-plane mouth.
+
+    Vertical headers are classified from their reviewed mechanical naming
+    contract before any 2D body-asymmetry heuristic runs. Every other footprint
+    needs an actual opening datum; `None` is deliberately ``unknown``, never
+    implicit evidence that it mates from above.
+    """
+    from kicraft.parts_library.footprint_opening import is_board_normal_header
+
+    if is_board_normal_header(_footprint_item_name(fp)):
+        return "board_normal", None
+    opening_direction = detect_opening_direction(fp)
+    return (
+        ("in_plane", opening_direction)
+        if opening_direction is not None
+        else ("unknown", None)
+    )
+
+
 
 
 
@@ -512,17 +532,19 @@ class KiCadAdapter:
                 if _layer_override.get(ref) == "back"
                 else _layer_to_enum(fp.GetLayer())
             )
-            # Mouth detection runs for connectors AND for anything the BOM
-            # zoned to an edge: the facings fab gate checks every edge-zoned
-            # ref prefix-blind, so an edge-zoned slide switch (SW1, kind
-            # "misc") whose opening stayed None here was oriented by the
-            # aspect-ratio fallback -- a coin flip the gate then honestly
-            # rejected (self-eval 2026-07-20 run_05 usb-pd-trigger).
+            # Mating evidence runs for connectors and for anything explicitly
+            # zoned to an edge. The same field is serialized into leaf artifacts
+            # for compose's pre-route gate.
             _zone_edge = (
                 (self.cfg.get("component_zones") or {}).get(ref) or {}
             ).get("edge")
-            _wants_mouth = kind == "connector" or _zone_edge in (
+            _wants_mating_evidence = kind == "connector" or _zone_edge in (
                 "left", "right", "top", "bottom"
+            )
+            mating_axis, opening_direction = (
+                connector_mating_evidence(fp)
+                if _wants_mating_evidence
+                else ("unknown", None)
             )
             comp = Component(
                 ref=ref,
@@ -537,9 +559,8 @@ class KiCadAdapter:
                 kind=kind,
                 is_through_hole=has_pth,
                 body_center=body_ctr,
-                opening_direction=(
-                    detect_opening_direction(fp) if _wants_mouth else None
-                ),
+                opening_direction=opening_direction,
+                mating_axis=mating_axis,
             )
 
             for pad in fp.Pads():

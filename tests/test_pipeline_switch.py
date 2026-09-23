@@ -3,9 +3,13 @@
 A swap between the two design pipelines must be visible everywhere it matters, and the
 dispatch must be readable from the durable config without a restart.
 """
+
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -43,7 +47,7 @@ def test_apply_overlays_the_pipeline_on_settings():
 
 
 def test_workspace_marker_is_what_the_build_reads(tmp_path):
-    """A legacy design builds with the legacy interpreter even if the switch moved back.
+    """A native design keeps its backend even if the configured default changes.
 
     The marker is written when the design is dispatched, so a workspace's pipeline is a
     property of the workspace, not of the config at build time.
@@ -54,26 +58,6 @@ def test_workspace_marker_is_what_the_build_reads(tmp_path):
     assert pipeline.read_marker(ws) == "legacy"
     marker = json.loads((ws / ".kicraft" / "pipeline.json").read_text())
     assert marker["legacy_commit"] == pipeline.LEGACY_COMMIT
-
-
-def test_build_command_substitutes_only_the_interpreter(tmp_path):
-    base = ["/usr/bin/python3", "-m", "kicraft.design.cli_app", "build", ".kicraft/state.json"]
-    assert pipeline.build_command(base, "current") == base
-    swapped = pipeline.build_command(base, "legacy")
-    assert swapped[0] == pipeline.legacy_build_python()
-    assert swapped[1:] == base[1:]  # the argv contract is the same in both trees
-
-
-def test_provenance_fields_name_the_pinned_commit():
-    current = pipeline.provenance_fields("current")
-    assert current == {
-        "pipeline": "current",
-        "pipeline_legacy_commit": None,
-        "pipeline_label": "current pipeline",
-    }
-    legacy = pipeline.provenance_fields("legacy")
-    assert legacy["pipeline"] == "legacy"
-    assert legacy["pipeline_legacy_commit"] == pipeline.LEGACY_COMMIT
 
 
 def test_project_row_records_the_pipeline(tmp_path):
@@ -115,39 +99,25 @@ def test_existing_database_gains_the_pipeline_column(tmp_path):
     assert store.get_project(7).pipeline == "legacy"
 
 
-def test_legacy_dispatch_uses_the_legacy_tree_and_its_environment(monkeypatch, tmp_path):
-    """The design subprocess runs the legacy driver with the measured provider overrides.
+def test_current_reconcile_never_starts_a_second_legacy_budget(tmp_path):
+    """An exhausted legacy repair park remains a user-visible park, not a new run."""
+    from kicraft.server import session as session_mod
 
-    The legacy tree's defaults cap the price below the current model and route to providers
-    that do not serve it, so every call failed in under a second at zero cost until these were
-    set per process (handoff §6.3). Without them the switch looks like it works and spends
-    nothing.
-    """
-    seen: dict = {}
-
-    class _Completed:
-        returncode = 1
-        stdout = "out"
-        stderr = "err"
-
-    def fake_run(command, **kwargs):
-        seen["command"] = command
-        seen["env"] = kwargs["env"]
-        seen["cwd"] = kwargs["cwd"]
-        return _Completed()
-
-    monkeypatch.setattr(pipeline.subprocess, "run", fake_run)
-    rc, out, err = pipeline.run_legacy_design(
-        tmp_path, "a brief", ("intent", "functional_spec"), budget_usd=0.25
-    )
-    assert (rc, out, err) == (1, "out", "err")
-    assert seen["command"][1:4] == ["-m", "kicraft.server.stage_driver", "run"]
-    assert "--no-build" in seen["command"]
-    for key, value in pipeline.LEGACY_ENV.items():
-        assert seen["env"][key] == value
-    # The legacy package must win over this checkout's editable install.
-    assert seen["env"]["PYTHONPATH"] == str(pipeline.legacy_root())
-    assert seen["cwd"] == str(pipeline.legacy_root())
+    pipeline.write_marker(tmp_path, pipeline.PIPELINE_LEGACY)
+    res = {
+        "status": "awaiting_input",
+        "last_stage": "wiring",
+        "questions": [
+            {
+                "text": "Add a 1uF capacitor for U1.",
+                "blocking": True,
+                "reconcile_target": "bom",
+            }
+        ],
+    }
+    repaired, passes = session_mod.maybe_bom_reconcile(tmp_path, "a brief", res, reconcile_passes=0)
+    assert repaired is res
+    assert passes == 0
 
 
 def test_selected_falls_back_to_current_when_the_legacy_tree_is_missing(monkeypatch, tmp_path):
@@ -171,7 +141,11 @@ def test_pipeline_is_named_in_the_report_and_the_scorecard(tmp_path):
 
 
 def test_promote_provenance_carries_the_pipeline(tmp_path):
-    from kicraft.cli.artifact_paths import provenance_path, read_provenance, write_promote_provenance
+    from kicraft.cli.artifact_paths import (
+        provenance_path,
+        read_provenance,
+        write_promote_provenance,
+    )
 
     pcb = tmp_path / "BOARD.kicad_pcb"
     pcb.write_text("(kicad_pcb)")
@@ -193,63 +167,137 @@ def test_promote_provenance_carries_the_pipeline(tmp_path):
     assert provenance_path(pcb).is_file()
 
 
-def test_current_tree_never_owns_a_legacy_workspace_tail(tmp_path):
-    """B1: the current tree may not write a legacy workspace's state (measured 2026-09-21).
-
-    A legacy design committed, then the current tree's post-wiring lifecycle re-serialized
-    state.json through the current models (adding `assembly`, `recipe_id`, `resolution_*`,
-    `lowering_*`), and the legacy build then rejected its own file with 171 schema errors. The
-    decision the web worker makes before running its tail is therefore pipeline-aware.
-    """
-    ws = tmp_path / "ws"
-    pipeline.write_marker(ws, pipeline.PIPELINE_CURRENT)
-    assert pipeline.current_tree_owns_tail(ws) is True
-    pipeline.write_marker(ws, pipeline.PIPELINE_LEGACY)
-    assert pipeline.current_tree_owns_tail(ws) is False
-
-
-def test_parked_legacy_run_surfaces_its_question(monkeypatch, tmp_path):
-    """B2: a legacy park is a question for the user, not a failure.
-
-    Projects 876 and 877 (2026-09-21) committed every design stage and then parked in wiring
-    on a programming-header question; the dispatch reported `failed`, so the question never
-    reached the user. The park is translated from the workspace's own open_questions.
-    """
-    import json
-
+def test_parked_legacy_run_surfaces_its_native_question(monkeypatch, tmp_path):
+    """A genuine legacy ambiguity is surfaced from its protocol result."""
     from kicraft.server import session as session_mod
 
-    ws = tmp_path / "ws"
-    (ws / ".kicraft").mkdir(parents=True)
+    native = {
+        "status": "awaiting_input",
+        "results": [{"stage": "wiring", "commit_ok": False, "needs_input": True}],
+        "guard": {"spent_total_usd": 0.02},
+        "questions": [
+            {
+                "stage": "wiring",
+                "text": "Add a 1x05 SWD programming header, then re-run wiring.",
+                "blocking": True,
+                "options": [],
+                "answer": None,
+            }
+        ],
+        "last_stage": "wiring",
+    }
 
-    answered: dict = {"value": None}
-
-    def fake_run(ws_, brief, stages, *, budget_usd, **kw):
-        # Like the real park: the stages before wiring committed; wiring itself did not.
-        state = {
-            "stage_status": {s: {"ok": True} for s in stages[:-1]},
-            "open_questions": [
-                {
-                    "stage": "wiring",
-                    "text": "Add a 1x05 SWD programming header, then re-run wiring.",
-                    "blocking": True,
-                    "options": [],
-                    "answer": answered["value"],
-                }
-            ],
-        }
-        (ws_ / ".kicraft" / "state.json").write_text(json.dumps(state))
-        return 1, "parked: awaiting input", ""
+    def fake_run(*args, **kwargs):
+        return (
+            1,
+            pipeline._LEGACY_SESSION_RESULT_PREFIX
+            + json.dumps({"result": native, "reconcile_passes": 0}),
+            "",
+        )
 
     monkeypatch.setattr(session_mod.pipeline_dispatch, "run_legacy_design", fake_run)
-    out = session_mod._run_legacy_session(ws, "a brief", ["intent", "bom", "wiring"])
+    out = session_mod._run_legacy_session(tmp_path, "a brief", ["intent", "bom", "wiring"])
     assert out["status"] == "awaiting_input"
     assert out["last_stage"] == "wiring"
     assert "SWD programming header" in out["questions"][0]["text"]
 
-    # The same workspace with the question answered keeps the ordinary failure mapping: the
-    # driver still exited nonzero (nothing left to commit), and no question is pending.
-    answered["value"] = "done"
-    out = session_mod._run_legacy_session(ws, "a brief", ["intent", "bom", "wiring"])
+
+@pytest.mark.parametrize(
+    "stdout",
+    ["legacy runner crashed", pipeline._LEGACY_SESSION_RESULT_PREFIX + "{not-json"],
+)
+def test_missing_or_malformed_legacy_result_fails_closed(monkeypatch, tmp_path, stdout):
+    """Stale state must never become a result when the subprocess protocol breaks."""
+    from kicraft.server import session as session_mod
+
+    def fake_run(*args, **kwargs):
+        return 0, stdout, ""
+
+    monkeypatch.setattr(session_mod.pipeline_dispatch, "run_legacy_design", fake_run)
+    out = session_mod._run_legacy_session(tmp_path, "a brief", ["wiring"])
     assert out["status"] == "failed"
+    assert out["failure_kind"] == "legacy_protocol_error"
     assert out["questions"] is None
+
+
+def test_nonzero_legacy_exit_cannot_report_success(monkeypatch, tmp_path):
+    """A contradictory successful packet is a process-boundary failure."""
+    from kicraft.server import session as session_mod
+
+    def fake_run(*args, **kwargs):
+        return (
+            1,
+            pipeline._LEGACY_SESSION_RESULT_PREFIX
+            + json.dumps({"result": {"status": "ok"}, "reconcile_passes": 0}),
+            "",
+        )
+
+    monkeypatch.setattr(session_mod.pipeline_dispatch, "run_legacy_design", fake_run)
+    out = session_mod._run_legacy_session(tmp_path, "a brief", ["wiring"])
+    assert out["status"] == "failed"
+    assert out["failure_kind"] == "legacy_protocol_error"
+
+
+def test_native_events_stream_before_exit(monkeypatch, tmp_path):
+    release = tmp_path / "release"
+    runner = tmp_path / "runner.py"
+    runner.write_text(
+        "import json, sys, time\n"
+        "from pathlib import Path\n"
+        "request = json.load(sys.stdin)\n"
+        "print('diagnostic', flush=True)\n"
+        "sys.stderr.write('x' * 200000); sys.stderr.flush()\n"
+        "print('__KICRAFT_LEGACY_EVENT__={\"kind\":\"stage_start\",\"stage\":\"spec\"}', flush=True)\n"
+        f"while not Path({str(release)!r}).exists(): time.sleep(.01)\n"
+        "print('__KICRAFT_LEGACY_EVENT__={\"kind\":\"stage_done\",\"stage\":\"spec\"}', flush=True)\n"
+        "print('__KICRAFT_LEGACY_SESSION_RESULT__={\"result\":{\"status\":\"ok\"}}')\n"
+    )
+    monkeypatch.setattr(pipeline, "legacy_root", lambda: tmp_path)
+    monkeypatch.setattr(pipeline, "legacy_python", lambda root: sys.executable)
+    monkeypatch.setattr(pipeline, "_legacy_session_runner", lambda: runner)
+    events = []
+
+    def progress(event):
+        events.append(event["kind"])
+        if event["kind"] == "stage_start":
+            assert not release.exists()
+            release.touch()
+
+    rc, stdout, stderr = pipeline.run_legacy_design(
+        tmp_path, "brief", ["spec"], budget_usd=.1, progress=progress, timeout_s=5,
+    )
+    assert events == ["stage_start", "stage_done"]
+    assert rc == 0
+    assert stdout.startswith("diagnostic\n")
+    assert "__KICRAFT_LEGACY_EVENT__" not in stdout
+    assert pipeline.legacy_session_result(stdout)["result"]["status"] == "ok"
+    assert stderr == "x" * 200000
+
+
+@pytest.mark.parametrize("mode", ["malformed", "silent", "callback"])
+def test_native_bridge_reaps_failed_children(monkeypatch, tmp_path, mode):
+    pid_file = tmp_path / "pid"
+    runner = tmp_path / "runner.py"
+    event = '[]' if mode == "malformed" else '{"kind":"stage_start"}'
+    runner.write_text(
+        "import json, os, sys, time\n"
+        "from pathlib import Path\n"
+        "json.load(sys.stdin)\n"
+        f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+        + (f"print('__KICRAFT_LEGACY_EVENT__=' + {event!r}, flush=True)\n" if mode != "silent" else "")
+        + "time.sleep(30)\n"
+    )
+    monkeypatch.setattr(pipeline, "legacy_root", lambda: tmp_path)
+    monkeypatch.setattr(pipeline, "legacy_python", lambda root: sys.executable)
+    monkeypatch.setattr(pipeline, "_legacy_session_runner", lambda: runner)
+
+    def progress(event):
+        raise RuntimeError("callback failed")
+
+    expected = {"malformed": ValueError, "silent": subprocess.TimeoutExpired, "callback": RuntimeError}[mode]
+    with pytest.raises(expected):
+        pipeline.run_legacy_design(
+            tmp_path, "brief", ["spec"], budget_usd=.1, timeout_s=.3, progress=progress,
+        )
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)

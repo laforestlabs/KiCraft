@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from math import atan2, hypot
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 if TYPE_CHECKING:
     from .subcircuit_composer import LeafBlockerSet
@@ -160,6 +160,10 @@ class Component:
     is_through_hole: bool = False  # True if footprint has PTH pads
     body_center: Point | None = None  # courtyard/body bbox center (absolute coords)
     opening_direction: float | None = None  # LOCAL-frame angle (0/90/180/270) where opening faces
+    # Board-normal connectors mate along Z and therefore have no in-plane
+    # mouth to align to an Edge.Cuts side. This is extraction evidence, not a
+    # geometric guess: unknown stays fail-closed at every orientation gate.
+    mating_axis: Literal["board_normal", "in_plane", "unknown"] = "unknown"
     block_blocker_set: LeafBlockerSet | None = None
     block_artifact_origin_offset: Point | None = None
     block_side: str | None = None

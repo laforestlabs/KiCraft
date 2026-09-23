@@ -255,9 +255,11 @@ def test_replay_pins_deterministic_env(tmp_path, monkeypatch):
 def test_replay_detects_synthesis_mutation(tmp_path, monkeypatch):
     """If anything rewrites the root schematic during a replay, the run fails
     loudly (rc 8) -- the no-synthesis invariant must hold."""
+    from kicraft import build_slots
+
     d = _stub_workspace(tmp_path)
     monkeypatch.setattr(cli_app, "_degenerate_hierarchy_error", lambda root: None)
-    monkeypatch.setattr("kicraft.build_slots.build_slot", lambda **k: contextlib.nullcontext())
+    monkeypatch.setattr(build_slots, "build_slot", lambda **k: contextlib.nullcontext())
 
     def mutating(args, state, sp, arts, results, stem, pdir, root, pcb):
         root.write_text("(kicad_sch root) MUTATED\n", encoding="utf-8")

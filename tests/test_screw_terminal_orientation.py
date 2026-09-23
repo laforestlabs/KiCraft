@@ -189,19 +189,18 @@ def test_facing_skips_battery_holder_refs(tmp_path):
     assert connector_edge_gaps(str(pcb), zones) == []
 
 
-def test_facing_omits_bare_vertical_header_strip(tmp_path):
-    # A vertical 1xN pin-header strip mates from above -- it has no mouth to
-    # verify, and the docstring promises it is OMITTED. Its mouth bbox
-    # (courtyard + pads) measures 3.63 mm, so the old 3.0 mm cut fired the
-    # unverifiable warning on every edge-zoned strip (17 per servo board).
+def test_facing_omits_verified_vertical_header_strip(tmp_path):
+    """A named vertical header mates along Z despite having no edge mouth."""
     from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
+    from kicraft.autoplacer.hardware.adapter import connector_mating_evidence
 
     lib = Path("/usr/share/kicad/footprints/Connector_PinHeader_2.54mm.pretty")
     if not lib.is_dir():
         pytest.skip("stock KiCad footprints not installed")
-    fp = pcbnew_mod = pytest.importorskip("pcbnew")
-    fp = pcbnew_mod.FootprintLoad(str(lib), "PinHeader_1x03_P2.54mm_Vertical")
+    pcbnew_mod = pytest.importorskip("pcbnew")
+    fp = pcbnew_mod.FootprintLoad(str(lib), "PinHeader_2x05_P2.54mm_Vertical")
     assert fp is not None
+    assert connector_mating_evidence(fp) == ("board_normal", None)
     board = pcbnew_mod.CreateEmptyBoard()
     fp.SetReference("J9")
     fp.SetPosition(pcbnew_mod.VECTOR2I(pcbnew_mod.FromMM(168), pcbnew_mod.FromMM(100)))
@@ -212,19 +211,18 @@ def test_facing_omits_bare_vertical_header_strip(tmp_path):
     rect.SetEnd(pcbnew_mod.VECTOR2I(pcbnew_mod.FromMM(170), pcbnew_mod.FromMM(110)))
     rect.SetLayer(pcbnew_mod.Edge_Cuts)
     board.Add(rect)
-    out = tmp_path / "strip.kicad_pcb"
+    out = tmp_path / "vertical_header.kicad_pcb"
     pcbnew_mod.SaveBoard(str(out), board)
     assert connector_facings(str(out), {"J9": {"edge": "right"}}) == []
 
 
-def test_facing_surfaces_undetectable_mouth(tmp_path):
-    # The pre-fix footprint (no marker): the gate must SAY it cannot verify,
-    # not silently skip -- that silence is how KC-YJ7Q69 shipped.
+def test_facing_blocks_unknown_mouth(tmp_path):
+    # No vertical identity and no mouth datum must block rather than disappear.
     from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
 
     pcb = _make_board(tmp_path, rotation=0.0, strip_marker=True)
     (v,) = connector_facings(str(pcb), ZONES)
-    assert v.status == "unknown_mouth"
+    assert v.status == "unverified_directional"
 
 
 def test_fab_gate_blocks_misoriented_connector(tmp_path):
@@ -239,7 +237,7 @@ def test_fab_gate_blocks_misoriented_connector(tmp_path):
     assert warnings == []
 
 
-def test_fab_gate_warns_on_unverifiable_connector(tmp_path):
+def test_fab_gate_blocks_unverifiable_connector(tmp_path):
     from kicraft.design.cli_app import _connector_misoriented
 
     pcb = _make_board(tmp_path, rotation=0.0, strip_marker=True)
@@ -247,8 +245,8 @@ def test_fab_gate_warns_on_unverifiable_connector(tmp_path):
         json.dumps({"component_zones": ZONES})
     )
     blocking, warnings = _connector_misoriented(pcb)
-    assert blocking == []
-    assert len(warnings) == 1 and "J2" in warnings[0]
+    assert blocking == ["connector_orientation_unmeasured:J2"]
+    assert warnings == []
 
 
 # --- Layer 0: the adapter populates the mouth for edge-zoned refs --------
@@ -588,26 +586,55 @@ def test_fab_gate_reports_measurement_failure_as_unmeasured(tmp_path, monkeypatc
     assert warnings == []
 
 
-def test_directional_edge_candidate_truth_table():
-    """The pre-routing compose gate only refuses an edge-pinned part that HAS a
-    directional body: a shallow strip or an SMD part has no mouth to verify."""
+def test_directional_edge_candidate_uses_mating_evidence():
+    """Compose accepts only verified board-normal mouthless connectors."""
     from kicraft.autoplacer.brain.types import Component, Layer, Pad, Point
     from kicraft.cli.compose_subcircuits import _directional_edge_candidate
+    from kicraft.parts_library.footprint_opening import is_board_normal_header
 
-    def _comp(*, ref, tht, w, h, opening):
+    def _comp(*, ref, opening, mating_axis):
         return Component(
             ref=ref, value="X", pos=Point(0.0, 0.0), rotation=0.0,
-            layer=Layer.FRONT, width_mm=w, height_mm=h, kind="connector",
-            is_through_hole=tht,
+            layer=Layer.FRONT, width_mm=12.7, height_mm=5.0, kind="connector",
+            is_through_hole=True,
             pads=[Pad(ref=ref, pad_id="1", pos=Point(0.0, 0.0), net="A",
                       layer=Layer.FRONT)],
             opening_direction=opening,
+            mating_axis=mating_axis,
         )
 
-    # Real stock 4P MKDS screw terminal: 13 x 10.81 mm courtyard, THT.
-    assert _directional_edge_candidate(_comp(ref="J2", tht=True, w=11.0, h=10.81, opening=None))
-    # Bare 1x03 pin-header strip: 3.63 mm deep -- not directional.
-    assert not _directional_edge_candidate(_comp(ref="J9", tht=True, w=3.63, h=8.71, opening=None))
-    # SMD part: no through-hole body.
-    assert not _directional_edge_candidate(_comp(ref="U9", tht=False, w=8.0, h=8.0, opening=None))
+    # Frozen USB J6 mechanical identity: HDR-TH plus its -V- mounting variant.
+    assert is_board_normal_header("HDR-TH_10P-P2.54-V-M-R2-C5-S2.54")
+    assert not _directional_edge_candidate(
+        _comp(ref="J6", opening=None, mating_axis="board_normal")
+    )
+    # A known horizontal connector keeps its measured mouth and is checked for
+    # outward rotation by the compose/final gates.
+    assert not _directional_edge_candidate(
+        _comp(ref="J2", opening=90.0, mating_axis="in_plane")
+    )
+    # Unknown physical identity is never treated as vertical merely because
+    # the 2D body lacks a detectable opening.
+    assert _directional_edge_candidate(
+        _comp(ref="JX", opening=None, mating_axis="unknown")
+    )
+
+
+def test_mating_axis_survives_leaf_artifact_transform():
+    """Compose must receive the same vertical evidence extraction recorded."""
+    from kicraft.autoplacer.brain.subcircuit_artifacts import serialize_component
+    from kicraft.autoplacer.brain.subcircuit_instances import (
+        _component_from_dict,
+        _transform_component,
+    )
+    from kicraft.autoplacer.brain.types import Component, Layer, Point
+
+    header = Component(
+        ref="J6", value="2x05 header", pos=Point(1.0, 2.0), rotation=0.0,
+        layer=Layer.FRONT, width_mm=12.7, height_mm=5.0, kind="connector",
+        is_through_hole=True, mating_axis="board_normal",
+    )
+    restored = _component_from_dict(serialize_component(header))
+    transformed = _transform_component(restored, Point(10.0, 20.0), 90.0)
+    assert restored.mating_axis == transformed.mating_axis == "board_normal"
 

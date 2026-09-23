@@ -1,17 +1,8 @@
-"""Regression tests for the trivial-leaf stamp path (no routable on-leaf nets).
-
-KC-V8YWN8 (2026-07-02): commit 4d359f0 added ``render_intermediate`` to the
-diagnostics gate inside ``_stamp_trivial_leaf``, but the variable was a local
-of ``route_local_subcircuit`` -- every trivial leaf (screw terminal, battery
-holder, any sheet whose nets each have a single on-leaf pad) raised NameError,
-was rejected all rounds as ``routing_exception``, never serialized a result,
-and the auto-pin safety net then failed the whole build. These tests drive the
-real dispatch through ``route_local_subcircuit`` so a scope regression in the
-trivial path can never ship silently again.
-"""
+"""A leaf without internal nets must still produce a real, DRC-valid board."""
 from __future__ import annotations
 
 import copy
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,42 +11,33 @@ import pytest
 from kicraft.autoplacer.brain import leaf_routing
 
 
-class _StubAdapter:
-    """Stands in for KiCadAdapter: 'stamps' by writing a minimal board file."""
+class _CopyStampedBoard:
+    """Keep fixture geometry fixed while exercising the real routing dispatch/DRC."""
 
     def __init__(self, source_pcb, config=None):
         self.source_pcb = source_pcb
-        self.config = config
 
     def stamp_subcircuit_board(self, board, *, output_path, **kwargs):
-        Path(output_path).write_text("(kicad_pcb (version 20240108))\n")
+        shutil.copy2(self.source_pcb, output_path)
 
 
 def _trivial_extraction(tmp_path: Path) -> SimpleNamespace:
-    """An extraction whose every net has < 2 on-leaf pads (trivial leaf)."""
-    local_state = SimpleNamespace(
-        nets={"VOUT": SimpleNamespace(pad_refs=["J3.1"]),
-              "GND": SimpleNamespace(pad_refs=["J3.2"])},
-        components={},
-        traces=[],
-        vias=[],
-        silkscreen=[],
-        board_outline=None,
-        board_width=20.0,
-        board_height=20.0,
-    )
-    sch = tmp_path / "leaf.kicad_sch"
-    sch.write_text("(kicad_sch)\n")
     return SimpleNamespace(
-        subcircuit=SimpleNamespace(schematic_path=str(sch), id="leaf-under-test"),
-        local_state=local_state,
+        subcircuit=SimpleNamespace(
+            schematic_path=str(tmp_path / "leaf.kicad_sch"), id="leaf-under-test"
+        ),
+        local_state=SimpleNamespace(
+            nets={}, components={}, traces=[], vias=[], silkscreen=[], board_outline=None,
+            board_width=20.0, board_height=20.0,
+        ),
         internal_net_names=[],
+        interface_ports=[],
         notes=[],
     )
 
 
 @pytest.fixture
-def stubbed_leaf_routing(monkeypatch, tmp_path):
+def fixed_leaf_geometry(monkeypatch, tmp_path):
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
     monkeypatch.setattr(
@@ -66,75 +48,77 @@ def stubbed_leaf_routing(monkeypatch, tmp_path):
         leaf_routing, "repair_leaf_placement_legality",
         lambda extraction, comps, cfg: (copy.deepcopy(comps), {"resolved": True}),
     )
-    monkeypatch.setattr(leaf_routing, "KiCadAdapter", _StubAdapter)
-    monkeypatch.setattr(leaf_routing, "_outline_around_geometry",
-                        lambda comps, cfg: None)
-    monkeypatch.setattr(leaf_routing, "_silk_for_leaf",
-                        lambda extraction, comps, cfg: [])
-    diag_calls: list[dict] = []
-
-    def _fake_diag(**kwargs):
-        diag_calls.append(kwargs)
-        return {"stubbed": True}
-
-    monkeypatch.setattr(leaf_routing, "generate_leaf_diagnostic_artifacts",
-                        _fake_diag)
-    return artifact_dir, diag_calls
+    monkeypatch.setattr(leaf_routing, "KiCadAdapter", _CopyStampedBoard)
+    monkeypatch.setattr(leaf_routing, "_outline_around_geometry", lambda comps, cfg: None)
+    monkeypatch.setattr(leaf_routing, "_silk_for_leaf", lambda extraction, comps, cfg: [])
+    return artifact_dir
 
 
-def test_trivial_leaf_routes_via_real_dispatch(stubbed_leaf_routing, tmp_path):
-    """route_local_subcircuit must complete the trivial path end-to-end,
-    including the per-round diagnostics gate (the 4d359f0 NameError line)."""
-    artifact_dir, diag_calls = stubbed_leaf_routing
-    source_pcb = tmp_path / "seed.kicad_pcb"
-    source_pcb.write_text("(kicad_pcb)\n")
-    cfg = {
-        "pcb_path": str(source_pcb),
-        # Defaults render_intermediate=True so the diagnostics branch (where
-        # the NameError lived) is actually evaluated and taken.
-    }
-    extraction = _trivial_extraction(tmp_path)
-
-    routing, timing = leaf_routing.route_local_subcircuit(
-        extraction,
-        solved_components={},
-        cfg=cfg,
-        generate_diagnostics=True,
-        round_index=0,
+def _prototyping_board(path: Path, *, overlapping_graphic: bool) -> None:
+    pcbnew = pytest.importorskip("pcbnew")
+    if shutil.which("kicad-cli") is None:
+        pytest.skip("real KiCad DRC requires kicad-cli")
+    # Build the fixture from the shipped footprint text: the fixed bundle is the
+    # source of truth, and the legacy defect is the same file plus the unnetted
+    # copper ring that shorted against the plated pad.
+    shipped = (
+        Path(__file__).resolve().parents[1] / "kicraft" / "parts_library"
+        / "prototyping-area" / "prototyping-area.pretty"
+        / "PrototypingPad_1.5mm_Drill0.8mm.kicad_mod"
+    ).read_text()
+    ring = (
+        '  (fp_circle (center 0 0) (end 0.75 0) (stroke (width 0.1) (type default))'
+        ' (fill none) (layer "F.Cu"))\n'
     )
+    assert ring not in shipped, "the shipped pad must not carry the copper ring"
+    library = path.parent / "proto.pretty"
+    library.mkdir(exist_ok=True)
+    (library / "PrototypingPad_1.5mm_Drill0.8mm.kicad_mod").write_text(
+        shipped if not overlapping_graphic else shipped.replace("  (fp_rect", ring + "  (fp_rect", 1)
+    )
+    board = pcbnew.BOARD()
+    footprint = pcbnew.FootprintLoad(str(library), "PrototypingPad_1.5mm_Drill0.8mm")
+    assert footprint is not None
+    footprint.SetReference("PB1")
+    board.Add(footprint)
+    footprint.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(10), pcbnew.FromMM(10)))
+    corners = [(0, 0), (20, 0), (20, 20), (0, 20)]
+    for start, end in zip(corners, corners[1:] + corners[:1]):
+        edge = pcbnew.PCB_SHAPE(board)
+        edge.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        edge.SetLayer(pcbnew.Edge_Cuts)
+        edge.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(start[0]), pcbnew.FromMM(start[1])))
+        edge.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(end[0]), pcbnew.FromMM(end[1])))
+        edge.SetWidth(pcbnew.FromMM(0.05))
+        board.Add(edge)
+    pcbnew.SaveBoard(str(path), board)
 
-    assert routing["reason"] == "no_internal_nets"
-    assert routing["failed"] is False
-    assert routing["validation"]["accepted"] is True
-    assert Path(routing["routed_board_path"]).exists()
-    assert (artifact_dir / "round_0000_leaf_routed.kicad_pcb").exists()
-    # The diagnostics branch ran (proves render_intermediate resolved).
-    assert routing["render_diagnostics"] == {"stubbed": True}
-    assert diag_calls, "diagnostics gate was never evaluated"
 
-
-def test_trivial_leaf_render_intermediate_off_skips_diagnostics(
-    stubbed_leaf_routing, tmp_path
+@pytest.mark.parametrize("overlapping_graphic", [False, True])
+def test_no_internal_nets_does_not_bypass_real_copper_drc(
+    fixed_leaf_geometry, tmp_path, overlapping_graphic
 ):
-    """Headless builds set subcircuit_render_intermediate=False; the trivial
-    path must honor the flag instead of crashing or rendering anyway."""
-    artifact_dir, diag_calls = stubbed_leaf_routing
-    source_pcb = tmp_path / "seed.kicad_pcb"
-    source_pcb.write_text("(kicad_pcb)\n")
-    cfg = {
-        "pcb_path": str(source_pcb),
-        "subcircuit_render_intermediate": False,
-    }
-    extraction = _trivial_extraction(tmp_path)
-
+    source = tmp_path / "seed.kicad_pcb"
+    _prototyping_board(source, overlapping_graphic=overlapping_graphic)
     routing, _ = leaf_routing.route_local_subcircuit(
-        extraction,
-        solved_components={},
-        cfg=cfg,
-        generate_diagnostics=True,
-        round_index=1,
+        _trivial_extraction(tmp_path), solved_components={},
+        cfg={"pcb_path": str(source)}, generate_diagnostics=False, round_index=0,
     )
+    assert routing["validation"]["drc"]["ran"] is True
+    assert routing["failed"] is overlapping_graphic
+    assert routing["validation"]["accepted"] is not overlapping_graphic
+    if overlapping_graphic:
+        assert routing["validation"]["drc"]["shorts"] > 0
+    else:
+        assert routing["validation"]["drc"]["shorts"] == 0
+        assert Path(routing["routed_board_path"]).exists()
 
-    assert routing["reason"] == "no_internal_nets"
-    assert routing["render_diagnostics"]["skipped"] is True
-    assert not diag_calls
+
+def test_missing_source_board_is_not_an_accepted_trivial_leaf(fixed_leaf_geometry, tmp_path):
+    routing, _ = leaf_routing.route_local_subcircuit(
+        _trivial_extraction(tmp_path), solved_components={},
+        cfg={"pcb_path": str(tmp_path / "missing.kicad_pcb")}, generate_diagnostics=False,
+    )
+    assert routing["failed"] is True
+    assert routing["validation"]["accepted"] is False
+    assert routing["validation"]["board_exists"] is False

@@ -656,8 +656,6 @@ def test_route_work_unit_ids_matches_sheet_case_insensitively():
     assert route_work_unit_ids(evidence, units) == ("bom-s000",)
 
 
-
-
 def test_exact_pin_offender_routes_only_its_slice_of_an_oversized_ref():
     units = (
         StageWorkUnit("wiring-u000", "wiring", "A", ("U1",), (("U1", "1"),)),
@@ -1640,7 +1638,7 @@ def test_curated_namespace_cannot_replace_an_explicitly_selected_device(monkeypa
     from types import SimpleNamespace
 
     from kicraft.server.stage_contracts import _requirement_owns_protected_group
-    from kicraft.server.stage_work_units import _normalize_curated_group_identities
+    from kicraft.server import stage_work_units
 
     conflicting = SimpleNamespace(
         manifest=SimpleNamespace(
@@ -1652,7 +1650,8 @@ def test_curated_namespace_cannot_replace_an_explicitly_selected_device(monkeypa
         )
     )
     monkeypatch.setattr(
-        "kicraft.server.stage_work_units._curated_part_indexes",
+        stage_work_units,
+        "_curated_part_indexes",
         lambda: ({"Sensor": conflicting}, {}),
     )
     group = BomComponentGroup.model_validate(
@@ -1664,14 +1663,14 @@ def test_curated_namespace_cannot_replace_an_explicitly_selected_device(monkeypa
             "footprint": "Package_LGA:Bosch_LGA-8_2.5x2.5mm_P0.65mm",
         }
     )
-    normalized = _normalize_curated_group_identities([group])[0]
+    normalized = stage_work_units._normalize_curated_group_identities([group])[0]
     assert _requirement_owns_protected_group(normalized, [{"exact_part": "BME280"}])
 
 
 def test_curated_prefix_cannot_change_an_explicit_order_code(monkeypatch):
     from types import SimpleNamespace
 
-    from kicraft.server.stage_work_units import _normalize_curated_group_identities
+    from kicraft.server import stage_work_units
 
     carrier = SimpleNamespace(
         manifest=SimpleNamespace(
@@ -1683,7 +1682,8 @@ def test_curated_prefix_cannot_change_an_explicit_order_code(monkeypatch):
         )
     )
     monkeypatch.setattr(
-        "kicraft.server.stage_work_units._curated_part_indexes",
+        stage_work_units,
+        "_curated_part_indexes",
         lambda: ({"nrf52840": carrier}, {"nrf52840qiaar": carrier}),
     )
     group = BomComponentGroup.model_validate(
@@ -1695,7 +1695,7 @@ def test_curated_prefix_cannot_change_an_explicit_order_code(monkeypatch):
             "footprint": "nrf52840:aQFN-73",
         }
     )
-    normalized = _normalize_curated_group_identities([group])[0]
+    normalized = stage_work_units._normalize_curated_group_identities([group])[0]
     assert normalized.mpn == "NRF52840-QIAA-R7"
     assert normalized.sourcing_note == group.sourcing_note
 
@@ -2160,12 +2160,15 @@ def test_physical_obligation_requires_real_connector_class_and_count():
             "family": "custom-input-panel",
             "obligations": [
                 {
-                    "kind": "physical", "original_obligation_id": "bnc",
+                    "kind": "physical",
+                    "original_obligation_id": "bnc",
                     "component_class": "bnc-connector",
                 },
                 {
-                    "kind": "quantity", "original_obligation_id": "bnc_count",
-                    "subject": "bnc-connector", "minimum": 2,
+                    "kind": "quantity",
+                    "original_obligation_id": "bnc_count",
+                    "subject": "bnc-connector",
+                    "minimum": 2,
                 },
             ],
         }
@@ -2174,14 +2177,21 @@ def test_physical_obligation_requires_real_connector_class_and_count():
     part = reviewed_part("KH-BNC50-3511")
     group = {
         **_group("coaxial", "A", prefix="J"),
-        "quantity": 2, "value": "KH-BNC50-3511", "mpn": "KH-BNC50-3511",
-        "symbol": part.symbol, "footprint": part.footprint,
+        "quantity": 2,
+        "value": "KH-BNC50-3511",
+        "mpn": "KH-BNC50-3511",
+        "symbol": part.symbol,
+        "footprint": part.footprint,
     }
-    assert validate_unit_candidate(unit, {"groups": [group]}, state, {})["groups"][0]["quantity"] == 2
+    assert (
+        validate_unit_candidate(unit, {"groups": [group]}, state, {})["groups"][0]["quantity"] == 2
+    )
     for changed in (
         {**group, "quantity": 1},
         {
-            **group, "mpn": None, "value": "header",
+            **group,
+            "mpn": None,
+            "value": "header",
             "symbol": "Connector_Generic:Conn_01x02",
             "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
         },
@@ -2301,7 +2311,12 @@ def test_pipeline_authored_bank_is_not_wiped_as_a_sibling_header():
             "sheet": "A",
             "role": "connector",
             "family": "servo-connector-bank",
-            "ports": {"gnd": "GND", "vdd": "+5V_SERVO", "signal0": "PWM0"},
+            "parameters": {"channels": 16},
+            "ports": {
+                "gnd": "GND",
+                "vdd": "+5V_SERVO",
+                **{f"signal{index}": f"PWM{index}" for index in range(16)},
+            },
         },
         {
             "id": "edge",
@@ -2326,23 +2341,16 @@ def test_pipeline_authored_bank_is_not_wiped_as_a_sibling_header():
         }
     ]
     unit = StageWorkUnit("bom-r001", "bom", "A", requirement_ids=("bank",))
-    payload = {
-        "groups": [
-            {
-                **_group("servo_headers", "A", prefix="J", quantity=16),
-                "value": "Servo_1x03",
-                "symbol": "Connector_Generic:Conn_01x03",
-                "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
-            }
-        ],
-        "_trusted_deterministic_candidate": True,
-        "_lowerer_id": "connector-bank@1",
-        "_lowering_requirement_id": "bank",
-    }
+    from kicraft.server.stage_work_units import deterministic_bom_candidate
+
+    payload = deterministic_bom_candidate(unit, state)
 
     validated = validate_unit_candidate(unit, payload, state, {})
 
-    assert [group["id"] for group in validated["groups"]] == ["servo_headers"]
+    headers = [
+        group for group in validated["groups"] if group["symbol"] == "Connector_Generic:Conn_01x03"
+    ]
+    assert sum(group["quantity"] for group in headers) == 16
 
 
 def _group_for(identity: str):
@@ -2359,8 +2367,14 @@ def _group_for(identity: str):
         None,
     )
     return BomComponentGroup(
-        id="g", sheet="MAIN", reference_prefix="J", quantity=1, value=rec.identity,
-        symbol=rec.symbol, footprint=rec.footprint, mpn=rec.identity,
+        id="g",
+        sheet="MAIN",
+        reference_prefix="J",
+        quantity=1,
+        value=rec.identity,
+        symbol=rec.symbol,
+        footprint=rec.footprint,
+        mpn=rec.identity,
     )
 
 
@@ -2372,16 +2386,23 @@ def test_obligation_class_aliases_match_the_reviewed_feature_vocabulary():
     """
     from kicraft.server.stage_work_units import _group_has_physical_feature
 
-    usb_c = _group_for("12401610e4#2a")   # feature: usb-c-receptacle
-    usb_a = _group_for("u-a-24ss-w-2")    # feature: usb-connector (USB-A)
+    usb_c = _group_for("12401610e4#2a")  # feature: usb-c-receptacle
+    usb_a = _group_for("u-a-24ss-w-2")  # feature: usb-connector (USB-A)
     assert _group_has_physical_feature(usb_c, "usb-c-connector") is True
     assert _group_has_physical_feature(usb_a, "usb-c-connector") is False
-    assert _group_has_physical_feature(_group_for("kh-fg0.5-h2.0-24pin"), "fpc-ffc-connector") is True
+    assert (
+        _group_has_physical_feature(_group_for("kh-fg0.5-h2.0-24pin"), "fpc-ffc-connector") is True
+    )
     assert _group_has_physical_feature(_group_for("ams1117-5.0"), "voltage-regulator-ic") is True
     # Classes the 2026-09-17 canary demanded under a second spelling of a reviewed class.
     assert _group_has_physical_feature(_group_for("tl3342f260qg"), "momentary-pushbutton") is True
+    assert _group_has_physical_feature(_group_for("tl3342f260qg"), "pushbutton") is True
+    assert _group_has_physical_feature(_group_for("ltst-c190kgkt"), "led") is True
     assert _group_has_physical_feature(_group_for("u-a-24ss-w-2"), "usb-a-connector") is True
-    assert _group_has_physical_feature(_group_for("wj126v-5.0-02p-14-00a"), "power-screw-terminal") is True
+    assert (
+        _group_has_physical_feature(_group_for("wj126v-5.0-02p-14-00a"), "power-screw-terminal")
+        is True
+    )
     assert _group_has_physical_feature(_group_for("tps5430ddar"), "buck-converter-ic") is True
     assert _group_has_physical_feature(_group_for("max31855kasa+"), "thermocouple-input") is True
     assert _group_has_physical_feature(_group_for("aonr21357"), "high-side-load-switch") is True
@@ -2392,6 +2413,195 @@ def test_obligation_class_aliases_match_the_reviewed_feature_vocabulary():
     # An addressable LED is not an indicator LED, and a digital isolator is not an optocoupler.
     assert _group_has_physical_feature(_group_for("ws2812b-b/t"), "status-led") is False
     assert _group_has_physical_feature(_group_for("adum1301arwz-rl"), "opto-isolator") is False
+
+
+def test_lowerer_physical_witness_is_explicit_and_requirement_bound():
+    """A verified R-2R artifact proves its topology, not arbitrary obligations."""
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    requirement = {
+        "id": "ladder",
+        "obligations": [
+            {
+                "kind": "physical",
+                "original_obligation_id": "ladder",
+                "component_class": "resistor-network",
+            }
+        ],
+    }
+    groups = [
+        BomComponentGroup(
+            id="series",
+            sheet="DAC",
+            reference_prefix="R",
+            quantity=7,
+            value="10k",
+            symbol="Device:R",
+            footprint="Resistor_SMD:R_0603_1608Metric",
+        ),
+        BomComponentGroup(
+            id="branch",
+            sheet="DAC",
+            reference_prefix="R",
+            quantity=9,
+            value="20k",
+            symbol="Device:R",
+            footprint="Resistor_SMD:R_0603_1608Metric",
+        ),
+    ]
+
+    assert (
+        _requirement_obligation_defects(
+            [requirement],
+            groups,
+            trusted_lowerer_id="r2r-ladder@1",
+            trusted_requirement_id="ladder",
+        )["physical-obligation-unfulfilled"]
+        == []
+    )
+    assert _requirement_obligation_defects(
+        [
+            {
+                **requirement,
+                "obligations": [
+                    {**requirement["obligations"][0], "component_class": "binding-post-terminal"}
+                ],
+            }
+        ],
+        groups,
+        trusted_lowerer_id="r2r-ladder@1",
+        trusted_requirement_id="ladder",
+    )["physical-obligation-unfulfilled"]
+    assert _requirement_obligation_defects(
+        [
+            {
+                **requirement,
+                "obligations": [
+                    *requirement["obligations"],
+                    {"kind": "quantity", "subject": "resistor-network", "minimum": 2},
+                ],
+            }
+        ],
+        groups,
+        trusted_lowerer_id="r2r-ladder@1",
+        trusted_requirement_id="ladder",
+    )["physical-obligation-unfulfilled"]
+
+
+def test_model_private_lowerer_metadata_cannot_satisfy_a_physical_obligation():
+    state = _state()
+    state["architecture"]["requirements"] = [
+        {
+            "id": "terminal",
+            "sheet": "A",
+            "role": "connector",
+            "family": "unlowered-terminal",
+            "obligations": [
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "thermocouple",
+                    "component_class": "thermocouple-input",
+                }
+            ],
+        }
+    ]
+    unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("terminal",))
+    group = {
+        **_group("terminal", "A", prefix="J"),
+        "value": "WJ126V-5.0-2P",
+        "mpn": "WJ126V-5.0-02P-14-00A",
+        "symbol": "screw-terminal-5mm-2p:WJ126V-5.0-2P",
+        "footprint": "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P",
+    }
+
+    with pytest.raises(WorkUnitValidationError) as caught:
+        validate_unit_candidate(
+            unit,
+            {
+                "groups": [group],
+                "_lowerer_id": "screw-terminal@1",
+                "_lowering_requirement_id": "terminal",
+            },
+            state,
+            {},
+        )
+
+    assert caught.value.defects["physical-obligation-unfulfilled"]
+
+
+def test_binding_post_order_code_is_an_exact_declared_owner():
+    from kicraft.server.stage_work_units import _group_matches_requirement_identity
+
+    requirement = {"id": "terminal", "exact_part": "keystone-8734"}
+    binding_post = BomComponentGroup(
+        id="terminal",
+        sheet="INPUT",
+        reference_prefix="J",
+        quantity=1,
+        value="Keystone 8734",
+        symbol="keystone-8734-binding-post:Keystone_8734",
+        footprint="keystone-8734-binding-post:Keystone_8734",
+        mpn="8734",
+    )
+
+    assert _group_matches_requirement_identity(binding_post, requirement)
+    assert not _group_matches_requirement_identity(
+        binding_post.model_copy(
+            update={
+                "symbol": "Connector_Generic:Conn_01x01",
+                "footprint": "Connector_PinSocket_2.54mm:PinSocket_1x01_P2.54mm_Vertical",
+            }
+        ),
+        requirement,
+    )
+
+
+def test_declared_interface_accepts_only_a_compiler_matched_fpc_owner():
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    fpc = {
+        "id": "fpc",
+        "sheet": "BREAKOUT",
+        "role": "connector",
+        "family": "fpc-connector",
+        "parameters": {"pitch_mm": 0.5},
+        "ports": {f"pin{index}": f"NET{index}" for index in range(1, 25)},
+    }
+    breakout = {
+        "id": "breakout",
+        "ports": {f"contact{index}": f"NET{index}" for index in range(1, 25)},
+        "obligations": [],
+        "declared_interface": {
+            "ports": [{"key": "contact1", "pin": "1", "direction": "bidirectional"}]
+        },
+    }
+    artifact = lower_requirement(CircuitRequirement.model_validate(fpc))
+    assert artifact is not None
+    lowered = artifact.groups[0]
+    owner = BomComponentGroup(
+        id="fpc",
+        sheet="BREAKOUT",
+        reference_prefix=lowered.reference_prefix,
+        quantity=lowered.quantity,
+        value=lowered.value,
+        symbol=lowered.symbol,
+        footprint=lowered.footprint,
+        mpn=lowered.mpn,
+    )
+
+    assert (
+        _requirement_obligation_defects([breakout], [owner], compiler_requirements=[fpc])[
+            "declared-interface-unrealized"
+        ]
+        == []
+    )
+    assert _requirement_obligation_defects(
+        [breakout], [owner.model_copy(update={"mpn": "WRONG"})], compiler_requirements=[fpc]
+    )["declared-interface-unrealized"] == [
+        "breakout: declared interface needs one identified hardware owner"
+    ]
 
 
 def test_unreviewed_part_class_is_proven_by_a_real_resolved_part():
@@ -2406,13 +2616,22 @@ def test_unreviewed_part_class_is_proven_by_a_real_resolved_part():
     from kicraft.server.stage_work_units import _group_has_physical_feature
 
     resolved = BomComponentGroup(
-        id="gnss", sheet="MAIN", reference_prefix="U", quantity=1, value="NEO-6M",
-        symbol="Device:R", footprint="Resistor_SMD:R_0603_1608Metric", mpn="NEO-6M-0-001",
+        id="gnss",
+        sheet="MAIN",
+        reference_prefix="U",
+        quantity=1,
+        value="NEO-6M",
+        symbol="Device:R",
+        footprint="Resistor_SMD:R_0603_1608Metric",
+        mpn="NEO-6M-0-001",
     )
     assert _group_has_physical_feature(resolved, "gps-module") is True
     assert _group_has_physical_feature(resolved, "air-quality-sensor") is True
     # No orderable identity: the parts stage emitted a label, so the demand stands.
-    assert _group_has_physical_feature(resolved.model_copy(update={"mpn": None}), "gps-module") is False
+    assert (
+        _group_has_physical_feature(resolved.model_copy(update={"mpn": None}), "gps-module")
+        is False
+    )
     # An unreviewed part never answers for a class the reviewed library does cover.
     assert _group_has_physical_feature(resolved, "usb-c-receptacle") is False
 
@@ -2464,9 +2683,14 @@ def test_declared_interface_claim_may_name_a_pin_by_its_symbol_name(monkeypatch)
     from kicraft.server.stage_work_units import _requirement_obligation_defects
 
     group = BomComponentGroup(
-        id="mcp", sheet="GPIO", reference_prefix="U", quantity=1,
-        value="MCP23017-E/SS", symbol="mcp23017-soic:MCP23017-E_SO",
-        footprint="Package_SO:SSOP-28_5.3x10.2mm_P0.65mm", mpn="MCP23017T-E/SS",
+        id="mcp",
+        sheet="GPIO",
+        reference_prefix="U",
+        quantity=1,
+        value="MCP23017T-E/SS",
+        symbol="mcp23017t-e-ss:MCP23017T-E_SS",
+        footprint="mcp23017t-e-ss:SSOP-28_L10.2-W5.3-P0.65-LS7.8-BL",
+        mpn="MCP23017T-E/SS",
     )
     requirement = {
         "id": "mcp23017",
@@ -2524,6 +2748,7 @@ def test_unfulfilled_obligation_names_the_groups_the_unit_emitted():
     assert "requires 1 real usb-c-receptacle, found 0" in defects[0]
     assert "the unit emitted: usb_c=Connector:USB_C_Receptacle_USB2.0_16P" in defects[0]
 
+
 def test_board_fact_obligations_are_not_bom_component_demands():
     """A fabrication feature and an absent class never demand a BOM group.
 
@@ -2560,7 +2785,6 @@ def test_board_fact_obligations_are_not_bom_component_demands():
         "physical-obligation-unfulfilled": [],
         "declared-interface-unrealized": [],
     }
-
 
 
 def _usb_breakout_state():
@@ -2617,3 +2841,78 @@ def _lowered_usb_receptacle():
         "footprint": group.footprint,
         "mpn": group.mpn,
     }
+
+
+def test_real_usb_lowerer_candidate_keeps_an_mpn_equal_to_its_value():
+    """A deterministic USB artifact must not lose its true order code in cleanup."""
+    unit = _usb_breakout_unit()
+    state = _usb_breakout_state()
+    state["architecture"]["requirements"][0]["exact_part"] = "12401610E4#2A"
+    candidate = deterministic_bom_candidate(unit, state)
+
+    assert candidate is not None
+    expected = candidate["groups"][0]
+    assert expected["mpn"] == expected["value"] == "12401610E4#2A"
+
+    validated = validate_unit_candidate(unit, candidate, state, {})
+
+    assert validated["groups"][0]["mpn"] == expected["mpn"]
+
+
+def test_canonical_r2r_realization_requires_the_complete_lowered_topology():
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.models import BOM, Architecture, BomPart, CircuitRequirement, Sheet
+    from kicraft.design.synthesis.validation import check_requirement_physical_realization
+
+    requirement = CircuitRequirement.model_validate(
+        {
+            "id": "r2r",
+            "sheet": "DAC",
+            "role": "analog_block",
+            "family": "r2r-ladder",
+            "parameters": {"bits": 2, "r_value": 10000, "two_r_value": 20000},
+            "ports": {"bit0": "BIT0", "bit1": "BIT1", "output": "OUT", "gnd": "GND"},
+            "obligations": [
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "r2r-network",
+                    "component_class": "resistor-network",
+                }
+            ],
+        }
+    )
+    artifact = lower_requirement(requirement)
+    assert artifact is not None
+    parts = []
+    number = 1
+    for group in artifact.groups:
+        for index in range(group.quantity):
+            parts.append(
+                BomPart(
+                    ref=f"{group.reference_prefix}{number}",
+                    value=group.value,
+                    symbol=group.symbol,
+                    footprint=group.footprint,
+                    sheet="DAC",
+                    mpn=group.mpn,
+                    resolution_source="lowerer",
+                    resolution_id=artifact.lowerer_id,
+                    lowering_requirement_id=requirement.id,
+                    lowering_role=group.role,
+                    lowering_index=index,
+                )
+            )
+            number += 1
+    architecture = Architecture(
+        sheets=[Sheet(name="DAC", stem="DAC", function="R-2R DAC")],
+        power_nets=[],
+        inter_sheet_nets=[],
+        requirements=[requirement],
+    )
+
+    assert check_requirement_physical_realization(architecture, BOM(parts=parts)).ok
+    assert not check_requirement_physical_realization(architecture, BOM(parts=parts[:-1])).ok
+    assert not check_requirement_physical_realization(
+        architecture,
+        BOM(parts=[*parts[:-1], parts[-1].model_copy(update={"resolution_source": "llm"})]),
+    ).ok

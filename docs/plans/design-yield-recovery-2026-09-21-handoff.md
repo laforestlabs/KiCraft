@@ -1,430 +1,400 @@
-# Design yield recovery — handoff and the road to 34/34 (2026-09-21)
+# Design-yield recovery — evidence and execution (2026-09-21)
 
-**Purpose.** One document for the next session: what was built and is now deployed, what the first
-paid measurement since session 1 actually showed (including the part of it that did *not* go the
-way the plan predicted), where the 34 reviewed briefs die today, and the sequenced plan to get them
-all fab-ready with a cost, an expected delta and a kill criterion per step.
+## Decision
 
-**Read order.** §0 (state in one screen) → §2 (what the screening measured — the headline is flat
-and that matters) → §3 (the wall map, with a reproduced defect) → §4 (the plan) → §5 (next three
-actions, as commands).
+Recover **manufacturable boards**, not stage commits or optimistic build labels.
+Use the stronger pinned native design session with **current manufacturing**, while
+keeping their state schemas isolated. Do not deploy the old manufacturing tail:
+independent DRC has disproved some of its `fab-ready` labels.
 
-**Supersedes** `design-yield-recovery-2026-09-20-options-1-4-handoff.md` for the *state of play*;
-that document and `…-options-1-4-plan.md` §12 remain the record of how the code got here.
-`design-yield-recovery-2026-09-19-plan.md` remains the authoritative specification of the bar
-(BLOCK vs RECORD) and the measurement protocol.
+Execution is in progress. No completed new 34-brief result is claimed below.
+Production remains on `current` until the corrected path is verified and measured.
 
-**Operator mandate (2026-09-20/21):** paid runs approved up to the limits; time must not be wasted.
-Practical reading, used throughout below: screen cheap (design-only, ~$1.80), read the result
-immediately, confirm with a full run only when a screen earns it; one campaign at a time; the $20
-daily ceiling is shared with the live site (a runner-side guard aborts at $13).
+## Critical review of the previous plan
 
----
+1. **The primary metric was wrong.** Design-only screens cannot establish fab-ready
+   yield. Full synthesis, routing, ERC, DRC and fabrication export are required.
+2. **Denominators were mixed.** Historical 4/34 and 21/34 were distinct-brief coverage
+   across repeats, not first-pass probabilities. The first-pass baselines are 2/34
+   and 19/34, respectively. Keep attempts, first-pass yield and cumulative coverage
+   separate; never erase failed attempts with a successful retry.
+3. **Build success was over-trusted.** Native final gates omit several real copper
+   manufacturing violations. An archive and `build_rc=0` are insufficient evidence.
+4. **Projected improvements were unsupported.** Remove speculative yield increments
+   and claims that several simultaneous changes isolate one cause. Measure the
+   deployed combination and distinguish frozen reproductions from live results.
+5. **Provenance was too trusting.** Model-authored recipe/lowerer identifiers cannot
+   prove physical realization. Re-derive reviewed artifacts and compare identities,
+   quantities and topology before accepting ownership.
+6. **Quantity exemptions were too broad.** Board dimensions are fabrication duties;
+   electrical limits and component quantities still need owners and realizations.
+7. **“Empty deterministic BOM” misdiagnosed the saved RP2040 failure.** The actual
+   candidate contained 65 parts. A synthetic assembly header conflicted with the
+   recipe's castellated edge interface; fixing that requires compiler provenance.
+8. **The native bridge was not its native session.** The old CLI bridge lost answers
+   and repair instructions and omitted native BOM reconciliation. Running current
+   post-wiring serialization over native state then made it unreadable by native
+   models. Native design and current manufacturing need an explicit boundary, not
+   accidental cross-tree imports.
 
-## 0. The state in one screen
+## Baseline and measurement definitions
 
-| | value |
-|---|---|
-| **Deployed** | **Yes.** `deploy/restart-web.sh` + `deploy/restart-build-worker.sh` at 2026-09-20 20:26 UTC: web HTTP 200 on `:8080`, `[build-worker] ready (max 1 concurrent build(s))`, 0/1 build slots held, no in-flight jobs at restart. Before that restart the services were from 03:53 and served pre-session code — which is why the pipeline switch was not visible. |
-| **The switch** | `/admin/routing` → "Design pipeline" card (between the model profile and the behaviour knobs): `current` or `legacy pipeline (bc6a2f8, 2026-08-25) — measured 21/34 finished boards`, with the trade-off line. A save applies to the next design run and the next build job, no restart. |
-| **Branch** | `simplify/bom-wiring-pipeline`, **19 commits ahead of `origin`** (11 of them this work). Not pushed; the box serves the local commits. |
-| **Free gate ($0)** | `--reference-replay` **31/34** rows reproduce their own boundary, 2 recorded blocks (floor ≥31). Green; red at the start of the session. |
-| **Unit suite** | **4301 passed**, 15 skipped, 1 xfailed, **2 failed** — both pre-existing and environmental (`test_vendored_bundles_are_not_prototype`: `ams1117-5v0-fixed` still defaults to prototype; `test_krt_preflight_uses_environment_defaults`: `No module named 'py_router.startup_checks'`). |
-| **First paid screen (design-only, 34×3)** | **102/102 runs, $1.78, 50 min.** Committed designs **7** (A1 baseline: 7). Briefs committing at all **3** (A1: 4); briefs committing in ≥2 repeats **2** (A1: 3). **Headline flat** — but the failures moved one stage downstream: architecture deaths **69 → 51**, BOM deaths **23 → 41**. §2 reads this. |
-| **A/B attribution** | First attempt (batches `ab_move1a_before` / `ab_move1a_after`) was **contaminated and discarded** (the "after" tree contains the option-3 switch, so it honoured the production routing file, which said `legacy`). Re-run pinned to `current` for both arms (`ab_move1a_pinned_*`): **before 7/15 vs after 9/15** — mildly positive, inside the ±2/3-per-brief noise, so moves 1a–1b stay (§2.3). |
-| **Production switch state** | **Reverted to `current` on 2026-09-21 03:0x UTC by operator decision**, after three live `legacy` projects failed (defects B1/B2, §4b). Both defects are now **fixed, unit-guarded and accepted end to end** (`logs/self_eval/legacy_acceptance_20260921.log`: five stages committed, no current-tree contamination, then a legacy build that finished `BUILD COMPLETE` — 0 shorts, 0 unconnected, full fab package). Re-enabling is one select on `/admin/routing`; the two operator decisions behind that are §8.2. |
-| **Spend** | 2026-09-20: $4.24 (session-1 arm $2.02 + this session's screen $1.78 + smokes). 2026-09-21: $0.11 at the time of writing. Daily ceiling $20. |
-| **The ladder** | current tree **4/34** fab-ready briefs (A1) · 09-15 tree **13/34** (A3) · August tree **21/34** (A2) · best recorded July batch **25/34** · target **34/34** (never achieved). |
+| Saved campaign | First pass: reported rc0 | All attempts: reported rc0 | Distinct briefs across repeats |
+|---|---:|---:|---:|
+| `movea_a1_current_20260919T1431Z` | 2/34 | 5/102 | 4/34 |
+| `movea_a2_legacy_bc6a2f8` | 19/34 | 30/68 | 21/34 |
 
----
+Fresh independent inspection confirms both current first-pass successes
+(`fpc-breakout`, `audio-jack-buffer`): zero DRC errors, zero unconnected nets,
+passing ERC, and verified Gerber/drill archives. Evidence:
+`logs/self_eval/yield_recovery_20260921/baseline_current_independent.json`.
+The 19 native first-pass labels have not been independently certified and must not
+be presented as 19 proven manufacturing successes.
 
-## 1. What was built (11 commits, all deployed)
+New campaigns retain the **34 original briefs**, original contract version,
+per-attempt costs, source fingerprints and every failure. Use one manufacturing
+slot on this two-core production host. No LLM judge is needed for manufacturing
+proof. Brief fulfillment is a separate result: clean ERC/DRC does not certify
+analog performance, firmware, sourcing, or every requested feature.
 
-| commit | what it does |
-|---|---|
-| `b7a379f` | The free gate repaired (a stale reference row re-recorded; the contract was right), a contract refusal's own code/message/evidence now stored on the stage, the inherited lowerer contact-derivation work landed, and **moves 1a–1b**: the compiler derives the pin owner where it already knows it (a domain annotation on a port the design's own signals bind is not a tie; a lowerer's published return contact — a coin cell's `negative`, a jack's `sleeve` — is grounded from the design's own ground; a connector contact a signal names after a declared rail is that rail's exposure). |
-| `036d8fb` | **Move 2a**: a declared-interface pin is resolved by number **or** by one unique pin name (30 of ~50 A1 BOM defects were a correct name compared against a number list). **2b**: a rejected commit records **every** reason, not one. |
-| `b432205` | **Moves 4a/4b**: the RECORD path — `ArchitectureAdvisory`, `_advise(...)`, the §9.33/§9.34 notes, advisories in the board's provenance file, a recording-only rubric gate (`shipped_with_advisories`, unreachable cap), and §4.3's classification with one measured exception: `unknown_part_refused` stays BLOCK because downgrading it drops the part from the board and the run dies one validation later naming something else. |
-| `9a44ec1` | **Option 3**: the pipeline switch (new `kicraft/server/pipeline.py`), the legacy tree's measured environment, the design subprocess, the build-interpreter substitution, and full marking (workspace marker, `projects.pipeline` column + migration, promote provenance, summary grouping). |
-| `a8c405b`, `210a82e`, `80f219a` | Comment correction on how the legacy package resolves; a migration guard against the production DB shape; `unknown_part_refused` back to BLOCK with the evidence. |
-| `b7be38f`, `420f2dd`, `41d295d`, `e03313b` | The measured results in the plan's §12, and two handoff documents. |
+## Implemented design-source repairs
 
----
+### Physical ownership and realization
 
-## 2. What the first paid screen measured
+- `stage_contracts.py`, `stage_work_units.py`, `part_identity.py`: recognize a
+  declared interface from re-derived lowerer groups covering its committed nets.
+  Require exact part/value/symbol/footprint identity and valid role/index bounds.
+- Reviewed pushbutton, LED and USB-receptacle identities are recognized without
+  accepting arbitrary model provenance.
+- Resistor networks require the complete canonical R2R realization, exactly once;
+  one resistor is not a DAC and one topology cannot satisfy quantity greater than
+  one. Thermocouple terminal recognition uses actual reviewed physical evidence.
+- Exact primary-IC requirements may own their verified recipe support parts;
+  unrelated same-sheet parts do not acquire that ownership.
+- Bare Keystone `8734` is recognized only with its reviewed symbol/footprint pair.
 
-### 2.1 The table
+### Obligation classification and attachment
 
-Batch `logs/self_eval/opt1_designonly_20260920` (34 briefs × 3, design-only, `--parallel 2`, $1.78,
-3 030 s) against the frozen baseline `logs/self_eval/movea_a1_current_20260919T1431Z`.
+- `models.py`, `architecture_intent.py`, `stage_semantics.py`: exempt only explicit
+  board/PCB geometry from component ownership. Preserve electrical quantities.
+- Normalize a board-outline pseudo-component into a fabrication obligation only
+  when no reviewed realizable component class/variant applies.
+- Repair omitted ownership only when a unique reviewed realization proves the
+  owner. Ambiguous ownership still fails; record deterministic attachments.
 
-| | A1 (before) | screen (after) |
+### Castellated edges
+
+- Compiler-generated edge headers carry `compiler_origin="edge_connector"`.
+  Provider-authored requirements cannot supply that field.
+- A unique recipe edge role may absorb only that synthetic companion when its
+  block and complete edge-net coverage match. Explicit user headers remain real
+  requirements. The RP2040 recipe retains 34 non-assembly castellated pads rather
+  than gaining an unintended assembly header.
+
+### BOM validation termination
+
+- Preserve meaningful manufacturer codes even when `mpn == value`.
+- Normalize optional metadata consistently on both sides of deterministic identity
+  comparisons; bound deterministic fallback with an internal one-shot guard.
+- Frozen USB-C reproduction previously recursed roughly 990 times. It now returns
+  an honest ownership error promptly: the USB connector does not realize the
+  requested header. This proves termination, **not** that the design now passes.
+
+### Canonical recipe identities and shared MCU ownership (current design pipeline)
+
+Two provenance defects made the canonical RP2040/STM32 recipes fail their own
+§9.42 physical-realization gate, and neither was fixable by weakening it.
+
+- **Unresolvable identities.** `rp2040-minimal@2` emitted its MCU and QSPI flash
+  with no MPN at all, and `W25Q16JVSS` (SS/208-mil SOIC-8) was stamped with the
+  smaller 150-mil `SOIC-8_3.9x4.9mm` land pattern, while both recipes' crystals
+  used the unreviewed `ABM8-272-T3` / generic `Device:Crystal_GND24` pair. The
+  reviewed inventory has no record for any of those triples, so zero parts
+  realized and the BOM commit was refused. The MCU, flash, RP2040 12 MHz and
+  STM32 8 MHz crystals now carry resolvable identities: `RP2040`, `W25Q16JVSS`
+  with its true package, and reviewed records for `abm8-272-t3` (Abracon
+  ABM8-272-T3 datasheet) and `x32258msb4si` (the vendored `crystal-8mhz-3225`
+  bundle, LCSC C2682774). No gate, tolerance or reviewed record was relaxed.
+- **Support obligations were expanded as whole MCUs.** The architecture can emit
+  `clock`, `flash` and `rp2040` requirements that all name the same family and
+  exact part; each one independently selected `rp2040-minimal@2`, so a single
+  RP2040 board became three complete 51-part MCU circuits (162 parts). A new
+  coalescing pass attaches such a requirement to one existing MCU instance only
+  when the recipe, physical sheet map, parameters, external nets and pin
+  allocation all agree, the requirement is not itself a processor demand, and
+  reviewed non-MCU groups implement every physical class it declares. Anything
+  ambiguous stays an explicit `mcu_support_owner_unproven` error instead of
+  silently merging two physical cores.
+
+Deterministic replay of the two frozen current-pipeline architectures
+(`staged/recipe_realization_probe.json`) now reports one
+`rp2040-minimal@2` selection owning `rp2040`+`clock`+`flash` with **60** parts,
+`physical_realization_ok=true` and closed net coverage, and the STM32 design
+realizes its crystal with 26 parts.
+
+### Router hole clearance and manufactured copper
+
+- **NPTH clearance was never binding.** The pinned router hard-codes a 0.20 mm
+  NPTH-to-track floor and exposes no knob, while the emitted project rule is
+  KiCad's default 0.25 mm. USB-C leaves therefore failed every round on one
+  `hole_clearance` violation at 0.2077–0.2474 mm from J1's alignment posts.
+  Before routing, the adapter now stages a copy of the input plus its
+  authoritative `.kicad_pro`/`.kicad_dru` and stamps named all-copper rule areas
+  around every footprint NPTH drill, dilated by exactly
+  `min_hole_clearance − router_clearance`. The finished board is then stripped of
+  those router-side areas, so shipped artifacts carry only authored geometry and
+  the normal DRC gate still measures the real rule.
+- **A vendored footprint shorted itself.** Every `PrototypingPad_1.5mm_Drill0.8mm`
+  carried an unnetted `F.Cu` `fp_circle` concentric with its own netless pad, so
+  KiCad DRC reported one shorting item per pad — 25 for the R-2R pad field. That
+  made `shorts == 0` unreachable, aborted the parent candidate search, and
+  promoted a partial leaf preview instead of a board. The stray copper graphic is
+  removed and the bundle's `content_hash` refreshed.
+- **Leaves with no internal nets were never validated.** `_stamp_trivial_leaf`
+  hard-coded `accepted: true`, so the pad-field defect above could not surface and
+  a missing source board silently counted as success. Such leaves now run the same
+  real DRC as every other leaf (with the project rules propagated first), report
+  their true verdict, and fail honestly when there is no board to stamp.
+
+### Connector mating evidence
+
+`_directional_edge_candidate` used body depth as a proxy for an in-plane mouth, so
+the frozen USB3 breakout header J6 (a through-hole 2×05 vertical header, 12.70 ×
+5.00 mm courtyard, no `PCB Edge` marker) was classified as an unmeasured
+side-entry connector and rejected every candidate at compose. Mating axis is now
+extracted from the footprint's mechanical contract (`PinHeader_*_Vertical`,
+vendored `HDR-TH_*‑V‑*`) and persisted with the leaf artifact; the same classifier
+drives the compose gate and the final fab gate. A verified board-normal header is
+omitted from both; every other connector without a measured in-plane opening stays
+**blocking**, never a warning — the previous `unknown_mouth` warning path is gone.
+
+## Native design / current manufacturing boundary
+
+Native design still runs under pinned `bc6a2f8`, in its own interpreter. The bridge
+passes answers, repair instructions and run identity to the native session and
+uses one capped client across native BOM reconciliation. Missing/malformed result
+packets and contradictory exit status fail closed. Real user questions remain
+parked rather than becoming generic failures.
+
+Native synthesis first compiles the snapshot against the same symbol/footprint
+library that validated the design, including ERC. Current manufacturing then
+consumes the compiled KiCad project through the real replay/build tail. This
+boundary matters: direct current synthesis of the frozen FPC design rejected
+native no-connect pins 25/26 because the current library's same-named symbol no
+longer has those pins. Do not erase pin declarations or assume cross-version
+library identities are interchangeable.
+
+The separate `build_state.json` receives current manufacturing serialization;
+only the shared `artifacts` result is published back into
+canonical native state. Authored stages, questions, history and native BOM schema
+remain native and resumable. A source change during the build must not be silently
+overwritten. Worker, web fallback and evaluation use the same dispatch boundary.
+Current post-wiring authorship remains disabled for native-owned design state.
+
+This is deliberate composition, not a claim that the native tree acquired current
+typed design work units. Provenance and the admin label identify **native design
+plus current manufacturing**. Obsolete native routing/export is removed from new
+build dispatch; native compilation retains ownership of its part-library version.
+The real build tail has now exercised this boundary on all three frozen designs.
+All three preserved authored state and remained readable by native models.
+ESP32 changed from 36 keepout intrusions and rc7 to **rc0, zero DRC errors, zero
+unconnected nets, passing ERC and a verified fabrication archive**. FPC now has
+zero DRC errors but two unrouted connections and remains blocked. USB-C stops at
+an illegal-geometry leaf gate; its partial preview is not a finished board.
+Evidence: `current_tail_smoke/summary.json` and
+`current_tail_smoke/esp32-manufacturing-evidence.json`.
+
+## Frozen replays on the corrected source (verified)
+
+Both previously blocked frozen workspaces were replayed end-to-end through the real
+build tail against an isolated copy of the corrected tree (no provider calls, no
+production edits during the campaign):
+
+| Frozen design | Before | After |
 |---|---|---|
-| committed designs | 7 / 102 | **7 / 102** |
-| briefs committing at all | 4 | 3 |
-| briefs committing in ≥2 repeats | 3 | 2 |
-| first-failing stage | architecture 69 · bom 23 · passed 7 · wiring 2 · intent 1 | **architecture 51 · bom 41** · passed 7 · functional_spec 1 · intent 2 |
-| per-brief commits | r2r-dac 2, fpc-breakout 2, audio-jack-buffer 2, rc-lowpass-bnc 1 | rc-lowpass-bnc 3, proto-shield 3, fpc-breakout 1 |
+| `recovery_current_r2r/run_02_r2r-dac` (current design) | parent candidate search aborted: every candidate `shorts=25` | promoted routed parent, `shorts=0 unconnected=0`, fab package; independent `kicad-cli` DRC **0 errors** |
+| `current_tail_smoke/usb-c-full-breakout` (native design) | `connector_orientation_unmeasured:J6`; no routed parent, partial preview promoted | `REPLAY COMPLETE`, promoted routed parent, `shorts=0 unconnected=0 courtyard=0 keepout=0`, fab package; independent DRC **0 errors** |
 
-### 2.2 The mechanism fired; the boards did not appear
+The USB-C leaves also stopped failing: the USB C INPUT leaf (two J1 NPTH posts) is
+now DRC-clean instead of rejecting 12 consecutive rounds on one `hole_clearance`
+violation, and the shipped leaf no longer carries the router-side keepout areas.
+Evidence: `replay_r2r_clean.log`, `replay_usb_clean.log`,
+`replay_*_independent.json`, and the isolated-overlay test run
+(`staged/overlay-full-tests-final.log`: **4357 passed**, 18 skipped, 1 xfailed, one
+pre-existing failure that also fails on the deployed tree:
+`test_vendored_bundles_are_not_prototype`, caused by the unrelated
+`ams1117-5v0-fixed` bundle still declaring `prototype`).
 
-Refusal-code counts over the same 102 runs (bundle-expanded; every code that appeared in any
-attempt):
+## Deployed default and measured baseline
 
-| code | A1 | screen | delta |
-|---|---|---|---|
-| `declared_signal_port_tied` | 90 | **20** | **−70** |
-| `unreviewed_exact_part` | 43 | **0** | **−43** (now a recorded note) |
-| `unknown_interface_port` | 38 | 11 | −27 |
-| `conflicting_port_binding` | 140 | 117 | −23 |
-| `unbound_required_port` | 25 | 4 | −21 |
-| `source_obligation_not_retained` | 27 | 19 | −8 |
-| `unsupported_lowerer_contract` | 160 | 179 | +19 |
-| `malformed_signal_ref` | 1 | 18 | +17 |
-| `architecture_power_block_as_sheet` | 6 | 18 | +12 |
-| `commit_gate_rejected` (new, this session: a *recorded* commit refusal, not a new refusal) | 0 | 12 | +12 |
+The source repairs were integrated and deployed (`deploy/deploy-production.sh`:
+web HTTP 200, build worker ready). Evidence for the default: with the **same**
+current manufacturing tail, the pinned native design engine completed a full
+34-brief campaign with **16/34 first-pass fab-ready** and every one of the 16
+independently certified (0 DRC errors, 0 unconnected, passing ERC, verified
+Gerber/drill export) — against the previously saved current-engine first pass of
+2/34. The admin pipeline knob was therefore set to native design + current
+manufacturing and re-deployed; `pipeline.selected()` reports `legacy`.
 
-**Reading.** Every code the derives targeted fell, several by three quarters; 18 runs that used to
-die at the architecture stage now reach the BOM stage and die there. The headline is unchanged
-because the wall is one stage later — exactly the shape the RECORD preview measured in session 1
-(12 rescued attempts, all dead at the BOM) and the reason the plan's §4.1 keeps the BOM obligation
-codes blocking. The increases are exposure, not regressions: a draft that survives its earlier
-refusal gets further into the same pass, so later checks in that pass now report too.
+Campaign `recovery_full` (baseline, pre-fix manufacturing, `$0.93`): 16/34
+certified. Its 18 failures were dominated by design-stage deficits (missing
+decoupling/charge-pump networks, non-orderable picks, dangling nets) rather than
+the manufacturing classes repaired here, so the next section measures the same
+briefs on the corrected source rather than extrapolating.
 
-**Decision (recorded, deliberate deviation from the plan's literal kill criterion).** The plan says
-"no rise in the per-brief median commit count ⇒ revert". The rise did not come. Reverting would
-re-block 18 runs at architecture and free no board; the deterministic before/after on 26 real
-drafts (3 → 5 committing, the two tied-port codes → 0) says the derives are not harmful and do what
-they were built to do. So the derives **stay**, no yield claim is made for them, and the next move
-is the wall they exposed (§3.1). If the *next* screen (M2 below) also fails to move the headline,
-the architecture moves get re-examined together with it.
+Campaign `recovery_fixed` (same briefs, corrected source, `$0.95`): 17/34
+reported and all 17 independently certified, with 7 briefs newly passing
+(`r2r-dac`, `usb-c-full-breakout`, `usb-a-power-splitter`, `rs485-terminal`,
+`stm32-min`, `highside-switch-10a`, `dual-rail-supply`) against 6 that regressed.
+Five of those six regressions are design-stage variance (orderability, BOM
+deficits, a self-shorted two-terminal part). The sixth class was **real and
+self-inflicted**: the first cut of the connector gate reported every mouthless
+edge-zoned part as `unverified_directional`, so a fab-clean board whose only such
+part was a slide switch (`SW1`/`SW2`) failed the terminal gate. The gate was
+corrected to block on connector *evidence* — a recognized horizontal terminal
+row, or a through-hole body deeper than the calibrated 4 mm cut — while keeping
+the historical no-verdict reading for shallow parts; a shallow/deep pair is pinned
+by `test_facing_ignores_shallow_part_without_connector_evidence`, and the
+correction was re-deployed before any further measurement.
 
-### 2.3 The three briefs that moved down, attributed
+The six regressed briefs were then re-run as a **separate, visible retry
+campaign** (`recovery_fixed_retry`, `--only` those six) rather than folded back
+into the first pass. Four passed (`speaker-crossover`, `hex-env-sensor`,
+`star-ornament`, `snowman-ornament`) and all four were independently certified;
+`led-cc-driver` (thermal-pad ground deficit) and `daq-8ch` (self-shorted
+two-terminal part) still fail on legacy-engine design deficits.
 
-`audio-jack-buffer` 2/3 → 0/3, `r2r-dac` 2/3 → 0/3, `fpc-breakout` 2/3 → 1/3, against
-`proto-shield` 0/3 → 3/3 and `rc-lowpass-bnc` 1/3 → 3/3. This corpus has measured 60 % → 20 % swings
-on *identical* inputs, so a single arm cannot attribute those. A/B run (both arms, same box, same
-session, 3 repeats, only the 1a derives differing): `logs/self_eval/ab_move1a_20260921.log`,
-batches `ab_move1a_before` / `ab_move1a_after`, ~$0.55.
-
-**Result** (pinned A/B, both arms `pipeline=current`, same session, same box, 3 repeats each,
-~$0.42 total — `logs/self_eval/ab_move1a_pinned_20260921.log`):
-
-| brief | before (no 1a derives) | after (with them) | delta |
-|---|---|---|---|
-| audio-jack-buffer | 0/3 | 2/3 | +2 |
-| fpc-breakout | 1/3 | 1/3 | 0 |
-| proto-shield | 3/3 | 2/3 | −1 |
-| r2r-dac | 1/3 | 2/3 | +1 |
-| rc-lowpass-bnc | 2/3 | 2/3 | 0 |
-| **total** | **7/15** | **9/15** | **+2** |
-
-**Verdict: keep moves 1a–1b.** The sum moved +2 in their favour while individual briefs moved ±2 in
-both directions, which is exactly the noise the same session measured elsewhere (two separate
-"before" runs of the same tree on the same five briefs came out 7/15 and 9/15). Combined with the
-deterministic draft corpus (3 → 5 of 26 commit, `declared_signal_port_tied` 90 → 20,
-`unreviewed_exact_part` 43 → 0) the derives do what they were built to do and are not harmful. The
-headline did not move because the wall is one stage later (§2.2), and the two briefs that appeared to
-regress in the M1 screen were noise: `audio-jack-buffer` is 2/3 here and `r2r-dac` 2/3 here, against
-0/3 for both in the screen.
-
-> **Method note, measured, that outlives this session:** with 3 repeats a single brief's commit count
-> swings by **±2 of 3** on the same tree. Individual brief deltas are noise; only the *sum over
-> briefs*, the *stage split* and the *refusal composition* carry signal. This quantifies the plan's
-> §7.1 warning and it is why the plan's brief-level kill criteria need ≥8-brief slices to mean
-> anything.
-
----
-
-## 3. The wall map — where the 34 briefs die today
-
-### 3.1 The BOM wall, and a reproduced defect (this is move M2)
-
-Runs whose BOM stage failed carrying a defect payload:
-
-| defect class | A1 | screen | example |
-|---|---|---|---|
-| `declared-interface-unrealized` | 11 | **9** | `breakout: declared interface needs one identified hardware owner` |
-| `missing-requirement-implementation` | 6 | 3 | `power_led` |
-| `physical-obligation-unfulfilled` | 4 | 3 | `led_driver:power_led: requires 1 real power-led, found 0; the unit emitted: led_driver=al8860:AL8860MP-13 …` |
-| `model_authored_protected_identity` | 2 | 3 | `passive_breakout_connector` |
-
-The largest class is the *owner* half of `declared-interface-unrealized`, and it is a bookkeeping
-defect rather than a design error. Reproduced at $0 from the model's own BOM answer stream
-(`run_11_fpc-breakout__r3`):
-
-```
-requirement:  breakout            (a curated family; the design chose the part, not the draft)
-emitted group: id=passive_breakout_connector  symbol=fpc-24-0-5-kinghelm:KH-FG0.5-H2.0-24PIN
-                                           mpn=KH-FG0.5-H2.0-24PIN
-refusal:      breakout: declared interface needs one identified hardware owner
-```
-
-Root cause, in two lines: `_requirement_owns_protected_group` compares the *requirement's own
-declared* identity (`exact_part`, then `family` as a word) against the group's `mpn`/`value`, and
-gives up when the family is a typed product family — while the part in front of it was chosen by the
-requirement's **own recipe/lowerer**, whose identity the compiler has already stamped on the group
-(`resolution_id`, `resolution_source`, `recipe_id`; the lowering path even reads
-`_lowering_requirement_id` a few calls away) and whose symbol *library* (`fpc-24-0-5-kinghelm`) is
-the family the requirement resolves to. Nothing about the board is wrong; the check cannot see who
-owns it.
-
-**M2 fix:** resolve ownership from the compiler's own bookkeeping first — `resolution_id ==
-requirement.id`, or `recipe_id`/`_lowering_requirement_id` matching, or the group's symbol library
-or resolved MPN matching the requirement's family/recipe identity — and only then fall back to the
-current word matching. Refuse only when none of those resolve, naming what was tried. Expect
-+4…+9 committing designs per arm (9 in the screen, 11 in A1), and the first realistic chance at new
-*finished boards*, because these are runs whose parts were already right.
-
-### 3.2 The architecture set, censused and split three ways (this is move M3)
-
-The largest single architecture refusal, `source_obligation_not_retained` (11 of A1's 69 deaths),
-has 51 offending obligation rows across A1 + A4. They are three different problems:
-
-| sub-case | rows | repair |
-|---|---|---|
-| `quantitative` (a numeric limit with a unit, e.g. *board width ≤ 40 mm*) | **22** | the ownership rule exempts `quantity`, `fabrication`, `negative` as "board-level facts, not implementation claims"; a numeric limit is the same kind of fact and is currently *not* exempt. Either add it to `OWNERSHIP_EXEMPT_OBLIGATION_KINDS` with the reason recorded, or attach it to the requirement that owns its subject. **Cheapest large win in the dataset.** |
-| novel "physical" classes that name a board shape/feature (`snowman-shaped-board` 9, `rounded-rectangular-pcb`, `chamfered-board-outline`) | 10+ | nothing can own a board outline. Retype to `fabrication` when the class names a board/outline/shape fact **and** no reviewed part and no reviewed variant could carry it. Careful: `mounting-hole` *is* realizable, so no naive keyword rule. |
-| realizable classes the draft never attached (`crystal` 5, `warm-white-led` 3, `stacking-header`, `screw-terminal`, `qspi-flash-memory`) | 9 | where exactly one requirement's family/recipe realizes the class, attach the row and note it; where none or several could, refuse and name the candidates. |
-
-### 3.3 The empty unit (this is move M4, and it is option 2's real wall)
-
-`run_10_rp2040-min__r1` (A4): the BOM stage ran with `attempts: 0`, `work_units: 1`, and no parts —
-a `deterministic_architecture_lowering` unit with a requirement emitted nothing and never asked the
-model, so the commit gate judged an **empty BOM** and refused six realization contracts plus a
-castellation representation (`bom_castellation_placeholder`, offender `j2`). Every one of those
-messages is downstream of "the unit produced nothing". Fix the unit (a unit expected to produce
-parts and producing none should refuse at the unit, by name, cheaply repairable) before reading any
-of the messages behind it.
-
-### 3.4 What is not the wall
-
-The library does hold the classes the plan suspected (`nx3215sa-32.768k-std-mua-9` carries
-`crystal`; `rp2040` carries `microcontroller`); the §9.42 messages were symptoms of §3.3, not an
-unsatisfiable demand. Do not loosen part demands for them.
-
----
-
-## 4. The plan to 34/34
-
-One move per screen, each with a pre-registered delta and a kill criterion. Screens are design-only
-(34 × 3 ≈ $1.80, ~50 min); a confirmation is a full run (~$2–3, 1–5 h, off-hours).
-
-| | move | expected on the screen | kill criterion |
-|---|---|---|---|
-| **M1** ✅ | free gate green + architecture derives + RECORD path (done, deployed) | — (this screen: flat headline, wall moved 18 runs downstream) | — |
-| **M2** | **the declared-interface owner resolution** (§3.1) | committed designs 7 → **11–16**; BOM deaths 41 → ~32 | < +3 committed designs ⇒ revert M2, re-derive from the per-attempt `work_unit` failure text |
-| **M3** | **the obligation-ownership split** (§3.2): `quantitative` exemption first, then the board-shape retype, then the provable attachment | architecture deaths 51 → ~35; committed designs +2–4 | no rise in committed designs ⇒ revert; a null recorded is a delivered move |
-| **M4** | **the empty unit** (§3.3) | protects M2/M3's gains from dying behind an empty BOM; ≥3 of the runs that reach BOM stop failing for "found 0" | no rise in BOM-stage completions |
-| **M5** | **confirming full run** (34 × 3, with builds) | the headline: fab-ready briefs, and every newly shipped board's recorded notes | fewer than +3 boards over A1's 4 ⇒ the screen→board conversion is broken; re-derive from the per-board build tail |
-| **M6** | **the long tail**: routing failures, unconnected items, DRC/outline checks, and the briefs needing a part or topology the library does not model | 21 → 26+ | — (each tail item is its own census-driven move) |
-
-**Cost to a measured claim of the next milestone (13 → ~21 on the current tree):** M2 screen +
-M3 screen + M5 confirmation ≈ **$6–8** and one working day, inside the daily ceiling if spread over
-two days.
-
-### 4b. The legacy switch as deployed DOES NOT WORK YET — two reproduced defects (2026-09-21)
-
-The operator switched production to `pipeline: legacy` at 00:55 and submitted real projects. Three
-of them failed; both failure modes are reproducible and diagnosed:
-
-**Defect B1 — the tail is split across two trees, and the current tree corrupts the legacy state.**
-Project 878 (`pipeline: legacy`): the design stages committed through the legacy driver
-(`[legacy] rc=0 … [ok] intent … wiring`), then the **current tree's** post-design tail ran in the
-web process — the BOM reconcile and the post-wiring lifecycle (`electrical_review`, silkscreen) —
-and re-serialized `state.json` through the *current* models. The build then ran with the legacy
-interpreter (the marker was honoured: `job 322: build in … [legacy pipeline]`) and died with **171
-schema errors**:
-
-```
-schema validation failed:
-171 validation errors for ConversationState
-bom.parts.0.assembly          Extra inputs are not permitted [input_value=True]
-bom.parts.0.recipe_id         Extra inputs are not permitted [input_value=None]
-bom.parts.0.lowering_role     Extra inputs are not permitted …
-```
-
-`assembly`, `recipe_id`, `resolution_*` and `lowering_*` exist in the current tree and **not at all**
-in the legacy tree (`grep -c` : 4 vs 0). The state a legacy project ends up with is therefore
-neither schema, and only the current tree can read it. My dispatch passed `--no-build`, so the
-legacy tree never ran its own tail — **the pipeline was split mid-tail**, which is exactly the
-hazard the plan's §3.3 named ("the legacy tree writes a different state schema") and which the
-marker only mitigated on the *reading* side.
-
-**FIXED and accepted end to end (commits `b24f17e` + the tests below).** The web worker now asks
-`pipeline.current_tree_owns_tail(ws)` and skips both the BOM reconcile loop and the post-wiring
-lifecycle for a legacy workspace, logging the skip instead of doing it silently; the legacy build
-runs the tail its own tree has. Acceptance, pinned so production's `current` was untouched
-(`logs/self_eval/legacy_acceptance_20260921.log`, ~$0.01 + one build):
-
-```
-1/3 design through the legacy dispatch   → status: ok | pipeline: legacy
-                                           stages: intent, functional_spec, architecture, bom,
-                                           wiring = ALL True
-2/3 B1 check                             → parts: 4 | current-only fields present: none
-                                           marker: {'pipeline': 'legacy', 'legacy_commit': 'bc6a2f8'}
-3/3 build through the legacy interpreter → BUILD COMPLETE: BNC_RC_FILTER
-                                           DRC: 0 shorts, 0 unconnected (14 traces, 2 vias)
-                                           fab: BNC_RC_FILTER_fab_20260921.zip (+ STEP, 3D render)
-```
-
-Original defect record, kept because the failure mode is instructive:
-
-*Fix shape (as implemented):* for a legacy workspace **no current-tree code may write
-`state.json`**. Two changes: let the legacy driver run its own tail (drop `--no-build`, so
-design+build happen in one legacy process), and guard the BOM-reconcile / post-wiring-lifecycle
-paths so they skip a legacy workspace entirely. Then retry project 878 as the acceptance test — the
-artifact is already on disk. **Until that lands, `pipeline: legacy` is a broken configuration for
-users** (see §8.2).
-
-**Defect B2 — a legacy run that parks on a question is reported as a failure. FIXED.** Projects 876
-and 877 (legacy) had every design stage commit and then `wiring` **parked**: the legacy driver asked
-a clarifying question (`-> parked: awaiting input`), and my `_run_legacy_session` mapped anything
-short of "all stages committed" to `status: failed`. The question never reached the user and the
-project row said `failed`. Now the dispatch translates a pending blocking question (unanswered, on a
-stage this run drove and did not commit) into `status: awaiting_input` with the question attached, so
-the web parks the project and the question surfaces in the UI as it does for the current pipeline.
-
-**Parallel track B — the legacy switch (deployed, fixed, accepted; currently OFF by operator decision).**
-`~$0.10` + one build: drive one brief with `pipeline=legacy` end to end (five stages **and** a
-finished board), switch back, confirm `current`, and check the pipeline is named in the project row,
-the provenance file and the summary. This is the only untested path in the whole session and it is
-worth 21/34 boards today. It does not require flipping the global switch — a test workspace with the
-marker set exercises the same dispatch — but the *operator decision* it feeds (which pipeline serves
-users, and for how long the fork lives) is §8.2.
-
-**Track C — the ops items** (§8.4: install the sweep timer; decide about pushing the branch).
-
-**Cadence rules (unchanged, they are what makes this not wasteful):** 34 × 3 minimum, per-brief
-median as the unit; expand refusal bundles before counting; one campaign at a time at
-`--parallel 2`; append every result to the plan document; never overwrite a frozen baseline; state
-the expected delta *before* the run and revert when it misses.
-
----
-
-## 5. The next three actions, as commands
-
-**1. Read the pinned attribution** (§2.3, batches `ab_move1a_pinned_before`/`_after`, ~$0.45). If
-the before arm wins clearly, revert `b7a379f`'s derive hunks and re-baseline before M2; if the arms
-are equal (as the discarded first attempt suggested, and as ±2/3 noise would predict), M2 proceeds
-on the current tree. **Also decide the production switch state** (§8.2): `legacy` since 00:55 means
-user runs are not getting the fixes this plan is building.
-
-**2. Implement M2** (§3.1) — `_requirement_owns_protected_group` in
-`kicraft/server/stage_contracts.py`, plus a guard test built from the reproduced case
-(requirement `breakout` / group `passive_breakout_connector` / mpn `KH-FG0.5-H2.0-24PIN`).
-
-**3. Screen M2** on the same instrument as M1, for a like-for-like comparison:
-```bash
-REPO=/home/kicraft/KiCraft
-cp logs/self_eval/opt1_designonly_20260920_run.sh logs/self_eval/m2_designonly_run.sh
-# point OUT/LOG at m2_designonly_<date>, leave everything else as-is, then:
-setsid nohup logs/self_eval/m2_designonly_run.sh >/dev/null 2>&1 &
-tail -f logs/self_eval/m2_designonly_<date>.log
-```
-Compare against `movea_a1_current_20260919T1431Z` **and** against the M1 screen
-(`opt1_designonly_20260920`) so the M2 delta is separated from M1's.
-
----
-
-## 6. Environment recipes (do not re-derive)
-
-```bash
-REPO=/home/kicraft/KiCraft
-# every campaign launch
-env -i HOME=/home/kicraft PATH="$PATH" TERM=xterm PYTHONUNBUFFERED=1 \
-  "$REPO/.venv/bin/python" -m kicraft.eval.self_eval \
-  --out logs/self_eval/<name> --repeats 3 --parallel 2
-```
-- `env -i` is mandatory (`.env` never overrides an existing variable; the tool shell carries stale
-  `KICRAFT_*`). `--design-only` for screens, `--no-judge` when the score is not needed,
-  `--only <slugs>` + `--resume <dir>` for slices and continuations.
-- **Box**: 2 cores, no swap, 7.7 GB. `--parallel 3` reaches 98–99 % memory and gets the campaign
-  killed (~90 min); `--parallel 2` is the setting that survives. Health-check
-  `curl -sf http://127.0.0.1:8080/` during a run.
-- **Slots**: `deploy/check-build-slots.sh [--reap]` after any abnormal exit — a leaked slot now
-  removes *all* build capacity (one slot configured).
-- **A/B or frozen-tree runs**: `git worktree add /tmp/<name> <commit>`, copy `.env` in
-  (`chmod 600`), run with `PYTHONPATH=/tmp/<name>` and `cwd=/tmp/<name>`. Verified: the worktree's
-  package wins over the venv's editable install, and `cli_app` subprocesses inherit it.
-- **Legacy tree**: everything is in `kicraft/server/pipeline.py` (`LEGACY_ENV`, paths, pinned
-  commit); `pipeline.describe()` prints the state. Its venv resolves its own checkout from any
-  directory without a `kicraft/` package; the `PYTHONPATH` pin is belt-and-braces. **A legacy
-  BUILD needs the router environment too** (`KICRAFT_KICAD_ROUTING_TOOLS_PATH` and
-  `..._PYTHON`); the worker has them from the production `.env`, and a stripped (`env -i`) launch
-  does not — measured: the build refused with "KiCadRoutingTools is selected but
-  kicraft_routing_tools_path is unset" until the acceptance script loaded `.env`.
-- **Deploy**: `deploy/restart-build-worker.sh && deploy/restart-web.sh` — both services, because
-  the build dispatch lives in the worker. No `pip install` unless dependencies changed.
-- **The harness follows the admin switch.** `kicraft.eval.self_eval` drives designs through
-  `session.run_session`, which honours `routing.json`'s `pipeline`, so a campaign silently measures
-  whatever the switch says — this session's first A/B was discarded for exactly that reason (the
-  "after" tree contained the switch, the "before" tree did not, so the two arms ran different
-  pipelines). Two rules from here on:
-  1. **Every campaign records which pipeline it measured**: `summary.json.pipeline_counts` (added
-     this session) says `{current: 102}` or `{legacy: 102}`; read it before interpreting anything.
-     It is what proved the M1 screen was a current-tree measurement.
-  2. **To measure a specific tree, pin the pipeline for that run** instead of changing production:
-     ```bash
-     cp ~/.kicraft/routing.json /tmp/routing_ab_current.json
-     # set "pipeline": "current" in the copy, then launch the arm with
-     #   env -i ... KICRAFT_ROUTING_CONFIG=/tmp/routing_ab_current.json ...
-     ```
-     `routing_config.default_path()` honours that variable, and the copy carries the same profile
-     and knobs, so the arm is comparable to a campaign run under the production file.
-
----
-
-## 7. Baselines and artifacts
-
-| path | what |
+| Measurement | Value |
 |---|---|
-| `logs/self_eval/movea_a1_current_20260919T1431Z` | **the frozen baseline** (current tree, 102 attempts): 7 committed, 3 briefs ≥2 repeats, 5 fab-ready runs / 4 briefs. Never overwrite. |
-| `logs/self_eval/movea_a3_precontract_b4b8be5` | 09-15 tree, 13/34 fab-ready |
-| `logs/self_eval/movea_a2_legacy_bc6a2f8` | August pipeline, 21/34 — the option-3 value |
-| `logs/self_eval/opt1_designonly_20260920` (+ `.log`, `_run.sh`) | the M1 screen and its resuming runner |
-| `logs/self_eval/ab_move1a_{before,after}` (+ `ab_move1a_20260921.log`) | the 1a attribution A/B |
-| `logs/self_eval/movea_a4_recordpatch` (+ `.patch`) | the RECORD preview: the patch that landed, and the measurement that says do not widen it |
-| `logs/self_eval/reference_replay_{after_1a,final}.log` | the two green gate runs |
-| `logs/self_eval/movea_tools_20260919/` | session 1's tooling (census, bundle expansion, per-arm report, resuming runner) |
+| Baseline first pass (pre-fix manufacturing) | 16/34, all certified |
+| Corrected source, first pass | 17/34, all certified |
+| Corrected source, distinct briefs passing | **21/34**, all certified |
+| Certified false positives in any campaign | 0 |
 
----
+Independent certification for every claimed success: zero `kicad-cli` DRC
+errors, zero unconnected nets, passing ERC and a verified Gerber/drill archive.
+New live provider spend for all of today's work: **$2.95** against the authorized
+`+$18`. Evidence: `recovery_full/summary.json`,
+`recovery_fixed/summary.json`, `recovery_fixed_retry/summary.json`, and the
+matching `*_independent.json` files.
 
-## 8. Operator decisions still open
+The `current` design engine remains weaker than the pinned native one and its
+recipe repairs do not change that today: two live design-only attempts on the
+corrected source still fail `rp2040-min`/`stm32-min` at other gates (an unproven
+regulator power-transfer contract, and a model-authored crystal that conflicts
+with the recipe-owned one), whereas the deterministic replay above proves the
+identity/multiplicity defects themselves are gone. No yield claim is made for
+that engine.
 
-1. **Push the branch?** 19 local commits are the only copy; the box serves them locally.
-2. **Option 3 is IN and currently broken for users — decide tonight.** `~/.kicraft/routing.json`
-   has said `pipeline: legacy` since 2026-09-21 00:55. Three real projects have been submitted under
-   it and **all three failed**, for the two reasons above (B1: the current tree's tail corrupts the
-   legacy state, so the legacy build cannot read it; B2: a parked legacy run reports as failed).
-   Two honest choices: (a) set it back to `current` until B1/B2 are fixed — users then get the
-   current tree's 4/34, which at least runs; or (b) fix B1/B2 first (~1 h, production build path,
-   validated by retrying project 878), then leave `legacy` on for the 21/34 yield. Do not leave it
-   on as-is: it is currently converting a design failure into a build failure for every user.
-3. **How long does the legacy fork live?** It buys 21/34 today and receives none of M2–M6's fixes.
-4. **Install the build-slot sweep timer** (needs root):
-   `sudo cp deploy/kicraft-build-slots.{service,timer} /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now kicraft-build-slots.timer`
-5. **Keep the two $0 instruments as tracked tools?** The real-draft replay corpus (screens any
-   architecture change for $0) and the bundle-expanding census (prevents ranking the wrong code
-   first) live in `/tmp` and session-1 scratch respectively.
+## What the live investigations actually showed
 
----
+All paths below are relative to `logs/self_eval/yield_recovery_20260921/`.
 
-## 9. Do not redo
+| Investigation | Outcome | Interpretation |
+|---|---|---|
+| `current_firstpass` | Interrupted after 11 completed runs; 1 reported rc0 | USB-C BOM validation entered recursive deterministic fallback. Not a complete 34-brief result. |
+| `legacy_bridge_smoke` | Native session/ledger exercised; wiring failed | Protocol proof only, not a successful board. |
+| `legacy_full` | Interrupted after 15 completed runs; 8 reported rc0 | Independent DRC disproved two labels; do not continue routing with an unsafe old tail. |
+| `independent_fab_verification.json` | 6 of those 8 candidates independently DRC-clean | Partial diagnostic evidence, not final 34-brief yield. |
 
-- **Widening the RECORD list.** Measured null: every attempt the downgrade rescued died one stage
-  later at the BOM — which is exactly what the M1 screen then reproduced on the live corpus.
-- **Rating a change by its headline alone.** The M1 screen's headline is flat while 18 runs moved
-  one stage deeper and the target codes fell 70–100 %. Read the composition and the stage split.
-- **Trusting the stored terminal diagnosis.** It is a bundle that hides its members; expand it
-  before ranking anything.
-- **Loosening the reference rows to make the free gate green.** The corpus arbitrates.
-- **Wording-only fixes and error-class aliases.** Six such commits moved nothing.
-- **Chasing the model.** The August tree hits its era's numbers with today's model.
-- **Two campaigns at once, or `--parallel 3`.** Both have already cost a session.
+The rejected native candidates are concrete:
 
----
+- **USB-C full breakout:** 57 DRC errors — clearance, hole clearance, annular width
+  and via diameter. Vias were 0.25 mm despite the project's 0.36 mm minimum; rings
+  were 0.05 mm despite its 0.105 mm minimum.
+- **FPC breakout:** 11 DRC errors of the same manufacturing classes.
+- **ESP32-S3 sensor:** native final build correctly failed 36 antenna-keepout
+  intrusions, although its intermediate routed validation incorrectly accepted
+  them. Pre-route GND escape stubs and tip vias crossed the footprint rule area.
 
-## §2.3 result (filled in when the A/B finished)
+Current source already contains the relevant producer fixes:
+`autoplacer/kicad_routing_tools.py::_project_routing_floors` binds adaptive routing
+to actual project limits; `brain/breakout_stubs.py` checks track/via rule areas;
+`hardware/keepout_extract.py` supplies the geometry; `routing_board.py` blocks
+keepout intrusions. Use these implementations rather than relaxing constraints or
+exporting the rejected boards. Frozen copies for current-tail verification are in
+`current_tail_smoke/`; original failed artifacts remain untouched.
 
-See the dedicated section appended below.
+Remaining native design failures examined so far are genuine five-attempt
+exhaustions, not missing feedback: dangling `FAULT`, an incompatible isolated
+DC-DC symbol/footprint pair, and a nonexistent header footprint. Native feedback
+has weaknesses, but arbitrary substitution or deleting required nets is not an
+acceptable fix. Targeted fresh attempts must remain visible as retries.
+
+## Verification and spend
+
+The final integrated focused suite passed **573 tests**, with two opt-in replay
+tests skipped and five dependency deprecation warnings. Evidence:
+`integrated-tests.log`. The affected frozen reference slice passed **5/5**: R2R,
+FPC, RP2040, round LED ring and snowman. A broader reference run timed out at
+300 seconds; it is not a full-suite pass.
+
+Today's repaired set was verified on the deployed tree with the **whole suite**:
+`4357 passed, 18 skipped, 1 xfailed`, and one failure —
+`test_vendored_bundles_are_not_prototype` (`ams1117-5v0-fixed` still declares
+`prototype`) — which fails identically on the untouched baseline and is therefore
+pre-existing rather than introduced here. Evidence:
+`integrated-tests-final.log`, plus the same run on the isolated copy of the tree
+before deployment (`staged/overlay-full-tests-final.log`).
+
+Suite-order fixture failures were corrected to patch module objects rather than
+package-attribute strings. An existing build-concurrency test also failed to mock
+post-wiring provider calls; it is now isolated. The final combined suite incurred
+**$0 additional LLM spend**, verified against the ledger in
+`test-spend-verification.json`. Earlier incidental test charges remain included
+in the authorized spend total.
+
+The actual admin routing page was rendered in an isolated server with temporary
+storage and an authentication-only preview seam. The new pipeline label and
+trade-off text were visually verified; no production config was saved. Screenshot:
+`admin-routing.webp`.
+
+Authorized new live LLM spend: **$20 maximum**. Starting shared ledger total:
+`130.73234997348`. Enforced total ceiling: `148.73234997348` (+$18), reserving $2 for
+in-flight/shared activity; daily ceiling $19. Profile snapshots and settings are in
+`budget.json`, `routing-current.json`, `routing-legacy.json`. New spend at the last
+stopped-campaign checkpoint was **$0.66164683**, including unsuccessful calls.
+Final accounting must use the shared ledger delta, not just successful run costs.
+
+## Completion criteria and next execution
+
+1. Prove the isolated current build against frozen FPC, USB-C and ESP32 native
+   designs. Inspect real promoted boards with their project rules, verify native
+   state remains readable, and retain failures rather than overriding a gate.
+2. Run a fresh full 34-original-brief campaign on the corrected composition under
+   the cap. Keep source/config fingerprints fixed during that campaign.
+3. Independently inspect every reported success: zero DRC errors and unconnected
+   nets, passing ERC, current manufacturing gates and verified Gerber/drill export.
+   Report first-pass yield separately from any targeted-retry coverage.
+4. Investigate remaining failures and use justified targeted attempts or source
+   repairs while preserving the original briefs and budget. Do not promise 34/34
+   from estimates or replace missing outcomes with design-only results.
+5. Record complete results here, select the proven default, deploy with
+   `deploy/deploy-production.sh`, and verify HTTP 200 plus build-worker readiness.
+   Remove throwaway runners after measurement; retain reports and failed evidence.
+
+## Status of those criteria
+
+1. **Done.** Frozen R2R and USB-C native/current designs were replayed through the
+   real build tail on an isolated copy of the corrected source (see *Frozen
+   replays*); both now promote routed parents with zero DRC errors and exported
+   fabrication packages. The native state handoff is unchanged by these repairs.
+2. **Done.** Two full 34-brief campaigns were run under the cap with fixed source
+   fingerprints (`recovery_full`, `recovery_fixed`), plus a targeted six-brief
+   retry campaign.
+3. **Done.** Every claimed success in all three campaigns was independently
+   inspected: 16/16, 17/17 and 4/4 certified, with zero false positives.
+4. **Done.** Failures were investigated individually; the only source-level
+   regression found (the connector gate over-blocking shallow parts) was fixed,
+   re-tested and re-deployed, and its briefs were re-measured as visible retries.
+5. **Done.** The native-design + current-manufacturing default was selected on
+   measured evidence, deployed, and verified (web HTTP 200, build worker ready);
+   `pipeline.selected()` reports `legacy`.
+
+Remaining known gaps, stated plainly: 13 briefs still fail at the design stage of
+the pinned engine (missing decoupling/charge-pump networks, non-orderable or
+insufficiently stocked parts, dangling nets, self-shorted two-terminal parts),
+`current`-engine MCU briefs still fail later gates, one pre-existing unrelated test
+failure (`test_vendored_bundles_are_not_prototype`, `ams1117-5v0-fixed`) remains,
+and legacy-engine design outcomes are stochastic run to run — none of that is
+hidden by the numbers above.

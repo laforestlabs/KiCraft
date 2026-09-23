@@ -1,29 +1,24 @@
-"""Which design pipeline builds a project, and how the legacy one is driven.
+"""Design backend selection with one current manufacturing implementation.
 
-The yield-recovery plan's option 3 puts the August pipeline (`bc6a2f8`, 2026-08-25) behind an
-admin switch, because it measured 21/34 finished boards against the current tree's 4/34. Two
-trees cannot share one interpreter: the legacy package would shadow the current one on
-``sys.path``, so a legacy project's *design* is driven by the legacy tree's own headless
-driver in a subprocess, and its *build* by the legacy interpreter.
-
-Everything about the switch that both dispatch sites must agree on lives here: the pinned
-commit, the legacy tree's paths, the per-process environment the legacy tree needs to reach
-the current model at all, and the marker/provenance record that keeps a swap visible
-(operator decision D2: nothing silent, including a pipeline swap).
+Native design runs in the pinned interpreter. Its canonical state remains native
+so questions, reconciliation and later edits can resume without schema pollution.
+Current manufacturing consumes an isolated snapshot and publishes only build
+artifacts back to that state; the obsolete native routing implementation is never
+used for new builds.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
-#: The pinned legacy tree. `bc6a2f8` is the newest commit that keeps the old design pipeline
-#: (no typed driver, no recipes/lowerers, no work units) *and* routes with KRT, which is why
-#: it can build on this box at all.
+#: Pinned native design backend; manufacturing always uses the current checkout.
 LEGACY_COMMIT = "bc6a2f8"
-LEGACY_LABEL = f"legacy pipeline ({LEGACY_COMMIT}, 2026-08-25)"
+LEGACY_LABEL = f"native design ({LEGACY_COMMIT}) + current manufacturing"
 LEGACY_ROOT_ENV = "KICRAFT_LEGACY_ROOT"
 DEFAULT_LEGACY_ROOT = Path("/home/kicraft/KiCraft-legacy")
 
@@ -33,9 +28,9 @@ PIPELINES = (PIPELINE_CURRENT, PIPELINE_LEGACY)
 
 #: What the operator is choosing, in the words the admin page shows.
 TRADE_OFF = (
-    "The legacy tree is a fork that will not receive the fixes from options 1-2, and this host "
-    "has one build slot: a legacy build serializes against a production build, so a user's "
-    "build can wait up to one build timeout (2400 s)."
+    "Native design uses the pinned August stage engine; manufacturing uses current "
+    "routing and fabrication gates. Native projects do not use current typed design "
+    "work units or post-wiring authorship. All builds share this host's single build slot."
 )
 
 #: The environment the legacy tree needs. Measured 2026-09-20: its DeepSeek-era defaults cap
@@ -49,6 +44,26 @@ LEGACY_ENV = {
 }
 
 _MARKER_NAME = "pipeline.json"
+_LEGACY_SESSION_RESULT_PREFIX = "__KICRAFT_LEGACY_SESSION_RESULT__="
+_LEGACY_EVENT_PREFIX = "__KICRAFT_LEGACY_EVENT__="
+
+
+def legacy_session_result(stdout: str) -> dict | None:
+    """Extract the legacy session runner's marked JSON response, if it finished."""
+    for line in reversed((stdout or "").splitlines()):
+        if not line.startswith(_LEGACY_SESSION_RESULT_PREFIX):
+            continue
+        try:
+            payload = json.loads(line[len(_LEGACY_SESSION_RESULT_PREFIX) :])
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+    return None
+
+
+def _legacy_session_runner() -> Path:
+    """The tiny protocol endpoint, executed *by* the legacy interpreter."""
+    return Path(__file__).with_name("legacy_session_runner.py")
 
 
 def legacy_root() -> Path:
@@ -134,24 +149,15 @@ def read_marker(ws) -> str | None:
 
 
 def project_pipeline(ws) -> str:
-    """The pipeline to BUILD a workspace with: its marker, else the configured default.
-
-    A legacy design that builds with the current tree would emit a board from a state schema
-    the current emitters do not own, so the marker wins once it is written.
-    """
+    """The workspace's design backend, pinned by its marker once selected."""
     return read_marker(ws) or selected()
 
 
-def current_tree_owns_tail(ws) -> bool:
-    """Whether CURRENT-tree code may write this workspace's ``state.json``.
+def current_tree_owns_design_state(ws) -> bool:
+    """Whether current design stages may reserialize the canonical state.
 
-    False for a legacy workspace, and that is not a style choice: the legacy tree's part model
-    has none of the current tree's fields (`assembly`, `recipe_id`, `resolution_*`,
-    `lowering_*`), so any current-tree stage that re-serializes the state adds them and the
-    legacy build then rejects the file — measured 2026-09-21 on project 878, 171 schema errors,
-    after the current tree's post-wiring lifecycle had run on a legacy design. Everything that
-    writes a legacy workspace (its own design driver, its own build) must be legacy code; the
-    current tree may only read the delivered artifacts.
+    Native sessions reject current-only part fields. Their manufacturing therefore
+    runs through native_build_runner on a separate current-schema snapshot.
     """
     return project_pipeline(ws) != PIPELINE_LEGACY
 
@@ -162,6 +168,7 @@ def provenance_fields(pipeline: str) -> dict:
     return {
         "pipeline": name,
         "pipeline_legacy_commit": LEGACY_COMMIT if name == PIPELINE_LEGACY else None,
+        "manufacturing_pipeline": PIPELINE_CURRENT,
         "pipeline_label": LEGACY_LABEL if name == PIPELINE_LEGACY else "current pipeline",
     }
 
@@ -172,77 +179,110 @@ def run_legacy_design(
     stages,
     *,
     budget_usd: float,
-    max_tokens: int = 4096,
-    max_retries: int = 2,
+    answers=None,
+    instruction: str | None = None,
+    run_id: str | None = None,
     timeout_s: float | None = None,
+    progress=None,
+    auto_default_questions: bool | None = None,
 ) -> tuple[int, str, str]:
-    """Drive the design stages through the legacy tree's own headless driver.
+    """Drive a legacy-owned session and its bounded BOM reconciliation.
 
-    A subprocess, not an import: two versions of the `kicraft` package cannot coexist in one
-    interpreter. The driver commits the same five stage slots into the same workspace (its
-    `state.json` schema is its own), so the build tail starts where the current pipeline's
-    would. Returns ``(returncode, stdout, stderr)``.
+    The protocol is intentionally only JSON over stdin/stdout. The runner executes
+    in the legacy interpreter and imports the legacy session APIs, which keeps its
+    models responsible for every state.json write while retaining one capped client
+    across the initial stages and every internal reconciliation re-drive.
     """
     root = legacy_root()
-    command = [
-        str(legacy_python(root)),
-        "-m",
-        "kicraft.server.stage_driver",
-        "run",
-        "--brief",
-        brief,
-        "--workspace",
-        str(Path(ws)),
-        "--stages",
-        ",".join(stages),
-        "--no-build",
-        "--budget",
-        f"{float(budget_usd):.4f}",
-        "--max-tokens",
-        str(int(max_tokens)),
-        "--max-retries",
-        str(int(max_retries)),
-    ]
+    request = {
+        "workspace": str(Path(ws)),
+        "brief": brief,
+        "stages": list(stages),
+        "answers": answers,
+        "instruction": instruction,
+        "run_id": run_id,
+        "budget_usd": float(budget_usd),
+        "auto_default_questions": auto_default_questions,
+    }
+    command = [str(legacy_python(root)), "-u", str(_legacy_session_runner())]
     # `cwd` is the legacy root and PYTHONPATH pins it: the current checkout must never be the
     # one that resolves, whichever of the two a future caller's cwd happens to be.
     env = {**os.environ, **LEGACY_ENV, "PYTHONPATH": str(root)}
     env["KICRAFT_PROJECTS_DIR"] = os.environ.get(
         "KICRAFT_LEGACY_PROJECTS_DIR", str(Path.home() / ".kicraft" / "projects-legacy")
     )
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=str(root),
-        timeout=timeout_s,
+    child = subprocess.Popen(
+        command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, errors="replace", bufsize=1, env=env, cwd=str(root),
     )
-    return completed.returncode, completed.stdout, completed.stderr
+    output, errors = [], []
+    read_errors = []
+    finished = threading.Event()
+    expired = threading.Event()
 
+    def drain_stderr():
+        try:
+            errors.append(child.stderr.read())
+        except BaseException as exc:
+            read_errors.append(exc)
+            child.kill()
 
-def legacy_build_python() -> str:
-    """The interpreter a legacy workspace's build runs under."""
-    return str(legacy_python())
+    def watchdog():
+        if not finished.wait(timeout_s):
+            expired.set()
+            child.kill()
+
+    reader = threading.Thread(target=drain_stderr)
+    timer = threading.Thread(target=watchdog) if timeout_s is not None else None
+    reader.start()
+    if timer:
+        timer.start()
+    try:
+        child.stdin.write(json.dumps(request))
+        child.stdin.close()
+        for line in child.stdout:
+            if line.startswith(_LEGACY_EVENT_PREFIX):
+                event = json.loads(line[len(_LEGACY_EVENT_PREFIX):])
+                if not isinstance(event, dict) or not isinstance(event.get("kind"), str) or not event["kind"].strip():
+                    raise ValueError("Invalid legacy progress event")
+                if progress:
+                    progress(event)
+            else:
+                output.append(line)
+        child.wait()
+    except BaseException:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+        if expired.is_set():
+            raise subprocess.TimeoutExpired(command, timeout_s) from None
+        raise
+    finally:
+        finished.set()
+        if timer:
+            timer.join()
+        reader.join()
+        try:
+            child.stdin.close()
+        except OSError:
+            pass  # An already-terminated child may have closed the request pipe.
+        child.stdout.close()
+        child.stderr.close()
+    stdout, stderr = "".join(output), "".join(errors)
+    if expired.is_set():
+        raise subprocess.TimeoutExpired(command, timeout_s, output=stdout, stderr=stderr)
+    if read_errors:
+        raise read_errors[0]
+    return child.returncode, stdout, stderr
 
 
 def build_command(cmd_base: list[str], pipeline: str) -> list[str]:
-    """Substitute the legacy interpreter for a legacy workspace's build job.
-
-    Only the interpreter changes: the argv contract (the module, the subcommand and its paths)
-    is the same in both trees, and the legacy venv's editable install resolves its own checkout
-    from any directory that does not itself hold a `kicraft/` package (measured: a build job's
-    workspace, and the legacy root, both resolve to `/home/kicraft/KiCraft-legacy/kicraft`).
-    `PYTHONPATH` pins that explicitly (see `legacy_env`) so the current checkout can never
-    shadow it, whatever the child's cwd turns out to be.
-    """
-    if normalise(pipeline) != PIPELINE_LEGACY or not cmd_base:
+    """Use current manufacturing, isolating native canonical design state."""
+    if normalise(pipeline) != PIPELINE_LEGACY:
         return list(cmd_base)
-    return [legacy_build_python(), *cmd_base[1:]]
-
-
-def legacy_env(base: dict | None = None) -> dict:
-    """The environment a legacy build subprocess needs (its own package, never this one)."""
-    return {**(base or {}), "PYTHONPATH": str(legacy_root())}
+    if cmd_base[1:3] != ["-m", "kicraft.design.cli_app"]:
+        raise ValueError("Native design builds require the current manufacturing CLI")
+    return [cmd_base[0], "-m", "kicraft.server.native_build_runner", *cmd_base[3:]]
 
 
 def describe() -> dict:

@@ -257,6 +257,7 @@ def run_session(
     progress=None,
     run_id=None,
     core_defaults=None,
+    auto_default_questions: bool | None = None,
 ) -> dict:
     """Drive `stages` over the workspace's state.json.
 
@@ -277,7 +278,16 @@ def run_session(
     pipeline = pipeline_dispatch.project_pipeline(ws)
     pipeline_dispatch.write_marker(ws, pipeline)
     if pipeline == pipeline_dispatch.PIPELINE_LEGACY:
-        return _run_legacy_session(ws, brief, stages, progress=progress, instruction=instruction)
+        return _run_legacy_session(
+            ws,
+            brief,
+            stages,
+            answers=answers,
+            instruction=instruction,
+            progress=progress,
+            run_id=run_id,
+            auto_default_questions=auto_default_questions,
+        )
     results, guard, state_path = drive_chain(
         stages,
         brief,
@@ -288,6 +298,7 @@ def run_session(
         instruction=instruction,
         run_id=run_id,
         core_defaults=core_defaults,
+        auto_default_questions=auto_default_questions,
     )
     last = results[-1] if results else None
     if last and last.get("needs_input"):
@@ -311,25 +322,23 @@ def run_session(
     }
 
 
-def _run_legacy_session(ws, brief: str, stages, *, progress=None, instruction=None) -> dict:
-    """Drive the same stages through the legacy tree's own headless driver.
+def _run_legacy_session(
+    ws,
+    brief: str,
+    stages,
+    *,
+    answers=None,
+    instruction=None,
+    progress=None,
+    run_id=None,
+    auto_default_questions: bool | None = None,
+) -> dict:
+    """Drive the legacy-owned session process and translate its reported outcome.
 
-    The legacy package cannot be imported beside this one, so the design runs as a
-    subprocess (see `kicraft.server.pipeline`). Its driver commits the five slots into the
-    same workspace and reports rc 0 only when every stage committed, so the status mapping
-    stays exactly the current pipeline's: a user sees "ok"/"failed" either way, and the
-    result rows are rebuilt from the workspace's own stage status.
+    The subprocess performs the entire design/reconciliation chain with its own
+    session models. This side reads its protocol result only; it never serializes
+    a legacy state file.
     """
-    if instruction:
-        # The legacy driver has no per-run instruction channel: it re-drafts from the
-        # committed state. Say so instead of dropping the instruction silently.
-        progress and progress(
-            {
-                "kind": "build_log",
-                "text": "legacy pipeline: per-run instructions are not supported; "
-                "the driver re-drafts from the committed state\n",
-            }
-        )
     from kicraft.server.config import Settings
 
     try:
@@ -337,68 +346,79 @@ def _run_legacy_session(ws, brief: str, stages, *, progress=None, instruction=No
     except (SystemExit, ValueError):
         budget = 0.10
     rc, stdout, stderr = pipeline_dispatch.run_legacy_design(
-        ws, brief, stages, budget_usd=budget
+        ws,
+        brief,
+        stages,
+        budget_usd=budget,
+        answers=answers,
+        instruction=instruction,
+        run_id=run_id,
+        progress=progress,
+        auto_default_questions=auto_default_questions,
     )
     if progress:
-        tail = "\n".join((stdout or "").strip().splitlines()[-12:])
+        diagnostics = [
+            line for line in (stdout or "").splitlines()
+            if not line.startswith("__KICRAFT_LEGACY_SESSION_RESULT__=")
+        ]
+        tail = "\n".join(diagnostics[-12:])
         progress({"kind": "build_log", "text": f"[legacy] rc={rc}\n{tail}\n"})
-    state = read_state(ws) or {}
-    status_block = state.get("stage_status") or {}
-    results = []
-    for stage in stages:
-        row = status_block.get(stage) or {}
-        results.append(
-            {
-                "stage": stage,
-                "commit_ok": bool(row.get("ok")),
-                "error": row.get("error"),
-                "failure_kind": row.get("failure_kind"),
-                "cost_usd": row.get("cost_usd"),
-                "attempts": row.get("attempts"),
-                "pipeline": pipeline_dispatch.PIPELINE_LEGACY,
-            }
+
+    packet = pipeline_dispatch.legacy_session_result(stdout)
+    if packet and isinstance(packet.get("result"), dict):
+        outcome = dict(packet["result"])
+        status = outcome.get("status")
+        if status not in {"ok", "failed", "awaiting_input"}:
+            return _legacy_protocol_failure(
+                ws,
+                "legacy session runner returned an invalid status",
+                stdout,
+                stderr,
+            )
+        if status == "ok" and rc != 0:
+            return _legacy_protocol_failure(
+                ws,
+                f"legacy session runner returned ok with exit status {rc}",
+                stdout,
+                stderr,
+            )
+        outcome["results"] = [
+            {**row, "pipeline": pipeline_dispatch.PIPELINE_LEGACY}
+            for row in outcome.get("results") or []
+            if isinstance(row, dict)
+        ]
+        outcome.update(
+            guard=outcome.get("guard"),
+            questions=outcome.get("questions"),
+            last_stage=outcome.get("last_stage"),
+            failure_kind=outcome.get("failure_kind"),
+            retryable=False,
+            retry_action=None,
+            pipeline=pipeline_dispatch.PIPELINE_LEGACY,
+            reconcile_passes=packet.get("reconcile_passes", 0),
+            stdout_tail=(stdout or "")[-2000:],
+            stderr_tail=(stderr or "")[-2000:],
         )
-    # A parked legacy run is a question for the user, not a failure. The legacy driver stops on
-    # a blocking question and records it in the workspace's own `open_questions` (with the stage,
-    # the text and the options), which is exactly what the current driver's park leaves behind —
-    # so translate it instead of reporting `failed`, or the user never sees the question and the
-    # project looks broken (measured 2026-09-21: projects 876 and 877 both parked on a
-    # programming-header question and were reported as failures). A question counts only when it
-    # is unanswered AND its stage is one this run drove and did not commit, so a stale question
-    # from an earlier park cannot masquerade as this run's outcome.
-    parked = [
-        dict(row)
-        for row in state.get("open_questions") or ()
-        if isinstance(row, dict)
-        and row.get("stage") in set(stages)
-        and row.get("answer") in (None, "")
-        and (status_block.get(str(row.get("stage"))) or {}).get("ok") is not True
-    ]
-    committed = bool(results) and all(row["commit_ok"] for row in results)
-    last = results[-1] if results else None
-    if parked:
-        return {
-            "status": "awaiting_input",
-            "results": results,
-            "guard": None,
-            "state_path": str(_state_path(Path(ws))),
-            "questions": parked,
-            "last_stage": str(parked[0].get("stage")),
-            "failure_kind": None,
-            "retryable": False,
-            "retry_action": None,
-            "pipeline": pipeline_dispatch.PIPELINE_LEGACY,
-            "stdout_tail": (stdout or "")[-2000:],
-            "stderr_tail": (stderr or "")[-2000:],
-        }
+        return outcome
+    return _legacy_protocol_failure(
+        ws,
+        "legacy session runner did not return a valid result packet",
+        stdout,
+        stderr,
+    )
+
+
+def _legacy_protocol_failure(ws, error: str, stdout: str, stderr: str) -> dict:
+    """Report a broken legacy process boundary without trusting on-disk state."""
     return {
-        "status": "ok" if committed and rc == 0 else "failed",
-        "results": results,
+        "status": "failed",
+        "results": [],
         "guard": None,
         "state_path": str(_state_path(Path(ws))),
         "questions": None,
-        "last_stage": (last["stage"] if last else None),
-        "failure_kind": (last["failure_kind"] if last else None),
+        "last_stage": None,
+        "failure_kind": "legacy_protocol_error",
+        "error": error,
         "retryable": False,
         "retry_action": None,
         "pipeline": pipeline_dispatch.PIPELINE_LEGACY,
@@ -810,6 +830,7 @@ def maybe_bom_reconcile(
     core_defaults=None,
     client=None,
     reconcile_passes: int = 0,
+    auto_default_questions: bool | None = None,
 ) -> tuple[dict, int]:
     """Re-drive ``[bom, wiring]`` once when wiring parked on a BOM parts shortfall.
 
@@ -824,6 +845,12 @@ def maybe_bom_reconcile(
     immediately: that is a stuck loop, not a chain. Returns
     ``(new_or_original_res, total_passes)``. Shared by ``server/web.py`` and
     ``kicraft/eval/self_eval.py`` (WS6)."""
+    if not pipeline_dispatch.current_tree_owns_design_state(ws):
+        # The legacy subprocess owns its native bounded repair loop. Starting a
+        # current-tree pass here would both reset its per-run client budget and
+        # risk serializing the incompatible state schema.
+        return res, reconcile_passes
+
     if reconcile_passes >= BOM_RECONCILE_MAX_PASSES:
         return res, reconcile_passes
     deficits = bom_reconcile_deficits(res)
@@ -895,6 +922,7 @@ def maybe_bom_reconcile(
             run_id=run_id,
             core_defaults=core_defaults,
             client=client,
+            auto_default_questions=auto_default_questions,
         )
         return rr, reconcile_passes + 1
     if progress is not None:
@@ -917,6 +945,7 @@ def maybe_bom_reconcile(
         run_id=run_id,
         core_defaults=core_defaults,
         client=client,
+        auto_default_questions=auto_default_questions,
     )
     passes = reconcile_passes + 1
     after = _bom_signature(ws)
@@ -986,6 +1015,7 @@ def maybe_bom_reconcile(
             run_id=run_id,
             core_defaults=core_defaults,
             client=client,
+            auto_default_questions=auto_default_questions,
         )
         passes += 1
         after2 = _bom_signature(ws)

@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+
 # A TH part whose body (courtyard + pad copper) is at least this deep in BOTH
 # axes has a directional body: an unmeasurable opening on one is a real
 # measurement gap, not a mouthless strip. Calibrated between a bare 2.54 mm
@@ -220,7 +221,7 @@ def stranded(gaps: list[EdgeGap]) -> list[EdgeGap]:
 class FacingVerdict:
     ref: str
     edge: str
-    status: str  # "ok" | "misoriented" | "unknown_mouth" | "unverified_directional"
+    status: str  # "ok" | "misoriented" | "unverified_directional"
     opening_board_deg: float | None  # board-space mouth angle; None = unmeasured
     outward_deg: float  # board-space outward angle of the assigned edge
 
@@ -241,32 +242,25 @@ def connector_facings(
     (``detect_opening_direction`` expressed in board coords) against the zoned
     edge's outward normal:
 
-        ok            -> mouth points off-board (within ``tol_deg``)
-        misoriented   -> mouth detectable and NOT pointing off-board
-        unknown_mouth -> TH connector with a deep (directional) body but no
-                         detectable opening: nothing to verify against. Fix the
-                         footprint (add a "PCB Edge" Dwgs.User marker) -- these
-                         parts are exactly one silent inversion away from
-                         shipping misoriented.
-        unverified_directional
-                      -> a recognized horizontal screw/plug terminal row with
-                         no opening datum (unreviewed variant, no marker).
-                         Its body overhang is NOT evidence of its mouth, so
-                         the gate reports it as unmeasured rather than
-                         asserting a direction it cannot measure. A zoned ref
-                         that has no footprint on the board reports the same
-                         status: it cannot be verified either.
+        ok                     -> a verified in-plane mouth points off-board
+        misoriented            -> a verified in-plane mouth points elsewhere
+        unverified_directional -> a part with connector evidence (a recognized
+                                  horizontal terminal row, or a through-hole
+                                  body deep enough to be directional) has no
+                                  trustworthy in-plane mouth datum, or the
+                                  zoned ref has no footprint at all. It is
+                                  blocking: orientation cannot be certified.
 
-    Shallow-bodied undetectable parts (bare pin-header strips, vertical
-    receptacles) are omitted: they have no meaningful mouth to verify. The
-    depth cut runs on ``_mouth_bbox`` (courtyard + pad copper), which measures
-    a bare 2.54mm strip at 3.63mm and a 2P screw terminal at 7.89mm -- the
-    default sits between them (a body-calibrated 3.0 read every vertical
-    strip as directional, spamming 17 unverifiable warnings per servo board).
+    A board-normal header is omitted only when its mechanical naming contract
+    explicitly declares vertical mating. Missing mouths, body size, or a
+    generic connector name are never evidence of board-normal mating. A
+    shallow, undetectable part (a bare pin-header strip, an edge-zoned switch)
+    keeps the historical no-verdict reading: nothing on it evidences an
+    off-board mating mouth to certify.
     """
     import pcbnew
 
-    from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+    from kicraft.autoplacer.hardware.adapter import connector_mating_evidence
     from kicraft.parts_library.footprint_opening import is_horizontal_terminal
 
     from .types import Layer, angles_close, edge_outward_angle, opening_board_angle
@@ -291,7 +285,9 @@ def connector_facings(
             continue
         layer = Layer.BACK if fp.GetLayer() == pcbnew.B_Cu else Layer.FRONT
         outward = edge_outward_angle(layer, edge)
-        opening_local = detect_opening_direction(fp)
+        mating_axis, opening_local = connector_mating_evidence(fp)
+        if mating_axis == "board_normal":
+            continue
         if opening_local is None:
             name = ""
             try:
@@ -305,11 +301,13 @@ def connector_facings(
                 continue
             has_hole = any(p.HasHole() for p in fp.Pads())
             bb = _mouth_bbox(fp, pcbnew)
-            depth = min(
-                pcbnew.ToMM(bb.GetWidth()), pcbnew.ToMM(bb.GetHeight())
-            )
+            depth = min(pcbnew.ToMM(bb.GetWidth()), pcbnew.ToMM(bb.GetHeight()))
             if has_hole and depth > min_directional_depth_mm:
-                out.append(FacingVerdict(ref, edge, "unknown_mouth", None, outward))
+                # Deep-bodied and unmeasurable: blocking, never a warning. A
+                # part like this is one silent inversion from shipping wrong.
+                out.append(
+                    FacingVerdict(ref, edge, "unverified_directional", None, outward)
+                )
             continue
         opening_board = opening_board_angle(
             opening_local, fp.GetOrientationDegrees()

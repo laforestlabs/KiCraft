@@ -19,6 +19,14 @@ KICAD_ROUTING_TOOLS_COMMIT = "3ceb773722bea67aa3685e7ee430c0c0d17ef38d"
 _KRT_NATIVE_VERSION = "0.20.1"
 _KRT_PREFLIGHT_CACHE: dict[tuple[str, str], dict[str, str]] = {}
 
+# Pinned KiCad Routing Tools exposes no NPTH-to-copper floor. Its native
+# obstacle map instead hard-codes this value, so a stricter KiCad project rule
+# must be expressed as a rule-area before invoking it.
+_KRT_NPTH_TRACK_CLEARANCE_MM = 0.20
+_KICAD_DEFAULT_MIN_HOLE_CLEARANCE_MM = 0.25
+_NPTH_KEEPOUT_ZONE_NAME = "KiCraft NPTH hole clearance"
+_NPTH_KEEPOUT_POLYGON_SIDES = 32
+
 
 
 class KicadRoutingToolsUnavailableError(RuntimeError):
@@ -321,6 +329,226 @@ def _propagate_sibling_project_rules(src_pcb_path: str, dst_pcb_path: str) -> No
         if os.path.isfile(src_rules) and os.path.abspath(src_rules) != os.path.abspath(dst_rules):
             shutil.copy2(src_rules, dst_rules)
 
+
+def _project_min_hole_clearance(project: Path) -> float:
+    """Return KiCad's effective board-level hole-to-copper rule."""
+    body = json.loads(project.read_text(encoding="utf-8"))
+    value = (
+        body.get("board", {})
+        .get("design_settings", {})
+        .get("rules", {})
+        .get("min_hole_clearance", _KICAD_DEFAULT_MIN_HOLE_CLEARANCE_MM)
+    )
+    result = float(value)
+    if isinstance(value, bool) or not math.isfinite(result) or result < 0:
+        raise ValueError(f"Routing project has invalid fabrication constraints: {project}")
+    return result
+
+
+def _board_has_npth_pads(board_path: Path) -> bool:
+    """Cheaply avoid a pcbnew staging pass on boards that have no NPTH pads."""
+    return "np_thru_hole" in board_path.read_text(encoding="utf-8", errors="replace")
+
+
+def _stamp_npth_keepouts(
+    board_path: Path,
+    *,
+    hole_clearance_mm: float,
+    router_clearance_mm: float,
+) -> dict[str, int | float]:
+    """Stamp temporary, all-copper rule areas that lift KRT's NPTH floor.
+
+    The contour dilates the actual drill capsule by only the clearance KRT
+    cannot model. KRT then applies its normal track/via half-width and
+    ``router_clearance_mm`` obstacle inflation, yielding the project's required
+    copper-edge-to-hole-edge distance for round holes and slots alike.
+    """
+    from kicraft.autoplacer.routing_board import run_pcbnew_script
+
+    summary_path = board_path.with_suffix(".npth-keepouts.json")
+    margin_mm = max(0.0, hole_clearance_mm - router_clearance_mm)
+    script = f"""
+import json
+import math
+import pcbnew
+
+_BOARD_PATH = {str(board_path)!r}
+_SUMMARY_PATH = {str(summary_path)!r}
+_MARGIN_MM = {margin_mm!r}
+_ZONE_NAME = {_NPTH_KEEPOUT_ZONE_NAME!r}
+_SIDES = {_NPTH_KEEPOUT_POLYGON_SIDES!r}
+
+
+def _convex_hull(points):
+    points = sorted(set(points))
+    if len(points) < 3:
+        return points
+
+    def cross(origin, a, b):
+        return ((a[0] - origin[0]) * (b[1] - origin[1])
+                - (a[1] - origin[1]) * (b[0] - origin[0]))
+
+    lower = []
+    for point in points:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+    upper = []
+    for point in reversed(points):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+    return lower[:-1] + upper[:-1]
+
+
+def _drill_capsule_polygon(pad):
+    drill = pad.GetDrillSize()
+    width = pcbnew.ToMM(drill.x)
+    height = pcbnew.ToMM(drill.y)
+    if width <= 0 or height <= 0:
+        return []
+    center = pad.GetPosition()
+    cx, cy = pcbnew.ToMM(center.x), pcbnew.ToMM(center.y)
+    angle = math.radians(float(pad.GetOrientationDegrees()))
+    if width >= height:
+        axis = (math.cos(angle), -math.sin(angle))
+        length = width - height
+        radius = height / 2.0
+    else:
+        axis = (math.sin(angle), math.cos(angle))
+        length = height - width
+        radius = width / 2.0
+    half_length = length / 2.0
+    centers = [
+        (cx - axis[0] * half_length, cy - axis[1] * half_length),
+        (cx + axis[0] * half_length, cy + axis[1] * half_length),
+    ]
+    # Circumscribed rather than inscribed: its chord edges cannot cut into the
+    # true circular drill wall between vertices.
+    outer_radius = (radius + _MARGIN_MM) / math.cos(math.pi / _SIDES)
+    points = [
+        (
+            x + outer_radius * math.cos(2.0 * math.pi * i / _SIDES),
+            y + outer_radius * math.sin(2.0 * math.pi * i / _SIDES),
+        )
+        for x, y in centers
+        for i in range(_SIDES)
+    ]
+    return _convex_hull(points)
+
+
+board = pcbnew.LoadBoard(_BOARD_PATH)
+for zone in list(board.Zones()):
+    if zone.GetIsRuleArea() and zone.GetZoneName() == _ZONE_NAME:
+        board.Delete(zone)
+
+copper_layers = list(board.GetEnabledLayers().CuStack())
+
+holes = 0
+zones = 0
+for footprint in board.Footprints():
+    for pad in footprint.Pads():
+        if pad.GetAttribute() != pcbnew.PAD_ATTRIB_NPTH:
+            continue
+        polygon = _drill_capsule_polygon(pad)
+        if len(polygon) < 3:
+            continue
+        holes += 1
+        for layer in copper_layers:
+            zone = pcbnew.ZONE(board)
+            zone.SetLayer(layer)
+            zone.SetIsRuleArea(True)
+            zone.SetDoNotAllowTracks(True)
+            zone.SetDoNotAllowVias(True)
+            zone.SetDoNotAllowPads(False)
+            zone.SetDoNotAllowCopperPour(True)
+            zone.SetZoneName(_ZONE_NAME)
+            outline = zone.Outline()
+            outline.NewOutline()
+            for x, y in polygon:
+                outline.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
+            board.Add(zone)
+            zones += 1
+
+board.BuildConnectivity()
+board.Save(_BOARD_PATH)
+with open(_SUMMARY_PATH, "w", encoding="utf-8") as out:
+    json.dump({{"holes": holes, "zones": zones, "margin_mm": _MARGIN_MM}}, out)
+"""
+    run_pcbnew_script(script)
+    try:
+        return json.loads(summary_path.read_text(encoding="utf-8"))
+    finally:
+        summary_path.unlink(missing_ok=True)
+
+
+def _strip_npth_keepouts(board_path: Path) -> None:
+    """Remove the temporary router-side keepouts from a finished board.
+
+    The rule areas are an input-only workaround: they make KiCadRoutingTools
+    respect the project hole rule, and the routed copper they produced already
+    satisfies it. A shipped board must carry only authored geometry, while the
+    normal DRC gate still measures the real clearance on the routed copper.
+    """
+    from kicraft.autoplacer.routing_board import run_pcbnew_script
+
+    script = f"""
+import pcbnew
+
+_BOARD_PATH = {str(board_path)!r}
+_ZONE_NAME = {_NPTH_KEEPOUT_ZONE_NAME!r}
+
+board = pcbnew.LoadBoard(_BOARD_PATH)
+removed = 0
+for zone in list(board.Zones()):
+    if zone.GetIsRuleArea() and zone.GetZoneName() == _ZONE_NAME:
+        board.Delete(zone)
+        removed += 1
+if removed:
+    board.BuildConnectivity()
+    board.Save(_BOARD_PATH)
+print("__KICRAFT_NPTH_STRIPPED__", removed)
+"""
+    run_pcbnew_script(script)
+
+
+def _stage_npth_keepouts(
+    input_board: Path,
+    output_board: Path,
+    source_project: Path,
+    *,
+    hole_clearance_mm: float,
+    router_clearance_mm: float,
+) -> tuple[Path, dict[str, int | float] | None]:
+    """Copy KRT input and stamp it only when the project's rule needs lifting."""
+    staged_board = output_board.with_name(
+        f"{output_board.stem}.krt-input.kicad_pcb"
+    )
+    shutil.copy2(input_board, staged_board)
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        source = source_project.with_suffix(suffix)
+        destination = staged_board.with_suffix(suffix)
+        if source.is_file():
+            shutil.copy2(source, destination)
+        else:
+            destination.unlink(missing_ok=True)
+    if (
+        hole_clearance_mm <= max(router_clearance_mm, _KRT_NPTH_TRACK_CLEARANCE_MM)
+        or not _board_has_npth_pads(input_board)
+    ):
+        return staged_board, None
+    summary = _stamp_npth_keepouts(
+        staged_board,
+        hole_clearance_mm=hole_clearance_mm,
+        router_clearance_mm=router_clearance_mm,
+    )
+    # pcbnew.Save rewrites its project sidecar; restore the authoritative rules,
+    # just as the normal board-stamping adapter does.
+    _propagate_sibling_project_rules(
+        str(source_project.with_suffix(".kicad_pcb")), str(staged_board)
+    )
+    return staged_board, summary
+
 def route_with_kicad_routing_tools(
     kicad_pcb_path: str,
     output_path: str,
@@ -367,12 +595,19 @@ def route_with_kicad_routing_tools(
         )
 
     floors = _project_routing_floors(source_project, config)
+    router_input, npth_keepouts = _stage_npth_keepouts(
+        input_board,
+        output_board,
+        source_project,
+        hole_clearance_mm=_project_min_hole_clearance(source_project),
+        router_clearance_mm=floors["clearance"],
+    )
     fab_overrides = output_board.with_suffix(".fab-overrides.txt")
     fab_overrides.write_text(
         "".join(f"{key} = {value:.9g}\n" for key, value in floors.items()),
         encoding="utf-8",
     )
-    command = _krt_command(str(input_board), str(output_board), config, fab_overrides)
+    command = _krt_command(str(router_input), str(output_board), config, fab_overrides)
     timeout_s = int(config.get("kicad_routing_tools_timeout_s", 120))
     environment = os.environ.copy()
     environment["KICAD_RIP_PREEXISTING"] = "0"
@@ -380,45 +615,32 @@ def route_with_kicad_routing_tools(
     environment["PYTHONUNBUFFERED"] = "1"
     started = time.monotonic()
     timed_out = False
-    temporary_sidecars: list[Path] = []
+    proc = subprocess.Popen(
+        command,
+        cwd=root,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
-        for suffix in (".kicad_pro", ".kicad_dru"):
-            destination = input_board.with_suffix(suffix)
-            if not destination.exists():
-                temporary_sidecars.append(destination)
-        _propagate_sibling_project_rules(
-            str(source_project.with_suffix(".kicad_pcb")), str(input_board)
-        )
-        if not expected_project.is_file():
-            raise KicadRoutingToolsUnavailableError(
-                "KiCadRoutingTools requires a sibling .kicad_pro; "
-                f"could not stage {source_project} beside {input_board}"
-            )
-        proc = subprocess.Popen(
-            command,
-            cwd=root,
-            env=environment,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-        )
+        stdout, stderr = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        os.killpg(proc.pid, signal.SIGTERM)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout_s)
+            stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
-            timed_out = True
-            os.killpg(proc.pid, signal.SIGTERM)
-            try:
-                stdout, stderr = proc.communicate(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                stdout, stderr = proc.communicate()
-        if output_board.is_file():
-            _propagate_sibling_project_rules(str(input_board), str(output_board))
-    finally:
-        for sidecar in temporary_sidecars:
-            sidecar.unlink(missing_ok=True)
-
+            os.killpg(proc.pid, signal.SIGKILL)
+            stdout, stderr = proc.communicate()
+    if output_board.is_file():
+        _propagate_sibling_project_rules(str(router_input), str(output_board))
+        if npth_keepouts is not None:
+            # The router consumed the keepouts; the routed copper already meets
+            # the project rule, so the shipped board keeps only authored geometry.
+            _strip_npth_keepouts(output_board)
+            _propagate_sibling_project_rules(str(router_input), str(output_board))
     elapsed = time.monotonic() - started
     stdout_path = output_board.with_suffix(".router.stdout.log")
     stderr_path = output_board.with_suffix(".router.stderr.log")
@@ -464,6 +686,9 @@ def route_with_kicad_routing_tools(
         "source_version": runtime["version"],
         "source_commit": runtime["commit"],
         "native_version": runtime["native_version"],
+        "source_input_path": str(input_board),
+        "router_input_path": str(router_input),
+        "npth_hole_clearance_keepouts": npth_keepouts,
         "returncode": proc.returncode,
         "elapsed_s": round(elapsed, 3),
         "successful_nets": summary.get("successful"),

@@ -1391,24 +1391,18 @@ def _ensure_edge_blocks_extremal(
 
 
 def _directional_edge_candidate(comp: Component) -> bool:
-    """True when an edge-pinned component HAS a directional body but no
-    measured opening -- i.e. its mouth should have been measurable.
+    """True when an edge-pinned connector lacks required mating evidence.
 
-    Mirrors the fab gate's classification (``connector_edge_gap``): a
-    through-hole part whose body (courtyard + pad copper, ``physical_bbox``)
-    is deeper than ``MIN_DIRECTIONAL_DEPTH_MM`` in BOTH axes is a directional
-    connector, so a missing opening is a measurement defect rather than a
-    mouthless part. A bare pin-header strip, a switch or an SMD part is not
-    judged here.
+    ``mating_axis`` is extracted from the footprint and persisted in the leaf
+    artifact. A verified board-normal header deliberately has no in-plane mouth;
+    every other connector without a measured opening remains unverified. This
+    fail-closed distinction replaces the unsound body-depth proxy.
     """
-    from kicraft.autoplacer.brain.connector_edge_gap import (
-        MIN_DIRECTIONAL_DEPTH_MM,
+    return (
+        comp.kind == "connector"
+        and comp.mating_axis != "board_normal"
+        and comp.opening_direction is None
     )
-
-    if not comp.is_through_hole:
-        return False
-    tl, br = comp.physical_bbox()
-    return min(br.x - tl.x, br.y - tl.y) > MIN_DIRECTIONAL_DEPTH_MM
 
 
 def _replica_rotation_groups(
@@ -2171,12 +2165,14 @@ def _compose_artifacts(
         comp = transformed.transformed_components.get(c.ref)
         if comp is None:
             continue
+        if comp.mating_axis == "board_normal":
+            # A verified vertical header mates along Z. There is intentionally
+            # no in-plane opening to aim at an Edge.Cuts side.
+            continue
         if comp.opening_direction is None:
-            # No detectable mouth. A deep-bodied TH part has a directional body,
-            # so "no measurement" is a defect the fab gate will also refuse
-            # (connector_facings -> unverified_directional/unknown_mouth);
-            # anything else (a shallow strip, an SMD part) genuinely has no
-            # mouth to verify and stays informational.
+            # Missing evidence for a connector that is not proven vertical is
+            # blocking. It can be a horizontal terminal without a datum or an
+            # unknown connector; neither can be certified by placement.
             if _directional_edge_candidate(comp):
                 orientation_rejections.append(
                     f"connector_orientation_unmeasured:{c.ref}"
@@ -2193,9 +2189,8 @@ def _compose_artifacts(
             )
     if mouthless_edge_refs:
         logger.info(
-            "Edge connector(s) %s have no detectable opening direction and no "
-            "directional body -- orientation was NEITHER placed deliberately "
-            "NOR verifiable here.",
+            "Edge-zoned non-connector(s) %s have no detectable opening "
+            "direction; orientation is informational.",
             ", ".join(sorted(set(mouthless_edge_refs))),
         )
     if orientation_rejections:

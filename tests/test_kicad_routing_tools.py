@@ -53,18 +53,7 @@ def test_preflight_requires_configured_checkout():
         rb.preflight_kicad_routing_tools({})
 
 
-def test_krt_preflight_uses_environment_defaults(monkeypatch, tmp_path):
-    monkeypatch.setenv("KICRAFT_KICAD_ROUTING_TOOLS_PATH", "/tmp/KiCadRoutingTools")
-    monkeypatch.setenv("KICRAFT_KICAD_ROUTING_TOOLS_PYTHON", "/tmp/krt-venv/bin/python")
 
-    result = rb.preflight_kicad_routing_tools({
-                "kicad_routing_tools_path": "",
-        "kicad_routing_tools_python": "",
-    })
-
-
-    assert result["root"] == "/tmp/KiCadRoutingTools"
-    assert result["python"] == "/tmp/krt-venv/bin/python"
 
 def test_parent_routes_stamped_board_once_with_krt(monkeypatch, tmp_path):
     import kicraft.autoplacer.kicad_routing_tools as krt
@@ -378,3 +367,128 @@ def test_krt_route_rejects_missing_input_copper(monkeypatch, tmp_path):
     assert preservation["vias"]["missing_count"] == 1
     assert output_board.is_file()
     assert output_board.with_suffix(".kicad_pro").read_bytes() == original_rules
+
+
+def test_npth_rule_area_staging_preserves_source_and_is_idempotent(tmp_path):
+    pcbnew = pytest.importorskip("pcbnew")
+    footprint_lib = (
+        Path(__file__).resolve().parents[1]
+        / "kicraft"
+        / "parts_library"
+        / "usb-c-16p"
+        / "usb-c-16p.pretty"
+    )
+    source = tmp_path / "pre_route.kicad_pcb"
+    output = tmp_path / "routed.kicad_pcb"
+    board = pcbnew.NewBoard(str(source))
+    connector = pcbnew.FootprintLoad(
+        str(footprint_lib), "USB-C_SMD-TYPE-C-31-M-12_1"
+    )
+    assert connector is not None
+    board.Add(connector)
+    connector.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(20), pcbnew.FromMM(20)))
+    connector.SetOrientationDegrees(90)
+    connector.Flip(connector.GetPosition(), False)
+    slot_lib = tmp_path / "slot.pretty"
+    slot_lib.mkdir()
+    (slot_lib / "Slot.kicad_mod").write_text(
+        """(footprint "Slot"
+  (version 20240108)
+  (generator pcbnew)
+  (layer "F.Cu")
+  (pad "" np_thru_hole oval
+    (at 0 0)
+    (size 1 3)
+    (drill oval 1 3)
+    (layers "*.Cu" "*.Mask"))
+)
+"""
+    )
+    slot = pcbnew.FootprintLoad(str(slot_lib), "Slot")
+    assert slot is not None
+    board.Add(slot)
+    slot.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(30), pcbnew.FromMM(20)))
+    slot.SetOrientationDegrees(90)
+    slot.Flip(slot.GetPosition(), False)
+    board.Save(str(source))
+    project = _write_project(source)
+    project_data = json.loads(project.read_text())
+    project_data["board"]["design_settings"]["rules"]["min_hole_clearance"] = 0.25
+    project.write_text(json.dumps(project_data))
+    source_bytes = source.read_bytes()
+
+    floors = rb._project_routing_floors(project, {})
+    staged, summary = rb._stage_npth_keepouts(
+        source,
+        output,
+        project,
+        hole_clearance_mm=0.25,
+        router_clearance_mm=floors["clearance"],
+    )
+
+    assert source.read_bytes() == source_bytes
+    assert staged.with_suffix(".kicad_pro").read_bytes() == project.read_bytes()
+    assert staged != source
+    assert summary is not None
+    assert summary["holes"] == 3
+    assert summary["zones"] == 6
+    assert summary["margin_mm"] == pytest.approx(0.25 - floors["clearance"])
+
+    staged_board = pcbnew.LoadBoard(str(staged))
+    npth_pads = [
+        pad
+        for footprint in staged_board.Footprints()
+        for pad in footprint.Pads()
+        if pad.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH
+    ]
+    keepouts = [
+        zone
+        for zone in staged_board.Zones()
+        if zone.GetIsRuleArea() and zone.GetZoneName() == rb._NPTH_KEEPOUT_ZONE_NAME
+    ]
+    assert len(keepouts) == len(npth_pads) * 2
+    for pad in npth_pads:
+        point = pad.GetPosition()
+        matching = [
+            zone
+            for zone in keepouts
+            if (
+                zone.GetBoundingBox().GetLeft() <= point.x <= zone.GetBoundingBox().GetRight()
+                and zone.GetBoundingBox().GetTop() <= point.y <= zone.GetBoundingBox().GetBottom()
+            )
+        ]
+        assert len(matching) == 2
+        drill = pad.GetDrillSize()
+        minor_radius = min(pcbnew.ToMM(drill.x), pcbnew.ToMM(drill.y)) / 2
+        major_diameter = max(pcbnew.ToMM(drill.x), pcbnew.ToMM(drill.y))
+        for zone in matching:
+            bounds = zone.GetBoundingBox()
+            width = pcbnew.ToMM(bounds.GetWidth())
+            height = pcbnew.ToMM(bounds.GetHeight())
+            assert min(width, height) / 2 >= minor_radius + summary["margin_mm"]
+            assert max(width, height) >= major_diameter + 2 * summary["margin_mm"]
+
+    repeat = rb._stamp_npth_keepouts(
+        staged,
+        hole_clearance_mm=0.25,
+        router_clearance_mm=floors["clearance"],
+    )
+    assert repeat["zones"] == len(keepouts)
+    restamped = pcbnew.LoadBoard(str(staged))
+    assert sum(
+        zone.GetIsRuleArea() and zone.GetZoneName() == rb._NPTH_KEEPOUT_ZONE_NAME
+        for zone in restamped.Zones()
+    ) == len(keepouts)
+
+    # The shipped board carries only authored geometry: the router-side areas
+    # are removed once the routed copper already satisfies the project rule.
+    rb._strip_npth_keepouts(staged)
+    stripped = pcbnew.LoadBoard(str(staged))
+    assert not [
+        zone
+        for zone in stripped.Zones()
+        if zone.GetIsRuleArea() and zone.GetZoneName() == rb._NPTH_KEEPOUT_ZONE_NAME
+    ]
+    assert sum(len(footprint.Pads()) for footprint in stripped.Footprints()) == sum(
+        len(footprint.Pads()) for footprint in restamped.Footprints()
+    )

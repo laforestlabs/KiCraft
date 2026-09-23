@@ -513,7 +513,7 @@ def admin_routing_page():
                 ui.select(
                     {
                         "current": "current pipeline (this tree, typed contracts)",
-                        "legacy": f"{pipeline.LEGACY_LABEL} — measured 21/34 finished boards",
+                        "legacy": pipeline.LEGACY_LABEL,
                     },
                     value=pipeline_state["selected"],
                     label="pipeline",

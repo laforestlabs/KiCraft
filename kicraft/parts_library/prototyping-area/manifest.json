@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:7f52a9a932e07ed3eac109b49adf74f074c175739929e51b274127b7f471c159",
+  "content_hash": "sha256:60b10e186a9beadfcea03adb22a7fa1eca55d2efb9bbde4d4c896ecd15484312",
   "datasheet_url": null,
   "description": "Board-fabricated 1.5 mm through-hole prototyping pad on a 0.1 inch (2.54 mm) grid. It is not a purchasable component: pad 1 is a bare plated hole the user wires by hand, and the field is a grid of these pads. The 1.93 mm courtyard is deliberately sized so the array placer's courtyard-plus-gap floor (1.93 + 0.6 = 2.53) stays inside the declared 2.54 mm pitch, while 2.54 mm pitch leaves a 0.61 mm courtyard gap between neighbouring pads.",
   "footprint_name": "PrototypingPad_1.5mm_Drill0.8mm",

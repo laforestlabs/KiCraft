@@ -740,6 +740,11 @@ def _component_from_dict(payload: dict[str, Any]) -> Component:
             if payload.get("opening_direction") is not None
             else None
         ),
+        mating_axis=(
+            str(payload.get("mating_axis"))
+            if payload.get("mating_axis") in {"board_normal", "in_plane", "unknown"}
+            else "unknown"
+        ),
     )
 
 

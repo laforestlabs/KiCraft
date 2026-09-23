@@ -9,7 +9,6 @@
     (effects (font (size 0.8 0.8) (thickness 0.12))))
   (fp_text value "Prototyping pad, 2.54 mm pitch" (at 0 2.2) (layer "F.Fab")
     (effects (font (size 0.8 0.8) (thickness 0.12))))
-  (fp_circle (center 0 0) (end 0.75 0) (stroke (width 0.1) (type default)) (fill none) (layer "F.Cu"))
   (fp_rect (start -0.92 -0.92) (end 0.92 0.92) (stroke (width 0.05) (type default)) (fill none) (layer "F.CrtYd"))
   (pad "1" thru_hole circle (at 0 0) (size 1.5 1.5) (drill 0.8) (layers "*.Cu" "*.Mask") (remove_unused_layers no))
 )
