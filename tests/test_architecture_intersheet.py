@@ -15,6 +15,8 @@ from kicraft.design.models import (
     FunctionalBlock,
     FunctionalSpec,
     InterSheetNet,
+    PhysicalObligation,
+    QuantityObligation,
     RecipeSelection,
     Sheet,
     SheetPin,
@@ -39,7 +41,7 @@ def _arch(sheets, inter_sheet_nets=None, requirements=(), obligations=()):
     )
 
 
-def _requirement(id, sheet, *blocks, ports=None):
+def _requirement(id, sheet, *blocks, ports=None, obligations=None):
     return CircuitRequirement(
         id=id,
         sheet=sheet,
@@ -47,6 +49,7 @@ def _requirement(id, sheet, *blocks, ports=None):
         family="header",
         functional_blocks=list(blocks),
         ports=ports or {},
+        obligations=list(obligations or ()),
     )
 
 
@@ -123,6 +126,121 @@ def test_board_feature_requirement_needs_no_functional_block():
 
     assert check_every_block_has_sheet(fs, arch).ok is True
     assert check_fs_connections_mapped(fs, arch).ok is True
+
+
+def test_board_wide_block_needs_no_implementing_requirement():
+    """A block whose every obligation is a board-wide fact is realized by the board itself.
+
+    The live shape (a beacon brief's "two mounting holes" arriving as a `quantity` row with no
+    part): the functional spec declares a MOUNTING block owning only that row, no requirement can
+    implement it, and every architecture attempt was refused with "functional block 'MOUNTING'
+    has no implementation requirement on a sheet" -- the design died at the stage. The
+    obligation-retention gate already exempts those rows via
+    ``obligation_requires_requirement_owner``; this gate now reads the same predicate.
+    """
+    fs = _fs(
+        FunctionalBlock(
+            name="POWER", category="power", purpose="rail", obligation_ids=["usb-connector"]
+        ),
+        FunctionalBlock(
+            name="MOUNTING",
+            category="mechanical",
+            purpose="two mounting holes",
+            count=2,
+            obligation_ids=["mounting-holes"],
+        ),
+        FunctionalBlock(
+            name="PAD_FIELD", category="mechanical", purpose="solder pad field",
+            obligation_ids=["pad-field"],
+        ),
+    )
+    arch = _arch(
+        [Sheet(name="POWER", stem="POWER", function="rail")],
+        requirements=[
+            _requirement(
+                "power",
+                "POWER",
+                "POWER",
+                obligations=[
+                    PhysicalObligation(
+                        kind="physical",
+                        original_obligation_id="usb-connector",
+                        component_class="usb-connector",
+                    )
+                ],
+            )
+        ],
+        obligations=[
+            PhysicalObligation(
+                kind="physical",
+                original_obligation_id="usb-connector",
+                component_class="usb-connector",
+            ),
+            QuantityObligation(
+                kind="quantity",
+                original_obligation_id="mounting-holes",
+                subject="mounting-holes",
+                minimum=2,
+            ),
+            FabricationObligation(
+                kind="fabrication",
+                original_obligation_id="pad-field",
+                feature="prototyping-area",
+            ),
+        ],
+    )
+
+    result = check_every_block_has_sheet(fs, arch)
+    assert result.ok is True, result.offenders
+
+
+def test_block_without_a_board_wide_obligation_is_still_refused():
+    """The exemption is keyed on the committed rows, never on a block's name or category.
+
+    An unimplemented block keeps today's refusal whenever its rows are not board-wide facts: no
+    `obligation_ids` at all (nothing realizes it), and an id the architecture does not carry
+    (unprovable) are both refused, so the gate cannot be cleared by declaring a block and
+    leaving the work out.
+    """
+    fs = _fs(
+        FunctionalBlock(
+            name="POWER", category="power", purpose="rail", obligation_ids=["usb-connector"]
+        ),
+        FunctionalBlock(name="GHOST", category="process", purpose="undeclared function"),
+        FunctionalBlock(
+            name="STRAY", category="process", purpose="cites a row nobody carries",
+            obligation_ids=["missing-obligation"],
+        ),
+    )
+    arch = _arch(
+        [Sheet(name="POWER", stem="POWER", function="rail")],
+        requirements=[
+            _requirement(
+                "power",
+                "POWER",
+                "POWER",
+                obligations=[
+                    PhysicalObligation(
+                        kind="physical",
+                        original_obligation_id="usb-connector",
+                        component_class="usb-connector",
+                    )
+                ],
+            )
+        ],
+        obligations=[
+            PhysicalObligation(
+                kind="physical",
+                original_obligation_id="usb-connector",
+                component_class="usb-connector",
+            ),
+        ],
+    )
+
+    result = check_every_block_has_sheet(fs, arch)
+    assert result.ok is False
+    assert any("'GHOST'" in offender for offender in result.offenders), result.offenders
+    assert any("'STRAY'" in offender for offender in result.offenders), result.offenders
 
 
 def test_only_the_board_feature_row_excuses_block_membership():
