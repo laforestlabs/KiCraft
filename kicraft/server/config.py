@@ -524,17 +524,20 @@ class Settings:
     eval_judge_max_tokens: int = 24000
     # --- Layer-3 electrical-review pass (the in-product design "judge") --------
     # Reviews a committed design for topology/value/completeness defects the
-    # deterministic §9 gates cannot judge. Runs the inexpensive DESIGN model by
-    # default, with a higher THINKING BUDGET because this one-shot review benefits
-    # from extra deliberation without requiring a premium model.
+    # deterministic §9 gates cannot judge. Runs at medium thinking effort, which
+    # this one-shot review benefits from.
     # review_model=None reuses `model`. review_reasoning_tokens is the OpenRouter
     # reasoning max_tokens budget (0 disables the reasoning channel).
-    # Bakeoff winner (2026-06-19): minimax-m3 gives 100% blocker recall + the
-    # lowest over-block (14% clean / 20% warn) vs flash's 83% / 43-71%, at
-    # ~$0.012 & ~2.5 min per review (flash: ~$0.001 / 35 s). The gate is
-    # once-per-build and fail-soft, so the latency is an acceptable trade. None
-    # reuses the design model. See docs/electrical_review_model_bakeoff.md.
-    review_model: str | None = "minimax/minimax-m3"
+    # Owner decision 2026-09-23: the reviewer is the DESIGN model (luna) at medium
+    # effort, and the pre-swap bake-off gate was explicitly dropped. The reviewer
+    # and the author are now the same model, so a review defect and an author
+    # defect can correlate; the corroboration pass and the deterministic severity
+    # clamp are the mitigations. The previous measured arm was minimax-m3 (100%
+    # blocker recall, 14% clean-board over-block, ~$0.012, ~2.5 min) -- see
+    # docs/electrical_review_model_bakeoff.md and
+    # docs/plans/stage-auditor-luna-2026-09-23.md (A4 keeps the harness as an
+    # optional post-ship regression tool, not a gate).
+    review_model: str | None = "openai/gpt-5.6-luna"
     review_reasoning_tokens: int = 8000
     # Reasoning effort for the review (OpenRouter; portable across the slate --
     # minimax/glm prefer effort and some models 400 on the token form). When
@@ -548,9 +551,13 @@ class Settings:
     # KICRAFT_REVIEW_MAX_TOKENS.
     review_max_tokens: int = 24000
     # Provider routing for role calls is independent from the designer profile.
-    # The incumbent reviewer and judge use the same dated service today, but
-    # retain separate fields so either can be promoted independently.
-    review_provider_order: list[str] = field(default_factory=lambda: ["coreweave/fp4"])
+    # The reviewer now rides the designer's own provider because it runs the
+    # designer's own model (openai/gpt-5.6-luna). The judge keeps its own route and
+    # its own model. Keep the fields separate so either can be promoted
+    # independently. NOTE: the from_env fallback below carries this same default
+    # as a separate literal -- change both, or a box reading env silently keeps
+    # the old provider (and with fallbacks disabled every review fails to route).
+    review_provider_order: list[str] = field(default_factory=lambda: ["openai"])
     review_max_price_prompt: float = 0.30
     review_max_price_completion: float = 1.25
     judge_provider_order: list[str] = field(default_factory=lambda: ["coreweave/fp4"])
@@ -748,7 +755,7 @@ class Settings:
             ),
             review_provider_order=[
                 p.strip()
-                for p in os.environ.get("KICRAFT_REVIEW_PROVIDER_ORDER", "coreweave/fp4").split(",")
+                for p in os.environ.get("KICRAFT_REVIEW_PROVIDER_ORDER", "openai").split(",")
                 if p.strip()
             ],
             review_max_price_prompt=float(
