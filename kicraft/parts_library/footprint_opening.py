@@ -126,6 +126,26 @@ _WJ128V_FOOTPRINT_NAMES = (
 for _wj128v_name in _WJ128V_FOOTPRINT_NAMES:
     _REVIEWED_OPENINGS[_wj128v_name] = (_WJ128V_OPENING_DEG, _WJ128V_MARKER_MM)
 
+# --- Vendored Kangnex WJ126V members that already carry a reviewed marker ----
+# Both bundles ship a `PCB Edge` Dwgs.User marker added by the KC-YJ7Q69 fix
+# (commit 7c82a8d) -- the 2P at footprint-local (-3.8, 0) -> 180 deg, the 3P at
+# (0, 4.13) -> 90 deg -- and a board synthesised from a curated-tier copy
+# therefore measures correctly with no entry here.
+#
+# They are recorded anyway because the datum must not depend on *which* copy of
+# the footprint a board was authored from: a markerless copy (an older project
+# tree, a fetched cache, a board written by another tool) fell through to the
+# body-overhang heuristic, which read the 3P as 180 deg -- the KC-AHW6GA record
+# -- while the reviewed marker says 90 deg. The table is consulted only when no
+# marker is present, so an author marker stays authoritative and the two can
+# never disagree silently.
+_WJ126V_OPENINGS: dict[str, tuple[float, tuple[float, float]]] = {
+    "CONN-TH_WJ126V-5.0-2P": (180.0, (-3.80, 0.0)),
+    "CONN-TH_3P-P5.00_WJ126V-5.0-3P": (90.0, (0.0, 4.13)),
+}
+
+_REVIEWED_OPENINGS.update(_WJ126V_OPENINGS)
+
 
 def _bare_name(footprint_name: str) -> str:
     """``"Lib:Name"`` -> ``"Name"``; already-bare names pass through."""
