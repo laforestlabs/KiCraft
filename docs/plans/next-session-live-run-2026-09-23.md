@@ -289,3 +289,103 @@ active pipeline back to `current` and compare the same brief on both backends
 Whichever way it goes, do not flip a production setting to run an experiment —
 use the `stage_driver run` harness for the comparison and change
 `routing.json` only as a deliberate product decision.
+
+---
+
+## Session log 2026-09-23 (second session)
+
+### B. The live run — **a board shipped**
+
+One Surprise-me run on the deployed code (datum included), driven through
+`https://kicraft.io` as the smoke user:
+
+| field | value |
+|---|---|
+| board code | `KC-MQNE7R` (project 896) |
+| seed / brief | `seed=9` — *"A 24 V DC screw terminal to 5 V converter with reverse-polarity protection, a 6-pin 0.1 inch header, and a power LED. Use a four-layer stack-up."* |
+| pipeline | `legacy` (`bc6a2f8` design + current manufacturing), `luna`, temperature 0, reasoning 0 |
+| stages | intent 1/$0.0007/3.8s · functional_spec 1/$0.0012/7.6s · architecture 1/$0.0025/14.7s · bom 4/$0.0229/170.4s · wiring 3/$0.0079/22.8s — all `ok` |
+| gate sentence | `4/5 verify: shorts=0 unconnected=0 courtyard=0 keepout=0 traces=158 components=16/16 util=36.1% aspect=1.46` |
+| build job | `build_jobs.id=327 rc=0` (fab export ran) |
+| artifacts | `generated/24V_TO_5V_CONVERTER/24V_TO_5V_CONVERTER_fab_20260923.zip` + `.receipt.json` (Gerbers per layer, PTH/NPTH drill + maps, CPL, BOM, STEP, 3D render) |
+| UI | "Design complete", stage pills INTENT→FAB all green, **Download KiCad project (.zip)**, 3D render; elapsed 9m 49s |
+| cost | **$0.0352** LLM (budget $0.60) |
+| issues shown | warnings only, all resolved by retry: BOM §9.25 capacitor polarity ×2, §9.5 stock, wiring §9.11/§9.15 — no blocking finding |
+
+So B6's success criterion is met for the first time in this stretch: a real
+Surprise-me request produced a fab package, and the terminal datum shipped in
+this session was in the deployed build that ran it.
+
+**One thing that run exposed, for the next session.** That board's `J1` is the
+*other* vendored Kangnex family — `CONN-TH_WJ126V-5.0-2P`, not the WJ128V this
+session reviewed. It is edge-zoned `left` and the fab gate certified it
+`status=ok, opening_board_deg=180`. That verdict is a **heuristic guess, not a
+reviewed datum**: `detect_opening_direction` fell through to the body-overhang
+rule because nothing about that name is reviewed. The placer and the gate share
+that same detection, so a *wrong* guess is self-consistent — the gate can never
+catch it, which is exactly the KC-DZQ76R failure mode the reviewed table exists
+to prevent. Reviewing the rest of the vendored families is therefore the next
+terminal-datum task: WJ126V-2P/3P and WJ127-5P have meshes, but the WJ126V-2P
+mesh is authored **rotated 90 deg** against its own footprint (mesh y-extent
+7.8 mm == the footprint's x-extent 7.8 mm; mesh pin centres x ±2.5 vs footprint
+pads y ±2.5), so each needs its own registration check, and the WJ126V-4P/5P
+bundles ship no 3D model at all.
+
+### C. Backend A/B — results (9 runs, $0.1501, no build, no production change)
+
+Three unseen briefs from the frozen 60 (`5 V greenhouse sensor hub`, `dual-channel
+line receiver`, `42 mm LED beacon`); every arm `rc=1` — **no arm completed all
+five stages, and nothing reached the build**:
+
+| brief | `cur0` current, reasoning 0 | `curR` current, reasoning 4096 | `leg` pinned `bc6a2f8` |
+|---|---|---|---|
+| 1 greenhouse hub | intent ✓2 · fs ✓1 · **architecture ✗3** (`source_obligation_not_retained`) | intent ✓1 · fs ✓1 · arch ✓2 · **bom ✗** work unit `qwiic_1`: *requires 1 real qwiic-receptacle, found 0* (emitted `Conn_01x04`/`PinSocket_1x04`) | intent ✓1 · fs ✓1 · arch ✓2 · **bom ✓4** · **wiring ✗** deficit park |
+| 2 line receiver | intent ✓1 · fs ✓1 · **architecture ✗3** (contract refused) | intent ✓1 · fs ✓1 · arch ✓2 · **bom ✗** work unit `input_condition_left`: *requires 1 real coupling-capacitor / input-protection, found 0* (emitted generic `Device:R`/`Device:C`) | intent ✓1 · fs ✓1 · arch ✓1 · **bom ✓3** · **wiring ✗** park |
+| 3 LED beacon | intent ✓2 · fs ✓1 · **architecture ✗3** | intent ✓1 · fs ✓1 · **architecture ✗3** (functional-block mapping: `MOUNTING` block has no implementation requirement on a sheet) | intent ✓1 · fs ✓1 · arch ✓1 · **bom ✓2** · **wiring ✗** park |
+
+Three measured facts:
+
+1. **The pinned engine still reaches further on unseen briefs**: 4/5 stages on
+   3/3 (bom committed after 2–4 attempts), and its only failure is the deficit
+   *park* at wiring — "awaiting a clarifying answer" — the model-authored
+   protocol park the 34/34 record already describes, with the reconcile budget
+   spent.
+2. **Reasoning measurably helps the current engine's architecture stage**:
+   reasoning 0 → 0/3 committed (3 attempts each, `source_obligation_not_retained`
+   / block-sheet mapping classes); reasoning 4096 → 2/3 committed, at 4–8× the
+   architecture cost ($0.022–0.026 vs $0.002–0.006). With architecture solved,
+   the current engine then dies in the **bom work-unit contract**: the typed
+   work unit demands a class-tagged real part ("requires 1 real
+   coupling-capacitor") and the model emits a generic `Device:C` — a refusal
+   that costs nothing but blocks the run 2/2.
+3. **Neither side is shippable on these briefs**, so this is not evidence for a
+   flip. It is evidence for the two current-side contract classes to fix next
+   (`architecture` obligation retention / block-sheet mapping;
+   `bom` work-unit class resolution), which is exactly the plan's A2 workstream
+   — now with a measured reproduction on the current side rather than only the
+   legacy-authored one.
+
+**Decision (owner: A/B first, then flip): do not flip yet.** Keep `pipeline:
+legacy` while the two current-side contract classes above are fixed and the
+same nine runs are repeated; turn the reasoning budget on for the `current`
+arm of that re-measurement (it is the single knob this A/B shows moving
+architecture, and the throwaway-config mechanism (`KICRAFT_ROUTING_CONFIG`)
+means it can be measured without touching production). Also worth carrying:
+the reasoning arm's cost is per-attempt, so the BOM stage (10–70× architecture
+in wall time) is where a reasoning default would be felt.
+
+Budget note: the A/B spent $0.1501; the ledger stands at $137.01 of a $250
+total ceiling (today $19.22 of $20 left), so the re-measurement fits.
+
+Method, for the re-measurement (production `routing.json` untouched
+throughout):
+
+| arm | tree | knobs |
+|---|---|---|
+| `cur0` | current checkout | `KICRAFT_ROUTING_CONFIG=/tmp/ab/rc-current.json` (luna, temp 0, reasoning 0) |
+| `curR` | current checkout | same file + `design_reasoning_tokens: 4096` (a throwaway routing config) |
+| `leg` | `~/KiCraft-legacy` @ `bc6a2f8` | `LEGACY_ENV` (openai route, 0.20/1.20 caps, reasoning 0) |
+
+Each run: `stage_driver run --brief <file> --workspace <tmp> --budget 0.15
+--no-build --quality draft`; logs in `/tmp/ab/<arm>-b<N>.log`, per-stage lines
+`[ok|FAIL] <stage> cost=$… attempts=…`.

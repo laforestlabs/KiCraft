@@ -134,10 +134,16 @@ are re-solved: `cli_app replay` (or **Rebuild board**) with a cold
 `.experiments`. Evidence for the fix is therefore the replay of this workspace
 plus `detect_opening_direction` on the shipped footprint.
 
-Fix 2 (emit a reviewed family from the design path) is still open: a
-legacy-authored BOM can name any vendored terminal, and only the two WJ128V
-footprints above are reviewed today. The vendored WJ126V/WJ127 families have
-3D models that do not register on their footprints' own outlines (WJ126V-2P
-mesh 7.8 mm deep against a 10.0 mm outline; WJ127-5P matches neither sign), so
-they need their own drawing review before a row can be added, not a copy of
-this one.
+Fix 2 (emit a reviewed family from the design path) is still open, and the
+live run in the same session showed why it matters: `KC-MQNE7R` shipped a board
+whose `J1` is `CONN-TH_WJ126V-5.0-2P` — the *other* vendored Kangnex family —
+with `connector_facings` reporting `status=ok, opening_board_deg=180` from a
+**heuristic guess**, not a reviewed datum (the placer and the gate share that
+detection, so a wrong guess is self-consistent and the gate cannot catch it;
+the render shows the openings off-board, so it is at least plausible here).
+Reviewing the rest of the vendored set is the next terminal task: WJ126V-2P/3P
+and WJ127-5P have meshes, but the WJ126V-2P mesh is authored **rotated 90°
+against its own footprint** (mesh y-extent 7.8 mm == the footprint's x-extent
+7.8 mm; mesh pin centres x ±2.5 against footprint pads y ±2.5) and does not
+register cleanly even after rotating it, so each needs its own registration
+check first; the WJ126V-4P/5P bundles ship no 3D model at all.
