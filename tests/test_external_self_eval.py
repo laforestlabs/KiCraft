@@ -66,7 +66,6 @@ def _settings(tmp_path, monkeypatch):
     monkeypatch.setenv("KICRAFT_PROJECT_LLM_BUDGET_USD", "0.6")
     monkeypatch.setenv("KICRAFT_EVAL_STRICT_BUDGET", "0")
     monkeypatch.setattr(se, "_source_fingerprint", lambda: "unchanged")
-    monkeypatch.setattr(se.pipeline_dispatch, "describe", lambda: {"selected": "current"})
     monkeypatch.setattr(se, "_make_judge_client", lambda *args: None)
     from kicraft.server import client
 
@@ -183,7 +182,6 @@ def test_external_interrupted_attempt_is_preserved_not_retried(tmp_path, monkeyp
 def test_general_brief_does_not_auto_answer_a_blocking_question(tmp_path, monkeypatch):
     monkeypatch.setattr(se, "read_state", lambda _: {})
     monkeypatch.setattr(se, "remaining_stages", lambda _: ["intent"])
-    monkeypatch.setattr(se.pipeline_dispatch, "current_tree_owns_design_state", lambda _: False)
     calls = []
 
     def park(*args, **kwargs):
@@ -199,24 +197,6 @@ def test_general_brief_does_not_auto_answer_a_blocking_question(tmp_path, monkey
     )
     assert result["failure_kind"] == "clarification_required"
     assert calls == [None]
-
-
-def test_native_reconcile_count_survives_harness_accounting(tmp_path, monkeypatch):
-    monkeypatch.setattr(se, "read_state", lambda _: {})
-    monkeypatch.setattr(se, "remaining_stages", lambda _: ["wiring"])
-    monkeypatch.setattr(se.pipeline_dispatch, "current_tree_owns_design_state", lambda _: False)
-    monkeypatch.setattr(
-        se,
-        "run_session",
-        lambda *a, **kw: {
-            "status": "awaiting_input",
-            "reconcile_passes": 3,
-            "questions": [{"text": "Missing bypass caps", "reconcile_target": "bom"}],
-        },
-    )
-    result = se.run_design(object(), "A controller", tmp_path, lambda _: None)
-    assert result["reconcile_passes"] == 3
-    assert result["failure_kind"] == "unresolved_bom_deficit"
 
 
 def test_external_budget_refusal_preserves_denominator_without_dispatch(tmp_path, monkeypatch):

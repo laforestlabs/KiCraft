@@ -593,37 +593,6 @@ def test_evaluate_one_happy_path_drives_builds_and_scores(tmp_path, monkeypatch)
     assert rec["lifecycle"]["silkscreen"]["cost_usd"] == 0.003
 
 
-def test_legacy_evaluation_preserves_state_for_legacy_build(tmp_path, monkeypatch):
-    state_bytes = json.dumps(_FULL_STATE).encode()
-
-    def design(ws, *args, **kwargs):
-        se.pipeline_dispatch.write_marker(ws, "legacy")
-        (ws / ".kicraft" / "state.json").write_bytes(state_bytes)
-        return {"status": "ok", "results": [], "last_stage": "wiring"}
-
-    def current_tail(state_path, *args, **kwargs):
-        Path(state_path).write_text('{"corrupted_by_current_schema": true}')
-        return {}
-
-    def build(ws, *args, **kwargs):
-        return 0 if (ws / ".kicraft" / "state.json").read_bytes() == state_bytes else 2
-
-    monkeypatch.setattr(se, "run_session", design)
-    monkeypatch.setattr(se, "run_post_wiring_lifecycle", current_tail)
-    monkeypatch.setattr(se, "run_build", build)
-    monkeypatch.setattr(se, "evaluate_project", lambda *args, **kwargs: _fake_report())
-    rec = se.evaluate_one(
-        object(),
-        1,
-        {"slug": "legacy-isolation", "archetype": "test", "brief": "RC filter"},
-        tmp_path,
-        judge_model=None,
-        skip_judge=True,
-    )
-    assert rec["build_rc"] == 0
-    assert (Path(rec["rundir"]) / ".kicraft" / "state.json").read_bytes() == state_bytes
-
-
 def test_evaluate_one_design_only_skips_build_and_scoring(tmp_path, monkeypatch):
     def fake_run_session(ws, brief, stages, **kw):
         state = {

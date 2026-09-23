@@ -26,7 +26,6 @@ from nicegui import ui
 from kicraft.cli.artifact_paths import LEAF_ROUTED, artifact_root
 
 from . import billing
-from . import pipeline
 from . import routing_config
 from .accounts import (
     CORE_COMPONENT_CATEGORIES,
@@ -382,7 +381,9 @@ def _admin_header(active: str) -> None:
                 "Tuning", icon="tune", on_click=lambda: ui.navigate.to("/admin/tuning")
             ).props("flat dense no-caps color=white").classes("text-xs")
             ui.button(
-                "Routing", icon="alt_route", on_click=lambda: ui.navigate.to("/admin/routing")
+                "Design model",
+                icon="alt_route",
+                on_click=lambda: ui.navigate.to("/admin/design"),
             ).props("flat dense no-caps color=white").classes("text-xs")
             ui.button(
                 "Tidiness A/B",
@@ -408,7 +409,7 @@ def _admin_card_style() -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Admin: design-model routing. Persists the active DESIGN_PROFILES entry plus
+# Admin: design model. Persists the active DESIGN_PROFILES entry plus
 # four behavior knobs in the routing config (~/.kicraft/routing.json; override
 # with KICRAFT_ROUTING_CONFIG). Both the web app and the build worker call
 # Settings.from_env() per run, so a save takes effect on the next design run --
@@ -423,8 +424,8 @@ def _routing_profile_summary(name: str) -> str:
     )
 
 
-@ui.page("/admin/routing")
-def admin_routing_page():
+@ui.page("/admin/design")
+def admin_design_page():
     """Pick the active design model (a named profile) and its behavior knobs:
     per-call token cap, project LLM budget, reasoning/thinking budget, and
     design temperature. Mutating handlers re-check is_admin() (defense in
@@ -434,7 +435,7 @@ def admin_routing_page():
         return redirect
     ui.dark_mode().enable()
     ui.query("body").style("background:var(--kc-bg)")
-    _admin_header("routing")
+    _admin_header("design")
 
     def guard() -> bool:
         """Defense in depth: never trust the page-load gate for a mutation."""
@@ -480,7 +481,7 @@ def admin_routing_page():
     }
 
     with ui.column().classes("w-full mx-auto p-4 gap-3").style("max-width:1300px"):
-        ui.label("Design-model routing").classes("text-2xl font-bold text-white")
+        ui.label("Design model").classes("text-2xl font-bold text-white")
         ui.label(
             "Selects the model that drafts the schematic (the active design "
             "profile) and its behavior knobs. A save applies to the NEXT design "
@@ -505,29 +506,6 @@ def admin_routing_page():
                 ui.label(f"{name}: {_routing_profile_summary(name)}").classes("text-xs").style(
                     f"color:{'#34d399' if name == active else '#64748b'}"
                 )
-
-        with ui.card().classes("w-full gap-2").style(_admin_card_style()):
-            ui.label("Design pipeline").classes("text-base font-semibold text-white")
-            pipeline_state = pipeline.describe()
-            pipeline_select = (
-                ui.select(
-                    {
-                        "current": "current pipeline (this tree, typed contracts)",
-                        "legacy": pipeline.LEGACY_LABEL,
-                    },
-                    value=pipeline_state["selected"],
-                    label="pipeline",
-                )
-                .classes("w-96")
-                .props("dark outlined dense")
-                .mark("routing-pipeline-select")
-            )
-            ui.label(pipeline_state["trade_off"]).classes("text-xs").style("color:#fbbf24")
-            if not pipeline_state["available"]:
-                ui.label(
-                    f"legacy tree not available at {pipeline_state['root']} — the switch falls "
-                    "back to the current pipeline"
-                ).classes("text-xs").style("color:#f87171")
 
         with ui.card().classes("w-full gap-2").style(_admin_card_style()):
             ui.label("Behavior").classes("text-base font-semibold text-white")
@@ -623,7 +601,6 @@ def admin_routing_page():
             try:
                 config = routing_config.RoutingConfig(
                     active_profile=str(profile_select.value or ""),
-                    pipeline=str(pipeline_select.value or "current"),
                     max_tokens_per_call=(
                         int(tokens_input.value) if tokens_input.value is not None else None
                     ),

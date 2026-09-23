@@ -63,7 +63,6 @@ from pathlib import Path
 from kicraft.build_slots import ACQUIRED_MARKER, resolve_build_slots
 from kicraft.proc_tree import kill_tree
 from kicraft.design.advisories import recorded_advisory_codes
-from kicraft.server import pipeline as pipeline_dispatch
 from kicraft.design.cli_app import run_post_wiring_lifecycle
 from kicraft.server.session import (
     bom_reconcile_deficits,
@@ -282,21 +281,10 @@ def _external_runtime_identity(settings) -> dict:
     from kicraft.server import routing_config
 
     root = Path(__file__).resolve().parents[2]
-    pipeline = pipeline_dispatch.describe()
     config_paths = [root / ".env"]
-    native_source = None
-    if pipeline.get("selected") == pipeline_dispatch.PIPELINE_LEGACY:
-        native_root = pipeline_dispatch.legacy_root()
-        native_source = _source_fingerprint(native_root)
-        if native_source == "unknown":
-            raise ValueError("cannot fingerprint native design engine")
-        config_paths.append(native_root / ".env")
     return {
         "settings": settings.redacted(),
         "routing": asdict(routing_config.load()),
-        "pipeline": pipeline,
-        "native_source": native_source,
-        "native_overrides": dict(pipeline_dispatch.LEGACY_ENV),
         "ledger_path": str(Path(settings.ledger_path).resolve()),
         "config_hashes": {
             str(path): hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
@@ -404,7 +392,6 @@ def _write_campaign_manifest(
     if external_bundle is not None:
         immutable["external_bundle"] = external_bundle
         immutable["execution_policy"] = execution_policy
-        immutable["pipeline"] = pipeline_dispatch.describe()
         immutable["runtime_identity"] = _external_runtime_identity(settings)
     payload = {
         "schema_version": 1,
@@ -530,11 +517,6 @@ def run_design(
             if isinstance(c, (int, float)):
                 cost += c
 
-        if not pipeline_dispatch.current_tree_owns_design_state(rundir):
-            passes = r_dict.get("reconcile_passes", 0)
-            if isinstance(passes, int) and not isinstance(passes, bool) and passes >= 0:
-                bom_passes += passes
-
     def _retry_provider_busy(result: dict, last: dict) -> bool:
         nonlocal provider_retries
         failure_kind = result.get("failure_kind") or last.get("failure_kind")
@@ -602,8 +584,7 @@ def run_design(
             # genuine shortfall -- fix-plan N3), so keep reconciling while the
             # pass budget advances. Never plain-answer a reconcile park.
             while (
-                pipeline_dispatch.current_tree_owns_design_state(rundir)
-                and res.get("status") == "awaiting_input"
+                res.get("status") == "awaiting_input"
                 and bom_reconcile_deficits(res)
             ):
                 prev = bom_passes
@@ -719,8 +700,7 @@ def run_build(rundir: Path, progress, *, timeout_s: int = 2400) -> int:
     # graded rc=6/7 partial instead of the empty rc=-9 the watchdog leaves. 90% of
     # the watchdog leaves headroom to finalize + export.
     build_env = _build_env()
-    pipeline = pipeline_dispatch.project_pipeline(rundir)
-    build_cmd = pipeline_dispatch.build_command(_BUILD_CMD, pipeline)
+    build_cmd = list(_BUILD_CMD)
     build_env.setdefault("KICRAFT_BUILD_MAX_WALL_S", f"{max(60.0, timeout_s * 0.9):.0f}")
     # start_new_session + kill_tree (not proc.kill): builds fan out to leaf,
     # router, and pcbnew subprocess groups that an outer watchdog must reap.
@@ -1012,11 +992,7 @@ def evaluate_one(
                 )
                 rec["design_cost_source"] = "stage_results_and_events"
             rec["stage_cost_usd"] = stage_costs
-        if (
-            not design_only
-            and d["status"] == "ok"
-            and pipeline_dispatch.current_tree_owns_design_state(rundir)
-        ):
+        if not design_only and d["status"] == "ok":
 
             def _rewire(instruction: str) -> None:
                 run_session(
@@ -1070,9 +1046,6 @@ def evaluate_one(
         )
         # RECORD-class advisories the run shipped with (design-yield-recovery plan §4.2).
         rec["advisories"] = _recorded_advisories(state_doc)
-        # Which pipeline built it (option 3): the workspace's own marker, so a campaign that
-        # ran a legacy project is grouped and never silently read as a current-tree board.
-        rec["pipeline"] = pipeline_dispatch.project_pipeline(rundir)
         rec.update(
             _stage_failure_attribution(
                 state_doc,
@@ -1328,10 +1301,6 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
 
     cost_summary = _campaign_costs(records)
     advisory_codes: dict[str, int] = {}
-    pipeline_counts: dict[str, int] = {}
-    for record in records:
-        name = str(record.get("pipeline") or pipeline_dispatch.PIPELINE_CURRENT)
-        pipeline_counts[name] = pipeline_counts.get(name, 0) + 1
     for record in records:
         for code in record.get("advisories") or ():
             advisory_codes[code] = advisory_codes.get(code, 0) + 1
@@ -1383,9 +1352,6 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         # so a downgrade is auditable over time (design-yield-recovery plan §4.2 step 3).
         "boards_with_advisories": sum(1 for r in records if r.get("advisories")),
         "advisory_codes": dict(sorted(advisory_codes.items())),
-        # Which design pipeline built each run, so boards from different trees are never
-        # compared as one cohort (design-yield-recovery plan option 3).
-        "pipeline_counts": dict(sorted(pipeline_counts.items())),
         "archetype_stats": _archetype_stats(records),
         "outline_stats": _outline_stats(records),
         "per_brief": per_brief,
@@ -1549,11 +1515,6 @@ def _render_md(s: dict) -> str:
         L.append(
             f"- advisory-flagged designs: **{s['boards_with_advisories']}/{s['n']}**  ·  codes: "
             + ", ".join(f"{c}×{n}" for c, n in (s.get("advisory_codes") or {}).items())
-        )
-    if len(s.get("pipeline_counts") or {}) > 1 or "legacy" in (s.get("pipeline_counts") or {}):
-        L.append(
-            "- pipelines: "
-            + ", ".join(f"{name}×{n}" for name, n in (s.get("pipeline_counts") or {}).items())
         )
     L.append("")
 

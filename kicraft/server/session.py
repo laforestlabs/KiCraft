@@ -26,7 +26,6 @@ from kicraft.design.stage_state import (
 from kicraft.fsutil import atomic_write_text
 
 from .stage_pipeline import DESIGN_STAGES, drive_chain
-from . import pipeline as pipeline_dispatch
 from .storage import _state_path
 
 # The deterministic build sub-phases, in pipeline order after DESIGN_STAGES.
@@ -275,19 +274,6 @@ def run_session(
     stages = list(stages)
     if not stages:
         return {"status": "ok", "results": [], "guard": None, "questions": None, "last_stage": None}
-    pipeline = pipeline_dispatch.project_pipeline(ws)
-    pipeline_dispatch.write_marker(ws, pipeline)
-    if pipeline == pipeline_dispatch.PIPELINE_LEGACY:
-        return _run_legacy_session(
-            ws,
-            brief,
-            stages,
-            answers=answers,
-            instruction=instruction,
-            progress=progress,
-            run_id=run_id,
-            auto_default_questions=auto_default_questions,
-        )
     results, guard, state_path = drive_chain(
         stages,
         brief,
@@ -319,111 +305,6 @@ def run_session(
         "retry_action": (
             "retry_stage" if last and last.get("failure_kind") == "provider_rate_limited" else None
         ),
-    }
-
-
-def _run_legacy_session(
-    ws,
-    brief: str,
-    stages,
-    *,
-    answers=None,
-    instruction=None,
-    progress=None,
-    run_id=None,
-    auto_default_questions: bool | None = None,
-) -> dict:
-    """Drive the legacy-owned session process and translate its reported outcome.
-
-    The subprocess performs the entire design/reconciliation chain with its own
-    session models. This side reads its protocol result only; it never serializes
-    a legacy state file.
-    """
-    from kicraft.server.config import Settings
-
-    try:
-        budget = float(Settings.from_env().project_llm_budget_usd)
-    except (SystemExit, ValueError):
-        budget = 0.10
-    rc, stdout, stderr = pipeline_dispatch.run_legacy_design(
-        ws,
-        brief,
-        stages,
-        budget_usd=budget,
-        answers=answers,
-        instruction=instruction,
-        run_id=run_id,
-        progress=progress,
-        auto_default_questions=auto_default_questions,
-    )
-    if progress:
-        diagnostics = [
-            line for line in (stdout or "").splitlines()
-            if not line.startswith("__KICRAFT_LEGACY_SESSION_RESULT__=")
-        ]
-        tail = "\n".join(diagnostics[-12:])
-        progress({"kind": "build_log", "text": f"[legacy] rc={rc}\n{tail}\n"})
-
-    packet = pipeline_dispatch.legacy_session_result(stdout)
-    if packet and isinstance(packet.get("result"), dict):
-        outcome = dict(packet["result"])
-        status = outcome.get("status")
-        if status not in {"ok", "failed", "awaiting_input"}:
-            return _legacy_protocol_failure(
-                ws,
-                "legacy session runner returned an invalid status",
-                stdout,
-                stderr,
-            )
-        if status == "ok" and rc != 0:
-            return _legacy_protocol_failure(
-                ws,
-                f"legacy session runner returned ok with exit status {rc}",
-                stdout,
-                stderr,
-            )
-        outcome["results"] = [
-            {**row, "pipeline": pipeline_dispatch.PIPELINE_LEGACY}
-            for row in outcome.get("results") or []
-            if isinstance(row, dict)
-        ]
-        outcome.update(
-            guard=outcome.get("guard"),
-            questions=outcome.get("questions"),
-            last_stage=outcome.get("last_stage"),
-            failure_kind=outcome.get("failure_kind"),
-            retryable=False,
-            retry_action=None,
-            pipeline=pipeline_dispatch.PIPELINE_LEGACY,
-            reconcile_passes=packet.get("reconcile_passes", 0),
-            stdout_tail=(stdout or "")[-2000:],
-            stderr_tail=(stderr or "")[-2000:],
-        )
-        return outcome
-    return _legacy_protocol_failure(
-        ws,
-        "legacy session runner did not return a valid result packet",
-        stdout,
-        stderr,
-    )
-
-
-def _legacy_protocol_failure(ws, error: str, stdout: str, stderr: str) -> dict:
-    """Report a broken legacy process boundary without trusting on-disk state."""
-    return {
-        "status": "failed",
-        "results": [],
-        "guard": None,
-        "state_path": str(_state_path(Path(ws))),
-        "questions": None,
-        "last_stage": None,
-        "failure_kind": "legacy_protocol_error",
-        "error": error,
-        "retryable": False,
-        "retry_action": None,
-        "pipeline": pipeline_dispatch.PIPELINE_LEGACY,
-        "stdout_tail": (stdout or "")[-2000:],
-        "stderr_tail": (stderr or "")[-2000:],
     }
 
 
@@ -845,12 +726,6 @@ def maybe_bom_reconcile(
     immediately: that is a stuck loop, not a chain. Returns
     ``(new_or_original_res, total_passes)``. Shared by ``server/web.py`` and
     ``kicraft/eval/self_eval.py`` (WS6)."""
-    if not pipeline_dispatch.current_tree_owns_design_state(ws):
-        # The legacy subprocess owns its native bounded repair loop. Starting a
-        # current-tree pass here would both reset its per-run client budget and
-        # risk serializing the incompatible state schema.
-        return res, reconcile_passes
-
     if reconcile_passes >= BOM_RECONCILE_MAX_PASSES:
         return res, reconcile_passes
     deficits = bom_reconcile_deficits(res)

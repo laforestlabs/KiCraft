@@ -274,9 +274,6 @@ class Project:
     # Human-quotable unique id (KC-XXXXXX) shown in the workspace so a user can
     # reference this exact board in a support report. See new_board_code().
     board_code: str | None = None
-    # Which design pipeline built this board: 'current' or 'legacy'. Recorded on the row so a
-    # pipeline swap is never invisible (design-yield-recovery plan option 3, decision D2).
-    pipeline: str | None = None
     auto_default_questions: bool = True
 
 
@@ -488,7 +485,6 @@ class AccountStore:
                 "like_count INTEGER NOT NULL DEFAULT 0,"
                 "quality TEXT,"
                 "board_code TEXT,"
-                "pipeline TEXT,"
                 "FOREIGN KEY(user_id) REFERENCES users(id))"
             )
             self._ensure_project_columns(conn)
@@ -730,10 +726,6 @@ class AccountStore:
             # fires for runs that finish after this column ships.
             conn.execute("UPDATE projects SET viewed_at=finished_at "
                          "WHERE finished_at IS NOT NULL")
-        if "pipeline" not in cols:
-            # Which design pipeline built the board (option 3 of the yield-recovery plan).
-            # NULL means "before the switch existed", which reads as the current pipeline.
-            conn.execute("ALTER TABLE projects ADD COLUMN pipeline TEXT")
         if "board_code" not in cols:
             conn.execute("ALTER TABLE projects ADD COLUMN board_code TEXT")
             # One-time backfill so EVERY project (including pre-existing ones)
@@ -1244,7 +1236,7 @@ class AccountStore:
                        cloned_from_id=row["cloned_from_id"],
                        view_count=row["view_count"], clone_count=row["clone_count"],
                        like_count=row["like_count"], quality=row["quality"],
-                       board_code=row["board_code"], pipeline=row["pipeline"])
+                       board_code=row["board_code"])
 
     def create_project(self, user_id: int, brief: str, *,
                        is_public: bool | None = None,
@@ -1276,20 +1268,19 @@ class AccountStore:
 
     def finish_project(self, project_id: int, status: str, stem: str | None = None,
                        cost_usd: float | None = None, dir_path: str | None = None,
-                       zip_path: str | None = None, pipeline: str | None = None) -> None:
+                       zip_path: str | None = None) -> None:
         with self._conn() as conn:
             conn.execute(
                 "UPDATE projects SET status=?, project_stem=?, cost_usd=?, "
-                "dir_path=?, zip_path=?, pipeline=?, finished_at=? WHERE id=?",
-                (status, stem, cost_usd, dir_path, zip_path, pipeline, _utcnow_iso(),
+                "dir_path=?, zip_path=?, finished_at=? WHERE id=?",
+                (status, stem, cost_usd, dir_path, zip_path, _utcnow_iso(),
                  project_id))
 
     def finish_project_if_running(self, project_id: int, status: str,
                                   stem: str | None = None,
                                   cost_usd: float | None = None,
                                   dir_path: str | None = None,
-                                  zip_path: str | None = None,
-                                  pipeline: str | None = None) -> bool:
+                                  zip_path: str | None = None) -> bool:
         """`finish_project`, but only while the row is still 'running'.
 
         Returns whether the terminal write landed. A janitor (the orphan reaper)
@@ -1299,9 +1290,9 @@ class AccountStore:
         with self._conn() as conn:
             cur = conn.execute(
                 "UPDATE projects SET status=?, project_stem=?, cost_usd=?, "
-                "dir_path=?, zip_path=?, pipeline=?, finished_at=? "
+                "dir_path=?, zip_path=?, finished_at=? "
                 "WHERE id=? AND status='running'",
-                (status, stem, cost_usd, dir_path, zip_path, pipeline,
+                (status, stem, cost_usd, dir_path, zip_path,
                  _utcnow_iso(), project_id))
             return cur.rowcount > 0
 

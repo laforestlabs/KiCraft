@@ -1,4 +1,4 @@
-"""Simulated-browser test of /admin/routing.
+"""Simulated-browser test of /admin/design.
 
 Uses NiceGUI's User simulation (same harness shape as test_web_core_components):
 no real browser, no LLM. Covers the admin render, the _require_admin bounce for
@@ -61,8 +61,8 @@ async def _login(u, email: str) -> None:
 async def test_admin_page_renders_profiles_and_effective_settings(harness):
     u, web, store = harness
     await _login(u, ADMIN_EMAIL)
-    await u.open("/admin/routing")
-    await u.should_see("Design-model routing")
+    await u.open("/admin/design")
+    await u.should_see("Design model")
     await u.should_see(DESIGN_PROFILES["luna"]["model"])  # the luna profile summary
     await u.should_see("deepseek-flash")           # the deepseek profile summary
     await u.should_see("Effective settings")
@@ -78,7 +78,7 @@ async def test_non_admin_is_bounced(harness):
     other = store.create_user(USER_EMAIL, PASSWORD)
     store.record_consent(other.id, LEGAL_VERSION)
     await _login(u, USER_EMAIL)
-    await u.open("/admin/routing")
+    await u.open("/admin/design")
     # _require_admin redirects non-staff to the workspace.
     await u.should_see("design a PCB from a sentence")
 
@@ -86,11 +86,10 @@ async def test_non_admin_is_bounced(harness):
 async def test_save_round_trips_through_the_routing_file(harness):
     u, web, store = harness
     await _login(u, ADMIN_EMAIL)
-    await u.open("/admin/routing")
+    await u.open("/admin/design")
 
     with u.client:
         next(iter(u.find(marker="routing-profile-select").elements)).value = "deepseek"
-        next(iter(u.find(marker="routing-pipeline-select").elements)).value = "legacy"
     u.find(marker="routing-tokens").clear().type("2048")
     u.find(marker="routing-budget").clear().type("0.05")
     u.find(marker="routing-reasoning").clear().type("1024")
@@ -101,7 +100,6 @@ async def test_save_round_trips_through_the_routing_file(harness):
     written = json.loads(Path(path).read_text())
     assert written == {
         "active_profile": "deepseek",
-        "pipeline": "legacy",
         "design_reasoning_tokens": 1024,
         "design_temperature": 0.25,
         "max_tokens_per_call": 2048,

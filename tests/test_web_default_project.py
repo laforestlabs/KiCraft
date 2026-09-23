@@ -521,7 +521,6 @@ def test_recovery_question_stops_manufacturing(tmp_path, live_runs, monkeypatch,
             rewire("Repair wiring")
 
     monkeypatch.setattr(web, "run_session", run_session)
-    monkeypatch.setattr(web.pipeline, "current_tree_owns_design_state", lambda ws: True)
     monkeypatch.setattr(cli_app, "run_post_wiring_lifecycle", lifecycle)
     monkeypatch.setattr(web, "_drive_build_queue", lambda *a: builds.append("build") or 5)
     monkeypatch.setattr(web, "_erc_offenders", lambda ws: ["Unconnected power pin"])
@@ -532,34 +531,6 @@ def test_recovery_question_stops_manufacturing(tmp_path, live_runs, monkeypatch,
     assert state["ok"] is None
     assert builds == (["build"] if path == "erc" else [])
     assert all(call["auto_default_questions"] is False for call in calls)
-
-
-def test_legacy_design_still_reaches_the_build(tmp_path, live_runs, monkeypatch):
-    """A legacy-owned workspace must still be MANUFACTURED here.
-
-    The post-wiring authorship step belongs to the native tree, so this tree skips
-    it for legacy designs -- but it used to `return` there, before the build. Every
-    fully committed legacy design then ended with no board and an 'interrupted'
-    verdict (state["ok"] left unset), which is what the live Surprise-me walkthrough
-    hit after all five stages had committed."""
-    (tmp_path / ".kicraft").mkdir(parents=True, exist_ok=True)
-    (tmp_path / ".kicraft" / "pipeline.json").write_text(
-        json.dumps({"pipeline": "legacy", "legacy_commit": "bc6a2f8"}))
-    state = web._fresh_run_state()
-    state.update(project_id=11, user_id=1, ws=str(tmp_path))
-    builds = []
-
-    monkeypatch.setattr(web, "run_session",
-                        lambda ws, brief, stages, **kw: {"status": "ok"})
-    monkeypatch.setattr(web, "_drive_build_queue",
-                        lambda *a, **kw: builds.append("build") or 0)
-    monkeypatch.setattr(web, "_persist_project", lambda st: None)
-
-    web._run_design(state, ["intent"])
-
-    assert builds == ["build"], "a committed legacy design was never built"
-    assert state["ok"] is False, \
-        "the run must reach a real verdict, not fall through with ok unset"
 
 
 def test_build_target_derives_the_first_build_from_a_committed_design(tmp_path):

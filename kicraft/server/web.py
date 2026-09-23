@@ -88,7 +88,6 @@ from kicraft.fsutil import atomic_write_text
 
 from . import activity as _activity
 from . import billing, notify
-from . import pipeline
 from .build_worker import JOB_KIND_COMMANDS, _kill_build
 from .stage_driver import DESIGN_STAGES
 from .stagetabs import (
@@ -329,8 +328,7 @@ def _reconcile_orphan_projects() -> None:
         # a terminal result with its own guess.
         landed = store.finish_project_if_running(
             p.id, "interrupted", cost_usd=_project_spend_usd(p.id), stem=stem,
-            dir_path=dir_path,
-            pipeline=(pipeline.project_pipeline(dir_path) if dir_path else p.pipeline))
+            dir_path=dir_path)
         if not landed:
             continue
         # Only journal the reconciliation for a row this sweep actually closed:
@@ -1877,9 +1875,6 @@ def _persist_project(state: dict) -> None:
             store.finish_project(
                 pid, status, stem=stem, cost_usd=state.get("spend"),
                 dir_path=dir_path, zip_path=zip_path,
-                pipeline=(
-                    pipeline.project_pipeline(dir_path) if dir_path else pipeline.selected()
-                ),
             )
         except Exception as e:
             # This write flips the durable row to its terminal status; losing it
@@ -3150,7 +3145,7 @@ def _execute_claimed_job_local(ws: Path, state: dict, job_id: int, progress,
     clock restarts at the slot-acquired marker so time spent queued for a host
     build slot is not billed against the job."""
     timeout_s = 1800.0
-    cmd = pipeline.build_command(JOB_KIND_COMMANDS[kind], pipeline.project_pipeline(ws))
+    cmd = list(JOB_KIND_COMMANDS[kind])
     if kind == "build":
         quality = _store().build_quality_for_user(state.get("user_id"))
         if quality:  # tier override (free tier -> draft); None = default
@@ -3409,9 +3404,6 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
         # CHAINS still resolve (fix-plan N3); an exhausted internal deficit is an
         # honest design failure, never a question for the user. Shared with the
         # self-eval driver (kicraft.server.session).
-        # Native sessions own their canonical design schema. Current manufacturing
-        # runs separately on a snapshot, without reserializing authored stages here.
-        current_owns_design = pipeline.current_tree_owns_design_state(ws)
 
         def _adopt_awaiting_input(result: dict) -> None:
             """Park with the same durable/live fields as the initial session."""
@@ -3461,8 +3453,7 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
             }
 
         _bom_passes = int(state.get("bom_reconcile_passes") or 0)
-        while (current_owns_design
-               and res.get("status") == "awaiting_input"
+        while (res.get("status") == "awaiting_input"
                and bom_reconcile_deficits(res)):
             _prev = _bom_passes
             res, _bom_passes = maybe_bom_reconcile(
@@ -3496,65 +3487,50 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
         # Advisory post-wiring review/repair and silkscreen authoring run through
         # the same lifecycle as batch self-evaluation. They intentionally remain
         # fail-soft: neither a review nor a cosmetic plan can fulfill a delivery.
-        # The native design tree owns the post-wiring SCHEMA, so this tree skips
-        # that authorship step for its workspaces -- but it never skips the build:
-        # manufacturing is this tree's job for every backend, and _drive_build_queue
-        # routes a legacy workspace through the isolated-snapshot runner. Returning
-        # here instead (as this branch used to) left every fully committed legacy
-        # design with no board and an "interrupted" verdict.
         pending_post_wiring_result: dict | None = None
-        if not current_owns_design:
-            progress(
-                {
-                    "kind": "build_log",
-                    "text": "native design: keeping post-wiring authorship in its own schema; "
-                    "current manufacturing will build an isolated snapshot\n",
-                }
-            )
-        else:
-            try:
-                from kicraft.design.cli_app import run_post_wiring_lifecycle
+        try:
+            from kicraft.design.cli_app import run_post_wiring_lifecycle
 
-                def _rewire(instr: str) -> None:
-                    nonlocal pending_post_wiring_result
-                    rr = run_session(
-                        ws,
-                        state.get("brief", ""),
-                        ["wiring"],
-                        instruction=instr,
-                        progress=progress,
-                        run_id=run_id,
-                        auto_default_questions=auto_default_questions,
-                    )
-                    if rr.get("guard"):
-                        state["spend"] = _project_spend_usd(state.get("project_id"))
-                    if rr.get("status") == "awaiting_input":
-                        pending_post_wiring_result = rr
-                        raise _AwaitingInputDuringLifecycle(rr)
-
-                board_code = None
-                if pid:
-                    try:
-                        proj = _store().get_project(pid)
-                        board_code = getattr(proj, "board_code", None)
-                    except Exception:  # noqa: BLE001
-                        board_code = None
-                state["post_wiring_lifecycle"] = run_post_wiring_lifecycle(
-                    ws / ".kicraft" / "state.json",
+            def _rewire(instr: str) -> None:
+                nonlocal pending_post_wiring_result
+                rr = run_session(
                     ws,
-                    progress,
-                    _rewire,
-                    board_code=board_code,
+                    state.get("brief", ""),
+                    ["wiring"],
+                    instruction=instr,
+                    progress=progress,
                     run_id=run_id,
-                    execution_mode="web",
+                    auto_default_questions=auto_default_questions,
                 )
-            except _AwaitingInputDuringLifecycle as pause:
-                pending_post_wiring_result = pause.result
-            except Exception:  # noqa: BLE001
-                pass  # advisory lifecycle must never block a sound build
-            if pending_post_wiring_result is not None:
-                _adopt_awaiting_input(pending_post_wiring_result)
-                return
+                if rr.get("guard"):
+                    state["spend"] = _project_spend_usd(state.get("project_id"))
+                if rr.get("status") == "awaiting_input":
+                    pending_post_wiring_result = rr
+                    raise _AwaitingInputDuringLifecycle(rr)
+
+            board_code = None
+            if pid:
+                try:
+                    proj = _store().get_project(pid)
+                    board_code = getattr(proj, "board_code", None)
+                except Exception:  # noqa: BLE001
+                    board_code = None
+            state["post_wiring_lifecycle"] = run_post_wiring_lifecycle(
+                ws / ".kicraft" / "state.json",
+                ws,
+                progress,
+                _rewire,
+                board_code=board_code,
+                run_id=run_id,
+                execution_mode="web",
+            )
+        except _AwaitingInputDuringLifecycle as pause:
+            pending_post_wiring_result = pause.result
+        except Exception:  # noqa: BLE001
+            pass  # advisory lifecycle must never block a sound build
+        if pending_post_wiring_result is not None:
+            _adopt_awaiting_input(pending_post_wiring_result)
+            return
 
         # Deterministic (zero-LLM) build: synthesize -> place -> route -> verify ->
         # fab. `build` re-runs synthesize first, so the schematic appears as soon

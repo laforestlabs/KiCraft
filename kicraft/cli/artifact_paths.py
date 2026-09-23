@@ -43,7 +43,7 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import Iterable, Literal, Mapping
+from typing import Iterable, Literal
 
 # --- canonical artifact filenames (the ONLY place these literals are defined) --
 PARENT_ROUTED = "parent_routed.kicad_pcb"
@@ -299,7 +299,6 @@ def write_promote_provenance(
     source_kind: str,
     fresh: bool,
     advisories: Iterable[str] = (),
-    pipeline: Mapping[str, object] | None = None,
 ) -> Path:
     """Record what THIS run promoted to ``<stem>.kicad_pcb``. The authoritative,
     agent-facing answer to "which run produced the board on disk, and from what".
@@ -308,10 +307,6 @@ def write_promote_provenance(
     ``advisories`` are the RECORD-class codes the design shipped with (design-yield-recovery
     plan §4.2 step 2): the board itself says what it could not prove, so a reader of the
     artifacts never has to open the run's state to find out.
-
-    ``pipeline`` names the design pipeline that produced the board (option 3 of the same
-    plan): `{"pipeline": ..., "pipeline_legacy_commit": ...}`, so a board built by the legacy
-    fork says so in its own provenance file.
     """
     payload = {
         "schema_version": "promote-provenance-v1",
@@ -326,7 +321,6 @@ def write_promote_provenance(
         "source_mtime": _safe_mtime(source_board),
         "fresh": bool(fresh),
         "advisories": list(dict.fromkeys(str(code) for code in advisories)),
-        **(dict(pipeline) if pipeline else {}),
     }
     out = provenance_path(pcb)
     tmp = out.with_suffix(out.suffix + ".tmp")

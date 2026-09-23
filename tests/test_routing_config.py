@@ -31,7 +31,6 @@ def test_save_and_load_round_trip(tmp_path):
     saved = routing_config.save(
         routing_config.RoutingConfig(
             active_profile="deepseek",
-            pipeline="legacy",
             max_tokens_per_call=4096,
             project_llm_budget_usd=0.10,
             design_reasoning_tokens=2048,
@@ -45,7 +44,6 @@ def test_save_and_load_round_trip(tmp_path):
     loaded = routing_config.load(path)
     assert loaded == routing_config.RoutingConfig(
         active_profile="deepseek",
-        pipeline="legacy",
         max_tokens_per_call=4096,
         project_llm_budget_usd=0.10,
         design_reasoning_tokens=2048,
@@ -118,7 +116,6 @@ def test_invalid_behavior_values_are_dropped_but_profile_applies(tmp_path):
         ),
         routing_config.RoutingConfig(active_profile="luna", design_temperature=1.5),
         routing_config.RoutingConfig(active_profile="luna", design_reasoning_tokens=-1),
-        routing_config.RoutingConfig(active_profile="luna", pipeline="august"),
     ],
 )
 def test_save_rejects_out_of_bounds_values(tmp_path, config):
