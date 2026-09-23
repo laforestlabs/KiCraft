@@ -1,8 +1,9 @@
 # Terminal opening datum: the vendored WJ128V family is unreviewed
 
 **2026-09-23.** Found while driving the production Surprise-me flow (board
-`KC-CG58R4`, project id 892). Status: **open — needs a reviewed physical datum,
-not a code heuristic.**
+`KC-CG58R4`, project id 892). Status: **resolved** — see "Resolution" at the
+end; the reviewed datum for the whole WJ128V family is in
+`kicraft/parts_library/footprint_opening.py`.
 
 ## What happens
 
@@ -91,3 +92,52 @@ Either way, verify with the board that exposed it:
 
 Expect `connector_orientation_unmeasured:J2` to disappear from the
 `cand=N rejected before routing` line and the parent to proceed to routing.
+
+## Resolution (2026-09-23): fix 1 landed
+
+Fix 1, reviewed from the model rather than guessed. The extra signal the two
+footprint heuristics could not supply is the **wire path**: material along Y at
+the window heights, measured on the part's vendored mesh registered on the
+footprint's own through-hole pins (mesh pin x centres `-7.5/-2.5/2.5/7.5` and
+pin y `-0.43..0.37` == the `y≈0` pad row, so the frame is the footprint frame;
+the mesh outline `-5.03..+5.27` against the `F.SilkS` outline `-5.02..+5.29`
+fixes the otherwise-ambiguous sign):
+
+| measurement (4P, at every pin position) | value |
+|---|---|
+| outer `+Y` wall | absent (wire window) over z `2.5..6.0` of the 14.1 mm body |
+| outer `-Y` wall | present to z `4.75`, no wire window |
+| material along Y at z `3..5` | clamp cage back plate only, y `-3.83..-3.03` |
+| wire reach from `+Y` | `8.6..9.1 mm` (datasheet strip length `6~7 mm`) |
+| wire reach from `-Y` | `1.2..2.0 mm` — stops on the cage plate, never crosses the clamp |
+| screwdriver access | hole in the TOP face per pin position (screws vertical) |
+
+So the mouth is **+Y = 90°**, with the marker on the wire-entry wall at
+`y = +5.27 mm` (the mesh-measured face; `F.SilkS` draws it at `+5.29`). The
+vendor customer drawing (LCSC `C192769`) agrees: its front view shows the
+square openings low on the body and the PCB LAYOUT view puts the pin row
+`4.90 mm` from one long edge and `5.38 mm` from the other, the openings on the
+`5.38` side. The 5P (`C192770`) carries the same window in `+Y` and the same
+drawing profile.
+
+Landed in `kicraft/parts_library/footprint_opening.py`
+(`_WJ128V_FOOTPRINT_NAMES`: `CONN-TH_4P-P5.00_WJ128V-4P-5.0-14-00A`,
+`CONN-TH_5P-P5.00_WJ128V-5P-5.0-14-00A`) with regression tests in
+`tests/test_screw_terminal_orientation.py`.
+
+**The command above is not a valid post-fix check by itself**: the leaf
+artifacts it composes were solved before the fix, and a component's
+`opening_direction` is persisted in the leaf artifact — the compose gate reads
+that frozen field, so re-running compose on this workspace still reports
+`connector_orientation_unmeasured:J2`. The datum takes effect where the leaves
+are re-solved: `cli_app replay` (or **Rebuild board**) with a cold
+`.experiments`. Evidence for the fix is therefore the replay of this workspace
+plus `detect_opening_direction` on the shipped footprint.
+
+Fix 2 (emit a reviewed family from the design path) is still open: a
+legacy-authored BOM can name any vendored terminal, and only the two WJ128V
+footprints above are reviewed today. The vendored WJ126V/WJ127 families have
+3D models that do not register on their footprints' own outlines (WJ126V-2P
+mesh 7.8 mm deep against a 10.0 mm outline; WJ127-5P matches neither sign), so
+they need their own drawing review before a row can be added, not a copy of
+this one.

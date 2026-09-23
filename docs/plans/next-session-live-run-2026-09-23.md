@@ -57,6 +57,60 @@ why-not-a-heuristic reasoning are in
 reach routing. Then rebuild the board in the UI (Rebuild board on `KC-CG58R4`)
 and read the next gate, if any.
 
+**Status 2026-09-23 (second session): DONE.** The datum was reviewed from the
+vendored 3D mesh, not from the two disagreeing footprint heuristics: a wire
+enters `8.6..9.1 mm` from `+Y` (matching the datasheet's `6~7 mm` strip length)
+and stops on the clamp cage after `1.2..2.0 mm` from `-Y`. `+Y = 90 deg`, marker
+on the wire-entry wall at `y = +5.27 mm`. Landed in
+`kicraft/parts_library/footprint_opening.py` for both vendored WJ128V footprint
+names, with tests in `tests/test_screw_terminal_orientation.py`. Measurements,
+the drawing cross-check and the verification caveat are in
+`docs/plans/terminal-opening-datum-2026-09-23.md` → "Resolution".
+
+Verification (no LLM, no cost — `cli_app replay --quality draft --seed 0` on a
+cold copy of project 892's workspace, pre-promote seed restored):
+
+| step | before the datum | after |
+|---|---|---|
+| `detect_opening_direction` on J2's board footprint | `None` | `90.0` |
+| persisted `opening_direction` in the re-solved leaf | `None` | `90.0` (`in_plane`) |
+| parent compose | every candidate rejected `connector_orientation_unmeasured:J2` | composed + routed |
+| promote / verify | `rc=6`, `no routed parent` | `3/5 promoted routed parent`, `4/5 verify: shorts=0 unconnected=0 courtyard=0 keepout=0 traces=243` |
+
+The same cold replay on the *frozen* (pre-fix) leaf artifacts still rejects
+`connector_orientation_unmeasured:J2`, and clearing only the two WJ128V rows
+in-process turns J2's measurement back into `None` — so the datum, not a
+stochastic placement difference, is what unblocked it.
+
+**Next gate found by that replay** (fab export still refused, so no board yet):
+the design zones two *non-connector* parts at board edges — `RT1` (`3296W-1-103LF`
+trim pot, zone `top`) and `Q2` (SOT-23 phototransistor, zone `bottom`) — and the
+fab-facing gate treats both as directional connectors:
+
+```
+connector_orientation_unmeasured:RT1        # THT part, no measured mouth -> blocking
+connector_misoriented:Q2(mouth 180deg vs bottom outward 90deg)   # heuristic mouth on a SOT-23
+connector_stranded:Q2@-1.23mm(bottom)
+```
+
+Owning modules: `kicraft/autoplacer/brain/connector_edge_gap.py`
+(`connector_facings`, `_access_only_connector`) and
+`kicraft/design/cli_app.py::_connector_misoriented`. Their zones are access /
+field-of-view hints (a trim pot the user turns, a phototransistor that must see
+light); neither has an in-plane mating mouth to aim. The existing escape hatch
+is `_access_only_connector`, an identity allowlist (coin cells, prog/debug
+headers) — extending it to these parts, or gating the facing/stranding verdicts
+on a connector identity rather than on THT evidence, is a policy decision for
+the next session (a wrong allowlist silently skips a real connector's mouth
+check). Note the *compose* gate did not block them: `_directional_edge_candidate`
+requires `kind == "connector"`, which the fab gate has no equivalent of.
+
+Note the `Verify` above as written is not sufficient: a leaf artifact persists
+its components' `opening_direction`, so the compose CLI on the frozen workspace
+re-reads the pre-fix `None` and still rejects. Re-solve the leaves
+(`cli_app replay` / **Rebuild board**) to see the datum take effect; the plan's
+B7(c)/(d) order should be reversed accordingly.
+
 ### A2. Design-stage contracts  *(peer workstream — coordinate before touching)*
 
 Surprise briefs fail in the LLM stages, so the build never runs:

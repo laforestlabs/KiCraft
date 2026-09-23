@@ -440,6 +440,99 @@ def test_unreviewed_horizontal_terminal_is_unmeasured():
     assert detect_opening_direction(other) is None
 
 
+WJ128V_LIB = (
+    Path.home() / ".kicraft" / "parts" / "screw-terminal-5mm-4p-128"
+    / "screw-terminal-5mm-4p-128.pretty"
+)
+WJ128V_4P = "CONN-TH_4P-P5.00_WJ128V-4P-5.0-14-00A"
+WJ128V_5P = "CONN-TH_5P-P5.00_WJ128V-5P-5.0-14-00A"
+
+
+def test_wj128v_family_opening_is_the_wire_face():
+    """The vendored WJ128V terminals carry a reviewed datum: +Y/90 deg, marker
+    on the wire-entry wall.
+
+    KC-CG58R4's J2 is ``WJ128V_4P``. Unreviewed, its 0.24 mm courtyard
+    asymmetry is under every heuristic threshold, so its mouth was unmeasured
+    and parent composition rejected every candidate before routing.
+    """
+    from kicraft.parts_library.footprint_opening import (
+        is_horizontal_terminal,
+        reviewed_connector_opening,
+    )
+
+    for name in (WJ128V_4P, WJ128V_5P):
+        assert is_horizontal_terminal(name)
+        opening_deg, (marker_x, marker_y) = reviewed_connector_opening(name)
+        assert opening_deg == 90.0
+        # Marker on the +Y wire-entry wall, mesh-measured at y=+5.27 mm (the
+        # F.SilkS outline draws the same face at +5.29 mm); the pin row is
+        # centred on x=0.
+        assert (marker_x, marker_y) == (0.0, 5.27)
+    # The loader hands over the bare item name; a "lib:name" form resolves too.
+    assert reviewed_connector_opening(
+        f"screw-terminal-5mm-4p-128:{WJ128V_4P}"
+    ) == (90.0, (0.0, 5.27))
+
+
+def _vendored_wj128v_board(tmp_path: Path, *, rotation: float) -> Path:
+    """Real board: the vendored WJ128V-4P terminal in an outline."""
+    pcbnew = pytest.importorskip("pcbnew")
+    if not WJ128V_LIB.is_dir():
+        pytest.skip("vendored screw-terminal-5mm-4p-128 not installed")
+    fp = pcbnew.FootprintLoad(str(WJ128V_LIB), WJ128V_4P)
+    assert fp is not None, f"{WJ128V_4P} missing from {WJ128V_LIB}"
+    board = pcbnew.CreateEmptyBoard()
+    fp.SetReference("J2")
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(150), pcbnew.FromMM(100)))
+    board.Add(fp)
+    fp.SetOrientationDegrees(rotation)
+    rect = pcbnew.PCB_SHAPE(board)
+    rect.SetShape(pcbnew.SHAPE_T_RECT)
+    rect.SetStart(pcbnew.VECTOR2I(pcbnew.FromMM(130), pcbnew.FromMM(80)))
+    rect.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(170), pcbnew.FromMM(120)))
+    rect.SetLayer(pcbnew.Edge_Cuts)
+    board.Add(rect)
+    out = tmp_path / f"wj128v_{int(rotation)}.kicad_pcb"
+    pcbnew.SaveBoard(str(out), board)
+    return out
+
+
+def test_wj128v_terminal_measures_its_mouth_and_faces_its_edge(tmp_path):
+    """The shipped footprint measures 90 deg, the load-time annotation stamps
+    its marker on the wire face, and the shared facing gate certifies rot 0 /
+    flags rot 180."""
+    from kicraft.autoplacer.brain.connector_edge_gap import connector_facings
+    from kicraft.autoplacer.hardware.adapter import detect_opening_direction
+    from kicraft.parts_library.footprint_opening import annotate_connector_opening
+
+    # The annotation runs on the unplaced footprint the synthesis loader hands
+    # over (footprint-local == board coords there).
+    pcbnew = pytest.importorskip("pcbnew")
+    if not WJ128V_LIB.is_dir():
+        pytest.skip("vendored screw-terminal-5mm-4p-128 not installed")
+    fp = pcbnew.FootprintLoad(str(WJ128V_LIB), WJ128V_4P)
+    assert detect_opening_direction(fp) == 90.0
+    assert annotate_connector_opening(pcbnew, fp, WJ128V_4P) is True
+    markers = [
+        (pcbnew.ToMM(i.GetPosition().x), pcbnew.ToMM(i.GetPosition().y))
+        for i in fp.GraphicalItems()
+        if i.GetLayer() == pcbnew.Dwgs_User and "edge" in i.GetText().lower()
+    ]
+    assert markers == [(0.0, 5.27)]
+    # The stamped marker agrees with the reviewed datum instead of shadowing it.
+    assert detect_opening_direction(fp) == 90.0
+
+    zones = {"J2": {"edge": "bottom"}}
+    for rotation, expected in ((0.0, "ok"), (180.0, "misoriented")):
+        pcb = _vendored_wj128v_board(tmp_path, rotation=rotation)
+        assert detect_opening_direction(
+            pcbnew.LoadBoard(str(pcb)).FindFootprintByReference("J2")
+        ) == 90.0
+        (verdict,) = connector_facings(str(pcb), zones)
+        assert verdict.status == expected, (rotation, verdict)
+
+
 def test_vertical_terminal_is_not_a_directional_terminal():
     from kicraft.autoplacer.hardware.adapter import detect_opening_direction
     from kicraft.parts_library.footprint_opening import is_horizontal_terminal

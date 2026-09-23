@@ -27,8 +27,15 @@ part into the synthesized board and every existing marker consumer (placement,
 consults the reviewed table directly, so boards synthesized before the
 annotation existed still measure correctly.
 
+Also reviewed here: the vendored Kangnex **WJ128V** 5.00 mm screw terminals
+(``CONN-TH_*P-P5.00_WJ128V-*``). They are not stock KiCad parts, but the pinned
+legacy design backend picks them by MPN, so a legacy-authored BOM can name a
+terminal whose footprint the stock lowerer never emits -- and their 0.24 mm
+courtyard asymmetry is under every threshold, so they came back unmeasured and
+blocked parent composition. See the family block below for the measurement.
+
 Physical family metadata -- never board-code, ref, or project specific. No
-other Phoenix footprint is matched: a terminal whose actual model has not been
+other footprint is matched: a terminal whose actual model has not been
 reviewed is reported unmeasured rather than guessed.
 """
 from __future__ import annotations
@@ -70,6 +77,54 @@ _REVIEWED_OPENINGS: dict[str, tuple[float, tuple[float, float]]] = {
     )
     for n in range(2, 13)
 }
+
+# --- Vendored Kangnex WJ128V 5.00 mm screw terminals -----------------------
+# Reviewed 2026-09-23 against each part's vendored easyeda2kicad 3D mesh (WRL,
+# 2.54 mm per VRML unit), registered on the footprint's own through-hole pins
+# (mesh pin x centres == the pad x row; the pin blade's y -0.43..0.37 == the
+# y~0 pad row), with the footprint's own drawing and the vendor customer
+# drawing as cross-checks.
+#
+# 4P (``CONN-TH_4P-P5.00_WJ128V-4P-5.0-14-00A``, LCSC C192769) -- the part
+# KC-CG58R4's J2 used -- measured at every pin position:
+#   * mesh outline y -5.03..+5.27 mm against the footprint's F.SilkS outline
+#     -5.02..+5.29 mm: the same profile, so the mesh frame is registered and
+#     the deeper long side is +Y;
+#   * the outer +Y wall is absent over z 2.5..6.0 mm of the 14.1 mm-tall body
+#     (the wire window), while the -Y wall stops at z 4.75 mm;
+#   * the only material along Y at those heights is the clamp cage's back
+#     plate, y -3.83..-3.03 mm at z 3..5. A wire enters 8.6..9.1 mm from +Y, so
+#     the datasheet's 6~7 mm strip length spans the clamp; from -Y it stops on
+#     the plate after 1.2..2.0 mm and never reaches the clamp;
+#   * the screws are vertical -- the driver-access hole is in the top face at
+#     each pin position -- so the entry is horizontal and the local mouth is
+#     +Y = 90 deg. The customer drawing's front view shows the same square
+#     openings low on the body, opposite the fence the reference text sits on.
+#
+# 5P (``CONN-TH_5P-P5.00_WJ128V-5P-5.0-14-00A``, LCSC C192770) corroborates
+# the family datum: its pins register the same way (x -10..10, y ~0), its mesh
+# carries the same window in the +Y wall (z 3.25..5.0) with the clamp-reaching
+# path from +Y (median 6.35 mm vs 4.15 mm from -Y), and its footprint drawing
+# repeats the 4P profile (F.SilkS -5.02..+5.29, wire-entry glyphs and the value
+# text on +Y, reference text at the -Y fence).
+#
+# Keyed on the exact footprint name; the two 4P bundles
+# (screw-terminal-5mm-4p-128, screw-terminal-5mm-4p-wj128v) ship the same one.
+_WJ128V_OPENING_DEG = 90.0
+
+# Wire-entry wall outer face (mm, footprint-local Y): the mesh-measured
+# y=+5.27 mm, which the F.SilkS outline draws at +5.29 mm. Both vendored
+# footprints centre their pin row on x=0.
+_WJ128V_MARKER_MM = (0.0, 5.27)
+
+_WJ128V_FOOTPRINT_NAMES = (
+    # 4P (C192769) and 5P (C192770), measured as described above.
+    "CONN-TH_4P-P5.00_WJ128V-4P-5.0-14-00A",
+    "CONN-TH_5P-P5.00_WJ128V-5P-5.0-14-00A",
+)
+
+for _wj128v_name in _WJ128V_FOOTPRINT_NAMES:
+    _REVIEWED_OPENINGS[_wj128v_name] = (_WJ128V_OPENING_DEG, _WJ128V_MARKER_MM)
 
 
 def _bare_name(footprint_name: str) -> str:
