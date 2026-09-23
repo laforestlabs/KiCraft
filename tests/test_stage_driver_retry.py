@@ -1146,6 +1146,80 @@ def test_semantic_repair_is_bounded_to_one_correction(tmp_path):
     )
 
 
+def test_intent_repair_is_scored_under_first_candidate_normalization(tmp_path):
+    """A semantic repair is normalized exactly like the first candidate.
+
+    ``complete_intent_classification`` adds the exact brief token ("ESP32-C3") to
+    the first candidate's ``named_parts``. A repair that fixes an unrealizable
+    obligation class but does not repeat that token used to be charged a spurious
+    ``intent_named_part_omitted``; the defect scores tied, the adoption guard
+    discarded the repair, and the committed slot kept the flagged class.
+    """
+    brief = (
+        "An ESP32-C3 module controller board powered from a 24 V DC screw terminal, "
+        "with the input reverse-polarity protected."
+    )
+    flagged = {
+        "goal": brief,
+        "constraints": ["Power input: 24 V DC", "Input reverse-polarity protection required"],
+        "named_parts": ["ESP32-C3 module"],
+        "inferred_expertise": "intermediate",
+        "assumptions": [],
+        "obligations": [
+            {
+                "kind": "physical",
+                "original_obligation_id": "esp32-c3-module",
+                "component_class": "microcontroller-module",
+            },
+            {
+                "kind": "physical",
+                "original_obligation_id": "power-terminal",
+                "component_class": "screw-terminal",
+            },
+            {
+                "kind": "physical",
+                "original_obligation_id": "reverse-polarity-protection",
+                "component_class": "reverse-polarity-protection",
+            },
+        ],
+        "project_stem": "ESP32C3_CONTROLLER",
+    }
+    repaired = {
+        **flagged,
+        "obligations": [
+            {**flagged["obligations"][0], "component_class": "microcontroller"},
+            *flagged["obligations"][1:],
+        ],
+    }
+
+    def reply(payload):
+        return {
+            "text": json.dumps(payload),
+            "reasoning": "",
+            "finish_reason": "stop",
+            "cost_usd": 0.0,
+        }
+
+    client = _ScriptedClient([reply(flagged), reply(repaired)])
+    client.s = Settings(api_key="test")
+
+    result = run_session(tmp_path, brief, ["intent"], client=client)
+
+    stage = result["results"][0]
+    assert result["status"] == "ok"
+    assert stage["repair_attempted"] is True
+    assert stage["repair_adopted"] is True
+    assert stage["repair_required"] is False
+    assert stage["diagnostics"] == []
+    classes = [
+        row.get("component_class")
+        for row in stage["slot"]["obligations"]
+        if row.get("kind") == "physical"
+    ]
+    assert "microcontroller-module" not in classes
+    assert "microcontroller" in classes
+
+
 def test_rate_limit_falls_back_once_with_shared_guard_and_pristine_messages(tmp_path):
     events = []
     client = _ScriptedClient(

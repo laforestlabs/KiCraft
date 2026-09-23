@@ -1241,6 +1241,36 @@ def _semantic_defect_score(diagnostics: list[models.StageDiagnostic]) -> int:
     return sum(max(1, len(diagnostic.evidence)) for diagnostic in diagnostics)
 
 
+def _normalize_candidate_for_diagnostics(
+    stage: str, candidate: dict, brief: str, semantic_state: dict
+) -> dict:
+    """Apply the stage's deterministic pre-diagnosis normalization to one candidate.
+
+    The first candidate and a semantic-repair candidate MUST pass through exactly
+    these helpers before ``diagnose_stage``. While only the first candidate was
+    normalized, a repair was scored against diagnostics the original never faced:
+    an intent repair kept its raw ``named_parts`` while
+    ``complete_intent_classification`` had already added the exact brief token to
+    the original, so the adoption guard saw equal defect scores and discarded a
+    repair that really did remove the flagged defect (a physical obligation whose
+    class the reviewed library spells differently). Architecture still runs
+    ``complete_unsourced_external_rails`` separately, after its first diagnose.
+    """
+    if stage == "intent":
+        candidate = complete_intent_classification(brief, candidate)
+        candidate["project_stem"] = normalize_project_stem(candidate.get("project_stem", ""))
+    elif stage == "functional_spec":
+        # A board-feature block cannot be wired (it owns no net), so it is removed
+        # deterministically here: the pad field survives as the intent's fabrication
+        # row, and the stage still reports the block through its diagnostic.
+        candidate = remove_board_feature_blocks(
+            remove_mislabeled_functional_defaults(brief, semantic_state, candidate)
+        )
+    elif stage == "architecture":
+        candidate = remove_mislabeled_architecture_defaults(semantic_state, candidate)
+    return candidate
+
+
 def _response_policy(client, stage: str, normal_max_tokens: int) -> StageResponsePolicy:
     """The stage's immutable response policy: normal cap + reasoning, plus the
     fixed serialization cap and retry budget (see Settings.design_stage_policy).
@@ -4558,18 +4588,7 @@ def drive_stage(
             )
             continue
 
-        if stage == "intent":
-            obj = complete_intent_classification(brief, obj)
-            obj["project_stem"] = normalize_project_stem(obj.get("project_stem", ""))
-        elif stage == "functional_spec":
-            # A board-feature block cannot be wired (it owns no net), so it is removed
-            # deterministically here: the pad field survives as the intent's fabrication
-            # row, and the stage still reports the block through its diagnostic.
-            obj = remove_board_feature_blocks(
-                remove_mislabeled_functional_defaults(brief, semantic_state, obj)
-            )
-        elif stage == "architecture":
-            obj = remove_mislabeled_architecture_defaults(semantic_state, obj)
+        obj = _normalize_candidate_for_diagnostics(stage, obj, brief, semantic_state)
         original_obj = obj
         diagnostics = diagnose_stage(
             stage, brief=brief, upstream_state=semantic_state, candidate=obj
@@ -4723,13 +4742,10 @@ def drive_stage(
                 total_cost += repair_facts.cost_usd
                 repair_outcome = decode_stage_response(prepared, repair_facts)
                 if repair_outcome.kind == "candidate":
-                    repaired = repair_outcome.payload["candidate"]
-                    if stage == "functional_spec":
-                        repaired = remove_mislabeled_functional_defaults(
-                            brief, semantic_state, repaired
-                        )
-                    elif stage == "architecture":
-                        repaired = remove_mislabeled_architecture_defaults(semantic_state, repaired)
+                    repaired = _normalize_candidate_for_diagnostics(
+                        stage, repair_outcome.payload["candidate"], brief, semantic_state
+                    )
+                    if stage == "architecture":
                         initial_repaired_diagnostics = diagnose_stage(
                             stage,
                             brief=brief,
