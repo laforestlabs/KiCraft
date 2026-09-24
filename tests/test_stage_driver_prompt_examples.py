@@ -896,6 +896,13 @@ def test_typed_mcp6001_requirement_resolves_to_verified_follower_recipe():
 
     assert canonical["recipe_selections"][0]["recipe"] == "mcp6001-follower@1"
     assert canonical["requirements"][0]["functional_blocks"] == ["BUFFER"]
+    # The reviewed follower publishes an optional `feedback` port; unbound, it is the unity-gain
+    # tie to the output, never an `unbound_required_port` refusal.
+    assert canonical["recipe_selections"][0]["port_bindings"]["feedback"] == "AOUT"
+    assert (
+        next(row for row in canonical["requirements"] if row["id"] == "buffer")["ports"]["feedback"]
+        == "AOUT"
+    )
 
 
 def test_model_owned_pd_controller_matches_typed_family_by_real_identity():

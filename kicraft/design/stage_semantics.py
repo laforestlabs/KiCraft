@@ -176,11 +176,14 @@ def _omitted_board_features(brief: str, candidate: dict) -> list[StageDiagnostic
 def _unrealizable_obligation_classes(obligations) -> list[StageDiagnostic]:
     """Physical obligations whose class is a not-a-part fact or a puzzled variant name.
 
-    Two cases only, both safe to reject at the stage that writes them:
+    Three cases, each safe to reject at the stage that writes them:
 
     * the class carries a token no physical class can have (an interface, bus, board
       format, package style, or printed-board feature), so it belongs in `constraints`,
       a `fabrication` row, or a `negative` row;
+    * the class names the power source itself (a battery, a cell, a pack), which no placed
+      part can implement: the board carries the mate, so the demand has no satisfying group
+      however many times the unit is re-driven;
     * the class is a longer spelling of a reviewed class, so the reviewed name is the
       repair.
 
@@ -189,9 +192,13 @@ def _unrealizable_obligation_classes(obligations) -> list[StageDiagnostic]:
     reviewed library can only answer for the classes it covers; refusing a new category
     here, or renaming it to a reviewed neighbour, would block or silently distort exactly
     the novel designs the pipeline exists to build.
+
+    ``coin-cell-holder`` and ``battery-connector`` are the mate classes and stay unflagged
+    for the same reason: they name something the board does place.
     """
     from kicraft.design.part_identity import (
         class_is_not_a_part,
+        off_board_source_class,
         realizable_physical_features,
         reviewed_class_variants,
     )
@@ -217,6 +224,21 @@ def _unrealizable_obligation_classes(obligations) -> list[StageDiagnostic]:
                     "A physical obligation names an interface, board format or board "
                     "fabrication feature rather than a part class.",
                     [f"{component_class} -> not a part class ({', '.join(not_a_part)})"],
+                )
+            )
+        elif off_board_source_class(component_class):
+            diagnostics.append(
+                _diag(
+                    "intent_obligation_class_unrealizable",
+                    "repair_required",
+                    "A physical obligation names the power source itself; the board carries the "
+                    "mate that the source plugs into, never the source.",
+                    [
+                        f"{component_class} -> off-board power source "
+                        f"({', '.join(off_board_source_class(component_class))}): demand the "
+                        "connector/holder class that mates with it, or drop the obligation and "
+                        "keep the source in the goal/named_parts"
+                    ],
                 )
             )
         elif variants:
@@ -515,6 +537,28 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
         for connection in candidate.get("connections") or []
         if isinstance(connection, dict)
     ]
+    # A connection that starts and ends at the same block states no flow between blocks.
+    # Live run 6 (KC-KAHKR7, seed 23) died on one and the only feedback the model got was the
+    # commit gate's bare `self-loop connection: 'DISPLAY_DRIVE' → 'DISPLAY_DRIVE'`, which
+    # carries no diagnostic code: the model could not tell a semantic defect it owned from a
+    # schema problem, and triage could not see it as a named refusal. Name it here, on the
+    # same surface as every other functional-spec defect, with the offending pair as evidence.
+    self_loops = [
+        f"{connection.get('from_block')!r} -> {connection.get('to_block')!r}"
+        for connection in connections
+        if connection.get("from_block")
+        and connection.get("from_block") == connection.get("to_block")
+    ]
+    if self_loops:
+        diagnostics.append(
+            _diag(
+                "functional_spec_self_loop",
+                "repair_required",
+                "A functional connection starts and ends at the same block, so it states no "
+                "flow between blocks; name the block the signal actually moves to.",
+                self_loops,
+            )
+        )
     incoming_power = {
         str(connection.get("to_block") or "")
         for connection in connections
@@ -1274,4 +1318,8 @@ def diagnose_stage(
         findings = _wiring(upstream_state, candidate)
     else:
         findings = []
-    return sorted(findings, key=lambda finding: (finding.severity, finding.code, finding.evidence))
+    # A row whose writer recorded no severity sorts with the advisory ones instead of raising.
+    return sorted(
+        findings,
+        key=lambda finding: (finding.severity or "", finding.code, finding.evidence),
+    )

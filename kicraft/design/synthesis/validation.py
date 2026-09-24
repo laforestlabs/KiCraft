@@ -5040,14 +5040,14 @@ def _functional_block_sheets(
     }
     # The same exemption, on the block side. A block whose every committed obligation is a
     # board-wide fact -- a `quantity`, `fabrication` or `negative` row, or a `quantitative` row
-    # that measures the board outline (`obligation_requires_requirement_owner`, the predicate the
-    # obligation-retention gate already uses) -- is realized by the board itself, so no
-    # requirement can implement it: demanding one refuses a design the committed intent legally
-    # declared (a brief's "two mounting holes" arrives as a `quantity` row with no part, and the
-    # MOUNTING block then had no implementer at all -> every attempt refused). A block carrying
-    # ANY obligation that needs a requirement owner is not exempt, so the gate still refuses a
-    # block the architecture silently dropped; an id the architecture does not carry is treated
-    # the same way (unprovable, not exempt).
+    # that measures the board outline or its stack-up (`obligation_requires_requirement_owner`,
+    # the predicate the obligation-retention gate already uses) -- is realized by the board itself,
+    # so no requirement can implement it: demanding one refuses a design the committed intent
+    # legally declared (a brief's "two mounting holes" arrives as a `quantity` row with no part,
+    # and the MOUNTING block then had no implementer at all -> every attempt refused). A block
+    # carrying ANY obligation that needs a requirement owner is not exempt, so the gate still
+    # refuses a block the architecture silently dropped; an id the architecture does not carry is
+    # treated the same way (unprovable, not exempt).
     ownership_rows = {
         row.original_obligation_id: row
         for row in (getattr(architecture, "obligations", None) or ())

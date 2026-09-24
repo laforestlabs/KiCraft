@@ -25,6 +25,7 @@ from __future__ import annotations
 import random
 import re
 import string
+from collections.abc import Callable
 
 # Full briefs the animated placeholder cycles through.
 EXAMPLE_PROMPTS = [
@@ -185,6 +186,40 @@ BRIEF_TRAILING = (
     "Add a reset button.",
 )
 
+_SLOT_VALUE_STOPWORDS = frozenset(
+    {"the", "and", "with", "for", "from", "using", "into", "over", "per"}
+)
+
+
+def _significant_tokens(value: str) -> set[str]:
+    """The tokens that make two slot values the same subject ("3 W power LED" / "power LED")."""
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", value.casefold())
+        if len(token) > 2 and token not in _SLOT_VALUE_STOPWORDS
+    }
+
+
+def _states_size_limit(body: str) -> bool:
+    return re.search(r"\bunder \d+ ?x ?\d+ mm\b", body) is not None
+
+
+#: Whether the composed body already asks for each trailing requirement, by the requirement's own
+#: subject. A click on seed 25 read "...four screw terminals, a power LED, and an enable jumper.
+#: Add an enable jumper." -- the template's requirement and the same one appended -- and 129 of
+#: 3000 seeds (4.3%) repeated a requirement this way. A trailing entry whose subject the body
+#: states is not appended; the click still draws a fresh brief, just not a self-contradicting one.
+_TRAILING_SUBJECT_STATED: dict[str, Callable[[str], bool]] = {
+    "Keep it under {size}.": _states_size_limit,
+    "Keep it under {size} and use common, easily sourced parts.": _states_size_limit,
+    "Use a two-layer stack-up.": lambda body: "two-layer" in body,
+    "Use a four-layer stack-up.": lambda body: "four-layer" in body,
+    "Make the input reverse-polarity protected.": lambda body: "reverse-polarity" in body,
+    "Add an enable jumper.": lambda body: "enable jumper" in body,
+    "Put all the connectors on one edge.": lambda body: "on one edge" in body,
+    "Add a reset button.": lambda body: "reset button" in body,
+}
+
 # Tokens whose spoken form contradicts the naive first-letter rule ("a USB-C"
 # not "an USB-C": the letter is pronounced "you"). Only the genuinely ambiguous
 # ones live here; everything else falls through to the vowel test.
@@ -233,7 +268,22 @@ class _Slots(string.Formatter):
         if isinstance(key, int):
             return args[key]
         if key not in self._drawn:
-            self._drawn[key] = self._rng.choice(BRIEF_SLOTS[key])
+            pool = BRIEF_SLOTS[key]
+            # Two *different* fields must not draw the same subject: seed 257 read "...a 3 W power
+            # LED, and a power LED." (one list's "3 W power LED", another's "power LED"). A value
+            # whose every significant token is already stated is the same subject and is passed
+            # over -- a *partial* overlap is not ("status LED" beside "3 W power LED" is a second
+            # indicator, not a repeat). When every candidate repeats, the pool is used unchanged
+            # rather than failing to fill the field.
+            stated = {
+                token for value in self._drawn.values() for token in _significant_tokens(value)
+            }
+            fresh = [
+                value
+                for value in pool
+                if not _significant_tokens(value) <= stated
+            ]
+            self._drawn[key] = self._rng.choice(fresh or list(pool))
         return self._drawn[key]
 
     def format_field(self, value, format_spec):
@@ -252,7 +302,12 @@ def generate_brief(seed: int) -> str:
     _family, templates = rng.choice(BRIEF_TEMPLATES)
     slots = _Slots(rng)
     text = slots.vformat(rng.choice(templates), (), {})
-    text = f"{text} {slots.vformat(rng.choice(BRIEF_TRAILING), (), {})}"
+    body = text.casefold()
+    available = [
+        entry for entry in BRIEF_TRAILING if not _TRAILING_SUBJECT_STATED[entry](body)
+    ]
+    if available:
+        text = f"{text} {slots.vformat(rng.choice(available), (), {})}"
     return text[:1].upper() + text[1:]
 
 

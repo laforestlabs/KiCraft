@@ -375,6 +375,36 @@ def test_stage_status_diagnostic_rows_read_additively() -> None:
     assert row.gate_codes == ["block-sheet mapping"]
 
 
+def test_obligation_retention_diagnostic_row_reads_additively() -> None:
+    """The retention refusal's `candidate_requirement_ids` must not poison the state either.
+
+    `validate_obligation_retention` writes that mapping into the diagnostic for `physical` rows,
+    and the live stack-up refusals KC-CTBW6M (44/917) and KC-9FPA59 (1/919) stored it -- so the
+    frozen states ``stage_driver replay`` exists to reopen could not be loaded back at all.
+    """
+    live = {
+        "code": "source_obligation_not_retained",
+        "message": "Attach every committed typed obligation to the requirement that implements it",
+        "evidence": [
+            {
+                "kind": "quantitative",
+                "original_obligation_id": "pcb-layer-count",
+                "quantity": "PCB copper layers",
+                "relation": "equal",
+                "value": 4.0,
+                "unit": "layers",
+            }
+        ],
+        "candidate_requirement_ids": {},
+    }
+    state = ConversationState.model_validate(
+        {"stage_status": {"architecture": {"ok": False, "diagnostics": [live]}}}
+    )
+    row = state.stage_status["architecture"].diagnostics[0]
+    assert row.code == "source_obligation_not_retained"
+    assert row.candidate_requirement_ids == {}
+
+
 def test_replace_open_questions_for_stage() -> None:
     s = ConversationState(
         open_questions=[

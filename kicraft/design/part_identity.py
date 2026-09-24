@@ -73,6 +73,62 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         manufacturer_sources=("https://www.lcsc.com/datasheet/C2837587.pdf",),
         lcsc="C2837587",
     ),
+    # SHOU HAN DC005 — the 5.5/2.1 mm DC power jack the corpus asks for as a
+    # "12 V DC barrel jack" (Surprise-me seeds 16/17/22).  The bundle is the
+    # vendored easyeda2kicad pair the parts loader resolves for MPN ``DC005``,
+    # so the record names that same symbol/footprint pair: physical_inventory_record
+    # classifies a part only when (mpn, symbol, footprint) all match it exactly.
+    # LCSC C431533 is the bundle's own catalog row (64 903 in stock at the installed
+    # 2026-09-16 dump), and the datasheet is the citation for everything asserted
+    # here: it publishes the DC 12 V / 0.5 A rating carried below and the -30..+70 C
+    # range, and shows a 2.1 mm centre pin, a sleeve and a normally-closed switch
+    # contact (drawing A1, 2023-02-12).  The classification comes from that part
+    # identity and the catalog's "DC Power Connectors" category, never from a name
+    # or footprint prefix rule.
+    #
+    # The vendored symbol exposes three contact numbers (1, 2, 3) and names none of
+    # them; the vendor drawing numbers its *terminals* 1..4, so which number is the
+    # centre, the sleeve and the switch is NOT asserted here.  Nothing in the
+    # pipeline reads that mapping today (there is no barrel-jack lowerer: a draft
+    # declares the jack's ports and the BOM selects this part), and a wrong guess
+    # would be a fabricated electrical fact.  What matters for design is stated
+    # without it: one of the three contacts is a normally-closed switch, so a design
+    # that does not use it must leave it unconnected rather than tie it to the return.
+    ReviewedPart(
+        identity="dc005",
+        family="barrel-jack",
+        package=(
+            "SHOU HAN DC005 right-angle through-hole DC power jack, 2.1 mm centre "
+            "pin / 5.5 mm barrel, 3 contacts (centre, sleeve, normally-closed switch)"
+        ),
+        bundle="dc005-barrel-jack",
+        symbol="dc005-barrel-jack:DC005_C431533",
+        footprint="dc005-barrel-jack:DC-IN-TH_DC005",
+        physical_features=frozenset(
+            {
+                "barrel-jack-connector",
+                "power-connector",
+                "wire-to-board-connector",
+                # The family name is a feature on this record for the same reason the
+                # screw-terminal and buck-converter records carry theirs: the BOM
+                # work-unit derives a requirement's typed demand from its family
+                # (`_required_physical_feature`), and a demand the library cannot name
+                # silently stops pruning the unit's groups.
+                "barrel-jack",
+            }
+        ),
+        contacts=("1", "2", "3"),
+        manufacturer_sources=(
+            "https://datasheet.lcsc.com/datasheet/pdf/c1c86644cdb5448d228bda08350b2b1f.pdf",
+        ),
+        lcsc="C431533",
+        # Contact functions from the datasheet's own SCHEMATIC (sheet 1 of the cited PDF):
+        # contact 1 is the sprung tip/centre contact, contact 2 is the normally-closed switch
+        # contact drawn closed to 1, contact 3 is the barrel/sleeve contact. The record holds
+        # the *functions*; which net is the positive one stays the draft's statement.
+        port_pins={"tip": "1", "switch": "2", "sleeve": "3"},
+        operating_limits={"voltage_v": 12.0, "current_a": 0.5},
+    ),
     ReviewedPart(
         identity="3296w-1-103lf",
         family="trim-potentiometer",
@@ -84,6 +140,10 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         contacts=("1", "2", "3"),
         manufacturer_sources=("https://www.bourns.com/docs/product-datasheets/3296.pdf",),
         lcsc="C34846",
+        # Pin functions from the cited datasheet's ordering block ("3296 W - 1 - 103 __ LF"),
+        # which labels the three terminals with their travel ends: 1 = CCW end, 2 = wiper,
+        # 3 = CW end.
+        port_pins={"ccw": "1", "wiper": "2", "cw": "3"},
     ),
     ReviewedPart(
         identity="c0805c103j5gactu",
@@ -412,6 +472,18 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "input_positive": "2",
             "output_negative": "3",
             "output_positive": "4",
+        },
+        # The module IS the complete converter: the LCSC row (C7500906) is a 1 W
+        # isolated module, 4.5-5.5 V in to 9 V / 112 mA out at 1.5 kV isolation, so
+        # its datasheet path is the module-level one (input pin 2 -> output pin 4)
+        # and its return (pin 1 -> pin 3) is the isolated reference domain §9.39
+        # requires a record to declare.  Both pins are named by number because the
+        # review is of the module's own pin table, not of a pin-name convention.
+        power_transfer={
+            "isolated": True,
+            "paths": [
+                {"from_pin": "2", "to_pin": "4", "return_from_pin": "1", "return_to_pin": "3"}
+            ],
         },
     ),
     ReviewedPart(
@@ -1587,6 +1659,101 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "feedback": "FB",
         },
     ),
+    # The fixed-output synchronous bucks the corpus's higher-voltage briefs resolve to
+    # (`ap63203-3v3@1` for 3V3, `ap63205-5v@1` for 5V).  Both are rows of the same Diodes
+    # datasheet and the same TSOT-26 pin table (FB 1, EN 2, VIN 3, GND 4, SW 5, BST 6),
+    # and both are catalog parts (C780769 / C2071056), so each order code carries its own
+    # record -- neither is inferred from the other, and the 5 V part deliberately does NOT
+    # carry the 3.3 V class.
+    #
+    # The §9.39 fact is the converter's own datasheet path: the high-side FET conducts VIN
+    # to the switch node SW, and the recipe's own power inductor (a plain `L` part from
+    # switch to output) carries it on to the regulated rail -- the generic inductor edge
+    # `_reviewed_transfer_edges` already adds.  Without these records the group's MPN
+    # resolves to no reviewed identity at all, so an 18 V -> 3V3 brief had no
+    # source-to-load witness and the wiring stage refused with
+    # "E_POWER_TRANSFER 'regulator': no reviewed source-to-load transfer from '+18V' to
+    # '+3V3'" even though the part the recipe emitted is the reviewed one.
+    #
+    # The bootstrap specification is the part's mandatory external, straight from the
+    # datasheet's typical application (BST to SW, 0.1 uF), and the bundle's own
+    # `watch_out_for` note.  §9.37 then proves the recipe's own bootstrap capacitor.
+    ReviewedPart(
+        identity="ap63203wu-7",
+        family="buck-converter",
+        package=(
+            "Diodes AP63203WU-7 fixed-3.3 V synchronous buck, TSOT-26, "
+            "3.8-32 V input, 2 A"
+        ),
+        bundle="ap63203",
+        symbol="ap63203:AP63203WU-7",
+        footprint="ap63203:TSOT-26_L2.9-W1.6-P0.95-LS2.8-BL",
+        physical_features=frozenset(
+            {"buck-converter", "buck-regulator", "voltage-regulator", "smt-3v3-regulator"}
+        ),
+        function_keys=frozenset({"fixed-3v3-buck"}),
+        contacts=("1", "2", "3", "4", "5", "6"),
+        manufacturer_sources=(
+            "https://www.diodes.com/assets/Datasheets/AP63200-AP63201-AP63203-AP63205.pdf",
+            "https://lcsc.com/product-detail/DC-DC-Converters_DIODES_AP63203WU-7_AP63203WU-7_C780769.html",
+        ),
+        lcsc="C780769",
+        operating_limits={
+            "vin_min_v": 3.8,
+            "vin_max_v": 32.0,
+            "input_voltage_min_v": 3.8,
+            "input_voltage_max_v": 32.0,
+            "output_voltage_v": 3.3,
+            "output_current_a": 2.0,
+        },
+        bootstrap={"positive_pin": "BST", "negative_pin": "SW", "capacitance_uf": 0.1},
+        power_transfer={"from_pin": "VIN", "to_pin": "SW"},
+        port_pins={
+            "input": "VIN",
+            "ground": "GND",
+            "switch": "SW",
+            "feedback": "FB",
+            "enable": "EN",
+            "bootstrap": "BST",
+        },
+    ),
+    ReviewedPart(
+        identity="ap63205wu-7",
+        family="buck-converter",
+        package=(
+            "Diodes AP63205WU-7 fixed-5 V synchronous buck, TSOT-26, "
+            "3.8-32 V input, 2 A"
+        ),
+        bundle="ap63205",
+        symbol="ap63205:AP63205WU-7",
+        footprint="ap63205:TSOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
+        physical_features=frozenset({"buck-converter", "buck-regulator", "voltage-regulator"}),
+        function_keys=frozenset({"fixed-5v-buck"}),
+        contacts=("1", "2", "3", "4", "5", "6"),
+        manufacturer_sources=(
+            "https://www.diodes.com/assets/Datasheets/AP63200-AP63201-AP63203-AP63205.pdf",
+            "https://lcsc.com/product-detail/DC-DC-Converters_DIODES_AP63205WU-7_AP63205WU-7_C2071056.html",
+        ),
+        lcsc="C2071056",
+        operating_limits={
+            "vin_min_v": 3.8,
+            "vin_max_v": 32.0,
+            "input_voltage_min_v": 3.8,
+            "input_voltage_max_v": 32.0,
+            "output_voltage_v": 5.0,
+            "output_current_a": 2.0,
+        },
+        bootstrap={"positive_pin": "BST", "negative_pin": "SW", "capacitance_uf": 0.1},
+        power_transfer={"from_pin": "VIN", "to_pin": "SW"},
+        port_pins={
+            "input": "VIN",
+            "ground": "GND",
+            "switch": "SW",
+            "feedback": "FB",
+            "enable": "EN",
+            "bootstrap": "BST",
+        },
+    ),
     ReviewedPart(
         identity="u-a-24ss-w-2",
         family="usb-a-receptacle",
@@ -1651,6 +1818,58 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "temperature_min_c": -40,
             "temperature_max_c": 105,
             "maximum_cpu_mhz": 20,
+        },
+    ),
+    # Two of the six MCUs the Surprise-me brief generator names (`BRIEF_SLOTS["mcu"]`) had no
+    # reviewed carrier, while the class they answer (`microcontroller`) is covered and therefore
+    # requires one: a brief that drew either died at the BOM with "requires 1 real
+    # microcontroller, found 0" whatever the unit emitted (live run KC-YMEWZV, seed 28 —
+    # ATtiny1604 — where the unit offered the right ordering code three times and no resolvable
+    # symbol/footprint pair, so no retry could ever satisfy the demand). Both records are the
+    # standard KiCad symbol/footprint pair plus the ordering code the offline catalog resolves;
+    # `tests/test_onboarding_examples.py` holds every generator MCU to this.
+    ReviewedPart(
+        identity="attiny1604-ssn",
+        family="attiny1604",
+        package="Microchip ATtiny1604 SOIC-14 (SOIC150), 3.9 x 8.7 mm, 1.27 mm pitch",
+        bundle="kicad-standard",
+        symbol="MCU_Microchip_ATtiny:ATtiny1604-SS",
+        footprint="Package_SO:SOIC-14_3.9x8.7mm_P1.27mm",
+        physical_features=frozenset({"microcontroller", "updi-programmable", "attiny1604"}),
+        contacts=tuple(str(number) for number in range(1, 15)),
+        manufacturer_sources=(
+            "https://www.microchip.com/en-us/product/ATtiny1604",
+            "https://lcsc.com/product-detail/C614830.html",
+        ),
+        lcsc="C614830",
+        operating_limits={
+            "supply_min_v": 1.8,
+            "supply_max_v": 5.5,
+            "temperature_min_c": -40,
+            "temperature_max_c": 105,
+            "maximum_cpu_mhz": 20,
+        },
+    ),
+    ReviewedPart(
+        identity="stm32g030f6p6",
+        family="stm32g0",
+        package="STMicro STM32G030F6P6 TSSOP-20, 4.4 x 6.5 mm, 0.65 mm pitch",
+        bundle="kicad-standard",
+        symbol="MCU_ST_STM32G0:STM32G030F6Px",
+        footprint="Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm",
+        physical_features=frozenset({"microcontroller", "swd-programmable", "stm32g0"}),
+        contacts=tuple(str(number) for number in range(1, 21)),
+        manufacturer_sources=(
+            "https://www.st.com/en/microcontrollers-microprocessors/stm32g030f6.html",
+            "https://lcsc.com/product-detail/C724040.html",
+        ),
+        lcsc="C724040",
+        operating_limits={
+            "supply_min_v": 2.0,
+            "supply_max_v": 3.6,
+            "temperature_min_c": -40,
+            "temperature_max_c": 85,
+            "maximum_cpu_mhz": 64,
         },
     ),
     # Microchip DS21952A orders MCP23017-E/SO as the 28-lead SOIC (wide body).
@@ -3006,6 +3225,12 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     "usb-c-connector": frozenset({"usb-c-receptacle"}),
     "usb-a-connector": frozenset({"usb-a-receptacle", "usb-connector"}),
     "usb_c_receptacle": frozenset({"usb-c-receptacle"}),
+    # The corpus names the DC input connector both ways; both denote the one
+    # physical class the reviewed DC005 carries.  `dc-power-jack` is the LCSC
+    # category spelling of the same part.
+    "barrel-jack": frozenset({"barrel-jack-connector"}),
+    "dc-barrel-jack": frozenset({"barrel-jack-connector"}),
+    "dc-power-jack": frozenset({"barrel-jack-connector"}),
     "fpc-ffc-connector": frozenset({"fpc-connector", "ffc-connector"}),
     "voltage-regulator-ic": frozenset({"voltage-regulator"}),
     "momentary-pushbutton": frozenset({"momentary-button"}),
@@ -3021,6 +3246,35 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     "lora-radio-module": frozenset({"lora-module", "spi-radio-module", "sx1276-module"}),
     "logic-input-header": frozenset({"header", "pin-header"}),
     "three-position-selector-switch": frozenset({"three-position-selector", "sp3t-selector"}),
+    # The 2026-09-24 coverage audit (every `physical` obligation class across the
+    # 2 826 saved states, joined with `has_reviewed_coverage`) found 190 demanded
+    # classes with no carrier.  These are the ones that are a plain second spelling
+    # of a class the library already implements, and that `reviewed_class_variants`
+    # does NOT already repair (a class whose tokens are a superset of a reviewed
+    # feature is told to use the reviewed name at the intent stage; an alias here
+    # would suppress that repair and silently accept a looser demand).  Each target
+    # below is verified to have at least one emittable record — an alias to a
+    # feature with no symbol/footprint pair would turn the class's real-part
+    # fallback into a permanent refusal, which is worse than the gap it closes.
+    # The rest of the audit's list (jst-connector, and the device/board classes with
+    # no reviewed carrier at all) is deliberately NOT aliased: no reviewed record
+    # implements them, so the fallback is the honest route.
+    "push-button": frozenset({"momentary-button"}),
+    "op-amp": frozenset({"operational-amplifier"}),
+    "gpio-expander": frozenset({"io-expander", "i2c-gpio-expander"}),
+    "gpio-expander-ic": frozenset({"io-expander", "i2c-gpio-expander"}),
+    "dc-dc-converter": frozenset(
+        {"buck-converter", "isolated-dc-dc-converter", "dual-output-dc-dc-converter"}
+    ),
+    "qwiic-receptacle": frozenset({"qwiic-connector"}),
+    "uln2003-driver": frozenset({"darlington-array"}),
+    "rs-485-transceiver": frozenset({"rs485-transceiver"}),
+    "current-limiting-switch": frozenset({"current-limited-power-switch"}),
+    "current-limiter": frozenset({"current-limited-power-switch"}),
+    "load-switch": frozenset({"highside-switch"}),
+    "selector-switch": frozenset({"three-position-selector", "sp3t-selector"}),
+    "audio-jack-3p5mm": frozenset({"audio-jack-3-5mm"}),
+    "temperature-humidity-pressure-sensor": frozenset({"environmental-sensor", "i2c-sensor"}),
 }
 
 
@@ -3149,6 +3403,53 @@ _NOT_A_PART_CLASS_TOKENS = frozenset(
 def class_is_not_a_part(component_class: str) -> tuple[str, ...]:
     """The tokens that mark a demanded class as a board/wiring fact, not a part class."""
     return tuple(sorted(_class_tokens(component_class) & _NOT_A_PART_CLASS_TOKENS))
+
+
+# Tokens naming the *source* of power rather than a part the board places: a pack, a cell, a bare
+# battery. The board carries the mate -- a holder, a connector, a terminal -- and the source stays
+# off-board, so no placed part can ever implement the demand. The real-part fallback cannot rescue
+# it either: the group that honestly implements the input is a generic header or terminal, and a
+# generic lowerer group carries no MPN to prove. Live run KC-5CNKJ3 asked a 2S Li-ion pack's BOM
+# unit for `battery-pack` and exhausted all four attempts on it, while the corpus's battery-input
+# designs that pass carry no such obligation at all -- the connector requirement alone.
+_OFF_BOARD_SOURCE_TOKENS = frozenset(
+    {"battery", "batteries", "cell", "cells", "pack", "packs", "accumulator"}
+)
+
+#: Tokens that name the board-side *mate* of a source rather than the source itself.
+_SOURCE_MATE_TOKENS = frozenset(
+    {
+        "holder",
+        "socket",
+        "connector",
+        "receptacle",
+        "terminal",
+        "clip",
+        "tray",
+        "retainer",
+        "contacts",
+        "spring",
+        "header",
+        "pins",
+    }
+)
+
+
+def off_board_source_class(component_class: str) -> tuple[str, ...]:
+    """The tokens that mark a demanded class as a power source the board does not carry.
+
+    Distinct from :func:`class_is_not_a_part`, which names a board or wiring fact: this class
+    names a real product, just not one that is placed on the board. Empty for every class the
+    library can realize (`coin-cell-holder`) and for every class naming the mate the board does
+    carry (`battery-connector`, `coin-cell-socket`).
+    """
+    canonical = str(component_class or "").strip().casefold().replace("_", "-")
+    tokens = _class_tokens(canonical)
+    if not (tokens & _OFF_BOARD_SOURCE_TOKENS) or (tokens & _SOURCE_MATE_TOKENS):
+        return ()
+    if realizable_physical_features(canonical) or reviewed_class_variants(canonical):
+        return ()
+    return tuple(sorted(tokens & _OFF_BOARD_SOURCE_TOKENS))
 
 
 def board_outline_fabrication_feature(component_class: str) -> str | None:

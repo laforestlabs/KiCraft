@@ -190,6 +190,92 @@ def test_reviewed_buck_transfer_needs_converter_and_inductor_not_capacitor(revie
     assert "E_POWER_TRANSFER" in result.offenders[0]
 
 
+def test_every_reviewed_buck_proves_its_own_source_to_load_path():
+    """§9.39's graph must reach the load for every reviewed buck, from the record's own symbol.
+
+    The frozen 18 V -> 3V3 wiring state (seed 20, `/tmp/ab-seed20-sw09mq2l`) refused with
+    `E_POWER_TRANSFER 'regulator': no reviewed source-to-load transfer from '+18V' to
+    '+3V3'`: the buck its recipe emits (`AP63203WU-7`) had no reviewed record at all, so
+    the only edge the graph held was the power inductor's. These are the real records
+    against the real symbol lookup, so a record whose transfer pin names stop resolving
+    fails here instead of on a paid run. The placeholder half proves the gate was not
+    loosened: an unreviewed converter on the same netlist still has no reviewed path.
+    """
+    from kicraft.design.part_identity import REVIEWED_PARTS
+
+    bucks = [
+        record
+        for record in REVIEWED_PARTS
+        if "buck" in record.family and record.power_transfer and record.is_portable_candidate
+    ]
+    assert {record.identity for record in bucks} >= {
+        "ap63203wu-7",
+        "ap63205wu-7",
+        "tlv62569dbvr",
+        "tps5430ddar",
+        "tps54331ddar",
+    }
+    architecture = SimpleNamespace(
+        requirements=[
+            SimpleNamespace(
+                id="regulator",
+                family="buck-converter",
+                role="regulator",
+                sheet="POWER",
+                obligations=[],
+                ports={"input": "VIN", "gnd": "GND", "output": "VOUT"},
+                declared_interface=None,
+            )
+        ]
+    )
+    for record in bucks:
+        converter = SimpleNamespace(
+            ref="U1",
+            value=record.identity,
+            mpn=record.identity,
+            symbol=record.symbol,
+            footprint=record.footprint,
+            sheet="POWER",
+        )
+        info, _ = validation._pin_info_by_ref(_bom([converter, _part("L1", "4.7uH")], {}))
+        vin = validation._pin_number_named(info, "U1", record.port_pins["input"])
+        switch = validation._pin_number_named(info, "U1", record.port_pins["switch"])
+        gnd = validation._pin_number_named(info, "U1", record.port_pins["ground"])
+        assert vin and switch and gnd, record.identity
+        bom = _bom(
+            [converter, _part("L1", "4.7uH")],
+            {
+                "VIN": [("U1", vin)],
+                "SW_NODE": [("U1", switch), ("L1", "1")],
+                "VOUT": [("L1", "2")],
+                "GND": [("U1", gnd)],
+            },
+        )
+        result = validation.check_reviewed_power_transfer(architecture, bom)
+        assert result.ok, f"{record.identity}: {result.offenders}"
+
+    placeholder = SimpleNamespace(
+        ref="U1",
+        value="BUCK-3V3",
+        mpn="BUCK-3V3",
+        symbol="Regulator_Switching:TPS5430DDA",
+        footprint="Package_SO:HSOP-8-1EP_3.9x4.9mm_P1.27mm_EP2.41x3.1mm",
+        sheet="POWER",
+    )
+    unreviewed = _bom(
+        [placeholder, _part("L1", "4.7uH")],
+        {
+            "VIN": [("U1", "7")],
+            "SW_NODE": [("U1", "8"), ("L1", "1")],
+            "VOUT": [("L1", "2")],
+            "GND": [("U1", "6")],
+        },
+    )
+    result = validation.check_reviewed_power_transfer(architecture, unreviewed)
+    assert not result.ok
+    assert any("E_POWER_TRANSFER" in offender for offender in result.offenders)
+
+
 def test_reviewed_transfer_rejects_distinct_reference_domains(reviewed):
     architecture = SimpleNamespace(requirements=[_conversion_requirement(output_domain="GND_ISO")])
     result = validation.check_reviewed_power_transfer(architecture, _bom([], {}))

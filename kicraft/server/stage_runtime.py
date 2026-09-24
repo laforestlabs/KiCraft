@@ -511,22 +511,27 @@ def _identity_name(identity: str) -> str:
     return identity.split(":", 1)[1]
 
 
-def _diagnostic_codes(row: dict | None) -> list[str]:
-    """Every blocking code one rejection named, directly or in its evidence rows.
+def _diagnostic_member_rows(row: dict | None) -> list[dict]:
+    """One diagnostic's own row plus every member row it nests, outer first.
 
-    The aggregate `multiple_*` diagnostic carries its member diagnostics in
-    `evidence`, so a per-class count has to read both levels (same rule the
-    ladder harness uses for its defect trajectory).
+    An aggregate (``multiple_intent_contracts``) carries its members as typed `findings`; the
+    artifacts written before that field existed carry the same rows in `evidence` as bare dicts.
+    Both shapes are read here, so the signature, the counting and the correction feedback keep
+    seeing the leaf codes whichever writer produced the row.
     """
     if not isinstance(row, dict):
         return []
-    codes = [str(row["code"])] if row.get("code") else []
-    codes.extend(
-        str(item["code"])
-        for item in row.get("evidence") or []
-        if isinstance(item, dict) and item.get("code")
-    )
-    return codes
+    members = [row]
+    for source in (row.get("findings") or [], row.get("evidence") or []):
+        members.extend(
+            item for item in source if isinstance(item, dict) and item.get("code")
+        )
+    return members
+
+
+def _diagnostic_codes(row: dict | None) -> list[str]:
+    """Every blocking code one rejection named, directly or in its member rows."""
+    return [str(member["code"]) for member in _diagnostic_member_rows(row)]
 
 
 def stage_telemetry(
@@ -607,16 +612,16 @@ def _schema_rejection_signature(
     row = diagnostic if isinstance(diagnostic, dict) else {}
     if not row.get("code"):
         return None
-    codes: set[str] = {str(row["code"])}
+    members = _diagnostic_member_rows(row)
+    codes: set[str] = {str(member["code"]) for member in members}
     texts: list[str] = [str(row.get("message") or "")]
+    for member in members:
+        if member is not row:
+            if member.get("message"):
+                texts.append(str(member["message"]))
+            texts.extend(str(extra) for extra in member.get("evidence") or [])
     for item in row.get("evidence") or []:
-        if isinstance(item, dict):
-            if item.get("code"):
-                codes.add(str(item["code"]))
-            if item.get("message"):
-                texts.append(str(item["message"]))
-            texts.extend(str(extra) for extra in item.get("evidence") or [])
-        else:
+        if not isinstance(item, dict):
             texts.append(str(item))
     names = set(re.findall(r"'([^']{1,64})'", " ".join(texts)))
     return (str(failure_kind or ""), tuple(sorted(codes)), tuple(sorted(names)))
@@ -3428,6 +3433,24 @@ def _standard_form_factor_block(intent: dict) -> str | None:
     return "\n".join(lines)
 
 
+def _reviewed_option_detail(part, ratings: list[str]) -> list[str]:
+    """What a stage needs to pick between reviewed carriers of one class, count first.
+
+    A class can be carried by several reviewed parts that differ in exactly one property, and the
+    model is choosing blind without it. The terminal class is carried by a 2-, a 3- and a
+    4-position block that differ in nothing else, and the architecture stage that named the
+    4-position part for a 2-contact requirement was refused five times out of six on the frozen
+    live inputs *after* the refusal text had been taught to name the mismatch -- the choice has to
+    be informed where it is made, which is what the ratings in this block are for too.
+    """
+    detail: list[str] = []
+    if part.contacts:
+        count = len(part.contacts)
+        detail.append(f"{count} contact" + ("" if count == 1 else "s"))
+    detail.extend(ratings)
+    return detail
+
+
 def _reviewed_class_options_block(intent: dict) -> str | None:
     """The reviewed parts that can satisfy each physical class this design demands.
 
@@ -3468,7 +3491,11 @@ def _reviewed_class_options_block(intent: dict) -> str | None:
                 options.setdefault(
                     part.identity,
                     f"{part.identity}"
-                    + (f" ({part.family}: {', '.join(ratings)})" if ratings else f" ({part.family})"),
+                    + (
+                        f" ({part.family}: {', '.join(detail)})"
+                        if (detail := _reviewed_option_detail(part, ratings))
+                        else f" ({part.family})"
+                    ),
                 )
         if options:
             lines.append(
@@ -3480,7 +3507,8 @@ def _reviewed_class_options_block(intent: dict) -> str | None:
         [
             "REVIEWED PARTS FOR THE DEMANDED CLASSES: a demanded physical class is realized "
             "only by one of these reviewed identities (with its own symbol/footprint pair), "
-            "so prefer them, and name `exact_part` only from this list:",
+            "so prefer them, and name `exact_part` only from this list. Where a part's contact "
+            "count is given, it must match the contacts the requirement declares:",
             *lines,
         ]
     )
@@ -3892,14 +3920,10 @@ def drive_stage(
                         )
                 ladder_previous_identities = current
         if "full_feedback" in ladder_modes:
-            row = diagnostic if isinstance(diagnostic, dict) else {}
-            entries = [row] if row.get("code") else []
-            entries.extend(
-                item
-                for item in row.get("evidence") or []
-                if isinstance(item, dict) and item.get("code")
-            )
-            for entry in entries:
+            # Every member row, whichever shape it was written in: the aggregate carries them in
+            # `findings` now and in `evidence` in older artifacts, and this arm's whole point is
+            # re-sending every blocking defect the stage has reported.
+            for entry in _diagnostic_member_rows(diagnostic if isinstance(diagnostic, dict) else None):
                 ladder_diagnostics[str(entry["code"])] = str(entry.get("message") or "")[:280]
             for error in (commit_out or {}).get("errors") or []:
                 label = " ".join(str(error).split())[:60]

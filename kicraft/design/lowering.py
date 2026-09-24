@@ -441,8 +441,19 @@ def lowerer_contract_diagnostic(
         )
     else:
         message = (
-            f"known lowerer {lowerer_id} cannot realize this port/parameter combination; "
-            "use a published satisfying configuration or choose a genuinely model-owned family"
+            f"known lowerer {lowerer_id} cannot realize this port/parameter combination"
+            # The build's own refusal is the actionable half: "does not implement the exact part
+            # 'LTST-C190KGKT'" names the one edit that repairs the draft, while the generic
+            # sentence alone leaves it to guess. Live run KC-HPD3YF re-emitted the same named
+            # exact part through all three rungs against this generic message.
+            + (
+                f": {failure}"
+                if failure
+                else (
+                    "; use a published satisfying configuration or choose a genuinely "
+                    "model-owned family"
+                )
+            )
         )
     return LoweringContractDiagnostic(
         requirement_id=requirement.id,
@@ -606,6 +617,46 @@ def _passive(role: str, prefix: str, value: str, *, quantity: int = 1) -> Loweri
     )
 
 
+def _reviewed_group_for_identity(
+    role: str,
+    prefix: str,
+    requirement: CircuitRequirement,
+    *,
+    expected_port_pins: Mapping[str, str],
+) -> LoweringGroup | None:
+    """The reviewed record's own identity, when the draft named one this build can place.
+
+    A demanded physical class is realized only by a reviewed part, and the architecture stage
+    is told to name `exact_part` from the reviewed list. A build that emits its own generic
+    symbol would then refuse *following that instruction* -- the draft names a reviewed LED and
+    the refusal is "does not implement the exact part" -- so a build that can place the named
+    record does: the group carries the record's symbol/footprint pair and its ordering code.
+
+    Adopted only when the record's own pin map agrees with the contacts this build places
+    (`expected_port_pins`, port function -> contact number): a record whose pins land elsewhere
+    is a different part, and the caller's own refusal is the honest answer. Returns None when no
+    usable identity was stated, so a caller falls back to its generic part.
+    """
+    identity = str(requirement.exact_part or "").strip()
+    if not identity:
+        return None
+    record = reviewed_part(identity)
+    if record is None or not record.symbol or not record.footprint:
+        return None
+    pins = {str(key): str(value) for key, value in dict(record.port_pins or {}).items()}
+    if any(pins.get(key) != str(value) for key, value in expected_port_pins.items()):
+        return None
+    ordering_code = record.identity.upper()
+    return LoweringGroup(
+        role=role,
+        reference_prefix=prefix,
+        value=ordering_code,
+        symbol=record.symbol,
+        footprint=record.footprint,
+        mpn=ordering_code,
+    )
+
+
 _CONTACT_KEY_RE = re.compile(r"(?P<prefix>pin|p)(?P<index>[1-9][0-9]*)")
 
 #: Contact key prefixes a cable-side connector family publishes, in match order.
@@ -660,6 +711,150 @@ def _contact_nets(
     return tuple(indexed[index] for index in range(1, len(indexed) + 1))
 
 
+#: Families whose reviewed record is a two-contact DC power inlet (centre pin plus barrel).
+#: Distinct families so a draft that names this connector family reaches this build instead of
+#: being refused as "no curated recipe and declares no interface".
+_REVIEWED_JACK_FAMILIES = ("barrel-jack", "barrel-jack-connector", "dc-barrel-jack")
+
+#: Draft-side spellings of the jack's two wires. The reviewed record owns the *contact numbers*
+#: (`tip`/`sleeve`), not the polarity: which net is the positive one is the draft's statement.
+_JACK_POSITIVE_PORTS = ("positive", "vbus", "vin", "input", "input_12v", "power", "v+")
+_JACK_RETURN_PORTS = ("gnd", "negative", "sleeve", "ret", "return", "v-")
+
+
+def _reviewed_connector(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """A reviewed DC power inlet, on the record's own symbol/footprint pair.
+
+    The jack is a two-wire passive connector: the build wires the draft's positive net to the
+    record's tip contact and its return to the sleeve. The reviewed record's pin map is the only
+    source of those contact numbers, so a record without one is refused rather than guessed. The
+    third contact of a switched jack (the normally-closed switch) is emitted as a no-connect when
+    the record publishes one: it is closed to the tip only while no plug is inserted, which is not
+    a net any design statement asks for.
+    """
+    record = reviewed_part(str(requirement.exact_part or "").strip())
+    if record is None or not record.symbol or not record.footprint:
+        return None
+    pins_by_function = {str(k): str(v) for k, v in dict(record.port_pins or {}).items()}
+    tip = pins_by_function.get("tip")
+    sleeve = pins_by_function.get("sleeve")
+    if not tip or not sleeve:
+        return None
+    ports = {str(key).lower(): net for key, net in requirement.ports.items()}
+    positive = next((ports[key] for key in _JACK_POSITIVE_PORTS if key in ports), None)
+    reference = next((ports[key] for key in _JACK_RETURN_PORTS if key in ports), None)
+    if positive is None or reference is None or len(ports) != 2:
+        return None
+    if not positive or not reference:
+        return None
+    group = _reviewed_group_for_identity(
+        "connector", "J", requirement, expected_port_pins={"tip": tip, "sleeve": sleeve}
+    )
+    if group is None:
+        return None
+    pins = (
+        LoweringPin(role="connector", pin=tip, net=positive),
+        LoweringPin(role="connector", pin=sleeve, net=reference),
+    )
+    switch = pins_by_function.get("switch")
+    no_connects = (
+        (
+            LoweringNoConnect(
+                role="connector",
+                pin=switch,
+                reason=(
+                    "the normally-closed switch contact is closed to the tip only while no plug "
+                    "is inserted; the design draws no net from it"
+                ),
+            ),
+        )
+        if switch
+        else ()
+    )
+    return _artifact(
+        "reviewed-connector@1",
+        requirement,
+        (group,),
+        pins,
+        no_connects=no_connects,
+        assumptions=(
+            f"{record.identity}: tip contact {tip} carries "
+            f"{positive!r}, sleeve contact {sleeve} carries {reference!r} "
+            "(contact numbers from the reviewed record's pin map, polarity from the draft)",
+        ),
+    )
+
+
+#: Families a draft uses for a trim potentiometer. Distinct spellings so a draft that names one
+#: reaches the build instead of being refused as a family with no curated recipe.
+_REVIEWED_TRIMMER_FAMILIES = ("trim-potentiometer", "trimpot", "trimmer-pot", "trimmer_pot")
+
+#: The two travel ends, as drafts spell them. The corpus uses `end_a`/`end_b`, `end1`/`end2`,
+#: `contact1`/`contact3`, and (for a rheostat with one end grounded) `gnd`.
+_TRIMMER_END_A_PORTS = ("end_a", "end1", "contact1", "ccw", "a", "gnd", "vss")
+_TRIMMER_END_B_PORTS = ("end_b", "end2", "contact3", "cw", "b", "vcc", "vdd")
+_TRIMMER_WIPER_PORTS = ("wiper", "wipe", "out", "output", "signal", "sig")
+
+
+def _reviewed_potentiometer(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """The reviewed trimmer on its own symbol/footprint pair, from the record's wiper/end map.
+
+    The class is realized only by a reviewed part and the architecture stage is told to name one,
+    so the build places the record the draft named instead of emitting a generic device it would
+    then have to refuse. A trimmer used as a rheostat binds one end and the wiper, so an unbound
+    end is a no-connect rather than a refusal.
+    """
+    record = reviewed_part(str(requirement.exact_part or "").strip())
+    if record is None or not record.symbol or not record.footprint:
+        return None
+    pins_by_function = {str(k): str(v) for k, v in dict(record.port_pins or {}).items()}
+    wiper = pins_by_function.get("wiper")
+    ccw = pins_by_function.get("ccw")
+    cw = pins_by_function.get("cw")
+    if not (wiper and ccw and cw):
+        return None
+    ports = {str(key).lower(): net for key, net in requirement.ports.items()}
+    if not any(ports.get(name) for name in _TRIMMER_WIPER_PORTS):
+        return None
+    bound_a = next((name for name in _TRIMMER_END_A_PORTS if ports.get(name)), None)
+    bound_b = next((name for name in _TRIMMER_END_B_PORTS if ports.get(name)), None)
+    if bound_a is None and bound_b is None:
+        return None
+    group = _reviewed_group_for_identity(
+        "trimmer", "RV", requirement, expected_port_pins={"ccw": ccw, "wiper": wiper, "cw": cw}
+    )
+    if group is None:
+        return None
+    wiper_net = next(ports[name] for name in _TRIMMER_WIPER_PORTS if ports.get(name))
+    pins = [LoweringPin(role="trimmer", pin=wiper, net=wiper_net)]
+    no_connects = []
+    for name, net, pin, label in (
+        (bound_a, ports.get(bound_a or ""), ccw, "counter-clockwise"),
+        (bound_b, ports.get(bound_b or ""), cw, "clockwise"),
+    ):
+        if name and net:
+            pins.append(LoweringPin(role="trimmer", pin=pin, net=net))
+        else:
+            no_connects.append(
+                LoweringNoConnect(
+                    role="trimmer",
+                    pin=pin,
+                    reason=f"the {label} end is unused: the trimmer is wired as a rheostat",
+                )
+            )
+    return _artifact(
+        "trim-potentiometer@1",
+        requirement,
+        (group,),
+        tuple(pins),
+        no_connects=tuple(no_connects),
+        assumptions=(
+            f"{record.identity}: wiper on contact {wiper}, ends on {ccw}/{cw} "
+            "(contacts from the reviewed record's pin map)",
+        ),
+    )
+
+
 def _reviewed_terminal_part(identity: str) -> tuple[int, str, str, str] | None:
     """``(contacts, ordering code, symbol, footprint)`` for a reviewed screw terminal.
 
@@ -682,7 +877,10 @@ def _reviewed_terminal_part(identity: str) -> tuple[int, str, str, str] | None:
 
 
 def _connector(
-    requirement: CircuitRequirement, *, terminal: bool = False
+    requirement: CircuitRequirement,
+    *,
+    terminal: bool = False,
+    assumptions: tuple[str, ...] = (),
 ) -> LoweringArtifact | None:
     if not requirement.ports or len(requirement.ports) > 40:
         return None
@@ -703,20 +901,41 @@ def _connector(
     else:
         ordered_nets = _contact_nets(requirement.ports, prefixes=("pin",))
     if ordered_nets is None:
-        return None
+        # These ports and parameters ARE the published contract (the caller checks that first), so
+        # this is the one refusal left: the declared contacts cannot be numbered. Saying so is what
+        # lets the draft repair itself -- live run KC-HPD3YF offered a terminal spelled
+        # `p2,positive` and was told only "cannot realize this identity/port/parameter combination".
+        raise ValueError(
+            "the declared contacts cannot be numbered: give every contact a net and spell them "
+            "either as contiguous contacts (`pin1..pinN`) or as the semantic names "
+            "(`positive`/`negative`, or `positive`/`common`/`negative`); got "
+            + ", ".join(sorted(requirement.ports))
+        )
     count = len(ordered_nets)
     if count % rows:
-        return None
+        raise ValueError(f"{count} declared contacts do not divide into rows={rows}")
     per_row = count // rows
     mpn: str | None = None
     if terminal:
         if not 2 <= count <= 12:
-            return None
+            raise ValueError(
+                f"a screw terminal block carries 2 to 12 contacts and this requirement declares "
+                f"{count}; spell a two-wire terminal as `positive`/`negative`, or an N-position "
+                "block as `pin1..pinN`"
+            )
         lowerer_id = "screw-terminal@1"
         if requirement.exact_part is not None:
             selected = _reviewed_terminal_part(str(requirement.exact_part))
-            if selected is None or selected[0] != count:
-                return None
+            if selected is None:
+                raise ValueError(
+                    f"{requirement.exact_part!r} is not a reviewed screw terminal; name a reviewed "
+                    "ordering code or omit `exact_part` for the generic part"
+                )
+            if selected[0] != count:
+                raise ValueError(
+                    f"the reviewed terminal {requirement.exact_part!r} carries {selected[0]} "
+                    f"contacts and this requirement declares {count}"
+                )
             _, mpn, symbol, footprint = selected
             value = mpn
         else:
@@ -762,7 +981,9 @@ def _connector(
         for index, net in enumerate(ordered_nets, 1)
         if net == "NC"
     )
-    return _artifact(lowerer_id, requirement, (group,), pins, no_connects=no_connects)
+    return _artifact(
+        lowerer_id, requirement, (group,), pins, no_connects=no_connects, assumptions=assumptions
+    )
 
 
 def _bnc_connector(requirement: CircuitRequirement) -> LoweringArtifact | None:
@@ -929,20 +1150,48 @@ def _usb_c_breakout(requirement: CircuitRequirement) -> LoweringArtifact | None:
     )
 
 
-def _numbered_connector_ports(requirement: CircuitRequirement) -> dict[str, str] | None:
-    # JSON objects have no physical ordering. Only explicit, contiguous `pinN` bindings
-    # establish the contact numbers of a generic header.
-    ordered = _contact_nets(requirement.ports, prefixes=("pin",))
-    if ordered is None:
+def _numbered_connector_ports(
+    requirement: CircuitRequirement, *, fill_gaps: bool = False
+) -> dict[str, str] | None:
+    """``pin1..pinN`` for a generic header, or None when the numbering is ambiguous.
+
+    JSON objects have no physical ordering, so only explicit ``pinN`` bindings establish
+    contact numbers. The header's physical size is its **highest declared contact**: a
+    draft that declares only the positions its circuit uses (the corpus's "8-pin header"
+    arriving as ``pin1,pin2,pin3,pin4,pin8``) describes the same part as one that spelled
+    out every position, and the undeclared positions are that part's no-connects.
+    ``fill_gaps`` is what accepts such a draft -- it emits the missing positions as
+    ``NC``, which `_connector` turns into no-connects. Without it the numbering must be
+    exactly ``1..N`` and any gap is undecidable, so the family refuses.
+    """
+    indexed = _contact_net_map(requirement.ports, prefixes=("pin",))
+    if indexed is None:
         return None
-    return {f"pin{index}": net for index, net in enumerate(ordered, 1)}
+    highest = max(indexed)
+    if not fill_gaps and set(indexed) != set(range(1, highest + 1)):
+        return None
+    return {f"pin{index}": indexed.get(index, "NC") for index in range(1, highest + 1)}
 
 
 def _pin_header(requirement: CircuitRequirement) -> LoweringArtifact | None:
-    ports = _numbered_connector_ports(requirement)
+    ports = _numbered_connector_ports(requirement, fill_gaps=True)
     if ports is None:
         return None
-    return _connector(requirement.model_copy(update={"ports": ports}))
+    filled = tuple(
+        index for index in range(1, len(ports) + 1) if f"pin{index}" not in requirement.ports
+    )
+    return _connector(
+        requirement.model_copy(update={"ports": ports}),
+        assumptions=(
+            (
+                f"the header's physical size is its highest declared contact ({len(ports)}); "
+                f"undeclared contact(s) {', '.join(str(index) for index in filled)} are "
+                "emitted as no-connects",
+            )
+            if filled
+            else ()
+        ),
+    )
 
 
 def _screw_terminal(requirement: CircuitRequirement) -> LoweringArtifact | None:
@@ -1157,7 +1406,12 @@ def _led_resistor(requirement: CircuitRequirement) -> LoweringArtifact | None:
     ideal = (rail - vf) / (current_ma / 1000.0)
     value = _standard_value(ideal, _E24, ceiling=True)
     resistor = _passive("resistor", "R", _resistance(value))
-    led = _passive("led", "D", str(requirement.parameters.get("color", "LED")))
+    # The build places the LED's anode on the drive node and its cathode on the return; a
+    # reviewed indicator record carries exactly that map (`anode`/`cathode`), so honour the
+    # identity the draft named instead of refusing it for naming one.
+    led = _reviewed_group_for_identity(
+        "led", "D", requirement, expected_port_pins={"anode": "2", "cathode": "1"}
+    ) or _passive("led", "D", str(requirement.parameters.get("color", "LED")))
     node = f"__lowerer__{requirement.id}__led_anode"
     pins = (
         LoweringPin(role="resistor", pin="1", net=ports["drive"]),
@@ -1729,9 +1983,41 @@ for _lowerer in (
         ),
         _pin_header,
         ("rows", "gender"),
-        ("<pin1..pinN: contiguous explicit physical pin numbers>",),
+        (
+            "<pin1..pinN: explicit physical pin numbers; the highest declared contact sets "
+            "the physical size, and every undeclared position becomes a no-connect>",
+        ),
         parameter_choices=(("rows", (1, 2)), ("gender", ("male", "female"))),
         port_patterns=((r"pin[1-9][0-9]*", "bidirectional"),),
+    ),
+    RegisteredLowerer(
+        "reviewed-connector@1",
+        frozenset(_REVIEWED_JACK_FAMILIES),
+        _reviewed_connector,
+        (),
+        ("positive; negative/gnd (the inlet's two wires)",),
+        # Every spelling this build accepts is published: an unpublished name is a refusal the
+        # draft cannot repair from the message alone, and these families were previously
+        # model-owned, so drafts in the corpus spell the inlet both ways.
+        port_directions=tuple(
+            (name, "input" if name in _JACK_POSITIVE_PORTS else "bidirectional")
+            for name in (*_JACK_POSITIVE_PORTS, *_JACK_RETURN_PORTS)
+        ),
+    ),
+    RegisteredLowerer(
+        "trim-potentiometer@1",
+        frozenset(_REVIEWED_TRIMMER_FAMILIES),
+        _reviewed_potentiometer,
+        (),
+        ("wiper; one or both travel ends (end_a/end_b, end1/end2, contact1/contact3)",
+         "ccw/cw or gnd/vcc)"),
+        port_directions=tuple(
+            (name, "bidirectional")
+            for name in (*_TRIMMER_WIPER_PORTS, *_TRIMMER_END_A_PORTS, *_TRIMMER_END_B_PORTS)
+        ),
+        # A trimmer always has its wiper on a net; naming it makes the "declares no ports"
+        # refusal say the one thing the draft has to add (live run KC-5UG8UR's `gain_pot`).
+        required_port_keys=("wiper",),
     ),
     RegisteredLowerer(
         "screw-terminal@1",

@@ -105,3 +105,76 @@ def test_every_slot_value_gets_a_valid_article():
         assert values, f"empty slot pool: {name!r}"
         for value in values:
             assert indefinite(value) in (f"a {value}", f"an {value}")
+
+
+#: One regex per requirement a brief may state. A brief that states one twice is not a harder
+#: ask, it is a malformed one -- and the generator used to hand those out.
+_REQUIREMENT_SUBJECTS = (
+    r"enable jumper",
+    r"reverse[- ]polarity",
+    r"reset button",
+    r"two-layer",
+    r"four-layer",
+    r"on one edge",
+    r"power LED",
+    r"\bunder \d+ ?x ?\d+ mm\b",
+)
+
+
+def test_no_brief_states_the_same_requirement_twice():
+    """A surprise must not ask for the same thing twice.
+
+    The first live click of the 2026-09-24 session (seed 25) read "...a power LED, and an enable
+    jumper. Add an enable jumper." -- the template's own requirement plus the same one appended by
+    `BRIEF_TRAILING`, which collided on 129 of 3000 seeds. Two slots could also draw one subject
+    between them (seed 257: "a 3 W power LED, and a power LED").
+    """
+    for seed in _SEEDS:
+        brief = generate_brief(seed)
+        for subject in _REQUIREMENT_SUBJECTS:
+            assert len(re.findall(subject, brief, flags=re.I)) <= 1, (seed, subject, brief)
+
+
+def _mcu_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.casefold().replace(" module", ""))
+
+
+def test_every_mcu_the_generator_names_has_a_reviewed_carrier():
+    """A surprise that names an MCU the reviewed library cannot build is unwinnable by construction.
+
+    The class these parts answer (`microcontroller`) HAS reviewed coverage, so the BOM requires a
+    reviewed carrier for it: no ordering code, no board. Live run KC-YMEWZV (seed 28, ATtiny1604)
+    offered the right code on all six attempts and could never satisfy the demand, because no
+    record carried that part — two of this generator's six MCUs had no carrier at all. This holds
+    the generator's own vocabulary to the library it feeds, and checks the carrier is *emittable*:
+    a group built from the record's own symbol/footprint/ordering code must answer the demand.
+    """
+    from kicraft.design.part_identity import reviewed_parts_for_feature
+    from kicraft.server.stage_contracts import BomComponentGroup
+    from kicraft.server.stage_work_units import _group_has_physical_feature
+
+    carriers = reviewed_parts_for_feature("microcontroller")
+    assert carriers, "the microcontroller class has no reviewed carrier at all"
+    for value in BRIEF_SLOTS["mcu"]:
+        token = _mcu_token(value)
+        matches = [
+            part
+            for part in carriers
+            if token in re.sub(r"[^a-z0-9]", "", part.identity)
+            or token in re.sub(r"[^a-z0-9]", "", part.family)
+        ]
+        assert matches, f"no reviewed microcontroller carrier for the generator's {value!r}"
+        for part in matches:
+            group = BomComponentGroup(
+                id="mcu",
+                reference_prefix="U",
+                quantity=1,
+                sheet="MCU",
+                value=part.identity.upper(),
+                mpn=part.identity.upper(),
+                symbol=part.symbol,
+                footprint=part.footprint,
+            )
+            assert _group_has_physical_feature(group, "microcontroller"), (
+                f"{part.identity} resolves but does not answer the demand it exists for"
+            )

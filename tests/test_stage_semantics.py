@@ -448,6 +448,48 @@ def test_functional_spec_requires_power_and_consistent_ground_for_drives():
     assert by_code["functional_spec_partial_ground_flow"].evidence == ["speaker"]
 
 
+def test_functional_spec_names_a_self_loop_connection():
+    """Run 6's `DISPLAY_DRIVE -> DISPLAY_DRIVE` must be a named defect, not a bare schema error.
+
+    The candidate is schema-valid (`BlockConnection` has no self-loop rule), so the only
+    feedback the model got was the commit gate's unclassified `self-loop connection: ...`
+    line. A repairable semantic defect belongs on the stage's own diagnostic surface, with
+    the offending pair as evidence.
+    """
+    candidate = {
+        "blocks": [
+            {"name": "MCU", "category": "process", "purpose": "Controller"},
+            {"name": "DISPLAY_DRIVE", "category": "drive", "purpose": "Segment drive"},
+        ],
+        "connections": [
+            {
+                "from_block": "MCU",
+                "to_block": "DISPLAY_DRIVE",
+                "signal_type": "other",
+                "description": "Segment data",
+            },
+            {
+                "from_block": "DISPLAY_DRIVE",
+                "to_block": "DISPLAY_DRIVE",
+                "signal_type": "power",
+                "description": "Loop",
+            },
+        ],
+        "assumptions": [],
+    }
+
+    diagnostics = diagnose_stage(
+        "functional_spec",
+        brief="A 7-segment display driver",
+        upstream_state={},
+        candidate=candidate,
+    )
+    by_code = {item.code: item for item in diagnostics}
+    # `_diag` lowercases evidence, exactly as it does for every other functional-spec finding.
+    assert by_code["functional_spec_self_loop"].evidence == ["'display_drive' -> 'display_drive'"]
+    assert by_code["functional_spec_self_loop"].severity == "repair_required"
+
+
 def test_live_functional_spec_reports_premature_topology():
     candidate = _load("rp2040_functional_spec_candidate.json")
     codes = _codes("functional_spec", candidate, {"intent": _load("rp2040_intent_candidate.json")})
@@ -1174,3 +1216,32 @@ def test_board_feature_block_is_removed_with_its_connections():
         "blocks": [{"name": "POWER"}],
         "connections": [],
     }
+
+
+def test_a_power_source_obligation_is_named_not_demanded():
+    """The brief's power source is not a part the board places, and the demand must say so.
+
+    Live run KC-5CNKJ3 (seed 26) turned "2S Li-ion battery pack" into a physical obligation for
+    `battery-pack`. No placed part can implement it -- the pack is off-board, and the connector
+    that honestly implements the input carries no MPN to prove an uncovered class with -- so the
+    BOM unit burned all four attempts and died `unit_repair_exhausted`. The corpus's battery-input
+    designs that pass BOM carry no such obligation: the connector requirement alone.
+    """
+    source = _codes(
+        "intent",
+        {"obligations": [{"kind": "physical", "component_class": "li-ion-battery-pack"}]},
+    )
+    assert "intent_obligation_class_unrealizable" in source
+
+    # The mate the board does carry is a real demand, and an unplaceable-but-real category the
+    # library has never covered stays unflagged.
+    clean = _codes(
+        "intent",
+        {
+            "obligations": [
+                {"kind": "physical", "component_class": "coin-cell-holder"},
+                {"kind": "physical", "component_class": "gps-module"},
+            ]
+        },
+    )
+    assert "intent_obligation_class_unrealizable" not in clean

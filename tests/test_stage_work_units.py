@@ -2414,6 +2414,16 @@ def test_obligation_class_aliases_match_the_reviewed_feature_vocabulary():
         _group_has_physical_feature(_group_for("wj126v-5.0-04p-14-00a"), "power-connector")
         is True
     )
+    # A barrel jack is the corpus's other DC input shape, and both spellings the
+    # model uses must reach the one reviewed, catalogued jack (DC005, C431533).
+    # Sharing `power-connector` does not make a terminal block a barrel jack.
+    assert _group_has_physical_feature(_group_for("dc005"), "barrel-jack-connector") is True
+    assert _group_has_physical_feature(_group_for("dc005"), "barrel-jack") is True
+    assert _group_has_physical_feature(_group_for("dc005"), "power-connector") is True
+    assert (
+        _group_has_physical_feature(_group_for("wj126v-5.0-02p-14-00a"), "barrel-jack-connector")
+        is False
+    )
     # The role stays a role: a part that carries no power path must not answer it.
     assert _group_has_physical_feature(_group_for("grm188r71c104ka01d"), "power-connector") is False
     assert _group_has_physical_feature(_group_for("tps5430ddar"), "buck-converter-ic") is True

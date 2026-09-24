@@ -7246,6 +7246,18 @@ def index(prompt: str = "", project: str = ""):
                           on_click=lambda: open_support_dialog()) \
                     .props("flat dense no-caps")
 
+        def _failure_card_shows(pres: dict) -> bool:
+            """Whether the inline failure card is this page's failure block.
+
+            The card states the cause, what survived on disk and the board id, so it owns
+            a stopped run's affordances: the summary card above it must not repeat the
+            same button. One failed run used to render two VISIBLE "Continue design"
+            nodes -- the summary's and the card's -- which reads as two different actions
+            on one failure.
+            """
+            return pres["status"] in ("failed", "interrupted") and bool(
+                state.get("project_id"))
+
         def _paint_summary(pres: dict) -> None:
             """Repaint the always-on summary -- only when a fact actually changed."""
             act = state.get("activity") or {}
@@ -7303,13 +7315,17 @@ def index(prompt: str = "", project: str = ""):
             summary_activity.style(
                 "color:#eab308" if state.get("journal_failed") else "color:#94a3b8")
 
+            owner = _failure_card_shows(pres)
             actions_sig = (pres["action"], pres["download_ready"],
-                           bool(state.get("retryable")), bool(state.get("brief")))
+                           bool(state.get("retryable")), bool(state.get("brief")), owner)
             if actions_sig != summary_actions_sig[0]:
                 summary_actions_sig[0] = actions_sig
                 summary_actions.clear()
-                with summary_actions:
-                    _render_presentation_actions(pres)
+                # The inline failure card owns a stopped run's affordances; the summary
+                # keeps the status line (and its actions for every other state).
+                if not owner:
+                    with summary_actions:
+                        _render_presentation_actions(pres)
 
             issues = pres["issues"]
             issues_sig = tuple((i.get("stage"), i.get("code"), i.get("message"))
@@ -7355,7 +7371,7 @@ def index(prompt: str = "", project: str = ""):
         def _paint_failure_card(pres: dict) -> None:
             """The inline failure/interruption card: cause, what survived, and the
             actions that are actually possible -- no modal, no false claims."""
-            show = pres["status"] in ("failed", "interrupted") and bool(state.get("project_id"))
+            show = _failure_card_shows(pres)
             if not show:
                 if view.get("failure_shown"):
                     view["failure_shown"] = False

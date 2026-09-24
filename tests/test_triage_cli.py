@@ -411,6 +411,51 @@ def test_contract_rejected_kind_classifies_when_the_label_is_honest(tmp_path):
     assert term["legacy_schema_label"] is False
 
 
+def test_rejection_signature_carries_the_detector_codes(tmp_path):
+    """Runs 904/905/907 printed "5 DISTINCT diagnostics under ONE signature".
+
+    A contract rejection repeats the same schema-clean wrapper text on every rung while
+    the diagnostic moves, so grouping on the wrapper alone could not tell convergence
+    from ping-pong. The codes are part of the signature: one row per attempt-level
+    situation, and its count is how often that situation repeated.
+    """
+    wrapper = ("the reply was schema-valid but a deterministic design contract refused it "
+               "(see the diagnostic)")
+    retry = lambda mode, codes: {
+        "kind": "retry",
+        "stage": "architecture",
+        "errors": [wrapper],
+        "failure_kind": "contract_rejected",
+        "call_mode": mode,
+        "diagnostic": {
+            "code": codes[0],
+            "evidence": [{"code": code} for code in codes[1:]],
+        },
+    }
+    run = make_stage_run(
+        tmp_path,
+        status={"architecture": {"ok": False, "attempts": 3,
+                                 "failure_kind": "contract_rejected"}},
+        events=_stage_events("architecture", [
+            retry("normal", ["multiple_intent_contracts", "declared_signal_port_tied"]),
+            retry("clean_slate", ["multiple_intent_contracts", "unsupported_lowerer_contract"]),
+            # The same situation twice: one row, count 2.
+            retry("normal", ["multiple_intent_contracts", "declared_signal_port_tied"]),
+        ]),
+    )
+
+    term = triage.collect_stages(run)["stages"][0]
+    assert [(r["codes"], r["count"]) for r in term["rejections"]] == [
+        (["multiple_intent_contracts", "declared_signal_port_tied"], 2),
+        (["multiple_intent_contracts", "unsupported_lowerer_contract"], 1),
+    ]
+    # The label names the situation, not just the generic wrapper text.
+    assert term["rejections"][0]["label"] == (
+        "(no gate id: a semantic contract refused a schema-clean candidate)"
+        " + multiple_intent_contracts + declared_signal_port_tied"
+    )
+
+
 def test_resolved_stage_failure_is_not_a_terminal_failure(tmp_path):
     """A stage that failed and was later re-run reads ok in stage_status (last
     attempt wins). The stale ok=false stage_done must not resurrect it."""

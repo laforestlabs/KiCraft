@@ -4186,3 +4186,60 @@ def test_ladder_full_feedback_repeats_every_diagnostic_from_the_drive(tmp_path, 
     assert "§9.15 dangling signal nets" in feedback
     assert "§9.17 two-terminal self-short" in feedback
 
+
+
+def test_an_aggregate_refusal_is_identified_by_its_member_defects():
+    """A refusal naming several defects compares by its members, whichever shape wrote them.
+
+    `_derive_intent_payload` stores an aggregate's members under `findings`; artifacts written
+    before that field existed carry the same rows in `evidence` as bare dicts. The rejection
+    signature, the per-class counts and the ``full_feedback`` text all read through
+    `_diagnostic_member_rows`, so the two shapes must give one identity -- otherwise a *changed*
+    defect set looks like a repeated one and the `signature` arm stops correcting exactly when
+    the draft is making progress (live runs KC-HPD3YF, KC-P4E2PH).
+    """
+    from kicraft.server.stage_runtime import (
+        _diagnostic_codes,
+        _diagnostic_member_rows,
+        _schema_rejection_signature,
+    )
+
+    members = [
+        {"code": "unknown_part_refused", "message": "requirement 'jack' (dc005) declares no interface"},
+        {"code": "unsupported_lowerer_contract", "message": "led does not implement 'LTST-C190KGKT'"},
+    ]
+    written_now = {
+        "code": "multiple_intent_contracts",
+        "severity": "repair_required",
+        "message": "two defects",
+        "evidence": [f"{m['code']}: {m['message']}" for m in members],
+        "findings": members,
+    }
+    written_before = {
+        "code": "multiple_intent_contracts",
+        "message": "two defects",
+        "evidence": members,
+    }
+    for row in (written_now, written_before):
+        assert _diagnostic_codes(row) == [
+            "multiple_intent_contracts",
+            "unknown_part_refused",
+            "unsupported_lowerer_contract",
+        ]
+    assert _schema_rejection_signature("contract_rejected", written_now) == (
+        _schema_rejection_signature("contract_rejected", written_before)
+    )
+
+    # One defect traded for another is progress, and the identity has to say so.
+    changed = {
+        "code": "multiple_intent_contracts",
+        "severity": "repair_required",
+        "message": "one defect",
+        "findings": [
+            {"code": "conflicting_port_binding", "message": "port 'gnd' of 'reg' already bound"},
+        ],
+    }
+    assert _schema_rejection_signature("contract_rejected", changed) != (
+        _schema_rejection_signature("contract_rejected", written_now)
+    )
+    assert len(_diagnostic_member_rows(written_now)) == 3

@@ -607,6 +607,7 @@ MCP6001_FOLLOWER = _power_recipe(
         Port(name="gnd", direction="power"),
         Port(name="input", direction="input"),
         Port(name="output", direction="output"),
+        Port(name="feedback", direction="input", required=False, default_tie="output"),
     ),
     internal_nets=(),
     parts=(
@@ -625,7 +626,7 @@ MCP6001_FOLLOWER = _power_recipe(
         Pin(role="amplifier", pin="2", net="gnd"),
         Pin(role="amplifier", pin="3", net="input"),
         Pin(role="amplifier", pin="1", net="output"),
-        Pin(role="amplifier", pin="4", net="output"),
+        Pin(role="amplifier", pin="4", net="feedback"),
         Pin(role="decoupling", pin="1", net="vdd"),
         Pin(role="decoupling", pin="2", net="gnd"),
     ),
@@ -633,7 +634,10 @@ MCP6001_FOLLOWER = _power_recipe(
     assertions=(
         Assertion(
             code="follower_feedback",
-            message="Inverting input is connected directly to output for unity gain",
+            message=(
+                "Inverting input ties to the output for unity gain unless the design wires a "
+                "feedback network"
+            ),
         ),
     ),
 )
@@ -700,7 +704,7 @@ def _buck(
                 )
             )
         else:
-            pins.append(Pin(role="converter", pin=pin, net="input"))
+            pins.append(Pin(role="converter", pin=pin, net="enable"))
     if fixed_output:
         parts = [part for part in parts if part.role not in {"feedback_top", "feedback_bottom"}]
         pins = [
@@ -756,6 +760,11 @@ def _buck(
             Port(name="input", direction="power"),
             Port(name="gnd", direction="power"),
             Port(name="output", direction="power"),
+            *(
+                (Port(name="enable", direction="input", required=False, default_tie="input"),)
+                if pins_map.get("en") and not enable_divider
+                else ()
+            ),
         ),
         internal_nets=tuple(internal_nets),
         parameters={"output_voltage": output_voltage},

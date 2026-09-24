@@ -1,6 +1,10 @@
 # Yield movers: the four changes that should move the number (2026-09-24)
 
-**Status: not started.** Written after the live Surprise-me session
+**Status: implemented 2026-09-24** — see `docs/plans/yield-movers-2026-09-24-session.md` for
+the per-item result, the guard tests, the replays, and the three places this plan's own
+diagnosis turned out to be wrong.
+
+This plan was written after the live Surprise-me session
 (`docs/plans/live-surprise-me-yield-2026-09-24.md`) measured the current yield and
 ruled out the two knobs (thinking, ladder) with controls. Every item below is a
 *fix at the source* of a named refusal, each with the artifact that proves it and a

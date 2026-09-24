@@ -45,7 +45,7 @@ def test_screw_terminal_gets_edge_zone():
 
 def test_vendored_dc_barrel_jack_gets_edge_zone():
     out = _edge_connector_zone_injections(
-        [("J1", "dc-barrel-jack-5-5-2-1:DC-IN-TH_DC005-5.5-2.1")], {}
+        [("J1", "dc005-barrel-jack:DC-IN-TH_DC005")], {}
     )
     assert out == {"J1": {"edge": DEFAULT_EDGE_CONNECTOR_ZONE}}
 

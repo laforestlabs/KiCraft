@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kicraft.design.models import (
     BomPart,
@@ -68,6 +68,10 @@ class RecipePort(BaseModel):
     direction: RecipePortDirection
     required: bool = True
     allow_ground: bool = False
+    #: The port this one is tied to by the recipe when the design wires neither: an enable pin
+    #: sits on the input rail (always-on), an inverting input on the output (unity-gain
+    #: follower). Names another port of the same recipe; the derived binding comes from here.
+    default_tie: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*$")
 
 
 class RecipeAllocatablePin(BaseModel):
@@ -138,6 +142,19 @@ class RecipeDefinition(BaseModel):
     placement_constraints: tuple[RecipePlacementConstraint, ...] = ()
     electrical_assertions: tuple[RecipeElectricalAssertion, ...] = ()
     source_documents: tuple[RecipeSourceDocument, ...] = ()
+
+    @model_validator(mode="after")
+    def _default_ties_name_another_port(self):
+        names = {port.name for port in self.ports}
+        for port in self.ports:
+            if port.default_tie is None:
+                continue
+            if port.default_tie not in names or port.default_tie == port.name:
+                raise ValueError(
+                    f"recipe {self.recipe} port {port.name!r} default_tie "
+                    f"{port.default_tie!r} must name another port of the same recipe"
+                )
+        return self
 
 
 class ResolvedRecipeSelection(BaseModel):

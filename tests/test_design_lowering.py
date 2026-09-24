@@ -416,16 +416,66 @@ def test_header_physical_numbers_survive_sorted_json_round_trip():
     "ports",
     [
         {"one": "NET1", "two": "NET2"},
-        {"pin1": "NET1", "pin3": "NET3"},
         {"pin0": "NET0", "pin1": "NET1"},
         {"pin01": "NET1", "pin2": "NET2"},
         {"pin1": "NET1", "signal": "NET2"},
         {"pin1": "NET1", "pin2": " "},
     ],
 )
-def test_header_rejects_ambiguous_or_gapped_contact_contracts(ports):
+def test_header_rejects_ambiguous_contact_contracts(ports):
     with pytest.raises(ValueError):
         lower_requirement(_requirement("pin-header", ports=ports))
+
+
+def test_header_accepts_a_declared_contact_subset_as_no_connects():
+    """A header whose middle positions are unused is a normal board part.
+
+    Live runs 4 (seed 21) and the seed-18 pair declared only the contacts their circuit
+    uses -- an "8-pin 0.1 inch header" arriving as ``pin1,pin2,pin3,pin4,pin8`` -- and
+    `pin-header@1` refused every draft because it required contiguous ``pin1..pinN``.
+    The physical size is the highest declared contact; the undeclared positions are that
+    part's no-connects, and the artifact says which ones they are.
+    """
+    requirement = _requirement(
+        "pin-header",
+        parameters={"rows": 1, "gender": "male"},
+        ports={"pin1": "A", "pin2": "B", "pin3": "C", "pin4": "D", "pin8": "H"},
+    )
+    assert lowerer_contract_diagnostic(requirement) is None
+    artifact = lower_requirement(requirement)
+    assert artifact.groups[0].symbol == "Connector_Generic:Conn_01x08"
+    assert artifact.groups[0].footprint == (
+        "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical"
+    )
+    assert {pin.pin: pin.net for pin in artifact.pins} == {
+        "1": "A",
+        "2": "B",
+        "3": "C",
+        "4": "D",
+        "8": "H",
+    }
+    assert {row.pin for row in artifact.no_connects} == {"5", "6", "7"}
+    assert artifact.assumptions == (
+        "the header's physical size is its highest declared contact (8); undeclared "
+        "contact(s) 5, 6, 7 are emitted as no-connects",
+    )
+    # The same shape starting above 1 (the seed-18 "main_header" draft): position 1 is
+    # the unused one, and the part is still the 8-way the brief asked for.
+    leading = lower_requirement(
+        _requirement(
+            "pin-header",
+            parameters={"rows": 1, "gender": "male"},
+            ports={f"pin{index}": f"N{index}" for index in range(2, 9)},
+        )
+    )
+    assert leading.groups[0].symbol == "Connector_Generic:Conn_01x08"
+    assert {row.pin for row in leading.no_connects} == {"1"}
+    # A genuinely unknown contact still refuses, naming what the contract does publish.
+    unknown = lowerer_contract_diagnostic(
+        _requirement("pin-header", ports={"pin1": "A", "signal": "B"})
+    )
+    assert unknown is not None
+    assert "does not support ports ['signal']" in unknown.message
 
 
 @pytest.mark.parametrize(
@@ -1546,3 +1596,192 @@ def test_prototyping_area_pads_are_what_populate_their_sheet():
     assert check_bom_parts_reference_architecture_sheets(architecture, bom).ok
     # The same sheet with no pads is exactly the empty sheet §9.13 refuses.
     assert not check_sheets_have_parts(architecture, BOM(parts=[])).ok
+
+
+def test_a_reviewed_led_identity_is_built_not_refused():
+    """A draft that follows "name exact_part from the reviewed list" must not be refused for it.
+
+    Live run KC-HPD3YF (seed 25) declared its status LED with the reviewed code the architecture
+    stage had just told it to use (`ltst-c190kgkt`) and `led-current-resistor@1` refused it three
+    rungs running -- "does not implement the exact part" -- because the build emitted a generic
+    ``Device:LED`` with no MPN. The reviewed record's own pin map (`anode` on 2, `cathode` on 1)
+    already agrees with the contacts the build places, so the identity is placed.
+    """
+    requirement = _requirement(
+        "status-led",
+        parameters={"rail_voltage": 5.0, "led_vf": 2.0, "target_current_ma": 10},
+        ports={"drive": "LED_DRIVE", "gnd": "GND"},
+    ).model_copy(update={"exact_part": "LTST-C190KGKT"})
+
+    assert lowerer_contract_diagnostic(requirement) is None
+    artifact = lower_requirement(requirement)
+    led = next(group for group in artifact.groups if group.role == "led")
+    assert led.value == "LTST-C190KGKT"
+    assert led.mpn == "LTST-C190KGKT"
+    assert led.symbol == "Device:LED"
+    assert led.footprint == "LED_SMD:LED_0603_1608Metric"
+    # The name the build resolves is the reviewed one, and the circuit is unchanged: anode on
+    # the drive node, cathode on the return.
+    assert {pin.pin: pin.net for pin in artifact.pins if pin.role == "led"} == {
+        "1": "GND",
+        "2": "__lowerer__block__led_anode",
+    }
+
+
+def test_a_reviewed_dc_jack_is_built_on_its_own_symbol_and_footprint():
+    """The reviewed DC inlet is placeable, so a `barrel-jack` requirement is not a dead end.
+
+    Live run KC-HPD3YF asked for "a 12 V DC barrel jack", the architecture stage named the one
+    reviewed carrier (`dc005`) as the prompt instructs, and the requirement was then refused as
+    "no curated recipe and declares no interface". The record owns the contact functions and the
+    symbol/footprint pair, so the build wires the draft's two nets onto them: tip on the positive
+    net, sleeve on the return, and the switched jack's normally-closed contact left unconnected.
+    """
+    requirement = _requirement(
+        "barrel-jack",
+        ports={"positive": "VIN_12V", "gnd": "GND"},
+    ).model_copy(update={"exact_part": "dc005"})
+
+    assert lowerer_contract_diagnostic(requirement) is None
+    artifact = lower_requirement(requirement)
+    (group,) = artifact.groups
+    assert group.value == "DC005" and group.mpn == "DC005"
+    assert group.symbol == "dc005-barrel-jack:DC005_C431533"
+    assert group.footprint == "dc005-barrel-jack:DC-IN-TH_DC005"
+    assert {pin.pin: pin.net for pin in artifact.pins} == {"1": "VIN_12V", "3": "GND"}
+    # Contact 2 is the normally-closed switch: closed to the tip only while no plug is inserted.
+    assert {row.pin for row in artifact.no_connects} == {"2"}
+    assert any("dc005" in note for note in artifact.assumptions)
+
+
+def test_dc_jack_accepts_the_spellings_drafts_use_for_its_two_wires():
+    """The corpus writes this inlet's rails several ways; all of them reach the same two contacts."""
+    cases = (
+        ({"positive": "VIN", "negative": "GND"}, ("VIN", "GND")),
+        ({"vbus": "VIN", "sleeve": "GND"}, ("VIN", "GND")),
+        ({"input_12v": "+12V", "gnd": "GND"}, ("+12V", "GND")),
+    )
+    for ports, (positive, reference) in cases:
+        requirement = _requirement("barrel-jack", ports=ports).model_copy(
+            update={"exact_part": "dc005"}
+        )
+        assert lowerer_contract_diagnostic(requirement) is None, ports
+        artifact = lower_requirement(requirement)
+        assert {pin.pin: pin.net for pin in artifact.pins} == {
+            "1": positive,
+            "3": reference,
+        }, ports
+
+
+def test_an_unrealizable_exact_part_names_the_part_in_the_diagnostic():
+    """The build's own refusal is what the draft can act on; the generic sentence alone is not.
+
+    KC-HPD3YF re-emitted the same named exact part through every rung of the ladder, because the
+    only text it saw was "cannot realize this port/parameter combination" while the actionable
+    half -- which part the build refuses -- sat in `evidence`.
+    """
+    requirement = _requirement(
+        "status-led",
+        parameters={"rail_voltage": 5.0, "led_vf": 2.0, "target_current_ma": 10},
+        ports={"drive": "LED_DRIVE", "gnd": "GND"},
+    ).model_copy(update={"exact_part": "S2B-PH-SM4-TB(LF)(SN)"})
+
+    diagnostic = lowerer_contract_diagnostic(requirement)
+    assert diagnostic is not None
+    assert "does not implement the exact part" in diagnostic.message
+    assert "S2B-PH-SM4-TB(LF)(SN)" in diagnostic.message
+
+
+def test_a_connector_refusal_names_the_shape_it_needs():
+    """A published-contract refusal has to say what is wrong with the declaration.
+
+    Live run KC-HPD3YF declared its `terminals` requirement with one contact (`pin1`), and the
+    only feedback across three rungs was "cannot realize this identity/port/parameter
+    combination" -- the build returned None without a reason, so the draft had nothing to repair.
+    The 1-contact case is a real bound, not an oversight: KiCad ships `Screw_Terminal_01x01` but
+    no 1-position MKDS footprint, so the generic part cannot be placed.
+    """
+    def message(**kw):
+        return lowerer_contract_diagnostic(
+            CircuitRequirement(id="terminals", sheet="POWER", role="power_input", **kw)
+        ).message
+
+    one_contact = message(family="screw-terminal", parameters={"rows": 1}, ports={"pin1": "VOUT"})
+    assert "carries 2 to 12 contacts and this requirement declares 1" in one_contact
+    assert "positive`/`negative" in one_contact
+
+    mixed = message(
+        family="screw-terminal", parameters={"rows": 1},
+        ports={"p2": "VOUT", "positive": "VIN"},
+    )
+    assert "cannot be numbered" in mixed and "p2" in mixed and "positive" in mixed
+
+    too_many = message(
+        family="screw-terminal", parameters={"rows": 1},
+        ports={f"pin{i}": f"N{i}" for i in range(1, 14)},
+    )
+    assert "declares 13" in too_many
+
+    wrong_width = message(
+        family="screw-terminal", parameters={"rows": 1},
+        ports={"pin1": "A", "pin2": "B"}, exact_part="wj126v-5.0-04p-14-00a",
+    )
+    assert "carries 4 contacts and this requirement declares 2" in wrong_width
+
+
+def test_the_shapes_a_screw_terminal_publishes_still_build():
+    """The explanation must not narrow the contract: both published spellings still lower."""
+    for ports in ({"positive": "VIN", "negative": "GND"}, {"pin1": "A", "pin2": "B", "pin3": "C"}):
+        requirement = CircuitRequirement(
+            id="terminals", sheet="POWER", role="power_input", family="screw-terminal",
+            parameters={"rows": 1}, ports=ports,
+        )
+        assert lowerer_contract_diagnostic(requirement) is None, ports
+        artifact = lower_requirement(requirement)
+        assert artifact.groups[0].role == "connector"
+
+
+def test_a_reviewed_trimmer_is_built_on_its_own_symbol_and_footprint():
+    """The prompt tells the stage to name a reviewed part for a demanded class, so naming one works.
+
+    Live run KC-5UG8UR declared its `gain_pot` as the reviewed `3296W-1-103LF` and was refused as
+    "no curated recipe and declares no interface" — the same contradiction the barrel jack and the
+    indicator LED were fixed for. The build places the record the draft named, wiring the wiper and
+    the travel ends onto the contacts the record's own pin map gives them (1 = CCW, 2 = wiper,
+    3 = CW, per the datasheet's ordering block).
+    """
+    def build(ports):
+        requirement = CircuitRequirement(
+            id="gain_pot", sheet="SIGNAL CONDITIONING", role="analog_block",
+            family="trim-potentiometer", parameters={}, ports=ports,
+        ).model_copy(update={"exact_part": "3296W-1-103LF"})
+        assert lowerer_contract_diagnostic(requirement) is None, ports
+        return lower_requirement(requirement)
+
+    three = build({"end_a": "IN", "wiper": "OUT", "end_b": "GND"})
+    (group,) = three.groups
+    assert group.value == "3296W-1-103LF" and group.mpn == "3296W-1-103LF"
+    assert group.symbol == "trim-pot-3296w-10k:3296W-1-103LF"
+    assert group.footprint == "trim-pot-3296w-10k:RES-ADJ-TH_3296W"
+    assert {pin.pin: pin.net for pin in three.pins} == {"1": "IN", "2": "OUT", "3": "GND"}
+    assert not three.no_connects
+
+    # Wired as a rheostat (wiper + one end) the unused end is a no-connect, not a refusal, and
+    # the corpus's other spellings for the same two ends reach the same contacts.
+    rheostat = build({"wiper": "W", "end_a": "GND"})
+    assert {pin.pin: pin.net for pin in rheostat.pins} == {"2": "W", "1": "GND"}
+    assert {row.pin for row in rheostat.no_connects} == {"3"}
+    for ports in ({"end1": "A", "end2": "B", "wiper": "W"},
+                  {"contact1": "A", "contact3": "B", "wiper": "W"},
+                  {"wiper": "W", "gnd": "GND"}):
+        assert build(ports).groups[0].value == "3296W-1-103LF", ports
+
+
+def test_a_trimmer_with_no_ports_is_told_which_contact_it_needs():
+    """A draft that declares nothing must be told the one port to add, not handed a generic refusal."""
+    requirement = CircuitRequirement(
+        id="gain_pot", sheet="SIGNAL CONDITIONING", role="analog_block",
+        family="trim-potentiometer", parameters={}, ports={},
+    ).model_copy(update={"exact_part": "3296W-1-103LF"})
+    diagnostic = lowerer_contract_diagnostic(requirement)
+    assert diagnostic is not None and "wiper" in diagnostic.message

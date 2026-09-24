@@ -79,7 +79,6 @@ APPLIED_TRANSFORMS: dict[str, tuple[int, tuple[float, float, float]]] = {
     "ch224k": (0, (0.00, 0.00, 0.81)),
     "ch32v003j4m6": (180, (0.00, 0.00, 0.85)),
     "ch340n": (0, (-0.01, 0.07, 0.80)),
-    "dc-barrel-jack-5-5-2-1": (0, (-1.39, 0.00, 11.00)),
     "dc005-barrel-jack": (0, (-3.75, 2.73, 0.20)),  # pin-anchored; bodies differ
     "pj-320d": (0, (-7.90, 0.00, 2.68)),
     "pj-320a": (0, (-2.10, 0.00, 2.30)),

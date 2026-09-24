@@ -213,6 +213,8 @@ def expand_static_definition(
                 )
             )
 
+    declared_ports = {port.name: port for port in definition.ports}
+
     def bound_net(logical: str) -> str:
         # A pin may name a parameter-controlled strap (e.g. an I2C address pin
         # tied to the supply instead of ground); resolve it through the same
@@ -225,6 +227,11 @@ def expand_static_definition(
             return logical
         if logical in selection.port_bindings:
             return selection.port_bindings[logical]
+        port = declared_ports.get(logical)
+        if port is not None and port.default_tie:
+            target = selection.port_bindings.get(port.default_tie)
+            if target:
+                return target
         if logical in definition.internal_nets:
             return _scope_internal_net(definition.recipe, selection.instance, logical)
         return logical

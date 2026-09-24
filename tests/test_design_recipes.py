@@ -509,6 +509,152 @@ def test_recipe_ports_bind_unique_declared_net_suffixes():
     assert "termination_switch" in canonical["unresolved_requirement_ids"]
 
 
+def _shared_net(expansion, ref: str, *pins: str) -> list[str]:
+    """Net names whose endpoints include every one of `pins` on `ref`."""
+    wanted = {(ref, pin) for pin in pins}
+    return [
+        connection.net_name
+        for connection in expansion.connections
+        if wanted <= {(endpoint.ref, endpoint.pin) for endpoint in connection.endpoints}
+    ]
+
+
+def test_a_declared_enable_binding_is_not_overwritten():
+    """A brief that wires `enable` explicitly keeps its net: the recipe default tie is a fallback.
+
+    `tlv62569-3v3@1` publishes an optional `enable` port tied to `input` by default. A design that
+    names a net for it (the enable-jumper brief) must keep that binding, and the tie must not turn
+    the binding into a `recipe_signal_in_power_nets` refusal.
+    """
+    from kicraft.design.models import Architecture
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = {
+        "topologies": {"POWER": "12 V to 3.3 V synchronous buck converter"},
+        "rail_voltages": {"+3V3": 3.3},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [
+            {"name": "POWER", "stem": "POWER", "function": "12 V to 3.3 V buck"},
+            {"name": "CONN", "stem": "CONN", "function": "enable header"},
+        ],
+        "power_nets": ["VIN_12V", "+3V3", "GND"],
+        "inter_sheet_nets": [
+            {
+                "name": "EN_JUMPER",
+                "endpoints": [
+                    {"sheet": "POWER", "direction": "bidirectional"},
+                    {"sheet": "CONN", "direction": "bidirectional"},
+                ],
+            }
+        ],
+        "assumptions": [],
+        "requirements": [
+            {
+                "id": "reg",
+                "sheet": "POWER",
+                "role": "regulator",
+                "family": "tlv62569-3v3",
+                "exact_part": None,
+                "ports": {
+                    "input": "VIN_12V",
+                    "gnd": "GND",
+                    "output": "+3V3",
+                    "enable": "EN_JUMPER",
+                },
+            }
+        ],
+    }
+
+    canonical, _expanded = _normalize_stage_response("architecture", payload, {})
+
+    selection = canonical["recipe_selections"][0]
+    assert selection["recipe"] == "tlv62569-3v3@1"
+    assert selection["port_bindings"]["enable"] == "EN_JUMPER"
+    assert selection["port_bindings"]["input"] == "VIN_12V"
+
+    result = resolve_architecture_recipes(Architecture.model_validate(payload), {})
+    assert not any(row.code == "recipe_signal_in_power_nets" for row in result.blocking)
+
+
+def test_the_published_recipe_ports_carry_their_default_tie():
+    """The published contract is what lets a brief bind `enable`/`feedback` at all."""
+    from kicraft.design.recipes.registry import recipe_summaries
+
+    summary = next(row for row in recipe_summaries() if row["recipe"] == "tlv62569-3v3@1")
+    assert {
+        "name": "enable",
+        "direction": "input",
+        "required": False,
+        "allow_ground": False,
+        "default_tie": "input",
+    } in summary["external_ports"]
+
+    follower = next(row for row in recipe_summaries() if row["recipe"] == "mcp6001-follower@1")
+    assert {
+        "name": "feedback",
+        "direction": "input",
+        "required": False,
+        "allow_ground": False,
+        "default_tie": "output",
+    } in follower["external_ports"]
+
+
+def test_an_unbound_enable_port_expands_onto_the_input_rail():
+    """The pre-change selection shape — no `enable` key — still expands onto the input rail."""
+    selection = RecipeSelection(
+        recipe="tlv62569-3v3@1",
+        instance="buck",
+        sheets={role: "POWER" for role in get_recipe("tlv62569-3v3@1").required_sheet_roles},
+        port_bindings={"input": "VIN_12V", "gnd": "GND", "output": "+5V"},
+    )
+
+    expansion = expand_recipe(selection)
+
+    # VIN (pin 4) and EN (pin 1) sit on one net; no separate `enable` net is created.
+    assert _shared_net(expansion, "U1", "4", "1") == ["VIN_12V"]
+    assert not any(connection.net_name == "enable" for connection in expansion.connections)
+
+
+def test_an_unbound_feedback_port_expands_onto_the_output():
+    """The follower's inverting input (pin 4) ties to its output (pin 1) for unity gain."""
+    selection = RecipeSelection(
+        recipe="mcp6001-follower@1",
+        instance="buffer",
+        sheets={role: "OPAMP" for role in get_recipe("mcp6001-follower@1").required_sheet_roles},
+        port_bindings={"input": "AIN", "output": "AOUT", "vdd": "VCC", "gnd": "GND"},
+    )
+
+    expansion = expand_recipe(selection)
+
+    assert _shared_net(expansion, "U1", "1", "4") == ["AOUT"]
+
+
+def test_a_default_tie_must_name_another_port_of_its_recipe():
+    """A typo'd or self-referential tie is refused at definition time, never a dangling net."""
+    from kicraft.design.recipes.models import RecipeDefinition, RecipePort
+
+    def definition(*ports):
+        return RecipeDefinition(
+            recipe="toy@1",
+            required_sheet_roles=("POWER",),
+            ports=tuple(ports),
+            parts=(),
+            pins=(),
+        )
+
+    with pytest.raises(ValueError, match="must name another port of the same recipe"):
+        definition(
+            RecipePort(name="input", direction="power"),
+            RecipePort(name="enable", direction="input", required=False, default_tie="nope"),
+        )
+    with pytest.raises(ValueError, match="must name another port of the same recipe"):
+        definition(
+            RecipePort(name="input", direction="power"),
+            RecipePort(name="enable", direction="input", required=False, default_tie="enable"),
+        )
+
+
 def test_architecture_discards_unknown_provider_unresolved_ids_before_resolution():
     payload = _add_native_usb(_esp32_architecture_payload())
     payload["unresolved_requirement_ids"] = ["req_mcu", "req_power"]
@@ -3860,6 +4006,149 @@ def test_native_usb_edge_without_a_five_volt_rail_names_what_the_socket_needs():
     assert set(diagnostic.evidence) == {"+3V3"}
 
 
+def _native_usb_board(*, usb_connector: bool, bind_usb: bool, five_volt_rail: bool = True):
+    """An RP2040 board whose brief never mentions USB (live run 904's shape)."""
+    def sheet(name, stem, function, role):
+        return {"name": name, "stem": stem, "function": function, "role": role}
+
+    requirements = [
+        {
+            "id": "rp2040",
+            "sheet": "RP2040",
+            "role": "mcu_core",
+            "family": "rp2040",
+            "parameters": {"package": "QFN-56"},
+            "supply": "3V3",
+        },
+        {
+            "id": "buck",
+            "sheet": "POWER",
+            "role": "regulator",
+            "family": "tps54331-adjustable",
+            "parameters": {"output_voltage": 3.3},
+            "supply": "VBUS" if five_volt_rail else "+12V",
+        },
+    ]
+    rails = {"3V3": {"voltage": 3.3, "from": "buck.output"}}
+    if five_volt_rail:
+        requirements.append(
+            {
+                "id": "usb_in",
+                "sheet": "USB POWER",
+                "role": "power_input",
+                "family": "usb-c-power-sink",
+                "exact_part": "USB-C-5V-SINK",
+            }
+        )
+        rails["VBUS"] = {"voltage": 5.0, "from": "usb_in.vbus"}
+    else:
+        requirements.append(
+            {
+                "id": "jack",
+                "sheet": "POWER",
+                "role": "power_input",
+                "family": "barrel-jack",
+                "exact_part": "DC005",
+                "declared_ports": [
+                    {"key": "positive", "direction": "power", "function": "12 V DC input"},
+                    {"key": "gnd", "direction": "power", "function": "supply return"},
+                ],
+            }
+        )
+        rails["+12V"] = {"voltage": 12.0, "from": "jack.positive"}
+    sheets = [
+        sheet("RP2040", "RP2040", "RP2040 core", "mcu"),
+        sheet("POWER", "POWER", "Power input and rails", "power"),
+    ]
+    signals = []
+    if five_volt_rail:
+        sheets.append(sheet("USB POWER", "USB_POWER", "USB-C 5 V power input", "power"))
+    if usb_connector:
+        sheets.append(sheet("USB", "USB", "USB-C USB 2.0 device receptacle", "interface"))
+        requirements.append(
+            {
+                "id": "usb_dev",
+                "sheet": "USB",
+                "role": "connector",
+                "family": "usb-c-usb2-device",
+                "exact_part": "USB-C-USB2-DEVICE",
+                "supply": "VBUS",
+            }
+        )
+    if bind_usb:
+        signals = [
+            {"name": "USB_DM", "from": "rp2040.usb_dm", "to": "usb_dev.usb_dm"},
+            {"name": "USB_DP", "from": "rp2040.usb_dp", "to": "usb_dev.usb_dp"},
+        ]
+    return {
+        "mcu_present": True,
+        "sheets": sheets,
+        "requirements": requirements,
+        "power": {"rails": rails},
+        "signals": signals,
+    }
+
+
+def test_native_usb_mcu_gains_exactly_one_derived_data_connector():
+    """Live run 904 (KC-SGYXF5) died on a port the brief never asked for.
+
+    `unbound_required_port: requirement 'rp2040' port 'usb_dm' is required by
+    rp2040-minimal@2 and nothing wires it` refused an RP2040 current-sense brief that
+    never mentioned USB. The reviewed satisfier already exists (`usb-c-usb2-device@1`),
+    so the compiler completes it the way it completes a published supply contact and says
+    why the part is on the board.
+    """
+    from kicraft.design.architecture_intent import derive_architecture
+
+    architecture = derive_architecture(_native_usb_board(usb_connector=False, bind_usb=False))
+
+    connectors = [row for row in architecture.requirements if row.family == "usb-c-usb2-device"]
+    assert len(connectors) == 1
+    assert connectors[0].ports["usb_dm"] == "USB_DM"
+    assert connectors[0].ports["usb_dp"] == "USB_DP"
+    assert connectors[0].ports["vbus"] == "VBUS"
+    assert connectors[0].exact_part == "USB-C-USB2-DEVICE"
+    mcu = next(row for row in architecture.requirements if row.id == "rp2040")
+    assert (mcu.ports["usb_dm"], mcu.ports["usb_dp"]) == ("USB_DM", "USB_DP")
+    assert any(
+        "native-USB MCU needs a data connector" in note for note in architecture.assumptions
+    )
+
+
+def test_native_usb_mcu_that_wires_its_own_connector_is_left_alone():
+    """A design that declares its USB data connector keeps exactly that one."""
+    from kicraft.design.architecture_intent import derive_architecture
+
+    architecture = derive_architecture(_native_usb_board(usb_connector=True, bind_usb=True))
+
+    connectors = [row for row in architecture.requirements if row.family == "usb-c-usb2-device"]
+    assert [row.id for row in connectors] == ["usb_dev"]
+    assert connectors[0].ports["usb_dm"] == "USB_DM"
+    assert not any(
+        "native-USB MCU needs a data connector" in note for note in architecture.assumptions
+    )
+
+
+def test_native_usb_completion_refuses_a_rail_that_is_not_a_usb_supply():
+    """The completion never puts a barrel jack's rail on a USB socket's VBUS.
+
+    A 12 V-powered RP2040 board (run 904's brief) must state the rail the socket exposes;
+    silently binding VBUS to `+12V` would ship a socket that cannot be plugged into. The
+    refusal names the rails the design did declare, so the next draft can add the 5 V rail.
+    """
+    from kicraft.design.architecture_intent import ArchitectureIntentError, derive_architecture
+
+    with pytest.raises(ArchitectureIntentError) as rejected:
+        derive_architecture(_native_usb_board(usb_connector=False, bind_usb=False, five_volt_rail=False))
+
+    codes = {row.code for row in rejected.value.diagnostics}
+    assert "usb_connector_supply_unknown" in codes
+    diagnostic = next(
+        row for row in rejected.value.diagnostics if row.code == "usb_connector_supply_unknown"
+    )
+    assert set(diagnostic.evidence) == {"+12V", "3V3"}
+
+
 @pytest.mark.parametrize("quantity", [1, 3])
 @pytest.mark.parametrize("export_output", [False, True])
 def test_ws2812_pixels_form_a_complete_cascade_with_optional_final_output(quantity, export_output):
@@ -3919,3 +4208,36 @@ def test_ws2812_rejects_unrealizable_pixel_quantities(quantity):
                 port_bindings={"vdd": "+5V", "gnd": "GND", "data_in": "DATA"},
             )
         )
+
+
+def test_reviewed_class_options_publish_the_contact_count_that_decides_the_choice():
+    """A class carried by parts that differ only in contact count has to show the count.
+
+    `screw-terminal` is carried by a 2-, a 3- and a 4-position block that differ in nothing else,
+    while the block published the family and the ratings but not the count. The architecture stage
+    then named the 4-position part for a 2- and for a 3-contact requirement and was refused on
+    five of the six frozen control replays (arm `control:stock`, 2026-09-24) -- *after* the refusal
+    text had been taught to name the mismatch, which is what showed the choice itself was blind.
+    The block's own rationale is that listing the options informs the choice where it is made; for
+    a connector the count is the deciding property, exactly as a rating is for a regulator.
+    """
+    from kicraft.server.stage_runtime import _reviewed_class_options_block
+
+    block = _reviewed_class_options_block(
+        {
+            "obligations": [
+                {"kind": "physical", "component_class": "screw-terminal"},
+                {"kind": "physical", "component_class": "barrel-jack-connector"},
+            ]
+        }
+    )
+    assert block is not None
+    for identity, count in (
+        ("wj126v-5.0-02p-14-00a", 2),
+        ("wj126v-5.0-03p-14-00a", 3),
+        ("wj126v-5.0-04p-14-00a", 4),
+    ):
+        assert f"{identity} (screw-terminal: {count} contacts)" in block
+    assert "dc005 (barrel-jack: 3 contacts)" in block
+    # The rule the counts exist for is stated, so the draft knows what to match them against.
+    assert "must match the contacts the requirement declares" in block

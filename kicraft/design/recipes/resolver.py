@@ -675,6 +675,11 @@ def _port_bindings(
         ]
         if len(matches) == 1:
             bindings[port_name] = matches[0]
+    for port_name, port in declared.items():
+        if port.default_tie and port_name not in bindings:
+            target = bindings.get(port.default_tie)
+            if target:
+                bindings[port_name] = target
     diagnostics: list[ResolutionDiagnostic] = []
     context = (
         f"requirement {requirement.id!r}, recipe {definition.recipe}, sheet {requirement.sheet!r}"
@@ -684,6 +689,11 @@ def _port_bindings(
         for name, net in bindings.items()
         if declared[name].direction == "power"
         or (declared[name].allow_ground and net == bindings.get("gnd"))
+        # A port the recipe itself ties to another port's net is a recipe-owned tap on that net.
+        or (
+            declared[name].default_tie is not None
+            and net == bindings.get(declared[name].default_tie)
+        )
     }
     signal_power_nets = sorted(
         {

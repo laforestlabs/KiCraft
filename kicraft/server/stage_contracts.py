@@ -1076,7 +1076,8 @@ def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict)
                         "spec, and a paraphrased copy is restored from the committed row. A "
                         "`quantity`, `fabrication`, or `negative` board-wide fact may stay at the "
                         "top level. A `quantitative` row may do so only when it explicitly measures "
-                        "a board/PCB outline in a geometric unit; electrical and part limits need "
+                        "a board/PCB outline in a geometric unit or names the board's own build "
+                        "stack-up in `layers`/`plies`; electrical and part limits need "
                         "their realizing requirement."
                     ),
                     "evidence": unowned,
@@ -1207,6 +1208,29 @@ def _intent_shaped(payload: dict) -> bool:
     return "signals" in payload and "inter_sheet_nets" not in payload
 
 
+def _aggregate_intent_diagnostic(exc) -> dict:
+    """One durable row for a refusal that names several contract findings.
+
+    A single finding is its own row. Two or more are wrapped, and the wrapper must still be a
+    `StageDiagnostic`: an aggregate that named no severity and left the rows in ``evidence`` as
+    bare dicts made *every* state saved after an architecture refusal with two or more defects
+    fail ``ConversationState.model_validate`` (live runs KC-HPD3YF and KC-P4E2PH, 119 states in
+    the corpus) -- so ``stage_driver replay`` could not open the runs it exists to iterate on.
+    The wrapper keeps the findings as typed `findings` rows and repeats their headline text in
+    ``evidence``, which is the shape every reader already accepts.
+    """
+    rows = [row.model_dump(exclude_none=True) for row in exc.diagnostics]
+    if len(rows) == 1:
+        return rows[0]
+    return {
+        "code": "multiple_intent_contracts",
+        "severity": "repair_required",
+        "message": str(exc),
+        "evidence": [f"{row.code}: {row.message}" for row in exc.diagnostics],
+        "findings": rows,
+    }
+
+
 def _derive_intent_payload(payload: dict, functional_spec: object | None = None) -> dict:
     """Intent slot -> canonical slot; every refusal is carried as one diagnostic.
 
@@ -1221,13 +1245,9 @@ def _derive_intent_payload(payload: dict, functional_spec: object | None = None)
     try:
         return derive_architecture(payload, functional_spec).model_dump(exclude_none=True)
     except ArchitectureIntentError as exc:
-        rows = [row.model_dump(exclude_none=True) for row in exc.diagnostics]
-        diagnostic = (
-            rows[0]
-            if len(rows) == 1
-            else {"code": "multiple_intent_contracts", "message": str(exc), "evidence": rows}
-        )
-        raise StageSchemaError(str(exc), diagnostic=diagnostic) from exc
+        raise StageSchemaError(
+            str(exc), diagnostic=_aggregate_intent_diagnostic(exc)
+        ) from exc
 
 
 def _schema_error_detail(exc: Exception) -> str:

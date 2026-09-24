@@ -578,8 +578,9 @@ class NegativeObligation(BaseModel):
 
 
 # Obligation kinds that can state a board-level fact instead of naming the requirement that
-# implements it. `quantitative` is only exempt when its *subject and unit* prove it measures the
-# board outline; electrical and component limits still require an implementing requirement (see
+# implements it. `quantitative` is exempt only when its subject and unit prove it is board-level
+# geometry: an outline dimension in a geometric unit, or the board's own build stack-up in
+# `layers`/`plies`. Electrical and component limits still require an implementing requirement (see
 # `obligation_requires_requirement_owner`). A `quantity` counts a class across the design, a
 # `fabrication` feature is a printed-board property the PCB side owns rather than any part, and a
 # `negative` forbids a class.
@@ -590,12 +591,18 @@ OWNERSHIP_EXEMPT_OBLIGATION_KINDS: frozenset[str] = frozenset(
     {"quantity", "quantitative", "fabrication", "negative"}
 )
 
+_BOARD_SUBJECT_TERMS = frozenset({"board", "pcb"})
 _BOARD_DIMENSION_TERMS = frozenset(
     {"width", "height", "length", "diameter", "radius", "perimeter", "area", "thickness"}
 )
 _BOARD_DIMENSION_UNITS = frozenset(
     {"mm", "cm", "m", "in", "inch", "inches", "mil", "mm2", "cm2", "in2"}
 )
+# The board's own build stack-up ("PCB copper layers", unit `layers`): a property of the printed
+# board, so no requirement can implement it. The build unit is what separates it from a part
+# count that merely mentions copper.
+_BOARD_STACKUP_TERMS = frozenset({"layer", "layers", "stackup", "stack", "ply", "plies", "copper"})
+_BOARD_STACKUP_UNITS = frozenset({"layer", "layers", "ply", "plies"})
 
 
 def _obligation_field(obligation: object, field: str) -> object:
@@ -605,11 +612,18 @@ def _obligation_field(obligation: object, field: str) -> object:
 
 
 def is_board_level_quantitative_obligation(obligation: object) -> bool:
-    """Whether a quantitative row is a board-outline measurement, not a part limit.
+    """Whether a quantitative row is a board-level measurement, not a part limit.
 
-    This deliberately requires all three pieces of semantic evidence: an explicit board/PCB
-    subject, an outline dimension, and a geometric unit. A current, voltage, frequency, contact
-    pitch, or component value must remain attached to the requirement whose realization proves it.
+    Two board-level shapes are admissible, each on its own evidence:
+
+    - an explicit board/PCB subject with an outline dimension in a geometric unit (board width in
+      mm);
+    - an explicit board/PCB subject with a build stack-up term in a build unit ("PCB copper
+      layers" in `layers`).
+
+    Everything else still requires all three pieces of semantic evidence to be attached to its
+    realizing requirement: a current, voltage, frequency, contact pitch, or component value must
+    remain on the requirement whose realization proves it.
     """
     if _obligation_field(obligation, "kind") != "quantitative":
         return False
@@ -617,11 +631,11 @@ def is_board_level_quantitative_obligation(obligation: object) -> bool:
         re.findall(r"[a-z0-9]+", str(_obligation_field(obligation, "quantity") or "").casefold())
     )
     unit = re.sub(r"\s+", "", str(_obligation_field(obligation, "unit") or "").casefold())
-    return (
-        bool({"board", "pcb"} & quantity_terms)
-        and bool(_BOARD_DIMENSION_TERMS & quantity_terms)
-        and unit in _BOARD_DIMENSION_UNITS
-    )
+    if not (_BOARD_SUBJECT_TERMS & quantity_terms):
+        return False
+    if unit in _BOARD_DIMENSION_UNITS and _BOARD_DIMENSION_TERMS & quantity_terms:
+        return True
+    return unit in _BOARD_STACKUP_UNITS and bool(_BOARD_STACKUP_TERMS & quantity_terms)
 
 
 def obligation_requires_requirement_owner(obligation: object) -> bool:
@@ -1563,7 +1577,11 @@ class StageDiagnostic(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: str = Field(pattern=r"^[a-z][a-z0-9_]{2,127}$")
-    severity: Literal["advisory", "repair_required", "fab_gate"]
+    # None = the writer that produced this row did not record one. Every consumer already reads
+    # a row as "severe" only when it names `repair_required`/`fab_gate`, so an unrecorded severity
+    # ranks as not-severe rather than making the whole state unloadable (119 saved states carried
+    # rows from the architecture gate, which recorded no severity at all).
+    severity: Literal["advisory", "repair_required", "fab_gate"] | None = None
     message: str
     evidence: list[str] = Field(default_factory=list)
     # None = the writer that produced this row did not record a detector version.
@@ -1577,6 +1595,51 @@ class StageDiagnostic(BaseModel):
     # a stage-scoped row (the commit-rejection and semantic findings) records neither.
     unit_id: str | None = None
     defects: dict[str, list[str]] | None = None
+    # The scope a design-contract refusal names: which requirement, on which sheet, from which
+    # resolved recipe. The architecture gate records all three and its rows are stored here, so
+    # the durable status carries them; before this they were `extra_forbidden` and the states
+    # holding them could not be loaded back (runs 905/907/913, and two self-eval campaigns).
+    requirement_id: str | None = None
+    sheet: str | None = None
+    recipe: str | None = None
+    # The per-obligation candidate requirements the obligation-retention refusal names, written
+    # into the diagnostic by `validate_obligation_retention` for `physical` rows. Same defect
+    # class as the fields above: the writer stored it and `extra="forbid"` made every state saved
+    # after that refusal unloadable — the live stack-up refusals KC-CTBW6M (44/917) and KC-9FPA59
+    # (1/919) could not be replayed at all. Read as empty, never a load refusal.
+    candidate_requirement_ids: dict[str, list[str]] | None = None
+    # The individual findings an aggregate row wraps -- an outer ``multiple_intent_contracts``
+    # over the contract refusals it collected. Typed and recursive: `_derive_intent_payload` used
+    # to put the same rows in `evidence` as bare dicts with no `severity`, which made *every* state
+    # saved after an architecture refusal naming two or more defects fail
+    # `ConversationState.model_validate` (live runs KC-HPD3YF and KC-P4E2PH) -- the one state
+    # `stage_driver replay` exists to iterate on.
+    findings: list[StageDiagnostic] = Field(default_factory=list)
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def _read_legacy_evidence_rows(cls, value):
+        """Read a nested row written into ``evidence`` by an earlier writer.
+
+        Historical states carry the findings as dicts there (the shape `findings` now types), and
+        the reader keeps them as one readable line rather than refusing the whole state. Losing a
+        nested row's structure is a report detail; refusing to load the state loses the run.
+        """
+        return [
+            (
+                item
+                if isinstance(item, str)
+                else " — ".join(
+                    str(part)
+                    for part in (
+                        ": ".join(str(v) for v in (item.get("code"), item.get("message")) if v)
+                        if isinstance(item, dict)
+                        else item,
+                    )
+                )
+            )
+            for item in (value or [])
+        ]
 
 
 class StageStatus(BaseModel):

@@ -263,6 +263,17 @@ def test_unused_groundable_recipe_port_is_tied_low():
     assert any("addr_d tied to GND" in row for row in architecture.assumptions)
 
 
+def test_an_unbound_enable_port_is_tied_to_the_input_rail():
+    """A `_buck` regulator with nothing wired to `enable` keeps EN on its input rail.
+
+    The fleet's always-on regulator wires EN to VIN in the emitted circuit; publishing the control
+    port must not change that default, so the compiler derives the tie the recipe declares.
+    """
+    architecture = derive_architecture(_hub75_intent())
+    assert _requirement(architecture, "buck").ports["enable"] == "VBUS"
+    assert any("enable tied to input (VBUS) (derived)" in row for row in architecture.assumptions)
+
+
 def test_native_usb_pair_gets_a_real_data_connector():
     architecture = derive_architecture(_hub75_intent())
     connector = _requirement(architecture, "esp32_usb_data")
@@ -1866,6 +1877,16 @@ _NEGATIVE_OBLIGATION = {
     "absent_class": "Microcontroller",
 }
 _NEGATIVE_CANONICAL = {**_NEGATIVE_OBLIGATION, "absent_class": "microcontroller"}
+# The live row from KC-CTBW6M (project 44/917) and KC-9FPA59 (project 1/919): a four-layer
+# stack-up the intent stage reads out of the brief, which no requirement can implement.
+_STACKUP_OBLIGATION = {
+    "kind": "quantitative",
+    "original_obligation_id": "pcb-layer-count",
+    "quantity": "PCB copper layers",
+    "relation": "equal",
+    "value": 4.0,
+    "unit": "layers",
+}
 
 
 @pytest.mark.parametrize(
@@ -1873,15 +1894,18 @@ _NEGATIVE_CANONICAL = {**_NEGATIVE_OBLIGATION, "absent_class": "microcontroller"
     [
         pytest.param(_FABRICATION_OBLIGATION, _FABRICATION_CANONICAL, id="fabrication"),
         pytest.param(_NEGATIVE_OBLIGATION, _NEGATIVE_CANONICAL, id="negative"),
+        pytest.param(_STACKUP_OBLIGATION, _STACKUP_OBLIGATION, id="stackup"),
     ],
 )
 def test_board_fact_obligation_commits_with_no_owning_requirement(obligation, canonical):
-    """A printed board feature and an absent class are board-level facts, not parts.
+    """A printed board feature, an absent class, and a build stack-up are board-level facts.
 
     The canary (2026-09-17, `led-cc-driver`, `star-ornament`, `buck-3a`, `thermocouple-amp`)
     turned "printed copper area as a heatsink" and "no microcontroller" into `physical`
     obligations with a component class no BOM line can ever be, so
-    `physical-obligation-unfulfilled` refused those designs forever.
+    `physical-obligation-unfulfilled` refused those designs forever. The stack-up row above is the
+    live KC-CTBW6M / KC-9FPA59 refusal: a four-layer board names no requirement, so requiring one
+    refuses the design.
     """
     from kicraft.design.models import Architecture
 
@@ -1901,6 +1925,77 @@ def test_board_fact_obligation_commits_with_no_owning_requirement(obligation, ca
         .model_dump(mode="json", exclude_none=True)
         == canonical
     )
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(
+            {
+                "kind": "quantitative",
+                "original_obligation_id": "input_voltage",
+                "quantity": "input voltage",
+                "relation": "equal",
+                "value": 5.0,
+                "unit": "V",
+            },
+            id="input-voltage",
+        ),
+        pytest.param(
+            {
+                "kind": "quantitative",
+                "original_obligation_id": "display_layers",
+                "quantity": "display layers",
+                "relation": "equal",
+                "value": 4.0,
+                "unit": "layers",
+            },
+            id="part-layer-count",
+        ),
+    ],
+)
+def test_a_part_limit_quantitative_row_still_needs_an_owner(row):
+    """The stack-up exemption is a board/PCB subject, not any row spelled in `layers`.
+
+    A supply voltage is electrical and a display's layer count belongs to the display: neither is
+    a property of the printed board, so the retention gate must still refuse both ownerless. This
+    is the negative control that proves the new shape does not widen the exemption.
+    """
+    from kicraft.server.stage_contracts import StageSchemaError, validate_obligation_retention
+
+    with pytest.raises(StageSchemaError) as refused:
+        validate_obligation_retention(
+            "architecture",
+            {},
+            {
+                "intent": {"obligations": [row]},
+                "functional_spec": {"obligations": [row]},
+            },
+        )
+
+    assert refused.value.diagnostic["code"] == "source_obligation_not_retained"
+    assert refused.value.diagnostic["evidence"] == [row]
+
+
+def test_a_board_stackup_row_is_board_level_and_an_outline_row_still_is():
+    """The predicate admits both board shapes and refuses a part limit spelled in the same unit."""
+    from kicraft.design.models import is_board_level_quantitative_obligation
+
+    def quantitative(quantity: str, unit: str) -> dict:
+        return {
+            "kind": "quantitative",
+            "original_obligation_id": "row",
+            "quantity": quantity,
+            "relation": "equal",
+            "value": 4.0,
+            "unit": unit,
+        }
+
+    assert is_board_level_quantitative_obligation(quantitative("PCB copper layers", "layers"))
+    assert is_board_level_quantitative_obligation(quantitative("four layer PCB stack-up", "layers"))
+    # The original outline shape is unchanged.
+    assert is_board_level_quantitative_obligation(quantitative("PCB copper thickness", "mm"))
+    assert not is_board_level_quantitative_obligation(quantitative("header pitch", "inch"))
 
 
 def test_board_fact_obligations_survive_intent_to_architecture_verbatim():

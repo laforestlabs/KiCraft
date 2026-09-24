@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -175,6 +175,7 @@ def apply_authoritative_standard_form_factor(
 _USB_DATA_PORTS = frozenset({"usb_dm", "usb_dp"})
 _USB_DEVICE_CONNECTOR_FAMILY = "usb-c-usb2-device"
 _USB_DEVICE_CONNECTOR_PART = "USB-C-USB2-DEVICE"
+_USB_DEVICE_CONNECTOR_RECIPE = "usb-c-usb2-device@1"
 # Reviewed factory-native-programmable families: their USB pair must reach one physical
 # data connector, never a UART header.
 _NATIVE_USB_MCU_RECIPES = frozenset(
@@ -446,7 +447,13 @@ class ArchitectureIntent(BaseModel):
 
 
 class IntentDiagnostic(BaseModel):
-    """One blocking refusal: the part, port or peer the derivation cannot derive from."""
+    """One finding the derivation records: a blocking refusal, or a recorded advisory.
+
+    ``severity`` is required-in-practice like ``StageDiagnostic.severity``, and each helper below
+    states which kind of row it builds. Rows used to be stored without it, and a durable status
+    carrying them could not be loaded back at all (119 saved states, live runs KC-HPD3YF and
+    KC-P4E2PH among them).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -455,6 +462,7 @@ class IntentDiagnostic(BaseModel):
     sheet: str | None = None
     message: str
     evidence: list[str] = Field(default_factory=list)
+    severity: Literal["advisory", "repair_required"] = "repair_required"
 
 
 class ArchitectureIntentError(ValueError):
@@ -476,6 +484,9 @@ class _Catalog:
     # ground when the design does not use them (a spare bus or address channel, a shell).
     required: frozenset[str] = frozenset()
     groundable: frozenset[str] = frozenset()
+    #: Ports the recipe ties to another of its own ports when the design wires neither
+    #: (`RecipePort.default_tie`): port name -> the port it is tied to.
+    default_ties: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def choices(self) -> str:
@@ -662,6 +673,11 @@ def _catalog(
             recipe=selected,
             required=frozenset(port.name for port in definition.ports if port.required),
             groundable=frozenset(port.name for port in definition.ports if port.allow_ground),
+            default_ties={
+                port.name: port.default_tie
+                for port in definition.ports
+                if port.default_tie is not None
+            },
         )
     if requirement.family in lowerers:
         lowerer = lowerers[requirement.family]
@@ -839,7 +855,7 @@ def derive_architecture(
         `Architecture.advisories` and mirrored into `assumptions`, so the artifact says what the
         board shipped with; it is never a refusal and never capped (plan D6).
         """
-        row = IntentDiagnostic(code=code, message=message, **kw)
+        row = IntentDiagnostic(code=code, message=message, severity="advisory", **kw)
         advisories.append(row)
         derived_notes.append(f"advisory [{code}]: {message}")
 
@@ -1977,6 +1993,45 @@ def derive_architecture(
                 context=f"tie {port_name!r}",
             )
 
+    # A factory-native-programmable MCU's USB data pair is not an optional signal: the part is
+    # flashed and recovered over it, and the reviewed satisfier is a registered recipe. Asking
+    # the draft for the connector refused live run 1 -- an RP2040 current-sense brief that never
+    # mentioned USB -- with `unbound_required_port: requirement 'rp2040' port 'usb_dm' is
+    # required by rp2040-minimal@2 and nothing wires it`. The draft was not wrong; the brief
+    # never named USB. The compiler therefore completes the connector the same way it completes
+    # a published supply contact, and records why the part is on the board. A design that wires
+    # its own USB data pair is untouched: `_open_edge` already built that connector from its
+    # signal, and an authored tie owns its port before this runs.
+    if not any(row.family == _USB_DEVICE_CONNECTOR_FAMILY for row in requirements.values()):
+        for requirement_id, catalog in sorted(catalogs.items()):
+            if catalog.source != "recipe" or catalog.recipe is None:
+                continue
+            if catalog.recipe.definition.recipe not in _NATIVE_USB_MCU_RECIPES:
+                continue
+            if all(bindings.get(requirement_id, {}).get(port) for port in _USB_DATA_PORTS):
+                continue
+            connector_id = f"{requirement_id}_usb"
+            opened = _open_edge(
+                connector_id.upper(),
+                _SheetRef(models_by_id[requirement_id], "usb_dm", "bidirectional"),
+                connector_id,
+            )
+            if opened is None:
+                continue  # `_open_edge` named the missing 5 V rail it needs
+            connector_id, _mode = opened
+            for port, net in (("usb_dm", "USB_DM"), ("usb_dp", "USB_DP")):
+                # A partially wired pair keeps the net the design chose for the line it did
+                # state; only the line nothing wired gets the conventional name.
+                already = bindings.get(requirement_id, {}).get(port)
+                if already is None:
+                    _bind(requirement_id, port, net, "bidirectional", context="derived USB data")
+                    already = net
+                _bind(connector_id, port, already, "bidirectional", context="derived USB data")
+            derived_notes.append(
+                f"{requirement_id}: native-USB MCU needs a data connector; bound "
+                f"{_USB_DEVICE_CONNECTOR_RECIPE} ({connector_id}) (derived)"
+            )
+
     # A required port the reviewed recipe allows grounding and the design does not use (HUB75's
     # spare address channel, a connector shell) is tied low here, once, instead of being asked for
     # and then validated: an unbound spare input floats, which is the defect, not the fix.
@@ -2063,6 +2118,24 @@ def derive_architecture(
                 sheet=candidate.sheet,
                 evidence=diagnostic.evidence,
             )
+
+    # A published control port whose recipe declares a default tie is tied to the port it names
+    # when the design does not wire it: the fleet's always-on regulator keeps EN on its input
+    # rail and the follower's inverting input on its output, which is what the recipes emitted
+    # before the port existed. A brief that asks for the controllable configuration binds the
+    # port instead, and that binding wins.
+    for requirement_id, catalog in sorted(catalogs.items()):
+        if catalog.source != "recipe":
+            continue
+        bound = bindings.setdefault(requirement_id, {})
+        for port, target in sorted(catalog.default_ties.items()):
+            if bound.get(port):
+                continue
+            net = bound.get(target)
+            if net is None:
+                continue  # the tie target is itself unwired: its own refusal names it
+            _bind(requirement_id, port, net, "bidirectional", context="recipe default tie")
+            derived_notes.append(f"{requirement_id}: {port} tied to {target} ({net}) (derived)")
 
     for requirement_id, catalog in sorted(catalogs.items()):
         if catalog.source != "recipe":
@@ -2164,17 +2237,27 @@ def derive_architecture(
 def _usb_vbus_rail(intent: ArchitectureIntent) -> str | None:
     """The 5 V rail a USB socket exposes, never a guess.
 
-    Preference: the rail the board's own input requirement generates (that is the
-    host's VBUS, exactly what a USB socket's VBUS pin carries), then a single
-    rail named VBUS/+5V, then a single rail at 5 V. Two candidates at any step
-    mean the design has not said which rail the socket exposes, and the model is
-    asked rather than guessed at.
+    Preference: the rail the board's own *USB* power input generates (that is the
+    host's VBUS, exactly what a USB socket's VBUS pin carries), then a single rail
+    named VBUS/+5V, then a single rail at ~5 V. Two candidates at any step mean the
+    design has not said which rail the socket exposes, and the model is asked rather
+    than guessed at.
+
+    The board's other inputs are deliberately NOT candidates: a 12 V barrel jack or a
+    screw terminal generating a rail is not a USB supply, and putting the jack's rail on
+    a socket's VBUS describes a board that does not survive being plugged in (live run
+    904's RP2040 brief is powered from 12 V DC). Such a design is refused with the rail
+    it must declare instead.
     """
-    input_ids = {row.id for row in intent.requirements if row.role == "power_input"}
+    usb_input_ids = {
+        row.id
+        for row in intent.requirements
+        if row.role == "power_input" and "usb" in row.family.casefold()
+    }
     from_input = [
         net
         for net, rail in intent.power.rails.items()
-        if rail.from_ref and rail.from_ref.partition(".")[0] in input_ids
+        if rail.from_ref and rail.from_ref.partition(".")[0] in usb_input_ids
     ]
     if len(from_input) == 1:
         return from_input[0]

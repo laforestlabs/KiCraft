@@ -374,6 +374,9 @@ _BARE_INT_RE = re.compile(r"\b\d+\b")
 _SIG_ALIAS = {
     "provider response did not satisfy the required JSON schema":
         "(no gate id: a semantic contract rejected a schema-clean candidate — read the diagnostics)",
+    "the reply was schema-valid but a deterministic design contract refused it "
+    "(see the diagnostic)":
+        "(no gate id: a semantic contract refused a schema-clean candidate)",
     "collection_limit": "(no gate id: provider collection limit hit before a commit)",
     "truncated JSON at the output token limit": "(no gate id: truncated answer, no gate ran)",
     "reasoning loop detected — retrying with reasoning disabled":
@@ -414,13 +417,17 @@ def _event_diagnostic_codes(event: dict) -> list[str]:
     """Every detector code a ``retry``/``stage_diagnostic`` event carries,
     outer first. A diagnostic's ``evidence`` can itself hold diagnosis codes
     (an outer ``multiple_recipe_contracts`` wrapping
-    ``unsupported_protected_variant``) — those name the leaf cause."""
+    ``unsupported_protected_variant``) — those name the leaf cause. So can its
+    typed ``findings``, which is where an aggregate row carries them now."""
     d = event.get("diagnostic") if event.get("kind") == "retry" else event
     d = d or {}
     codes = [d["code"]] if d.get("code") else []
     for it in d.get("evidence") or []:
         if isinstance(it, dict) and it.get("code"):
             codes.append(it["code"])
+    for row in d.get("findings") or []:
+        if isinstance(row, dict) and row.get("code"):
+            codes.append(row["code"])
     return codes
 
 
@@ -485,14 +492,18 @@ def rejection_label(sig) -> str:
 
 
 def collect_stage_rejections(events: list[dict]) -> list[dict]:
-    """Group a stage's retry events by gate identity.
+    """Group a stage's retry events by gate identity **and detector codes**.
 
-    ``gate`` is the stable part of the runtime's own rejection identity
-    (_commit_rejection_signature): the 9.x gate ids, or the normalized error
-    text when the rejection carries no gate id. ``distinct_diagnostics`` counts
-    the different detector codes inside the group — more than one under a
-    single gate means the group's error text is NOT a faithful signature of
-    what failed, so it cannot be used to tell progress from repetition.
+    The gate identity is the runtime's own rejection identity
+    (``_commit_rejection_signature``): the 9.x gate ids, or the normalized error
+    text when the rejection carries no gate id. The detector codes the event
+    carries join the group key, because a contract rejection repeats the same
+    schema-clean wrapper text on every rung while the *diagnostic* moves
+    (``declared_signal_port_tied`` on one attempt, ``unsupported_lowerer_contract``
+    on the next). Grouping on the wrapper alone hid exactly that movement: live
+    runs 904/905/907 printed "5 DISTINCT diagnostics under ONE signature", which
+    cannot tell convergence from ping-pong. Each row is now one attempt-level
+    situation, and its ``count`` is how often that situation repeated.
     """
     groups: dict[str, dict] = {}
     order: list[str] = []
@@ -500,27 +511,28 @@ def collect_stage_rejections(events: list[dict]) -> list[dict]:
         if e.get("kind") != "retry":
             continue
         gates = _rejection_signature(e)[0] or ("(no gate id)",)
-        key = " + ".join(gates)
+        # A code can repeat within one attempt (usb_dm and usb_dp are two
+        # `unbound_required_port` rows); the per-code counts live in the
+        # diagnostics section, so the signature keys on the code set.
+        codes = list(dict.fromkeys(_event_diagnostic_codes(e)))
+        key = " + ".join([*gates, *codes])
         if key not in groups:
             order.append(key)
-            groups[key] = {"gate": key, "label": rejection_label((gates, ())),
-                           "count": 0, "offenders": [], "codes": [],
-                           "example": norm_stage_error((e.get("errors") or [""])[0])}
+            groups[key] = {
+                "gate": key,
+                "label": " + ".join([rejection_label((gates, ())), *codes]),
+                "count": 0,
+                "offenders": [],
+                "codes": list(codes),
+                "example": norm_stage_error((e.get("errors") or [""])[0]),
+            }
         g = groups[key]
         g["count"] += 1
-        for code in _event_diagnostic_codes(e):
-            if code not in g["codes"]:
-                g["codes"].append(code)
         for o in (e.get("offenders") or []):
             s = _WS_RE.sub(" ", str(o))[:220]
             if s not in g["offenders"] and len(g["offenders"]) < 3:
                 g["offenders"].append(s)
-    out = []
-    for key in order:
-        g = groups[key]
-        g["distinct_diagnostics"] = len(g["codes"])
-        out.append(g)
-    return out
+    return [groups[key] for key in order]
 
 
 def collect_stage_units(events: list[dict]) -> list[dict]:
@@ -837,12 +849,9 @@ def print_stages(d: dict) -> None:
                     print(f"         {dd['message']}")
         if s["rejections"]:
             print("     rejection signatures (gate identity = the runtime's own "
-                  "_commit_rejection_signature):")
+                  "_commit_rejection_signature + the detector codes):")
             for r in s["rejections"]:
-                note = (f"  <-- {r['distinct_diagnostics']} DISTINCT diagnostics under ONE "
-                        "signature: the error text cannot tell them apart"
-                        if r["distinct_diagnostics"] > 1 else "")
-                print(f"       {r['label']} x{r['count']}{note}")
+                print(f"       {r['label']} x{r['count']}")
                 print(f"         {r['example']}")
                 for o in r["offenders"]:
                     print(f"         - {o}")

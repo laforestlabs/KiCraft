@@ -152,3 +152,109 @@ def test_bom_reconciliation_question_does_not_require_user_options():
     )
 
     assert payload["questions"][0]["options"] == []
+
+
+def test_a_multi_finding_refusal_stays_a_loadable_stage_diagnostic():
+    """An aggregate refusal must not make the run's own state unreadable.
+
+    Live runs KC-HPD3YF (seed 25) and KC-P4E2PH (seed 27) each died on a draft with several
+    contract defects at once. The wrapper row that carried them named no `severity` and left the
+    findings in `evidence` as bare dicts, so `ConversationState.model_validate` refused the state
+    those runs had just written -- and `stage_driver replay`, the tool that exists to iterate on
+    exactly those runs, could not open them.
+    """
+    from kicraft.design.architecture_intent import ArchitectureIntentError, IntentDiagnostic
+    from kicraft.design.models import ConversationState, StageDiagnostic
+    from kicraft.server.stage_contracts import _aggregate_intent_diagnostic
+
+    error = ArchitectureIntentError(
+        [
+            IntentDiagnostic(
+                code="unknown_part_refused",
+                message="requirement 'jack' (dc005) has no curated recipe and declares no interface",
+                requirement_id="jack",
+                sheet="POWER INPUT",
+                evidence=["dc005"],
+            ),
+            IntentDiagnostic(
+                code="unsupported_lowerer_contract",
+                message="known lowerer led-current-resistor@1 does not implement the exact part",
+                requirement_id="led",
+                sheet="OUTPUT INTERFACE",
+            ),
+        ]
+    )
+    row = _aggregate_intent_diagnostic(error)
+    diag = StageDiagnostic.model_validate(row)
+    assert diag.code == "multiple_intent_contracts"
+    assert diag.severity == "repair_required"
+    assert [finding.code for finding in diag.findings] == [
+        "unknown_part_refused",
+        "unsupported_lowerer_contract",
+    ]
+    assert diag.findings[0].requirement_id == "jack"
+    assert "unknown_part_refused" in " ".join(diag.evidence)
+
+    # ...and the state it is written into round-trips, which is what replay depends on.
+    state = ConversationState.model_validate(
+        {"stage_status": {"architecture": {"diagnostics": [row], "ok": False}}}
+    )
+    reloaded = ConversationState.model_validate(state.model_dump())
+    assert reloaded.stage_status["architecture"].diagnostics[0].findings[1].code == (
+        "unsupported_lowerer_contract"
+    )
+
+
+def test_a_single_finding_refusal_is_its_own_typed_row():
+    """One defect is stored as itself, not wrapped: the model sees the finding, not a summary."""
+    from kicraft.design.architecture_intent import ArchitectureIntentError, IntentDiagnostic
+    from kicraft.design.models import StageDiagnostic
+    from kicraft.server.stage_contracts import _aggregate_intent_diagnostic
+
+    row = _aggregate_intent_diagnostic(
+        ArchitectureIntentError(
+            [IntentDiagnostic(code="unknown_supply_rail", message="rail '+9V' is undeclared")]
+        )
+    )
+    assert row["code"] == "unknown_supply_rail"
+    assert StageDiagnostic.model_validate(row).severity == "repair_required"
+
+
+def test_rows_written_before_the_fix_still_load():
+    """A state written by the old writer stays readable: severity defaulted, evidence coerced.
+
+    119 saved states carry an architecture row with no severity, a dict in `evidence`, and the
+    refusal's own scope (`requirement_id`/`sheet`/`recipe`). Losing the structure of a nested row
+    is a report detail; refusing to load the state loses the run.
+    """
+    from kicraft.design.models import ConversationState, StageDiagnostic
+
+    legacy = {
+        "code": "multiple_intent_contracts",
+        "message": "two defects",
+        "evidence": [
+            {"code": "unknown_part_refused", "message": "jack", "evidence": ["dc005"]},
+            {"code": "declared_signal_port_tied", "message": "pin1", "evidence": []},
+        ],
+    }
+    diag = StageDiagnostic.model_validate(legacy)
+    assert diag.severity is None
+    assert diag.evidence == ["unknown_part_refused: jack", "declared_signal_port_tied: pin1"]
+
+    scoped = StageDiagnostic.model_validate(
+        {
+            "code": "unavailable_recipe_gpio",
+            "message": "mcu has no allocatable pin",
+            "requirement_id": "mcu",
+            "sheet": "ESP32 C3",
+            "recipe": "esp32-c3-mini-1-minimal@1",
+        }
+    )
+    assert (scoped.requirement_id, scoped.sheet, scoped.recipe) == (
+        "mcu",
+        "ESP32 C3",
+        "esp32-c3-mini-1-minimal@1",
+    )
+    ConversationState.model_validate(
+        {"stage_status": {"architecture": {"diagnostics": [legacy, scoped], "ok": False}}}
+    )

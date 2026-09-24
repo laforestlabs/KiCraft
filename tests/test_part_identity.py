@@ -6,6 +6,7 @@ from kicraft.design.part_identity import (
     accepted_part_identities,
     is_part_family,
     matches_part_identity,
+    realizable_physical_features,
     reviewed_part,
     reviewed_parts_for_feature,
     physical_inventory_record,
@@ -183,6 +184,61 @@ def test_reviewed_physical_part_metadata_requires_complete_pair():
     assert qwiic.port_pins == {"ground": "1", "vcc": "2", "sda": "3", "scl": "4"}
     assert matches_part_identity("ATTINY402", "ATTINY402-SSNR")
     assert not reviewed_part("STM32L072CZU6").is_portable_candidate
+    # The corpus's "12 V DC barrel jack" shape: one reviewed, catalogued jack.
+    # Its bundle is the vendored pair the loader resolves for MPN DC005, and the
+    # catalog row (LCSC C431533) is the record's citation.
+    jack = reviewed_part("DC005")
+    assert jack is not None and jack.is_portable_candidate
+    assert jack.symbol == "dc005-barrel-jack:DC005_C431533"
+    assert jack.footprint == "dc005-barrel-jack:DC-IN-TH_DC005"
+    assert jack.lcsc == "C431533"
+    assert jack.contacts == ("1", "2", "3")
+    assert "barrel-jack-connector" in jack.physical_features
+    assert tuple(part.identity for part in reviewed_parts_for_feature("barrel-jack-connector")) == (
+        "dc005",
+    )
+    # Both spellings the corpus uses resolve to that one physical class.
+    assert realizable_physical_features("barrel-jack") == frozenset({"barrel-jack-connector"})
+    assert realizable_physical_features("barrel-jack-connector") == frozenset(
+        {"barrel-jack-connector"}
+    )
+
+
+def test_every_demanded_class_alias_names_an_emittable_reviewed_feature():
+    """An alias must not turn a class's real-part fallback into a permanent refusal.
+
+    `_group_has_physical_feature` refuses a demand whose class HAS reviewed coverage
+    unless the BOM group resolves to a reviewed record, so an alias pointing at a
+    feature no emittable record carries would block that class everywhere -- worse than
+    the zero-coverage gap the alias closes. The 2026-09-24 coverage audit added aliases
+    for spellings the corpus demands constantly; every target must answer with a record
+    that names a symbol and a footprint.
+    """
+    from kicraft.design import part_identity as pi
+
+    emittable = {
+        feature
+        for record in (*pi.REVIEWED_PARTS, *pi._STANDARD_LIBRARY_PARTS, *pi._STOCK_COMMON_PARTS)
+        if record.symbol and record.footprint
+        for feature in record.physical_features
+    }
+    # The stock-pattern records (`_stock_library_physical_record`) are synthesized on
+    # demand from a canonical KiCad pair rather than listed in a tuple, so the features
+    # they carry are emittable too.
+    emittable |= (
+        pi._TERMINAL_PATTERN_FEATURES
+        | pi._HEADER_PATTERN_FEATURES
+        | pi._LED0805_PATTERN_FEATURES
+        | {pi._STACKING_HEADER_FEATURE}
+    )
+    for demanded, targets in pi._DEMANDED_CLASS_ALIASES.items():
+        # The demand must have coverage at all ...
+        assert pi.realizable_physical_features(demanded), demanded
+        # ... and at least one of its targets must be a feature some record can emit.
+        # (A target may legitimately be a spelling no record carries -- `header` maps to
+        # `pin-socket`, which a lowerer accepts but no reviewed record declares -- as long
+        # as another target does the realizing.)
+        assert targets & emittable, demanded
 
 
 def test_physical_inventory_is_exact_and_never_text_classified():
@@ -384,3 +440,40 @@ def test_highside_pfet_requires_the_reviewed_thermal_package_and_all_power_pins(
         )
         is None
     )
+
+
+def test_the_reviewed_dc_jack_maps_its_contact_functions_to_real_contacts():
+    """The DC inlet's pin map comes from its datasheet schematic, not from a convention.
+
+    Live run KC-HPD3YF could not wire the reviewed jack at all: the record held its three
+    contacts but no function for any of them, so the architecture stage -- which requires a
+    declared interface for a part with no curated recipe -- had nothing to derive pins from.
+    Sheet 1 of the record's own datasheet draws contact 1 as the sprung tip, 2 as the
+    normally-closed switch closed to 1, and 3 as the sleeve.
+    """
+    jack = reviewed_part("dc005")
+    assert jack is not None
+    assert jack.port_pins == {"tip": "1", "switch": "2", "sleeve": "3"}
+    assert set(jack.port_pins.values()) <= set(jack.contacts)
+    assert jack.symbol == "dc005-barrel-jack:DC005_C431533"
+    assert jack.footprint == "dc005-barrel-jack:DC-IN-TH_DC005"
+
+
+def test_a_contact_numbered_pin_map_names_contacts_the_record_declares():
+    """A *numeric* pin map is a claim about the part's own pads, and it may not name a pad it lacks.
+
+    The library uses two conventions, both handled by the readers: an IC maps its ports to the
+    symbol's pin names (`VIN`, `SW`), a connector maps them to contact numbers (`tip` on 1). Only
+    the numeric form is checkable against `contacts` without loading the symbol, and it is the one
+    a connector build places directly, so a wrong number there is an unplaceable pin.
+    """
+    import kicraft.design.part_identity as pi
+
+    checked = 0
+    for part in pi.REVIEWED_PARTS:
+        numeric = {key: value for key, value in part.port_pins.items() if str(value).isdigit()}
+        if not numeric:
+            continue
+        checked += 1
+        assert set(numeric.values()) <= set(part.contacts), part.identity
+    assert checked, "no reviewed record carries a contact-numbered pin map"

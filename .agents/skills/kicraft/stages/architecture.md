@@ -86,10 +86,14 @@ Slot shape:
     when your design implements one obligation in more than one place (three binding posts), and a
     `quantity` count over the whole design may stay at the top level. The top-level `obligations`
     list itself is written for you from the committed set: do not copy the rows into it.
-  - `ties`: rare. The compiler already ties the family's ground, its unused groundable ports, and a
-    standard template's stacking pin map. State a tie only for a direct connection no signal names
-    and no rule derives: a connector shell to `GND`, an enable pin to the rail it runs on. The net
-    must be `GND`, a declared rail, or a net one of your signals names.
+  - `ties`: rare. The compiler already ties the family's ground, its unused groundable ports, its
+    default-tied control ports, and a standard template's stacking pin map. State a tie only for a
+    direct connection no signal names and no rule derives: a connector shell to `GND`, an enable
+    pin to the rail it runs on. The net must be `GND`, a declared rail, or a net one of your
+    signals names. A port a recipe advertises with a default tie (a regulator's `enable`, a
+    follower's `feedback`) is tied to the port it names when your design wires neither — the
+    always-on / unity-gain configuration — so bind it only when the brief asks for the
+    controllable configuration, and that binding wins.
   - `supply_bindings` / `reference_bindings`: rare refinements for a part with several supply or
     reference domains (an isolated side named `GND_ISO`); a domain must be a declared zero-volt
     rail. The compiler binds the single supply/reference case itself — do not restate it.
