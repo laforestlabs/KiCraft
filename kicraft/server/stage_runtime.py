@@ -61,6 +61,7 @@ from .stage_work_units import (
     plan_stage_work_units,
     route_work_unit_ids,
     stage_draft_fingerprint,
+    unit_defect_diagnostic,
     validate_unit_candidate,
 )
 from .stage_state_io import (
@@ -2802,7 +2803,7 @@ def _drive_work_unit_stage(
                     _redacted_schema_error(error) if isinstance(error, Exception) else None
                 ),
                 "diagnostic": (
-                    {"unit_id": unit.unit_id, "defects": error.defects}
+                    unit_defect_diagnostic(error, error_text)
                     if isinstance(error, WorkUnitValidationError)
                     else getattr(error, "diagnostic", None)
                 ),

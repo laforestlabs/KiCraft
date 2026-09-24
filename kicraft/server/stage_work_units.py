@@ -511,6 +511,39 @@ class WorkUnitValidationError(ValueError):
         super().__init__(f"work unit {unit_id} invalid: {detail}")
 
 
+def unit_defect_diagnostic(error: "WorkUnitValidationError", error_text: str) -> dict:
+    """A unit refusal as a stage ``diagnostics`` row, in ``StageDiagnostic`` shape.
+
+    The stage stamp falls back to the drive's bare ``diagnostic`` when it produced no
+    ``diagnostics`` rows, and that row is typed: ``code``/``severity``/``message`` are
+    required and extra keys are forbidden. A raw ``{unit_id, defects}`` map therefore made
+    the whole state unreadable by ``ConversationState.model_validate`` -- every state saved
+    after a BOM/wiring unit exhausted its repair loop, which is exactly the state an
+    investigation replays and the state ``stage_driver replay`` exists to iterate on.
+
+    The per-check offender lists move into ``evidence``, where a reader still sees which
+    check failed and which groups the unit emitted.
+    """
+    offenders = [
+        f"{check}: {'; '.join(str(row) for row in rows)}"
+        for check, rows in sorted(error.defects.items())
+        if rows
+    ]
+    primary = next(
+        (check for check, rows in sorted(error.defects.items()) if rows), "unit_repair_exhausted"
+    )
+    return {
+        "code": primary.replace("-", "_"),
+        "severity": "repair_required",
+        "message": error_text,
+        "evidence": [f"unit {error.unit_id}", *offenders],
+        # The machine-readable identity the callers and tests already read: the row is a
+        # typed StageDiagnostic AND still names the unit and its per-check offenders.
+        "unit_id": error.unit_id,
+        "defects": error.defects,
+    }
+
+
 def _duplicates(values: list[str]) -> list[str]:
     seen: set[str] = set()
     duplicates: list[str] = []

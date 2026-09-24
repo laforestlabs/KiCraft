@@ -1572,6 +1572,11 @@ class StageDiagnostic(BaseModel):
     # The stable gate ids (``§9.9``, ``9.15``, ...) a commit rejection names, so the durable
     # status names every reason a candidate was refused and not just the first error line.
     gate_codes: list[str] = Field(default_factory=list)
+    # A work-unit refusal is scoped to ONE unit of a multi-unit stage (bom/wiring), so the
+    # row carries which unit and that unit's per-check offender lists. Both are optional:
+    # a stage-scoped row (the commit-rejection and semantic findings) records neither.
+    unit_id: str | None = None
+    defects: dict[str, list[str]] | None = None
 
 
 class StageStatus(BaseModel):

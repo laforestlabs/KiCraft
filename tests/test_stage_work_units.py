@@ -2403,6 +2403,19 @@ def test_obligation_class_aliases_match_the_reviewed_feature_vocabulary():
         _group_has_physical_feature(_group_for("wj126v-5.0-02p-14-00a"), "power-screw-terminal")
         is True
     )
+    # A reviewed 5.00 mm terminal block IS a power connector (LCSC Terminal Blocks,
+    # 250 V / 18 A): demanding the generic `power-connector` class for a DC input must
+    # not be satisfiable only by the single JST PH record that carries that role.
+    assert (
+        _group_has_physical_feature(_group_for("wj126v-5.0-02p-14-00a"), "power-connector")
+        is True
+    )
+    assert (
+        _group_has_physical_feature(_group_for("wj126v-5.0-04p-14-00a"), "power-connector")
+        is True
+    )
+    # The role stays a role: a part that carries no power path must not answer it.
+    assert _group_has_physical_feature(_group_for("grm188r71c104ka01d"), "power-connector") is False
     assert _group_has_physical_feature(_group_for("tps5430ddar"), "buck-converter-ic") is True
     assert _group_has_physical_feature(_group_for("max31855kasa+"), "thermocouple-input") is True
     assert _group_has_physical_feature(_group_for("aonr21357"), "high-side-load-switch") is True
@@ -2413,6 +2426,44 @@ def test_obligation_class_aliases_match_the_reviewed_feature_vocabulary():
     # An addressable LED is not an indicator LED, and a digital isolator is not an optocoupler.
     assert _group_has_physical_feature(_group_for("ws2812b-b/t"), "status-led") is False
     assert _group_has_physical_feature(_group_for("adum1301arwz-rl"), "opto-isolator") is False
+
+
+def test_unit_refusal_is_written_as_a_loadable_stage_diagnostic():
+    """A unit-stage refusal must survive a state round trip.
+
+    The stage stamp falls back to the drive's bare ``diagnostic`` when a stage produced no
+    ``diagnostics`` rows, and that row is typed (``code``/``severity``/``message`` required,
+    extra keys forbidden). The raw ``{unit_id, defects}`` map therefore made every state
+    saved after a BOM/wiring unit exhausted its repair loop unreadable by
+    ``ConversationState`` -- so ``stage_driver replay`` could not open exactly the runs it
+    exists to iterate on, and neither could any other validated reader.
+    """
+    from kicraft.design.models import ConversationState, StageDiagnostic
+    from kicraft.server.stage_work_units import WorkUnitValidationError, unit_defect_diagnostic
+
+    error = WorkUnitValidationError(
+        "bom-r000",
+        {
+            "physical-obligation-unfulfilled": [
+                "input:dc_input: requires 1 real power-connector, found 0"
+            ],
+            "empty-sheet": [],
+        },
+    )
+    row = unit_defect_diagnostic(error, str(error))
+    diag = StageDiagnostic.model_validate(row)
+    # The failing check is the row's code, and the offender text stays readable.
+    assert diag.code == "physical_obligation_unfulfilled"
+    assert diag.severity == "repair_required"
+    assert "power-connector" in diag.message
+    assert "input:dc_input: requires 1 real power-connector, found 0" in " ".join(diag.evidence)
+    assert "unit bom-r000" in diag.evidence
+    # ...and a state carrying it still loads.
+    state = ConversationState.model_validate(
+        {"stage_status": {"bom": {"diagnostics": [row], "ok": False}}}
+    )
+    reloaded = ConversationState.model_validate(state.model_dump())
+    assert reloaded.stage_status["bom"].diagnostics[0].code == "physical_obligation_unfulfilled"
 
 
 def test_lowerer_physical_witness_is_explicit_and_requirement_bound():

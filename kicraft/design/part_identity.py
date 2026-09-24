@@ -217,7 +217,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="screw-terminal-5mm-2p",
         symbol="screw-terminal-5mm-2p:WJ126V-5.0-2P",
         footprint="screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P",
-        physical_features=frozenset({"screw-terminal", "terminal-block"}),
+        physical_features=frozenset({"screw-terminal", "terminal-block", "power-connector"}),
         contacts=("1", "2"),
         manufacturer_sources=(
             "https://www.lcsc.com/product-detail/Terminal-Blocks_WJ126V-5-0-2P_C8404.html",
@@ -240,7 +240,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="screw-terminal-5mm-3p",
         symbol="screw-terminal-5mm-3p:WJ126V-5.0-3P",
         footprint="screw-terminal-5mm-3p:CONN-TH_3P-P5.00_WJ126V-5.0-3P",
-        physical_features=frozenset({"screw-terminal", "terminal-block"}),
+        physical_features=frozenset({"screw-terminal", "terminal-block", "power-connector"}),
         contacts=("1", "2", "3"),
         manufacturer_sources=(
             "https://www.lcsc.com/product-detail/Terminal-Blocks_WJ126V-5-0-3P_C8401.html",
@@ -978,7 +978,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="screw-terminal-5mm-4p",
         symbol="screw-terminal-5mm-4p:WJ126V-5.0-4P",
         footprint="screw-terminal-5mm-4p:CONN-TH_4P-P5.00_WJ126V-5.0-4P-1",
-        physical_features=frozenset({"screw-terminal", "terminal-block"}),
+        physical_features=frozenset({"screw-terminal", "terminal-block", "power-connector"}),
         contacts=("1", "2", "3", "4"),
         manufacturer_sources=(
             "https://www.china-wj.com/cms/en/prod_pdf/id/18.html",
@@ -2900,7 +2900,7 @@ _ARDUINO_SHIELD_STACKING_PAIRS = frozenset(
 # inline in the builder, because _REVIEWED_FEATURE_VOCABULARY (and through it the
 # realizable-class gate) must know every feature a reviewed record can carry without
 # re-deriving these regexes.
-_TERMINAL_PATTERN_FEATURES = frozenset({"screw-terminal", "terminal-block"})
+_TERMINAL_PATTERN_FEATURES = frozenset({"screw-terminal", "terminal-block", "power-connector"})
 _HEADER_PATTERN_FEATURES = frozenset({"pin-header", "header"})
 _STACKING_HEADER_FEATURE = "stacking-header"
 _LED0805_PATTERN_FEATURES = frozenset({"led-0805"})
