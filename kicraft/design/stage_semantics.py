@@ -2217,7 +2217,17 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
             re.I,
         )
         looks_like_power_only = is_power_or_ground_name(name) or bool(_POWER_RE.search(name))
-        if looks_like_power_only and not physical_power_domain:
+        # A sheet named for a rail is only a distribution sheet when nothing else lives on it: a
+        # "POWER INDICATOR" sheet holds a user-io requirement, and flagging it on the word "power"
+        # alone asked the stage to delete a real circuit (live draft, 2026-09-25: two repair
+        # rounds spent on a sheet the design needs).
+        installed_roles = {
+            str(row.get("role") or "")
+            for row in candidate.get("requirements") or []
+            if isinstance(row, dict) and str(row.get("sheet") or "") == name
+        }
+        distribution_only = not installed_roles or installed_roles <= {"power_input", "regulator"}
+        if looks_like_power_only and not physical_power_domain and distribution_only:
             diagnostics.append(
                 _diag(
                     "architecture_power_block_as_sheet",

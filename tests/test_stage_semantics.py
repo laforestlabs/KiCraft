@@ -2098,3 +2098,38 @@ def test_the_retarget_reads_the_target_voltage_from_the_rail_it_feeds():
     assert retargeted == ["hbridge_regulator"]
     assert candidate["requirements"][0]["family"] == "ap63205-5v"
     assert candidate["requirements"][1]["family"] == "tps54331-adjustable"
+
+
+def test_a_rail_named_sheet_that_holds_a_circuit_is_not_a_distribution_sheet():
+    """A sheet may be named for the rail it serves and still carry a real circuit.
+
+    Live architecture draft 2026-09-25: the "POWER INDICATOR" sheet holds the power LED, and the
+    word "power" in its name alone was enough to refuse it -- the stage spent two repair rounds
+    trying to delete a sheet its own functional block requires. A bare rail sheet with nothing on
+    it (or only a converter) is still refused.
+    """
+    diagnostics = diagnose_stage(
+        "architecture",
+        brief="A 5 V to 3.3 V converter with a power LED.",
+        upstream_state={},
+        candidate={
+            "sheets": [
+                {"name": "POWER INDICATOR", "stem": "POWER_INDICATOR",
+                 "function": "Show that the 3.3 V rail is up"},
+                {"name": "+3V3", "stem": "3V3", "function": "3.3 V distribution"},
+            ],
+            "requirements": [
+                {"id": "power_led", "sheet": "POWER INDICATOR", "role": "user_io",
+                 "family": "led-0603"},
+                {"id": "regulator", "sheet": "+3V3", "role": "regulator",
+                 "family": "me6211-3v3"},
+            ],
+        },
+    )
+    flagged = [
+        evidence
+        for diagnostic in diagnostics
+        if diagnostic.code == "architecture_power_block_as_sheet"
+        for evidence in diagnostic.evidence
+    ]
+    assert flagged == ["+3v3"]
