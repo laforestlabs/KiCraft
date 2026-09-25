@@ -18,7 +18,8 @@ from kicraft.parts_library import jlcparts
 _SCHEMA = """CREATE TABLE jlc_components (
     lcsc INTEGER PRIMARY KEY NOT NULL, mfr TEXT NOT NULL, package TEXT NOT NULL,
     manufacturer TEXT NOT NULL, library_type TEXT NOT NULL, stock INTEGER NOT NULL,
-    price TEXT NOT NULL, description TEXT NOT NULL, joints INTEGER)"""
+    price TEXT NOT NULL, description TEXT NOT NULL, joints INTEGER,
+    attributes TEXT NOT NULL DEFAULT '{}', datasheet TEXT NOT NULL DEFAULT '')"""
 
 _ROWS = [
     # lcsc, mfr, package, manufacturer, type, stock, price, description
@@ -33,6 +34,11 @@ _ROWS = [
      900000, "1-:0.0046", "50V 100nF X7R +-10% 0805 MLCC ROHS"),
 ]
 
+_PARAMETERS = {
+    190004: '{"Voltage - Supply": "2.6V~3.5V", "Operating Temperature": "-40℃~+85℃"}',
+    1525: '{"Capacitance": "100nF", "Voltage Rating": "50V"}',
+}
+
 
 @pytest.fixture
 def catalog(tmp_path, monkeypatch) -> Path:
@@ -40,6 +46,11 @@ def catalog(tmp_path, monkeypatch) -> Path:
     con = sqlite3.connect(db)
     con.execute(_SCHEMA)
     con.executemany("INSERT INTO jlc_components (lcsc, mfr, package, manufacturer, library_type, stock, price, description) VALUES (?,?,?,?,?,?,?,?)", _ROWS)
+    con.executemany(
+        "UPDATE jlc_components SET attributes=?, datasheet=? WHERE lcsc=?",
+        [(attrs, f"https://example.invalid/C{lcsc}.pdf", lcsc)
+         for lcsc, attrs in _PARAMETERS.items()],
+    )
     con.commit()
     con.close()
     monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(db))
@@ -128,6 +139,38 @@ def test_lookup_by_id_with_ladder(catalog):
     assert jlcparts.lookup(190004)["lcsc"] == "C190004"
     assert jlcparts.lookup("C424242") is None
     assert jlcparts.lookup("not-an-id") is None
+
+
+def test_parameters_reads_the_parts_own_parametric_table(catalog):
+    """The catalog's own numbers, exactly as published — the only rating a researched part has."""
+    read = jlcparts.parameters("C1525")
+    assert read["attributes"]["Capacitance"] == "100nF"
+    assert read["attributes"]["Voltage Rating"] == "50V"
+    assert read["datasheet"] == "https://example.invalid/C1525.pdf"
+
+    # A part with no parameters says so by having none, and an unknown part is None.
+    assert jlcparts.parameters("C25744")["attributes"] == {}
+    assert jlcparts.parameters("C424242") is None
+    assert jlcparts.parameters("not-an-id") is None
+
+
+def test_parameters_tolerates_a_dump_without_the_parameter_columns(tmp_path, monkeypatch):
+    """An older dump has no parametric columns: no ratings to read, never a crash."""
+    db = tmp_path / "old.sqlite3"
+    con = sqlite3.connect(db)
+    con.execute("""CREATE TABLE jlc_components (
+        lcsc INTEGER PRIMARY KEY NOT NULL, mfr TEXT NOT NULL, package TEXT NOT NULL,
+        manufacturer TEXT NOT NULL, library_type TEXT NOT NULL, stock INTEGER NOT NULL,
+        price TEXT NOT NULL, description TEXT NOT NULL, joints INTEGER)""")
+    con.execute("INSERT INTO jlc_components (lcsc, mfr, package, manufacturer, library_type, "
+                "stock, price, description) VALUES (190004, 'VL53L1CXV0FY/1', 'LGA-12', 'ST', "
+                "'expand', 5640, '1-:4.8', 'ToF')")
+    con.commit()
+    con.close()
+    monkeypatch.setenv("KICRAFT_JLCPARTS_DB", str(db))
+
+    assert jlcparts.lookup("C190004")["stock"] == 5640   # the dump still serves sourcing facts
+    assert jlcparts.parameters("C190004") is None
 
 
 # ------------------------------------------------- split-zip extraction

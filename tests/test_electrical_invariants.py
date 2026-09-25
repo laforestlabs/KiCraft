@@ -763,6 +763,44 @@ def test_demanded_class_aliases_apply_in_the_realization_gate_too(monkeypatch):
     assert validation.check_requirement_physical_realization(architecture, bom).ok
 
 
+def test_a_researched_records_catalog_supply_range_is_not_an_input_declaration(monkeypatch):
+    """A researched part's own supply range must not become a false input-range refusal.
+
+    §9.38 refuses a record that states a voltage input without the pin it lands on, because it
+    then cannot compare the rail. A researched record declares no pin, so a catalog supply range
+    claimed under the input-domain names would turn every researched regulator into a build
+    failure; the range is claimed as ``supply_min_v``/``supply_max_v`` instead -- the names the
+    hand-reviewed MCU records use -- which this check reads only when the record also names its
+    supply port.
+    """
+    from kicraft.design import part_identity, part_research
+
+    record = part_research.build_record(
+        "linear-regulator",
+        {"lcsc": "C1", "description": "a 3.3 V linear regulator"},
+        {"name": "ldo-c1", "mpn": "XC6206", "sourcing": {"lcsc": "C1"}},
+        attributes={
+            "Voltage - Supply": "2.6V~6V",
+            "Output Voltage": "3.3V",
+            "Output Current": "200mA",
+        },
+    )
+    part = part_identity._reviewed_part_from_record(record)
+    assert (part.operating_limits["supply_min_v"], part.operating_limits["supply_max_v"]) == (2.6, 6.0)
+    assert part.operating_limits["output_current_a"] == 0.2
+
+    monkeypatch.setattr(validation, "_reviewed_fact_for_part", lambda _part: vars(part))
+    monkeypatch.setattr(
+        validation,
+        "_pin_info_by_ref",
+        lambda _bom: ({"U9": {"1": {"name": "VIN", "type": "power_in"}}}, {}),
+    )
+    bom = _bom([_part("U9", "XC6206", mpn="XC6206")], {"+5V": [("U9", "1")]})
+    architecture = SimpleNamespace(rail_voltages={"+5V": 5.0})
+
+    assert validation.check_reviewed_input_operating_ranges(architecture, bom).ok
+
+
 def test_motor_supply_over_rating_is_refused_on_the_reviewed_vm_domain(reviewed):
     """A part's own supply rating decides, whatever domain the record spells it in.
 

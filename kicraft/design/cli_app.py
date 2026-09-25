@@ -2462,6 +2462,7 @@ def _cmd_research_part(args: argparse.Namespace) -> int:
                     "symbol": result.symbol if result else None,
                     "footprint": result.footprint if result else None,
                     "reason": result.reason if result else "already covered, or nothing qualified",
+                    "operating_limits": dict(result.limits) if result else {},
                 },
                 indent=2,
             )
@@ -2478,6 +2479,7 @@ def _cmd_research_part(args: argparse.Namespace) -> int:
     print(f"  symbol  : {result.symbol}")
     print(f"  footprint: {result.footprint}")
     print(f"  why     : {result.reason}")
+    print(f"  ratings : {result.ratings_note()}")
     print(f"  recorded: {result.as_record_note()}")
     return 0
 

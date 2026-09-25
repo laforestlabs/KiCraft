@@ -35,16 +35,23 @@ NiceGUI on `127.0.0.1:8080`, Caddy in front; services run as detached processes 
 
 ## Open work, most valuable first
 
-1. **Researched parts carry no ratings, on purpose.** `part_research.build_record` leaves
-   `operating_limits` empty because no rating was read from a datasheet, so rating gates treat
-   those parts as unproven. Next step: fill the limits this loop *can* verify (the catalog's own
-   parametric description, the package, the pin count) and mark anything it cannot as unverified
-   rather than absent — or add a review step a human confirms once. This is the difference
-   between "the part exists and is in stock" and "the part is right for this rail".
+1. ~~**Researched parts carry no ratings, on purpose.**~~ **Closed 2026-09-25 (later the same
+   night), plan section 9.** `part_research.build_record` now reads the catalog's own parametric
+   fields for the chosen part and fills `operating_limits` with them under the names the reviewed
+   records already use (`reverse_voltage_v`, `vds_max_v`, `capacitance_f`, `voltage_v`,
+   `pitch_mm`, `positions`, `output_voltage_v`, the temperature pair, a published supply range as
+   `supply_min_v`/`supply_max_v`), each limit naming the catalog field it came from in
+   `limits_source`. What the catalog does not state is kept verbatim in `unrated_parameters` and
+   the record says `limits_review.status: unverified` when nothing was readable — never a blank
+   that could pass for "no limit needed". `jlcparts.parameters()` is the new reader; an older dump
+   without the parametric columns degrades to no ratings instead of erroring. Verified on the live
+   catalog (a 120 000-row sweep found every mapped field name in real use; B340A → 40 V/3 A,
+   10D471K → 385 V DC / 300 V AC / 775 V clamp, a 5.08 mm terminal → 2 positions / 250 V / 18 A).
 2. **The class claim is a description match.** `choose_candidate` accepts a row because the
    catalog's phrase matched its text. A second, independent signal would raise confidence: the
-   package and contact count against the demand, the parametric fields, or a typed yes/no from the
-   decision model (the pipeline already has a Jev client in `kicraft/server/decision_layer.py`).
+   package and contact count against the demand, the parametric fields (now readable —
+   `jlcparts.parameters`), or a typed yes/no from the decision model (the pipeline already has a
+   Jev client in `kicraft/server/decision_layer.py`).
 3. **The regression evidence still counts only two copper layers**
    (`kicraft/eval/geometry_artifact_evidence.py`), so a four-layer board's inner planes are
    invisible to a self-eval sweep. Small change, but it changes what the rubric measures — the
@@ -101,6 +108,6 @@ NiceGUI on `127.0.0.1:8080`, Caddy in front; services run as detached processes 
 
 ## First action
 
-Read the plan and the findings, then either take the top open item (ratings for researched parts)
-or start a loop run on a new seed and report the first gap you find — in plain words, with the
-evidence beside it.
+Read the plan and the findings, then either take the top open item (a second, independent signal
+on whether a researched part really is the demanded class) or start a loop run on a new seed and
+report the first gap you find — in plain words, with the evidence beside it.

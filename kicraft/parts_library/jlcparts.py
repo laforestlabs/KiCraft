@@ -13,6 +13,7 @@ fall through to their network paths.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -284,6 +285,48 @@ def lookup(lcsc_id: str | int) -> dict | None:
     cand = _candidate(row)
     cand["ladder"] = parse_ladder(row["price"])
     return cand
+
+
+def parameters(lcsc_id: str | int) -> dict | None:
+    """One part's own parametric table, exactly as its catalog row publishes it.
+
+    The dump carries LCSC's parametric fields per part (``attributes``, a JSON object keyed by
+    the parameter's own name -- ``"Voltage - DC Reverse(Vr)"``: ``"40V"``). Nothing else in the
+    pipeline reads them: sourcing needs stock and price, and the ratings a reviewed record may
+    claim were, until now, read by hand from a datasheet. A part the pipeline researches for
+    itself has no hand reading, so the catalog's own numbers are where its ratings can honestly
+    come from -- quoted, never invented.
+
+    Returns ``{"attributes": {...}, "datasheet": <url|None>}``. ``None`` when the part is absent,
+    the id is not an LCSC id, or the installed dump predates the parameter columns (an older
+    dump simply has no ratings to read, which the caller records as unverified)."""
+    if not available():
+        return None
+    try:
+        num = int(str(lcsc_id).strip().upper().lstrip("C"))
+    except (ValueError, TypeError):
+        return None
+    con = _connect()
+    try:
+        row = con.execute(
+            "SELECT attributes, datasheet FROM jlc_components WHERE lcsc = ?", (num,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        con.close()
+    if row is None:
+        return None
+    try:
+        attributes = json.loads(row["attributes"] or "{}")
+    except (TypeError, ValueError):
+        attributes = {}
+    if not isinstance(attributes, dict):
+        attributes = {}
+    return {
+        "attributes": {str(key): value for key, value in attributes.items()},
+        "datasheet": row["datasheet"] or None,
+    }
 
 
 def lcsc_exists(lcsc: str) -> bool:

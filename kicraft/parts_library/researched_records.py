@@ -14,6 +14,11 @@ fixed by editing this file, not by editing a Python literal.
 Layout, one object per record::
 
     {"identity": "b5819w", "family": "schottky-diode", "package": "SOD-123", ...,
+     "operating_limits": {"reverse_voltage_v": 40.0, "rectified_current_a": 1.0},
+     "limits_source": {"reverse_voltage_v": "catalog parameter 'Voltage - DC Reverse(Vr)' = '40V'"},
+     "limits_review": {"status": "catalog-parameters", "source": "jlcparts (...) parametric fields",
+                       "reason": "2 rating(s) read from the catalog's own parametric fields ..."},
+     "unrated_parameters": {"Reverse Leakage Current (Ir)": "1mA@30V"},
      "researched": {"on": "2026-09-25", "from": "jlcparts", "lcsc": "C7420330",
                     "why": "the demanded class schottky-diode had no reviewed carrier"}}
 

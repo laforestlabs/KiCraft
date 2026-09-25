@@ -86,6 +86,7 @@ Per design step, in order, with the owner watching:
 | 16 | **The regression evidence still counts only two copper layers.** `eval/geometry_artifact_evidence.py` treats F.Cu/B.Cu as "copper", so a four-layer board's inner planes are invisible to a self-eval sweep: a future regression that emptied the inner layers would not show up in the evidence. | open, owner's call (it changes what the rubric measures) |
 | 17 | **The debugger stopped the owner to ask a number it could have assumed.** Mid-walkthrough it asked how much current the 3.3 V output must supply, instead of defaulting to the production reading and analysing the consequence. Owner: *"you should have auto defaulted then analyzed that choice automatically. i need the live debug skill to become more automated so i can run it in a loop in the future."* | fixed in the skill: *Default, then analyse* (default it the way the live product would, analyse what a wrong default costs and where it would bite, record it, carry on) and a **loop mode** for unattended runs (self-checked review, save each step when its own checks pass, stop only on provider failure / an unrepairable save refusal / an unjustified repair escalation / the run cap, then a summary and a machine-readable last line) |
 | 18 | **Two words of my own shorthand reached a report.** The owner was asked to review "facet 1"; the skill had no rule against the pipeline's internal vocabulary. | fixed in the skill: *Say it plainly* (ban on internal words in reports, machine wording only as quoted evidence, and a worked example), with the same wording fixed in this document; owner's request, 2026-09-25 |
+| 19 | **A researched part carried no ratings, on purpose** — `part_research.build_record` left `operating_limits` empty because no rating had been read off a datasheet, so every check that reads a record's own limits treated a researched part as unproven: "in stock" without "right for this rail". | **fixed + tested 2026-09-25** (section 9): the catalog's own parametric fields are read for the chosen part and mapped onto the limit names the reviewed records already use (reverse voltage, Vds, capacitance, positions, pitch, temperature pair, a published supply range), each rating citing the catalog field it came from; a parameter no rating can honestly be read from is kept verbatim, and a part with no such fields says `unverified` rather than leaving the field blank |
 
 ## 6. Making a missing part (the owner's directive, in mechanics)
 
@@ -108,8 +109,8 @@ When the parts step needs a class the library cannot answer:
 **Done 2026-09-25:** steps 1-4 are mechanical now (`kicraft research-part <class>`, and
 automatically before the architecture and parts steps are diagnosed). The record it writes claims
 only what was verified — the class match from the catalog's own description, the contacts read from
-the vendored symbol — and leaves every rating absent, because an absent limit means unproven. The
-bundle keeps the `prototype` badge: machine-researched, not human-vetted.
+the vendored symbol, and (since section 9 below) the ratings the catalog's own parametric fields
+state. The bundle keeps the `prototype` badge: machine-researched, not human-vetted.
 
 ## 7. Open questions for the owner
 
@@ -200,5 +201,53 @@ fails without it:
 
 Items 17 and 18 above (loop mode, plain reporting) and these five are the session's output; the
 findings file carries the exact evidence and validation for each.
+
+## 9. Session of 2026-09-25 (third): the ratings a researched part can prove
+
+Top item of the handoff, done the same night. A researched part used to be an existence proof —
+"this part exists, is in stock and its catalog description names the demanded class" — with every
+rating left out on purpose. A part's own numbers are what a check needs to answer "is it right for
+this rail", so the record now carries them:
+
+- **Where they come from.** The dump already holds LCSC's parametric table for every part
+  (`jlcparts.parameters` reads `attributes`; the field is real, e.g. C64982 B340A publishes
+  `Voltage - DC Reverse(Vr) = 40V`, `Current - Rectified = 3A`). That is a published number, quoted,
+  not a scrape of prose and not a guess.
+- **How they are claimed.** 39 real catalog field names map onto the limit names the reviewed
+  records already use, so a researched part is read by the same checks as a hand-reviewed one:
+  `reverse_voltage_v`, `vds_max_v`, `capacitance_f`, `voltage_v`, `current_a`, `pitch_mm`,
+  `positions`, `output_voltage_v`, the `temperature_min_c`/`temperature_max_c` pair, and a
+  published *range* such as `Voltage - Supply = 2V~6V` as the `supply_min_v`/`supply_max_v` pair.
+  Each limit names its source (`limits_source`: `catalog parameter 'Inductance' = '10uH'`).
+- **What is deliberately not claimed.** A lone `Voltage - Supply: 3.3V` is a nominal on an
+  oscillator and a maximum on a regulator, and nothing in the field says which, so it is no rating.
+  A range becomes a pair only where the pipeline already names one. Nothing is claimed from a value
+  with two magnitudes, a tolerance, or a test-condition suffix it cannot separate. Every parameter
+  left over is kept verbatim in `unrated_parameters`, and a record with no readable parameters says
+  `limits_review.status: unverified` — explicitly, so an empty field never passes for "no limit
+  needed".
+- **A trap the mapping avoids.** The input-range check refuses a record that states a voltage input
+  without the pin it lands on, and a researched record declares no pin: claiming a lone catalog
+  maximum under the input names would have turned every researched regulator into a build refusal.
+  The pair spelling (`supply_*_v`) is what the hand-reviewed MCU records use and what that check
+  reads only when the record also names its supply port. Pinned by
+  `tests/test_electrical_invariants.py::test_a_researched_records_catalog_supply_range_is_not_an_input_declaration`.
+- **Verified on the live catalog**, not on fixtures alone: a sweep of 120 000 in-stock rows found
+  all 39 mapped field names in real use; a Schottky research yields `reverse_voltage_v 40`,
+  `rectified_current_a 1`; a varistor `max_dc_volts_v 385`, `max_ac_volts_v 300`,
+  `clamping_voltage_v 775`; a 5.08 mm screw terminal `positions 2`, `pitch_mm 5.08`,
+  `voltage_v 250`, `current_a 18` — the same numbers the hand-reviewed screw-terminal records
+  carry. Temperature ranges read on 99.95 % of rows; what is left out is what the catalog states
+  ambiguously.
+- **Tests**: `tests/test_part_research.py` (unit conversion, what is kept rather than claimed, the
+  milliamp unit its own records use, a range end that drops its unit, a record with nothing to read,
+  and a researched rating reaching the checks) and `tests/test_jlcparts_catalog.py`
+  (`parameters()` reads the part's own table, and an older dump without the columns degrades to no
+  ratings instead of an error).
+
+Still open from the handoff, unchanged: the class claim is still a description match (item 2), the
+copper evidence still counts two layers (3), the layout report still reads as three failures (4),
+the internal net names still reach the shipped schematic (5), and protection topology is the
+owner's choice (6).
 
 
