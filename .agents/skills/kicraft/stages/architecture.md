@@ -207,6 +207,11 @@ ground, then the rails you listed in `rails`. So `LED_DATA` → `edge:LED_STRING
 - Without `declared_ports`, a requirement whose ports a signal needs is **refused once**, naming
   the part: nothing can be wired to a part whose connections are unknown. State the interface (or
   use a family with a curated recipe) and re-emit.
+- A demanded class that **no placeable reviewed part carries** is researched for you before this
+  stage is diagnosed: the pipeline searches the offline catalog, vendors the winner's symbol and
+  footprint into the machine-wide parts library and records it, so the class is covered from then
+  on (`kicraft research-part <class>` does the same by hand). Name the class plainly and let that
+  happen; never rename the demand to an unrelated reviewed class to look buildable.
 - Whatever the provenance, the BOM stage still refuses anything that does not resolve to a real
   symbol, footprint and orderable part; never invent a library prefix or package name.
 

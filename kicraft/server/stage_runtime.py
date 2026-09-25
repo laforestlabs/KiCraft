@@ -23,6 +23,7 @@ from kicraft.design.stage_semantics import (
     EXTERNAL_LOAD_CURRENT_CODE,
     complete_intent_classification,
     complete_over_rated_supply,
+    complete_unavailable_part_classes,
     complete_unstated_power_input,
     complete_unsourced_external_rails,
     complete_usb_socket_rail,
@@ -1470,12 +1471,19 @@ def _normalize_candidate_for_diagnostics(
             remove_mislabeled_functional_defaults(brief, semantic_state, candidate)
         )
     elif stage == "architecture":
+        # A demanded part class the library cannot answer is researched and added HERE, before
+        # the audit and the option blocks read it: the audit's "no carrier in the catalogue" then
+        # describes a real dead end instead of the pipeline's own blind spot.
+        candidate = complete_unavailable_part_classes(stage, candidate, semantic_state)
         # A load part whose reviewed supply limit is below the rail it is on has no reviewed
         # alternative to fall back on (checked inside), so the rail it needs is added here --
         # before diagnosis, so what the checker sees is a design the pipeline can build.
         candidate = complete_over_rated_supply(candidate)
         candidate = complete_usb_socket_rail(candidate)
         candidate = remove_mislabeled_architecture_defaults(semantic_state, candidate)
+    elif stage == "bom":
+        # The parts stage meets the same demand from the committed architecture's obligations.
+        candidate = complete_unavailable_part_classes(stage, candidate, semantic_state)
     return candidate
 
 

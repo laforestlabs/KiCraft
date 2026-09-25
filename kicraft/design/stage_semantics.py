@@ -512,6 +512,63 @@ def _dc_supply_voltage(brief: str, candidate: dict) -> str | None:
     return f"{match.group(1) or match.group(2)} V"
 
 
+def complete_unavailable_part_classes(
+    stage: str, candidate: dict, semantic_state: dict
+) -> dict:
+    """Answer a demanded part class the library cannot, by researching a real part once.
+
+    A brief can demand a physical class no vendored record carries -- a series Schottky diode, a
+    varistor, a part nobody has needed before. Every gate that later checks the demand refuses
+    (the architecture audit, the parts work-unit obligation check, §9.42) because nothing can
+    satisfy it, and no stage is allowed to invent a part. The owner's rule is that such a demand is
+    **researched and added, not refused**, so it is answered here, before diagnosis: the class is
+    searched in the offline catalog, the best in-stock single-device candidate is vendored into the
+    machine-wide parts library and recorded as reviewed, and the assumption says so in plain words.
+    From then on the class is covered -- for this project and every later one.
+
+    Soft by construction: an unavailable catalog or a failed fetch changes nothing and the stage's
+    own refusal stands, rather than a wrong part being smuggled in. Bounded to two classes per
+    call, so one draft cannot become an unbounded fetching run.
+    """
+    if stage not in {"architecture", "bom"}:
+        return candidate
+    from kicraft.design.part_identity import reviewed_parts_for_feature
+    from kicraft.design.part_research import research_uncovered_classes
+
+    demanded: list[str] = []
+    sources = [
+        candidate,
+        semantic_state.get("intent") or {},
+        semantic_state.get("architecture") or {},
+        semantic_state.get("functional_spec") or {},
+    ]
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for row in source.get("obligations") or []:
+            if isinstance(row, dict) and row.get("kind") == "physical":
+                demanded.append(str(row.get("component_class") or ""))
+
+    unanswered = [
+        component_class
+        for component_class in demanded
+        if component_class.strip() and not reviewed_parts_for_feature(component_class)
+    ]
+    if not unanswered:
+        return candidate
+
+    researched = research_uncovered_classes(unanswered, limit=2)
+    if not researched:
+        return candidate
+
+    completed = dict(candidate)
+    completed["assumptions"] = [
+        *(candidate.get("assumptions") or []),
+        *(result.as_record_note() for result in researched),
+    ]
+    return completed
+
+
 def complete_unstated_power_input(brief: str, candidate: dict) -> dict:
     """Default the entry path for a DC supply the brief states but never routes.
 

@@ -2437,6 +2437,51 @@ def _warn_undetectable_mouth(part_dir: Path, libname: str, footprint_name: str) 
     )
 
 
+def _cmd_research_part(args: argparse.Namespace) -> int:
+    """Research a part for a demanded class and record it, so the class stops being a dead end.
+
+    Exit 0 when a part was researched, 1 when the class is already covered or nothing usable was
+    found -- either way the class's own gates stay in charge of what happens next.
+    """
+    from kicraft.design.part_research import DEFAULT_MIN_STOCK, research_part_for_class
+
+    result = research_part_for_class(
+        args.component_class,
+        keywords=tuple(args.keyword or ()),
+        package=args.package,
+        min_stock=DEFAULT_MIN_STOCK if args.min_stock is None else args.min_stock,
+    )
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "ok": result is not None,
+                    "component_class": args.component_class,
+                    "identity": result.identity if result else None,
+                    "lcsc": result.lcsc if result else None,
+                    "symbol": result.symbol if result else None,
+                    "footprint": result.footprint if result else None,
+                    "reason": result.reason if result else "already covered, or nothing qualified",
+                },
+                indent=2,
+            )
+        )
+        return 0 if result else 1
+    if result is None:
+        print(
+            f"no part researched for {args.component_class!r}: the class is already covered, or no "
+            "catalog row matched it with enough stock"
+        )
+        return 1
+    print(f"researched {result.identity} for the class {args.component_class!r}")
+    print(f"  LCSC    : {result.lcsc}")
+    print(f"  symbol  : {result.symbol}")
+    print(f"  footprint: {result.footprint}")
+    print(f"  why     : {result.reason}")
+    print(f"  recorded: {result.as_record_note()}")
+    return 0
+
+
 def _cmd_add_part(args: argparse.Namespace) -> int:
     """Bundle a part for the parts library, from LCSC or from supplied files.
 
@@ -7891,6 +7936,38 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p_add_part.set_defaults(func=_cmd_add_part)
+
+    p_research = sub.add_parser(
+        "research-part",
+        help=(
+            "research a real, in-stock part for a demanded class the parts library cannot answer "
+            "(e.g. schottky-diode), vendor it into the HOME library and record it, so the class is "
+            "covered from then on -- for this project and every later one"
+        ),
+    )
+    p_research.add_argument(
+        "component_class",
+        help="the demanded physical class, in the library's own spelling (e.g. varistor, inductor)",
+    )
+    p_research.add_argument(
+        "--keyword",
+        action="append",
+        default=[],
+        help="extra search phrase (repeatable), e.g. --keyword '40V 3A'",
+    )
+    p_research.add_argument(
+        "--package",
+        default=None,
+        help="require this package substring in the candidate (e.g. SOD-123)",
+    )
+    p_research.add_argument(
+        "--min-stock",
+        type=int,
+        default=None,
+        help="stock floor a candidate must clear (default: the BOM gate's own floor)",
+    )
+    p_research.add_argument("--json", action="store_true", help="machine-readable output")
+    p_research.set_defaults(func=_cmd_research_part)
 
     p_val_part = sub.add_parser(
         "validate-part",

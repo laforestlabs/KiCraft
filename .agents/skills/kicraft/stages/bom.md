@@ -141,6 +141,14 @@ This is the case to handle deliberately — never silently substitute an inferio
 
 The principle: **the BOM must either reference a real, resolvable symbol+footprint pair, or surface the gap explicitly.** Off-board substitutions, downgraded connectors, and "we don't have this so we'll use a header instead" decisions belong as `material: true` questions, not as silent `(defaulted)` assumptions.
 
+Before this stage runs, a demanded **class** with no placeable reviewed part is researched
+automatically: the offline JLC/LCSC catalog is searched, the best in-stock single-device candidate
+is vendored into the machine-wide parts library and recorded as a reviewed part, and the fact is
+written into this stage's own assumptions. `kicraft research-part <class>` runs the same research by
+hand. If a class is *still* unanswered when you draft, that research found nothing worth standing
+behind: keep the demand visible (a `material: true` question, or a `sourcing_note` on the affected
+group) rather than substituting a part that does not implement it.
+
 ## Sourcing memory
 
 Prefer cheap **in-stock** LCSC parts over premium brands — in stock meaning both JLCPCB assembly and lcsc.com retail (see "Stock is a hard gate" above). The `sourcing_note` field is a good place to record LCSC part numbers for stock-library parts; for parts-library entries, the `sourcing` dict in the manifest already carries the canonical vendor IDs.

@@ -73,7 +73,7 @@ Per design step, in order, with the owner watching:
 | 3 | Saving a corrected step recorded "not corrected" | fixed + tested (`F1b`), verified live |
 | 4 | Counts people asked for ("two JST-XH connectors", "two screw terminals") were silently not enforced — 613 of 634 saved boards affected | fixed + tested (`F6`); 186 count lines in the saved history now enforce, 248 name a part class their board's list forgot and are refused instead of dropped |
 | 5 | A supply voltage with no stated way in left the requirement with no part | fixed + tested (`F3`): one 2-position screw terminal, recorded as a defaulted choice |
-| 6 | **A demanded part the library does not carry is refused instead of researched and added** (owner: unacceptable) | **open, owner's priority.** First case: `jst-xh-connector` — the vendored 2-pin XH bundle `b2b-xh-a-lf-sn` (LCSC C158012, symbol + footprint + manifest already in the repo) has no reviewed record, so the parts step cannot use it. |
+| 6 | **A demanded part the library does not carry is refused instead of researched and added** (owner: unacceptable) | **closed 2026-09-25** (`P14`-`P16`). The pipeline now researches the part itself: it searches the offline JLC/LCSC catalog for the demanded class, ranks on the catalog's own description, stock and single-device evidence, vendors the winner's symbol and footprint into the machine-wide parts library, and writes the reviewed record — so the class is covered here and in every later run. It runs before the architecture and parts steps are diagnosed, and by hand as `kicraft research-part <class>`. Verified live on a varistor (10D471K, LCSC C8760, 211854 in stock, real EasyEDA symbol+footprint fetched in 4.4 s). Two seam bugs it exposed are fixed too: the selection lookups could not see 25 already-reviewed portable records (two Schottky order codes among them), and a one-word class query returned nothing from the catalog. |
 | 7 | Nothing checked that a named part can take the stated supply voltage — and the run proved it: the draft powered the DRV8833 (datasheet max 10.8 V) straight from the 18 V input. The generator draws its supply value and its parts independently, so it can ask for an electrically impossible pairing | **fixed** (`F9`): the build-time range check now reads the part's own supply domain (`motor_supply_max_v`), and a new architecture-stage refusal names the rail, the voltage and the limit and asks for a regulator that steps it down or a part rated for the input. Verified firing on the real model reply | **fixed** (`F9`); the stage-level check was DEAD until 2026-09-25 (finding P9: it read `power.rails`/`requirement.supply`, which the architecture response contract derives away before diagnosis) — now live and refusing the 18 V-on-DRV8833 draft |
 | 8 | The debugger's trace is only as good as the flags the commit path forwards; each gap was found by reading the artifact, not by a test | partially fixed (F1/F1b); no test guards the *class* of gap |
 | 9 | Report vocabulary drifts back to internals when the agent is in a hurry | rule restated in §3; needs the owner to keep flagging it |
@@ -104,6 +104,12 @@ When the parts step needs a class the library cannot answer:
 6. Prefer the *same* research path in production (a parts step that can ask for an
    acquisition) over a human adding records by hand — that is the capability this skill
    should make routine.
+
+**Done 2026-09-25:** steps 1-4 are mechanical now (`kicraft research-part <class>`, and
+automatically before the architecture and parts steps are diagnosed). The record it writes claims
+only what was verified — the class match from the catalog's own description, the contacts read from
+the vendored symbol — and leaves every rating absent, because an absent limit means unproven. The
+bundle keeps the `prototype` badge: machine-researched, not human-vetted.
 
 ## 7. Open questions for the owner
 
@@ -187,6 +193,7 @@ fails without it:
 - **P10** the block that owns the support parts was rewritten away: naming the reviewed LED *and*
   the reviewed `status-led` builder still produced a bare LED across the rail (no series resistor,
   and the typed LED current-path check keyed on the family it had been renamed away from).
+- **P14-P16** a demanded class the library could not answer dead-ended: the pipeline could research nothing, the selection lookups could not see 25 already-reviewed portable records, and a one-word class query returned nothing from the catalog. It now researches, vendors and records the part itself (see section 5, item 6).
 - **P11** a stated count ignored by the part actually built: "header pins = 6" produced a 2-way
   header because only the used contacts sized the part; the stated count now sizes it and the
   unused contacts become no-connects.
