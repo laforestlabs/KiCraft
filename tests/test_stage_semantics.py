@@ -2056,6 +2056,7 @@ def test_a_regulator_family_with_no_instance_at_its_voltage_is_retargeted():
             {"id": "reg3v3", "role": "regulator", "family": "tps54331-adjustable",
              "parameters": {"output_voltage": 3.3}},
             {"id": "hbridge_regulator", "role": "regulator", "family": "tps54331-adjustable",
+             "exact_part": "MP1584EN",
              "parameters": {"output_voltage": 10.0},
              "ports": {"input": "+18V", "output": "HBRIDGE_RAIL"}},
         ],
@@ -2065,6 +2066,9 @@ def test_a_regulator_family_with_no_instance_at_its_voltage_is_retargeted():
 
     assert retargeted == ["hbridge_regulator"]
     assert candidate["requirements"][1]["family"] == "ap63205-5v"
+    # The part it named belonged to the family it left: kept, it reads as an explicitly named
+    # part on a family that does not carry it, and the resolver refuses the whole resolution.
+    assert candidate["requirements"][1]["exact_part"] is None
     # 10 V has no orderable family: the rail moves to the nearest buildable one with it.
     assert candidate["rail_voltages"]["HBRIDGE_RAIL"] == 5.0
     assert candidate["requirements"][1]["parameters"]["output_voltage"] == 5.0

@@ -1595,6 +1595,20 @@ def _logic_rails(candidate: dict) -> set[str]:
     return rails
 
 
+def _family_output_voltages() -> dict[str, set[float]]:
+    """The output voltages each registered recipe family actually carries."""
+    from kicraft.design.recipes import registered_recipes
+
+    voltages: dict[str, set[float]] = {}
+    for registered in registered_recipes():
+        definition = getattr(registered, "definition", registered)
+        family = str(getattr(definition, "family", "") or "").strip().casefold()
+        default = (getattr(definition, "parameter_defaults", None) or {}).get("output_voltage")
+        if family and isinstance(default, (int, float)):
+            voltages.setdefault(family, set()).add(float(default))
+    return voltages
+
+
 def _retarget_unbuildable_regulators(candidate: dict) -> list[str]:
     """Point a regulator whose family has no instance at its output voltage at the reviewed one.
 
@@ -1622,6 +1636,15 @@ def _retarget_unbuildable_regulators(candidate: dict) -> list[str]:
         family = str(requirement.get("family") or "")
         if (family, float(target)) in _REVIEWED_RAIL_FAMILIES:
             continue
+        family_key = family.strip().casefold()
+        carried = _family_output_voltages().get(family_key)
+        if carried is None:
+            # Not a recipe family this pipeline manages: whatever is wrong with it is the
+            # checkers' business, not this pass's. Replacing a deliberately weak regulator
+            # would erase the very defect the stage exists to report.
+            continue
+        if any(abs(voltage - float(target)) <= 0.05 for voltage in carried):
+            continue
         reviewed = next(
             (row for row in _REVIEWED_RAIL_FAMILIES if abs(row[1] - float(target)) <= 0.05),
             None,
@@ -1635,6 +1658,12 @@ def _retarget_unbuildable_regulators(candidate: dict) -> list[str]:
                 _REVIEWED_RAIL_FAMILIES, key=lambda row: abs(row[1] - float(target))
             )
         requirement["family"] = reviewed[0]
+        # The exact part the requirement named belonged to the family it was on. Left in place it
+        # reads as an explicitly named part on a family that does not carry it, and the resolver
+        # refuses exactly that ("protected variant 'MP1584EN' has no verified recipe", live
+        # walkthrough 2026-09-25) -- which blocks the whole resolution, not just this requirement.
+        if str(requirement.get("exact_part") or "").strip():
+            requirement["exact_part"] = None
         if clamped:
             requirement["parameters"] = {**parameters, "output_voltage": reviewed[1]}
             for port, net in (requirement.get("ports") or {}).items():
@@ -1648,6 +1677,45 @@ def _retarget_unbuildable_regulators(candidate: dict) -> list[str]:
 
 
 def complete_over_rated_supply(candidate: dict) -> dict:
+    """Give a load part the rail it can actually run on, then resolve what the pass wrote.
+
+    The resolver pass runs on every candidate, not only on the ones this pass edited: a
+    requirement can inherit a part its family no longer carries (live walkthrough, 2026-09-25:
+    `exact_part: MP1584EN` beside `family: ap63205-5v`), which the resolver refuses as a
+    protected variant with no recipe and which blocks the whole resolution.
+    """
+    return _resolve_added_requirements(_complete_load_supply_rails(candidate))
+
+
+def _resolve_added_requirements(completed: dict) -> dict:
+    """Run the recipe resolver, clearing a part the resolver says its family cannot carry."""
+    try:
+        from kicraft.design import models as _models
+        from kicraft.design.recipes import resolve_architecture_recipes
+        from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+
+        blocking = resolve_architecture_recipes(
+            _models.Architecture.model_validate(completed), None
+        ).blocking
+        blocked_ids = {
+            str(row.requirement_id)
+            for row in blocking
+            if getattr(row, "code", "") == "unsupported_protected_variant"
+        }
+        if blocked_ids:
+            for row in completed.get("requirements") or []:
+                if (
+                    isinstance(row, dict)
+                    and str(row.get("id") or "") in blocked_ids
+                    and str(row.get("exact_part") or "").strip()
+                ):
+                    row["exact_part"] = None
+        return apply_architecture_recipe_resolution(completed).model_dump(exclude_none=True)
+    except Exception:  # a resolution problem is the stage's to report, not this pass's
+        return completed
+
+
+def _complete_load_supply_rails(candidate: dict) -> dict:
     """Give an over-rated load part its own regulated rail, before it is diagnosed.
 
     Live walkthrough (2026-09-25, seed 37): the brief states an 18 V DC input and a DRV8833
@@ -1844,14 +1912,6 @@ def complete_over_rated_supply(candidate: dict) -> dict:
         # which is how the 10 V motor rail ended up carrying the 3.3 V divider and failing §9.32
         # (live walkthrough, 2026-09-25). This is the same pass the slot already went through, so
         # every existing requirement keeps its own resolution.
-        try:
-            from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
-
-            completed = apply_architecture_recipe_resolution(completed).model_dump(
-                exclude_none=True
-            )
-        except Exception:  # a resolution problem is the stage's to report, not this pass's
-            pass
         return completed
     # A declared load rail that nothing generates is the same fault one step later: the writer
     # stated the voltage and bound the part, and left the converter out (live draft,
@@ -1929,14 +1989,6 @@ def complete_over_rated_supply(candidate: dict) -> dict:
         # which is how the 10 V motor rail ended up carrying the 3.3 V divider and failing §9.32
         # (live walkthrough, 2026-09-25). This is the same pass the slot already went through, so
         # every existing requirement keeps its own resolution.
-        try:
-            from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
-
-            completed = apply_architecture_recipe_resolution(completed).model_dump(
-                exclude_none=True
-            )
-        except Exception:  # a resolution problem is the stage's to report, not this pass's
-            pass
         return completed
 
     return candidate
