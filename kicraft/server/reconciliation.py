@@ -30,11 +30,11 @@ from typing import Any, Callable, Mapping, Sequence
 
 from kicraft.design.part_identity import (
     _DEMANDED_CLASS_ALIASES,
-    _REVIEWED_FEATURE_VOCABULARY,
     class_key,
     has_reviewed_coverage,
     quantity_class_for,
     reviewed_class_variants,
+    reviewed_feature_vocabulary,
 )
 
 from .decision_layer import DEFAULT_MODEL, Question, decide
@@ -101,7 +101,7 @@ def shortlist_reviewed_classes(demanded: str, limit: int = 12) -> tuple[str, ...
         return ()
     demanded_head = class_key(demanded).split("-")[-1]
     scored: list[tuple[int, str]] = []
-    for feature in sorted(_REVIEWED_FEATURE_VOCABULARY):
+    for feature in sorted(reviewed_feature_vocabulary()):
         if not has_reviewed_coverage(feature):
             continue
         feature_tokens = _tokens(feature.replace("-", " "))

@@ -203,7 +203,7 @@ def _candidate(row: sqlite3.Row) -> dict:
         "joints": row["joints"],
         "type": "Basic" if row["library_type"] == "base" else "Extended",
         "price": price_at(ladder, 1),
-        "description": desc[:120] or None,
+        "description": desc[:200] or None,
     }
 
 
@@ -246,7 +246,11 @@ def search(query: str, limit: int = 10) -> list[dict]:
                                (f"%{q}%", limit)).fetchall()
         if not rows:
             terms = [t for t in re.split(r"\s+", q) if len(t) >= 2]
-            if len(terms) > 1:
+            # A one-word query is a legitimate catalog question ("inductor", "varistor"): the
+            # description carries the category even when no MPN does. Without this the class
+            # searches ran to their MPN paths and returned nothing, so a part the catalog holds
+            # thousands of looked unavailable (live 2026-09-25, part research for a demanded class).
+            if terms and (len(terms) > 1 or len(terms[0]) >= 3):
                 hay = "(mfr || ' ' || description || ' ' || manufacturer || ' ' || package)"
                 cond = " AND ".join([f"{hay} LIKE ?"] * len(terms))
                 rows = con.execute(f"{sel} WHERE {cond} {order}",

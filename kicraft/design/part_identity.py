@@ -2314,10 +2314,108 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
 )
 
 
+# ------------------------------------------------------------- researched records
+# A demanded class the vendored records cannot answer is researched once and stored as data
+# (`kicraft.parts_library.researched_records`), never as another literal in this file: that is
+# what makes it a one-time cost for every later run and every other project on the machine. The
+# merge is cached on the file's own state, so a record added mid-run is visible to the very next
+# check in the same process -- which is what lets one stage research a part and the next select it.
+_RESEARCHED_CACHE: tuple[tuple[object, ...], tuple[ReviewedPart, ...]] | None = None
+
+
+def _researched_parts() -> tuple[ReviewedPart, ...]:
+    """Records this machine researched for itself, cached per state of the record file."""
+    global _RESEARCHED_CACHE
+    from kicraft.parts_library import researched_records
+
+    path = researched_records.records_path()
+    try:
+        stat = path.stat()
+        stamp: tuple[object, ...] = (str(path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        stamp = (str(path), None, None)
+    if _RESEARCHED_CACHE is not None and _RESEARCHED_CACHE[0] == stamp:
+        return _RESEARCHED_CACHE[1]
+
+    rows: list[ReviewedPart] = []
+    for row in researched_records.load(path):
+        try:
+            rows.append(_reviewed_part_from_record(row))
+        except (TypeError, ValueError):
+            # A hand-edited row that cannot be read must not take the pipeline down: it is
+            # skipped, and the demand it was meant to answer is researched again on demand.
+            continue
+    _RESEARCHED_CACHE = (stamp, tuple(rows))
+    return _RESEARCHED_CACHE[1]
+
+
+def _reviewed_part_from_record(row: Mapping[str, object]) -> ReviewedPart:
+    """One stored record as a ReviewedPart. Raises ValueError when it names no part or class."""
+
+    def _texts(key: str) -> tuple[str, ...]:
+        value = row.get(key)
+        if value is None:
+            return ()
+        if isinstance(value, (str, bytes)):
+            return (value.decode() if isinstance(value, bytes) else value,)
+        return tuple(str(item) for item in value)  # type: ignore[union-attr]
+
+    def _mapping(key: str) -> dict:
+        value = row.get(key)
+        return dict(value) if isinstance(value, Mapping) else {}
+
+    identity = str(row.get("identity") or "").strip().casefold()
+    family = str(row.get("family") or "").strip().casefold()
+    if not identity or not family:
+        raise ValueError("a researched record needs an identity and a family")
+    bundle = row.get("bundle")
+    symbol = row.get("symbol")
+    footprint = row.get("footprint")
+    return ReviewedPart(
+        identity=identity,
+        family=family,
+        package=str(row.get("package") or ""),
+        bundle=None if bundle is None else str(bundle),
+        symbol=None if symbol is None else str(symbol),
+        footprint=None if footprint is None else str(footprint),
+        physical_features=frozenset(_texts("physical_features")),
+        function_keys=frozenset(_texts("function_keys")),
+        contacts=_texts("contacts"),
+        manufacturer_sources=_texts("manufacturer_sources"),
+        lcsc=None if row.get("lcsc") is None else str(row["lcsc"]),
+        current_feedback=_mapping("current_feedback"),
+        power_transfer=_mapping("power_transfer"),
+        operating_limits=_mapping("operating_limits"),
+        bootstrap=_mapping("bootstrap"),
+        port_pins={str(key): str(value) for key, value in _mapping("port_pins").items()},
+        support_network=_mapping("support_network"),
+    )
+
+
+def reviewed_inventory() -> tuple[ReviewedPart, ...]:
+    """Every reviewed record the pipeline may select a part from.
+
+    The three vendored sets were kept apart for provenance -- device records, the stock KiCad
+    pairs the lowerers emit, and the validated stock/common identities -- but the selection-facing
+    lookups read only the first. That made 25 portable records invisible, the two reviewed
+    Schottky order codes (B340A, SS34: symbol, footprint and ratings all recorded) among them: a
+    brief that demanded a Schottky was told the library carried no such part while the library
+    carried two. Selection now reads all of them plus anything this machine researched for itself;
+    rows that are not placeable (an identity-only package boundary) are filtered by the caller's
+    own ``is_portable_candidate`` test where a real part is required.
+    """
+    return (
+        *REVIEWED_PARTS,
+        *_STANDARD_LIBRARY_PARTS,
+        *_STOCK_COMMON_PARTS,
+        *_researched_parts(),
+    )
+
+
 def reviewed_part(identity: str) -> ReviewedPart | None:
     """Return the exact reviewed record, never a prefix or family inference."""
     key = identity.strip().casefold()
-    return next((part for part in REVIEWED_PARTS if part.identity == key), None)
+    return next((part for part in reviewed_inventory() if part.identity == key), None)
 
 
 # A small number of reviewed rows are selected by the manufacturer's bare order
@@ -3147,7 +3245,7 @@ _ARDUINO_SHIELD_STACKING_PAIRS = frozenset(
 
 
 # The physical features each stock pattern record below can carry. They live here, not
-# inline in the builder, because _REVIEWED_FEATURE_VOCABULARY (and through it the
+# inline in the builder, because reviewed_feature_vocabulary() (and through it the
 # realizable-class gate) must know every feature a reviewed record can carry without
 # re-deriving these regexes.
 _TERMINAL_PATTERN_FEATURES = frozenset({"screw-terminal", "terminal-block", "power-connector"})
@@ -3344,16 +3442,36 @@ def lowerer_witnesses_physical_class(lowerer_id: str, component_class: str) -> b
 # vocabulary — the BOM work-unit obligation check (_group_has_physical_feature) and the
 # §9.42 physical-realization gate — match a demand against a record's physical_features,
 # so this union is exactly the set of demands some reviewed part can satisfy.
-_REVIEWED_FEATURE_VOCABULARY: frozenset[str] = frozenset().union(
-    _TERMINAL_PATTERN_FEATURES,
-    _HEADER_PATTERN_FEATURES,
-    _LED0805_PATTERN_FEATURES,
-    {_STACKING_HEADER_FEATURE},
-    *(
-        part.physical_features
-        for part in (*REVIEWED_PARTS, *_STANDARD_LIBRARY_PARTS, *_STOCK_COMMON_PARTS)
-    ),
-)
+#
+# Researched records join the union (a class this pipeline answered for itself is covered from
+# then on), and the result is recomputed when the record file changes rather than fixed at import:
+# a class researched mid-run must be visible to the next check in the same process.
+_VOCABULARY_CACHE: tuple[tuple[ReviewedPart, ...], frozenset[str]] | None = None
+
+
+def reviewed_feature_vocabulary() -> frozenset[str]:
+    """Every physical feature a reviewed record carries, researched records included."""
+    global _VOCABULARY_CACHE
+    researched = _researched_parts()
+    if _VOCABULARY_CACHE is not None and _VOCABULARY_CACHE[0] is researched:
+        return _VOCABULARY_CACHE[1]
+    vocabulary = frozenset().union(
+        _TERMINAL_PATTERN_FEATURES,
+        _HEADER_PATTERN_FEATURES,
+        _LED0805_PATTERN_FEATURES,
+        {_STACKING_HEADER_FEATURE},
+        *(
+            part.physical_features
+            for part in (
+                *REVIEWED_PARTS,
+                *_STANDARD_LIBRARY_PARTS,
+                *_STOCK_COMMON_PARTS,
+                *researched,
+            )
+        ),
+    )
+    _VOCABULARY_CACHE = (researched, vocabulary)
+    return vocabulary
 
 
 def realizable_physical_features(component_class: str) -> frozenset[str]:
@@ -3364,7 +3482,7 @@ def realizable_physical_features(component_class: str) -> frozenset[str]:
     at BOM, `E_PHYSICAL_REALIZATION` at commit) and must be re-worded by the stage that
     wrote it, not discovered later as an unrepairable work-unit defect.
     """
-    return canonical_physical_features(component_class) & _REVIEWED_FEATURE_VOCABULARY
+    return canonical_physical_features(component_class) & reviewed_feature_vocabulary()
 
 
 def has_reviewed_coverage(component_class: str) -> bool:
@@ -3576,7 +3694,7 @@ def reviewed_class_heads() -> frozenset[str]:
     a count it should stay out of.
     """
     heads = set()
-    for feature in _REVIEWED_FEATURE_VOCABULARY:
+    for feature in reviewed_feature_vocabulary():
         key = class_key(feature)
         if key:
             heads.add(key.split("-")[-1])
@@ -3720,7 +3838,7 @@ def reviewed_class_variants(component_class: str) -> tuple[str, ...]:
     scored = sorted(
         (
             (-len(tokens), feature)
-            for feature in _REVIEWED_FEATURE_VOCABULARY
+            for feature in reviewed_feature_vocabulary()
             if (tokens := _class_tokens(feature)) and tokens < demanded
         )
     )
@@ -3773,8 +3891,7 @@ def reviewed_parts_for_feature(feature: str) -> tuple[ReviewedPart, ...]:
     """Portable reviewed parts implementing one exact physical feature."""
     key = feature.strip().casefold()
     return tuple(
-        part
-        for part in REVIEWED_PARTS
+        part for part in reviewed_inventory()
         if part.is_portable_candidate and key in part.physical_features
     )
 

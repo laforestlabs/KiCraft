@@ -322,3 +322,25 @@ def test_update_refuses_a_truncated_dump_over_a_working_catalog(tmp_path, monkey
         dest=dest, base_url=site.as_uri() + "/", progress=lambda _msg: None
     )
     assert stats["rows"] == 1_000
+
+
+def test_a_single_word_class_query_reaches_the_description(catalog, monkeypatch):
+    """A one-word catalog question ("Varistors") must not come back empty.
+
+    The description fallback only ran for multi-term queries, so a class search -- exactly what
+    part research asks ("varistor", "inductor") -- walked the MPN paths and returned nothing, and a
+    class the catalog holds thousands of parts for looked unavailable.
+    """
+    db = Path(jlcparts.db_path())
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO jlc_components (lcsc, mfr, package, manufacturer, library_type, "
+                "stock, price, description) VALUES (?,?,?,?,?,?,?,?)",
+                (8760, "10D471K", "插件,P=7.5mm", "VaristorCo", "expand", 211854, "1-:0.02",
+                 "190pF 2.5kA 300V 385V 423V~517V 775V 插件,P=7.5mm Varistors ROHS"))
+    con.commit()
+    con.close()
+
+    rows = jlcparts.search("varistor", limit=5)
+
+    assert [r["lcsc"] for r in rows] == ["C8760"]
+    assert rows[0]["stock"] == 211854

@@ -540,3 +540,36 @@ def test_the_vendored_xh_header_answers_the_jst_xh_demand():
     assert part.identity not in {
         p.identity for p in reviewed_parts_for_feature("screw-terminal")
     }
+
+
+def test_the_selection_lookups_see_every_reviewed_set_and_researched_records(tmp_path, monkeypatch):
+    """Every reviewed record the pipeline may place is selectable, plus what it researched itself.
+
+    The reviewed inventory was split across three literals for provenance, but the selection-facing
+    lookups read only the first: 25 portable records -- the two reviewed Schottky order codes among
+    them, symbol, footprint and ratings all recorded -- were invisible, so a brief demanding a
+    Schottky was told the library carried no such part while the library carried two.
+    """
+    import json
+
+    from kicraft.design import part_identity
+
+    assert part_identity.reviewed_part("b340a") is not None
+    assert part_identity.reviewed_part("B340A").symbol == "Device:D_Schottky"
+    carriers = {part.identity for part in part_identity.reviewed_parts_for_feature("schottky-diode")}
+    assert {"b340a", "ss34"} <= carriers
+    assert part_identity.has_reviewed_coverage("schottky-diode")
+
+    # A record this machine researched is selectable too, exactly like a vendored one.
+    records = tmp_path / "researched.json"
+    monkeypatch.setenv("KICRAFT_RESEARCHED_RECORDS", str(records))
+    records.write_text(json.dumps([{
+        "identity": "researched-diode", "family": "schottky-diode", "package": "SOD-123",
+        "bundle": "schottky-sod123", "symbol": "schottky-sod123:D", "footprint": "schottky-sod123:D",
+        "physical_features": ["schottky-diode"], "contacts": ["1", "2"], "lcsc": "C9999999",
+    }]))
+
+    assert part_identity.reviewed_part("researched-diode").lcsc == "C9999999"
+    assert "researched-diode" in {
+        part.identity for part in part_identity.reviewed_parts_for_feature("schottky-diode")
+    }
