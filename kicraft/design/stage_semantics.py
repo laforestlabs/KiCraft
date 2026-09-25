@@ -1689,6 +1689,7 @@ def complete_over_rated_supply(candidate: dict) -> dict:
             )
             for row in completed.get("sheets") or []
         ]
+        refresh_touched_rail_nets(completed, {wrong_rail, new_rail, source_rail})
         completed["assumptions"] = [
             *(completed.get("assumptions") or []),
             (
@@ -1750,6 +1751,7 @@ def complete_over_rated_supply(candidate: dict) -> dict:
                 ),
             },
         ]
+        refresh_touched_rail_nets(completed, {rail_name, input_rail})
         completed["assumptions"] = [
             *(completed.get("assumptions") or []),
             (
@@ -1762,6 +1764,69 @@ def complete_over_rated_supply(candidate: dict) -> dict:
         return completed
 
     return candidate
+
+
+def refresh_touched_rail_nets(candidate: dict, touched: set[str]) -> None:
+    """Rebuild the derived inter-sheet endpoints of the rails this completion touched.
+
+    The derived nets are computed at decode, before this code runs, so a rebound port leaves the
+    net list naming a rail its sheet no longer binds -- and the commit gate refuses exactly that
+    ("inter-sheet net '+18V' endpoint on sheet 'DUAL H BRIDGE' has no requirement.ports value
+    bound to that exact net name", live walkthrough 2026-09-25). Endpoints are recomputed for the
+    touched rails only: every other net keeps the derivation's own rows.
+    """
+    if not touched:
+        return
+    requirements = [row for row in candidate.get("requirements") or [] if isinstance(row, dict)]
+    bound: dict[str, set[str]] = {}
+    generates: dict[tuple[str, str], bool] = {}
+    for requirement in requirements:
+        sheet = str(requirement.get("sheet") or "")
+        for port, net in (requirement.get("ports") or {}).items():
+            name = str(net)
+            bound.setdefault(name, set()).add(sheet)
+            port_key = str(port).casefold()
+            if port_key.startswith(("output", "vout", "sw")) or port_key in {"out", "vout_sw"}:
+                generates[(sheet, name)] = True
+    nets: list[dict] = []
+    seen: set[str] = set()
+    for row in candidate.get("inter_sheet_nets") or []:
+        if not isinstance(row, dict):
+            nets.append(row)
+            continue
+        name = str(row.get("name") or "")
+        if name not in touched:
+            nets.append(row)
+            continue
+        seen.add(name)
+        previous = {
+            str(endpoint.get("sheet")): str(endpoint.get("direction") or "bidirectional")
+            for endpoint in row.get("endpoints") or []
+            if isinstance(endpoint, dict)
+        }
+        endpoints = []
+        for sheet in sorted(bound.get(name, set())):
+            direction = previous.get(sheet)
+            if direction is None:
+                direction = "output" if generates.get((sheet, name)) else "input"
+            endpoints.append({"sheet": sheet, "direction": direction})
+        if len(endpoints) >= 2:  # a net needs two ends; one sheet is not an inter-sheet net
+            nets.append({"name": name, "endpoints": endpoints})
+    for name in sorted(touched - seen):
+        endpoints = [
+            {
+                "sheet": sheet,
+                "direction": "output" if generates.get((sheet, name)) else "input",
+            }
+            for sheet in sorted(bound.get(name, set()))
+        ]
+        if len(endpoints) >= 2:
+            nets.append({"name": name, "endpoints": endpoints})
+    candidate["inter_sheet_nets"] = nets
+    if isinstance(candidate.get("power_nets"), list):
+        for name in sorted(touched):
+            if bound.get(name) and name not in candidate["power_nets"]:
+                candidate["power_nets"] = [*candidate["power_nets"], name]
 
 
 def _rail_generators(candidate: dict) -> set[str]:

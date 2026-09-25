@@ -1922,3 +1922,71 @@ def test_a_declared_load_rail_nothing_generates_gets_its_converter():
         ],
     }
     assert complete_over_rated_supply(sourced) == sourced
+
+
+def test_the_rail_completion_keeps_the_derived_nets_consistent():
+    """The commit gate reads the derived nets, so a rebound rail must not leave a stale endpoint.
+
+    Live walkthrough (2026-09-25): the commit refused the architecture candidate with
+    "inter-sheet net '+18V' endpoint on sheet 'DUAL H BRIDGE' has no requirement.ports value
+    bound to that exact net name" -- the completion had rebound the bridge's supply but the
+    derived net list is computed at decode, before that. This runs the gate that refused.
+    """
+    from kicraft.design import models
+    from kicraft.design.stage_semantics import complete_over_rated_supply
+    from kicraft.design.synthesis.validation import check_fs_connections_mapped
+
+    candidate = {
+        "topologies": {},
+        "rail_voltages": {"VIN": 18.0, "+3V3": 3.3, "GND": 0.0},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [
+            {"name": "POWER INPUT", "stem": "POWER_INPUT", "role": "power_input", "function": "Input"},
+            {"name": "H BRIDGE", "stem": "H_BRIDGE", "role": "driver", "function": "Drive"},
+        ],
+        "power_nets": ["GND", "VIN"],
+        "inter_sheet_nets": [
+            {"name": "VIN", "endpoints": [{"sheet": "POWER INPUT", "direction": "output"},
+                                          {"sheet": "H BRIDGE", "direction": "input"}]},
+            {"name": "GND", "endpoints": [{"sheet": "POWER INPUT", "direction": "bidirectional"},
+                                          {"sheet": "H BRIDGE", "direction": "bidirectional"}]},
+        ],
+        "requirements": [
+            {"id": "input", "sheet": "POWER INPUT", "role": "power_input", "family": "screw-terminal",
+             "parameters": {"rows": 1}, "ports": {"positive": "VIN", "negative": "GND"},
+             "functional_blocks": ["INPUT"]},
+            {"id": "hbridge", "sheet": "H BRIDGE", "role": "driver",
+             "family": "dual-dc-motor-driver", "exact_part": "DRV8833PWPR", "parameters": {},
+             "ports": {"vm": "VIN", "gnd": "GND"}, "functional_blocks": ["DRIVE"]},
+        ],
+        "assumptions": [],
+    }
+    spec = models.FunctionalSpec.model_validate(
+        {
+            "blocks": [
+                {"name": "INPUT", "category": "power", "purpose": "Input"},
+                {"name": "DRIVE", "category": "drive", "purpose": "Drive"},
+            ],
+            "connections": [
+                {"from_block": "INPUT", "to_block": "DRIVE", "signal_type": "power",
+                 "description": "18 V"}
+            ],
+            "assumptions": [],
+        }
+    )
+
+    fixed = complete_over_rated_supply(candidate)
+    architecture = models.Architecture.model_validate(fixed)
+    result = check_fs_connections_mapped(spec, architecture)
+
+    assert result.ok, result.offenders
+    sheets_by_rail = {
+        net.name: {endpoint.sheet for endpoint in net.endpoints}
+        for net in architecture.inter_sheet_nets
+    }
+    # The bridge sheet no longer speaks for the input rail; the new rail is a two-ended net.
+    assert "H BRIDGE" not in sheets_by_rail["VIN"], sheets_by_rail["VIN"]
+    assert sheets_by_rail["HBRIDGE_RAIL"] == {"H BRIDGE", "HBRIDGE REGULATOR"}
+    # The untouched ground net keeps the derivation's own rows.
+    assert sheets_by_rail["GND"] == {"POWER INPUT", "H BRIDGE"}
