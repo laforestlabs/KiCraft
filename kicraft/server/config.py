@@ -577,6 +577,15 @@ class Settings:
     # disable (the gate is also fail-soft: any infra/parse error skips it).
     enable_electrical_review: bool = True
 
+    # Pre-flight audit of a design-stage draft by Jev (TypeSafe System One, through OpenRouter):
+    # the rulebook the compiler enforces, asked as typed questions before the draft reaches it, so
+    # a finding costs a correction round instead of a contract refusal. One call per architecture
+    # draft, input-only pricing (~$0.0003 on a real draft). Fail-soft: an unavailable auditor
+    # yields no findings and never blocks a stage. Set KICRAFT_DRAFT_AUDIT=0 to disable.
+    enable_draft_audit: bool = True
+    draft_audit_model: str = "typesafe/jev-1.13"
+    draft_audit_confidence: float = 0.7
+
     @classmethod
     def from_env(cls, dotenv: bool = True) -> "Settings":
         if dotenv:
@@ -786,6 +795,14 @@ class Settings:
                 os.environ.get("KICRAFT_REVIEW_TEMPERATURE", cls.review_temperature)
             ),
             enable_electrical_review=_env_bool_default("KICRAFT_ELECTRICAL_REVIEW", True),
+            enable_draft_audit=_env_bool_default("KICRAFT_DRAFT_AUDIT", True),
+            draft_audit_model=(
+                os.environ.get("KICRAFT_DRAFT_AUDIT_MODEL", "").strip()
+                or cls.draft_audit_model
+            ),
+            draft_audit_confidence=float(
+                os.environ.get("KICRAFT_DRAFT_AUDIT_CONFIDENCE", cls.draft_audit_confidence)
+            ),
         )
         # Admin behavior knobs (only when the routing file selected the profile;
         # an ignored file leaves the env-derived values untouched).

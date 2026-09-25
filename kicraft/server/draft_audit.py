@@ -94,6 +94,26 @@ def _rail_voltage(candidate: Mapping[str, Any], rail_name: Any) -> float | None:
         return None
 
 
+def part_alternatives(family: str, exact: str) -> tuple[str, ...]:
+    """Reviewed parts that could implement ``family`` besides ``exact``, or nothing.
+
+    A *class* spelling (``status-led``, ``voltage-regulator``) resolves to the reviewed parts
+    that carry it, so the audit can offer real alternatives. A curated recipe family
+    (``dual-dc-motor-driver``) resolves to no feature at all — its parts belong to the recipe —
+    and an empty list is the honest answer: the deterministic refusal states the remedy instead
+    of the audit asking a degenerate "this part, or none" question.
+    """
+    return tuple(
+        sorted(
+            {
+                str(part.identity)
+                for feature in canonical_physical_features(family)
+                for part in reviewed_parts_for_feature(feature)
+            }
+            - {exact}
+        )
+    )
+
 def architecture_questions(candidate: Mapping[str, Any]) -> list[Question]:
     """The questions this draft is audited with. Empty when the draft offers nothing to ask."""
     questions: list[Question] = []
@@ -200,30 +220,23 @@ def architecture_questions(candidate: Mapping[str, Any]) -> list[Question]:
                         kind="noul",
                     )
                 )
-                questions.append(
-                    Question(
-                        key=f"part_choice_{rid}",
-                        prompt=(
-                            f"Requirement {rid!r} runs on {voltage:g} V but its part {exact!r} is "
-                            f"rated at most {max(row[2] for row in limits):g} V. Which listed part "
-                            "should implement it instead, or is it none of these?"
-                        ),
-                        kind="choice",
-                        options=(
-                            *sorted(
-                                {
-                                    str(part.identity)
-                                    for feature in canonical_physical_features(
-                                        str(requirement.get("family") or "")
-                                    )
-                                    for part in reviewed_parts_for_feature(feature)
-                                }
+                alternatives = part_alternatives(str(requirement.get("family") or ""), exact)
+                # Only worth asking when the catalogue actually offers something else: a
+                # degenerate list ("this part, or none") produces a useless answer, and the
+                # deterministic refusal already states the remedy for a class with no successor.
+                if alternatives:
+                    questions.append(
+                        Question(
+                            key=f"part_choice_{rid}",
+                            prompt=(
+                                f"Requirement {rid!r} runs on {voltage:g} V but its part {exact!r} "
+                                f"is rated at most {max(row[2] for row in limits):g} V. Which "
+                                "listed part should implement it instead, or is it none of these?"
                             ),
-                            exact,
-                            _NOT_LISTED,
-                        ),
+                            kind="choice",
+                            options=(*alternatives, exact, _NOT_LISTED),
+                        )
                     )
-                )
     return questions
 
 
@@ -301,12 +314,16 @@ def audit_architecture(
             )
         elif answer.key.startswith("identity_") and answer.value not in ("", _NOT_LISTED):
             requirement_id = answer.key[len("identity_") :]
+            chosen = str(answer.value)
             findings.append(
                 _finding(
                     "audit_identity_unresolved",
-                    f"Requirement {requirement_id!r} does not name a curated family or reviewed "
-                    "part; the audit reads it as this one.",
-                    [f"audit choice: {answer.value}", f"confidence={answer.confidence:.2f}"],
+                    f"Requirement {requirement_id!r} does not name a curated family or a reviewed "
+                    f"part; the audit reads it as {chosen!r}.",
+                    [
+                        f"set the requirement's family or exact_part to {chosen!r}",
+                        f"confidence={answer.confidence:.2f}",
+                    ],
                 )
             )
         elif answer.key.startswith("part_choice_") and answer.value not in ("", _NOT_LISTED):

@@ -28,7 +28,9 @@ def test_a_draft_earns_a_question_for_each_rule_it_touches():
     keys = [question.key for question in draft_audit.architecture_questions(_draft())]
     assert "usb_socket_rail" in keys          # a USB data edge
     assert "rated_driver" in keys             # 18 V rail on a 10.8 V part
-    assert "part_choice_driver" in keys       # ... with a suggested alternative
+    # No part-choice question for the driver: the catalogue holds no other motor driver, so the
+    # deterministic refusal states the remedy instead of the audit asking a degenerate question.
+    assert "part_choice_driver" not in keys
     assert "identity_jst_a" in keys           # a class no curated family carries
     assert "carrier_exists_jst_a" in keys
     # A draft that breaks nothing gets no questions, so the audit costs nothing.
@@ -68,3 +70,90 @@ def test_an_unavailable_auditor_yields_no_findings(monkeypatch):
 
     monkeypatch.setattr(draft_audit, "decide", boom)
     assert draft_audit.audit_architecture(_draft()) == []
+
+
+def test_driver_runs_the_audit_and_folds_its_findings_into_the_round(tmp_path, monkeypatch):
+    """A Jev finding reaches the correction round, and its call is billed.
+
+    The audit exists so a rule the compiler would refuse outright is instead stated to the
+    corrector, in the same round as the deterministic findings. It is fail-soft: an unreachable
+    auditor contributes nothing.
+    """
+    import json
+
+    from kicraft.server import stage_runtime
+    from kicraft.server.config import Settings
+    from kicraft.server.decision_layer import Answer
+
+    finding = stage_runtime.models.StageDiagnostic(
+        code="audit_part_over_rating",
+        severity="repair_required",
+        message="the driver runs above its part rating",
+        evidence=["confidence=0.90"],
+    )
+    billed: list[tuple] = []
+
+    def fake_audit(candidate, *, model, confidence, recorder):
+        recorder({"input_tokens": 100, "output_tokens": 20, "cost": 0.0001})
+        return [finding]
+
+    monkeypatch.setattr("kicraft.server.draft_audit.audit_architecture", fake_audit)
+
+    class _Guard:
+        def record(self, model, input_tokens, output_tokens, cost_usd, meta=""):
+            billed.append((model, cost_usd))
+
+    class _Client:
+        def __init__(self, replies):
+            self.replies = list(replies)
+            self.calls = []
+            self.guard = _Guard()
+            self.s = Settings(api_key="test")
+
+        def chat(self, messages=None, **kwargs):
+            self.calls.append({**kwargs, "messages": messages})
+            return {
+                "text": json.dumps(self.replies.pop(0)),
+                "reasoning": "",
+                "finish_reason": "stop",
+                "cost_usd": 0.0,
+            }
+
+    draft = {
+        "power": {"rails": {"+3V3": {"voltage": 3.3, "from": None}}},
+        "sheets": [{"name": "MAIN", "stem": "MAIN", "role": "mcu", "function": "the board"}],
+        "requirements": [
+            {
+                "id": "mcu",
+                "sheet": "MAIN",
+                "role": "mcu_core",
+                "family": "generic-header",
+                "parameters": {"rows": 1, "gender": "male"},
+                "functional_blocks": [],
+            }
+        ],
+        "signals": [{"name": "GPIO", "from": "mcu.pin1", "to": "edge:IO"}],
+    }
+    # The finding is `repair_required`, so the driver asks for a correction round: one draft
+    # per scheduled call, and the audit runs on each candidate it sees.
+    client = _Client([draft] * 4)
+
+    result = stage_runtime.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft/state.json", tmp_path
+    )
+
+    assert any(f["code"] == "audit_part_over_rating" for f in result["diagnostics"])
+    assert billed, "the audit's call was never billed"
+    assert {model for model, _cost in billed} == {"typesafe/jev-1.13"}
+    assert {cost for _model, cost in billed} == {0.0001}
+
+
+def test_part_alternatives_are_offered_only_when_the_catalogue_has_them():
+    from kicraft.server.draft_audit import part_alternatives
+
+    # A class spelling resolves to its reviewed parts, so real alternatives can be offered.
+    leds = part_alternatives("status-led", "ltst-c190kgkt")
+    assert leds and "ltst-c190kgkt" not in leds
+
+    # A curated recipe family owns its parts; nothing else can stand in for it.
+    assert part_alternatives("dual-dc-motor-driver", "DRV8833PWPR") == ()

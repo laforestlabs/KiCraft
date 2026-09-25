@@ -1167,6 +1167,45 @@ _MAX_SEMANTIC_REPAIR_ROUNDS = 1
 _MAX_DESIGN_CONTRACT_REPAIR_ROUNDS = 2
 
 
+def _audit_architecture_draft(client, candidate: dict) -> list[models.StageDiagnostic]:
+    """Jev's typed findings about one architecture draft, billed and never blocking.
+
+    The audit is one decision call over the draft (input-only pricing, a fraction of a cent at
+    this size). It is optional by setting, absent by default on a client without settings, and
+    silent on every failure: a stage must not depend on an auditor being reachable.
+    """
+    settings = getattr(client, "s", None)
+    if not getattr(settings, "enable_draft_audit", False):
+        return []
+    from . import draft_audit
+
+    def bill(usage) -> None:
+        guard = getattr(client, "guard", None)
+        record = getattr(guard, "record", None)
+        if not callable(record):
+            return
+        try:
+            record(
+                str(getattr(settings, "draft_audit_model", draft_audit.DEFAULT_MODEL)),
+                usage.get("input_tokens"),
+                usage.get("output_tokens"),
+                float(usage.get("cost") or 0.0),
+                meta={"stage": "architecture", "phase": "draft_audit"},
+            )
+        except Exception:  # accounting must never break a stage
+            pass
+
+    try:
+        return draft_audit.audit_architecture(
+            candidate,
+            model=str(getattr(settings, "draft_audit_model", draft_audit.DEFAULT_MODEL)),
+            confidence=float(getattr(settings, "draft_audit_confidence", 0.7)),
+            recorder=bill,
+        )
+    except Exception:
+        return []
+
+
 def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnostic]) -> str:
     message = _SEMANTIC_REPAIR_MSG.format(
         diagnostics=json.dumps(
@@ -4727,6 +4766,28 @@ def drive_stage(
                     upstream_state=semantic_state,
                     candidate=obj,
                 )
+            # The rulebook, asked of Jev before the compiler refuses the draft: a finding lands in
+            # the same correction round as the deterministic ones instead of costing the stage a
+            # contract refusal. Fail-soft by construction — an unavailable auditor contributes
+            # nothing and never blocks the draft.
+            audit_findings = _audit_architecture_draft(active_client, obj)
+            if audit_findings:
+                diagnostics = [*diagnostics, *audit_findings]
+                provider_diagnostic_codes = [
+                    *provider_diagnostic_codes,
+                    *(finding.code for finding in audit_findings),
+                ]
+                defect_codes.extend(finding.code for finding in audit_findings)
+                if progress:
+                    for finding in audit_findings:
+                        progress(
+                            {
+                                "kind": "stage_diagnostic",
+                                "stage": stage,
+                                "attempt": current_attempt_number,
+                                **finding.model_dump(exclude_none=True),
+                            }
+                        )
         severe = [d for d in diagnostics if d.severity in {"repair_required", "fab_gate"}]
         # The external-load current is a physical fact. Interactive policy parks
         # immediately; automatic policy must fail honestly rather than inventing a
@@ -4871,6 +4932,13 @@ def drive_stage(
                     repaired_diagnostics = diagnose_stage(
                         stage, brief=brief, upstream_state=semantic_state, candidate=repaired
                     )
+                    if stage == "architecture":
+                        # The audit judges the draft that would be adopted, not only the first
+                        # one: a correction is exactly where a rule can be broken again.
+                        repaired_diagnostics = [
+                            *repaired_diagnostics,
+                            *_audit_architecture_draft(active_client, repaired),
+                        ]
                     repaired_severe = [
                         d
                         for d in repaired_diagnostics
