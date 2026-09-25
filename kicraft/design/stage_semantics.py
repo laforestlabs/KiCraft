@@ -1036,6 +1036,47 @@ def _rail_producers(candidate: dict, rails: dict) -> list[dict]:
     return rows
 
 
+def _architecture_rail_voltages(candidate: dict) -> dict[str, float]:
+    """Declared rail voltages, in either candidate shape.
+
+    The model states ``power.rails[name].voltage``; the architecture response contract derives
+    the slot before anything diagnoses it, and the derived shape states the same numbers as
+    ``rail_voltages``. Reading only the first made this family of checks dead in production:
+    a live walkthrough draft (2026-09-25) put the 18 V input straight on a DRV8833's ``vm``
+    (reviewed maximum 10.8 V) and reported zero diagnostics.
+    """
+    voltages: dict[str, float] = {}
+    for name, row in ((candidate.get("power") or {}).get("rails") or {}).items():
+        try:
+            voltages[str(name)] = float((row or {}).get("voltage"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    for name, volts in (candidate.get("rail_voltages") or {}).items():
+        try:
+            voltages.setdefault(str(name), float(volts))
+        except (TypeError, ValueError):
+            continue
+    return voltages
+
+
+def _requirement_supply_rails(requirement: dict) -> list[str]:
+    """Every rail a requirement is powered from, in either candidate shape.
+
+    The model writes ``supply``; the derived shape binds the family's own supply ports
+    (``vm``, ``vdd``, ``input`` …) to their nets in ``ports``. Both are the same fact.
+    """
+    rails: list[str] = []
+    declared = requirement.get("supply")
+    if isinstance(declared, str) and declared:
+        rails.append(declared)
+    from kicraft.design.architecture_intent import _supply_port_name
+
+    for port, net in (requirement.get("ports") or {}).items():
+        if _supply_port_name(str(port).casefold()) and str(net) not in rails:
+            rails.append(str(net))
+    return rails
+
+
 def _architecture_supply_over_rating(candidate: dict) -> list[StageDiagnostic]:
     """A rail a requirement is powered from that exceeds every supply rating its part publishes.
 
@@ -1047,26 +1088,29 @@ def _architecture_supply_over_rating(candidate: dict) -> list[StageDiagnostic]:
     """
     from kicraft.design.part_identity import reviewed_part, reviewed_supply_voltage_limits
 
-    rails = (candidate.get("power") or {}).get("rails") or {}
+    rails = _architecture_rail_voltages(candidate)
     diagnostics: list[StageDiagnostic] = []
     for requirement in candidate.get("requirements") or []:
         if not isinstance(requirement, dict):
-            continue
-        rail_name = requirement.get("supply")
-        if not isinstance(rail_name, str) or not rail_name:
-            continue
-        try:
-            voltage = float((rails.get(rail_name) or {}).get("voltage"))
-        except (TypeError, ValueError):
             continue
         exact = str(requirement.get("exact_part") or "").strip()
         record = reviewed_part(exact) if exact else None
         if record is None:
             continue
         rated = [row for row in reviewed_supply_voltage_limits(record) if row[2] is not None]
-        if not rated or voltage <= max(row[2] for row in rated):
+        if not rated:
             continue
-        label, _low, worst = min(rated, key=lambda row: row[2])
+        allowed = max(row[2] for row in rated)
+        over = [
+            (rail_name, rails[rail_name])
+            for rail_name in _requirement_supply_rails(requirement)
+            if rails.get(rail_name) is not None and rails[rail_name] > allowed
+        ]
+        if not over:
+            continue
+        rail_name, voltage = max(over, key=lambda pair: pair[1])
+        label, _low, worst_row = min(rated, key=lambda row: row[2])
+        worst = worst_row if len(rated) == 1 else allowed
         diagnostics.append(
             _diag(
                 "architecture_supply_exceeds_part_rating",

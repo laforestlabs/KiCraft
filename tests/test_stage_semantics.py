@@ -1511,3 +1511,67 @@ def test_derivation_refusals_reach_the_repair_path_as_diagnostics():
     assert [d.code for d in diagnostics] == ["unknown_signal_requirement"]
     assert diagnostics[0].severity == "repair_required"
     assert "undeclared requirement" in diagnostics[0].message
+
+
+def test_supply_over_rating_reads_the_derived_architecture_shape():
+    """The response contract derives the slot before diagnosis, so the check must read that shape.
+
+    Live walkthrough (2026-09-25, seed 37): an 18 V rail landed on a DRV8833 whose reviewed
+    ``vm`` maximum is 10.8 V, and the stage reported zero diagnostics -- the check read
+    ``power.rails`` and ``requirement.supply``, both of which the derivation removes.
+    """
+    from kicraft.design.stage_semantics import _architecture_supply_over_rating
+
+    derived = {
+        "rail_voltages": {"VIN18": 18.0, "+3V3": 3.3, "GND": 0.0},
+        "requirements": [
+            {
+                "id": "driver",
+                "role": "driver",
+                "family": "dual-dc-motor-driver",
+                "exact_part": "DRV8833PWPR",
+                "ports": {"vm": "VIN18", "gnd": "GND"},
+            },
+            {
+                "id": "regulator",
+                "role": "regulator",
+                "family": "tps54331-adjustable",
+                "exact_part": "TPS54331DDAR",
+                "ports": {"input": "VIN18", "output": "+3V3", "gnd": "GND"},
+            },
+        ],
+    }
+    rows = _architecture_supply_over_rating(derived)
+    assert [row.code for row in rows] == ["architecture_supply_exceeds_part_rating"]
+    assert "vin18" in rows[0].evidence[0].casefold() and "10.8" in rows[0].evidence[0]
+
+    # The model's own shape still works: `supply` against `power.rails`.
+    stated = {
+        "power": {"rails": {"VIN18": {"voltage": 18.0}}},
+        "requirements": [
+            {
+                "id": "driver",
+                "family": "dual-dc-motor-driver",
+                "exact_part": "DRV8833PWPR",
+                "supply": "VIN18",
+            }
+        ],
+    }
+    assert [row.code for row in _architecture_supply_over_rating(stated)] == [
+        "architecture_supply_exceeds_part_rating"
+    ]
+
+    # A part whose reviewed input range covers the rail (TPS54331: 3.5-28 V) is not flagged,
+    # and neither is a rail that is simply not bound to any supply port.
+    within = {
+        "rail_voltages": {"VIN18": 18.0},
+        "requirements": [
+            {
+                "id": "regulator",
+                "role": "regulator",
+                "exact_part": "TPS54331DDAR",
+                "ports": {"input": "VIN18"},
+            }
+        ],
+    }
+    assert _architecture_supply_over_rating(within) == []
