@@ -295,6 +295,36 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         },
     ),
     ReviewedPart(
+        # The demanded `jst-xh-connector` had no reviewed carrier, so a live brief that asked for
+        # two XH connectors could not be built (owner's priority: a demanded part the library does
+        # not carry must be added, not refused). The bundle was already vendored and marked
+        # `production`; this is its reviewed record: real order code, real LCSC id, the datasheet,
+        # its two signal contacts, and the class the demand names.
+        identity="b2b-xh-a(lf)(sn)",
+        family="jst-xh-connector",
+        package="JST 1x02, 2.50 mm-pitch, top-entry shrouded XH header",
+        bundle="b2b-xh-a-lf-sn",
+        symbol="b2b-xh-a-lf-sn:B2B-XH-A",
+        footprint="b2b-xh-a-lf-sn:CONN-TH_B2B-XH-A-LF-SN",
+        physical_features=frozenset(
+            {"jst-xh-connector", "wire-to-board-connector", "power-connector"}
+        ),
+        contacts=("1", "2"),
+        manufacturer_sources=(
+            "https://lcsc.com/product-detail/XH-Connectors_JST_B2B-XH-A-LF-SN_XHsocket-1-2P-"
+            "pitch2-5mm_C158012.html",
+        ),
+        lcsc="C158012",
+        operating_limits={
+            "pitch_mm": 2.5,
+            "positions": 2,
+            "voltage_v": 250,
+            "current_a": 3,
+            "temperature_min_c": -25,
+            "temperature_max_c": 85,
+        },
+    ),
+    ReviewedPart(
         identity="wj126v-5.0-03p-14-00a",
         family="screw-terminal",
         package="KANGNEX 1x03, 5.00 mm-pitch, through-hole screw terminal",

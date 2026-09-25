@@ -503,3 +503,40 @@ def test_quantity_subject_binds_only_the_class_it_names(subject, component_class
     from kicraft.design.part_identity import quantity_subject_binds
 
     assert quantity_subject_binds(subject, component_class) is binds
+
+
+def test_the_vendored_xh_header_answers_the_jst_xh_demand():
+    """Plan section 6, steps 1 and 4: the vendored part gets its reviewed record, and it is the
+    only carrier of the demanded class.
+
+    The seed-37 walkthrough's brief asked for two JST-XH connectors; the demand had no reviewed
+    carrier, so the parts step could not build it (recorded as the owner's priority). The bundle
+    `b2b-xh-a-lf-sn` was already vendored and marked `production`, so this record states its real
+    order code, its LCSC id, the datasheet, its two signal contacts and the class the demand names.
+    """
+    from kicraft.design.part_identity import (
+        has_reviewed_coverage,
+        reviewed_part,
+        reviewed_parts_for_feature,
+    )
+
+    part = reviewed_part("B2B-XH-A(LF)(SN)")
+    assert part is not None, "the vendored part must resolve by its real order code"
+    assert part.is_portable_candidate
+    assert part.bundle == "b2b-xh-a-lf-sn"
+    assert part.symbol == "b2b-xh-a-lf-sn:B2B-XH-A"
+    assert part.footprint == "b2b-xh-a-lf-sn:CONN-TH_B2B-XH-A-LF-SN"
+    assert "jst-xh-connector" in part.physical_features
+    assert part.contacts == ("1", "2")
+    assert part.lcsc == "C158012"
+    assert part.manufacturer_sources, "the record must carry its provenance"
+
+    # The demand is answered, and by exactly this part -- a different connector cannot answer it,
+    # which is what keeps a 2-contact XH demand from being filled by something else.
+    assert has_reviewed_coverage("jst-xh-connector")
+    assert tuple(p.identity for p in reviewed_parts_for_feature("jst-xh-connector")) == (
+        part.identity,
+    )
+    assert part.identity not in {
+        p.identity for p in reviewed_parts_for_feature("screw-terminal")
+    }

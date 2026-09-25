@@ -54,11 +54,11 @@ def test_shortlists_are_closed_and_deterministic():
 def test_a_confident_reading_rewrites_the_demanded_class():
     candidate = {
         "obligations": [
-            {"kind": "physical", "original_obligation_id": "x", "component_class": "jst-xh-connector"}
+            {"kind": "physical", "original_obligation_id": "x", "component_class": "actuator-driver"}
         ],
         "assumptions": [],
     }
-    listing = shortlist_reviewed_classes("jst-xh-connector")
+    listing = shortlist_reviewed_classes("actuator-driver")
     assert listing, "an uncovered class with reviewed neighbours still gets a closed list"
     expected = listing[0]
     decider = _decider({"class_0": (expected, 0.9)})
@@ -72,11 +72,11 @@ def test_a_confident_reading_rewrites_the_demanded_class():
 def test_a_low_confidence_or_kept_class_is_left_alone():
     candidate = {
         "obligations": [
-            {"kind": "physical", "original_obligation_id": "x", "component_class": "jst-xh-connector"}
+            {"kind": "physical", "original_obligation_id": "x", "component_class": "actuator-driver"}
         ],
         "assumptions": [],
     }
-    candidate_option = shortlist_reviewed_classes("jst-xh-connector")[0]
+    candidate_option = shortlist_reviewed_classes("actuator-driver")[0]
     for script in ({"class_0": (candidate_option, 0.4)}, {"class_0": (KEEP, 0.99)}):
         completed, notes = resolve_demanded_classes(candidate, decider=_decider(script))
         assert completed == candidate and notes == []
@@ -122,7 +122,7 @@ def test_a_group_that_implements_the_class_is_named_when_it_is_the_only_one():
     ]
     decider = _decider({"implements_0": (True, 0.88), "implements_1": (False, 0.95)})
 
-    notes = reconcile_bom_classes(["jst-xh-connector"], groups, decider=decider)
+    notes = reconcile_bom_classes(["actuator-driver"], groups, decider=decider)
 
     assert len(notes) == 1
     assert "jst_a" in notes[0] and "bind the group" in notes[0]
@@ -136,10 +136,10 @@ def test_an_ambiguous_or_unsure_group_recommends_nothing():
         SimpleNamespace(id="b", value="y", symbol="S2", footprint="F", mpn=None, quantity=1),
     ]
     both = _decider({"implements_0": (True, 0.9), "implements_1": (True, 0.9)})
-    assert reconcile_bom_classes(["jst-xh-connector"], groups, decider=both) == []
+    assert reconcile_bom_classes(["actuator-driver"], groups, decider=both) == []
 
     unsure = _decider({"implements_0": (True, 0.3), "implements_1": (False, 0.9)})
-    assert reconcile_bom_classes(["jst-xh-connector"], groups, decider=unsure) == []
+    assert reconcile_bom_classes(["actuator-driver"], groups, decider=unsure) == []
 
 
 def test_a_free_text_contact_is_read_as_a_published_pin():
@@ -177,7 +177,7 @@ def test_an_unreachable_decider_leaves_the_candidate_alone(monkeypatch):
 
     candidate = {
         "obligations": [
-            {"kind": "physical", "original_obligation_id": "x", "component_class": "jst-xh-connector"}
+            {"kind": "physical", "original_obligation_id": "x", "component_class": "actuator-driver"}
         ],
         "assumptions": [],
     }

@@ -1359,6 +1359,15 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
             "exists. Never move the part's supply onto the logic rail, and never delete the "
             "rail, the requirement or the binding to clear this."
         )
+    if any(d.code == "architecture_obligation_family_mismatch" for d in diagnostics):
+        message += (
+            " For each flagged requirement, use a family that realizes the class its obligation "
+            "names: the reviewed carrier's family, or the carrier's exact part. When that carrier "
+            "is not a curated recipe, state its interface with `declared_ports` (one entry per pin "
+            "function, with the contact the part's own data names). Never keep a generic connector "
+            "family for a specifically demanded class: the parts stage may not reopen a "
+            "requirement family, so the design would dead-end there."
+        )
     if any(d.code == "architecture_drive_shares_logic_rail" for d in diagnostics):
         message += (
             " Do not restructure the power tree to satisfy this: keep the part's supply binding "

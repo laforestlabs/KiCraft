@@ -1990,3 +1990,45 @@ def test_the_rail_completion_keeps_the_derived_nets_consistent():
     assert sheets_by_rail["HBRIDGE_RAIL"] == {"H BRIDGE", "HBRIDGE REGULATOR"}
     # The untouched ground net keeps the derivation's own rows.
     assert sheets_by_rail["GND"] == {"POWER INPUT", "H BRIDGE"}
+
+
+def test_a_requirement_family_that_cannot_implement_its_class_is_refused_here():
+    """The parts stage may not reopen a family, so the mismatch is refused where it is chosen.
+
+    Live walkthrough (2026-09-25): the architecture gave the JST-XH connector requirements the
+    generic `pin-header` family while they carried the `jst-xh-connector` obligation; the BOM then
+    failed four rounds with "missing-requirement-implementation=['motor_a']".
+    """
+    from kicraft.design.stage_semantics import _architecture_obligation_family_mismatch
+
+    obligation = {"kind": "physical", "original_obligation_id": "xh",
+                  "component_class": "jst-xh-connector"}
+
+    def candidate(family: str, component_class: str = "jst-xh-connector") -> dict:
+        return {
+            "requirements": [
+                {
+                    "id": "motor_a",
+                    "sheet": "ACTUATOR CONNECTOR 1",
+                    "role": "connector",
+                    "family": family,
+                    "exact_part": None,
+                    "parameters": {},
+                    "ports": {},
+                    "obligations": [{**obligation, "component_class": component_class}],
+                }
+            ]
+        }
+
+    rows = _architecture_obligation_family_mismatch(candidate("pin-header"))
+    assert [row.code for row in rows] == ["architecture_obligation_family_mismatch"]
+    assert "jst-xh-connector" in rows[0].evidence[0]
+
+    # The carrier's own family, or its exact part, is the fix; an uncovered class stays legitimate.
+    assert _architecture_obligation_family_mismatch(candidate("jst-xh-connector")) == []
+    named = candidate("pin-header")
+    named["requirements"][0]["exact_part"] = "B2B-XH-A(LF)(SN)"
+    assert _architecture_obligation_family_mismatch(named) == []
+    assert _architecture_obligation_family_mismatch(
+        candidate("pin-header", component_class="gps-module")
+    ) == []

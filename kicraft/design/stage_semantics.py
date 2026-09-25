@@ -1512,6 +1512,58 @@ def _corrected_load_supply_rows(
 _OVER_RATED_REGULATOR_FAMILY = "tps54331-adjustable"
 
 
+def _architecture_obligation_family_mismatch(candidate: dict) -> list[StageDiagnostic]:
+    """A requirement's family cannot implement a part class that requirement claims.
+
+    Live walkthrough (2026-09-25): the architecture gave the two JST-XH connector requirements the
+    generic lowerer family ``pin-header`` while they carried the ``jst-xh-connector`` obligation.
+    The parts stage may not reopen a requirement family ("Architecture is binding"), so the BOM
+    could only fail: four repair rounds, then
+    "work unit bom-r001 invalid: missing-requirement-implementation=['motor_a']", unit repair
+    exhausted. The family is still the writer's to choose *here*, so it is refused here.
+
+    A class with no reviewed carrier is legitimate and is left alone: the intent contract says a
+    class the library does not cover yet may be named plainly, and the parts step resolves it.
+    """
+    from kicraft.design.part_identity import reviewed_parts_for_feature
+
+    diagnostics: list[StageDiagnostic] = []
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        family = str(requirement.get("family") or "")
+        exact = str(requirement.get("exact_part") or "").strip().casefold()
+        for obligation in requirement.get("obligations") or []:
+            if not isinstance(obligation, dict) or obligation.get("kind") != "physical":
+                continue
+            component_class = str(obligation.get("component_class") or "")
+            if not component_class:
+                continue
+            carriers = reviewed_parts_for_feature(component_class)
+            if not carriers:
+                continue
+            if family in {part.family for part in carriers} or exact in {
+                part.identity for part in carriers
+            }:
+                continue
+            diagnostics.append(
+                _diag(
+                    "architecture_obligation_family_mismatch",
+                    "repair_required",
+                    "A requirement's family cannot implement the part class it claims.",
+                    [
+                        f"requirement {requirement.get('id')!r} claims {component_class!r} but its "
+                        f"family {family!r} cannot realize it "
+                        f"(exact_part={requirement.get('exact_part')!r}); the reviewed carrier(s) "
+                        f"are {sorted(part.identity for part in carriers)} in family "
+                        f"{sorted({part.family for part in carriers})} — name that family (with "
+                        "`declared_ports` for the carrier's interface) or that exact part"
+                    ],
+                )
+            )
+    return diagnostics
+
+
 def _logic_rails(candidate: dict) -> set[str]:
     """The rails that power the logic this board is controlled by (MCU, sensors, buses)."""
     from kicraft.design.architecture_intent import _supply_port_name
@@ -1975,6 +2027,7 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     diagnostics = architecture_power_requirement_diagnostics(upstream, candidate)
     diagnostics.extend(_architecture_supply_over_rating(candidate))
     diagnostics.extend(_architecture_drive_on_logic_rail(upstream, candidate))
+    diagnostics.extend(_architecture_obligation_family_mismatch(candidate))
     diagnostics.extend(_architecture_derivation_diagnostics(upstream, candidate))
     sheets = candidate.get("sheets") or []
     for sheet in sheets:
