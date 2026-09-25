@@ -1506,6 +1506,16 @@ def _corrected_load_supply_rows(
     return out
 
 
+#: Reviewed converter families by the rail each one produces, for a load that needs a rail of its
+#: own. Every entry is a recipe the library carries with the divider its own data specifies, so the
+#: pipeline picks a rail it can actually build and never invents a voltage: the highest one that
+#: fits inside the part's rated range (a DRV8833's 2.7-10.8 V vm picks 10.0 V, the MP1584 instance).
+_REVIEWED_RAIL_FAMILIES: tuple[tuple[str, float], ...] = (
+    ("mp1584-10v", 10.0),
+    ("ap63205-5v", 5.0),
+    ("tps54331-adjustable", 3.3),
+)
+
 #: The reviewed adjustable buck the pipeline uses when a load needs its own regulated rail
 #: (3.5-28 V input, adjustable output). Named here, not chosen per design: it is the library's
 #: general-purpose converter family, and the assumption records the choice.
@@ -1582,6 +1592,44 @@ def _logic_rails(candidate: dict) -> set[str]:
     return rails
 
 
+def _retarget_unbuildable_regulators(candidate: dict) -> list[str]:
+    """Point a regulator whose family has no instance at its output voltage at the reviewed one.
+
+    A requirement can name an adjustable family and a voltage that family is not registered for
+    (live walkthrough 2026-09-25: `tps54331-adjustable` at 10.0 V, whose only instance is 3.3 V).
+    The resolver then falls back to the instance's default, so the rail's feedback divider comes
+    out sized for the wrong voltage and §9.32 refuses the commit. The reviewed family at that
+    voltage is the same design intent, built from parts whose own data sizes it correctly.
+    """
+    retargeted: list[str] = []
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict) or str(requirement.get("role") or "") != "regulator":
+            continue
+        parameters = requirement.get("parameters") or {}
+        target = parameters.get("output_voltage")
+        if not isinstance(target, (int, float)):
+            # The derived shape states the same fact as the rail this part's output port feeds.
+            for port, net in (requirement.get("ports") or {}).items():
+                port_key = str(port).casefold()
+                if port_key.startswith(("output", "vout", "sw")) or port_key == "out":
+                    target = (candidate.get("rail_voltages") or {}).get(str(net))
+                    break
+        if not isinstance(target, (int, float)):
+            continue
+        family = str(requirement.get("family") or "")
+        if (family, float(target)) in _REVIEWED_RAIL_FAMILIES:
+            continue
+        reviewed = next(
+            (row for row in _REVIEWED_RAIL_FAMILIES if abs(row[1] - float(target)) <= 0.05),
+            None,
+        )
+        if reviewed is None:
+            continue
+        requirement["family"] = reviewed[0]
+        retargeted.append(str(requirement.get("id") or ""))
+    return retargeted
+
+
 def complete_over_rated_supply(candidate: dict) -> dict:
     """Give an over-rated load part its own regulated rail, before it is diagnosed.
 
@@ -1603,6 +1651,17 @@ def complete_over_rated_supply(candidate: dict) -> dict:
         reviewed_supply_voltage_limits,
     )
 
+    retargeted = _retarget_unbuildable_regulators(candidate)
+    if retargeted:
+        candidate["assumptions"] = [
+            *(candidate.get("assumptions") or []),
+            (
+                "regulator requirement(s) "
+                + ", ".join(sorted(retargeted))
+                + " moved to the reviewed converter family registered at that output voltage, "
+                "because the named family has no instance there (defaulted)"
+            ),
+        ]
     rails = _architecture_rail_voltages(candidate)
     if not rails:
         return candidate
@@ -1656,8 +1715,18 @@ def complete_over_rated_supply(candidate: dict) -> dict:
         ):
             continue
         label, low, _high = min(limits, key=lambda row: row[2])
-        floor = float(int(allowed)) if int(allowed) >= float(low or 0.0) else allowed
-        voltage = max(float(low or 0.0), min(floor, allowed))
+        # A rail the library can build: the highest reviewed family that fits the part's range.
+        reviewed = next(
+            (
+                (family, volts)
+                for family, volts in _REVIEWED_RAIL_FAMILIES
+                if float(low or 0.0) <= volts <= allowed
+            ),
+            None,
+        )
+        if reviewed is None:
+            continue
+        converter_family, voltage = reviewed
         new_rail = f"{str(requirement.get('id') or 'load').upper()}_RAIL"
         converter_id = f"{str(requirement.get('id') or 'load')}_regulator"
         sheet_name = f"{str(requirement.get('id') or 'load').upper()} REGULATOR"
@@ -1686,7 +1755,7 @@ def complete_over_rated_supply(candidate: dict) -> dict:
                 "id": converter_id,
                 "sheet": sheet_name,
                 "role": "regulator",
-                "family": _OVER_RATED_REGULATOR_FAMILY,
+                "family": converter_family,
                 "parameters": {"output_voltage": voltage},
                 "ports": {"input": source_rail, "output": new_rail, "gnd": "GND"},
                 "functional_blocks": list(requirement.get("functional_blocks") or []),
@@ -1752,6 +1821,20 @@ def complete_over_rated_supply(candidate: dict) -> dict:
                 f"{source_rail} input stays the board input only (defaulted)"
             ),
         ]
+        # The added requirement is a recipe requirement like any other, and the recipe's owned
+        # parts -- an adjustable regulator's feedback divider, its compensation network -- exist
+        # only after the resolver's pass. Without it the parts unit drafts them from scratch,
+        # which is how the 10 V motor rail ended up carrying the 3.3 V divider and failing §9.32
+        # (live walkthrough, 2026-09-25). This is the same pass the slot already went through, so
+        # every existing requirement keeps its own resolution.
+        try:
+            from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+
+            completed = apply_architecture_recipe_resolution(completed).model_dump(
+                exclude_none=True
+            )
+        except Exception:  # a resolution problem is the stage's to report, not this pass's
+            pass
         return completed
     # A declared load rail that nothing generates is the same fault one step later: the writer
     # stated the voltage and bound the part, and left the converter out (live draft,
@@ -1774,9 +1857,18 @@ def complete_over_rated_supply(candidate: dict) -> dict:
         ]
         if not consumers or input_rail is None or input_rail == rail_name:
             continue
+        # The rail is built by a family the library carries: the nearest reviewed output voltage,
+        # which is also the rail's voltage (a declared 10.8 V has no reviewed instance; 10.0 V
+        # does, and it is inside any part that accepts 10.8 V).
+        converter_family, rail_voltage = min(
+            _REVIEWED_RAIL_FAMILIES, key=lambda row: abs(row[1] - rail_voltage)
+        )
         converter_id = f"{rail_name.strip('+').replace(' ', '_').lower()}_regulator"
         sheet_name = f"{rail_name.strip('+').upper()} REGULATOR"
         completed = dict(candidate)
+        rail_voltages = dict(completed.get("rail_voltages") or {})
+        rail_voltages[rail_name] = rail_voltage
+        completed["rail_voltages"] = rail_voltages
         completed["sheets"] = [dict(row) for row in completed.get("sheets") or []]
         completed["sheets"].append(
             {
@@ -1795,7 +1887,7 @@ def complete_over_rated_supply(candidate: dict) -> dict:
                 "id": converter_id,
                 "sheet": sheet_name,
                 "role": "regulator",
-                "family": _OVER_RATED_REGULATOR_FAMILY,
+                "family": converter_family,
                 "parameters": {"output_voltage": rail_voltage},
                 "ports": {"input": input_rail, "output": rail_name, "gnd": "GND"},
                 "functional_blocks": list(
@@ -1807,12 +1899,27 @@ def complete_over_rated_supply(candidate: dict) -> dict:
         completed["assumptions"] = [
             *(completed.get("assumptions") or []),
             (
-                f"{rail_name} ({rail_voltage:g} V) is generated by {converter_id}, a reviewed "
-                f"adjustable buck fed from the {input_rail} input, because the design declared "
+                f"{rail_name} ({rail_voltage:g} V) is generated by {converter_id} "
+                f"({converter_family}, a reviewed buck) fed from the {input_rail} input, because "
+                f"the design declared "
                 f"the rail and bound {consumers[0].get('id')} to it without naming a source "
                 "(defaulted)"
             ),
         ]
+        # The added requirement is a recipe requirement like any other, and the recipe's owned
+        # parts -- an adjustable regulator's feedback divider, its compensation network -- exist
+        # only after the resolver's pass. Without it the parts unit drafts them from scratch,
+        # which is how the 10 V motor rail ended up carrying the 3.3 V divider and failing §9.32
+        # (live walkthrough, 2026-09-25). This is the same pass the slot already went through, so
+        # every existing requirement keeps its own resolution.
+        try:
+            from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+
+            completed = apply_architecture_recipe_resolution(completed).model_dump(
+                exclude_none=True
+            )
+        except Exception:  # a resolution problem is the stage's to report, not this pass's
+            pass
         return completed
 
     return candidate

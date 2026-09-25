@@ -823,44 +823,6 @@ def _complete_terminal_returns(payload: dict) -> dict:
     return payload
 
 
-def _drop_derived_edge_connectors(payload: dict) -> dict:
-    """Drop a connector requirement the compiler writes itself for an edge the draft names.
-
-    "duplicate_edge_connector: edge 'USB' would need connector 'mcu_usb', which already exists"
-    (live walkthrough 2026-09-25): a native-USB socket is compiler-created from the data pair sent
-    to that edge, so a requirement declaring that socket is a duplicate. A requirement a signal
-    still references is kept -- dropping it would leave the signal dangling.
-    """
-    signals = [row for row in payload.get("signals") or [] if isinstance(row, dict)]
-    if not any(
-        str(reference).startswith("edge:")
-        for signal in signals
-        for reference in ([signal.get("to")] if not isinstance(signal.get("to"), list) else signal.get("to"))
-        if reference is not None
-    ):
-        return payload
-    referenced_ids = set()
-    for signal in signals:
-        for reference in [signal.get("from"), *(
-            signal.get("to") if isinstance(signal.get("to"), list) else [signal.get("to")]
-        )]:
-            text = str(reference or "")
-            if "." in text and not text.startswith("edge:"):
-                referenced_ids.add(text.split(".", 1)[0])
-    kept = [
-        row
-        for row in payload.get("requirements") or []
-        if not (
-            isinstance(row, dict)
-            and _token(str(row.get("family") or "")) == _token(_DERIVED_SOCKET_FAMILY)
-            and str(row.get("id")) not in referenced_ids
-        )
-    ]
-    if len(kept) != len(payload.get("requirements") or []):
-        payload["requirements"] = kept
-    return payload
-
-
 def complete_architecture_payload(payload: dict) -> dict:
     """Drop the duplicate power statements the deterministic contracts can only refuse.
 
@@ -880,7 +842,6 @@ def complete_architecture_payload(payload: dict) -> dict:
     # Family and interface repairs first: they change what the later steps see.
     _adopt_carrier_families(payload)
     _complete_terminal_returns(payload)
-    _drop_derived_edge_connectors(payload)
     requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
     signals = [row for row in payload.get("signals") or [] if isinstance(row, dict)]
     if not requirements or not signals:

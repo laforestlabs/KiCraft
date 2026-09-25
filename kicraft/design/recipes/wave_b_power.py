@@ -659,6 +659,7 @@ def _buck(
     feedback_bottom: str = "22k",
     fixed_output: bool = False,
     enable_divider: bool = False,
+    no_connect_pins: tuple[str, ...] = (),
 ) -> RecipeDefinition:
     parts = [
         _part("converter", "U", part, symbol, footprint, mpn=part),
@@ -771,6 +772,9 @@ def _buck(
         allowed={"output_voltage": (output_voltage,)},
         parts=tuple(parts),
         pins=tuple(pins),
+        no_connects=tuple(
+            NoConnect(role="converter", pin=pin) for pin in no_connect_pins
+        ),
         source_url=datasheet,
         assertions=(
             Assertion(
@@ -816,6 +820,39 @@ AP63205_5V = _buck(
     rated_output_current_a=2.0,
     fixed_output=True,
 )
+MP1584_10V = _buck(
+    # The motor rail needs a converter above the 3.3/5.0 logic instances and inside a DRV8833's
+    # 10.8 V limit (live walkthrough, 2026-09-25). The MP1584EN bundle is vendored and marked
+    # production (28 V in, 0.8-25 V out, 3 A); its own notes give Vfb = 0.8 V, so the divider is
+    # 100k/8.66k = 10.04 V. Without this instance the family the demand named resolved to its 3.3 V
+    # default and the motor rail came out carrying the 3.3 V divider, which §9.32 refuses.
+    recipe="mp1584-10v@1",
+    family="mp1584-10v",
+    part="MP1584EN",
+    symbol="mp1584en:MP1584EN",
+    footprint="mp1584en:SOIC-8_L4.9-W3.9-P1.27-LS6.0-BL-EP3.3",
+    datasheet="https://www.lcsc.com/datasheet/C454188.pdf",
+    pins_map={
+        "vin": "7",
+        "gnd": "5",
+        "sw": "1",
+        "fb": "4",
+        "en": "2",
+        "comp": "3",
+        "boot": "8",
+        "ep": "9",
+    },
+    # FREQ is left open: the part runs at its default switching frequency.
+    no_connect_pins=("6",),
+    output_voltage=10.0,
+    rated_output_current_a=3.0,
+    inductor="15uH",
+    feedback_top="100k",
+    feedback_bottom="8.66k",
+    enable_divider=True,
+)
+
+
 TPS54331_ADJUSTABLE = _buck(
     recipe="tps54331-adjustable@1",
     family="tps54331-adjustable",
@@ -887,4 +924,5 @@ WAVE_B_POWER_RECIPES = (
     AP63203_3V3,
     AP63205_5V,
     TPS54331_ADJUSTABLE,
+    MP1584_10V,
 )

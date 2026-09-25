@@ -681,6 +681,63 @@ def _group_matches_requirement_identity(group: BomComponentGroup, requirement: d
     return record is not None and record.identity == exact_reviewed.identity
 
 
+def _keep_one_connector_group(
+    groups: list[BomComponentGroup],
+    unit: StageWorkUnit,
+    prompt_state: dict,
+) -> tuple[list[BomComponentGroup], int]:
+    """Keep one connector group per connector requirement.
+
+    A connector requirement is one physical connector; its declared ports are that connector's
+    contacts. Live walkthrough (2026-09-25): each actuator sheet emitted two JST-XH parts (J4/J5
+    and J6/J7) -- four connectors for a brief that names two -- because the requirement's two
+    contacts read as two instances. The quantity gate is a minimum, so nothing refused it.
+    """
+    requirement_ids = tuple(getattr(unit, "requirement_ids", ()) or ())
+    if not requirement_ids:
+        return groups, 0
+    requirements = {
+        str(row.get("id")): row
+        for row in (prompt_state.get("architecture") or {}).get("requirements") or []
+        if isinstance(row, dict)
+    }
+    roles = {str((requirements.get(rid) or {}).get("role") or "") for rid in requirement_ids}
+    if roles != {"connector"}:
+        return groups, 0
+    kept: list[BomComponentGroup] = []
+    seen: set[tuple[str, str]] = set()
+    for group in groups:
+        key = (str(group.symbol), str(group.footprint))
+        if group.reference_prefix == "J" and key in seen:
+            continue
+        seen.add(key)
+        kept.append(group)
+    return kept, len(groups) - len(kept)
+
+
+def _adopt_reviewed_library_pair(group: BomComponentGroup) -> BomComponentGroup:
+    """Use the reviewed record's own symbol/footprint for a group that names its part.
+
+    The contract requires the curated pair verbatim, and the realization gate compares exactly
+    that pair, so a group carrying the right MPN on a stock symbol or footprint counts as *no*
+    implementation. Live walkthrough (2026-09-25): the parts unit emitted
+    ``status_led=Device:LED mpn=LTST-C190KGKT`` with a pair the record does not publish, the
+    gate reported "requires 1 real led, found 0" for seven repair rounds, and the reconciler
+    could only recommend the binding it was not allowed to make. The MPN is the design's own
+    source of truth for the part, so the pair comes from that record.
+    """
+    from kicraft.design.part_identity import reviewed_part
+
+    if not group.mpn:
+        return group
+    record = reviewed_part(str(group.mpn))
+    if record is None or not record.is_portable_candidate:
+        return group
+    if (group.symbol, group.footprint) == (record.symbol, record.footprint):
+        return group
+    return group.model_copy(update={"symbol": record.symbol, "footprint": record.footprint})
+
+
 def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
     """Whether one BOM group implements a demanded physical class.
 
@@ -1712,11 +1769,22 @@ def _validate_bom_unit(
 
     groups = _normalize_curated_group_identities(
         [
-            BomComponentGroup.model_validate(_normalize_bom_optional_metadata(group))
+            _adopt_reviewed_library_pair(
+                BomComponentGroup.model_validate(_normalize_bom_optional_metadata(group))
+            )
             for group in (payload.get("groups") or [])
         ]
     )
+    groups, dropped_connectors = _keep_one_connector_group(groups, unit, prompt_state)
     assumptions = [str(value) for value in payload.get("assumptions") or []]
+    if dropped_connectors:
+        assumptions = [
+            *assumptions,
+            (
+                f"one connector per connector requirement: {dropped_connectors} duplicate "
+                "connector group(s) dropped from this unit (derived)"
+            ),
+        ]
     deterministic = deterministic_bom_candidate(unit, prompt_state)
     deterministic_groups = (
         _normalize_curated_group_identities(

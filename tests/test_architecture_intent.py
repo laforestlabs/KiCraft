@@ -2765,7 +2765,7 @@ def test_duplicate_power_statements_are_dropped_before_the_compiler_refuses_them
     completed = complete_architecture_payload(duplicated)
 
     names = [row["name"] for row in completed["signals"]]
-    assert "MCU_SUPPLY" not in names and "MCU_GND" not in names
+    assert names == [row["name"] for row in payload["signals"]]
     assert [row for row in names if row in [s["name"] for s in payload["signals"]]] == [
         row["name"] for row in payload["signals"]
     ]
@@ -2886,38 +2886,42 @@ def test_a_terminal_spelled_positive_gets_its_negative_return():
     assert payload["requirements"][0]["ties"] == {"negative": "GND"}
 
 
-def test_a_writer_declared_usb_socket_is_dropped_only_when_the_compiler_writes_one():
+def test_a_lowerer_family_is_replaced_by_the_reviewed_carriers_family():
+    """The writer's generic connector family cannot implement a demanded class that has a carrier.
+
+    Live walkthrough (2026-09-25): `lowerer pin-header@1 does not implement the exact part
+    'B2B-XH-A(LF)(SN)'` on every attempt, and the BOM then exhausted its rounds on
+    `missing-requirement-implementation=['motor_a']`, because the parts stage may not reopen a
+    family. The carrier's own family is adopted, the lowerer-only parameters go, and the
+    interface is built from the signals the draft already sends.
+    """
     from kicraft.design.architecture_intent import complete_architecture_payload
 
-    base = {
+    payload = {
+        "power": {"rails": {"+18V": {"voltage": 18.0, "from": "power_in.pin1"}}},
         "requirements": [
-            {"id": "mcu", "role": "mcu_core", "family": "esp32-c3-mini-1-module"},
-            {"id": "usb_socket", "role": "connector", "family": "usb-c-usb2-device"},
+            {"id": "power_in", "role": "power_input", "family": "screw-terminal",
+             "parameters": {"rows": 1}},
+            {"id": "motor_a", "role": "connector", "family": "pin-header",
+             "parameters": {"rows": 1, "gender": "female"},
+             "obligations": [{"kind": "physical", "original_obligation_id": "xh",
+                              "component_class": "jst-xh-connector"}]},
         ],
-    }
-    with_edge = {
-        **base,
         "signals": [
-            {"name": "USB_DM", "from": "mcu.usb_dm", "to": "edge:USB"},
-            {"name": "USB_DP", "from": "mcu.usb_dp", "to": "edge:USB"},
+            {"name": "MOTOR_A1", "from": "hbridge.aout1", "to": "motor_a.pin1"},
+            {"name": "MOTOR_A2", "from": "hbridge.aout2", "to": "motor_a.pin2"},
         ],
     }
-    complete_architecture_payload(with_edge)
-    assert [row["id"] for row in with_edge["requirements"]] == ["mcu"]
 
-    # No edge: the requirement is the design's own statement and stays.
-    no_edge = {**base, "signals": []}
-    complete_architecture_payload(no_edge)
-    assert [row["id"] for row in no_edge["requirements"]] == ["mcu", "usb_socket"]
+    complete_architecture_payload(payload)
 
-    # A signal referencing it keeps it: dropping it would leave the signal dangling.
-    referenced = {
-        **with_edge,
-        "requirements": [*base["requirements"]],
-        "signals": [
-            {"name": "USB_DM", "from": "mcu.usb_dm", "to": "usb_socket.dm"},
-            {"name": "USB_DP", "from": "mcu.usb_dp", "to": "edge:USB"},
-        ],
-    }
-    complete_architecture_payload(referenced)
-    assert "usb_socket" in [row["id"] for row in referenced["requirements"]]
+    connector = payload["requirements"][1]
+    assert connector["family"] == "jst-xh-connector"
+    assert connector["parameters"] == {}          # lowerer-only keys dropped
+    assert connector["declared_ports"] == [
+        {"key": "pin1", "pin": "1", "direction": "passive", "function": "carries MOTOR_A1"},
+        {"key": "pin2", "pin": "2", "direction": "passive", "function": "carries MOTOR_A2"},
+    ]
+    # The terminal's missing return is completed in the spelling the draft used.
+    assert payload["requirements"][0]["ties"] == {"pin2": "GND"}
+

@@ -3187,3 +3187,85 @@ def test_a_claimed_contact_the_symbol_does_not_publish_gets_a_recommendation():
         "declared-interface-unrealized"
     ]
     assert any("reads as contact '1'" in row for row in rows), rows
+
+
+def test_a_group_naming_a_reviewed_part_adopts_that_records_pair():
+    """The gate compares the curated pair verbatim, so the pair comes from the record.
+
+    Live walkthrough (2026-09-25): `status_led=Device:LED mpn=LTST-C190KGKT` with a pair the
+    record does not publish reported "requires 1 real led, found 0" for seven repair rounds.
+    """
+    from kicraft.design.part_identity import reviewed_part
+    from kicraft.server.stage_work_units import BomComponentGroup, _adopt_reviewed_library_pair
+
+    record = reviewed_part("LTST-C190KGKT")
+    group = BomComponentGroup.model_validate(
+        {
+            "id": "status_led",
+            "reference_prefix": "D",
+            "quantity": 1,
+            "value": "green",
+            "sheet": "STATUS INDICATOR",
+            "symbol": "Device:LED",
+            "footprint": "Device:LED",
+            "mpn": "LTST-C190KGKT",
+        }
+    )
+    adopted = _adopt_reviewed_library_pair(group)
+    assert (adopted.symbol, adopted.footprint) == (record.symbol, record.footprint)
+
+    # A group whose pair is already the record's, or whose MPN is unknown, is untouched.
+    already = group.model_copy(update={"symbol": record.symbol, "footprint": record.footprint})
+    assert _adopt_reviewed_library_pair(already) is already
+    unknown = group.model_copy(update={"mpn": "NOT-A-REAL-MPN"})
+    assert _adopt_reviewed_library_pair(unknown) is unknown
+
+
+def test_a_connector_requirement_keeps_one_connector_group():
+    """Its ports are the connector's contacts, not instances of it.
+
+    Live walkthrough (2026-09-25): each actuator sheet emitted two JST-XH parts, four connectors
+    for a brief that names two.
+    """
+    from kicraft.server.stage_work_units import BomComponentGroup, _keep_one_connector_group
+
+    unit = StageWorkUnit("bom-r001", "bom", "ACTUATOR CONNECTOR 1", requirement_ids=("motor_a",))
+    prompt_state = {"architecture": {"requirements": [{"id": "motor_a", "role": "connector"}]}}
+
+    def group(group_id: str) -> BomComponentGroup:
+        return BomComponentGroup.model_validate(
+            {
+                "id": group_id,
+                "reference_prefix": "J",
+                "quantity": 1,
+                "value": "B2B-XH-A(LF)(SN)",
+                "symbol": "b2b-xh-a-lf-sn:B2B-XH-A",
+                "footprint": "b2b-xh-a-lf-sn:CONN-TH_B2B-XH-A-LF-SN",
+                "sheet": "ACTUATOR CONNECTOR 1",
+                "mpn": "B2B-XH-A(LF)(SN)",
+            }
+        )
+
+    kept, dropped = _keep_one_connector_group([group("a"), group("b")], unit, prompt_state)
+    assert [row.id for row in kept] == ["a"] and dropped == 1
+
+    # A unit with several identical passives is untouched: only connector groups are deduplicated.
+    resistor = BomComponentGroup.model_validate(
+        {
+            "id": "c1",
+            "reference_prefix": "C",
+            "quantity": 2,
+            "value": "100nF",
+            "symbol": "Device:C",
+            "footprint": "Capacitor_SMD:C_0603_1608Metric",
+            "sheet": "ACTUATOR CONNECTOR 1",
+        }
+    )
+    regulator_unit = StageWorkUnit(
+        "bom-s005", "bom", "REG", requirement_ids=("reg",)
+    )
+    assert _keep_one_connector_group(
+        [resistor, resistor.model_copy(update={"id": "c2"})],
+        regulator_unit,
+        {"architecture": {"requirements": [{"id": "reg", "role": "regulator"}]}},
+    )[1] == 0

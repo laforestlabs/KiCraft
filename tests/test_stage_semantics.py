@@ -1687,7 +1687,8 @@ def test_an_over_rated_load_gets_its_own_regulated_rail_before_diagnosis():
     assert fixed["rail_voltages"]["BRIDGE_RAIL"] == 10.0
     assert "+18V" in fixed["rail_voltages"] and fixed["rail_voltages"]["+18V"] == 18.0
     converter = next(row for row in fixed["requirements"] if row["id"] == "bridge_regulator")
-    assert converter["family"] == "tps54331-adjustable"
+    # A family the library carries at exactly this rail: the reviewed MP1584 10 V instance.
+    assert converter["family"] == "mp1584-10v"
     assert converter["parameters"]["output_voltage"] == 10.0
     assert converter["ports"] == {"input": "+18V", "output": "BRIDGE_RAIL", "gnd": "GND"}
     bridge = next(row for row in fixed["requirements"] if row["id"] == "bridge")
@@ -1906,8 +1907,11 @@ def test_a_declared_load_rail_nothing_generates_gets_its_converter():
         row for row in fixed["requirements"] if row["id"] == "motor_vin_regulator"
     )
     assert converter["ports"] == {"input": "VIN", "output": "MOTOR_VIN", "gnd": "GND"}
-    assert converter["parameters"]["output_voltage"] == 10.8
-    assert converter["family"] == "tps54331-adjustable"
+    # 10.8 V has no reviewed instance; the rail takes the nearest one the library builds, and the
+    # rail's own voltage follows it rather than naming a rail nothing can produce.
+    assert converter["parameters"]["output_voltage"] == 10.0
+    assert converter["family"] == "mp1584-10v"
+    assert fixed["rail_voltages"]["MOTOR_VIN"] == 10.0
     assert any(row["name"] == "MOTOR_VIN REGULATOR" for row in fixed["sheets"])
     assert any("motor_vin_regulator" in row and "(defaulted)" in row for row in fixed["assumptions"])
     # The board input and the 3.3 V rail already have their sources; only the bare rail is filled.
@@ -2032,3 +2036,53 @@ def test_a_requirement_family_that_cannot_implement_its_class_is_refused_here():
     assert _architecture_obligation_family_mismatch(
         candidate("pin-header", component_class="gps-module")
     ) == []
+
+
+def test_a_regulator_family_with_no_instance_at_its_voltage_is_retargeted():
+    """The resolver falls back to the instance default, so the divider comes out for 3.3 V.
+
+    Live walkthrough (2026-09-25): `tps54331-adjustable` at 10.0 V -- a family registered only at
+    3.3 V -- produced a 3.28 V divider on the 10 V rail, which §9.32 refuses at commit.
+    """
+    from kicraft.design.stage_semantics import _retarget_unbuildable_regulators
+
+    candidate = {
+        "rail_voltages": {"+18V": 18.0, "+3V3": 3.3, "HBRIDGE_RAIL": 10.0},
+        "requirements": [
+            {"id": "reg3v3", "role": "regulator", "family": "tps54331-adjustable",
+             "parameters": {"output_voltage": 3.3}},
+            {"id": "hbridge_regulator", "role": "regulator", "family": "tps54331-adjustable",
+             "parameters": {"output_voltage": 10.0}},
+        ],
+        "assumptions": [],
+    }
+    retargeted = _retarget_unbuildable_regulators(candidate)
+
+    assert retargeted == ["hbridge_regulator"]
+    assert candidate["requirements"][1]["family"] == "mp1584-10v"
+    # The 3.3 V requirement already names the family registered at its voltage: untouched.
+    assert candidate["requirements"][0]["family"] == "tps54331-adjustable"
+
+
+def test_the_retarget_reads_the_target_voltage_from_the_rail_it_feeds():
+    """The derived shape drops `parameters`, so the rail the output port feeds states the target."""
+    from kicraft.design.stage_semantics import _retarget_unbuildable_regulators
+
+    candidate = {
+        "rail_voltages": {"+18V": 18.0, "HBRIDGE_RAIL": 10.0},
+        "requirements": [
+            {"id": "hbridge_regulator", "role": "regulator",
+             "family": "tps54331-adjustable",
+             "ports": {"input": "+18V", "output": "HBRIDGE_RAIL", "gnd": "GND"}},
+            {"id": "reg3v3", "role": "regulator", "family": "tps54331-adjustable",
+             "ports": {"input": "+18V", "output": "+3V3", "gnd": "GND"}},
+        ],
+        "assumptions": [],
+    }
+    candidate["rail_voltages"]["+3V3"] = 3.3
+
+    retargeted = _retarget_unbuildable_regulators(candidate)
+
+    assert retargeted == ["hbridge_regulator"]
+    assert candidate["requirements"][0]["family"] == "mp1584-10v"
+    assert candidate["requirements"][1]["family"] == "tps54331-adjustable"
