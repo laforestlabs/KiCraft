@@ -1785,3 +1785,53 @@ def test_a_trimmer_with_no_ports_is_told_which_contact_it_needs():
     ).model_copy(update={"exact_part": "3296W-1-103LF"})
     diagnostic = lowerer_contract_diagnostic(requirement)
     assert diagnostic is not None and "wiper" in diagnostic.message
+
+
+def test_a_stated_contact_count_sizes_the_header_the_circuit_only_partly_uses():
+    """The brief's "6-pin header" must not become a 2-pin header because two pins are used.
+
+    Live 2026-09-25 (5 V to 3.3 V converter): the intent and the committed architecture both carry
+    "header pins = 6" on the header requirement, the circuit uses contacts 1 and 2, and the parts
+    step emitted a 2-way header -- a board that could not mate with its host, with no diagnostic
+    from any gate. The stated count now sizes the part, and the unused contacts are no-connects.
+    """
+    requirement = CircuitRequirement(
+        id="header",
+        sheet="MAIN",
+        role="connector",
+        family="pin-header",
+        parameters={"rows": 1, "gender": "male"},
+        ports={"pin1": "HOST_5V", "pin2": "+3V3"},
+        obligations=[
+            {
+                "kind": "quantitative",
+                "original_obligation_id": "header-pin-count",
+                "quantity": "header pins",
+                "relation": "equal",
+                "value": 6.0,
+                "minimum": None,
+                "maximum": None,
+                "unit": "pins",
+            }
+        ],
+    )
+
+    artifact = lower_requirement(requirement)
+
+    assert artifact.groups[0].symbol == "Connector_Generic:Conn_01x06"
+    assert artifact.groups[0].footprint == (
+        "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"
+    )
+    assert {pin.pin: pin.net for pin in artifact.pins} == {"1": "HOST_5V", "2": "+3V3"}
+    assert {row.pin for row in artifact.no_connects} == {"3", "4", "5", "6"}
+
+    # A circuit that already uses the stated count is unchanged, and so is a header with no
+    # stated count at all (its size is still the highest contact the draft named).
+    assert lower_requirement(
+        requirement.model_copy(
+            update={"ports": {f"pin{index}": f"N{index}" for index in range(1, 7)}}
+        )
+    ).groups[0].symbol == "Connector_Generic:Conn_01x06"
+    assert lower_requirement(
+        requirement.model_copy(update={"obligations": [], "ports": {"pin1": "A", "pin2": "B"}})
+    ).groups[0].symbol == "Connector_Generic:Conn_01x02"

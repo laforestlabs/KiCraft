@@ -196,6 +196,39 @@ def registered_lowerers() -> tuple[RegisteredLowerer, ...]:
     return tuple(_REGISTRY[key] for key in sorted(_REGISTRY))
 
 
+def lowerer_family_for_class(family: str, parameters: object) -> str | None:
+    """The lowerer family that owns the support parts a class-named requirement needs, or None.
+
+    A draft may name the reviewed *part class* it wants (`led-0603`) where the stage's reference
+    data lists lowerer *families* (`status-led`). The class is what the reviewed record carries, so
+    the name reads as legitimate -- and the build then emits the bare part with none of the support
+    the circuit needs: the live 2026-09-25 converter draft wired a LED straight across the 3.3 V
+    rail, the audit caught it at 0.98 confidence, and two repair rounds could not talk the writer
+    out of the name. No deterministic gate covered it either, because §9.36 (the typed LED
+    current-path check) keys on the lowerer family.
+
+    Deliberately narrow: the class must be one the candidate lowerer family denotes, every
+    parameter the draft states must be one that lowerer publishes, and the draft must state every
+    parameter that lowerer requires. Anything else is left exactly as written.
+    """
+    from kicraft.design.part_identity import canonical_physical_features
+
+    wanted = str(family or "").strip().casefold()
+    stated = {str(key) for key in (parameters or {})}
+    if not wanted or not stated:
+        return None
+    for lowerer in registered_lowerers():
+        for candidate in sorted(lowerer.families):
+            if wanted not in canonical_physical_features(candidate):
+                continue
+            if not stated <= set(lowerer.parameter_keys):
+                continue
+            if not set(lowerer.required_parameter_keys) <= stated:
+                continue
+            return candidate
+    return None
+
+
 def lowerer_summaries() -> list[dict]:
     return [
         {
@@ -1150,8 +1183,32 @@ def _usb_c_breakout(requirement: CircuitRequirement) -> LoweringArtifact | None:
     )
 
 
+def _stated_contact_count(requirement: CircuitRequirement) -> int:
+    """The contact count the requirement's own obligations state, or 0.
+
+    A brief's "6-pin 0.1 inch header" reaches the parts step as a quantitative row owned by the
+    header requirement ("header pins = 6"). The connector's physical size otherwise comes from the
+    contacts the circuit happens to use -- two of six here, so the parts step emitted a 2-way
+    header for a brief that demands six, and no gate anywhere said a word (live 2026-09-25). Only
+    an equality row about the connector's own contacts counts, and it only ever grows the part.
+    """
+    for row in requirement.obligations:
+        if row.kind != "quantitative" or row.relation != "equal" or row.value is None:
+            continue
+        quantity = str(row.quantity or "").casefold()
+        if not any(term in quantity for term in ("pin", "contact", "position")):
+            continue
+        try:
+            count = int(row.value)
+        except (TypeError, ValueError):
+            continue
+        if 2 <= count <= 64:
+            return count
+    return 0
+
+
 def _numbered_connector_ports(
-    requirement: CircuitRequirement, *, fill_gaps: bool = False
+    requirement: CircuitRequirement, *, fill_gaps: bool = False, minimum: int = 0
 ) -> dict[str, str] | None:
     """``pin1..pinN`` for a generic header, or None when the numbering is ambiguous.
 
@@ -1162,35 +1219,49 @@ def _numbered_connector_ports(
     out every position, and the undeclared positions are that part's no-connects.
     ``fill_gaps`` is what accepts such a draft -- it emits the missing positions as
     ``NC``, which `_connector` turns into no-connects. Without it the numbering must be
-    exactly ``1..N`` and any gap is undecidable, so the family refuses.
+    exactly ``1..N`` and any gap is undecidable, so the family refuses. ``minimum`` is the
+    size the requirement's own obligations state, which the part may be larger than.
     """
     indexed = _contact_net_map(requirement.ports, prefixes=("pin",))
     if indexed is None:
         return None
-    highest = max(indexed)
+    highest = max({*indexed, int(minimum or 0)} or {0})
     if not fill_gaps and set(indexed) != set(range(1, highest + 1)):
         return None
     return {f"pin{index}": indexed.get(index, "NC") for index in range(1, highest + 1)}
 
 
 def _pin_header(requirement: CircuitRequirement) -> LoweringArtifact | None:
-    ports = _numbered_connector_ports(requirement, fill_gaps=True)
+    stated = _stated_contact_count(requirement)
+    ports = _numbered_connector_ports(requirement, fill_gaps=True, minimum=stated)
     if ports is None:
         return None
     filled = tuple(
         index for index in range(1, len(ports) + 1) if f"pin{index}" not in requirement.ports
     )
+    declared = max(
+        (
+            int(key[3:])
+            for key in requirement.ports
+            if key.startswith("pin") and key[3:].isdigit()
+        ),
+        default=0,
+    )
+    notes: list[str] = []
+    if stated > declared:
+        notes.append(
+            f"the header is sized to the {stated} contacts its own requirement states, "
+            f"which the circuit uses {declared} of"
+        )
+    if filled:
+        notes.append(
+            f"the header's physical size is its highest declared contact ({len(ports)}); "
+            f"undeclared contact(s) {', '.join(str(index) for index in filled)} are "
+            "emitted as no-connects"
+        )
     return _connector(
         requirement.model_copy(update={"ports": ports}),
-        assumptions=(
-            (
-                f"the header's physical size is its highest declared contact ({len(ports)}); "
-                f"undeclared contact(s) {', '.join(str(index) for index in filled)} are "
-                "emitted as no-connects",
-            )
-            if filled
-            else ()
-        ),
+        assumptions=tuple(notes),
     )
 
 

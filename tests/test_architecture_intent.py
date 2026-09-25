@@ -2925,3 +2925,106 @@ def test_a_lowerer_family_is_replaced_by_the_reviewed_carriers_family():
     # The terminal's missing return is completed in the spelling the draft used.
     assert payload["requirements"][0]["ties"] == {"pin2": "GND"}
 
+
+
+def test_a_duplicate_supply_signal_keeps_the_contact_that_feeds_the_rail():
+    """A rail that names no source of its own is entered through the contact the duplicate named.
+
+    Live architecture draft 2026-09-25 (5 V to 3.3 V converter): the host 5 V input was written as
+    a signal from the header contact to the protection block's supply port, and that rail (`+5V`)
+    has `from: null`. The duplicate-statement normalizer dropped the whole signal, so the header
+    kept only its 3.3 V contact, the board's input rail was left with no physical source, and
+    nothing in the diagnostics said so.
+    """
+    from kicraft.design.architecture_intent import (
+        complete_architecture_payload,
+        derive_architecture,
+    )
+    import copy
+
+    payload = {
+        "sheets": [{"name": "POWER", "stem": "POWER", "role": "power",
+                    "function": "Conversion and indicator"}],
+        "power": {
+            "rails": {
+                "+5V": {"voltage": 5.0, "from": None},
+                "+3V3": {"voltage": 3.3, "from": "regulator.output"},
+            }
+        },
+        "requirements": [
+            {"id": "host_header", "sheet": "POWER", "role": "connector", "family": "pin-header",
+             "parameters": {"rows": 1, "gender": "female"}, "ties": {}},
+            {"id": "protection", "sheet": "POWER", "role": "power_input",
+             "family": "reverse-polarity-pmos", "supply": "+5V", "ties": {}},
+            {"id": "regulator", "sheet": "POWER", "role": "regulator", "family": "me6211-3v3",
+             "supply": "+5V", "ties": {}},
+        ],
+        "signals": [
+            {"name": "HOST_5V", "from": "host_header.pin1", "to": "protection.input"},
+            {"name": "PROTECTED_5V", "from": "protection.output", "to": "regulator.input"},
+            {"name": "OUTPUT_3V3", "from": "regulator.output", "to": "host_header.pin2"},
+        ],
+    }
+
+    # Taken before the normalizer runs: it edits the requirement rows it is handed.
+    sourced = copy.deepcopy(payload)
+    sourced["power"]["rails"]["+5V"]["from"] = "protection.output"
+
+    completed = complete_architecture_payload(payload)
+    header = next(row for row in completed["requirements"] if row["id"] == "host_header")
+    assert header["ties"] == {"pin1": "+5V"}
+    assert "HOST_5V" not in [row["name"] for row in completed["signals"]]
+
+    ports = {row.id: row.ports for row in derive_architecture(completed, None).requirements}
+    assert ports["host_header"]["pin1"] == "+5V"
+    assert ports["protection"]["input"] == "+5V"
+
+    # A rail that names its own source keeps today's drop: the signal really is the duplicate.
+    assert next(
+        row for row in complete_architecture_payload(sourced)["requirements"]
+        if row["id"] == "host_header"
+    ).get("ties", {}) == {}
+
+
+def test_a_lowerer_that_denotes_the_named_part_keeps_its_family():
+    """The block that owns the support parts must survive naming the part it builds.
+
+    Live architecture draft 2026-09-25 (5 V to 3.3 V converter): the writer named the reviewed
+    lowerer family `status-led` *and* the reviewed LED `LTST-C190KGKT` -- exactly what the reference
+    data asks for. The carrier-family rewrite replaced `status-led` with the part's own class
+    (`led-0603`), which emits a bare LED with no series resistor and takes §9.36 (the typed LED
+    current-path gate, keyed on the lowerer family) out of play. The audit caught the bare LED at
+    0.98 confidence and two repair rounds could not talk the writer out of the family it had
+    chosen, because the rewrite happened after the writer's answer.
+    """
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    def _payload(family: str, exact: str) -> dict:
+        return {
+            "requirements": [
+                {
+                    "id": "indicator",
+                    "sheet": "POWER",
+                    "role": "user_io",
+                    "family": family,
+                    "exact_part": exact,
+                    "parameters": {
+                        "rail_voltage": 3.3,
+                        "led_vf": 2.0,
+                        "target_current_ma": 2.0,
+                        "color": "green",
+                    },
+                    "obligations": [{"kind": "physical", "original_obligation_id": "led",
+                                     "component_class": "led"}],
+                }
+            ],
+            "signals": [],
+        }
+
+    kept = complete_architecture_payload(_payload("status-led", "LTST-C190KGKT"))
+    assert kept["requirements"][0]["family"] == "status-led"
+    assert kept["requirements"][0]["exact_part"] == "LTST-C190KGKT"
+
+    # A lowerer that cannot answer the named part's class still adopts the carrier's family.
+    replaced = complete_architecture_payload(_payload("pin-header", "B2B-XH-A(LF)(SN)"))
+    assert replaced["requirements"][0]["family"] == "jst-xh-connector"

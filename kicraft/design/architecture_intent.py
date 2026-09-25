@@ -740,7 +740,8 @@ def _adopt_carrier_families(payload: dict) -> dict:
     "lowerer pin-header@1 does not implement the exact part 'B2B-XH-A(LF)(SN)'", and the BOM
     exhausted its rounds on "missing-requirement-implementation=['motor_a']").
     """
-    from kicraft.design.part_identity import reviewed_part
+    from kicraft.design.lowering import lowerer_family_for_class
+    from kicraft.design.part_identity import canonical_physical_features, reviewed_part
 
     requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
     if not requirements:
@@ -750,12 +751,30 @@ def _adopt_carrier_families(payload: dict) -> dict:
     for requirement in requirements:
         family = str(requirement.get("family") or "")
         if family.casefold() not in lowerers:
+            # A requirement that names a reviewed part *class* instead of the lowerer family that
+            # builds it gets the family that owns the class's support parts -- the part is the
+            # reviewed one either way, but only the family emits the series element the circuit
+            # needs (a bare LED across the rail was the live 2026-09-25 shape).
+            adopting = lowerer_family_for_class(family, requirement.get("parameters"))
+            if adopting is not None and adopting != family:
+                requirement["family"] = adopting
+                changed = True
             # A curated family that names a reviewed part is the compiler's own business.
             continue
         exact = str(requirement.get("exact_part") or "").strip()
         record = reviewed_part(exact) if exact else None
         target = None
-        if record is not None and record.family and family != record.family:
+        if (
+            record is not None
+            and record.family
+            and family != record.family
+            # A lowerer whose own family vocabulary already denotes the named part's class *is* the
+            # builder for it: the LED lowerer honours the reviewed LED identity and adds its series
+            # resistor, so rewriting `status-led` to the part's own class (`led-0603`) dropped the
+            # resistor and took §9.36 -- which keys on the lowerer family -- out of play (live
+            # 2026-09-25). A lowerer that cannot answer the class still adopts the carrier's family.
+            and record.family not in canonical_physical_features(family)
+        ):
             target = record.family
         else:
             for obligation in requirement.get("obligations") or []:
@@ -763,7 +782,11 @@ def _adopt_carrier_families(payload: dict) -> dict:
                     continue
                 component_class = str(obligation.get("component_class") or "")
                 carrier_family = _carrier_family_for_class(component_class) if component_class else None
-                if carrier_family and family != carrier_family:
+                if (
+                    carrier_family
+                    and family != carrier_family
+                    and carrier_family not in canonical_physical_features(family)
+                ):
                     target = carrier_family
                     if record is None:
                         from kicraft.design.part_identity import reviewed_parts_for_feature
@@ -877,10 +900,43 @@ def complete_architecture_payload(payload: dict) -> dict:
         return bool(requirement.get("supply")) and supply_shaped
 
     kept: list[dict] = []
+
+    def _rail_entry_the_signal_carries(signal: dict) -> tuple[str, str, str] | None:
+        """(rail, requirement id, port) when this duplicate signal is a rail's only entry.
+
+        A signal that restates a rail its peer requirement already declares is dropped -- unless
+        that rail names no source of its own (`from` null), in which case this signal *is* how the
+        rail reaches the board, and dropping it takes the contact with it. Live 2026-09-25: the
+        host 5 V input contact of a header disappeared exactly this way, leaving the board's input
+        rail with no physical source and nothing in the diagnostics to show for it.
+        """
+        rail: str | None = None
+        for peer in _peers(signal):
+            parts = _endpoint(peer)
+            requirement = by_id.get(parts[0]) if parts else None
+            if requirement is None:
+                continue
+            key = parts[1].casefold()
+            if (_supply_port_name(key) or key in _SUPPLY_PORTS) and requirement.get("supply"):
+                rail = str(requirement["supply"])
+        if rail is None:
+            return None
+        declared = ((payload.get("power") or {}).get("rails") or {}).get(rail)
+        if not isinstance(declared, dict) or declared.get("from"):
+            return None
+        source = _endpoint(signal.get("from"))
+        if source is None or source[0] not in by_id:
+            return None
+        return rail, source[0], source[1]
+
     dropped: list[str] = []
+    rail_entries: list[tuple[str, str, str]] = []
     for signal in signals:
         peers = _peers(signal)
         if peers and all(_duplicates_a_binding(peer) for peer in peers):
+            entry = _rail_entry_the_signal_carries(signal)
+            if entry is not None:
+                rail_entries.append(entry)
             dropped.append(str(signal.get("name") or ""))
             continue
         kept.append(signal)
@@ -898,6 +954,16 @@ def complete_architecture_payload(payload: dict) -> dict:
             parts = _endpoint(reference) if reference is not None else None
             if parts is not None:
                 carried.add((parts[0].casefold(), parts[1].casefold()))
+    # A rail whose only entry was a signal that restated it keeps that contact: the tie names the
+    # rail on the contact the signal named, which is the one statement the compiler cannot derive
+    # from anywhere else. A contact a kept signal still names is left alone (the tie normalizer
+    # would clear it and the compiler would refuse the two names on one pin).
+    for rail, requirement_id, port in rail_entries:
+        if (requirement_id.casefold(), port.casefold()) in carried:
+            continue
+        ties = by_id[requirement_id].setdefault("ties", {})
+        if isinstance(ties, dict):
+            ties.setdefault(port, rail)
     completed_requirements: list[dict] = []
     for requirement in requirements:
         declared = requirement.get("declared_ports")
