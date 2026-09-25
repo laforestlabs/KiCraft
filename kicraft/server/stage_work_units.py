@@ -694,14 +694,22 @@ def _keep_one_connector_group(
     contacts read as two instances. The quantity gate is a minimum, so nothing refused it.
     """
     requirement_ids = tuple(getattr(unit, "requirement_ids", ()) or ())
-    if not requirement_ids:
-        return groups, 0
-    requirements = {
-        str(row.get("id")): row
+    architecture_requirements = [
+        row
         for row in (prompt_state.get("architecture") or {}).get("requirements") or []
         if isinstance(row, dict)
-    }
-    roles = {str((requirements.get(rid) or {}).get("role") or "") for rid in requirement_ids}
+    ]
+    if requirement_ids:
+        requirements = {str(row.get("id")): row for row in architecture_requirements}
+        roles = {str((requirements.get(rid) or {}).get("role") or "") for rid in requirement_ids}
+    else:
+        # A sheet-scoped unit carries no requirement ids: its sheet's requirements decide.
+        sheet = str(getattr(unit, "sheet", "") or "")
+        roles = {
+            str(row.get("role") or "")
+            for row in architecture_requirements
+            if str(row.get("sheet") or "") == sheet
+        }
     if roles != {"connector"}:
         return groups, 0
     kept: list[BomComponentGroup] = []

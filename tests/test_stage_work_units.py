@@ -3269,3 +3269,33 @@ def test_a_connector_requirement_keeps_one_connector_group():
         regulator_unit,
         {"architecture": {"requirements": [{"id": "reg", "role": "regulator"}]}},
     )[1] == 0
+
+
+def test_a_sheet_scoped_connector_unit_keeps_one_connector_too():
+    """Units for a sheet with a single connector requirement carry no requirement ids."""
+    from kicraft.server.stage_work_units import BomComponentGroup, _keep_one_connector_group
+
+    unit = StageWorkUnit("bom-s002", "bom", "ACTUATOR CONNECTOR 1")
+    prompt_state = {
+        "architecture": {
+            "requirements": [
+                {"id": "motor_a", "role": "connector", "sheet": "ACTUATOR CONNECTOR 1"}
+            ]
+        }
+    }
+    group = BomComponentGroup.model_validate(
+        {
+            "id": "motor_a",
+            "reference_prefix": "J",
+            "quantity": 1,
+            "value": "B2B-XH-A(LF)(SN)",
+            "symbol": "b2b-xh-a-lf-sn:B2B-XH-A",
+            "footprint": "b2b-xh-a-lf-sn:CONN-TH_B2B-XH-A-LF-SN",
+            "sheet": "ACTUATOR CONNECTOR 1",
+            "mpn": "B2B-XH-A(LF)(SN)",
+        }
+    )
+    kept, dropped = _keep_one_connector_group(
+        [group, group.model_copy(update={"id": "motor_a_2"})], unit, prompt_state
+    )
+    assert [row.id for row in kept] == ["motor_a"] and dropped == 1
