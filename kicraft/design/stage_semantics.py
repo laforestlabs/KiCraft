@@ -1249,10 +1249,285 @@ _LOGIC_ROLES = frozenset(
 _GENERATOR_PORTS = ("output", "vout", "sw")
 
 
+#: Words that mean "the load this board drives", for finding claims about its supply.
+_LOAD_WORDS = r"(?:motor|actuator|solenoid|heater|load)"
+
+
+def _load_part_tokens(requirement: dict, exact: str) -> list[str]:
+    """The tokens that identify this part in the writer's own prose."""
+    tokens = {
+        str(requirement.get("id") or "").strip().casefold(),
+        str(requirement.get("family") or "").strip().casefold(),
+        str(exact or "").strip().casefold(),
+    }
+    for name in requirement.get("functional_blocks") or []:
+        tokens.add(str(name).replace("-", " ").replace("_", " ").casefold())
+    return sorted(token for token in tokens if token)
+
+
+def _mentions_load_part(text: str, tokens: list[str], exact: str) -> bool:
+    """Whether this field names the part, by its id/family/block or by its order code.
+
+    The writer names a part three ways in prose -- the requirement id, the block it implements,
+    and the order code -- and shortens the order code ("DRV8833" for "DRV8833PWPR"). A short
+    form that prefixes the code it belongs to is the same part.
+    """
+    lowered = str(text).casefold()
+    if any(token in lowered for token in tokens):
+        return True
+    order_code = str(exact or "").casefold()
+    if not order_code:
+        return False
+    return any(
+        order_code.startswith(word) for word in re.findall(r"[a-z0-9]{4,}", lowered)
+    )
+
+
+def _voltage_pattern(voltage: float) -> str:
+    return rf"\b{re.escape(f'{float(voltage):g}')}\s*v\b"
+
+
+def _rewrite_load_supply_claim(
+    text: str,
+    tokens: list[str],
+    exact: str,
+    wrong_rail: str,
+    wrong_voltage: float,
+    new_rail: str,
+    new_voltage: float,
+    *,
+    force: bool = False,
+) -> str:
+    """Point a claim about a load's supply at the regulated rail it now has.
+
+    ``force`` skips the part-name gate for narrative fields: a sheet function that says
+    "Drive the actuators from the 18 V motor supply" never names the part, but it makes the
+    same claim about the same rail.
+    """
+    if not text:
+        return text
+    row = str(text)
+    if not force and not any(token in row.casefold() for token in tokens):
+        return row
+    changed_before = row
+    row = _rewrite_rail_claims(row, tokens, exact, wrong_rail, new_rail)
+    row = _rewrite_voltage_claims(row, tokens, exact, wrong_voltage, new_voltage)
+    if (row != changed_before or _mentions_load_part(row, tokens, exact)) and (
+        new_rail.casefold() not in row.casefold()
+    ):
+        # The part's supply is now a rail the sentence never named ("fed from the 18 V input"
+        # becomes "fed from the 10 V input", which reads as if the board input changed). Name
+        # the rail the design actually uses rather than leaving the reader to infer it.
+        row = f"{row} (fed from the regulated {new_rail} rail)"
+    return row
+
+
+def _claim_clause(row: str, start: int, end: int) -> str:
+    """The statement a claim sits in, so a rewrite stays inside it.
+
+    Two separators, because both join independent statements: ``;`` and ``and`` -- "18 V DC
+    input feeding the DRV8833 motor supply directly **and** a 3.3 V buck regulator" claims two
+    different things, and judging them together let the converter mention excuse the load claim
+    (live draft, 2026-09-25).
+    """
+    left = row.rfind(";", 0, start)
+    right = row.find(";", end)
+    clause_left = left + 1
+    clause = row[clause_left : right if right != -1 else len(row)]
+    offset = start - clause_left
+    position = 0
+    for piece in re.split(r" and ", clause, flags=re.I):
+        if position <= offset < position + len(piece):
+            return piece
+        position += len(piece) + len(" and ")
+    return clause
+
+
+def _drives_the_load(clause: str) -> bool:
+    """Whether this clause states that something drives or supplies a load.
+
+    Only such a clause carries a supply claim to correct: "Drive two actuator outputs from the
+    18 V input" does, while "Run actuator control and provide H-bridge control signals from the
+    18 V input" describes signals the MCU produces and "18 V input with buck conversion to 3.3 V"
+    describes the board input. Correcting either of those would falsify a true statement.
+    """
+    return bool(
+        re.search(_LOAD_WORDS, clause, re.I)
+        and re.search(
+            r"\b(?:drive[sdn]?|driven|feed(?:s|ing)?|fed|power(?:s|ed|ing)?|"
+            r"suppl(?:y|ies|ied|ying))\b",
+            clause,
+            re.I,
+        )
+    )
+
+
+def _rewrite_rail_claims(
+    row: str, tokens: list[str], exact: str, wrong_rail: str, new_rail: str
+) -> str:
+    """Name the regulated rail wherever a clause about this load named the wrong one.
+
+    Only clauses that mention the part or a load are touched: a statement about the board input
+    ("the +18V input") stays exactly as the writer wrote it.
+    """
+    # Non-word guards: "VIN" must not rewrite the "vin" inside "driving".
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_]){re.escape(str(wrong_rail))}(?![A-Za-z0-9_])", re.I
+    )
+    out: list[str] = []
+    last = 0
+    for match in pattern.finditer(row):
+        tail = row[match.end() : match.end() + 12]
+        clause = _claim_clause(row, match.start(), match.end())
+        names_part = _mentions_load_part(clause, tokens, exact)
+        if not names_part and not _drives_the_load(clause):
+            continue
+
+        if names_part and re.match(r"\s*(?:dc\s+)?input\b", tail, re.I) and re.search(
+            r"\b(?:convert(?:s|ed|ing)?|step(?:s|ped)?\s+down|regulat(?:e|es|ed|or|ion)?|buck)\b",
+            clause,
+            re.I,
+        ):
+            continue
+        input_phrase = re.match(r"\s*((?:dc\s+)?input)\b", tail, re.I)
+        if input_phrase and (names_part or _drives_the_load(clause)):
+            # "…from the 18 V input" is a claim about the load's supply that names the board
+            # input: both facts belong in the statement, so the rail is named and the input is
+            # kept, rather than the input's own voltage being falsified.
+            replaced = (
+                f"the regulated {new_rail} rail (stepped down from the "
+                f"{row[match.start():match.end()]}{input_phrase.group(0)})"
+            )
+            out.append(row[last : match.start()])
+            out.append(replaced)
+            last = match.end() + len(input_phrase.group(0))
+            continue
+        out.append(row[last : match.start()])
+        out.append(new_rail)
+        last = match.end()
+    out.append(row[last:])
+    return "".join(out)
+
+
+def _rewrite_voltage_claims(
+    row: str, tokens: list[str], exact: str, wrong_voltage: float, new_voltage: float
+) -> str:
+    """Rewrite the voltage of a clause about this load's supply, never the board input.
+
+    Live walkthrough (2026-09-25): the first version replaced every occurrence in a field, which
+    turned "18 V input converted to 3.3 V ... DRV8833 supplied from the 18 V motor rail" into
+    "10 V input converted to 3.3 V" -- the input rail's own statement, falsified. A clause about
+    the input ("the 18 V input", "18 V DC input") is left alone; the load's clause is rewritten.
+    """
+    out: list[str] = []
+    last = 0
+    for match in re.finditer(_voltage_pattern(wrong_voltage), row, re.I):
+        tail = row[match.end() : match.end() + 12]
+        clause = _claim_clause(row, match.start(), match.end())
+        names_part = _mentions_load_part(clause, tokens, exact)
+        if not names_part and not _drives_the_load(clause):
+            continue
+        # "Convert the 18 V input to a 3.3 V rail for the ESP32-C3 and the DRV8833" states the
+        # conversion, not the part's supply: the part is fed by the converter's *output*. A
+        # clause with a conversion verb and an input-rail mention is describing the board input.
+        if names_part and re.match(r"\s*(?:dc\s+)?input\b", tail, re.I) and re.search(
+            r"\b(?:convert(?:s|ed|ing)?|step(?:s|ped)?\s+down|regulat(?:e|es|ed|or|ion)?|buck)\b",
+            clause,
+            re.I,
+        ):
+            continue
+        out.append(row[last : match.start()])
+        out.append(f"{new_voltage:g} V")
+        last = match.end()
+    out.append(row[last:])
+    return "".join(out)
+
+
+def _rewrite_load_narrative(
+    text: str,
+    tokens: list[str],
+    exact: str,
+    wrong_rail: str,
+    wrong_voltage: float,
+    new_rail: str,
+    new_voltage: float,
+) -> str:
+    """Correct a narrative field (a sheet function, a topology line) that fed the load.
+
+    The field is rewritten when it names the part *or* when it claims the load's supply at the
+    input voltage; either way it states where the load's power comes from, and after the fix
+    that is the regulated rail. Fields about the input itself name no load and are left alone.
+    """
+    row = str(text or "")
+    lowered = row.casefold()
+    names_part = _mentions_load_part(row, tokens, exact)
+    feeds_load = bool(re.search(_LOAD_WORDS, lowered, re.I)) and bool(
+        re.search(_voltage_pattern(wrong_voltage), row, re.I)
+    )
+    if not (names_part or feeds_load):
+        return row
+    return _rewrite_load_supply_claim(
+        row, tokens, exact, wrong_rail, wrong_voltage, new_rail, new_voltage, force=True
+    )
+
+
+def _corrected_load_supply_rows(
+    rows,
+    tokens: list[str],
+    exact: str,
+    wrong_rail: str,
+    wrong_voltage: float,
+    new_rail: str,
+    new_voltage: float,
+) -> list[str]:
+    """Rewrite the part's own supply claims; drop a row that feeds the load at the input.
+
+    A row like "the 18 V DC input is treated as the actuator supply" mixes the input voltage
+    with the load's supply and cannot be corrected by substitution; left in place it states the
+    opposite of the binding, which is how a candidate ends up asking a reviewer to accept an
+    18 V motor supply that the ports say is 10 V. The pipeline's own disclosure replaces it.
+    """
+    out: list[str] = []
+    for original in rows:
+        row = str(original)
+        lowered = row.casefold()
+        named = any(token in lowered for token in tokens)
+        claims_input = bool(re.search(_voltage_pattern(wrong_voltage), row, re.I))
+        if named and claims_input:
+            out.append(
+                _rewrite_load_supply_claim(
+                    row, tokens, exact, wrong_rail, wrong_voltage, new_rail, new_voltage
+                )
+            )
+            continue
+        if not named and claims_input and re.search(_LOAD_WORDS, lowered, re.I):
+            continue
+        out.append(row)
+    return out
+
+
 #: The reviewed adjustable buck the pipeline uses when a load needs its own regulated rail
 #: (3.5-28 V input, adjustable output). Named here, not chosen per design: it is the library's
 #: general-purpose converter family, and the assumption records the choice.
 _OVER_RATED_REGULATOR_FAMILY = "tps54331-adjustable"
+
+
+def _logic_rails(candidate: dict) -> set[str]:
+    """The rails that power the logic this board is controlled by (MCU, sensors, buses)."""
+    from kicraft.design.architecture_intent import _supply_port_name
+
+    rails: set[str] = set()
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        if str(requirement.get("role") or "") not in _LOGIC_ROLES:
+            continue
+        for port, net in (requirement.get("ports") or {}).items():
+            port_key = str(port).casefold()
+            if port_key in _GENERATOR_PORTS or not _supply_port_name(port_key):
+                continue
+            rails.add(str(net))
+    return rails
 
 
 def complete_over_rated_supply(candidate: dict) -> dict:
@@ -1298,16 +1573,28 @@ def complete_over_rated_supply(candidate: dict) -> dict:
         if not limits:
             continue
         allowed = max(high for _label, _low, high in limits)
-        offend = [
-            rail
-            for rail in _requirement_supply_rails(requirement)
-            if rails.get(rail) is not None and rails[rail] > allowed
+        logic_rails = _logic_rails(candidate)
+        supplied = [
+            rail for rail in _requirement_supply_rails(requirement) if rails.get(rail) is not None
         ]
-        if not offend:
+        over = [rail for rail in supplied if rails[rail] > allowed]
+        # Riding the logic rail is the other half of the same fault: a load part on the rail that
+        # powers the MCU takes its current out of the logic budget, and that is what the writer
+        # reaches for once an over-rated rail is refused (seen live, 2026-09-25).
+        on_logic = [rail for rail in supplied if rail in logic_rails]
+        if not over and not on_logic:
             continue
-        # Only when no reviewed part for this class is rated for the stated rail: otherwise the
-        # writer's own fix (name the rated part) is the better one and is not ours to pre-empt.
-        source_rail = max(offend, key=lambda rail: rails[rail])
+        if over:
+            source_rail = max(over, key=lambda rail: rails[rail])
+        else:
+            sources = [
+                rail
+                for rail, volts in rails.items()
+                if rail not in logic_rails and rail not in on_logic and abs(float(volts)) > 0.0
+            ]
+            if not sources:
+                continue
+            source_rail = max(sources, key=lambda rail: rails[rail])
         if any(
             any(
                 high is not None and high >= rails[source_rail]
@@ -1324,8 +1611,9 @@ def complete_over_rated_supply(candidate: dict) -> dict:
         sheet_name = f"{str(requirement.get('id') or 'load').upper()} REGULATOR"
         completed = dict(candidate)
         completed["requirements"] = [dict(row) if isinstance(row, dict) else row for row in requirements]
+        offending = {*over, *on_logic}
         completed["requirements"][index]["ports"] = {
-            key: (new_rail if str(value) == source_rail else value)
+            key: (new_rail if str(value) in offending else value)
             for key, value in (requirement.get("ports") or {}).items()
         }
         completed.setdefault("sheets", [])
@@ -1357,6 +1645,50 @@ def complete_over_rated_supply(candidate: dict) -> dict:
         completed["rail_voltages"] = rail_voltages
         if isinstance(completed.get("power_nets"), list):
             completed["power_nets"] = [*completed["power_nets"], new_rail]
+        # The writer's own statements are now false: they say this part runs on the source
+        # rail, and (for the load) that the actuators are fed at the input voltage. A candidate
+        # whose prose contradicts its bindings is not reviewable, so the claims are corrected
+        # here before the disclosure below states the whole picture in one row.
+        tokens = _load_part_tokens(requirement, exact)
+        # The rail the part was wrongly on is the one its claims have to stop naming; for an
+        # over-rated part that is the source rail, for a part riding the logic rail it is that
+        # logic rail, and the converter's input is the source rail either way.
+        wrong_rail = source_rail if over else (on_logic[0] if on_logic else source_rail)
+        wrong_voltage = float(rails[wrong_rail])
+        completed["assumptions"] = _corrected_load_supply_rows(
+            completed.get("assumptions") or [],
+            tokens,
+            exact,
+            wrong_rail,
+            wrong_voltage,
+            new_rail,
+            voltage,
+        )
+        completed["topologies"] = {
+            key: _rewrite_load_narrative(
+                value, tokens, exact, wrong_rail, wrong_voltage, new_rail, voltage
+            )
+            for key, value in (completed.get("topologies") or {}).items()
+        }
+        completed["sheets"] = [
+            (
+                {
+                    **row,
+                    "function": _rewrite_load_narrative(
+                        row.get("function") or "",
+                        tokens,
+                        exact,
+                        wrong_rail,
+                        wrong_voltage,
+                        new_rail,
+                        voltage,
+                    ),
+                }
+                if isinstance(row, dict)
+                else row
+            )
+            for row in completed.get("sheets") or []
+        ]
         completed["assumptions"] = [
             *(completed.get("assumptions") or []),
             (
@@ -1368,7 +1700,106 @@ def complete_over_rated_supply(candidate: dict) -> dict:
             ),
         ]
         return completed
+    # A declared load rail that nothing generates is the same fault one step later: the writer
+    # stated the voltage and bound the part, and left the converter out (live draft,
+    # 2026-09-25: MOTOR_VIN at 10.8 V, `from: null`, nothing producing it, zero diagnostics).
+    generators = _rail_generators(candidate)
+    input_rail = _board_input_rail(rails)
+    for rail_name, voltage in (candidate.get("rail_voltages") or {}).items():
+        rail_name = str(rail_name)
+        try:
+            rail_voltage = float(voltage)
+        except (TypeError, ValueError):
+            continue
+        if rail_name in generators or _rail_needs_no_generator(rail_name, rail_voltage, rails):
+            continue
+        consumers = [
+            requirement
+            for requirement in requirements
+            if isinstance(requirement, dict)
+            and rail_name in _requirement_supply_rails(requirement)
+        ]
+        if not consumers or input_rail is None or input_rail == rail_name:
+            continue
+        converter_id = f"{rail_name.strip('+').replace(' ', '_').lower()}_regulator"
+        sheet_name = f"{rail_name.strip('+').upper()} REGULATOR"
+        completed = dict(candidate)
+        completed["sheets"] = [dict(row) for row in completed.get("sheets") or []]
+        completed["sheets"].append(
+            {
+                "name": sheet_name,
+                "stem": sheet_name.replace(" ", "_"),
+                "role": "regulator",
+                "function": (
+                    f"Step the {input_rail} input down to {rail_voltage:g} V for the {rail_name} "
+                    "load rail."
+                ),
+            }
+        )
+        completed["requirements"] = [
+            *(dict(row) if isinstance(row, dict) else row for row in requirements),
+            {
+                "id": converter_id,
+                "sheet": sheet_name,
+                "role": "regulator",
+                "family": _OVER_RATED_REGULATOR_FAMILY,
+                "parameters": {"output_voltage": rail_voltage},
+                "ports": {"input": input_rail, "output": rail_name, "gnd": "GND"},
+                "functional_blocks": list(
+                    consumers[0].get("functional_blocks") or []
+                ),
+            },
+        ]
+        completed["assumptions"] = [
+            *(completed.get("assumptions") or []),
+            (
+                f"{rail_name} ({rail_voltage:g} V) is generated by {converter_id}, a reviewed "
+                f"adjustable buck fed from the {input_rail} input, because the design declared "
+                f"the rail and bound {consumers[0].get('id')} to it without naming a source "
+                "(defaulted)"
+            ),
+        ]
+        return completed
+
     return candidate
+
+
+def _rail_generators(candidate: dict) -> set[str]:
+    """Every declared rail a part in this design generates, in either candidate shape."""
+    generators: set[str] = set()
+    for name, row in ((candidate.get("power") or {}).get("rails") or {}).items():
+        if isinstance(row, dict) and row.get("from"):
+            generators.add(str(name))
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        for port, net in (requirement.get("ports") or {}).items():
+            key = str(port).casefold()
+            if key.startswith(("output", "vout", "sw")) or key in {"out", "vout_sw"}:
+                generators.add(str(net))
+    return generators
+
+
+def _rail_needs_no_generator(name: str, voltage: float, rails: dict) -> bool:
+    """Ground, a host-supplied socket rail, or the board's own input rail."""
+    key = str(name).strip().casefold()
+    if key in {"gnd", "ground", "0v"} or abs(float(voltage)) <= 0.05:
+        return True
+    if key in {"vbus", "+5v", "5v"} and abs(float(voltage) - 5.0) <= 0.5:
+        return True
+    others = [float(v) for rail, v in rails.items() if str(rail).strip().casefold() != key]
+    return bool(others) and float(voltage) >= max(others)
+
+
+def _board_input_rail(rails: dict) -> str | None:
+    candidates = [
+        (str(rail), float(volts))
+        for rail, volts in rails.items()
+        if abs(float(volts)) > 0.05
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda row: row[1])[0]
 
 
 def _load_current_disclosed_on(text: str, rail: str) -> bool:

@@ -638,6 +638,108 @@ def _reference_port(catalog: _Catalog) -> str | None:
     return qualified[0] if len(qualified) == 1 else None
 
 
+def complete_architecture_payload(payload: dict) -> dict:
+    """Drop the duplicate power statements the deterministic contracts can only refuse.
+
+    The writer states one supply twice -- a port's `supply` (or a declared rail) *and* a signal
+    to the same pin -- or sets a tie field on a port a signal already names. The compiler
+    refuses both (`conflicting_port_binding`, `declared_signal_port_tied`), and a refusal at
+    decode costs a whole ladder round: three of the four rejections across the 2026-09-25
+    seed-37 architecture drafts were these two shapes, and one of those drafts failed outright.
+
+    Neither correction changes the design. A port a rail owns keeps that net and the ground net
+    is implicit on every part, so a signal to such a pin is the duplicate and is dropped; the
+    net a tie field would name is already named by the signal, so the field goes. Everything
+    else -- the rails, the parts, the nets the writer meant -- is left exactly as written.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
+    signals = [row for row in payload.get("signals") or [] if isinstance(row, dict)]
+    if not requirements or not signals:
+        return payload
+    by_id = {str(row.get("id") or ""): row for row in requirements}
+
+    def _endpoint(reference) -> tuple[str, str] | None:
+        text = str(reference)
+        if text.startswith("edge:") or "." not in text:
+            return None
+        requirement_id, port = text.split(".", 1)
+        return requirement_id, port
+
+    def _peers(signal: dict) -> list[str]:
+        peers = signal.get("to")
+        rows = peers if isinstance(peers, list) else [peers]
+        return [str(row) for row in rows if row is not None]
+
+    def _duplicates_a_binding(reference: str) -> bool:
+        parts = _endpoint(reference)
+        if parts is None:
+            return False
+        requirement_id, port = parts
+        requirement = by_id.get(requirement_id)
+        if requirement is None:
+            return False
+        key = port.casefold()
+        if _reference_port_name(key):
+            return True
+        # The compiler's own notion of a supply input, not just the token list: a regulator's
+        # `input` is one, so `_supply_port_name` alone would miss it.
+        supply_shaped = _supply_port_name(key) or key in _SUPPLY_PORTS
+        return bool(requirement.get("supply")) and supply_shaped
+
+    kept: list[dict] = []
+    dropped: list[str] = []
+    for signal in signals:
+        peers = _peers(signal)
+        if peers and all(_duplicates_a_binding(peer) for peer in peers):
+            dropped.append(str(signal.get("name") or ""))
+            continue
+        kept.append(signal)
+    if not dropped and not any(
+        isinstance(entry, dict)
+        and (entry.get("supply_rail") or entry.get("reference_domain"))
+        for row in requirements
+        for entry in (row.get("declared_ports") or [])
+    ):
+        return payload
+
+    carried = set()
+    for signal in kept:
+        for reference in [signal.get("from"), *_peers(signal)]:
+            parts = _endpoint(reference) if reference is not None else None
+            if parts is not None:
+                carried.add((parts[0].casefold(), parts[1].casefold()))
+    completed_requirements: list[dict] = []
+    for requirement in requirements:
+        declared = requirement.get("declared_ports")
+        if not isinstance(declared, list):
+            completed_requirements.append(requirement)
+            continue
+        requirement_id = str(requirement.get("id") or "").casefold()
+        rows = []
+        for entry in declared:
+            if (
+                isinstance(entry, dict)
+                and (requirement_id, str(entry.get("key") or "").casefold()) in carried
+                and (entry.get("supply_rail") or entry.get("reference_domain"))
+            ):
+                rows.append(
+                    {
+                        key: value
+                        for key, value in entry.items()
+                        if key not in ("supply_rail", "reference_domain")
+                    }
+                )
+            else:
+                rows.append(entry)
+        completed_requirements.append({**requirement, "declared_ports": rows})
+    completed = dict(payload)
+    completed["signals"] = kept
+    completed["requirements"] = completed_requirements
+    return completed
+
+
 def _supply_port_name(port: str) -> bool:
     """Whether a published port key *is* a supply input (`vdd`, `vbus_5v`)."""
     return any(port == token or port.startswith(f"{token}_") for token in _SUPPLY_TOKENS)

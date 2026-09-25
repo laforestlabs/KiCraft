@@ -2730,3 +2730,89 @@ def test_connector_contact_naming_a_declared_rail_binds_that_rail():
     host = _requirement(architecture, "host")
     assert host.ports["pin1"] == "+5V"
     assert any("carries rail '+5V'" in row for row in architecture.assumptions)
+
+
+def test_duplicate_power_statements_are_dropped_before_the_compiler_refuses_them():
+    """A refusal at decode costs a whole ladder round; the duplicate statement is mechanical.
+
+    Live walkthrough (2026-09-25, seed 37): one draft failed outright after five rejections,
+    two of them "signal 'MOTOR_SUPPLY': port 'vm' of 'hbridge' is already bound to
+    'MOTOR_VOLTAGE'" and "signal 'GND_INPUT': port 'gnd' of 'reg' is already bound to 'GND'".
+    """
+    import copy
+
+    from kicraft.design.architecture_intent import (
+        complete_architecture_payload,
+        derive_architecture,
+    )
+
+    payload = _hub75_intent()
+    # The compiler accepts this design as it stands.
+    assert derive_architecture(payload, None) is not None
+
+    mcu = next(
+        row for row in payload["requirements"] if str(row.get("role")) == "mcu_core"
+    )
+    duplicated = copy.deepcopy(payload)
+    duplicated["signals"] = [
+        *duplicated["signals"],
+        # Restates the supply the rail already feeds...
+        {"name": "MCU_SUPPLY", "from": "input.positive", "to": f"{mcu['id']}.vdd"},
+        # ...and a return pin, which is implicit on every part.
+        {"name": "MCU_GND", "from": "input.positive", "to": f"{mcu['id']}.gnd"},
+    ]
+
+    completed = complete_architecture_payload(duplicated)
+
+    names = [row["name"] for row in completed["signals"]]
+    assert "MCU_SUPPLY" not in names and "MCU_GND" not in names
+    assert [row for row in names if row in [s["name"] for s in payload["signals"]]] == [
+        row["name"] for row in payload["signals"]
+    ]
+    # The writer's payload is untouched, and the design still derives.
+    assert len(duplicated["signals"]) == len(payload["signals"]) + 2
+    assert derive_architecture(completed, None) is not None
+
+
+def test_a_tie_field_on_a_port_that_carries_a_signal_is_cleared():
+    """The signal is what names that net; the tie field names a second one on the same pin."""
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    payload = {
+        "requirements": [
+            {"id": "mcu", "role": "mcu_core", "family": "esp32-c3-mini-1-module"},
+            {
+                "id": "sense",
+                "role": "sensor",
+                "family": "temperature-sensor",
+                "declared_ports": [
+                    {
+                        "key": "out",
+                        "pin": "1",
+                        "direction": "output",
+                        "function": "reading",
+                        "supply_rail": "VIN18",
+                        "reference_domain": "GND",
+                    }
+                ],
+            },
+        ],
+        "signals": [{"name": "SENSOR_OUT", "from": "mcu.output_1", "to": "sense.out"}],
+    }
+
+    completed = complete_architecture_payload(payload)
+
+    entry = completed["requirements"][1]["declared_ports"][0]
+    assert "supply_rail" not in entry and "reference_domain" not in entry
+    assert entry["function"] == "reading"
+    assert payload["requirements"][1]["declared_ports"][0]["supply_rail"] == "VIN18"
+
+
+def test_a_payload_without_duplicates_is_returned_untouched():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    payload = {
+        "requirements": [{"id": "mcu", "role": "mcu_core", "family": "esp32-c3-mini-1-module"}],
+        "signals": [{"name": "LED_DRIVE", "from": "mcu.output_status", "to": "led.anode"}],
+    }
+    assert complete_architecture_payload(payload) is payload

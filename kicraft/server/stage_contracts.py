@@ -1240,10 +1240,16 @@ def _derive_intent_payload(payload: dict, functional_spec: object | None = None)
     give the derived requirement that block's exact name; with no spec, or with
     no matching block, the derived requirement owns none.
     """
-    from kicraft.design.architecture_intent import ArchitectureIntentError, derive_architecture
+    from kicraft.design.architecture_intent import (
+        ArchitectureIntentError,
+        complete_architecture_payload,
+        derive_architecture,
+    )
 
     try:
-        return derive_architecture(payload, functional_spec).model_dump(exclude_none=True)
+        return derive_architecture(
+            complete_architecture_payload(payload), functional_spec
+        ).model_dump(exclude_none=True)
     except ArchitectureIntentError as exc:
         raise StageSchemaError(
             str(exc), diagnostic=_aggregate_intent_diagnostic(exc)

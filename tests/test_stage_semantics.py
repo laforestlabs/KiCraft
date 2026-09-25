@@ -1706,3 +1706,219 @@ def test_an_over_rated_load_gets_its_own_regulated_rail_before_diagnosis():
     within = {**candidate, "rail_voltages": {"+9V": 9.0, "GND": 0.0},
               "requirements": [{**candidate["requirements"][0], "ports": {"vm": "+9V"}}]}
     assert complete_over_rated_supply(within) == within
+
+
+def test_the_rail_fix_corrects_the_statements_it_invalidates():
+    """A candidate whose prose contradicts its bindings is not reviewable.
+
+    Live walkthrough (2026-09-25): after the pipeline rebound the bridge's `vm` to a 10 V rail,
+    the writer's own rows still said "the DRV8833 motor supply is connected to the 18 V input",
+    and the sheet said "from the 18 V motor supply" -- a review that has to notice the binding
+    was 10 V was reading two contradictory stories.
+    """
+    from kicraft.design.stage_semantics import complete_over_rated_supply
+
+    candidate = {
+        "rail_voltages": {"+18V": 18.0, "GND": 0.0},
+        "topologies": {
+            "DRIVE": "DRV8833 dual H-bridge fed from the 18 V input",
+            "POWER": "18 V input converted to 3.3 V by an adjustable buck regulator",
+        },
+        "sheets": [
+            {
+                "name": "H BRIDGE",
+                "stem": "H_BRIDGE",
+                "role": "driver",
+                "function": "Drive two external actuators from the 18 V motor supply",
+            },
+            {
+                "name": "POWER CONVERSION",
+                "stem": "POWER_CONVERSION",
+                "role": "regulator",
+                "function": "Convert the 18 V input to a 3.3 V rail for the ESP32-C3 and the "
+                "DRV8833 logic side",
+            }
+        ],
+        "requirements": [
+            {
+                "id": "bridge",
+                "sheet": "H BRIDGE",
+                "role": "driver",
+                "family": "dual-dc-motor-driver",
+                "exact_part": "DRV8833PWPR",
+                "parameters": {},
+                "ports": {"vm": "+18V", "gnd": "GND"},
+                "functional_blocks": ["DUAL H-BRIDGE"],
+            }
+        ],
+        "assumptions": [
+            "The DRV8833 motor supply is connected to the 18 V input (defaulted)",
+            "The 18 V DC input is treated as the actuator supply and the input to a dedicated "
+            "3.3 V buck regulator (defaulted)",
+            "A green status LED is operated at approximately 2 mA (defaulted)",
+        ],
+    }
+
+    fixed = complete_over_rated_supply(candidate)
+    rows = [str(row).casefold() for row in fixed["assumptions"]]
+    text = " ".join(rows)
+
+    # No writer row says the part runs on the 18 V rail any more (the pipeline's own disclosure
+    # names both rails on purpose -- it is where the whole picture is stated), and the row that
+    # mixed the input voltage with the load's supply is gone.
+    disclosure_rows = [row for row in rows if "runs from a regulated" in row]
+    assert len(disclosure_rows) == 1, rows
+    assert not any(
+        "drv8833" in row and "18 v" in row for row in rows if row not in disclosure_rows
+    ), rows
+    assert not any("actuator supply" in row for row in rows), rows
+    # Statements the fix does not invalidate are left alone.
+    assert any("status led" in row for row in rows)
+    assert not any("18 v" in str(row).casefold() for row in [fixed["topologies"]["DRIVE"]])
+    assert "BRIDGE_RAIL" in fixed["topologies"]["DRIVE"]
+    sheet = next(row for row in fixed["sheets"] if row["name"] == "H BRIDGE")
+    assert "18 V" not in sheet["function"] and "BRIDGE_RAIL" in sheet["function"]
+    # And the pipeline states the whole picture in one disclosed row.
+    disclosure = next(row for row in fixed["assumptions"] if "(defaulted)" in row and "regulator" in row)
+    assert "BRIDGE_RAIL" in disclosure and "10.8 V" in disclosure and "18 V" in disclosure
+    # The statements about the board input survive: the fix regulates the *load* rail, and the
+    # converter still takes 18 V in.
+    conversion_sheet = next(
+        row for row in fixed["sheets"] if row["name"] == "POWER CONVERSION"
+    )
+    # The conversion sentence is intact -- not rewritten into "regulated rail … to a 3.3 V rail".
+    assert "Convert the 18 V input to a 3.3 V rail" in conversion_sheet["function"], (
+        conversion_sheet["function"]
+    )
+    assert "18 V input" in fixed["topologies"]["POWER"], fixed["topologies"]["POWER"]
+    assert text  # the ledger is non-empty
+
+
+def test_a_drive_on_the_logic_rail_gets_its_own_rail_too():
+    """The escape has a deterministic fix as well, so it cannot park either."""
+    from kicraft.design.stage_semantics import (
+        _architecture_drive_on_logic_rail,
+        complete_over_rated_supply,
+    )
+
+    candidate = {
+        "rail_voltages": {"+18V": 18.0, "+3V3": 3.3, "GND": 0.0},
+        "requirements": [
+            {"id": "mcu", "role": "mcu_core", "exact_part": "ESP32-C3-MINI-1-N4",
+             "ports": {"vdd": "+3V3", "gnd": "GND"}},
+            {"id": "bridge", "role": "driver", "family": "dual-dc-motor-driver",
+             "exact_part": "DRV8833PWPR", "ports": {"vm": "+3V3", "gnd": "GND"},
+             "functional_blocks": ["DUAL H-BRIDGE"]},
+        ],
+        "sheets": [{"name": "H BRIDGE", "stem": "H_BRIDGE", "role": "driver",
+                    "function": "Drive the actuators from the 3.3 V rail"}],
+        "assumptions": [],
+    }
+    assert [row.code for row in _architecture_drive_on_logic_rail({}, candidate)] == [
+        "architecture_drive_shares_logic_rail"
+    ]
+
+    fixed = complete_over_rated_supply(candidate)
+
+    # Its own rail, at the highest voltage the part's reviewed limit allows, from the board input.
+    assert fixed["rail_voltages"]["BRIDGE_RAIL"] == 10.0
+    assert next(r for r in fixed["requirements"] if r["id"] == "bridge")["ports"]["vm"] == "BRIDGE_RAIL"
+    converter = next(r for r in fixed["requirements"] if r["id"] == "bridge_regulator")
+    assert converter["ports"] == {"input": "+18V", "output": "BRIDGE_RAIL", "gnd": "GND"}
+    assert _architecture_drive_on_logic_rail({}, fixed) == []
+    # And the sheet that claimed the 3.3 V rail now names the rail the part runs on.
+    assert "BRIDGE_RAIL" in next(r for r in fixed["sheets"] if r["name"] == "H BRIDGE")["function"]
+
+
+def test_the_rail_rewrite_neither_mangles_words_nor_skips_the_part():
+    """Two defects the live draft exposed (2026-09-25).
+
+    The rail name "VIN" was substituted inside the word "driving" ("driVINg"), and the part was
+    written as "DRV8833" while the token list held only the order code "DRV8833PWPR", so its own
+    false claim ("supplied from the 18 V input") survived the correction.
+    """
+    from kicraft.design.stage_semantics import complete_over_rated_supply
+
+    candidate = {
+        "rail_voltages": {"VIN": 18.0, "+3V3": 3.3, "GND": 0.0},
+        "topologies": {
+            "DRIVER": "DRV8833 dual H-bridge driving two actuator connectors",
+            "POWER": "18 V DC input with buck conversion to 3.3 V; DRV8833 supplied from the 18 V input",
+            "CONTROL": "Run actuator control and provide H-bridge control signals from the 18 V input",
+        },
+        "sheets": [
+            {"name": "DUAL H BRIDGE", "stem": "DUAL_H_BRIDGE", "role": "driver",
+             "function": "Drive two actuator outputs from the 18 V input"},
+        ],
+        "requirements": [
+            {"id": "hbridge", "sheet": "DUAL H BRIDGE", "role": "driver",
+             "family": "dual-dc-motor-driver", "exact_part": "DRV8833PWPR",
+             "ports": {"vm": "VIN", "gnd": "GND"}, "functional_blocks": ["DUAL H-BRIDGE"]},
+        ],
+        "assumptions": [],
+    }
+
+    fixed = complete_over_rated_supply(candidate)
+    bridge_rail = "HBRIDGE_RAIL"
+    driver = next(r for r in fixed["requirements"] if r["id"] == "hbridge")
+    assert driver["ports"]["vm"] == bridge_rail
+
+    # No mangled word: the rail name never lands inside "driving".
+    assert "driving two actuator connectors" in fixed["topologies"]["DRIVER"]
+    assert "dri" + bridge_rail not in fixed["topologies"]["DRIVER"]
+    # The part's own claim is corrected, even though the writer shortened the order code.
+    assert "DRV8833 supplied from the 18 V input" not in fixed["topologies"]["POWER"]
+    assert bridge_rail in fixed["topologies"]["POWER"]
+    # A sentence about control signals keeps the board input's voltage: it is not a supply claim.
+    assert "18 V input" in fixed["topologies"]["CONTROL"]
+    # And the bridge's own sheet now names the rail it runs on.
+    assert "18 V" not in fixed["sheets"][0]["function"]
+    assert bridge_rail in fixed["sheets"][0]["function"]
+
+
+def test_a_declared_load_rail_nothing_generates_gets_its_converter():
+    """The same fault one step later: the writer declared the rail and left the converter out.
+
+    Live walkthrough (2026-09-25, seed 37): a draft declared MOTOR_VIN at 10.8 V with
+    `from: null`, bound the DRV8833 to it, and reported zero diagnostics -- the rail-source
+    check only covers ~3.3 V rails. A rail nothing generates is not a design.
+    """
+    from kicraft.design.stage_semantics import complete_over_rated_supply
+
+    candidate = {
+        "rail_voltages": {"VIN": 18.0, "MOTOR_VIN": 10.8, "+3V3": 3.3, "GND": 0.0},
+        "sheets": [{"name": "DUAL H BRIDGE", "stem": "DUAL_H_BRIDGE", "role": "driver",
+                    "function": "Drive the actuators"}],
+        "requirements": [
+            {"id": "reg", "role": "regulator", "family": "tps54331-adjustable",
+             "exact_part": "TPS54331DDAR", "parameters": {"output_voltage": 3.3},
+             "ports": {"input": "VIN", "output": "+3V3"}},
+            {"id": "driver", "role": "driver", "family": "dual-dc-motor-driver",
+             "exact_part": "DRV8833PWPR", "ports": {"vm": "MOTOR_VIN", "gnd": "GND"},
+             "functional_blocks": ["DUAL H-BRIDGE"]},
+        ],
+        "assumptions": [],
+    }
+
+    fixed = complete_over_rated_supply(candidate)
+
+    converter = next(
+        row for row in fixed["requirements"] if row["id"] == "motor_vin_regulator"
+    )
+    assert converter["ports"] == {"input": "VIN", "output": "MOTOR_VIN", "gnd": "GND"}
+    assert converter["parameters"]["output_voltage"] == 10.8
+    assert converter["family"] == "tps54331-adjustable"
+    assert any(row["name"] == "MOTOR_VIN REGULATOR" for row in fixed["sheets"])
+    assert any("motor_vin_regulator" in row and "(defaulted)" in row for row in fixed["assumptions"])
+    # The board input and the 3.3 V rail already have their sources; only the bare rail is filled.
+    assert not any(row["id"] == "vin_regulator" for row in fixed["requirements"])
+    # A design where every rail has a generator is left alone.
+    sourced = {
+        **candidate,
+        "requirements": [
+            *candidate["requirements"],
+            {"id": "motor_reg", "role": "regulator", "family": "tps54331-adjustable",
+             "ports": {"input": "VIN", "output": "MOTOR_VIN"}},
+        ],
+    }
+    assert complete_over_rated_supply(sourced) == sourced

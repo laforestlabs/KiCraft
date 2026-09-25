@@ -1350,25 +1350,21 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
         # walkthrough (2026-09-25): an 18 V rail on a DRV8833 (`vm` rated 10.8 V) survived the
         # repair round and parked the stage, because the only guidance was the evidence line.
         message += (
-            " Fix the flagged part in THIS candidate by regulating the rail it runs on: declare "
-            "the rail the part actually needs (a converter whose output feeds the part's supply "
-            "port at a voltage inside its reviewed range -- for a motor driver, a buck that steps "
-            "the input down to the motor supply), add that converter as its own requirement on "
-            "its own sheet, bind the part's supply port to the regulated rail, and record the "
-            "chosen voltage and current rating in `assumptions` ending '(defaulted)'. Leave the "
-            "higher input voltage as the board input only, and keep the load drive on the "
-            "regulated rail. Name a different part only when the demanded class has a reviewed "
-            "part rated for the stated voltage. Never clear this by dropping the rail, the "
-            "requirement or the supply binding, and never by moving the part's supply onto the "
-            "logic rail (the rail that powers the MCU or another non-drive part): the load must "
-            "not run from the logic regulator."
+            " Do not restructure the power tree to satisfy this: keep the part's supply binding "
+            "and every other binding as the draft states them. The pipeline adds the regulated "
+            "rail the part needs when the stated input is above the part's reviewed limit and no "
+            "reviewed part for that class is rated for it -- the rail, its converter on the input "
+            "and the '(defaulted)' assumption are written for you, and the input voltage stays "
+            "the board input. Name a reviewed part rated for the stated rail only when one "
+            "exists. Never move the part's supply onto the logic rail, and never delete the "
+            "rail, the requirement or the binding to clear this."
         )
     if any(d.code == "architecture_drive_shares_logic_rail" for d in diagnostics):
         message += (
-            " Give the flagged drive part its own regulated rail: add a converter as its own "
-            "requirement on its own sheet, set its output voltage inside the part's reviewed "
-            "range, bind the part's supply port to that new rail, and leave the higher input "
-            "voltage as the board input only. If sharing the rail is deliberate, state the "
+            " Do not restructure the power tree to satisfy this: keep the part's supply binding "
+            "as the draft states it. The pipeline adds the regulated rail a load part needs when "
+            "the logic rail cannot carry it -- the rail, its converter and the '(defaulted)' "
+            "assumption are written for you. If sharing the logic rail is deliberate, state the "
             "load's maximum current on that rail in `assumptions` ending '(defaulted)' instead."
         )
     if any(d.code == "architecture_external_load_current_unspecified" for d in diagnostics):
