@@ -17,6 +17,7 @@ from kicraft.design.stage_semantics import (
     DETECTOR_VERSION,
     EXTERNAL_LOAD_CURRENT_CODE,
     complete_intent_classification,
+    complete_over_rated_supply,
     complete_unstated_power_input,
     complete_unsourced_external_rails,
     complete_usb_socket_rail,
@@ -1343,6 +1344,33 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
             "reading: state the chosen default in `assumptions`, ending '(defaulted)', and "
             "name the load whose power the board supplies."
         )
+    if any(d.code == "architecture_supply_exceeds_part_rating" for d in diagnostics):
+        # Catching the fault is not enough: the correction must have a concrete move, or the
+        # stage spends its rounds restating the same electrical impossibility and parks. Live
+        # walkthrough (2026-09-25): an 18 V rail on a DRV8833 (`vm` rated 10.8 V) survived the
+        # repair round and parked the stage, because the only guidance was the evidence line.
+        message += (
+            " Fix the flagged part in THIS candidate by regulating the rail it runs on: declare "
+            "the rail the part actually needs (a converter whose output feeds the part's supply "
+            "port at a voltage inside its reviewed range -- for a motor driver, a buck that steps "
+            "the input down to the motor supply), add that converter as its own requirement on "
+            "its own sheet, bind the part's supply port to the regulated rail, and record the "
+            "chosen voltage and current rating in `assumptions` ending '(defaulted)'. Leave the "
+            "higher input voltage as the board input only, and keep the load drive on the "
+            "regulated rail. Name a different part only when the demanded class has a reviewed "
+            "part rated for the stated voltage. Never clear this by dropping the rail, the "
+            "requirement or the supply binding, and never by moving the part's supply onto the "
+            "logic rail (the rail that powers the MCU or another non-drive part): the load must "
+            "not run from the logic regulator."
+        )
+    if any(d.code == "architecture_drive_shares_logic_rail" for d in diagnostics):
+        message += (
+            " Give the flagged drive part its own regulated rail: add a converter as its own "
+            "requirement on its own sheet, set its output voltage inside the part's reviewed "
+            "range, bind the part's supply port to that new rail, and leave the higher input "
+            "voltage as the board input only. If sharing the rail is deliberate, state the "
+            "load's maximum current on that rail in `assumptions` ending '(defaulted)' instead."
+        )
     if any(d.code == "architecture_external_load_current_unspecified" for d in diagnostics):
         message += (
             " Do not guess the external-load current. Return one blocking question "
@@ -1432,6 +1460,10 @@ def _normalize_candidate_for_diagnostics(
             remove_mislabeled_functional_defaults(brief, semantic_state, candidate)
         )
     elif stage == "architecture":
+        # A load part whose reviewed supply limit is below the rail it is on has no reviewed
+        # alternative to fall back on (checked inside), so the rail it needs is added here --
+        # before diagnosis, so what the checker sees is a design the pipeline can build.
+        candidate = complete_over_rated_supply(candidate)
         candidate = complete_usb_socket_rail(candidate)
         candidate = remove_mislabeled_architecture_defaults(semantic_state, candidate)
     return candidate

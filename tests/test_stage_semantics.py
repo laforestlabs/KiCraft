@@ -1575,3 +1575,134 @@ def test_supply_over_rating_reads_the_derived_architecture_shape():
         ],
     }
     assert _architecture_supply_over_rating(within) == []
+
+
+def test_a_drive_part_may_not_be_powered_from_the_logic_rail():
+    """The rating refusal has a cheap escape: move the drive's supply onto the logic rail.
+
+    Live walkthrough (2026-09-25, seed 37): after the 18 V-on-DRV8833 refusal, the correction
+    bound the bridge's `vm` to the 3.3 V rail that powers the ESP32-C3 and reported zero
+    diagnostics -- the actuators would run from the MCU's regulator. A deliberate shared rail
+    is a real design, so a disclosed load-current budget clears it; silence does not.
+    """
+    from kicraft.design.stage_semantics import _architecture_drive_on_logic_rail
+
+    def candidate(driver_rail: str) -> dict:
+        return {
+            "rail_voltages": {"+3V3": 3.3, "VMOT": 9.0},
+            "requirements": [
+                {
+                    "id": "mcu",
+                    "role": "mcu_core",
+                    "exact_part": "ESP32-C3-MINI-1-N4",
+                    "ports": {"vdd": "+3V3", "gnd": "GND"},
+                },
+                {
+                    "id": "bridge",
+                    "role": "driver",
+                    "exact_part": "DRV8833PWPR",
+                    "ports": {"vm": driver_rail, "gnd": "GND"},
+                },
+                {
+                    "id": "reg",
+                    "role": "regulator",
+                    "exact_part": "TPS54331DDAR",
+                    "ports": {"input": "VIN18", "output": "+3V3"},
+                },
+            ],
+            "assumptions": [],
+        }
+
+    shared = _architecture_drive_on_logic_rail({}, candidate("+3V3"))
+    assert [row.code for row in shared] == ["architecture_drive_shares_logic_rail"]
+    assert "'+3v3'" in shared[0].evidence[0].casefold()
+
+    # Its own regulated rail: clean.
+    assert _architecture_drive_on_logic_rail({}, candidate("VMOT")) == []
+
+    # A deliberate shared rail is allowed once the load's current is disclosed.
+    disclosed = candidate("+3V3")
+    disclosed["assumptions"] = ["The +3V3 rail feeds the bridge with up to 1.2 A (defaulted)"]
+    assert _architecture_drive_on_logic_rail({}, disclosed) == []
+
+
+def test_a_logic_rail_driver_that_needs_no_load_rail_is_not_flagged():
+    """A display/level driver on the logic rail is a real design; only a load-rail part is."""
+    from kicraft.design.stage_semantics import _architecture_drive_on_logic_rail
+
+    def candidate(exact_part: str, role: str = "driver") -> dict:
+        return {
+            "rail_voltages": {"+3V3": 3.3},
+            "requirements": [
+                {"id": "mcu", "role": "mcu_core", "exact_part": "ESP32-C3-MINI-1-N4",
+                 "ports": {"vdd": "+3V3"}},
+                {"id": "panel", "role": role, "exact_part": exact_part, "ports": {"vm": "+3V3"}},
+            ],
+            "assumptions": [],
+        }
+
+    # Reviewed limits that name no load domain (a logic-rail part): not this check's business.
+    assert _architecture_drive_on_logic_rail({}, candidate("TPS54331DDAR")) == []
+
+
+def test_an_over_rated_load_gets_its_own_regulated_rail_before_diagnosis():
+    """Catching the fault is not enough: the pipeline adds the rail the part can run on.
+
+    Live walkthrough (2026-09-25, seed 37): 18 V DC in, a DRV8833 (`vm` 2.7-10.8 V) driving the
+    actuators, and no reviewed dual-H-bridge rated for 18 V -- three drafts restated the
+    impossibility and the stage parked. The completion adds a reviewed adjustable buck, sets a
+    rail inside the part's range, rebinds the part, and discloses it as a default.
+    """
+    from kicraft.design.stage_semantics import (
+        _architecture_supply_over_rating,
+        complete_over_rated_supply,
+    )
+    from kicraft.server.stage_runtime import _normalize_candidate_for_diagnostics
+
+    candidate = {
+        "rail_voltages": {"+18V": 18.0, "+3V3": 3.3, "GND": 0.0},
+        "power_nets": ["GND", "+3V3", "+18V"],
+        "sheets": [{"name": "H BRIDGE", "stem": "H_BRIDGE", "role": "driver", "function": "Drive loads"}],
+        "requirements": [
+            {
+                "id": "bridge",
+                "sheet": "H BRIDGE",
+                "role": "driver",
+                "family": "dual-dc-motor-driver",
+                "exact_part": "DRV8833PWPR",
+                "parameters": {},
+                "ports": {"vm": "+18V", "gnd": "GND", "aout1": "MOTOR_A"},
+                "functional_blocks": ["DUAL H-BRIDGE"],
+            }
+        ],
+        "assumptions": [],
+    }
+    assert [row.code for row in _architecture_supply_over_rating(candidate)] == [
+        "architecture_supply_exceeds_part_rating"
+    ]
+
+    fixed = complete_over_rated_supply(candidate)
+
+    # A rail inside the part's rated range, sourced from a reviewed converter on the input.
+    assert fixed["rail_voltages"]["BRIDGE_RAIL"] == 10.0
+    assert "+18V" in fixed["rail_voltages"] and fixed["rail_voltages"]["+18V"] == 18.0
+    converter = next(row for row in fixed["requirements"] if row["id"] == "bridge_regulator")
+    assert converter["family"] == "tps54331-adjustable"
+    assert converter["parameters"]["output_voltage"] == 10.0
+    assert converter["ports"] == {"input": "+18V", "output": "BRIDGE_RAIL", "gnd": "GND"}
+    bridge = next(row for row in fixed["requirements"] if row["id"] == "bridge")
+    assert bridge["ports"]["vm"] == "BRIDGE_RAIL"
+    assert any(row["name"] == "BRIDGE REGULATOR" for row in fixed["sheets"])
+    assert any("(defaulted)" in row and "BRIDGE_RAIL" in row for row in fixed["assumptions"])
+
+    # The fault is gone from the candidate the checks and the commit see.
+    assert _architecture_supply_over_rating(fixed) == []
+
+    # The normalize step (the pipeline's own path) applies it, so diagnosis never sees the fault.
+    normalized = _normalize_candidate_for_diagnostics("architecture", candidate, "18 V actuator board", {})
+    assert _architecture_supply_over_rating(normalized) == []
+
+    # A design already inside its rating is left exactly as it is.
+    within = {**candidate, "rail_voltages": {"+9V": 9.0, "GND": 0.0},
+              "requirements": [{**candidate["requirements"][0], "ports": {"vm": "+9V"}}]}
+    assert complete_over_rated_supply(within) == within

@@ -1239,9 +1239,246 @@ def _architecture_derivation_diagnostics(upstream: dict, candidate: dict) -> lis
     return []
 
 
+#: Roles that a rail powering a drive part must not be shared with: these are the logic loads
+#: whose supply the drive would then steal headroom from.
+_LOGIC_ROLES = frozenset(
+    {"mcu_core", "sensor", "bus_interface", "programming", "analog_block", "user_io"}
+)
+
+#: Supply-port names that a part *generates* rather than consumes.
+_GENERATOR_PORTS = ("output", "vout", "sw")
+
+
+#: The reviewed adjustable buck the pipeline uses when a load needs its own regulated rail
+#: (3.5-28 V input, adjustable output). Named here, not chosen per design: it is the library's
+#: general-purpose converter family, and the assumption records the choice.
+_OVER_RATED_REGULATOR_FAMILY = "tps54331-adjustable"
+
+
+def complete_over_rated_supply(candidate: dict) -> dict:
+    """Give an over-rated load part its own regulated rail, before it is diagnosed.
+
+    Live walkthrough (2026-09-25, seed 37): the brief states an 18 V DC input and a DRV8833
+    (``vm`` rated 2.7-10.8 V) driving the actuators. The reviewed library has no dual-H-bridge
+    rated for 18 V, so no part satisfies the stated input, and every correction round restated
+    the impossibility: three drafts, no candidate. Catching the fault is not enough -- the rail
+    the part can run on has to exist.
+
+    So the pipeline adds it: a reviewed adjustable buck on the offending rail, its output at a
+    voltage inside the part's rated range, the part's supply port rebound to that rail, and an
+    assumption ending "(defaulted)" that names the choice. The higher input voltage stays the
+    board input only. Nothing is invented about the *load*: its current and voltage stay as the
+    brief and the writer stated them.
+    """
+    from kicraft.design.part_identity import (
+        reviewed_part,
+        reviewed_parts_for_feature,
+        reviewed_supply_voltage_limits,
+    )
+
+    rails = _architecture_rail_voltages(candidate)
+    if not rails:
+        return candidate
+    requirements = candidate.get("requirements") or []
+    for index, requirement in enumerate(requirements):
+        if not isinstance(requirement, dict):
+            continue
+        role = str(requirement.get("role") or "")
+        if role not in {"driver", "analog_block"}:
+            continue
+        exact = str(requirement.get("exact_part") or "").strip()
+        record = reviewed_part(exact) if exact else None
+        if record is None:
+            continue
+        limits = [
+            (str(label), low, high)
+            for label, low, high in reviewed_supply_voltage_limits(record)
+            if high is not None
+        ]
+        if not limits:
+            continue
+        allowed = max(high for _label, _low, high in limits)
+        offend = [
+            rail
+            for rail in _requirement_supply_rails(requirement)
+            if rails.get(rail) is not None and rails[rail] > allowed
+        ]
+        if not offend:
+            continue
+        # Only when no reviewed part for this class is rated for the stated rail: otherwise the
+        # writer's own fix (name the rated part) is the better one and is not ours to pre-empt.
+        source_rail = max(offend, key=lambda rail: rails[rail])
+        if any(
+            any(
+                high is not None and high >= rails[source_rail]
+                for _label, _low, high in reviewed_supply_voltage_limits(alternative)
+            )
+            for alternative in reviewed_parts_for_feature(str(requirement.get("family") or ""))
+        ):
+            continue
+        label, low, _high = min(limits, key=lambda row: row[2])
+        floor = float(int(allowed)) if int(allowed) >= float(low or 0.0) else allowed
+        voltage = max(float(low or 0.0), min(floor, allowed))
+        new_rail = f"{str(requirement.get('id') or 'load').upper()}_RAIL"
+        converter_id = f"{str(requirement.get('id') or 'load')}_regulator"
+        sheet_name = f"{str(requirement.get('id') or 'load').upper()} REGULATOR"
+        completed = dict(candidate)
+        completed["requirements"] = [dict(row) if isinstance(row, dict) else row for row in requirements]
+        completed["requirements"][index]["ports"] = {
+            key: (new_rail if str(value) == source_rail else value)
+            for key, value in (requirement.get("ports") or {}).items()
+        }
+        completed.setdefault("sheets", [])
+        completed["sheets"] = [dict(row) for row in completed.get("sheets") or []]
+        completed["sheets"].append(
+            {
+                "name": sheet_name,
+                "stem": sheet_name.replace(" ", "_"),
+                "role": "regulator",
+                "function": (
+                    f"Step the {source_rail} input down to {voltage:g} V for the "
+                    f"{requirement.get('id')} load supply."
+                ),
+            }
+        )
+        completed["requirements"].append(
+            {
+                "id": converter_id,
+                "sheet": sheet_name,
+                "role": "regulator",
+                "family": _OVER_RATED_REGULATOR_FAMILY,
+                "parameters": {"output_voltage": voltage},
+                "ports": {"input": source_rail, "output": new_rail, "gnd": "GND"},
+                "functional_blocks": list(requirement.get("functional_blocks") or []),
+            }
+        )
+        rail_voltages = dict(completed.get("rail_voltages") or {})
+        rail_voltages[new_rail] = voltage
+        completed["rail_voltages"] = rail_voltages
+        if isinstance(completed.get("power_nets"), list):
+            completed["power_nets"] = [*completed["power_nets"], new_rail]
+        completed["assumptions"] = [
+            *(completed.get("assumptions") or []),
+            (
+                f"{exact} runs from a regulated {voltage:g} V rail ({new_rail}) because its "
+                f"reviewed {label} limit is {allowed:g} V and no reviewed part for "
+                f"{requirement.get('family')!r} is rated for {source_rail} "
+                f"({rails[source_rail]:g} V); {converter_id} steps {source_rail} down, and the "
+                f"{source_rail} input stays the board input only (defaulted)"
+            ),
+        ]
+        return completed
+    return candidate
+
+
+def _load_current_disclosed_on(text: str, rail: str) -> bool:
+    """Whether the text states how much current a load draws on this rail.
+
+    ``external_load_budget_stated`` is anchored on the display/LED-string vocabulary ("5v",
+    "hub75", "led string"); a motor or actuator rail is disclosed in its own words, so the
+    drive-rail check reads both. Without this a deliberate shared rail could not be disclosed
+    at all, and the check would park the stage -- the outcome it exists to avoid.
+    """
+    text = _text(text)
+    if external_load_budget_stated(text):
+        return True
+    rail_words = re.escape(str(rail).casefold())
+    load_words = r"(?:motor|actuator|solenoid|heater|driver|external load|load)"
+    return bool(
+        re.search(
+            rf"(?:{rail_words}|{load_words})[^.;]{{0,80}}\d+(?:\.\d+)?\s*(?:a|ma)\b",
+            text,
+            re.I,
+        )
+        or re.search(
+            rf"\d+(?:\.\d+)?\s*(?:a|ma)\b[^.;]{{0,80}}(?:{rail_words}|{load_words})",
+            text,
+            re.I,
+        )
+    )
+
+
+def _architecture_drive_on_logic_rail(
+    upstream: dict, candidate: dict
+) -> list[StageDiagnostic]:
+    """A drive part powered from the rail that powers the logic it is controlled by.
+
+    The rating check has a cheap escape the writer found live (2026-09-25): after an 18 V rail
+    was refused on a DRV8833 (``vm`` rated 10.8 V), the correction bound ``vm`` to the 3.3 V
+    rail that powers the ESP32-C3 -- always inside the part's range, and always wrong: the
+    actuators would run from the MCU's regulator, taking their current out of the logic budget.
+
+    A deliberate shared rail is a real design, so the check is satisfied by *disclosing* the
+    load's current on that rail (``external_load_budget_stated``); what it refuses is sharing
+    the logic rail silently.
+    """
+    from kicraft.design.architecture_intent import _supply_port_name
+
+    from kicraft.design.part_identity import reviewed_part, reviewed_supply_voltage_limits
+
+    def needs_its_own_rail(requirement: dict) -> bool:
+        """Whether the record says this part runs on a load rail rather than the logic rail.
+
+        A level shifter or a display driver legitimately runs on the logic rail; a motor
+        driver's reviewed record names a *motor supply* domain (the DRV8833's ``vm``). Only
+        the latter is the escape this check exists to stop, so the check keys on the record,
+        not on the role alone.
+        """
+        exact = str(requirement.get("exact_part") or "").strip()
+        record = reviewed_part(exact) if exact else None
+        if record is None:
+            return False
+        return any(
+            re.search(r"\b(?:motor|load|coil|actuator)\b", str(label), re.I)
+            for label, _low, high in reviewed_supply_voltage_limits(record)
+            if high is not None
+        )
+
+    drives: dict[str, list[str]] = {}
+    logic: dict[str, list[str]] = {}
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        role = str(requirement.get("role") or "")
+        if role == "driver" and not needs_its_own_rail(requirement):
+            continue
+        requirement_id = str(requirement.get("id") or "")
+        for port, net in (requirement.get("ports") or {}).items():
+            port_key = str(port).casefold()
+            if port_key in _GENERATOR_PORTS or not _supply_port_name(port_key):
+                continue
+            rail = str(net)
+            if role == "driver":
+                drives.setdefault(rail, []).append(requirement_id)
+            elif role in _LOGIC_ROLES:
+                logic.setdefault(rail, []).append(requirement_id)
+
+    disclosure_text = _text([candidate, upstream.get("_stage_answers", [])])
+    diagnostics: list[StageDiagnostic] = []
+    for rail in sorted(set(drives) & set(logic)):
+        if _load_current_disclosed_on(disclosure_text, rail):
+            continue
+        diagnostics.append(
+            _diag(
+                "architecture_drive_shares_logic_rail",
+                "repair_required",
+                "A drive part is powered from the same rail as the logic it is controlled by.",
+                [
+                    f"rail {rail!r} powers drive requirement(s) {drives[rail]} and logic "
+                    f"requirement(s) {logic[rail]} — give the load its own regulated rail inside "
+                    "the part's rated range (a converter whose output feeds the drive's supply "
+                    "port, with the higher input voltage left as the board input), or state the "
+                    "load's maximum current on that rail if sharing it is deliberate",
+                ],
+            )
+        )
+    return diagnostics
+
+
 def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     diagnostics = architecture_power_requirement_diagnostics(upstream, candidate)
     diagnostics.extend(_architecture_supply_over_rating(candidate))
+    diagnostics.extend(_architecture_drive_on_logic_rail(upstream, candidate))
     diagnostics.extend(_architecture_derivation_diagnostics(upstream, candidate))
     sheets = candidate.get("sheets") or []
     for sheet in sheets:
