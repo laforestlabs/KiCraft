@@ -3407,7 +3407,9 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
 
     Returns JSON on stdout containing the current ``ConversationState``
     plus stage-specific extras the LLM stage needs to draft its slot:
-      - architecture: ``leaves_block`` (rendered "Available leaves" markdown)
+      - architecture: ``leaves_block`` (rendered "Available leaves" markdown), plus the reference
+                      blocks the runtime shows the stage (``circuit_recipes``,
+                      ``circuit_lowerers``, ``reviewed_class_options``, ``standard_form_factor``)
       - bom:          ``parts_block`` (rendered "Available parts" markdown)
       - wiring:       ``symbol_pinouts`` mapping every BomPart.ref to its exact
                       symbol and pin inventory (symbol lookups remain batched)
@@ -3435,6 +3437,19 @@ def _cmd_stage_prep(args: argparse.Namespace) -> int:
     if stage == "architecture":
         leaves = _load_library_leaves()
         extras["leaves_block"] = _format_available_leaves_block(leaves)
+        # The reference blocks the draft itself is shown, from the same builders the runtime
+        # uses, so a reviewer judging this stage sees the data it had: the curated circuit
+        # recipes, the generic building blocks, the reviewed parts that can carry each class
+        # this design demands, and a standard template when the design resolved to one. The
+        # admin-curated default parts come from the store rather than the state, so only the
+        # runtime can add those.
+        from kicraft.design.stage_reference import architecture_reference_extras
+
+        extras.update(
+            architecture_reference_extras(
+                state.intent.model_dump() if state.intent is not None else {}
+            )
+        )
 
     elif stage == "bom":
         parts, _broken = _load_library_parts(state_path.parent.parent.resolve())
