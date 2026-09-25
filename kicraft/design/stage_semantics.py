@@ -9,7 +9,10 @@ from collections.abc import Iterable
 from kicraft.design.models import (
     Architecture,
     BOM,
+    MAX_BOARD_COPPER_LAYERS,
+    MIN_BOARD_COPPER_LAYERS,
     StageDiagnostic,
+    board_copper_layers,
     is_power_or_ground_name,
 )
 from kicraft.design.synthesis.board_features import (
@@ -111,6 +114,17 @@ def complete_intent_classification(brief: str, candidate: dict) -> dict:
         ]
         completed["constraints"] = requirements
 
+    # A stated stack-up is a machine-readable board fact the builder reads to set the copper
+    # layer count; prose in `constraints` reaches no gate. The brief's own words are the
+    # evidence, so no default is recorded -- unlike the power-entry fallback, nothing is
+    # invented here. A row the writer already wrote is left alone.
+    layers = requested_board_copper_layers(brief)
+    if layers is not None and board_copper_layers(completed.get("obligations")) is None:
+        completed["obligations"] = [
+            *(completed.get("obligations") or []),
+            _board_stackup_obligation(layers),
+        ]
+
     normalized_obligations = []
     for obligation in completed.get("obligations") or []:
         if not isinstance(obligation, dict) or obligation.get("kind") != "physical":
@@ -129,6 +143,62 @@ def complete_intent_classification(brief: str, candidate: dict) -> dict:
     if normalized_obligations != completed.get("obligations"):
         completed["obligations"] = normalized_obligations
     return completed
+
+
+#: The brief's spelled-out layer counts. "four-layer stack-up" and "4 layers" both read here;
+#: the generator's own trailing sentences use the first spelling.
+_STACKUP_COUNT_WORDS = {
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+}
+
+#: A count bound to the layer noun, so an unrelated number ("under 100 x 100 mm") never reads
+#: as a stack-up. `two-layer`, `4 layer`, `four copper layers` all match.
+_STACKUP_COUNT_RE = re.compile(
+    r"\b(?P<count>\d{1,2}|"
+    + "|".join(_STACKUP_COUNT_WORDS)
+    + r")[\s-]+(?:copper[\s-]+)?layers?\b",
+    re.IGNORECASE,
+)
+
+
+def requested_board_copper_layers(text: str) -> int | None:
+    """The copper-layer count the brief states, or ``None`` when it states none.
+
+    Only a count a printed stack-up can carry is returned, so a nonsensical request ("a
+    hundred-layer board") stays unrecorded rather than failing the build with a number the
+    writer never meant as a stack-up.
+    """
+    for match in _STACKUP_COUNT_RE.finditer(text or ""):
+        raw = match.group("count").casefold()
+        count = int(raw) if raw.isdigit() else _STACKUP_COUNT_WORDS.get(raw)
+        if count is not None and MIN_BOARD_COPPER_LAYERS <= count <= MAX_BOARD_COPPER_LAYERS:
+            return count
+    return None
+
+
+def _board_stackup_obligation(layers: int) -> dict:
+    return {
+        "kind": "quantitative",
+        "original_obligation_id": "board-copper-layers",
+        "quantity": "PCB copper layers",
+        "relation": "equal",
+        "value": float(layers),
+        "unit": "layers",
+    }
 
 
 def normalize_project_stem(value: str) -> str:

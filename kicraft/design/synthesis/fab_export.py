@@ -29,9 +29,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from kicraft.pcb_layers import declared_copper_layers
+
 _KICAD_CLI = "kicad-cli"
 # Standard 2-layer fab stack. KiCad-9 untranslated layer names.
 _FAB_LAYERS = "F.Cu,B.Cu,F.Paste,B.Paste,F.Silkscreen,B.Silkscreen,F.Mask,B.Mask,Edge.Cuts"
+# The non-copper half of a fab stack: every board plots the same mask/silk/paste/edge set.
+_FAB_NON_COPPER_LAYERS = "F.Paste,B.Paste,F.Silkscreen,B.Silkscreen,F.Mask,B.Mask,Edge.Cuts"
+
+
+def fab_stack_layers(pcb_path: str) -> str:
+    """The fab layer list for this board: every copper layer it declares, then the standard
+    mask/silk/paste/edge set.
+
+    Falls back to the two-layer stack when the layer block cannot be read, which keeps a
+    malformed or unreadable board exporting what it did before rather than plotting nothing.
+    """
+    copper = declared_copper_layers(pcb_path)
+    if not copper:
+        return _FAB_LAYERS
+    return ",".join([*copper, *_FAB_NON_COPPER_LAYERS.split(",")])
+
+
 _LCSC_RE = re.compile(r"\bC\d{4,}\b")
 # Chip R/C/L imperial size codes that LOOK like C-numbers when prefixed with
 # 'C' in prose ("100nF X7R, package C0603") -- never LCSC pins. Real LCSC
@@ -286,17 +305,21 @@ def export_fab(
     stem: str,
     *,
     bom_parts: list[dict[str, Any]] | None = None,
-    fab_layers: str = _FAB_LAYERS,
+    fab_layers: str | None = None,
     include_3d: bool = True,
 ) -> dict[str, Any]:
-    """Publish a fresh package; never certify stale files from an earlier export."""
+    """Publish a fresh package; never certify stale files from an earlier export.
+
+    ``fab_layers`` defaults to the stack the board file itself declares, so a four-layer
+    board plots four copper gerbers without the caller having to say so.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".fab-export-", dir=out) as temporary:
         staging = Path(temporary)
         result = _export_fab(
             pcb_path, str(staging), stem, bom_parts=bom_parts,
-            fab_layers=fab_layers, include_3d=include_3d,
+            fab_layers=fab_layers or fab_stack_layers(pcb_path), include_3d=include_3d,
         )
         # This is generated output, not an input tree. Replace it only after all
         # required exports succeeded, so old drills/images cannot reappear.

@@ -26,14 +26,14 @@ import logging
 import shutil
 from pathlib import Path
 
-from .models import ArtifactPaths, ConversationState
+from .models import ArtifactPaths, ConversationState, board_copper_layers
 from .synthesis.autoplacer import write_autoplacer_json
 from .synthesis.emitter import (
     build_sheet_instances,
     emit_schematic,
     ensure_leaf_stems_distinct,
 )
-from .synthesis.kicad_pcb_stub import PadBindingError, write_empty_pcb
+from .synthesis.kicad_pcb_stub import DEFAULT_COPPER_LAYERS, PadBindingError, write_empty_pcb
 from .synthesis.kicad_pro import write_kicad_pro
 from .synthesis.models3d import stage_3d_models
 from .synthesis.validation import (
@@ -148,6 +148,23 @@ def _install_library_sheets(
     return fragments, library_leaves
 
 
+def _requested_copper_layers(state: ConversationState) -> int:
+    """The copper-layer count this design's own stack-up statement asks for.
+
+    Raises ``SynthesisInputError`` for a stated count no printed stack-up can carry: rounding
+    it silently would ship a board the brief did not ask for.
+    """
+    requested = board_copper_layers(state.intent.obligations if state.intent else None)
+    if requested is None:
+        return DEFAULT_COPPER_LAYERS
+    if requested % 2:
+        raise SynthesisInputError(
+            f"the design asks for {requested} copper layers; a printed stack-up carries an "
+            "even number, so the stack-up stated in the intent needs correcting"
+        )
+    return requested
+
+
 def run(
     state: ConversationState,
     project_dir: Path,
@@ -165,6 +182,10 @@ def run(
     assert state.project_stem is not None
     assert state.architecture is not None
     assert state.bom is not None
+
+    # Resolved before anything is written, so an impossible stack-up fails the run cleanly
+    # instead of leaving half-emitted files behind.
+    copper_layers = _requested_copper_layers(state)
 
     project_dir = project_dir.resolve()
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -290,7 +311,7 @@ def run(
     )
 
     try:
-        write_empty_pcb(project_dir, state.project_stem, state.bom)
+        write_empty_pcb(project_dir, state.project_stem, state.bom, copper_layers=copper_layers)
     except PadBindingError as exc:
         # A wired endpoint matched no footprint pad (invisible dead copper).
         # §9.27 rejects the symbol/footprint pairing at BOM commit, but any

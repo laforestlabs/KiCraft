@@ -150,6 +150,41 @@ def test_synthesis_passes_all_validations(tmp_path, llups_like_state) -> None:
     run_validations(tmp_path, "DEMO33")
 
 
+def _stackup_row(layers: int):
+    from kicraft.design.models import QuantitativeObligation
+
+    return QuantitativeObligation(
+        kind="quantitative",
+        original_obligation_id="board-copper-layers",
+        quantity="PCB copper layers",
+        relation="equal",
+        value=float(layers),
+        unit="layers",
+    )
+
+
+def test_synthesis_declares_the_requested_copper_layers(tmp_path, llups_like_state) -> None:
+    import pcbnew
+
+    llups_like_state.intent.obligations.append(_stackup_row(4))
+    artifacts, results = run(llups_like_state, tmp_path)
+    assert all(r.ok for r in results), [r.message for r in results if not r.ok]
+
+    board = pcbnew.LoadBoard(str(artifacts.project_dir / "DEMO33.kicad_pcb"))
+    assert board.GetCopperLayerCount() == 4
+    assert [board.GetLayerName(layer) for layer in board.GetEnabledLayers().CuStack()] == [
+        "F.Cu", "In1.Cu", "In2.Cu", "B.Cu",
+    ]
+
+
+def test_synthesis_refuses_a_stack_up_no_board_can_carry(tmp_path, llups_like_state) -> None:
+    llups_like_state.intent.obligations.append(_stackup_row(3))
+    with pytest.raises(SynthesisInputError, match="3 copper layers"):
+        run(llups_like_state, tmp_path)
+    # Refused before anything was written, so a retry starts from a clean directory.
+    assert not list(tmp_path.glob("*.kicad_sch"))
+
+
 def _led_array_arch_bom() -> tuple[Architecture, BOM]:
     arch = Architecture(
         sheets=[Sheet(name="LED MATRIX", stem="LED_MATRIX", function="LED array")],

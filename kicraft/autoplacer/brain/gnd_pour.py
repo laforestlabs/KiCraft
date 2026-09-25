@@ -21,6 +21,7 @@ EP array while leaving perimeter GND pins -- which route normally -- alone.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 from kicraft.autoplacer.fab_profile import fab_floors
@@ -64,6 +65,25 @@ def _apply_gnd_pad_connection(zone: Any, cfg: dict[str, Any]) -> None:
         zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
 
 
+def _copper_layer_ids(board: Any) -> dict[str, int]:
+    """Every enabled copper layer of this board, name -> layer id.
+
+    Read from the board rather than a F.Cu/B.Cu constant, so a four-layer design's inner
+    layers resolve instead of being skipped as unknown names.
+    """
+    return {board.GetLayerName(layer): layer for layer in board.GetEnabledLayers().CuStack()}
+
+
+def _plane_layers(layer_ids: dict[str, int], layers: tuple[str, ...]) -> tuple[str, ...]:
+    """The requested plane layers plus every inner copper layer the board declares.
+
+    A stack with inner layers keeps its planes inside and its signals on the outer pair, so
+    the inner layers are poured as well. A conventional two-layer board is unchanged.
+    """
+    inner = [name for name in layer_ids if re.fullmatch(r"In\d+\.Cu", name)]
+    return tuple(dict.fromkeys([*layers, *inner]))
+
+
 def pour_gnd_planes(
     pcb_path: str,
     cfg: dict[str, Any] | None = None,
@@ -76,6 +96,8 @@ def pour_gnd_planes(
     pour F.Cu as well. Layer-stitching vias (F.Cu<->B.Cu) come from
     :func:`add_gnd_pour_and_thermal_vias`; this only manages the zones + fill,
     so it is safe to call repeatedly (idempotent w.r.t. zones, adds no vias).
+
+    A board with inner copper layers also gets the GND plane on those layers.
     """
     cfg = cfg or {}
     gnd_name = cfg.get("gnd_zone_net", "GND")
@@ -91,11 +113,12 @@ def pour_gnd_planes(
     x1, y1 = rect.GetX() + margin, rect.GetY() + margin
     x2 = rect.GetX() + rect.GetWidth() - margin
     y2 = rect.GetY() + rect.GetHeight() - margin
-    layer_map = {"B.Cu": pcbnew.B_Cu, "F.Cu": pcbnew.F_Cu}
+    layer_ids = _copper_layer_ids(board)
+    layers = _plane_layers(layer_ids, tuple(layers))
 
     zones = 0
     for lname in layers:
-        target_layer = layer_map.get(lname)
+        target_layer = layer_ids.get(lname)
         if target_layer is None:
             continue
         zone = None
@@ -195,7 +218,7 @@ def pour_power_planes(
     x1, y1 = rect.GetX() + margin, rect.GetY() + margin
     x2 = rect.GetX() + rect.GetWidth() - margin
     y2 = rect.GetY() + rect.GetHeight() - margin
-    layer_map = {"B.Cu": pcbnew.B_Cu, "F.Cu": pcbnew.F_Cu}
+    layer_map = _copper_layer_ids(board)
     priority = int(cfg.get("power_plane_priority", 1))
 
     for net_name in power_nets:
@@ -946,6 +969,14 @@ def add_gnd_pour_and_thermal_vias(
     summary["zone_filled"] = True
 
     board.Save(pcb_path)
+
+    # A stack with inner copper layers carries its planes there (signals keep the outer
+    # pair), so the GND plane grows to the inner layers. The single-zone block above only
+    # knows the one configured outer layer; pour_gnd_planes owns the inner-layer set.
+    inner = [name for name in _copper_layer_ids(board) if re.fullmatch(r"In\d+\.Cu", name)]
+    if inner:
+        poured = pour_gnd_planes(pcb_path, cfg, layers=tuple(inner))
+        summary["inner_plane_zones"] = int(poured.get("zones", 0))
     return summary
 
 

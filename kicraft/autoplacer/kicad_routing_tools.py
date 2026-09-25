@@ -13,6 +13,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from kicraft.pcb_layers import OUTER_COPPER_LAYERS, declared_copper_layers
+
 
 KICAD_ROUTING_TOOLS_VERSION = "0.20.2"
 KICAD_ROUTING_TOOLS_COMMIT = "3ceb773722bea67aa3685e7ee430c0c0d17ef38d"
@@ -272,6 +274,13 @@ def _krt_command(
     layers = config.get("kicad_routing_tools_layers")
     if layers:
         cmd.extend(["--layers", *map(str, layers)])
+    elif len(declared_copper_layers(input_path)) > len(OUTER_COPPER_LAYERS):
+        # A board with inner copper layers keeps its planes inside and its signals on the
+        # outer pair: KiCraft's copper bookkeeping carries front/back only (routing_board
+        # import + the leaf/parent stampers rebuild tracks from a two-valued layer), so a
+        # signal the router placed on an inner layer would come back as front copper and be
+        # rebuilt there. An explicit kicad_routing_tools_layers still wins.
+        cmd.extend(["--layers", *OUTER_COPPER_LAYERS])
     return cmd
 
 

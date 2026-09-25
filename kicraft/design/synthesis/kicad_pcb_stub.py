@@ -19,9 +19,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..models import BOM
+from ..models import BOM, MIN_BOARD_COPPER_LAYERS
 from .footprint_library import load_footprint
 from .parts_lookup import DEFAULT_KICAD_FOOTPRINT_DIR
+
+#: The board a design that states no stack-up gets: two copper layers, the fab-standard board
+#: every earlier stage assumes.
+DEFAULT_COPPER_LAYERS = MIN_BOARD_COPPER_LAYERS
 
 
 class PadBindingError(ValueError):
@@ -76,6 +80,16 @@ def _normalize_text_heights(pcbnew_mod, fp) -> None:
             t.SetTextThickness(max(int(t.GetTextThickness() * scale), min_t))
 
 
+def _apply_copper_layers(pcbnew_mod, board, copper_layers: int) -> None:
+    """Declare the board's copper stack-up (pcbnew's own default is two layers).
+
+    ``SetCopperLayerCount`` both enables the inner layers and writes them into the file's
+    ``(layers ...)`` block, which is what the placer, router, DRC and fab export read.
+    """
+    if int(copper_layers) != board.GetCopperLayerCount():
+        board.SetCopperLayerCount(int(copper_layers))
+
+
 def write_empty_pcb(
     project_dir: Path,
     project_stem: str,
@@ -83,22 +97,30 @@ def write_empty_pcb(
     *,
     project_root: Path | None = None,
     stock_dir: Path = DEFAULT_KICAD_FOOTPRINT_DIR,
+    copper_layers: int = DEFAULT_COPPER_LAYERS,
 ) -> Path:
     """Create `<project_stem>.kicad_pcb`.
 
     Empty board when ``bom`` is None or ``bom.connections`` is empty
     (Stage A backwards compatibility). Populated board with footprints
     and nets otherwise.
+
+    ``copper_layers`` declares the board's stack-up. Every stage after this one (placement,
+    routing, pour, DRC, fab export) follows the board file, so this is the single place the
+    requested layer count is applied; the default is the conventional two-layer board.
     """
     import pcbnew  # noqa: WPS433 — local import keeps non-pcbnew callers (tests) clean
 
     out = project_dir / f"{project_stem}.kicad_pcb"
 
     if bom is None or not bom.connections:
-        pcbnew.NewBoard(str(out))
+        board = pcbnew.NewBoard(str(out))
+        _apply_copper_layers(pcbnew, board, copper_layers)
+        board.Save(str(out))
         return out
 
     board = pcbnew.NewBoard(str(out))
+    _apply_copper_layers(pcbnew, board, copper_layers)
 
     # Scatter footprints on a 200×150 mm grid; the autoplacer.json
     # carries the real placement plan, this just gets parts on the board.

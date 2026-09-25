@@ -638,6 +638,34 @@ def is_board_level_quantitative_obligation(obligation: object) -> bool:
     return unit in _BOARD_STACKUP_UNITS and bool(_BOARD_STACKUP_TERMS & quantity_terms)
 
 
+#: Copper layers a printed stack-up can carry. A board is built from an even number of copper
+#: layers; KiCad's own board editor accepts 2..32.
+MIN_BOARD_COPPER_LAYERS = 2
+MAX_BOARD_COPPER_LAYERS = 32
+
+
+def board_copper_layers(obligations: object) -> int | None:
+    """The copper-layer count the design asked for, or ``None`` when it never said.
+
+    Reads the board-level stack-up obligation ("PCB copper layers" in `layers`) the intent
+    contract asks the writer for. Callers keep the conventional two-layer default when this
+    returns ``None``; a stated count no stack-up can carry is theirs to refuse, not to round.
+    """
+    for obligation in obligations or ():
+        if not is_board_level_quantitative_obligation(obligation):
+            continue
+        value = _obligation_field(obligation, "value")
+        if value is None:
+            continue
+        try:
+            count = int(float(value))
+        except (TypeError, ValueError):
+            continue
+        if MIN_BOARD_COPPER_LAYERS <= count <= MAX_BOARD_COPPER_LAYERS:
+            return count
+    return None
+
+
 def obligation_requires_requirement_owner(obligation: object) -> bool:
     """Whether an obligation must be attached to a realizable architecture requirement."""
     kind = str(_obligation_field(obligation, "kind") or "")
