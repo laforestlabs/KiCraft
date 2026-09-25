@@ -89,7 +89,11 @@ No prior schematic is required.
   source, so the repository skills override stale user-level copies with the
   same names.
 - The optional `kicraft-debug` skill calls the production provider-backed stage
-  runtime and pauses before each durable commit for explicit review.
+  runtime. It runs in two modes: interactive, which pauses before each durable commit for
+  explicit review, and loop, which drives every stage to a committed board unattended,
+  defaults anything the design can absorb (recording and analysing each default), and stops
+  only on a failure it cannot repair. Both modes keep the same audit trail under
+  `.kicraft/debug/`.
 - The deterministic synthesis/build step is the `kicraft` CLI.
 
 ### Run it
@@ -111,8 +115,10 @@ Describe your project ("USB-C powered 3.3V regulator with status LED,
 JLCPCB target, under $5 BOM"). The ordinary flow steps through all five
 stages and commits each slot. The debug flow uses the production provider
 and retains its prompt, raw response, tool trace, candidate, and diagnostics
-under `.kicraft/debug/`, while keeping `.kicraft/state.json` unchanged until
-explicit acceptance. After wiring is committed, ask the ordinary skill to
+under `.kicraft/debug/`. Interactive runs keep `.kicraft/state.json` unchanged
+until explicit acceptance; loop runs commit each stage as soon as its own checks
+pass, and write an end-of-run summary plus a machine-readable last line so a
+wrapper can iterate. After wiring is committed, ask the ordinary skill to
 run the deterministic build.
 
 ```bash

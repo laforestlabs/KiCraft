@@ -31,7 +31,7 @@ Per design step, in order, with the owner watching:
    not allowed to decide yet, and what it will hand to the next step.
 2. **Draft** against the real provider, paused before saving, with the production
    auto-default behaviour (no parking on questions the live product would answer itself).
-3. **Show the answer in plain words**, facet by facet, with the exact lines that matter and
+3. **Show the answer in plain words**, one piece at a time, with the exact lines that matter and
    the machine's own complaints beside them. Skip the internals unless asked.
 4. **Say what looks wrong and why**, in plain words, each problem as: what the machine did,
    what it should have done, what it costs, and whether it is the machine's slip or the
@@ -50,12 +50,15 @@ Per design step, in order, with the owner watching:
   themselves.
 - A missing part is a research task, not an error path (§5, item 3).
 - Only the owner approves a stage; "looks plausible" is not approval.
+- Plain language is not a preference. The skill now bans the pipeline's internal vocabulary in
+  reports and works an example instead: "Say it plainly" in `.agents/skills/kicraft-debug/SKILL.md`
+  (added 2026-09-25, at the owner's request, after "facet" reached a report).
 
 ## 4. What works
 
 | # | Observation | Evidence |
 |---|---|---|
-| 1 | Pausing before save and reviewing by facet catches real defects before they reach a board | this session: two misleading defaults, one vanished requirement, one dropped connector demand found before anything was built |
+| 1 | Pausing before save and reviewing one piece at a time catches real defects before they reach a board | this session: two misleading defaults, one vanished requirement, one dropped connector demand found before anything was built |
 | 2 | Running the real provider with production's auto-default behaviour makes the debug run match what a real click produces | `debug-draft --budget 0.25` with `auto_default_questions=True`; the draft invented the same 18 V entry path the live product would |
 | 3 | Deterministic completion (adding a default instead of asking) is stable and invisible when the writer already did the right thing | the power-entry default is a no-op on draft 3 because the writer named one |
 | 4 | A shared comparison used by every checker removes a whole class of silent divergence | count matching now lives in one function used by the parts step and the final gate |
@@ -79,6 +82,10 @@ Per design step, in order, with the owner watching:
 | 12 | Count/consumption bookkeeping: the generation of a stage's answer can consume the whole correction budget on unrelated defects, so a *correct* design can fail for a *different* mistake in the same draft | **fixed** (design-contract rounds): a *changed* contract defect earns up to 2 extra preserving corrections by default, each sanctioning its own call, with the budget scoped so no other lane's ceiling moves. Reproduce-proof in `tests/test_stage_driver_retry.py` (3 calls/fail → 5 calls/commit) |
 | 13 | **The research path is broken by configuration, not by the network.** The box has full egress (openrouter.ai, api.github.com, example.com all 200), but the harness's `web_search` providers are all quota-exhausted (Codex 429, ~44 h) or bot-walled from this datacenter IP, and no credentialed provider is configured. Setting `enabledProviders` does **not** change the search chain (`omp search` fails identically in a fresh process) and was reverted. Working now: direct URL fetch (`curl`/`read` against Wikipedia/GitHub/raw.githubusercontent/OpenRouter APIs) and the Chromium browser tool; durable fix is one key (`BRAVE_API_KEY`/`TAVILY_API_KEY`/`EXA_API_KEY`/`JINA_API_KEY`) or a `searxng.endpoint` | **open, owner action** (a key). Workaround in use for all research this session |
 | 14 | **Model-shaped work where the answer set is closed is not being asked as a closed question** — the design stages hand a chat model a free-text field (a part class, a family, a part identity) and then spend correction rounds parsing what came back. Jev is exactly the tool for that: it takes state + typed questions and returns typed values with calibrated probabilities, and it is callable **on OpenRouter** as `typesafe/jev-1.13` (input-only pricing $0.042/1M; deliberately absent from the public model list, and it refuses `/chat/completions`, which points at `/api/alpha/decisions`) | **working, but placement still wrong**: `decision_layer` (real Jev client, 7 tests) and `draft_audit` (rulebook as typed questions, 5 tests) are in the tree and wired into both candidate sites of the driver; a live audit of the seed-37 draft cost **$0.0003** and independently flagged the over-rated DRV8833 (confidence 0.90). **But the audit sits after the derivation, and the derivation runs inside decode** — so a draft that the compiler refuses at decode gets neither the semantic checks nor the audit. Measured: the next live draft was refused at decode in all three rounds (`missing_recipe_requirement`, the prose name `ESP32-C3-based`, identical each time, so the design-contract rounds correctly declined to extend it). Next step: audit the **parsed payload before `_normalize_stage_response` derives it**, which is where "before the compiler sees it" actually is |
+| 15 | **A brief that asks for a four-layer stack-up got a two-layer board.** The sentence stayed prose in the intent's constraints box, so nothing enforced it; the builder's board stub, its router configuration, its ground pours and its fab export all assumed two copper layers. Fixed on the owner's call (2026-09-25): the stated stack-up becomes the machine-readable board fact the builder reads (a pipeline completion, from the brief's own words, no invention), the seed board declares the count, a stated count no stack-up can carry is refused instead of rounded, the fab package plots the layers the board declares, and a board with inner layers keeps its signals on the outer pair with ground planes on the inner layers. Verified end-to-end: a real build produced a four-layer board with 0 shorts / 0 unconnected, no track on an inner layer, GND planes on both inner layers, and four copper gerbers. | fixed + tested (`P1`, `P3` in `~/.kicraft/debug/surprise-40-3v3-converter-20260925/.kicraft/debug/findings.json`) |
+| 16 | **The regression evidence still counts only two copper layers.** `eval/geometry_artifact_evidence.py` treats F.Cu/B.Cu as "copper", so a four-layer board's inner planes are invisible to a self-eval sweep: a future regression that emptied the inner layers would not show up in the evidence. | open, owner's call (it changes what the rubric measures) |
+| 17 | **The debugger stopped the owner to ask a number it could have assumed.** Mid-walkthrough it asked how much current the 3.3 V output must supply, instead of defaulting to the production reading and analysing the consequence. Owner: *"you should have auto defaulted then analyzed that choice automatically. i need the live debug skill to become more automated so i can run it in a loop in the future."* | fixed in the skill: *Default, then analyse* (default it the way the live product would, analyse what a wrong default costs and where it would bite, record it, carry on) and a **loop mode** for unattended runs (self-checked review, save each step when its own checks pass, stop only on provider failure / an unrepairable save refusal / an unjustified repair escalation / the run cap, then a summary and a machine-readable last line) |
+| 18 | **Two words of my own shorthand reached a report.** The owner was asked to review "facet 1"; the skill had no rule against the pipeline's internal vocabulary. | fixed in the skill: *Say it plainly* (ban on internal words in reports, machine wording only as quoted evidence, and a worked example), with the same wording fixed in this document; owner's request, 2026-09-25 |
 
 ## 6. Making a missing part (the owner's directive, in mechanics)
 
@@ -104,7 +111,87 @@ When the parts step needs a class the library cannot answer:
   choice) or beside the skill itself?
 - How much should the skill do without being asked once a session is running (draft the next
   step automatically, or wait at every boundary)? Current behaviour: pause for approval
-  before saving a step, and pause at each review facet.
+  before saving a step, and pause at each piece of the review. **Answered 2026-09-25** (owner:
+  *"i need the live debug skill to become more automated so i can run it in a loop in the
+  future"*, after the debugger stopped to ask for a number it could have assumed): the skill now
+  has two modes -- interactive (unchanged) and loop (unattended: defaults and analyses anything
+  the design can absorb, saves each step as soon as its own checks pass, stops only on provider
+  failure, an unrepairable save refusal, an unjustified repair escalation, or the run cap, and
+  ends with a summary plus a machine-readable line). The rule *Default, then analyse* applies in
+  both modes.
 - When the parts step finds a class with no carrier, should it (a) research and add the part
   and continue, or (b) stop and show the owner the candidate part first? Owner's directive
   reads as (a) with a visible record.
+
+## 8. Session of 2026-09-25 (second): the stack-up the builder could not build
+
+Workspace: `~/.kicraft/debug/surprise-40-3v3-converter-20260925`, brief
+`generate_brief(40)` — *"A 5 V header from the host board to 3.3 V converter with
+reverse-polarity protection, a 6-pin 0.1 inch header, and a power LED. Use a four-layer
+stack-up."* Running record: that workspace's `.kicraft/debug/findings.json` (`P1`-`P4`).
+
+What the intent draft showed, and what was done about it:
+
+1. **The four-layer request reached nothing** (`P1`). The writer kept it as one line of prose
+   and the whole builder was two-layer: the seed board file, the router configuration, the
+   ground pours and the gerber list. Nothing in the pipeline read a stack-up request. Owner's
+   call: make the builder deliver four layers.
+2. **Found on the way** (`P3`): KiCraft's own copper bookkeeping only knows front/back, and
+   the router uses *every* enabled copper layer by default. Declaring four layers without
+   touching that would have routed signals onto the inner layers and then rebuilt that copper
+   on the front layer. Owner's call: planes inside, signals outside.
+3. **Fixed and verified** (findings `P1`, `P3`): the stated stack-up becomes the board fact
+   the builder reads; the seed board declares it; a count no stack-up can carry is refused
+   instead of rounded; the fab package plots the layers the board declares; the router is
+   pinned to the outer pair and the ground plane grows to the inner layers. A real build
+   then produced a four-layer board with 0 shorts, 0 unconnected, no track on an inner layer
+   and four copper gerbers.
+4. **Left alone on purpose** (`P2`): "reverse-polarity protection" stays a stated
+   requirement for the architecture/BOM stages plus the end-of-board electrical review; no
+   gate was added.
+5. **Still open** (`P4`, finding 16 above): the writer also expresses a stack-up as a
+   free-form board "feature" row that nothing realizes (inert, but a second spelling of one
+   requirement); and the self-eval's copper evidence still counts only F.Cu/B.Cu.
+
+Nothing here is committed to git yet: the patches are in the working tree, so the live site
+keeps running its current code until the next restart.
+
+### 8a. Same session, later: automation
+
+Asked mid-run to stop pausing for things it can assume, and to become loopable. The skill now
+carries *Default, then analyse* (default the way the live product would, then work out what the
+default costs, where it would bite, and how to settle it cheaply -- recorded in the run's
+`assumptions_taken`), *Modes* (interactive unchanged; loop unattended with self-checked review
+and per-step saving), and *Running in a loop* (one workspace per run, hard caps, four stop
+conditions, an end-of-run summary and a machine-readable last line, exit status 0 only when
+every step is saved). The same wording was carried into this document and `README.md`. A later
+interjection added *Keep the owner oriented*: one short plain-language note per state change,
+and never a whole run reported only at the end.
+
+### 8b. What the loop run itself turned up
+
+The unattended run of the same brief (workspace
+`~/.kicraft/debug/surprise-40-3v3-converter-20260925`, running record in its
+`.kicraft/debug/findings.json`) repaired five more pipeline gaps, each with the focused test that
+fails without it:
+
+- **P7** a real circuit sheet refused on the word in its name -- `architecture_power_block_as_sheet`
+  fired on "POWER INDICATOR" because the name contains "power"; a rail-named sheet is now
+  distribution-only only when nothing else lives on it.
+- **P8** no buildable block for reverse-polarity protection, a must-have of the brief: added the
+  curated block `reverse-polarity-pmos@1` on the reviewed AONR21357 P-channel MOSFET (drain to the
+  input, source to the protected rail, gate to ground through a series resistor).
+- **P9** the board's own 5 V input contact silently dropped: the duplicate-statement normalizer
+  deleted a signal that was the only statement of how a sourceless rail reaches the board; the
+  contact now keeps the rail through a tie.
+- **P10** the block that owns the support parts was rewritten away: naming the reviewed LED *and*
+  the reviewed `status-led` builder still produced a bare LED across the rail (no series resistor,
+  and the typed LED current-path check keyed on the family it had been renamed away from).
+- **P11** a stated count ignored by the part actually built: "header pins = 6" produced a 2-way
+  header because only the used contacts sized the part; the stated count now sizes it and the
+  unused contacts become no-connects.
+
+Items 17 and 18 above (loop mode, plain reporting) and these five are the session's output; the
+findings file carries the exact evidence and validation for each.
+
+
