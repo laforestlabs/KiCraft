@@ -638,6 +638,229 @@ def _reference_port(catalog: _Catalog) -> str | None:
     return qualified[0] if len(qualified) == 1 else None
 
 
+def _token(value) -> str:
+    """Casefolded, punctuation-free token, for family comparisons."""
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+#: Lowerer parameters that mean nothing to a reviewed part's family.
+_LOWERER_ONLY_PARAMETERS = ("rows", "gender")
+
+#: The family the compiler uses for the USB socket it writes itself from a data pair sent to an
+#: edge. A requirement declaring that family duplicates the socket.
+_DERIVED_SOCKET_FAMILY = "usb-c-usb2-device"
+
+
+def _referenced_ports(payload: dict, requirement_id: str) -> set[str]:
+    """Every port of this requirement the draft names: in rails, signals and ties."""
+    ports: set[str] = set()
+    for row in ((payload.get("power") or {}).get("rails") or {}).values():
+        text = str((row or {}).get("from") or "")
+        if text.startswith(f"{requirement_id}."):
+            ports.add(text.split(".", 1)[1])
+    for signal in payload.get("signals") or []:
+        if not isinstance(signal, dict):
+            continue
+        peers = signal.get("to")
+        references = [signal.get("from"), *(peers if isinstance(peers, list) else [peers])]
+        for reference in references:
+            text = str(reference or "")
+            if text.startswith(f"{requirement_id}."):
+                ports.add(text.split(".", 1)[1])
+    requirement = next(
+        (row for row in payload.get("requirements") or []
+         if isinstance(row, dict) and str(row.get("id")) == requirement_id),
+        None,
+    )
+    ports.update(str(key) for key in (requirement or {}).get("ties") or {})
+    return ports
+
+
+def _lowerer_families() -> frozenset[str]:
+    """The generic lowerer families, which implement their own parts and not a reviewed one."""
+    from kicraft.design.lowering import lowerer_summaries
+
+    return frozenset(
+        str(name).casefold()
+        for row in lowerer_summaries()
+        if isinstance(row, dict)
+        for name in (row.get("families") or [])
+    )
+
+
+def _carrier_family_for_class(component_class: str) -> str | None:
+    """The family that realizes this class, when the library has exactly one carrier family."""
+    from kicraft.design.part_identity import reviewed_parts_for_feature
+
+    families = sorted(
+        {part.family for part in reviewed_parts_for_feature(component_class) if part.family}
+    )
+    return families[0] if len(families) == 1 else None
+
+
+def _declared_ports_from_signals(payload: dict, requirement_id: str, contacts: tuple) -> list[dict]:
+    """Interface for a reviewed part with no recipe, built from the signals the draft already sends.
+
+    The compiler needs a `pin` per declared port and refuses a function claimed on a contact the
+    part does not have, so each port takes the carrier's own contact in the order the draft wires
+    them, and its function names the net the draft carries. Nothing here is invented: the port
+    names are the draft's, the contacts are the part's, and the function names its own signal.
+    """
+    ports: list[dict] = []
+    index = 0
+    for signal in payload.get("signals") or []:
+        if not isinstance(signal, dict):
+            continue
+        peers = signal.get("to")
+        references = peers if isinstance(peers, list) else [peers]
+        for reference in references:
+            text = str(reference or "")
+            if not text.startswith(f"{requirement_id}."):
+                continue
+            key = text.split(".", 1)[1]
+            pin = str(contacts[index]) if index < len(contacts) else key
+            ports.append(
+                {
+                    "key": key,
+                    "pin": pin,
+                    "direction": "passive",
+                    "function": f"carries {signal.get('name')}",
+                }
+            )
+            index += 1
+    return ports
+
+
+def _adopt_carrier_families(payload: dict) -> dict:
+    """Give a requirement the family its reviewed carrier answers to.
+
+    The writer reaches for a generic lowerer (`pin-header`) for a class that has a reviewed
+    carrier (`jst-xh-connector`), or names the reviewed exact part on that lowerer. Both are
+    refused, and the parts stage may not change a family later (live walkthrough 2026-09-25:
+    "lowerer pin-header@1 does not implement the exact part 'B2B-XH-A(LF)(SN)'", and the BOM
+    exhausted its rounds on "missing-requirement-implementation=['motor_a']").
+    """
+    from kicraft.design.part_identity import reviewed_part
+
+    requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
+    if not requirements:
+        return payload
+    changed = False
+    lowerers = _lowerer_families()
+    for requirement in requirements:
+        family = str(requirement.get("family") or "")
+        if family.casefold() not in lowerers:
+            # A curated family that names a reviewed part is the compiler's own business.
+            continue
+        exact = str(requirement.get("exact_part") or "").strip()
+        record = reviewed_part(exact) if exact else None
+        target = None
+        if record is not None and record.family and family != record.family:
+            target = record.family
+        else:
+            for obligation in requirement.get("obligations") or []:
+                if not isinstance(obligation, dict) or obligation.get("kind") != "physical":
+                    continue
+                component_class = str(obligation.get("component_class") or "")
+                carrier_family = _carrier_family_for_class(component_class) if component_class else None
+                if carrier_family and family != carrier_family:
+                    target = carrier_family
+                    if record is None:
+                        from kicraft.design.part_identity import reviewed_parts_for_feature
+
+                        record = next(
+                            (
+                                part
+                                for part in reviewed_parts_for_feature(component_class)
+                                if part.family == carrier_family
+                            ),
+                            None,
+                        )
+                    break
+        if target is None or target == family:
+            continue
+        requirement["family"] = target
+        parameters = dict(requirement.get("parameters") or {})
+        for key in _LOWERER_ONLY_PARAMETERS:
+            parameters.pop(key, None)
+        requirement["parameters"] = parameters
+        if record is not None and not requirement.get("declared_ports"):
+            declared = _declared_ports_from_signals(payload, str(requirement.get("id") or ""), record.contacts)
+            if declared:
+                requirement["declared_ports"] = declared
+        changed = True
+    return payload
+
+
+def _complete_terminal_returns(payload: dict) -> dict:
+    """Give a screw terminal its return contact when the draft names only the live one.
+
+    The compiler refuses a terminal whose contacts cannot be numbered, and a board input terminal
+    has two: the live contact and the return. The return is the ground net, so it is a tie, and it
+    keeps the spelling the draft already used ("positive" -> "negative", "pin1" -> "pin2").
+    """
+    requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
+    for requirement in requirements:
+        if "screw" not in _token(str(requirement.get("family") or "")):
+            continue
+        referenced = sorted(_referenced_ports(payload, str(requirement.get("id") or "")))
+        if len(referenced) >= 2:
+            continue
+        if not referenced:
+            continue
+        live = referenced[0]
+        if live.startswith("pin") and live[3:].isdigit():
+            return_key = f"pin{int(live[3:]) + 1}"
+        elif live == "positive":
+            return_key = "negative"
+        else:
+            continue
+        ties = dict(requirement.get("ties") or {})
+        if return_key in ties:
+            continue
+        ties[return_key] = "GND"
+        requirement["ties"] = ties
+    return payload
+
+
+def _drop_derived_edge_connectors(payload: dict) -> dict:
+    """Drop a connector requirement the compiler writes itself for an edge the draft names.
+
+    "duplicate_edge_connector: edge 'USB' would need connector 'mcu_usb', which already exists"
+    (live walkthrough 2026-09-25): a native-USB socket is compiler-created from the data pair sent
+    to that edge, so a requirement declaring that socket is a duplicate. A requirement a signal
+    still references is kept -- dropping it would leave the signal dangling.
+    """
+    signals = [row for row in payload.get("signals") or [] if isinstance(row, dict)]
+    if not any(
+        str(reference).startswith("edge:")
+        for signal in signals
+        for reference in ([signal.get("to")] if not isinstance(signal.get("to"), list) else signal.get("to"))
+        if reference is not None
+    ):
+        return payload
+    referenced_ids = set()
+    for signal in signals:
+        for reference in [signal.get("from"), *(
+            signal.get("to") if isinstance(signal.get("to"), list) else [signal.get("to")]
+        )]:
+            text = str(reference or "")
+            if "." in text and not text.startswith("edge:"):
+                referenced_ids.add(text.split(".", 1)[0])
+    kept = [
+        row
+        for row in payload.get("requirements") or []
+        if not (
+            isinstance(row, dict)
+            and _token(str(row.get("family") or "")) == _token(_DERIVED_SOCKET_FAMILY)
+            and str(row.get("id")) not in referenced_ids
+        )
+    ]
+    if len(kept) != len(payload.get("requirements") or []):
+        payload["requirements"] = kept
+    return payload
+
+
 def complete_architecture_payload(payload: dict) -> dict:
     """Drop the duplicate power statements the deterministic contracts can only refuse.
 
@@ -654,6 +877,10 @@ def complete_architecture_payload(payload: dict) -> dict:
     """
     if not isinstance(payload, dict):
         return payload
+    # Family and interface repairs first: they change what the later steps see.
+    _adopt_carrier_families(payload)
+    _complete_terminal_returns(payload)
+    _drop_derived_edge_connectors(payload)
     requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
     signals = [row for row in payload.get("signals") or [] if isinstance(row, dict)]
     if not requirements or not signals:
