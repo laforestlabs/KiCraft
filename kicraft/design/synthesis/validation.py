@@ -3348,6 +3348,7 @@ def check_requirement_physical_realization(
             if obligation.kind == "physical"
         }
         local_demands = {component_class: 1 for component_class in physical_classes}
+        count_rows: dict[str, str] = {}
         for obligation in requirement.obligations:
             if obligation.kind != "quantity":
                 continue
@@ -3359,6 +3360,9 @@ def check_requirement_physical_realization(
                 if quantity_subject_binds(obligation.subject, component_class):
                     local_demands[component_class] = max(
                         local_demands[component_class], obligation.minimum
+                    )
+                    count_rows[component_class] = str(
+                        getattr(obligation, "original_obligation_id", None) or obligation.subject
                     )
                     break
         for component_class, minimum in local_demands.items():
@@ -3383,7 +3387,7 @@ def check_requirement_physical_realization(
                     "MPN/symbol/footprint evidence"
                 )
             aggregate_demands[(requirement.sheet, component_class)].append(
-                (requirement.id, minimum)
+                (requirement.id, minimum, count_rows.get(component_class))
             )
         claim = requirement.declared_interface
         if claim is None or not bom.connections:
@@ -3455,10 +3459,20 @@ def check_requirement_physical_realization(
                     f"of one of {sorted(found)}, found {found}"
                 )
     for (sheet, component_class), demand_rows in sorted(aggregate_demands.items()):
-        demanded = sum(minimum for _, minimum in demand_rows)
+        # A count the brief states once is one demand on the sheet, even when several requirements
+        # carry the same committed row -- the architecture contract allows one row on each
+        # requirement that implements it, and "two JST-XH connectors" then demands two parts, not
+        # four. Live commit (seed-43, 2026-09-25) refused this board with "jst1x2, jst2x2 demand 4
+        # distinct part(s), but only 2 exact reviewed MPN/symbol/footprint realization(s) exist".
+        distinct_counts: dict[str, int] = {}
+        for _requirement_id, minimum, count_row in demand_rows:
+            if count_row:
+                distinct_counts[count_row] = max(distinct_counts.get(count_row, 0), minimum)
+        # ...and never fewer parts than there are requirements claiming the class.
+        demanded = max(sum(distinct_counts.values()), len(demand_rows))
         candidate_refs: set[str] = set()
         topology_witnesses = 0
-        for requirement_id, _minimum in demand_rows:
+        for requirement_id, _minimum, _count_row in demand_rows:
             requirement = requirements_by_id.get(requirement_id)
             if requirement is None:
                 continue
@@ -3478,7 +3492,7 @@ def check_requirement_physical_realization(
         available = len(candidate_refs) + topology_witnesses
         if available < demanded:
             owners = ", ".join(
-                f"{requirement_id}×{minimum}" for requirement_id, minimum in demand_rows
+                f"{requirement_id}×{minimum}" for requirement_id, minimum, _row in demand_rows
             )
             evidence = "reviewed" if has_reviewed_coverage(component_class) else "real"
             bad.append(

@@ -3426,6 +3426,13 @@ _TRUSTED_LOWERER_PHYSICAL_WITNESSES = frozenset(
         ("r2r-ladder@1", "resistorladder"),
         ("r2r-ladder@1", "resistornetwork"),
         ("screw-terminal@1", "thermocoupleinput"),
+        # A momentary-switch input builds its button: `_switch_input` emits the SW_Push symbol on
+        # the tactile-button footprint, with the pull the requirement asks for. Live seed-43 run
+        # (2026-09-25): the architecture stage refused `switch-input` for a `pushbutton`
+        # obligation -- the class had just been researched and its carrier's family was
+        # `pushbutton` -- and spent its repair rounds asking for that carrier, while the parts
+        # stage then bound exactly this lowerer's SW1 and the board was right.
+        ("switch-input@1", "pushbutton"),
     }
 )
 
@@ -3858,7 +3865,13 @@ def physical_inventory_record(
     ``datasheet`` and ``sourcing_note`` are intentionally ignored: they can
     aid human review but cannot classify a part.  An explicit MPN takes
     precedence and MUST match an exact reviewed or standard-library identity;
-    it never falls back to a symbol/footprint family.
+    it never falls back to a symbol/footprint family.  A part with no MPN is
+    identified by its pair alone against the whole reviewed inventory: the parts
+    stage resolves a curated *bundle* part (a HOME or leaf bundle, a researched
+    part) by exactly that pair, so a commit gate that only knew the stock-library
+    sets saw no record at all for a part the stage had just proven (live seed-43
+    commit, 2026-09-25: ``E_PHYSICAL_REALIZATION 'power_led': requires 1 reviewed
+    'led' physical part(s), found 0`` for the vendored warm-white LED).
     """
     del datasheet, sourcing_note
     normalized_mpn = (mpn or "").strip().casefold()
@@ -3884,7 +3897,14 @@ def physical_inventory_record(
             if record.symbol == exact_symbol and record.footprint == exact_footprint
             else None
         )
-    return _stock_library_physical_record(exact_symbol, exact_footprint)
+    return _stock_library_physical_record(exact_symbol, exact_footprint) or next(
+        (
+            candidate
+            for candidate in reviewed_inventory()
+            if candidate.symbol == exact_symbol and candidate.footprint == exact_footprint
+        ),
+        None,
+    )
 
 
 def reviewed_parts_for_feature(feature: str) -> tuple[ReviewedPart, ...]:

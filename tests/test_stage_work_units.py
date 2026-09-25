@@ -2147,6 +2147,61 @@ def test_pd_controller_label_and_substitution_cannot_turn_a_header_into_an_ic(fa
     assert caught.value.defects["missing-requirement-implementation"] == ["control"]
 
 
+def test_a_count_two_requirements_share_is_one_demand_not_two():
+    """The brief's own count is one demand on the unit, not one per requirement carrying it.
+
+    Live seed-43 run (2026-09-25): a sheet carried two JST-XH connector requirements -- each
+    carrying the intent's "two JST-XH connectors" row, which the architecture contract allows --
+    and the parts stage refused all six of its repairs. Two single connectors read
+    "jst2: requires 2 real jst-xh-connector, found 0" and one group of two read "found -1",
+    because the count was charged against each requirement in turn; the stage then failed with
+    ``unit_repair_exhausted`` and the run stopped there.
+    """
+    from kicraft.design.part_identity import reviewed_part
+
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": "A", "function": "Two external connectors"}]
+    obligations = [
+        {"kind": "physical", "original_obligation_id": "jst", "component_class": "jst-xh-connector"},
+        {"kind": "quantity", "original_obligation_id": "two_jst", "subject": "jst-xh connector",
+         "minimum": 2},
+    ]
+    state["architecture"]["requirements"] = [
+        {"id": "jst1", "sheet": "A", "role": "connector", "family": "jst-xh-connector",
+         "obligations": [dict(row) for row in obligations]},
+        {"id": "jst2", "sheet": "A", "role": "connector", "family": "jst-xh-connector",
+         "obligations": [dict(row) for row in obligations]},
+    ]
+    unit = StageWorkUnit("bom-s003", "bom", "A", requirement_ids=("jst1", "jst2"))
+    part = reviewed_part("B2B-XH-A(LF)(SN)")
+    assert part is not None
+
+    def connectors(*counts: int) -> dict:
+        return {
+            "groups": [
+                {
+                    **_group(f"connector{index}", "A", prefix="J", quantity=count),
+                    "value": "B2B-XH-A(LF)(SN)",
+                    "mpn": "B2B-XH-A(LF)(SN)",
+                    "symbol": part.symbol,
+                    "footprint": part.footprint,
+                }
+                for index, count in enumerate(counts, start=1)
+            ]
+        }
+
+    # The two ways a two-connector sheet is written are the same board.
+    assert validate_unit_candidate(unit, connectors(2), state, {})["groups"][0]["quantity"] == 2
+    assert len(validate_unit_candidate(unit, connectors(1, 1), state, {})["groups"]) == 2
+
+    # One connector for a two-connector demand is still refused, and the count reads as one.
+    with pytest.raises(WorkUnitValidationError) as refused:
+        validate_unit_candidate(unit, connectors(1), state, {})
+    rows = refused.value.defects["physical-obligation-unfulfilled"]
+    assert any("requires 2 real jst-xh-connector, found 1" in row for row in rows)
+    assert not any("found -" in row for row in rows)
+
+
 def test_physical_obligation_requires_real_connector_class_and_count():
     from kicraft.design.part_identity import reviewed_part
 

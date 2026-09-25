@@ -531,6 +531,47 @@ def test_board_fact_obligations_are_not_physical_component_demands(monkeypatch):
     assert validation.check_requirement_physical_realization(architecture, bom).ok
 
 
+def test_a_count_two_requirements_share_is_one_demand_on_the_sheet(monkeypatch):
+    """Two requirements carrying the brief's "two connectors" row demand two parts, not four.
+
+    Live seed-43 commit (2026-09-25) refused the board with ``E_PHYSICAL_REALIZATION 'JST
+    INTERFACES'/'jst-xh-connector': jst1×2, jst2×2 demand 4 distinct part(s), but only 2 exact
+    reviewed MPN/symbol/footprint realization(s) exist`` for a sheet holding exactly the two
+    connectors the brief asked for: the shared row was summed once per requirement.
+    """
+    record = SimpleNamespace(
+        identity="reviewed-xh",
+        family="jst-xh-connector",
+        physical_features=frozenset({"jst-xh-connector"}),
+    )
+    monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda _part: record)
+    monkeypatch.setattr(validation, "_pin_info_by_ref", lambda _bom: ({}, {}))
+
+    def requirement(ident: str):
+        return SimpleNamespace(
+            id=ident,
+            sheet="XH",
+            exact_part=None,
+            family="jst-xh-connector",
+            declared_interface=None,
+            obligations=[
+                SimpleNamespace(kind="physical", original_obligation_id="xh",
+                                component_class="jst-xh-connector"),
+                SimpleNamespace(kind="quantity", original_obligation_id="two_xh",
+                                subject="jst-xh connectors", minimum=2),
+            ],
+        )
+
+    architecture = SimpleNamespace(requirements=[requirement("jst1"), requirement("jst2")])
+    two = _bom([_part("J1", "XH", sheet="XH"), _part("J2", "XH", sheet="XH")], {})
+    assert validation.check_requirement_physical_realization(architecture, two).ok
+
+    one = _bom([_part("J1", "XH", sheet="XH")], {})
+    result = validation.check_requirement_physical_realization(architecture, one)
+    assert not result.ok
+    assert any("demand 2 distinct" in offender for offender in result.offenders)
+
+
 def test_distinct_requirement_owners_cannot_share_one_reviewed_connector(monkeypatch):
     record = SimpleNamespace(
         identity="reviewed-bnc",

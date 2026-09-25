@@ -87,6 +87,12 @@ Per design step, in order, with the owner watching:
 | 17 | **The debugger stopped the owner to ask a number it could have assumed.** Mid-walkthrough it asked how much current the 3.3 V output must supply, instead of defaulting to the production reading and analysing the consequence. Owner: *"you should have auto defaulted then analyzed that choice automatically. i need the live debug skill to become more automated so i can run it in a loop in the future."* | fixed in the skill: *Default, then analyse* (default it the way the live product would, analyse what a wrong default costs and where it would bite, record it, carry on) and a **loop mode** for unattended runs (self-checked review, save each step when its own checks pass, stop only on provider failure / an unrepairable save refusal / an unjustified repair escalation / the run cap, then a summary and a machine-readable last line) |
 | 18 | **Two words of my own shorthand reached a report.** The owner was asked to review "facet 1"; the skill had no rule against the pipeline's internal vocabulary. | fixed in the skill: *Say it plainly* (ban on internal words in reports, machine wording only as quoted evidence, and a worked example), with the same wording fixed in this document; owner's request, 2026-09-25 |
 | 19 | **A researched part carried no ratings, on purpose** — `part_research.build_record` left `operating_limits` empty because no rating had been read off a datasheet, so every check that reads a record's own limits treated a researched part as unproven: "in stock" without "right for this rail". | **fixed + tested 2026-09-25** (section 9): the catalog's own parametric fields are read for the chosen part and mapped onto the limit names the reviewed records already use (reverse voltage, Vds, capacitance, positions, pitch, temperature pair, a published supply range), each rating citing the catalog field it came from; a parameter no rating can honestly be read from is kept verbatim, and a part with no such fields says `unverified` rather than leaving the field blank |
+| 20 | **The parts stage could not be satisfied by either correct answer for a counted connector sheet.** The brief's own count ("two JST-XH connectors") was charged against every requirement carrying it, so a two-connector sheet read `found -1` for one group of two and `found 0` for two single connectors; and the rule that keeps *one connector group per connector requirement* had caps per part, so it silently dropped the second connector. Six repairs exhausted, `unit_repair_exhausted`, stage failed. | **fixed + tested 2026-09-25** (`P2`, `P3`): the design-wide count is compared once against the groups the unit emitted, each requirement then needs one part of its own, and the group rule caps by connector requirement. Live: the same stage went from 6 attempts/failed to 3 attempts/complete, with both J4 and J5 placed. |
+| 21 | **An architecture family that builds the demanded class itself was refused as a mismatch.** `switch-input` emits the reset button (`Switch:SW_Push` on the TL3342 footprint), but the check demanded the freshly researched carrier of the `pushbutton` class, spending two repair rounds and asking to replace a working lowerer with a raw part. | **fixed + tested 2026-09-25** (`P4`): the reviewed lowerer-witness table now records that the switch lowerer's graph *is* a pushbutton, and the check accepts a family whose own lowering proves the class. Re-diagnosed on the unchanged candidate: clean. |
+| 22 | **The commit gate could not see two things the parts stage could.** A bundle part with no MPN was invisible to §9.42 (`E_PHYSICAL_REALIZATION 'power_led': ... found 0` for the vendored warm-white LED whose pair is exactly the reviewed record's), and the same shared count was summed per requirement there too (`jst1×2, jst2×2 demand 4 distinct part(s)` for a two-connector sheet). | **fixed + tested 2026-09-25** (`P6`, `P7`): a part with no MPN is identified by its own reviewed pair against the whole inventory, and the sheet's count counts each distinct row once and never asks for fewer parts than there are requirements. Live: both complaints gone from the commit. |
+| 23 | **The one reviewed CH32V003 order code is out of stock at the LCSC retail storefront**, so a board whose brief names that MCU cannot pass §9.26 and cannot be saved. Same-device alternatives change the package (SOP-16 C5346357, TSSOP-20 C5187096). | **open — owner decision** (`P8`): add a reviewed record and bundle for another variant, point the bundle at a same-device listing if one appears, or accept the stock risk. The run stopped here rather than choosing a package. |
+| 24 | **A default the intent recorded is not carried into the design.** "Standard UART pins plus ground" is the intent's own default, yet the architecture declared a two-contact UART header, so the shipped header has transmit and receive and no return. | open (`P5`), with the two honest fixes named: add a contact wired to ground, or send the serial pair to an `edge:` peer whose compiler-built header carries ground automatically. |
+| 25 | **A derived function is visible but not marked as a guess.** The functional spec added a power-conversion block (12 V in, 3.3 V logic) without recording it in its assumptions; the check that exists for that duty keys on four literal words (`esd protection`, `ldo`, `buck`, `boost`) and this block said "Convert". | open (`P1`). The machine-readable signal an obvious fix would key on — a block with no requirement attached — does not hold up: seed-40's committed spec leaves its reverse-polarity block unattached for a requirement the brief states in those words, and the replay fixture attaches nothing at all. The durable fix is a marker the pipeline owns. |
 
 ## 6. Making a missing part (the owner's directive, in mechanics)
 
@@ -251,3 +257,61 @@ the internal net names still reach the shipped schematic (5), and protection top
 owner's choice (6).
 
 
+
+
+## 10. Session of 2026-09-25 (fourth): a loop run on seed 43, and the part nobody can buy
+
+The first unattended loop run under the new rules, on the brief the live site's next click gets
+(`generate_brief(43)`): *"A CH32V003 development board with a 12 V DC barrel jack, a UART header,
+two JST-XH connectors, a reset button, and a power LED. Make the input reverse-polarity
+protected."* Caps stated before the first call and never raised: **$0.25 per draft, $1.00 for the
+run**. Workspace `~/.kicraft/debug/surprise-43-ch32v003-devboard-20260925`; its `findings.json`,
+`run-log.md` and per-stage answers carry the evidence for everything below.
+
+**What the run produced.** Three stages committed: the goal and must-haves (five must-haves, seven
+typed rows, five recorded guesses), the functional decomposition (seven functions, the two
+connectors as one function repeated twice), and the architecture (12 V in, P-channel reverse-
+polarity protection, an AMS1117 to 3.3 V, the CH32V003, a UART header, two JST-XH connectors, a
+reset button, a power LED, with the rails, nets and bindings derived by the compiler). The parts
+list was drafted and refused on sourcing; wiring was not reached. The run also exercised the
+capability built earlier the same day: the demanded `pushbutton` class was researched and vendored
+for real mid-stage (K2-1109DF-E4SW-04, LCSC C2909684) and its record carries the catalog's own
+ratings, so "the part exists" and "the part is right for this rail" now come from one place.
+
+**Five pipeline defects found and fixed at the source, each with the smallest test that fails
+without it** (details in `findings.json`, rows 20-22 of section 5):
+
+- **P2** the parts stage charged a count the brief states once against every requirement carrying
+  it, so a two-connector sheet could not be satisfied by either correct answer (`found -1`,
+  `found 0`) and exhausted six repairs.
+- **P3** the rule that keeps one connector group per connector *requirement* capped per part, so it
+  silently deleted the second connector of that sheet — a demanded part gone from the board.
+- **P4** the architecture stage refused `switch-input` for a `pushbutton` demand although that
+  lowerer builds the button itself, and the "repair" it asked for would have replaced a working
+  lowerer with a raw part.
+- **P6** the commit gate could not see a bundle part with no MPN even when its symbol/footprint
+  pair was exactly the reviewed record's, so it refused the LED the parts stage had just proven.
+- **P7** the same shared count was summed once per requirement in that gate too: a sheet holding
+  exactly the two connectors the brief asks for read "demand 4 distinct part(s)".
+
+**Where it stopped, and why that is the right stop.** With all five fixed, the save reached the
+real question: the CH32V003 the library carries (SOP-8, `ch32v003j4m6`, LCSC C5346354) shows **0 in
+stock at the lcsc.com retail storefront**, so the board's MCU cannot be bought today.
+`kicraft lookup-lcsc-id CH32V003J4M6` confirms it (`retail_stock: 0, min_buy: 5`), and the offline
+catalog has no second listing for that order code. Same-device alternatives exist but change the
+package (SOP-16 C5346357 and TSSOP-20 C5187096, both in stock). Choosing between a bigger package
+and a wait for restock on a part whose SOP-8 already uses most of its six GPIOs is the owner's
+call, so the run stopped rather than making it. The retail half of the gate is production
+behaviour and was deliberately left on: weakening it would have made the run pass and the board
+unbuildable.
+
+**Two findings left open with their evidence** (no fix applied, so nothing is claimed):
+
+- **P5** the intent recorded the default "standard UART pins plus ground", yet the architecture
+  declared a two-contact UART header, so the shipped header has transmit, receive and no return.
+- **P1** the functional spec introduced the 12 V-to-3.3 V conversion without recording it as a
+  guess. The check that exists for that duty keys on four literal words; and the machine-readable
+  signal an obvious fix would key on (a block with no requirement attached) was measured and does
+  not hold up — seed-40's committed spec leaves its *reverse-polarity* block unattached for a
+  requirement the brief states in those words, and the replayed fixture attaches nothing at all.
+  The durable fix is a marker the pipeline owns, which is a schema decision for the owner.

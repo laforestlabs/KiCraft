@@ -2042,6 +2042,46 @@ def test_a_requirement_family_that_cannot_implement_its_class_is_refused_here():
     ) == []
 
 
+def test_a_lowerer_that_builds_the_class_itself_is_not_a_family_mismatch(monkeypatch):
+    """`switch-input` builds the reset button, so it satisfies a `pushbutton` demand.
+
+    Live seed-43 run (2026-09-25): the architecture stage refused the reset requirement's
+    `switch-input` family -- the `pushbutton` class had just been researched and its carrier's
+    family was `pushbutton` -- then spent its repair rounds asking for that carrier. The parts
+    stage went on to bind exactly this lowerer's SW1 (`Switch:SW_Push` on the TL3342 button
+    footprint) and the board was right. Only a family whose own graph proves the class is exempt:
+    the generic `pin-header` family is still refused for a demanded `jst-xh-connector` (below).
+    """
+    from types import SimpleNamespace
+
+    from kicraft.design import part_identity
+    from kicraft.design.stage_semantics import _architecture_obligation_family_mismatch
+
+    carrier = SimpleNamespace(family="pushbutton", identity="k2-1109df-e4sw-04")
+    monkeypatch.setattr(
+        part_identity, "reviewed_parts_for_feature", lambda _feature: (carrier,)
+    )
+    requirement = {
+        "id": "reset",
+        "sheet": "RESET INPUT",
+        "role": "user_io",
+        "family": "switch-input",
+        "exact_part": None,
+        "parameters": {},
+        "ports": {},
+        "obligations": [
+            {"kind": "physical", "original_obligation_id": "reset-button",
+             "component_class": "pushbutton"}
+        ],
+    }
+
+    assert _architecture_obligation_family_mismatch({"requirements": [requirement]}) == []
+    # A family that does not build the class is still refused.
+    assert _architecture_obligation_family_mismatch(
+        {"requirements": [{**requirement, "family": "pin-header"}]}
+    ) != []
+
+
 def test_a_regulator_family_with_no_instance_at_its_voltage_is_retargeted():
     """The resolver falls back to the instance default, so the divider comes out for 3.3 V.
 

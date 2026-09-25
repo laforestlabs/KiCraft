@@ -1652,6 +1652,29 @@ _REVIEWED_RAIL_FAMILIES: tuple[tuple[str, float], ...] = (
 _OVER_RATED_REGULATOR_FAMILY = "tps54331-adjustable"
 
 
+def _lowerer_family_witnesses_class(family: str, component_class: str) -> bool:
+    """Whether a registered lowerer of this family builds the demanded class itself.
+
+    A family that constructs the class out of its own reviewed parts is a realization, not a
+    substitute: `switch-input` emits the SW_Push symbol on the tactile-button footprint for a
+    reset button. The witness table is the reviewed list of those relations
+    (``kicraft.design.part_identity.lowerer_witnesses_physical_class``), so a family that merely
+    looks switch-like -- a generic `pin-header` standing in for a demanded JST-XH connector --
+    stays refused.
+    """
+    from kicraft.design.lowering import registered_lowerers
+    from kicraft.design.part_identity import lowerer_witnesses_physical_class
+
+    key = str(family or "").strip().casefold()
+    if not key:
+        return False
+    return any(
+        lowerer_witnesses_physical_class(registered.lowerer_id, component_class)
+        for registered in registered_lowerers()
+        if key in {name.casefold() for name in registered.families}
+    )
+
+
 def _architecture_obligation_family_mismatch(candidate: dict) -> list[StageDiagnostic]:
     """A requirement's family cannot implement a part class that requirement claims.
 
@@ -1685,6 +1708,8 @@ def _architecture_obligation_family_mismatch(candidate: dict) -> list[StageDiagn
             if family in {part.family for part in carriers} or exact in {
                 part.identity for part in carriers
             }:
+                continue
+            if _lowerer_family_witnesses_class(family, component_class):
                 continue
             diagnostics.append(
                 _diag(

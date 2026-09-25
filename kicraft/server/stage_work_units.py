@@ -712,13 +712,37 @@ def _keep_one_connector_group(
         }
     if roles != {"connector"}:
         return groups, 0
+    # One group per connector *requirement*: a unit carrying two connector requirements (two
+    # JST-XH headers on one sheet) needs both kept. The cap counts requirements, not parts, so the
+    # actuator case stays right (one requirement that emitted two identical parts keeps one) while
+    # a two-header sheet keeps its second header. Live seed-43 run (2026-09-25): the second
+    # JST-XH group was dropped here, the count gate then refused the sheet as "requires 2 real
+    # jst-xh-connector, found 1", and the parts stage spent six repairs on a board that was
+    # already correct before failing.
+    if requirement_ids:
+        allowed = max(len(requirement_ids), 1)
+    else:
+        sheet = str(getattr(unit, "sheet", "") or "")
+        allowed = max(
+            sum(
+                1
+                for row in architecture_requirements
+                if str(row.get("sheet") or "") == sheet
+                and str(row.get("role") or "") == "connector"
+            ),
+            1,
+        )
     kept: list[BomComponentGroup] = []
     seen: set[tuple[str, str]] = set()
+    connectors_kept = 0
     for group in groups:
+        connector_like = group.reference_prefix == "J"
         key = (str(group.symbol), str(group.footprint))
-        if group.reference_prefix == "J" and key in seen:
+        if connector_like and key in seen and connectors_kept >= allowed:
             continue
         seen.add(key)
+        if connector_like:
+            connectors_kept += 1
         kept.append(group)
     return kept, len(groups) - len(kept)
 
@@ -1603,6 +1627,8 @@ def _requirement_obligation_defects(
     unfilled_classes: list[str] = []
     pending_claims: list[dict] = []
     consumed: dict[str, int] = {}
+    # Classes whose design-wide count has already been compared (see below).
+    counted: set[str] = set()
     for requirement in requirements:
         obligations = requirement.get("obligations") or []
         checked_features: set[str] = set()
@@ -1622,11 +1648,28 @@ def _requirement_obligation_defects(
                 ),
                 default=1,
             )
-            actual = sum(
+            total = sum(
                 group.quantity for group in groups if _group_has_physical_feature(group, feature)
-            ) - consumed.get(feature, 0)
-            witnessed = minimum == 1 and lowerer_witnesses(requirement, obligation)
-            if actual < minimum and not witnessed:
+            )
+            outstanding = max(total - consumed.get(feature, 0), 0)
+            witnessed = lowerer_witnesses(requirement, obligation)
+            if minimum > 1 and feature not in counted:
+                # A count the brief states once ("two JST-XH connectors") is one demand on the
+                # whole unit, and every requirement implementing the class may carry the same
+                # committed row: compare it once against the groups the unit emitted, then each
+                # requirement still needs a part of its own. Charging the count against every
+                # requirement in turn made the later ones unsatisfiable -- the live seed-43 parts
+                # stage was refused six times over a two-connector sheet, "requires 2 real
+                # jst-xh-connector, found -1" among the readings, including for both correct
+                # shapes (two single connectors, one group of two).
+                counted.add(feature)
+                needed, available = minimum, total
+                # A lowerer witness proves the topology implements the class; it never proves
+                # the count the brief itself states.
+                witnessed = False
+            else:
+                needed, available = 1, outstanding
+            if available < needed and not witnessed:
                 # Name the groups the unit emitted, with the identity each one resolved to: the
                 # repair (and the next diagnosis) needs to tell "the draft picked an unreviewed
                 # part" from "the draft emitted no part at all".
@@ -1638,14 +1681,14 @@ def _requirement_obligation_defects(
                     unfilled_classes.append(feature)
                 defects["physical-obligation-unfulfilled"].append(
                     f"{requirement['id']}:{obligation['original_obligation_id']}: "
-                    f"requires {minimum} real {feature}, found {actual}"
+                    f"requires {needed} real {feature}, found {available}"
                     + (
                         "; the unit emitted: " + " | ".join(emitted)
                         if emitted
                         else "; the unit emitted no groups"
                     )
                 )
-            consumed[feature] = consumed.get(feature, 0) + minimum
+            consumed[feature] = consumed.get(feature, 0) + 1
         claim = requirement.get("declared_interface")
         if not claim:
             continue

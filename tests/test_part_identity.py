@@ -8,6 +8,7 @@ from kicraft.design.part_identity import (
     matches_part_identity,
     realizable_physical_features,
     reviewed_part,
+    reviewed_inventory,
     reviewed_parts_for_feature,
     physical_inventory_record,
 )
@@ -273,6 +274,35 @@ def test_physical_inventory_is_exact_and_never_text_classified():
             footprint="attiny402-ssnr:SOIC-8_L5.0-W4.0-P1.27-LS6.0-BL",
         ).identity
         == "attiny402-ssnr"
+    )
+
+
+def test_a_part_with_no_mpn_is_identified_by_its_own_reviewed_pair():
+    """A bundle part carries no MPN, and its symbol/footprint pair is still exact evidence.
+
+    Live seed-43 commit (2026-09-25): ``E_PHYSICAL_REALIZATION 'power_led': requires 1 reviewed
+    'led' physical part(s), found 0 with exact MPN/symbol/footprint evidence`` -- for the vendored
+    warm-white LED whose pair is exactly the reviewed record's, on the BOM group the parts stage
+    had just accepted by its bundle. The stock-library lookup answered only for the stock sets, so
+    the commit gate saw no record at all; the pair is now matched against the whole inventory.
+    """
+    record = next(
+        candidate for candidate in reviewed_inventory() if candidate.family == "warm-white-led"
+    )
+    resolved = physical_inventory_record(
+        mpn=None, symbol=record.symbol, footprint=record.footprint
+    )
+    assert resolved is not None
+    assert (resolved.identity, resolved.family) == (record.identity, "warm-white-led")
+
+    # A pair the review does not publish stays unresolved, and an explicit non-matching MPN
+    # is still fail-closed rather than rescued by the pair.
+    assert physical_inventory_record(mpn=None, symbol=record.symbol, footprint="No:Such") is None
+    assert (
+        physical_inventory_record(
+            mpn="NOT-AN-MPN", symbol=record.symbol, footprint=record.footprint
+        )
+        is None
     )
 
 

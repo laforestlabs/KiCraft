@@ -111,3 +111,21 @@ NiceGUI on `127.0.0.1:8080`, Caddy in front; services run as detached processes 
 Read the plan and the findings, then either take the top open item (a second, independent signal
 on whether a researched part really is the demanded class) or start a loop run on a new seed and
 report the first gap you find — in plain words, with the evidence beside it.
+
+---
+
+## Addendum, same night: the first loop run (seed 43)
+
+The top item above was closed (plan §9: researched parts now carry the catalog's own ratings), and
+then the loop ran unattended on the brief the live site's next click gets — `generate_brief(43)`, a
+CH32V003 development board. It is written up in plan §10; the run's own evidence is in
+`~/.kicraft/debug/surprise-43-ch32v003-devboard-20260925/` (`findings.json`, `run-log.md`, the
+per-stage answers).
+
+Short version: intent, functional spec and architecture committed; five pipeline defects found and
+fixed at the source with tests (plan table rows 20-22); and the run **stopped** at the parts-stage
+save because the only CH32V003 order code the reviewed library carries (SOP-8, LCSC C5346354) is
+out of stock at the lcsc.com retail storefront, with same-device alternatives only in other
+packages. That is the owner's call, so it is the first thing to settle before any further run on
+this brief. Two findings are open with their evidence: the UART header has no ground contact
+(`P5`), and the functional spec's derived conversion block was never recorded as a guess (`P1`).
