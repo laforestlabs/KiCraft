@@ -406,6 +406,39 @@ def test_functional_spec_requires_external_load_power_decision():
     )
     assert "functional_spec_external_load_power_assumed" not in {item.code for item in answered}
 
+    # The production policy disables clarifying questions at this stage, so the writer is told
+    # to record the choice instead. A recorded, disclosed default is a resolution -- refusing it
+    # would make the stage unsatisfiable (no question is representable in that schema).
+    disclosed = diagnose_stage(
+        "functional_spec",
+        brief="Drive a HUB75 panel and an addressable LED string",
+        upstream_state={},
+        candidate={
+            **candidate,
+            "assumptions": [
+                "The board supplies power to the hub75 panel and the addressable led "
+                "string from the input supply (defaulted)"
+            ],
+        },
+    )
+    assert "functional_spec_external_load_power_assumed" not in {item.code for item in disclosed}
+
+    # An undisclosed claim (or one that names an unrelated part) does not clear the refusal:
+    # the disclosure is what the contract requires, not merely any assumption row.
+    for row in (
+        "The board supplies power to the panel",
+        "The panel is a 64x64 module (defaulted)",
+    ):
+        still_open = diagnose_stage(
+            "functional_spec",
+            brief="Drive a HUB75 panel and an addressable LED string",
+            upstream_state={},
+            candidate={**candidate, "assumptions": [row]},
+        )
+        assert "functional_spec_external_load_power_assumed" in {
+            item.code for item in still_open
+        }, row
+
 
 def test_functional_spec_requires_power_and_consistent_ground_for_drives():
     candidate = {

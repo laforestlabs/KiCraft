@@ -499,6 +499,45 @@ def complete_unstated_power_input(brief: str, candidate: dict) -> dict:
     return completed
 
 
+_LOAD_POWER_STOPWORDS = {"block", "drive", "output", "the", "of", "and"}
+
+
+def _defaulted_load_power_disclosed(assumption_rows, target_text: str) -> bool:
+    """Whether a recorded default already discloses who powers this external load.
+
+    The contract forbids *silently* making the board responsible for an external load's
+    power. ``functional_spec`` is an auto-default stage, so under the production policy the
+    response schema carries no ``questions`` array and the prompt says: apply the sensible
+    default and record it in ``assumptions`` ending ``(defaulted)``. A row that names the
+    load (or "external loads"/"both loads") and states that the board supplies its power is
+    that disclosure. Refusing it would leave the stage unsatisfiable: the only other exit
+    the checker offers -- a blocking question -- is disabled by the same policy.
+    """
+    words = {
+        word
+        for word in re.findall(r"[a-z0-9]+", str(target_text).casefold())
+        if word not in _LOAD_POWER_STOPWORDS
+    }
+    for row in assumption_rows:
+        text = str(row).casefold()
+        if "(defaulted)" not in text:
+            continue
+        if not re.search(
+            r"\b(?:suppl(?:y|ies|ied)|power(?:s|ed|ing)?|provid(?:e|es|ed)|feed(?:s|ed)?)\b", text
+        ):
+            continue
+        if not (
+            re.search(r"\b(?:board|on-?board)\b", text)
+            or re.search(r"\b(?:both|the|external) loads?\b", text)
+        ):
+            continue
+        if re.search(r"\b(?:both|external) loads?\b", text) or (
+            words & set(re.findall(r"[a-z0-9]+", text))
+        ):
+            return True
+    return False
+
+
 def _mislabeled_functional_defaults(
     brief: str, upstream: dict, assumption_rows: list[str]
 ) -> list[str]:
@@ -721,7 +760,10 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
             )
             or answered_board_power
         )
-        if not explicitly_powered:
+        if not (
+            explicitly_powered
+            or _defaulted_load_power_disclosed(assumption_rows, target_text)
+        ):
             external_power_assumptions.append(target)
     if external_power_assumptions:
         diagnostics.append(

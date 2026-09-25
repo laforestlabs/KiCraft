@@ -1339,6 +1339,9 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
             "load. Return one blocking question with exactly these options: "
             '["Board supplies the external loads", '
             '"External loads use a separate power supply"].'
+            " If clarifying questions are disabled for this call, do not invent a second "
+            "reading: state the chosen default in `assumptions`, ending '(defaulted)', and "
+            "name the load whose power the board supplies."
         )
     if any(d.code == "architecture_external_load_current_unspecified" for d in diagnostics):
         message += (
