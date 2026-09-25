@@ -1511,7 +1511,10 @@ def _corrected_load_supply_rows(
 #: pipeline picks a rail it can actually build and never invents a voltage: the highest one that
 #: fits inside the part's rated range (a DRV8833's 2.7-10.8 V vm picks 10.0 V, the MP1584 instance).
 _REVIEWED_RAIL_FAMILIES: tuple[tuple[str, float], ...] = (
-    ("mp1584-10v", 10.0),
+    # Highest first: the selection takes the first entry that fits inside the part's rated range.
+    # Only families whose part the offline catalog stocks at both JLCPCB assembly and the lcsc.com
+    # retail storefront belong here -- a rail that cannot be ordered is not a rail (the 10 V
+    # MP1584EN looked ideal until §9.26 reported 0 retail stock and the BOM could not commit).
     ("ap63205-5v", 5.0),
     ("tps54331-adjustable", 3.3),
 )
@@ -1623,9 +1626,23 @@ def _retarget_unbuildable_regulators(candidate: dict) -> list[str]:
             (row for row in _REVIEWED_RAIL_FAMILIES if abs(row[1] - float(target)) <= 0.05),
             None,
         )
+        clamped = reviewed is None
         if reviewed is None:
-            continue
+            # No orderable converter produces this voltage: the rail moves to the nearest one the
+            # library can build, and its consumers keep working (a motor driver's range usually
+            # spans it), rather than the design naming a rail nothing can supply.
+            reviewed = min(
+                _REVIEWED_RAIL_FAMILIES, key=lambda row: abs(row[1] - float(target))
+            )
         requirement["family"] = reviewed[0]
+        if clamped:
+            requirement["parameters"] = {**parameters, "output_voltage": reviewed[1]}
+            for port, net in (requirement.get("ports") or {}).items():
+                port_key = str(port).casefold()
+                if port_key.startswith(("output", "vout", "sw")) or port_key == "out":
+                    rail_voltages = dict(candidate.get("rail_voltages") or {})
+                    rail_voltages[str(net)] = reviewed[1]
+                    candidate["rail_voltages"] = rail_voltages
         retargeted.append(str(requirement.get("id") or ""))
     return retargeted
 

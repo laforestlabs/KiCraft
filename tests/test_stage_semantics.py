@@ -1684,13 +1684,17 @@ def test_an_over_rated_load_gets_its_own_regulated_rail_before_diagnosis():
     fixed = complete_over_rated_supply(candidate)
 
     # A rail inside the part's rated range, sourced from a reviewed converter on the input.
-    assert fixed["rail_voltages"]["BRIDGE_RAIL"] == 10.0
+    assert fixed["rail_voltages"]["BRIDGE_RAIL"] == 5.0
     assert "+18V" in fixed["rail_voltages"] and fixed["rail_voltages"]["+18V"] == 18.0
     converter = next(row for row in fixed["requirements"] if row["id"] == "bridge_regulator")
     # A family the library carries at exactly this rail: the reviewed MP1584 10 V instance.
-    assert converter["family"] == "mp1584-10v"
-    assert converter["parameters"]["output_voltage"] == 10.0
-    assert converter["ports"] == {"input": "+18V", "output": "BRIDGE_RAIL", "gnd": "GND"}
+    assert converter["family"] == "ap63205-5v"
+    assert converter["parameters"]["output_voltage"] == 5.0
+    assert {
+        key: converter["ports"][key] for key in ("input", "output", "gnd")
+    } == {"input": "+18V", "output": "BRIDGE_RAIL", "gnd": "GND"}
+    # The recipe binds its own EN pin to its input; that is the record's business, not this test's.
+    assert converter["ports"].get("enable") == "+18V"
     bridge = next(row for row in fixed["requirements"] if row["id"] == "bridge")
     assert bridge["ports"]["vm"] == "BRIDGE_RAIL"
     assert any(row["name"] == "BRIDGE REGULATOR" for row in fixed["sheets"])
@@ -1822,7 +1826,7 @@ def test_a_drive_on_the_logic_rail_gets_its_own_rail_too():
     fixed = complete_over_rated_supply(candidate)
 
     # Its own rail, at the highest voltage the part's reviewed limit allows, from the board input.
-    assert fixed["rail_voltages"]["BRIDGE_RAIL"] == 10.0
+    assert fixed["rail_voltages"]["BRIDGE_RAIL"] == 5.0
     assert next(r for r in fixed["requirements"] if r["id"] == "bridge")["ports"]["vm"] == "BRIDGE_RAIL"
     converter = next(r for r in fixed["requirements"] if r["id"] == "bridge_regulator")
     assert converter["ports"] == {"input": "+18V", "output": "BRIDGE_RAIL", "gnd": "GND"}
@@ -1909,9 +1913,9 @@ def test_a_declared_load_rail_nothing_generates_gets_its_converter():
     assert converter["ports"] == {"input": "VIN", "output": "MOTOR_VIN", "gnd": "GND"}
     # 10.8 V has no reviewed instance; the rail takes the nearest one the library builds, and the
     # rail's own voltage follows it rather than naming a rail nothing can produce.
-    assert converter["parameters"]["output_voltage"] == 10.0
-    assert converter["family"] == "mp1584-10v"
-    assert fixed["rail_voltages"]["MOTOR_VIN"] == 10.0
+    assert converter["parameters"]["output_voltage"] == 5.0
+    assert converter["family"] == "ap63205-5v"
+    assert fixed["rail_voltages"]["MOTOR_VIN"] == 5.0
     assert any(row["name"] == "MOTOR_VIN REGULATOR" for row in fixed["sheets"])
     assert any("motor_vin_regulator" in row and "(defaulted)" in row for row in fixed["assumptions"])
     # The board input and the 3.3 V rail already have their sources; only the bare rail is filled.
@@ -2052,14 +2056,18 @@ def test_a_regulator_family_with_no_instance_at_its_voltage_is_retargeted():
             {"id": "reg3v3", "role": "regulator", "family": "tps54331-adjustable",
              "parameters": {"output_voltage": 3.3}},
             {"id": "hbridge_regulator", "role": "regulator", "family": "tps54331-adjustable",
-             "parameters": {"output_voltage": 10.0}},
+             "parameters": {"output_voltage": 10.0},
+             "ports": {"input": "+18V", "output": "HBRIDGE_RAIL"}},
         ],
         "assumptions": [],
     }
     retargeted = _retarget_unbuildable_regulators(candidate)
 
     assert retargeted == ["hbridge_regulator"]
-    assert candidate["requirements"][1]["family"] == "mp1584-10v"
+    assert candidate["requirements"][1]["family"] == "ap63205-5v"
+    # 10 V has no orderable family: the rail moves to the nearest buildable one with it.
+    assert candidate["rail_voltages"]["HBRIDGE_RAIL"] == 5.0
+    assert candidate["requirements"][1]["parameters"]["output_voltage"] == 5.0
     # The 3.3 V requirement already names the family registered at its voltage: untouched.
     assert candidate["requirements"][0]["family"] == "tps54331-adjustable"
 
@@ -2084,5 +2092,5 @@ def test_the_retarget_reads_the_target_voltage_from_the_rail_it_feeds():
     retargeted = _retarget_unbuildable_regulators(candidate)
 
     assert retargeted == ["hbridge_regulator"]
-    assert candidate["requirements"][0]["family"] == "mp1584-10v"
+    assert candidate["requirements"][0]["family"] == "ap63205-5v"
     assert candidate["requirements"][1]["family"] == "tps54331-adjustable"
