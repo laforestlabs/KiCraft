@@ -4241,3 +4241,42 @@ def test_reviewed_class_options_publish_the_contact_count_that_decides_the_choic
     assert "dc005 (barrel-jack: 3 contacts)" in block
     # The rule the counts exist for is stated, so the draft knows what to match them against.
     assert "must match the contacts the requirement declares" in block
+
+
+def test_the_reverse_polarity_block_binds_the_reviewed_p_fet() -> None:
+    """A stated reverse-polarity requirement needs a family the parts step can resolve.
+
+    Live architecture draft 2026-09-25: the stage invented a family called
+    ``reverse-polarity-protection``, which no curated recipe and no reviewed part implements, so the
+    audit refused it and the parts step had nothing to select. The library already carried a
+    production AONR21357 P-channel MOSFET; this block is the canonical high-side arrangement on top
+    of it -- drain to the raw input, source to the protected rail, gate to ground through a series
+    resistor, so a reversed input holds the FET off.
+    """
+    from kicraft.design.recipes import recipe_summaries
+
+    assert "reverse-polarity-pmos" in {row["family"] for row in recipe_summaries()}
+
+    definition = get_recipe("reverse-polarity-pmos@1")
+    assert definition.exact_part == "AONR21357"
+    assert [port.name for port in definition.ports] == ["input", "output", "gnd"]
+
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe="reverse-polarity-pmos@1",
+            instance="protection",
+            sheets={"power": "POWER INPUT"},
+            port_bindings={"input": "HOST_5V", "output": "PROTECTED_5V", "gnd": "GND"},
+        )
+    )
+    assert [(part.ref, part.value, part.symbol) for part in expansion.parts] == [
+        ("Q1", "AONR21357", "aonr21357:AONR21357"),
+        ("R1", "10k", "Device:R"),
+    ]
+    nets = {connection.net_name: {f"{e.ref}.{e.pin}" for e in connection.endpoints}
+            for connection in expansion.connections}
+    # Every drain contact faces the raw input and every source contact the protected rail.
+    assert nets["HOST_5V"] == {"Q1.5", "Q1.6", "Q1.7", "Q1.8", "Q1.9"}
+    assert nets["PROTECTED_5V"] == {"Q1.1", "Q1.2", "Q1.3"}
+    assert nets["GND"] == {"R1.2"}
+    assert {"Q1.4", "R1.1"} in nets.values()

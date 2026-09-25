@@ -877,6 +877,57 @@ def expand_usb_c_usb2_device(resolved):
     return expand_static_definition(definition, resolved)
 
 
+# Reverse-polarity protection on the board input, built from a reviewed part the library already
+# carries: the AONR21357 P-channel MOSFET is a production bundle with its own symbol, footprint
+# and datasheet, and its own record warns to keep the gate inside the +-25 V VGS bound. The block
+# is the canonical high-side arrangement -- drain (pins 5-8 and exposed pad 9) faces the raw
+# input, source (1-3) faces the protected rail, the gate sits on ground through a series resistor
+# -- so a reversed input holds the FET off and leaves only a reverse-biased body diode. Before
+# this, a stated protection requirement had no family to select and no reviewed carrier to name:
+# the architecture stage invented one, and the parts step could not resolve it.
+REVERSE_POLARITY_PMOS = _power_recipe(
+    recipe="reverse-polarity-pmos@1",
+    family="reverse-polarity-pmos",
+    exact_part="AONR21357",
+    parts=(
+        _part(
+            "mosfet",
+            "Q",
+            "AONR21357",
+            "aonr21357:AONR21357",
+            "aonr21357:DFN-8_L3.0-W3.0-P0.65-BL",
+            mpn="AONR21357",
+        ),
+        _passive("gate_resistor", "R", "10k"),
+    ),
+    pins=(
+        *(Pin(role="mosfet", pin=pin, net="input") for pin in ("5", "6", "7", "8", "9")),
+        *(Pin(role="mosfet", pin=pin, net="output") for pin in ("1", "2", "3")),
+        Pin(role="mosfet", pin="4", net="gate"),
+        Pin(role="gate_resistor", pin="1", net="gate"),
+        Pin(role="gate_resistor", pin="2", net="gnd"),
+    ),
+    ports=(
+        Port(name="input", direction="power"),
+        Port(name="output", direction="power"),
+        Port(name="gnd", direction="power"),
+    ),
+    internal_nets=("gate",),
+    source_url=(
+        "https://lcsc.com/product-detail/MOSFET_Alpha-Omega-Semicon-AOS-AONR21357_C431196.html"
+    ),
+    assertions=(
+        Assertion(
+            code="reverse_polarity_blocking",
+            message=(
+                "A reversed input reverse-biases the P-channel body diode and holds the FET off; "
+                "the gate stays inside the part's +-25 V VGS bound"
+            ),
+        ),
+    ),
+)
+
+
 WAVE_B_POWER_RECIPES = (
     USB_C_5V_SINK,
     USB_C_USB2_DEVICE,
@@ -891,4 +942,5 @@ WAVE_B_POWER_RECIPES = (
     AP63203_3V3,
     AP63205_5V,
     TPS54331_ADJUSTABLE,
+    REVERSE_POLARITY_PMOS,
 )
