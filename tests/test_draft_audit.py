@@ -157,3 +157,72 @@ def test_part_alternatives_are_offered_only_when_the_catalogue_has_them():
 
     # A curated recipe family owns its parts; nothing else can stand in for it.
     assert part_alternatives("dual-dc-motor-driver", "DRV8833PWPR") == ()
+
+
+def test_a_draft_the_compiler_refuses_is_still_audited(tmp_path, monkeypatch):
+    """The audit sees the parsed draft *before* the derivation, so a refusal cannot hide it.
+
+    The derivation runs inside decode, so an audit placed after it never saw the drafts that
+    actually fail (measured on the seed-37 walkthrough). Here the compiler refuses the draft's
+    rail reference, and the audit still runs and still reaches the correction message.
+    """
+    import json
+
+    from kicraft.server import stage_runtime
+    from kicraft.server.config import Settings
+
+    finding = stage_runtime.models.StageDiagnostic(
+        code="audit_identity_unresolved",
+        severity="repair_required",
+        message="Requirement 'mcu' does not name a curated family",
+        evidence=["set the requirement's family or exact_part to 'esp32-c3-mini-1-module'"],
+    )
+    seen: list[dict] = []
+
+    def fake_pre_audit(parsed):
+        seen.append(parsed)
+        return [finding]
+
+    monkeypatch.setattr(stage_runtime, "_pre_audit_hook", lambda client: fake_pre_audit)
+
+    class _Client:
+        def __init__(self):
+            self.replies = [refused_draft] * 4
+            self.calls = []
+            self.s = Settings(api_key="test")
+
+        def chat(self, messages=None, **kwargs):
+            self.calls.append({"messages": messages, **kwargs})
+            return {
+                "text": json.dumps(self.replies.pop(0)),
+                "reasoning": "",
+                "finish_reason": "stop",
+                "cost_usd": 0.0,
+            }
+
+    refused_draft = {
+        "power": {"rails": {"VBUS": {"voltage": 5.0, "from": "ghost.vbus"}}},
+        "sheets": [{"name": "MAIN", "stem": "MAIN", "role": "mcu", "function": "the board"}],
+        "requirements": [
+            {
+                "id": "mcu",
+                "sheet": "MAIN",
+                "role": "mcu_core",
+                "family": "generic-header",
+                "parameters": {"rows": 1, "gender": "male"},
+                "functional_blocks": [],
+            }
+        ],
+        "signals": [{"name": "GPIO", "from": "mcu.pin1", "to": "edge:IO"}],
+    }
+    client = _Client()
+
+    result = stage_runtime.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft/state.json", tmp_path
+    )
+
+    assert seen, "the audit never saw the parsed draft"
+    assert result["failure_kind"] == "contract_rejected"
+    correction = client.calls[1]["messages"][-1]["content"]
+    assert "audit_identity_unresolved" in correction
+    assert "A Jev audit of this same draft" in correction

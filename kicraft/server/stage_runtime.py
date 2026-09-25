@@ -1076,6 +1076,27 @@ _SYNTAX_LIMIT_RETRY_MSG = (
 )
 
 
+def _audit_notes_sentence(audit_notes) -> str:
+    """One sentence naming what the Jev audit of the same draft reported.
+
+    The notes are left out of the rejection's identity (``_schema_rejection_signature`` reads the
+    diagnostic, not this message), so an audit note that changes wording can never be mistaken
+    for progress on the defect itself.
+    """
+    rows = [note for note in (audit_notes or []) if isinstance(note, dict) and note.get("code")]
+    if not rows:
+        return ""
+    described = "; ".join(
+        f"{row['code']}: {str(row.get('message') or '').strip()}"
+        + (f" [{str((row.get('evidence') or [''])[0])[:120]}]" if row.get("evidence") else "")
+        for row in rows[:4]
+    )
+    return (
+        "\nA Jev audit of this same draft, taken from the draft alone before the compiler "
+        f"derived it, additionally reports: {described}. Fix these in the same correction."
+    )
+
+
 def _stage_recovery_message(
     kind: str | None,
     raw: str,
@@ -1084,6 +1105,7 @@ def _stage_recovery_message(
     schema_error: str | None = None,
     diagnostic: dict | None = None,
     collection_limit: dict | None = None,
+    audit_notes=None,
 ) -> str:
     limit = collection_limit or {}
     if kind == "collection_limit":
@@ -1146,7 +1168,7 @@ def _stage_recovery_message(
     )
     if diagnostic:
         message += "\nConcrete diagnostic:\n" + json.dumps(diagnostic, separators=(",", ":"))
-    return message
+    return message + _audit_notes_sentence(audit_notes)
 
 
 _SEMANTIC_REPAIR_MSG = (
@@ -1165,6 +1187,33 @@ _MAX_SEMANTIC_REPAIR_ROUNDS = 1
 #: from-scratch rewrite and then died; with this bound the loop keeps the draft while the defect
 #: set keeps changing, for two rounds. An unchanged defect set still terminates immediately.
 _MAX_DESIGN_CONTRACT_REPAIR_ROUNDS = 2
+
+
+def _audit_parsed_draft(pre_audit, parsed) -> list[dict]:
+    """Audit a parsed draft if a hook is configured; findings as plain rows, never shared state."""
+    if pre_audit is None or not isinstance(parsed, dict):
+        return []
+    try:
+        findings = pre_audit(parsed)
+    except Exception:
+        return []
+    return [
+        finding.model_dump(exclude_none=True)
+        for finding in findings or []
+        if hasattr(finding, "model_dump")
+    ]
+
+
+def _pre_audit_hook(client):
+    """The pre-derivation audit hook for the stages that have one (architecture)."""
+
+    def audit(parsed: dict):
+        settings = getattr(client, "s", None)
+        if not getattr(settings, "enable_draft_audit", False):
+            return []
+        return _audit_architecture_draft(client, parsed)
+
+    return audit
 
 
 def _audit_architecture_draft(client, candidate: dict) -> list[models.StageDiagnostic]:
@@ -1530,8 +1579,16 @@ def _unknown_sheet_references(prepared: PreparedStage, candidate: dict) -> list[
 def decode_stage_response(
     prepared: PreparedStage,
     facts: ProviderFacts,
+    *,
+    pre_audit=None,
 ) -> AttemptOutcome:
-    """Parse and normalize one response without mutating durable state."""
+    """Parse and normalize one response without mutating durable state.
+
+    ``pre_audit`` sees the *parsed* draft before ``_normalize_stage_response`` derives it — which
+    is where the compiler's contracts run, so a draft they refuse still gets audited and the
+    audit's findings travel with the refusal instead of being lost with it.
+    """
+    audit_findings: list[dict] = []
     try:
         if facts.finish == "collection_limit":
             raise ValueError("stream collection limit")
@@ -1545,19 +1602,20 @@ def decode_stage_response(
                     "expanded_component_count": 0,
                 },
             )
+        audit_findings = _audit_parsed_draft(pre_audit, parsed)
         candidate, expanded = _normalize_stage_response(
             prepared.stage,
             parsed,
             prepared.prompt_state,
         )
         kind = "questions" if isinstance(candidate.get("questions"), list) else "candidate"
-        return AttemptOutcome(
-            kind,
-            {
-                "candidate": candidate,
-                "expanded_component_count": expanded,
-            },
-        )
+        payload = {
+            "candidate": candidate,
+            "expanded_component_count": expanded,
+        }
+        if audit_findings:
+            payload["audit_findings"] = audit_findings
+        return AttemptOutcome(kind, payload)
     except StageSchemaError as exc:
         diagnostic = getattr(exc, "diagnostic", None)
         # A StageSchemaError that carries a diagnostic is a semantic/recipe
@@ -1570,6 +1628,7 @@ def decode_stage_response(
                 "failure_kind": "contract_rejected" if diagnostic else "invalid_schema",
                 "schema_error": str(exc),
                 "diagnostic": diagnostic,
+                "audit_findings": audit_findings,
             },
         )
     except (json.JSONDecodeError, ValueError):
@@ -3891,6 +3950,7 @@ def drive_stage(
     # dedupes any re-issued lookup, so the dropped transcript is free to rebuild.
     base_messages = list(messages)
     ladder_modes = _contract_ladder_modes(active_client)
+    pre_audit = _pre_audit_hook(active_client)
     prepared = PreparedStage(
         stage=stage,
         prompt_state=prompt_state,
@@ -4323,7 +4383,7 @@ def drive_stage(
             messages = _lean_retry(None, _REASONING_LOOP_RETRY_MSG)
             continue
 
-        outcome = decode_stage_response(prepared, facts)
+        outcome = decode_stage_response(prepared, facts, pre_audit=pre_audit)
         emit_candidate_decoded(
             outcome,
             provider_attempt=attempts,
@@ -4369,6 +4429,7 @@ def drive_stage(
                 "error": _FAILURE_KIND_ERROR.get(kind, kind),
                 "schema_error": schema_error_detail,
                 "diagnostic": outcome.payload.get("diagnostic"),
+                "audit_findings": outcome.payload.get("audit_findings") or [],
             }
             rejection_codes = _diagnostic_codes(last.get("diagnostic"))
             defect_codes.extend(rejection_codes)
@@ -4468,6 +4529,7 @@ def drive_stage(
                         schema_error=schema_error_detail,
                         diagnostic=last.get("diagnostic"),
                         collection_limit=collection_limit,
+                        audit_notes=last.get("audit_findings"),
                     )
                     + ladder_suffix(
                         raw,
@@ -4493,6 +4555,7 @@ def drive_stage(
                 schema_error=schema_error_detail,
                 diagnostic=last.get("diagnostic"),
                 collection_limit=collection_limit,
+                audit_notes=last.get("audit_findings"),
             ) + ladder_suffix(
                 raw,
                 _rejection_text(last.get("schema_error"), last.get("diagnostic")),
@@ -4566,7 +4629,7 @@ def drive_stage(
                 break
             sraw = sfacts.raw
             scollection_limit = sfacts.collection_limit
-            serialization_outcome = decode_stage_response(prepared, sfacts)
+            serialization_outcome = decode_stage_response(prepared, sfacts, pre_audit=pre_audit)
             emit_candidate_decoded(
                 serialization_outcome,
                 provider_attempt=attempts,
@@ -4654,6 +4717,7 @@ def drive_stage(
                         schema_error=schema_error_detail,
                         diagnostic=last.get("diagnostic"),
                         collection_limit=scollection_limit,
+                        audit_notes=last.get("audit_findings"),
                     )
                     + (
                         " Preserve every already-valid net, port binding and "
@@ -4913,7 +4977,9 @@ def drive_stage(
                     },
                 )
                 total_cost += repair_facts.cost_usd
-                repair_outcome = decode_stage_response(prepared, repair_facts)
+                repair_outcome = decode_stage_response(
+                    prepared, repair_facts, pre_audit=pre_audit
+                )
                 if repair_outcome.kind == "candidate":
                     repaired = _normalize_candidate_for_diagnostics(
                         stage, repair_outcome.payload["candidate"], brief, semantic_state
