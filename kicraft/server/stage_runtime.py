@@ -17,7 +17,9 @@ from kicraft.design.stage_semantics import (
     DETECTOR_VERSION,
     EXTERNAL_LOAD_CURRENT_CODE,
     complete_intent_classification,
+    complete_unstated_power_input,
     complete_unsourced_external_rails,
+    complete_usb_socket_rail,
     diagnose_stage,
     external_load_budget_stated,
     normalize_project_stem,
@@ -1155,6 +1157,15 @@ _SEMANTIC_REPAIR_MSG = (
 )
 _MAX_SEMANTIC_REPAIR_ROUNDS = 1
 
+#: Preserving corrections a *design-contract* refusal earns by default (no ladder flag needed).
+#: A schema-clean draft that a design contract refused is a design defect, and one draft can carry
+#: several independent ones: the seed-37 walkthrough's four architecture drafts each fixed the
+#: reported defect and surfaced another (USB rail, unwired USB pins, unnumbered terminal contacts,
+#: a prose string where a part identity belongs). Stock behaviour answered them with a single
+#: from-scratch rewrite and then died; with this bound the loop keeps the draft while the defect
+#: set keeps changing, for two rounds. An unchanged defect set still terminates immediately.
+_MAX_DESIGN_CONTRACT_REPAIR_ROUNDS = 2
+
 
 def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnostic]) -> str:
     message = _SEMANTIC_REPAIR_MSG.format(
@@ -1180,6 +1191,14 @@ def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnosti
             "class. A part category the reviewed library does not cover yet (a GPS module, "
             "a new sensor class) is legitimate — keep the user's own class name and let the "
             "parts stage resolve the real part."
+        )
+    if any(d.code == "intent_quantity_subject_unbound" for d in diagnostics):
+        message += (
+            " Fix each flagged `quantity` row: it counts a part class that this slot does not "
+            "record, so add that class's obligation row (`kind` `physical`, `component_class` "
+            "spelled as the evidence shows) or delete the count if it described a property of "
+            "one part. A count of a property (pins on a header, contacts in a connector, "
+            "channels of one driver) is a `quantitative` row, never a `quantity` row."
         )
     if any(d.code == "intent_prototyping_area_omitted" for d in diagnostics):
         message += (
@@ -1268,6 +1287,7 @@ def _normalize_candidate_for_diagnostics(
     """
     if stage == "intent":
         candidate = complete_intent_classification(brief, candidate)
+        candidate = complete_unstated_power_input(brief, candidate)
         candidate["project_stem"] = normalize_project_stem(candidate.get("project_stem", ""))
     elif stage == "functional_spec":
         # A board-feature block cannot be wired (it owns no net), so it is removed
@@ -1277,6 +1297,7 @@ def _normalize_candidate_for_diagnostics(
             remove_mislabeled_functional_defaults(brief, semantic_state, candidate)
         )
     elif stage == "architecture":
+        candidate = complete_usb_socket_rail(candidate)
         candidate = remove_mislabeled_architecture_defaults(semantic_state, candidate)
     return candidate
 
@@ -3970,6 +3991,7 @@ def drive_stage(
     # signature is no progress and stays terminal, while a different one may
     # continue with ordinary preserving corrections (never a second escape).
     clean_slate_spent = False
+    design_repair_rounds = 0
     clean_slate_armed_signature: tuple | None = None
     serialization_calls = 0
     attempts = 0
@@ -4021,7 +4043,7 @@ def drive_stage(
             }
         )
 
-    for attempt in range(max_retries + 1):
+    for attempt in range(max_retries + 1 + _MAX_DESIGN_CONTRACT_REPAIR_ROUNDS):
         if attempts >= provider_call_budget:
             break
         if escalation_pending:
@@ -4351,14 +4373,50 @@ def drive_stage(
                 # corrections (never a second escape: clean_slate_spent stays).
                 # A rejection with no identity to compare (a parse failure)
                 # keeps the stock terminal behaviour.
+                #
+                # A design-contract refusal earns the same treatment by default, without the
+                # ladder flag: it is a design defect with an itemized fix, and a single rewrite
+                # fixes one defect while breaking another (four live architecture drafts). Two
+                # such rounds, then the stock terminal behaviour returns.
                 rejection_identity = _schema_rejection_signature(kind, last.get("diagnostic"))
+                earned_by_ladder = "signature" in ladder_modes
+                earned_by_design = (
+                    not earned_by_ladder
+                    and kind == "contract_rejected"
+                    and rejection_identity is not None
+                    and design_repair_rounds < _MAX_DESIGN_CONTRACT_REPAIR_ROUNDS
+                )
                 if (
-                    "signature" not in ladder_modes
+                    not (earned_by_ladder or earned_by_design)
                     or clean_slate_armed_signature is None
                     or rejection_identity is None
                     or rejection_identity == clean_slate_armed_signature
                 ):
                     break
+                if earned_by_design:
+                    # Each granted round sanctions its own call: the budget carries them, so no
+                    # other lane's ceiling moves (an unchanged defect set still stops at stock).
+                    design_repair_rounds += 1
+                    clean_slate_armed_signature = rejection_identity
+                    provider_call_budget += 1
+            elif (
+                clean_slate_spent
+                and kind == "contract_rejected"
+                and "signature" not in ladder_modes
+            ):
+                # The escape is spent, so a later design-contract refusal is judged on its own
+                # identity: a changed defect set earns the second round (and its call), while an
+                # unchanged one stays terminal exactly as before.
+                rejection_identity = _schema_rejection_signature(kind, last.get("diagnostic"))
+                if (
+                    rejection_identity is None
+                    or rejection_identity == clean_slate_armed_signature
+                    or design_repair_rounds >= _MAX_DESIGN_CONTRACT_REPAIR_ROUNDS
+                ):
+                    break
+                design_repair_rounds += 1
+                clean_slate_armed_signature = rejection_identity
+                provider_call_budget += 1
             if attempts >= provider_call_budget:
                 break
             if serialization_calls >= serialization_budget:
@@ -4836,6 +4894,14 @@ def drive_stage(
                     semantic_repair_adopted = True
                     adopted_repair_facts = repair_facts
                     repair_source_raw = repair_facts.raw
+                    # The adopted candidate is THIS call's, not the first attempt's. The
+                    # review row and the candidate_review event below read the current_*
+                    # context, and leaving it stale attributed the reviewed candidate to the
+                    # superseded call (debug walkthrough 2026-09-24, seed 37: attempts=2 but
+                    # candidate_review attempt=1 and a review row carrying call 1's facts).
+                    current_attempt_number = attempts
+                    current_facts = repair_facts
+                    current_call_mode = "semantic_repair"
                     continue
 
                 if repair_outcome.kind == "questions":
@@ -4935,6 +5001,8 @@ def drive_stage(
                 "schema_ok": schema_ok,
                 "semantic_clean": not diagnostics,
                 "repair_required": bool(severe),
+                "repair_attempted": semantic_repair_attempted,
+                "repair_adopted": semantic_repair_adopted,
                 "fab_safe": fab_safe,
                 "debug_context": _debug_context(
                     adopted_repair_facts.raw if adopted_repair_facts is not None else raw

@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Mapping
 
 
@@ -3344,6 +3345,212 @@ def has_reviewed_coverage(component_class: str) -> bool:
     :func:`resolved_part_evidence` instead of refusing it.
     """
     return bool(realizable_physical_features(component_class))
+
+
+def _class_plural_singular(token: str) -> str:
+    """``connectors`` -> ``connector``, ``terminals`` -> ``terminal``; ``bus`` stays ``bus``."""
+    return token[:-1] if len(token) > 3 and token.endswith("s") and not token.endswith("ss") else token
+
+
+def class_key(value: str) -> str:
+    """Comparable key for a part class or a phrase that names one.
+
+    Folds case, separators and a trailing plural "s" per token, so the model's natural
+    spelling of a class compares equal to the class itself: "JST-XH connectors" and
+    "screw terminals" key to "jst-xh-connector" and "screw-terminal".
+
+    Deliberately does NOT fall back to token overlap or substring matching. A quantity
+    row's subject is often a *property* of one part rather than a count of that part
+    ("pins on the 0.1 inch header", "fpc/ffc connector contacts"): those share a token
+    with the class but mean eight pins on one header, so a fuzzy rule would demand eight
+    headers. A phrase whose key differs from every class key is reported to the writer
+    instead (:func:`quantity_subject_binds` consumers), never guessed at.
+    """
+    text = re.sub(r"[^a-z0-9]+", "-", str(value).strip().casefold()).strip("-")
+    return "-".join(_class_plural_singular(token) for token in text.split("-") if token)
+
+
+#: Words a count's subject uses to describe a property OF something ("pins on the header",
+#: "digits of the display") instead of naming a part class. A subject carrying one is the
+#: writer's own property count: it never resolves to a class, and intent does not police it.
+PROPERTY_PREPOSITIONS = frozenset({"of", "on", "in", "per", "for", "from", "within", "across"})
+
+
+def _describes_a_property(subject: str) -> bool:
+    tokens = set(re.findall(r"[a-z0-9]+", str(subject).casefold()))
+    return bool(tokens & PROPERTY_PREPOSITIONS)
+
+
+def quantity_subject_binds(subject: str, component_class: str) -> bool:
+    """Whether a ``quantity`` row's subject names ``component_class``.
+
+    Both consumers of a count (the BOM work-unit obligation check and the §9.42
+    physical-realization gate) ask this one question, so a count can never bind in one
+    gate and dangle in the other.
+    """
+    return quantity_class_for(subject, [component_class]) == component_class
+
+
+def _alias_targets(value: str) -> frozenset[str]:
+    """The reviewed classes a demanded-class spelling resolves to ("status led" -> led)."""
+    key = class_key(value)
+    targets: set[str] = set()
+    for alias in (key, key.split("-")[-1]):
+        for target in _DEMANDED_CLASS_ALIASES.get(alias, ()):
+            targets.add(class_key(target))
+    return frozenset(targets)
+
+
+def quantity_class_for(subject: str, classes) -> str | None:
+    """The ONE class in ``classes`` a quantity row's subject counts, else ``None``.
+
+    Resolution order, most specific first:
+
+    1. the same key -- case, separators and a trailing plural are folded ("screw terminals",
+       "JST-XH connectors");
+    2. the same reviewed class through the demanded-class alias map ("status led" and "led"
+       both denote the reviewed LED classes).
+
+    A subject that describes a property OF something ("pins on the 0.1 inch header") is never
+    resolved through the alias map: its head noun names the container the property belongs to,
+    not a class to count, so eight pins stay eight pins on one header. An ambiguous subject
+    (two classes it could count) or one naming no class resolves to ``None``: the count binds
+    to nothing, and the stage that wrote it is asked to name the class
+    (``intent_quantity_subject_unbound``) rather than the pipeline guessing which class a
+    count was for.
+    """
+    keys = class_key(subject)
+    if not keys:
+        return None
+    exact = [value for value in classes if class_key(value) == keys]
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        return None
+    if _describes_a_property(subject):
+        return None
+    forms = {keys, *_alias_targets(subject)}
+    matches = [
+        value
+        for value in classes
+        if class_key(value) in forms or (_alias_targets(value) & forms)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+#: How a reviewed supply limit domain reads in a message. A record names its supply domain
+#: consistently, not identically: a logic part's `vin`/`input_voltage`, a motor driver's `vm`
+#: (published as `motor_supply_*_v`).
+_SUPPLY_DOMAIN_LABELS = {
+    "motor_supply": "motor supply",
+    "input_voltage": "input",
+    "vin": "input",
+    "vdd": "logic supply",
+    "output_voltage": "output",
+}
+
+
+#: Which reviewed port carries each published limit domain. A record names its limit domain
+#: and its supply port independently ("motor_supply_*_v" on "vm"; "supply_*_v" on "vdd"), so
+#: the check maps the domain onto the port the record actually declares instead of trusting
+#: either spelling alone. Ports the map does not know stay unrated: silence, never a guess.
+_DOMAIN_PORT_CANDIDATES = {
+    "motor_supply": ("vm", "motor_supply", "vs", "vmm"),
+    "input_voltage": ("vin", "input", "input_positive"),
+    "vin": ("vin", "input", "input_positive"),
+    "input": ("vin", "input", "input_positive"),
+    "supply": ("vdd", "vcc", "vin", "input", "vm", "vs"),
+    "io_supply": ("vddio", "iovdd", "vdd", "vcc"),
+    "output_voltage": ("vout", "output", "output_positive"),
+}
+
+
+def _record_field(record, name: str) -> dict:
+    """A reviewed record's field, whether the caller holds the ``ReviewedPart`` or its ``vars()``."""
+    value = record.get(name) if isinstance(record, dict) else getattr(record, name, None)
+    return value if isinstance(value, dict) else {}
+
+
+def reviewed_supply_voltage_limits(
+    record,
+) -> list[tuple[str, float | None, float | None]]:
+    """Every supply domain a reviewed record publishes, as ``(label, min_v, max_v)``.
+
+    Read straight from ``operating_limits`` so a record's own spelling reaches the checks:
+    the DRV8833's ``motor_supply_min_v``/``motor_supply_max_v`` pair is exactly the fact that
+    makes 18 V on its VM pin a fault, and the input-range check used to skip it because it
+    only knew ``vin``/``input`` spellings. Sorted most restrictive first.
+    """
+    limits = _record_field(record, "operating_limits")
+    rows: list[tuple[str, float | None, float | None]] = []
+    for key, value in limits.items():
+        if not str(key).endswith("_max_v"):
+            continue
+        try:
+            maximum = float(value)
+        except (TypeError, ValueError):
+            continue
+        domain = str(key)[: -len("_max_v")]
+        try:
+            minimum = float(limits[f"{domain}_min_v"])
+        except (KeyError, TypeError, ValueError):
+            minimum = None
+        rows.append((_SUPPLY_DOMAIN_LABELS.get(domain, domain.replace("_", " ")), minimum, maximum))
+    return sorted(rows, key=lambda row: (row[2], row[0]))
+
+
+def reviewed_supply_port_limits(
+    record,
+) -> list[tuple[str, str, float | None, float | None]]:
+    """``(port_key, label, min_v, max_v)`` for each rated supply domain the record also declares
+    a port for. The record's ports decide which domain a rail is compared against, so a motor
+    supply is checked against its motor rating rather than a logic rating."""
+    limits = _record_field(record, "operating_limits")
+    ports = _record_field(record, "port_pins")
+    declared = {str(key).casefold(): str(key) for key in ports}
+    rows: list[tuple[str, str, float | None, float | None]] = []
+    for key, value in limits.items():
+        if not str(key).endswith("_max_v"):
+            continue
+        domain = str(key)[: -len("_max_v")]
+        try:
+            maximum = float(value)
+        except (TypeError, ValueError):
+            continue
+        port_key = next(
+            (
+                declared[candidate]
+                for candidate in _DOMAIN_PORT_CANDIDATES.get(domain, ())
+                if candidate in declared
+            ),
+            None,
+        )
+        if port_key is None:
+            continue
+        try:
+            minimum = float(limits[f"{domain}_min_v"])
+        except (KeyError, TypeError, ValueError):
+            minimum = None
+        label = _SUPPLY_DOMAIN_LABELS.get(domain, domain.replace("_", " "))
+        rows.append((port_key, label, minimum, maximum))
+    return sorted(rows, key=lambda row: (row[3], row[0]))
+
+
+@lru_cache(maxsize=1)
+def reviewed_class_heads() -> frozenset[str]:
+    """The head nouns of the reviewed class vocabulary ("connector", "terminal", "led").
+
+    A quantity subject ending in one of these reads as a part class ("JST-XH connectors",
+    "3.5 mm audio jacks"); one that does not ("relay channels", "temperature settings") is a
+    property or a design fact. The intent detector uses this to tell a lost part class from
+    a count it should stay out of.
+    """
+    heads = set()
+    for feature in _REVIEWED_FEATURE_VOCABULARY:
+        key = class_key(feature)
+        if key:
+            heads.add(key.split("-")[-1])
+    return frozenset(heads)
 
 
 def resolved_part_evidence(*, mpn: str | None, symbol: str | None, footprint: str | None) -> bool:

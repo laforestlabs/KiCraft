@@ -177,6 +177,13 @@ ground, then the rails you listed in `rails`. So `LED_DATA` → `edge:LED_STRING
   UART/SWD header instead is a repairable error, never an alternative. Do not add a bridge.
   RP2040 also needs its BOOTSEL path (its recipe owns it); an ESP32 needs a BOOT strap pull path
   during reset (the native-USB recipes own it).
+  The socket also carries power: an edge that carries the USB data pair must have the rail that
+  socket exposes declared under `power.rails`, at about 5 V and named `VBUS` or `+5V`. The socket
+  itself is written by the compiler for the edge, so it is NOT a requirement you declare and you
+  cannot source the rail from it: state `{"VBUS": {"voltage": 5.0, "from": null}}` (the rail is
+  the host's, and the design assumptions record it). Naming an undeclared requirement here is
+  refused (`unknown_signal_requirement`), and a USB data edge with no such rail is refused
+  (`usb_connector_supply_unknown`). Never tie this rail to the board's battery or 3.3 V rail.
 - **Classic ESP32 (ESP32-WROOM-32):** add the vendored `ch340c` bridge as its own requirement with
   `"programming": "usb_uart_bridge"`, `supply` on the same 3.3 V rail as the MCU, and typed UART
   ports crossed device-relative: bridge `tx` → MCU `uart_rx`, bridge `rx` → MCU `uart_tx`, with

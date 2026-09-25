@@ -1167,6 +1167,95 @@ def test_semantic_repair_is_bounded_to_one_correction(tmp_path):
     )
 
 
+def test_semantic_repair_review_names_the_adopted_attempt(tmp_path):
+    """An adopted semantic repair is reviewed as the call that produced it.
+
+    The review path (``review_before_commit``) stamps the ``candidate_review`` event and
+    the review's stage_attempts row from the current_* context. The repair round advances
+    ``attempts`` without syncing that context, so a walkthrough saw
+    ``result["attempts"] == 2`` beside ``candidate_review attempt=1`` and a review row
+    carrying the superseded first call's facts (Surprise-me seed 37, 2026-09-24).
+    """
+    brief = "USB-C 5V controller with a speaker output"
+    intent = {
+        "goal": brief,
+        "constraints": ["USB-C input", "5V input", "speaker output"],
+        "named_parts": [],
+        "inferred_expertise": "intermediate",
+        "assumptions": [],
+        "project_stem": "USB_SPEAKER",
+    }
+    blocks = [
+        {
+            "name": "CONTROLLER",
+            "category": "process",
+            "purpose": "Generates an amplified PWM audio output.",
+        },
+        {"name": "SPEAKER", "category": "drive", "purpose": "Drives the speaker output."},
+        {"name": "POWER", "category": "power", "purpose": "Powers the controller"},
+    ]
+    connection = {
+        "from_block": "CONTROLLER",
+        "to_block": "SPEAKER",
+        "signal_type": "analog",
+        "description": "Audio output",
+    }
+    power_connection = {
+        "from_block": "POWER",
+        "to_block": "SPEAKER",
+        "signal_type": "power",
+        "description": "Speaker power",
+    }
+    initial = {
+        "blocks": blocks,
+        "connections": [connection, power_connection],
+        "assumptions": ["USB-C input is configured for 5V (defaulted)."],
+    }
+    repaired = {
+        **initial,
+        "connections": [
+            {
+                **connection,
+                "signal_type": "other",
+                "description": "Speaker control signal",
+            },
+            power_connection,
+        ],
+    }
+
+    def reply(payload):
+        return {
+            "text": json.dumps(payload),
+            "reasoning": "",
+            "finish_reason": "stop",
+            "cost_usd": 0.0,
+        }
+
+    client = _ScriptedClient([reply(intent), reply(initial), reply(repaired)])
+    client.s = Settings(api_key="test")
+    state_path = tmp_path / ".kicraft" / "state.json"
+
+    assert run_session(tmp_path, brief, ["intent"], client=client)["status"] == "ok"
+
+    events: list[dict] = []
+    result = stage_driver_mod.drive_stage(
+        client,
+        "functional_spec",
+        brief,
+        state_path,
+        tmp_path,
+        progress=events.append,
+        review_before_commit=True,
+    )
+
+    assert result["repair_adopted"] is True
+    assert result["attempts"] == 2
+    assert [
+        event["attempt"] for event in events if event["kind"] == "candidate_review"
+    ] == [2]
+    assert json.loads(state_path.read_text())["functional_spec"] is None
+
+
 def test_intent_repair_is_scored_under_first_candidate_normalization(tmp_path):
     """A semantic repair is normalized exactly like the first candidate.
 
@@ -4079,8 +4168,11 @@ def test_ladder_signature_continues_when_the_contract_defect_changed(tmp_path, m
     )
     stage_pipeline.drive_chain(["intent"], "a USB-powered LED", tmp_path / "stock",
                                max_retries=3, client=stock)
-    assert _rungs(stock) == ["normal", "serialization", "normal"]
-    assert len(stock.calls) == 3
+    # A design-contract refusal whose defect set changed now earns preserving corrections on its
+    # own: this replay changes once (a -> c) and then repeats c, so it earns one round and stops —
+    # 4 calls where it used to stop at 3. Every other failure lane keeps its stock ceiling.
+    assert _rungs(stock) == ["normal", "serialization", "normal", "normal"]
+    assert len(stock.calls) == 4
 
     monkeypatch.setattr(
         stage_driver_mod,
@@ -4243,3 +4335,154 @@ def test_an_aggregate_refusal_is_identified_by_its_member_defects():
         _schema_rejection_signature("contract_rejected", written_now)
     )
     assert len(_diagnostic_member_rows(written_now)) == 3
+
+
+def test_unstated_dc_input_gets_a_defaulted_screw_terminal(tmp_path):
+    """A supply voltage with no entry path is completed before the candidate is reviewed.
+
+    The live product auto-answers the question rather than parking, so the walkthrough has to
+    see the same outcome: one reviewed 2-position screw terminal, with the assumption that says
+    it was defaulted, and no repair round spent on the omission.
+    """
+    brief = (
+        "An ESP32-C3 module actuator driver: a DRV8833 dual H-bridge, an 18 V DC input, "
+        "two JST-XH connectors, and a secondary status LED."
+    )
+    intent = {
+        "goal": brief,
+        "constraints": ["18 V DC input", "two JST-XH connectors"],
+        "named_parts": ["ESP32-C3", "DRV8833", "JST-XH"],
+        "inferred_expertise": "intermediate",
+        "assumptions": [],
+        "obligations": [
+            {
+                "kind": "physical",
+                "original_obligation_id": "mcu",
+                "component_class": "microcontroller",
+            },
+            {
+                "kind": "physical",
+                "original_obligation_id": "jst",
+                "component_class": "jst-xh-connector",
+            },
+            {
+                "kind": "quantity",
+                "original_obligation_id": "jst_count",
+                "subject": "JST-XH connectors",
+                "minimum": 2,
+            },
+            {
+                "kind": "quantitative",
+                "original_obligation_id": "vin",
+                "quantity": "input voltage",
+                "relation": "equal",
+                "value": 18.0,
+                "unit": "V DC",
+            },
+        ],
+        "project_stem": "ESP32_ACTUATOR_DRIVER",
+    }
+    client = _ScriptedClient(
+        [{"text": json.dumps(intent), "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0}]
+    )
+    client.s = Settings(api_key="test")
+
+    result = stage_driver_mod.drive_stage(
+        client,
+        "intent",
+        brief,
+        tmp_path / ".kicraft" / "state.json",
+        tmp_path,
+        review_before_commit=True,
+    )
+
+    slot = result["slot"]
+    assert [row["component_class"] for row in slot["obligations"] if row["kind"] == "physical"] == [
+        "microcontroller",
+        "jst-xh-connector",
+        "screw-terminal",
+    ]
+    assert slot["assumptions"] == [
+        "Power input: 2-position screw terminal for the 18 V DC supply (defaulted)"
+    ]
+    assert result["attempts"] == 1  # the bound count and the completed entry need no repair
+    assert result["diagnostics"] == []
+
+
+def _header_board(rails: dict) -> dict:
+    """A minimal architecture answer that derives, for contract-refusal loop tests."""
+    return {
+        "power": {"rails": rails},
+        "sheets": [{"name": "MAIN", "stem": "MAIN", "role": "mcu", "function": "the board"}],
+        "requirements": [
+            {
+                "id": "mcu",
+                "sheet": "MAIN",
+                "role": "mcu_core",
+                "family": "generic-header",
+                "parameters": {"rows": 1, "gender": "male"},
+                "functional_blocks": [],
+            }
+        ],
+        "signals": [{"name": "GPIO", "from": "mcu.pin1", "to": "edge:IO"}],
+    }
+
+
+def test_a_changing_design_defect_earns_bounded_preserving_corrections(tmp_path):
+    """A design-contract refusal is a design defect: keep the draft while the defect set changes.
+
+    Stock behaviour answered the first refusal with one serialization pass and one from-scratch
+    rewrite, then failed the stage outright — which is how four live architecture drafts died
+    without ever producing a candidate (seed-37 walkthrough). A *changed* defect set is progress,
+    the same rule the commit path and the optional ladder already used, so it now earns up to two
+    preserving corrections on its own. An unchanged defect set still terminates immediately.
+    """
+    def reply(payload):
+        return {
+            "text": json.dumps(payload),
+            "reasoning": "",
+            "finish_reason": "stop",
+            "cost_usd": 0.0,
+        }
+
+    defects = [
+        _header_board({"VBUS": {"voltage": 5.0, "from": "ghost.vbus"}}),
+        _header_board({"VBUS": {"voltage": 5.0, "from": "missing_rail.vbus"}}),
+        _header_board({"VBUS": {"voltage": 5.0, "from": "phantom.vbus"}}),
+        _header_board({"VBUS": {"voltage": 5.0, "from": "absent_rail.vbus"}}),
+    ]
+    good = _header_board({"VBUS": {"voltage": 5.0, "from": None}})
+
+    client = _ScriptedClient([reply(payload) for payload in [*defects, good]])
+    client.s = Settings(api_key="test")
+    state_path = tmp_path / ".kicraft" / "state.json"
+
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "a header breakout", state_path, tmp_path
+    )
+
+    assert result["commit_ok"] is True, result
+    assert len(client.calls) == 5  # normal, serialization, escape, then two design-contract rounds
+    assert json.loads(state_path.read_text())["architecture"] is not None
+
+
+def test_a_repeated_design_defect_stays_terminal(tmp_path):
+    """No progress, no extra rounds: the same defect twice ends the stage as before."""
+    def reply(payload):
+        return {
+            "text": json.dumps(payload),
+            "reasoning": "",
+            "finish_reason": "stop",
+            "cost_usd": 0.0,
+        }
+
+    same = _header_board({"VBUS": {"voltage": 5.0, "from": "ghost.vbus"}})
+    client = _ScriptedClient([reply(same) for _ in range(4)])
+    client.s = Settings(api_key="test")
+
+    result = stage_driver_mod.drive_stage(
+        client, "architecture", "a header breakout", tmp_path / ".kicraft" / "state.json", tmp_path
+    )
+
+    assert result["commit_ok"] is False
+    assert len(client.calls) == 3  # unchanged defect set: nothing is earned

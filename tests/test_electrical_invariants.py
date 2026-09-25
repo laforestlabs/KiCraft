@@ -76,6 +76,17 @@ _FACTS = (
             "paths": [{"from_pin": "VIN", "to_pin": "+VO"}, {"from_pin": "VIN", "to_pin": "-VO"}],
         },
     },
+    {
+        # The real DRV8833 record, in miniature: its supply rating lives under the motor-supply
+        # domain and its port is `vm`, so an input-spelling-only reader sees no voltage input.
+        "mpn": "DRV8833PWPR",
+        "port_pins": {"vm": "12", "ain1": "16", "aout1": "2", "ground": "13"},
+        "operating_limits": {
+            "motor_supply_min_v": 2.7,
+            "motor_supply_max_v": 10.8,
+            "continuous_current_per_channel_a": 1.5,
+        },
+    },
 )
 
 
@@ -125,6 +136,10 @@ def reviewed(monkeypatch):
                 "D4": {
                     "1": {"name": "A", "type": "passive"},
                     "2": {"name": "K", "type": "passive"},
+                },
+                "U4": {
+                    "12": {"name": "VM", "type": "power_in"},
+                    "13": {"name": "GND", "type": "power_in"},
                 },
             },
             {},
@@ -746,3 +761,25 @@ def test_demanded_class_aliases_apply_in_the_realization_gate_too(monkeypatch):
     bom = _bom([_part("SW1", "SS13D07VG4", sheet="OUTPUT")], {})
 
     assert validation.check_requirement_physical_realization(architecture, bom).ok
+
+
+def test_motor_supply_over_rating_is_refused_on_the_reviewed_vm_domain(reviewed):
+    """A part's own supply rating decides, whatever domain the record spells it in.
+
+    The DRV8833 publishes ``motor_supply_min_v``/``motor_supply_max_v`` (2.7–10.8 V) against its
+    ``vm`` pin and no ``vin``/``input`` character at all, so this check used to skip the record as
+    "no voltage input to compare" and an 18 V rail reached the board. Surprise-me seed 37 wires
+    exactly that: rail ``VIN_18V`` at 18 V into the driver's supply.
+    """
+    bom = _bom([_part("U4", "DRV8833PWPR", mpn="DRV8833PWPR")], {"+18V": [("U4", "12")]})
+    architecture = SimpleNamespace(rail_voltages={"+18V": 18.0})
+
+    result = validation.check_reviewed_input_operating_ranges(architecture, bom)
+    assert not result.ok
+    assert "E_INPUT_OPERATING_RANGE" in result.offenders[0]
+    assert "MOTOR SUPPLY range 2.7–10.8V" in result.offenders[0]
+
+    # The same part on a rail inside its motor rating stays clean.
+    assert validation.check_reviewed_input_operating_ranges(
+        SimpleNamespace(rail_voltages={"+18V": 9.0}), bom
+    ).ok

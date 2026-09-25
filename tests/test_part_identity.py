@@ -477,3 +477,29 @@ def test_a_contact_numbered_pin_map_names_contacts_the_record_declares():
         checked += 1
         assert set(numeric.values()) <= set(part.contacts), part.identity
     assert checked, "no reviewed record carries a contact-numbered pin map"
+
+
+@pytest.mark.parametrize(
+    ("subject", "component_class", "binds"),
+    [
+        ("screw terminals", "screw-terminal", True),
+        ("JST-XH connectors", "jst-xh-connector", True),
+        ("BNC Connector", "bnc-connector", True),
+        ("binding_post_terminals", "binding-post-terminal", True),
+        ("status led", "led", True),
+        ("buttons", "push-button", True),
+        ("bus", "bus", True),
+        # A count of a PROPERTY of one part shares a token with the class but must not bind:
+        # "eight pins on the header" is eight pins on one header, not eight headers.
+        ("pins on the 0.1 inch header", "pin-header", False),
+        ("header pins", "pin-header", False),
+        ("fpc/ffc connector contacts", "fpc-ffc-connector", False),
+        ("relay channels", "through-hole-relay", False),
+        ("", "screw-terminal", False),
+    ],
+)
+def test_quantity_subject_binds_only_the_class_it_names(subject, component_class, binds):
+    """The one comparison both count gates use, so a count can never bind in one and dangle."""
+    from kicraft.design.part_identity import quantity_subject_binds
+
+    assert quantity_subject_binds(subject, component_class) is binds

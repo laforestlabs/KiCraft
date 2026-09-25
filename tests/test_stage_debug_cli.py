@@ -263,3 +263,46 @@ def test_debug_commit_accepts_exact_candidate_and_finalizes_trace(tmp_path, caps
     assert artifact["status"] == "accepted"
     assert artifact["commit"]["invalidated_stages"] == payload["invalidated_stages"]
     assert artifact["accepted_state_sha256"] == hashlib.sha256(state_path.read_bytes()).hexdigest()
+
+
+def test_debug_commit_records_adopted_repair_provenance(tmp_path, capsys):
+    """A candidate accepted out of a semantic-repair round keeps that provenance.
+
+    The commit path (_finalize_stage) has always recorded repair_attempted/adopted in
+    stage_status; the debug path recorded only repair_required, so an accepted repair
+    was stamped `repair_adopted: false` beside `attempts: 2` (dry run of Surprise-me
+    seed 37, 2026-09-24).
+    """
+    slot = _intent_candidate()
+    artifact_path = _pending_artifact(tmp_path, slot)
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["result"] |= {
+        "attempts": 2,
+        "repair_required": False,
+        "repair_attempted": True,
+        "repair_adopted": True,
+    }
+    artifact_path.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+    history = tmp_path / "history.txt"
+    history.write_text("Accepted the repaired USB status LED intent.\n", encoding="utf-8")
+
+    rc = stage_driver.main(
+        [
+            "debug-commit",
+            "--workspace",
+            str(tmp_path),
+            "--stage",
+            "intent",
+            "--history-message-file",
+            str(history),
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0, payload
+    status = json.loads(
+        (tmp_path / ".kicraft" / "state.json").read_text(encoding="utf-8")
+    )["stage_status"]["intent"]
+    assert status["attempts"] == 2
+    assert status["repair_attempted"] is True
+    assert status["repair_adopted"] is True

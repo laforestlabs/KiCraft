@@ -1515,7 +1515,10 @@ def _requirement_obligation_defects(
     here: callers derive these arguments from an artifact-equal candidate.
     """
     from kicraft.design.synthesis.symbol_pinout import lookup_pins
-    from kicraft.design.part_identity import lowerer_witnesses_physical_class
+    from kicraft.design.part_identity import (
+        lowerer_witnesses_physical_class,
+        quantity_subject_binds,
+    )
 
     def lowerer_witnesses(requirement: dict, obligation: dict) -> bool:
         return (
@@ -1542,7 +1545,8 @@ def _requirement_obligation_defects(
                 (
                     row["minimum"]
                     for row in obligations
-                    if row.get("kind") == "quantity" and row.get("subject") == feature
+                    if row.get("kind") == "quantity"
+                    and quantity_subject_binds(str(row.get("subject") or ""), feature)
                 ),
                 default=1,
             )

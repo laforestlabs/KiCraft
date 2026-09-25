@@ -2977,3 +2977,52 @@ def test_canonical_r2r_realization_requires_the_complete_lowered_topology():
         architecture,
         BOM(parts=[*parts[:-1], parts[-1].model_copy(update={"resolution_source": "llm"})]),
     ).ok
+
+
+def test_physical_obligation_count_binds_through_the_writers_spelling():
+    """Two BNC jacks asked for as "BNC connectors" are still two BNC jacks.
+
+    The count row is prose and the class is kebab-case; 613 of 634 committed intents spelled
+    them differently, so the exact-string comparison dropped the count and one jack passed.
+    """
+    from kicraft.design.part_identity import reviewed_part
+
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": "A", "function": "Input and output connectors"}]
+    state["architecture"]["requirements"] = [
+        {
+            "id": "panel",
+            "sheet": "A",
+            "role": "connector",
+            "family": "custom-input-panel",
+            "obligations": [
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "bnc",
+                    "component_class": "bnc-connector",
+                },
+                {
+                    "kind": "quantity",
+                    "original_obligation_id": "bnc_count",
+                    "subject": "BNC connectors",
+                    "minimum": 2,
+                },
+            ],
+        }
+    ]
+    unit = StageWorkUnit("bom-panel", "bom", "A", requirement_ids=("panel",))
+    part = reviewed_part("KH-BNC50-3511")
+    group = {
+        **_group("coaxial", "A", prefix="J"),
+        "quantity": 2,
+        "value": "KH-BNC50-3511",
+        "mpn": "KH-BNC50-3511",
+        "symbol": part.symbol,
+        "footprint": part.footprint,
+    }
+
+    assert (
+        validate_unit_candidate(unit, {"groups": [group]}, state, {})["groups"][0]["quantity"] == 2
+    )
+    with pytest.raises(WorkUnitValidationError):
+        validate_unit_candidate(unit, {"groups": [{**group, "quantity": 1}]}, state, {})

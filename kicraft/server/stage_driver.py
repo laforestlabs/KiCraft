@@ -393,6 +393,12 @@ def _cmd_debug_commit(args) -> int:
         schema_ok=result.get("schema_ok"),
         semantic_clean=result.get("semantic_clean"),
         repair_required=result.get("repair_required", False),
+        # The debug path must record the same repair provenance the commit path does
+        # (stage_runtime.finalize_stage). Without these, an accepted candidate that came
+        # from a semantic-repair round was stamped repair_attempted/adopted false next to
+        # attempts=2 (dry run of Surprise-me seed 37, 2026-09-24).
+        repair_attempted=result.get("repair_attempted", False),
+        repair_adopted=result.get("repair_adopted", False),
         fab_safe=result.get("fab_safe"),
         diagnostics=result.get("diagnostics") or [],
     )

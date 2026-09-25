@@ -31,7 +31,11 @@ from kicraft.design.models import (
     is_power_or_ground_name,
     obligation_requires_requirement_owner,
 )
-from kicraft.design.part_identity import canonical_physical_features
+from kicraft.design.part_identity import (
+    canonical_physical_features,
+    quantity_subject_binds,
+    reviewed_supply_port_limits,
+)
 
 
 REQUIRED_SCHEMATIC_VERSION = 20250114
@@ -2362,6 +2366,18 @@ def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
             vin_min = _fact_number(limits, *_INPUT_MIN_KEYS)
         if vin_max is None:
             vin_max = _fact_number(limits, *_INPUT_MAX_KEYS)
+        # A record may rate its supply under a domain the input spellings above do not cover:
+        # the DRV8833 publishes motor_supply_min_v/motor_supply_max_v against its `vm` pin, and
+        # its record declares no vin/input character at all, so 18 V on VM used to be skipped
+        # as "no voltage input to compare" and reached the board.
+        domain = "VIN"
+        if vin is None or vin_min is None or vin_max is None:
+            for port_key, label, rated_min, rated_max in reviewed_supply_port_limits(fact):
+                pin = _fact_pin_name(fact, port_key)
+                if pin is None or rated_max is None:
+                    continue
+                vin, vin_min, vin_max, domain = pin, rated_min, rated_max, label.upper()
+                break
         if vin is None and vin_min is None and vin_max is None:
             # The reviewed record declares no voltage-input character at all (a
             # MOSFET's drain/source, a bare pass element, a holder's terminals):
@@ -2395,7 +2411,7 @@ def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
         elif not vin_min <= voltage <= vin_max:
             bad.append(
                 f"E_INPUT_OPERATING_RANGE {part.ref}.{number}: {actual_net!r} is typed "
-                f"{voltage:g}V, outside reviewed {_reviewed_name(fact)!r} VIN range "
+                f"{voltage:g}V, outside reviewed {_reviewed_name(fact)!r} {domain} range "
                 f"{vin_min:g}–{vin_max:g}V"
             )
     return CheckResult(
@@ -3335,11 +3351,16 @@ def check_requirement_physical_realization(
         for obligation in requirement.obligations:
             if obligation.kind != "quantity":
                 continue
-            component_class = obligation.subject.casefold()
-            if component_class in physical_classes:
-                local_demands[component_class] = max(
-                    local_demands[component_class], obligation.minimum
-                )
+            # A count binds to the class it names, whatever separator/plural form the
+            # writer used; a subject that names no class in this requirement is reported
+            # at the stage that wrote it (intent_quantity_subject_unbound), never
+            # silently dropped.
+            for component_class in local_demands:
+                if quantity_subject_binds(obligation.subject, component_class):
+                    local_demands[component_class] = max(
+                        local_demands[component_class], obligation.minimum
+                    )
+                    break
         for component_class, minimum in local_demands.items():
             matching = (
                 [requirement]

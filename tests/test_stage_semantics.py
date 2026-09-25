@@ -1245,3 +1245,236 @@ def test_a_power_source_obligation_is_named_not_demanded():
         },
     )
     assert "intent_obligation_class_unrealizable" not in clean
+
+
+def test_quantity_row_subject_must_name_the_class_it_counts():
+    """A count binds in the writer's own spelling; a class-shaped count with no class is refused.
+
+    The model writes counts in prose ("two JST-XH connectors", "2 BNC connectors"). Before the
+    binding rule existed the gate compared the prose to the class character by character, so 613
+    of 634 committed intents carried a count no gate could enforce -- and when the count was the
+    only row naming its class, no demand for that class at all.
+    """
+    bound = _codes(
+        "intent",
+        {
+            "obligations": [
+                {"kind": "physical", "component_class": "jst-xh-connector"},
+                {"kind": "quantity", "subject": "JST-XH connectors", "minimum": 2},
+            ]
+        },
+    )
+    assert "intent_quantity_subject_unbound" not in bound
+
+    # A role spelling resolves through the library's aliases, so no repair is asked for.
+    role = _codes(
+        "intent",
+        {
+            "obligations": [
+                {"kind": "physical", "component_class": "led"},
+                {"kind": "quantity", "subject": "status led", "minimum": 2},
+            ]
+        },
+    )
+    assert "intent_quantity_subject_unbound" not in role
+
+    # A count of a PROPERTY of one part is the writer's own business: eight pins on one header
+    # must never be nudged towards eight headers.
+    for subject in ("pins on the 0.1 inch header", "relay channels"):
+        property_count = _codes(
+            "intent",
+            {
+                "obligations": [
+                    {"kind": "physical", "component_class": "pin-header"},
+                    {"kind": "quantity", "subject": subject, "minimum": 8},
+                ]
+            },
+        )
+        assert "intent_quantity_subject_unbound" not in property_count
+
+    # A count that names a part class the slot never carries: the shape that silently dropped
+    # both connectors of a motor driver from the checklist.
+    orphan = _codes(
+        "intent",
+        {"obligations": [{"kind": "quantity", "subject": "jst-xh connectors", "minimum": 2}]},
+    )
+    assert "intent_quantity_subject_unbound" in orphan
+
+
+def test_unstated_dc_input_gets_a_defaulted_two_position_screw_terminal():
+    """A supply voltage with no entry path gets one connector and says so in assumptions."""
+    from kicraft.design.stage_semantics import complete_unstated_power_input
+
+    brief = (
+        "An ESP32-C3 module actuator driver: a DRV8833 dual H-bridge, an 18 V DC input, "
+        "two JST-XH connectors, and a secondary status LED. Use a two-layer stack-up."
+    )
+    candidate = {
+        "obligations": [
+            {"kind": "physical", "component_class": "jst-xh-connector"},
+            {
+                "kind": "quantitative",
+                "quantity": "input voltage",
+                "relation": "equal",
+                "value": 18.0,
+                "unit": "V DC",
+            },
+        ]
+    }
+
+    completed = complete_unstated_power_input(brief, candidate)
+
+    assert [row["component_class"] for row in completed["obligations"] if row["kind"] == "physical"] == [
+        "jst-xh-connector",
+        "screw-terminal",
+    ]
+    assert completed["assumptions"] == [
+        "Power input: 2-position screw terminal for the 18 V DC supply (defaulted)"
+    ]
+    # The signal connector the brief names is not an entry path, and the completion is idempotent.
+    assert complete_unstated_power_input(brief, completed) == completed
+
+
+@pytest.mark.parametrize(
+    ("brief", "obligations"),
+    [
+        ("A board with a 12 V DC barrel jack input", []),
+        ("A logger powered from a 2S Li-ion battery pack", []),
+        ("A USB-C 5 V input sensor node", []),
+        ("A 5 V header from the host board", []),
+        (
+            "An 18 V DC input board",
+            [{"kind": "physical", "component_class": "screw-terminal"}],
+        ),
+    ],
+)
+def test_power_entry_default_stays_silent_when_the_entry_is_already_described(
+    brief, obligations
+):
+    """Never invent a carrier over one the brief or the writer already named."""
+    from kicraft.design.stage_semantics import complete_unstated_power_input
+
+    candidate = {"obligations": list(obligations)}
+    assert complete_unstated_power_input(brief, candidate) == candidate
+
+
+def test_rail_above_the_reviewed_part_rating_is_refused_at_architecture():
+    """The 18 V rail on a DRV8833's VM pin is refused where it is written, not at build time.
+
+    The reviewed record carries ``motor_supply_max_v`` 10.8 V, so the architecture stage can say
+    so and the writer can make the rail a regulated one (or pick a part rated for the input).
+    Surprise-me seed 37 declared ``VIN_18V`` 18 V straight onto the driver's supply and nothing
+    objected until this check existed.
+    """
+    over = {
+        "power": {"rails": {"VIN_18V": {"voltage": 18.0, "from": "input.positive"}}},
+        "requirements": [
+            {
+                "id": "driver",
+                "role": "driver",
+                "family": "dual-dc-motor-driver",
+                "exact_part": "DRV8833PWPR",
+                "supply": "VIN_18V",
+            }
+        ],
+    }
+    diagnostics = diagnose_stage(
+        "architecture", brief="an 18 V motor driver", upstream_state={}, candidate=over
+    )
+    flagged = [d for d in diagnostics if d.code == "architecture_supply_exceeds_part_rating"]
+    assert flagged
+    assert "10.8" in flagged[0].evidence[0]
+    assert "steps this rail down" in flagged[0].evidence[0]
+
+    # A regulated rail inside the part's rating is what the design should have said.
+    in_range = {
+        **over,
+        "power": {"rails": {"VIN_9V": {"voltage": 9.0, "from": "reg.output"}}},
+        "requirements": [{**over["requirements"][0], "supply": "VIN_9V"}],
+    }
+    assert "architecture_supply_exceeds_part_rating" not in {
+        d.code
+        for d in diagnose_stage(
+            "architecture", brief="an 18 V motor driver", upstream_state={}, candidate=in_range
+        )
+    }
+
+
+def test_usb_data_edge_without_a_five_volt_rail_gets_one_declared():
+    """A native-USB socket carries VBUS: state the rail rather than lose the socket.
+
+    Two refusals on the seed-37 drafts had this one cause — the compiler writes the socket for a
+    `usb_dm`/`usb_dp` edge, and with no declared ~5 V rail it drops the edge
+    (`usb_connector_supply_unknown`), after which the MCU's USB pins read as unwired.
+    """
+    from kicraft.design.stage_semantics import complete_usb_socket_rail
+
+    candidate = {
+        "power": {"rails": {"+3V3": {"voltage": 3.3, "from": "buck.output"}}},
+        "signals": [
+            {"name": "USB_DM", "from": "mcu.usb_dm", "to": "edge:USB"},
+            {"name": "USB_DP", "from": "mcu.usb_dp", "to": "edge:USB"},
+        ],
+        "assumptions": ["native USB programming (defaulted)"],
+    }
+
+    completed = complete_usb_socket_rail(candidate)
+
+    assert completed["power"]["rails"]["VBUS"] == {"voltage": 5.0, "from": None}
+    assert completed["assumptions"][-1].endswith("(defaulted)")
+    assert "USB" in completed["assumptions"][-1]
+    assert complete_usb_socket_rail(completed) == completed  # idempotent
+
+    # A rail the draft sources from a requirement it never declared cannot resolve — the socket
+    # is compiler-created, so naming it is the refusal that repeated in every round of the last
+    # live draft. The completion re-states the rail as the host's.
+    broken = {
+        **candidate,
+        "power": {"rails": {"VBUS": {"voltage": 5.0, "from": "usb.vbus"}}},
+    }
+    repaired = complete_usb_socket_rail(broken)
+    assert repaired["power"]["rails"]["VBUS"] == {"voltage": 5.0, "from": None}
+
+    # A rail sourced from a requirement the draft DOES declare is left exactly as written.
+    declared = {
+        **candidate,
+        "requirements": [{"id": "usb", "family": "usb-c-receptacle", "sheet": "MAIN"}],
+        "power": {"rails": {"VBUS": {"voltage": 5.0, "from": "usb.vbus"}}},
+    }
+    assert complete_usb_socket_rail(declared) == declared
+    no_usb = {
+        "power": {"rails": {"+3V3": {"voltage": 3.3, "from": "buck.output"}}},
+        "signals": [{"name": "LED", "from": "mcu.io1", "to": "led.anode"}],
+    }
+    assert complete_usb_socket_rail(no_usb) == no_usb
+
+
+def test_derivation_refusals_reach_the_repair_path_as_diagnostics():
+    """A design-contract refusal is a design defect, not a dead end.
+
+    `derive_architecture` used to be the only place these contracts were enforced, and the loop
+    answers a refusal there with a single from-scratch retry and then fails the stage (four live
+    drafts, no candidate). Reported as repairable diagnostics they join the ordinary correction
+    path, which keeps the rest of the draft and carries the whole defect list at once.
+    """
+    candidate = {
+        "power": {"rails": {"VBUS": {"voltage": 5.0, "from": "ghost.vbus"}}},
+        "sheets": [{"name": "MAIN", "stem": "MAIN", "role": "mcu", "function": "the board"}],
+        "requirements": [
+            {
+                "id": "mcu",
+                "sheet": "MAIN",
+                "role": "mcu_core",
+                "family": "generic-header",
+                "parameters": {"rows": 1, "gender": "male"},
+                "functional_blocks": [],
+            }
+        ],
+        "signals": [{"name": "GPIO", "from": "mcu.pin1", "to": "edge:IO"}],
+    }
+    diagnostics = diagnose_stage(
+        "architecture", brief="a header breakout", upstream_state={}, candidate=candidate
+    )
+    assert [d.code for d in diagnostics] == ["unknown_signal_requirement"]
+    assert diagnostics[0].severity == "repair_required"
+    assert "undeclared requirement" in diagnostics[0].message

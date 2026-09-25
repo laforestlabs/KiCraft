@@ -23,6 +23,17 @@ thermal-via field, an edge treatment) or the *absence* of a class ("no microcont
 never a `physical` obligation: use `kind: "fabrication"` with its `feature` and any stated
 `minimum`/`unit`, or `kind: "negative"` with the `absent_class`.
 
+A `quantity` row counts instances of ONE part class. Its `subject` must name that class, and the
+slot must also carry that class's `physical` row: a count with no class row is refused, because no
+gate could enforce it. Case, separators and a trailing plural are forgiven — `"screw terminals"`
+binds to `screw-terminal`, and a role spelling resolves through the library's aliases
+(`"status led"` binds to `led`) — but a count of a *property of one part* is not a quantity row:
+pins on a header, contacts in a connector, or channels of one driver are `quantitative` rows
+(`quantity` "header pins", `relation` `equal`, `value` 8, `unit` "pins") — eight pins on one header
+is not eight headers. When the brief states a supply voltage but never says how it reaches the
+board, the pipeline defaults ONE 2-position screw terminal and records it in `assumptions`; do not
+invent a different carrier for that case.
+
 A **prototyping area** (a pad field the user solders into — the defining feature of a
 prototyping shield, board, perfboard or pad field) is one of those board features: record
 `kind: "fabrication"` with `feature: "prototyping-area"`, and keep the brief's wording in

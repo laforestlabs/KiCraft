@@ -253,6 +253,61 @@ def _unrealizable_obligation_classes(obligations) -> list[StageDiagnostic]:
     return diagnostics
 
 
+def _quantity_subject_unbound(candidate: dict) -> list[StageDiagnostic]:
+    """Counts of a part class this slot does not carry.
+
+    A count binds to the class it names (:func:`quantity_class_for`), so a slot that demands
+    "two JST-XH connectors" as a count but records no `jst-xh-connector` obligation loses the
+    demand entirely: nothing requires the part. The writer restores it -- spell the class, or
+    drop the row if the brief's count was a property of one part.
+
+    Only a subject that *reads as a part class* (its head noun is one the reviewed vocabulary
+    uses) is refused. A property count ("pins on the 0.1 inch header") or a design fact
+    ("relay channels") is left to the writer: it was never a part count, and demanding a
+    rewrite would churn designs that are already correct.
+    """
+    from kicraft.design.part_identity import (
+        PROPERTY_PREPOSITIONS,
+        class_key,
+        quantity_class_for,
+        reviewed_class_heads,
+    )
+
+    obligations = [row for row in candidate.get("obligations") or [] if isinstance(row, dict)]
+    classes = [
+        str(row.get("component_class") or "")
+        for row in obligations
+        if row.get("kind") == "physical"
+    ]
+    heads = reviewed_class_heads()
+    diagnostics: list[StageDiagnostic] = []
+    for row in obligations:
+        if row.get("kind") != "quantity":
+            continue
+        subject = str(row.get("subject") or "").strip()
+        if not subject or quantity_class_for(subject, classes) is not None:
+            continue
+        if set(re.findall(r"[a-z0-9]+", subject.casefold())) & PROPERTY_PREPOSITIONS:
+            continue
+        key = class_key(subject)
+        if not key or key.split("-")[-1] not in heads:
+            continue  # a design fact or a property count, not a part class
+        diagnostics.append(
+            _diag(
+                "intent_quantity_subject_unbound",
+                "repair_required",
+                "A quantity row counts a part class this slot does not carry, so no gate "
+                "can enforce the count.",
+                [
+                    f"{subject} = {row.get('minimum')} -> add the physical obligation for "
+                    f"the class it counts (spell the class, e.g. {key}), or delete the row "
+                    "if the brief's count was a property of one part"
+                ],
+            )
+        )
+    return diagnostics
+
+
 def _intent(brief: str, candidate: dict) -> list[StageDiagnostic]:
     diagnostics: list[StageDiagnostic] = []
     expected = named_part_tokens([brief])
@@ -279,6 +334,7 @@ def _intent(brief: str, candidate: dict) -> list[StageDiagnostic]:
             )
         )
     diagnostics.extend(_unrealizable_obligation_classes(candidate.get("obligations")))
+    diagnostics.extend(_quantity_subject_unbound(candidate))
     diagnostics.extend(_omitted_board_features(brief, candidate))
     goal = re.sub(r"\s+", " ", str(candidate.get("goal") or "")).strip().lower()
     source = re.sub(r"\s+", " ", brief).strip().lower()
@@ -297,6 +353,150 @@ def _intent(brief: str, candidate: dict) -> list[StageDiagnostic]:
             )
         )
     return diagnostics
+
+
+#: Reviewed classes that can carry a board's supply in. Deliberately broad: any connector
+#: the writer already named counts as an entry path, so the default below only ever fills a
+#: supply path nobody described.
+_POWER_ENTRY_FEATURES = frozenset(
+    {
+        "barrel-jack",
+        "barrel-jack-connector",
+        "screw-terminal",
+        "terminal-block",
+        "screw-clamp-terminal",
+        "binding-post",
+        "power-connector",
+        "wire-to-board-connector",
+        "usb-c-receptacle",
+        "usb-a-receptacle",
+        "usb-connector",
+        "header",
+        "pin-header",
+        "pin-socket",
+        "stacking-header",
+        "jst-ph",
+        "battery-holder",
+        "battery-connector",
+        "coin-cell-holder",
+    }
+)
+
+#: Words that name a way power enters the board. Only these suppress the default: a signal
+#: connector the brief names (the "two JST-XH connectors" of a motor driver) is not a supply
+#: path, so `jst` and bare `connector` are deliberately absent.
+_POWER_ENTRY_WORDS = (
+    "usb",
+    "barrel",
+    "jack",
+    "screw",
+    "terminal",
+    "binding post",
+    "battery",
+    "batteries",
+    "pack",
+    "cell",
+    "holder",
+    "header",
+    "socket",
+    "plug",
+    "receptacle",
+    "dc-in",
+    "psu",
+    "wall wart",
+)
+
+#: The carrier a DC supply the brief never routes is defaulted to: one reviewed 2-position
+#: screw terminal, the corpus's field-wiring DC entry (the generator's own supply values
+#: name "24 V DC screw terminal" the same way).
+DEFAULT_POWER_ENTRY_CLASS = "screw-terminal"
+
+_VOLTAGE_NEAR_INPUT_RE = re.compile(
+    r"(?:(\d+(?:\.\d+)?)\s*V(?:olt)?s?\s*(?:DC)?\s*(?:input|supply)"
+    r"|(?:input|supply)[^.;]{0,20}?(\d+(?:\.\d+)?)\s*V)",
+    re.IGNORECASE,
+)
+
+
+def _dc_supply_voltage(brief: str, candidate: dict) -> str | None:
+    """The board's stated DC supply voltage, as an assumption should read it.
+
+    The typed `quantitative` row wins -- the writer already parsed it -- and the brief is
+    the fallback, where the voltage must sit next to input/supply wording so a signal
+    rail ("3.3 V logic") is not mistaken for the supply.
+    """
+    for row in candidate.get("obligations") or []:
+        if not isinstance(row, dict) or row.get("kind") != "quantitative":
+            continue
+        quantity = str(row.get("quantity") or "").casefold()
+        unit = str(row.get("unit") or "").strip()
+        if row.get("value") is None or not unit or "v" not in unit.casefold():
+            continue
+        if not any(word in quantity for word in ("input", "supply", "rail")):
+            continue
+        value = f"{row['value']:g}"
+        return f"{value} {unit}" if unit.casefold().startswith("v") else f"{value} V"
+    match = _VOLTAGE_NEAR_INPUT_RE.search(brief)
+    if match is None:
+        return None
+    return f"{match.group(1) or match.group(2)} V"
+
+
+def complete_unstated_power_input(brief: str, candidate: dict) -> dict:
+    """Default the entry path for a DC supply the brief states but never routes.
+
+    A brief can name a supply voltage and no way for it to reach the board ("an 18 V DC
+    input"); the deliverable still needs a real connector, and parking on a question the
+    live product would auto-answer is not this stage's job. The default is one reviewed
+    2-position screw terminal, recorded as an assumption so the user can see and override
+    it -- the same "safety net" shape as the board-outline default.
+
+    Idempotent, and silent whenever the supply path is already described: an entry class in
+    the obligations, an entry word in the brief's own words, or an off-board source
+    (battery/pack/cell) that must instead be answered by its mate class.
+    """
+    from kicraft.design.part_identity import canonical_physical_features
+
+    obligations = [row for row in candidate.get("obligations") or [] if isinstance(row, dict)]
+    if any(
+        canonical_physical_features(str(row.get("component_class") or "")) & _POWER_ENTRY_FEATURES
+        for row in obligations
+        if row.get("kind") == "physical"
+    ):
+        return candidate
+    words = _text(
+        [
+            brief,
+            candidate.get("goal"),
+            candidate.get("constraints"),
+            candidate.get("named_parts"),
+            candidate.get("assumptions"),
+        ]
+    ).casefold()
+    if any(word in words for word in _POWER_ENTRY_WORDS):
+        return candidate
+    voltage = _dc_supply_voltage(brief, candidate)
+    if voltage is None:
+        return candidate
+
+    completed = copy.deepcopy(candidate)
+    completed["obligations"] = [
+        *obligations,
+        {
+            "kind": "physical",
+            "original_obligation_id": "power_input_connector",
+            "component_class": DEFAULT_POWER_ENTRY_CLASS,
+        },
+    ]
+    note = (
+        f"Power input: 2-position {DEFAULT_POWER_ENTRY_CLASS.replace('-', ' ')} "
+        f"for the {voltage} supply (defaulted)"
+    )
+    assumptions = [str(item) for item in completed.get("assumptions") or []]
+    if note not in assumptions:
+        assumptions.append(note)
+    completed["assumptions"] = assumptions
+    return completed
 
 
 def _mislabeled_functional_defaults(
@@ -794,8 +994,169 @@ def _rail_producers(candidate: dict, rails: dict) -> list[dict]:
     return rows
 
 
+def _architecture_supply_over_rating(candidate: dict) -> list[StageDiagnostic]:
+    """A rail a requirement is powered from that exceeds every supply rating its part publishes.
+
+    The reviewed records carry the ratings (the DRV8833's ``motor_supply_max_v`` 10.8 V against
+    its ``vm`` pin), so an 18 V rail landing on that pin is a fault the architecture states
+    outright -- and the writer can fix it here by making the rail a regulated one. The
+    build-time range check only sees this after the fact, and used to skip the motor domain
+    entirely; a refusal at this stage is what lets the design step the rail down.
+    """
+    from kicraft.design.part_identity import reviewed_part, reviewed_supply_voltage_limits
+
+    rails = (candidate.get("power") or {}).get("rails") or {}
+    diagnostics: list[StageDiagnostic] = []
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        rail_name = requirement.get("supply")
+        if not isinstance(rail_name, str) or not rail_name:
+            continue
+        try:
+            voltage = float((rails.get(rail_name) or {}).get("voltage"))
+        except (TypeError, ValueError):
+            continue
+        exact = str(requirement.get("exact_part") or "").strip()
+        record = reviewed_part(exact) if exact else None
+        if record is None:
+            continue
+        rated = [row for row in reviewed_supply_voltage_limits(record) if row[2] is not None]
+        if not rated or voltage <= max(row[2] for row in rated):
+            continue
+        label, _low, worst = min(rated, key=lambda row: row[2])
+        diagnostics.append(
+            _diag(
+                "architecture_supply_exceeds_part_rating",
+                "repair_required",
+                "A requirement is powered from a rail above every supply rating its reviewed part "
+                "publishes.",
+                [
+                    f"requirement {requirement.get('id')!r} "
+                    f"(family={requirement.get('family')!r}, exact_part={exact!r}) "
+                    f"supply={rail_name!r} ({voltage:g}V); reviewed {record.identity!r} "
+                    f"allows {label} {worst:g}V — add a regulator that steps this rail down into "
+                    "range and keep the load drive on the regulated rail, or choose a part rated "
+                    f"for {voltage:g}V",
+                ],
+            )
+        )
+    return diagnostics
+
+
+def complete_usb_socket_rail(candidate: dict) -> dict:
+    """Declare the rail a native-USB socket exposes, and keep it resolvable.
+
+    Sending ``usb_dm``/``usb_dp`` to an ``edge:`` peer makes the compiler write the socket, and
+    that socket carries VBUS. Two defects follow from that, and both are the writer's to state
+    rather than the compiler's to guess: no ~5 V rail at all (``usb_connector_supply_unknown``,
+    which then reports the MCU's USB pins as unwired), or a rail sourced from a requirement the
+    draft never declared — the socket is compiler-created, so ``<socket>.vbus`` cannot resolve
+    (``unknown_signal_requirement``, the one refusal repeated in every round of the seed-37
+    walkthrough's last draft). The rail is the host's, so the honest statement is
+    ``from: null``; the unsourced-rail completion and the design assumptions then say where it
+    comes from.
+    """
+    rails = (candidate.get("power") or {}).get("rails")
+    if not isinstance(rails, dict):
+        return candidate
+    port_keys = {
+        str(reference).rsplit(".", 1)[-1].casefold()
+        for signal in candidate.get("signals") or []
+        if isinstance(signal, dict)
+        for reference in [signal.get("from"), *(signal.get("to") or [])]
+        if isinstance(reference, str)
+    }
+    if not port_keys & {"usb_dm", "usb_dp"}:
+        return candidate
+
+    def _is_socket_rail(name: str, rail: dict) -> bool:
+        voltage = rail.get("voltage")
+        if isinstance(voltage, (int, float)) and abs(float(voltage) - 5.0) <= 0.5:
+            return True
+        return str(name).strip().upper() in {"VBUS", "+5V"}
+
+    declared = {
+        str(row.get("id")) for row in candidate.get("requirements") or [] if isinstance(row, dict)
+    }
+    socket_rails = {
+        name: rail
+        for name, rail in rails.items()
+        if isinstance(rail, dict) and _is_socket_rail(str(name), rail)
+    }
+    unresolvable = sorted(
+        name
+        for name, rail in socket_rails.items()
+        if isinstance(rail.get("from"), str)
+        and str(rail["from"]).partition(".")[0] not in declared
+    )
+    if socket_rails and not unresolvable:
+        return candidate
+
+    completed = copy.deepcopy(candidate)
+    updated = dict(completed["power"]["rails"])
+    for name in unresolvable:
+        updated[name] = {**updated[name], "from": None}
+    if not socket_rails:
+        updated["VBUS"] = {"voltage": 5.0, "from": None}
+    completed["power"] = {**completed["power"], "rails": updated}
+    note = "VBUS: the USB socket's 5 V host rail, declared for the USB data connector (defaulted)"
+    assumptions = [str(item) for item in completed.get("assumptions") or []]
+    if note not in assumptions:
+        assumptions.append(note)
+    completed["assumptions"] = assumptions
+    return completed
+
+
+def _architecture_derivation_diagnostics(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
+    """The design-level contracts the derivation enforces, as repairable diagnostics.
+
+    ``derive_architecture`` refuses a payload that breaks a design contract — a USB edge with no
+    5 V rail, a lowerer whose declared contacts cannot be numbered, a named part with no owning
+    requirement. Those refusals used to surface only at the commit step, where the loop spends its
+    single from-scratch retry on them and then fails the stage (four live drafts, no candidate).
+    Reported here they join the ordinary repair path instead: the correction keeps every other
+    part of the candidate and carries the whole defect list at once, which is what a draft with
+    several independent structural faults needs.
+    """
+    from kicraft.design.architecture_intent import ArchitectureIntentError, derive_architecture
+    from pydantic import ValidationError
+
+    try:
+        derive_architecture(candidate, upstream.get("functional_spec"))
+    except ValidationError:
+        # An incomplete payload is the response-schema lane's business, not this one.
+        return []
+    except ArchitectureIntentError as exc:
+        rows = list(getattr(exc, "diagnostics", None) or [])
+        if not rows:
+            return [
+                _diag(
+                    "architecture_derivation_refused",
+                    "repair_required",
+                    str(exc),
+                    [],
+                )
+            ]
+        diagnostics: list[StageDiagnostic] = []
+        for row in rows:
+            payload = row.model_dump(exclude_none=True) if hasattr(row, "model_dump") else dict(row)
+            diagnostics.append(
+                _diag(
+                    str(payload.get("code") or "architecture_derivation_refused"),
+                    str(payload.get("severity") or "repair_required"),
+                    str(payload.get("message") or str(exc)),
+                    [str(item) for item in payload.get("evidence") or []],
+                )
+            )
+        return diagnostics
+    return []
+
+
 def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     diagnostics = architecture_power_requirement_diagnostics(upstream, candidate)
+    diagnostics.extend(_architecture_supply_over_rating(candidate))
+    diagnostics.extend(_architecture_derivation_diagnostics(upstream, candidate))
     sheets = candidate.get("sheets") or []
     for sheet in sheets:
         if not isinstance(sheet, dict):
