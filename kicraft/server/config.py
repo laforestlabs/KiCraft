@@ -585,6 +585,12 @@ class Settings:
     enable_draft_audit: bool = True
     draft_audit_model: str = "typesafe/jev-1.13"
     draft_audit_confidence: float = 0.7
+    # Name reconciliation: typed decisions that settle naming differences the deterministic
+    # path cannot (a class spelling, an unbound count subject, a part class no emitted group
+    # claims, a declared contact no symbol publishes). One input-only decision per batch
+    # (~$0.0003), advisory only -- a declined or unavailable decider leaves the stage's own
+    # refusal in place. Independent of the draft audit; KICRAFT_NAME_RECONCILIATION=0 disables.
+    enable_name_reconciliation: bool = True
 
     @classmethod
     def from_env(cls, dotenv: bool = True) -> "Settings":
@@ -796,6 +802,7 @@ class Settings:
             ),
             enable_electrical_review=_env_bool_default("KICRAFT_ELECTRICAL_REVIEW", True),
             enable_draft_audit=_env_bool_default("KICRAFT_DRAFT_AUDIT", True),
+            enable_name_reconciliation=_env_bool_default("KICRAFT_NAME_RECONCILIATION", True),
             draft_audit_model=(
                 os.environ.get("KICRAFT_DRAFT_AUDIT_MODEL", "").strip()
                 or cls.draft_audit_model

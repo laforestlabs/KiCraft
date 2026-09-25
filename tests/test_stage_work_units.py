@@ -3026,3 +3026,164 @@ def test_physical_obligation_count_binds_through_the_writers_spelling():
     )
     with pytest.raises(WorkUnitValidationError):
         validate_unit_candidate(unit, {"groups": [{**group, "quantity": 1}]}, state, {})
+
+
+def test_intent_normalization_reconciles_demanded_classes_and_counts_with_a_decider():
+    """The intent normalize step runs one typed decision, and only when a decider is supplied.
+
+    A class the reviewed library cannot read ("jst-xh-connector") and a count whose subject
+    names no class ("temperature channels") are the two naming failures that dominated the
+    live rounds; both have a closed answer set, so the decider settles them before diagnosis.
+    """
+    import copy
+
+    from kicraft.server.decision_layer import Answer
+    from kicraft.server.reconciliation import shortlist_reviewed_classes
+    from kicraft.server.stage_runtime import _normalize_candidate_for_diagnostics
+
+    candidate = {
+        "project_stem": "recon",
+        "goal": "a small sensor board",
+        "constraints": ["3.3 V supply"],
+        "assumptions": [],
+        "obligations": [
+            {
+                "kind": "physical",
+                "original_obligation_id": "relay",
+                "component_class": "through-hole-relay",
+            },
+            {
+                "kind": "quantity",
+                "original_obligation_id": "ch",
+                "subject": "relay channels",
+                "minimum": 4,
+            },
+            {
+                "kind": "physical",
+                "original_obligation_id": "host",
+                "component_class": "jst-xh-connector",
+            },
+        ],
+        "named_parts": [],
+    }
+    brief = "a small sensor board"
+
+    baseline = _normalize_candidate_for_diagnostics("intent", copy.deepcopy(candidate), brief, {})
+    assert baseline["obligations"][1]["subject"] == "relay channels"
+    assert baseline["obligations"][2]["component_class"] == "jst-xh-connector"
+
+    pick = shortlist_reviewed_classes("jst-xh-connector")[0]
+
+    def decider(state, questions):
+        return {
+            question.key: Answer(
+                key=question.key,
+                kind=question.kind,
+                value=pick if question.key.startswith("class_") else "through-hole-relay",
+                confidence=0.9,
+            )
+            for question in questions
+        }
+
+    done = _normalize_candidate_for_diagnostics(
+        "intent", copy.deepcopy(candidate), brief, {}, decider=decider
+    )
+    assert done["obligations"][1]["subject"] == "through-hole-relay"
+    assert done["obligations"][2]["component_class"] == pick
+
+
+def test_a_refused_part_class_gets_a_typed_recommendation_from_the_decider():
+    """The repair feedback names the group when exactly one group is the confident reading."""
+    from kicraft.server.decision_layer import Answer
+
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": "A", "function": "Resistor ladder"}]
+    state["architecture"]["requirements"] = [
+        {
+            "id": "ladder",
+            "sheet": "A",
+            "role": "analog_block",
+            "family": "custom-ladder",
+            "obligations": [
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "post",
+                    "component_class": "binding-post-terminal",
+                }
+            ],
+        }
+    ]
+    unit = StageWorkUnit("bom-ladder", "bom", "A", requirement_ids=("ladder",))
+    groups = [
+        {
+            **_group("series", "A", prefix="R"),
+            "quantity": 7,
+            "value": "10k",
+            "symbol": "Device:R",
+            "footprint": "Resistor_SMD:R_0603_1608Metric",
+        },
+        {
+            **_group("branch", "A", prefix="R"),
+            "quantity": 9,
+            "value": "20k",
+            "symbol": "Device:R",
+            "footprint": "Resistor_SMD:R_0603_1608Metric",
+        },
+    ]
+
+    # Without a decider the refusal is unchanged: no recommendation is invented.
+    with pytest.raises(WorkUnitValidationError) as plain:
+        validate_unit_candidate(unit, {"groups": groups}, state, {})
+    assert plain.value.defects["physical-obligation-unfulfilled"]
+    assert not any("bind the group" in row for row in plain.value.defects["physical-obligation-unfulfilled"])
+
+    def decider(_state, questions):
+        return {
+            question.key: Answer(
+                key=question.key,
+                kind=question.kind,
+                value=("series" in question.prompt),
+                confidence=0.9,
+            )
+            for question in questions
+        }
+
+    with pytest.raises(WorkUnitValidationError) as answered:
+        validate_unit_candidate(unit, {"groups": groups}, state, {}, decider=decider)
+    rows = answered.value.defects["physical-obligation-unfulfilled"]
+    assert any("binding-post-terminal" in row and "series" in row for row in rows), rows
+
+
+def test_a_claimed_contact_the_symbol_does_not_publish_gets_a_recommendation():
+    """A claim naming no published contact gets the reading, so the correction round is precise."""
+    from kicraft.server.decision_layer import Answer
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    requirement = {
+        "id": "mcu",
+        "family": "stm32l0-mcu",
+        "exact_part": "STM32L031K6T6",
+        "obligations": [],
+        "declared_interface": {
+            "ports": [{"key": "pa9", "pin": "99", "direction": "output", "function": "uart tx"}]
+        },
+    }
+    group = _group_for("stm32l031k6t6")
+    plain = _requirement_obligation_defects([requirement], [group])["declared-interface-unrealized"]
+    assert plain and not any("reads as contact" in row for row in plain)
+
+    def decider(_state, questions):
+        return {
+            question.key: Answer(
+                key=question.key,
+                kind=question.kind,
+                value="1",
+                confidence=0.9,
+            )
+            for question in questions
+        }
+
+    rows = _requirement_obligation_defects([requirement], [group], decider=decider)[
+        "declared-interface-unrealized"
+    ]
+    assert any("reads as contact '1'" in row for row in rows), rows

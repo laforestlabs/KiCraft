@@ -1507,6 +1507,8 @@ def _requirement_obligation_defects(
     trusted_lowerer_id: str | None = None,
     trusted_requirement_id: str | None = None,
     compiler_requirements=(),
+    decider=None,
+    reconciliation_confidence: float = 0.7,
 ) -> dict:
     """Check physical obligations and claimed pins against implementing hardware.
 
@@ -1530,6 +1532,11 @@ def _requirement_obligation_defects(
         )
 
     defects = {"physical-obligation-unfulfilled": [], "declared-interface-unrealized": []}
+    # Classes the unit left unfulfilled and contacts it claimed under a name the symbol does not
+    # publish: both are naming questions with a closed answer set (the emitted groups; the symbol's
+    # own pins), so they are reconciled in one batch before the defects are returned.
+    unfilled_classes: list[str] = []
+    pending_claims: list[dict] = []
     consumed: dict[str, int] = {}
     for requirement in requirements:
         obligations = requirement.get("obligations") or []
@@ -1562,6 +1569,8 @@ def _requirement_obligation_defects(
                     f"{group.id}={group.symbol} mpn={group.mpn or group.value}"
                     for group in groups[:8]
                 ]
+                if feature not in unfilled_classes:
+                    unfilled_classes.append(feature)
                 defects["physical-obligation-unfulfilled"].append(
                     f"{requirement['id']}:{obligation['original_obligation_id']}: "
                     f"requires {minimum} real {feature}, found {actual}"
@@ -1640,6 +1649,25 @@ def _requirement_obligation_defects(
             named = by_name.get(claimant.strip().casefold()) or []
             if len(named) == 1:
                 continue
+            pending_claims.append(
+                {
+                    "requirement_id": str(requirement["id"]),
+                    "key": str(port["key"]),
+                    "function": str(port.get("function") or ""),
+                    "symbol": str(owners[0].symbol),
+                    "claimed": str(claimed),
+                    "pins": sorted(str(pin) for pin in pins),
+                    # The symbol's own published contacts, so the reading can be reasoned about
+                    # (a pin number alone says nothing about which contact is the UART TX).
+                    "contacts": sorted(
+                        {
+                            str(pin["number"]): str(pin.get("name") or "")
+                            for pin in inventory.get("pins") or []
+                            if isinstance(pin, dict) and pin.get("number") is not None
+                        }.items()
+                    ),
+                }
+            )
             defects["declared-interface-unrealized"].append(
                 f"{requirement['id']}:{port['key']}: claimed pin {claimed!r} "
                 f"is not in {owners[0].symbol}; available pins={sorted(pins)}"
@@ -1649,6 +1677,24 @@ def _requirement_obligation_defects(
                     else ""
                 )
             )
+    if decider is not None:
+        from .reconciliation import reconcile_bom_classes, reconcile_declared_port_pins
+
+        defects["physical-obligation-unfulfilled"].extend(
+            reconcile_bom_classes(
+                unfilled_classes,
+                groups,
+                decider=decider,
+                confidence=reconciliation_confidence,
+            )
+        )
+        defects["declared-interface-unrealized"].extend(
+            reconcile_declared_port_pins(
+                pending_claims,
+                decider=decider,
+                confidence=reconciliation_confidence,
+            )
+        )
     return defects
 
 
@@ -1659,6 +1705,8 @@ def _validate_bom_unit(
     extras: dict,
     *,
     _allow_deterministic_fallback: bool = True,
+    decider=None,
+    reconciliation_confidence: float = 0.7,
 ):
     from kicraft.design.synthesis.validation import _resistance_ohms
 
@@ -1925,6 +1973,8 @@ def _validate_bom_unit(
         _requirement_obligation_defects(
             unit_requirements,
             groups,
+            decider=decider,
+            reconciliation_confidence=reconciliation_confidence,
             trusted_lowerer_id=(
                 str(lowering_metadata["_lowerer_id"])
                 if used_deterministic_candidate and lowering_metadata.get("_lowerer_id")
@@ -1961,6 +2011,8 @@ def _validate_bom_unit(
                     prompt_state,
                     extras,
                     _allow_deterministic_fallback=False,
+                    decider=decider,
+                    reconciliation_confidence=reconciliation_confidence,
                 )
         raise WorkUnitValidationError(unit.unit_id, defects)
     return {
@@ -2247,6 +2299,8 @@ def validate_unit_candidate(
     extras: dict,
     *,
     allow_deterministic_fallback: bool = True,
+    decider=None,
+    reconciliation_confidence: float = 0.7,
 ) -> dict:
     """Validate one complete unit replacement before it can enter the aggregate.
 
@@ -2265,6 +2319,8 @@ def validate_unit_candidate(
             prompt_state,
             extras,
             _allow_deterministic_fallback=allow_deterministic_fallback,
+            decider=decider,
+            reconciliation_confidence=reconciliation_confidence,
         )
     return _validate_wiring_unit(unit, payload, prompt_state, extras)
 

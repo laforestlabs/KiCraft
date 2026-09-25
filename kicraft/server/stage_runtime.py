@@ -66,6 +66,7 @@ from .stage_work_units import (
     unit_defect_diagnostic,
     validate_unit_candidate,
 )
+from .reconciliation import resolve_demanded_classes, resolve_quantity_subjects
 from .stage_state_io import (
     KICRAFT,
     attach_questions,
@@ -1255,6 +1256,42 @@ def _audit_architecture_draft(client, candidate: dict) -> list[models.StageDiagn
         return []
 
 
+def _name_reconciliation_decider(client, *, stage: str):
+    """The typed-decision decider that reconciles naming differences, or None.
+
+    One decider per drive: each batch of naming questions is a single typed decision
+    (input-only pricing, a fraction of a cent at this size), billed through the same
+    guard as every other provider call. Off by setting, and silent on every failure:
+    a candidate must never depend on a decider being reachable, because every
+    question it asks has a deterministic fallback (the stage's own refusal).
+    """
+    settings = getattr(client, "s", None)
+    if not getattr(settings, "enable_name_reconciliation", False):
+        return None
+    from . import draft_audit
+    from .reconciliation import jev_decider
+
+    model = str(getattr(settings, "draft_audit_model", draft_audit.DEFAULT_MODEL))
+
+    def bill(usage) -> None:
+        guard = getattr(client, "guard", None)
+        record = getattr(guard, "record", None)
+        if not callable(record):
+            return
+        try:
+            record(
+                model,
+                usage.get("input_tokens"),
+                usage.get("output_tokens"),
+                float(usage.get("cost") or 0.0),
+                meta={"stage": stage, "phase": "name_reconciliation"},
+            )
+        except Exception:  # accounting must never break a stage
+            pass
+
+    return jev_decider(model=model, recorder=bill)
+
+
 def _semantic_repair_message(stage: str, diagnostics: list[models.StageDiagnostic]) -> str:
     message = _SEMANTIC_REPAIR_MSG.format(
         diagnostics=json.dumps(
@@ -1359,7 +1396,7 @@ def _semantic_defect_score(diagnostics: list[models.StageDiagnostic]) -> int:
 
 
 def _normalize_candidate_for_diagnostics(
-    stage: str, candidate: dict, brief: str, semantic_state: dict
+    stage: str, candidate: dict, brief: str, semantic_state: dict, *, decider=None
 ) -> dict:
     """Apply the stage's deterministic pre-diagnosis normalization to one candidate.
 
@@ -1377,6 +1414,13 @@ def _normalize_candidate_for_diagnostics(
         candidate = complete_intent_classification(brief, candidate)
         candidate = complete_unstated_power_input(brief, candidate)
         candidate["project_stem"] = normalize_project_stem(candidate.get("project_stem", ""))
+        if decider is not None:
+            # An intent class the reviewed library cannot read and a count whose subject names
+            # no class are naming questions with a closed answer set (the reviewed classes; the
+            # classes this candidate already demands), so one typed decision resolves them before
+            # diagnosis: the refusal round stays for the residue the decider declines.
+            candidate, _ = resolve_demanded_classes(candidate, decider=decider)
+            candidate, _ = resolve_quantity_subjects(candidate, decider=decider)
     elif stage == "functional_spec":
         # A board-feature block cannot be wired (it owns no net), so it is removed
         # deterministically here: the pad field survives as the intent's fabrication
@@ -2133,6 +2177,7 @@ def _drive_work_unit_stage(
     state_path,
     workspace,
     *,
+    decider=None,
     prompt_state: dict,
     extras: dict,
     max_tokens: int,
@@ -2207,7 +2252,9 @@ def _drive_work_unit_stage(
         if deterministic is not None:
             continue
         try:
-            candidates[unit.unit_id] = validate_unit_candidate(unit, loaded, prompt_state, extras)
+            candidates[unit.unit_id] = validate_unit_candidate(
+                unit, loaded, prompt_state, extras, decider=decider
+            )
             unit_sources[unit.unit_id] = "reuse"
         except (WorkUnitValidationError, TypeError, ValueError):
             candidates.clear()
@@ -2321,6 +2368,7 @@ def _drive_work_unit_stage(
                 deterministic,
                 prompt_state,
                 extras,
+                decider=decider,
             )
         except (WorkUnitValidationError, TypeError, ValueError) as exc:
             # The lowering could not satisfy its own reviewed obligations (a real
@@ -2755,6 +2803,7 @@ def _drive_work_unit_stage(
                     parsed,
                     prompt_state,
                     extras,
+                    decider=decider,
                     # A unit whose own lowering was already refused gets its
                     # answer judged on its own merits: adopting the refused
                     # lowering could only re-raise that lowering's defect and
@@ -3715,6 +3764,10 @@ def drive_stage(
         review_before_commit=review_before_commit,
         auto_default_questions=auto_default_questions,
     )
+    # One typed-decision decider per drive: it reconciles naming differences the deterministic
+    # path cannot settle (a class spelling, an unbound count subject, a part class no group
+    # claims, a declared contact no symbol publishes). None when the setting is off.
+    decider = _name_reconciliation_decider(client, stage=stage)
     if progress:
         progress({"kind": "stage_start", "stage": stage, "model": _client_model(client)})
 
@@ -3860,6 +3913,7 @@ def drive_stage(
                 brief,
                 state_path,
                 workspace,
+                decider=decider,
                 prompt_state=prompt_state,
                 extras=extras,
                 max_tokens=max_tokens,
@@ -4803,7 +4857,9 @@ def drive_stage(
             )
             continue
 
-        obj = _normalize_candidate_for_diagnostics(stage, obj, brief, semantic_state)
+        obj = _normalize_candidate_for_diagnostics(
+            stage, obj, brief, semantic_state, decider=decider
+        )
         original_obj = obj
         diagnostics = diagnose_stage(
             stage, brief=brief, upstream_state=semantic_state, candidate=obj
@@ -4982,7 +5038,11 @@ def drive_stage(
                 )
                 if repair_outcome.kind == "candidate":
                     repaired = _normalize_candidate_for_diagnostics(
-                        stage, repair_outcome.payload["candidate"], brief, semantic_state
+                        stage,
+                        repair_outcome.payload["candidate"],
+                        brief,
+                        semantic_state,
+                        decider=decider,
                     )
                     if stage == "architecture":
                         initial_repaired_diagnostics = diagnose_stage(
