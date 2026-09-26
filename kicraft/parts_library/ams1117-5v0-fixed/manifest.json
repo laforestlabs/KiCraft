@@ -4,7 +4,7 @@
   "description": "Advanced Monolithic Systems AMS1117-5.0",
   "footprint_name": "SOT-223_L6.5-W3.5-P2.30-LS7.0-BR",
   "kicad_version_min": "9.0.0",
-  "maturity": "prototype",
+  "maturity": "production",
   "mpn": "AMS1117-5.0",
   "name": "ams1117-5v0-fixed",
   "provenance": {
@@ -19,6 +19,7 @@
   },
   "symbol_name": "AMS1117-5.0",
   "tags": [],
+  "three_d_model": null,
   "version": "0.1.0",
   "watch_out_for": null
 }

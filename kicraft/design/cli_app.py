@@ -31,6 +31,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Iterable
 from pathlib import Path
 from typing import get_args
 
@@ -68,6 +69,7 @@ from .models import (
     Question,
     ReviewFinding,
     StageStatus,
+    Substitution,
 )
 from .stage_state import invalidate_downstream
 
@@ -680,13 +682,18 @@ def _lcsc_identity_conflict(part, hit: dict) -> str | None:
 
 
 def _resolve_bom_mpn_sourcing(
-    bom, project_root: Path, receipt: list[dict] | None = None
+    bom, project_root: Path, receipt: list[dict] | None = None, *,
+    named_parts: Iterable[str] = (), brief: str = "",
 ) -> tuple[list[str], list[str]]:
-    """§9.26 — every BOM part must be a real, orderable part, in stock BOTH
-    for JLCPCB assembly (the offline jlcparts dump) AND at the lcsc.com
-    retail storefront (live check via ``lcsc_retail``). The two inventories
-    are separate pools: KC-4AZ7PE's 0603 passives had 5-15M in the dump
-    while the storefront had 0 of every one of them.
+    """§9.26 — every BOM part must be a real part, and the board must still get made.
+
+    Existence is a hard gate: a fabricated MPN, a C# the catalog does not hold, or a signature
+    that contradicts the part the symbol describes still refuses the commit. Stock is not: a part
+    that is real, matches the design and simply cannot be bought today is **kept** (or replaced by
+    an in-stock carrier of the same family and package) and recorded as a warning, per the owner's
+    rule of 2026-09-26 — *make a valid board at the end, even if one or two of the parts are out of
+    stock*. The keep-or-swap decision and its sentence live in
+    :mod:`kicraft.design.sourcing_policy`; this gate only supplies the readings.
 
     Before this gate, MPN strings on stock-symbol parts (connectors, diodes,
     inductors) were unverified LLM prose: a hallucinated or out-of-stock part
@@ -726,13 +733,16 @@ def _resolve_bom_mpn_sourcing(
 
     Retail checks fail OPEN ("can't verify — don't block"): an unreachable
     storefront never bounces the model, it downgrades to a warning. A
-    deliberately chosen part (explicit pin, bundle) is vetoed only when its
-    retail stock is below the listing's own minimum buy; walk-time candidates
-    must also clear the retail floor (KICRAFT_BOM_RETAIL_STOCK_FLOOR).
+    deliberately chosen part (explicit pin, bundle) that is out of stock follows
+    the owner's rule above rather than being vetoed: kept, or swapped for an
+    in-stock same-package carrier, and always recorded. Walk-time candidates
+    (the two auto-pinning tiers) still *prefer* parts that clear the retail floor
+    (KICRAFT_BOM_RETAIL_STOCK_FLOOR), because there the gate is choosing and can
+    simply choose one that is buyable.
 
-    Returns ``(offenders, warnings)`` (both empty = all sourceable, or the
-    catalog is unavailable). Only mutation is appending ``LCSC <C#>`` pins to
-    ``sourcing_note``.
+    Returns ``(offenders, warnings)`` (offenders empty = everything is real, or
+    the catalog is unavailable). Only mutations are appending ``LCSC <C#>`` pins
+    and the recorded keep-or-swap outcome.
     """
     if not jlcparts.available():
         return [], []  # can't verify — don't block
@@ -842,6 +852,71 @@ def _resolve_bom_mpn_sourcing(
     active, _broken = _load_library_parts(project_root)
     manifest_by_name = {p.manifest.name: p.manifest for p in active}
     bad: list[str] = []
+
+    def _stock_ok(record) -> bool:
+        """Whether a reviewed carrier can be bought now, in both inventories.
+
+        The swap only offers parts that clear the same two checks this gate applies to the part
+        being replaced: the offline catalog's stock floor and the retail storefront.
+        """
+        cid = str(getattr(record, "lcsc", "") or "").strip().upper()
+        if not cid:
+            return False
+        hit = jlcparts.lookup(cid)
+        if hit is None or (hit.get("stock") or 0) < floor:
+            return False
+        return _retail_verdict(cid, picky=False)[0] in ("ok", "unverified", "off")
+
+    def _out_of_stock(part, *, label: str, cid: str, shortfall: str) -> None:
+        """A real part nobody can buy today: keep it, or swap it, but never refuse the board.
+
+        Owner's rule, 2026-09-26: *make a valid board at the end, even if one or two of the parts
+        are out of stock*. A part the brief names by its own order code is kept -- the owner may
+        hold stock or have a second source -- and an unattended run says so; a person watching is
+        asked, which the BOM stage does at draft time. A part the pipeline chose for a class the
+        brief names is swapped for an in-stock carrier of the same family and package. Either way
+        the outcome is recorded here, on the BOM, where the substitution and the assumption live.
+        """
+        from kicraft.design import part_identity, sourcing_policy
+
+        lib = _lib_prefix(part.symbol) or _lib_prefix(part.footprint or "")
+        man = manifest_by_name.get(lib) if lib else None
+        record = part_identity.physical_inventory_record(
+            mpn=part.mpn, symbol=part.symbol, footprint=part.footprint
+        )
+        if record is None and man is not None:
+            record = part_identity.reviewed_part(str(getattr(man, "mpn", "") or ""))
+        identity = str(getattr(record, "identity", "") or part.mpn or part.value or "").strip()
+        family = str(getattr(record, "family", "") or "").strip()
+        decision = sourcing_policy.decide(
+            identity=identity,
+            mpn=part.mpn,
+            family=family,
+            shortfall=shortfall,
+            named_parts=named_parts,
+            brief=brief,
+            in_stock=_stock_ok,
+        )
+        if decision.alternative is not None:
+            alternative = decision.alternative
+            alt_man = manifest_by_name.get(str(getattr(alternative, "bundle", "") or ""))
+            part.value = str(getattr(alternative, "identity", "") or part.value)
+            part.mpn = str((alt_man.mpn if alt_man is not None else "") or part.mpn or "").strip() or None
+            part.symbol = getattr(alternative, "symbol", None)
+            part.footprint = getattr(alternative, "footprint", None)
+            alt_cid = str(getattr(alternative, "lcsc", "") or "").strip().upper()
+            if alt_cid:
+                part.sourcing_note = f"LCSC {alt_cid}"
+            bom.substitutions.append(
+                Substitution(
+                    wanted=identity or label,
+                    got=str(getattr(alternative, "identity", "") or ""),
+                    reason=decision.reason,
+                )
+            )
+        bom.assumptions.append(decision.reason)
+        warnings.append(f"{part.ref} ({label}): {decision.reason}")
+
     best_by_mpn: dict[tuple[str, bool], tuple[dict | None, list[str], bool]] = {}
     best_by_kw: dict[tuple[str, bool], tuple[dict | None, bool, bool]] = {}
     for part in bom.parts or []:
@@ -899,21 +974,26 @@ def _resolve_bom_mpn_sourcing(
                     f"{cid} and use that bundle's own symbol/footprint ids"
                 )
             elif (hit.get("stock") or 0) < floor:
-                bad.append(
-                    f"{part.ref} ({label}): LCSC {cid} has only "
-                    f"{hit.get('stock') or 0} in stock (< {floor}); pick a "
-                    f"better-stocked alternative"
+                _out_of_stock(
+                    part,
+                    label=label,
+                    cid=cid,
+                    shortfall=(
+                        f"in the LCSC catalog with only {hit.get('stock') or 0} in stock for "
+                        f"JLCPCB assembly (< {floor})"
+                    ),
                 )
             else:
                 verdict, info = _retail_verdict(cid, picky=False)
                 if verdict == "dry":
-                    bad.append(
-                        f"{part.ref} ({label}): LCSC {cid} has "
-                        f"{hit.get('stock') or 0} in stock for JLCPCB "
-                        f"assembly but only {info['stock']} at the lcsc.com "
-                        f"retail storefront (min buy {info['min_buy']}) — a "
-                        f"pick must be in stock at BOTH; find an alternative "
-                        f"with lookup_lcsc_id" + _alternates_note(part, cid, floor)
+                    _out_of_stock(
+                        part,
+                        label=label,
+                        cid=cid,
+                        shortfall=(
+                            f"out of stock at the lcsc.com retail storefront "
+                            f"({info['stock']} available, min buy {info['min_buy']})"
+                        ),
                     )
                 elif verdict == "unverified":
                     unverified.append(f"{part.ref} ({cid})")
@@ -928,23 +1008,26 @@ def _resolve_bom_mpn_sourcing(
             cid = str((man.sourcing or {}).get("lcsc")).strip().upper()
             hit = jlcparts.lookup(cid)
             if hit is not None and (hit.get("stock") or 0) < floor:
-                bad.append(
-                    f"{part.ref}: library bundle '{lib}' sources LCSC {cid} "
-                    f"which has only {hit.get('stock') or 0} in stock for "
-                    f"JLCPCB assembly (< {floor}); fetch an in-stock "
-                    f"alternative with lookup_lcsc_id + add_part_from_lcsc "
-                    f"and point this part at the new bundle"
+                _out_of_stock(
+                    part,
+                    label=lib,
+                    cid=cid,
+                    shortfall=(
+                        f"in the LCSC catalog with only {hit.get('stock') or 0} in stock for "
+                        f"JLCPCB assembly (< {floor})"
+                    ),
                 )
             else:
                 verdict, info = _retail_verdict(cid, picky=False)
                 if verdict == "dry":
-                    bad.append(
-                        f"{part.ref}: library bundle '{lib}' sources LCSC "
-                        f"{cid} which is out of stock at the lcsc.com retail "
-                        f"storefront ({info['stock']} available, min buy "
-                        f"{info['min_buy']}); fetch an in-stock alternative "
-                        f"with lookup_lcsc_id + add_part_from_lcsc and point "
-                        f"this part at the new bundle" + _alternates_note(part, cid, floor)
+                    _out_of_stock(
+                        part,
+                        label=lib,
+                        cid=cid,
+                        shortfall=(
+                            f"out of stock at the lcsc.com retail storefront "
+                            f"({info['stock']} available, min buy {info['min_buy']})"
+                        ),
                     )
                 elif verdict == "unverified":
                     unverified.append(f"{part.ref} ({cid})")
@@ -4296,8 +4379,19 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     bom_warnings: list[str] = []
     sourcing_receipt: list[dict] = []
     if stage == "bom" and state.bom is not None:
+        project_root = state_path.resolve().parent.parent
+        try:
+            brief_text = (project_root / "brief.txt").read_text(encoding="utf-8")
+        except OSError:
+            brief_text = ""
         bad_mpn, bom_warnings = _resolve_bom_mpn_sourcing(
-            state.bom, state_path.resolve().parent.parent, sourcing_receipt
+            state.bom,
+            project_root,
+            sourcing_receipt,
+            # A part the brief names by its own order code belongs to the owner (they may hold
+            # stock or have a second source); the keep-or-swap rule reads both.
+            named_parts=tuple(getattr(state.intent, "named_parts", ()) or ()),
+            brief=brief_text,
         )
         if bad_mpn:
             print(

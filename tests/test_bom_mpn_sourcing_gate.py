@@ -331,24 +331,33 @@ def test_library_bundle_in_stock_everywhere_passes_unpinned(tmp_path, monkeypatc
     assert p.sourcing_note is None
 
 
-def test_library_bundle_low_jlc_stock_is_an_offender(tmp_path, monkeypatch):
-    # Bundles were previously exempt from stock checks entirely.
+def test_library_bundle_low_jlc_stock_is_kept_and_recorded(tmp_path, monkeypatch):
+    """A bundle part that is real but thin is kept: the board must still get made.
+
+    Owner's rule, 2026-09-26 — *make a valid board at the end, even if one or two of the parts are
+    out of stock*. Existence is still gated (by ``_unresolved_lcsc``); stock is now a recorded
+    decision, so the offender list stays empty and the reading lands on the BOM's assumptions.
+    """
     _install_bundle(monkeypatch, _FakeCatalog(by_lcsc={
         "C9864": {"lcsc": "C9864", "model": "TPS5430DDAR", "stock": 12}}))
-    bad, _warns = _resolve_bom_mpn_sourcing(_bom(_bundle_part()), tmp_path)
-    assert len(bad) == 1 and "tps5430" in bad[0] and "only 12" in bad[0]
-    assert "add_part_from_lcsc" in bad[0]
+    bom = _bom(_bundle_part())
+    bad, warns = _resolve_bom_mpn_sourcing(bom, tmp_path)
+    assert bad == []
+    assert len(warns) == 1 and "tps5430" in warns[0] and "only 12" in warns[0]
+    assert any("only 12" in row for row in bom.assumptions)
 
 
-def test_library_bundle_retail_dry_is_an_offender(tmp_path, monkeypatch):
+def test_library_bundle_retail_dry_is_kept_and_recorded(tmp_path, monkeypatch):
     _install_bundle(
         monkeypatch,
         _FakeCatalog(by_lcsc={
             "C9864": {"lcsc": "C9864", "model": "TPS5430DDAR", "stock": 148617}}),
         _FakeRetail(by_lcsc={"C9864": {"stock": 0, "min_buy": 1}}))
-    bad, _warns = _resolve_bom_mpn_sourcing(_bom(_bundle_part()), tmp_path)
-    assert len(bad) == 1 and "retail storefront" in bad[0]
-    assert "add_part_from_lcsc" in bad[0]
+    bom = _bom(_bundle_part())
+    bad, warns = _resolve_bom_mpn_sourcing(bom, tmp_path)
+    assert bad == []
+    assert len(warns) == 1 and "retail storefront" in warns[0]
+    assert any("retail storefront" in row for row in bom.assumptions)
 
 
 def test_shared_bundle_lcsc_is_live_checked_once(tmp_path, monkeypatch):
@@ -365,18 +374,136 @@ def test_shared_bundle_lcsc_is_live_checked_once(tmp_path, monkeypatch):
 
 # ------------------------------------------------- retail-dry picks (KC-4AZ7PE)
 
-def test_explicit_pin_retail_dry_is_an_offender_naming_both(tmp_path, monkeypatch):
-    # The KC-4AZ7PE shape: millions in the JLC dump, 0 at the storefront.
+def test_explicit_pin_retail_dry_is_kept_and_names_both_inventories(tmp_path, monkeypatch):
+    """The KC-4AZ7PE shape: millions in the JLC dump, 0 at the storefront.
+
+    Out of stock is now a decision rather than a refusal (owner's rule, 2026-09-26). The part is
+    kept, the reading names both inventories so the owner can see which one ran dry, and the choice
+    is recorded on the BOM.
+    """
     _install(monkeypatch,
              _FakeCatalog(by_lcsc={
                  "C25804": {"lcsc": "C25804", "model": "0603WAF1002T5E",
                             "stock": 7_612_043}}),
              _FakeRetail(by_lcsc={"C25804": {"stock": 0, "min_buy": 100}}))
     p = _part(ref="R1", mpn=None, note="LCSC C25804")
-    bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
-    assert len(bad) == 1
-    assert "JLCPCB assembly" in bad[0] and "retail storefront" in bad[0]
-    assert "BOTH" in bad[0]
+    bom = _bom(p)
+    bad, warns = _resolve_bom_mpn_sourcing(bom, tmp_path)
+    assert bad == []
+    assert len(warns) == 1
+    assert "retail storefront" in warns[0] and "0 available" in warns[0]
+    # Kept, with the reason: nothing else shares this part's package, and the variants that exist
+    # are in different packages -- a design decision, named rather than taken.
+    assert "no in-stock carrier shares its package" in warns[0]
+    assert "different packages" in warns[0]
+    assert bom.assumptions == [warns[0].split(": ", 1)[1]]
+
+
+def test_an_unnamed_out_of_stock_bundle_part_is_swapped_for_an_in_stock_carrier(
+    tmp_path, monkeypatch
+):
+    """A part the pipeline chose for a class the brief names gets replaced, not kept.
+
+    Owner's rule, 2026-09-26: *stick with the out-of-stock part if it is specifically named in the
+    brief, otherwise swap to an in-stock alternative*. The replacement must share the family and
+    the package, so no pin the design already binds moves; the swap is recorded as a substitution
+    (why the fab BOM differs from the draft) and as a '(defaulted)' assumption.
+    """
+    from kicraft.design import part_identity, sourcing_policy
+
+    stale = part_identity.ReviewedPart(
+        identity="led-a", family="led-0603", package="0603 LED",
+        bundle="led-a", symbol="led-a:LED_0603_1608Metric",
+        footprint="led-a:LED_0603_1608Metric", contacts=("1", "2"),
+        physical_features=frozenset({"led-0603"}), lcsc="C1",
+    )
+    fresh = part_identity.ReviewedPart(
+        identity="led-b", family="led-0603", package="0603 LED",
+        bundle="led-b", symbol="led-b:LED_0603_1608Metric",
+        footprint="led-b:LED_0603_1608Metric", contacts=("1", "2"),
+        physical_features=frozenset({"led-0603"}), lcsc="C2",
+    )
+    monkeypatch.setattr(part_identity, "reviewed_inventory", lambda: (stale, fresh))
+    monkeypatch.setattr(
+        part_identity, "reviewed_part",
+        lambda name: {stale.identity: stale, fresh.identity: fresh}.get(str(name).casefold()),
+    )
+    monkeypatch.setattr(
+        part_identity, "physical_inventory_record",
+        lambda **kwargs: stale if kwargs.get("mpn") == "LED-A" else None,
+    )
+    monkeypatch.setattr(sourcing_policy, "swap_candidates", lambda *a, **k: (fresh,))
+
+    class _Man:
+        name = "led-a"
+        mpn = "LED-A"
+        sourcing = {"lcsc": "C1"}
+
+    class _Loaded:
+        manifest = _Man()
+
+    _install(monkeypatch,
+             _FakeCatalog(by_lcsc={"C1": {"lcsc": "C1", "model": "LED-A", "stock": 500}}),
+             _FakeRetail(by_lcsc={"C1": {"stock": 0, "min_buy": 5}}))
+    monkeypatch.setattr(cli_app, "_load_library_parts", lambda root: ([_Loaded()], []))
+    part = _part(ref="D1", mpn="LED-A", symbol="led-a:LED_0603_1608Metric",
+                 footprint="led-a:LED_0603_1608Metric")
+    bom = _bom(part)
+
+    bad, warns = _resolve_bom_mpn_sourcing(bom, tmp_path, named_parts=("SOME-OTHER-PART",))
+
+    assert bad == []
+    assert "takes its place (defaulted)" in warns[0]
+    assert (part.symbol, part.footprint) == (fresh.symbol, fresh.footprint)
+    assert part.value == "led-b"
+    assert bom.substitutions and bom.substitutions[0].got == "led-b"
+
+
+def test_a_brief_named_part_is_never_swapped(tmp_path, monkeypatch):
+    """The brief names the part, so it stays: the owner may have stock or a second source."""
+    from kicraft.design import part_identity, sourcing_policy
+
+    stale = part_identity.ReviewedPart(
+        identity="led-a", family="led-0603", package="0603 LED",
+        bundle="led-a", symbol="led-a:LED_0603_1608Metric",
+        footprint="led-a:LED_0603_1608Metric", contacts=("1", "2"),
+        physical_features=frozenset({"led-0603"}), lcsc="C1",
+    )
+    fresh = part_identity.ReviewedPart(
+        identity="led-b", family="led-0603", package="0603 LED",
+        bundle="led-b", symbol="led-b:LED_0603_1608Metric",
+        footprint="led-b:LED_0603_1608Metric", contacts=("1", "2"),
+        physical_features=frozenset({"led-0603"}), lcsc="C2",
+    )
+    monkeypatch.setattr(part_identity, "reviewed_inventory", lambda: (stale, fresh))
+    monkeypatch.setattr(part_identity, "reviewed_part", lambda name: stale)
+    monkeypatch.setattr(
+        part_identity, "physical_inventory_record", lambda **kwargs: stale
+    )
+    monkeypatch.setattr(sourcing_policy, "swap_candidates", lambda *a, **k: (fresh,))
+
+    class _Man:
+        name = "led-a"
+        mpn = "LED-A"
+        sourcing = {"lcsc": "C1"}
+
+    class _Loaded:
+        manifest = _Man()
+
+    _install(monkeypatch,
+             _FakeCatalog(by_lcsc={"C1": {"lcsc": "C1", "model": "LED-A", "stock": 500}}),
+             _FakeRetail(by_lcsc={"C1": {"stock": 0, "min_buy": 5}}))
+    monkeypatch.setattr(cli_app, "_load_library_parts", lambda root: ([_Loaded()], []))
+    part = _part(ref="D1", mpn="LED-A", symbol="led-a:LED_0603_1608Metric",
+                 footprint="led-a:LED_0603_1608Metric")
+    bom = _bom(part)
+
+    bad, warns = _resolve_bom_mpn_sourcing(bom, tmp_path, named_parts=("LED-A",))
+
+    assert bad == []
+    assert part.symbol == "led-a:LED_0603_1608Metric"
+    assert bom.substitutions == []
+    assert "the brief names this part" in warns[0]
 
 
 def test_explicit_pin_low_retail_but_orderable_passes(tmp_path, monkeypatch):

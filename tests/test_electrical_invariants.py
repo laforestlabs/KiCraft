@@ -467,6 +467,96 @@ def test_physical_quantity_requires_exact_reviewed_identity_evidence(monkeypatch
     assert result.offenders[0].startswith("E_PHYSICAL_REALIZATION")
 
 
+def test_a_recipe_realized_regulator_is_a_reviewed_transfer_path():
+    """A curated recipe is reviewed evidence: §9.39 must read its declared input/output ports.
+
+    Live seed-43 run (2026-09-26): an AMS1117 board -- a curated recipe, the sanctioned way to
+    build a converter -- was refused with "no reviewed source-to-load transfer from
+    'VIN_PROTECTED' to '+3V3'" because §9.39 read only the reviewed *records*' `power_transfer`
+    mapping, and a recipe-realized part has no record at all.
+    """
+    from types import SimpleNamespace
+
+    from kicraft.design.synthesis.validation import _recipe_transfer_pairs
+
+    requirement = SimpleNamespace(
+        id="reg", ports={"input": "VIN_PROTECTED", "output": "+3V3", "gnd": "GND"}
+    )
+    bom = SimpleNamespace(
+        recipe_ownership=[SimpleNamespace(recipe="ams1117-3v3@1", requirement_ids=("reg",))]
+    )
+    assert _recipe_transfer_pairs(requirement, bom) == [("VIN_PROTECTED", "+3V3")]
+
+    # A requirement the manifest does not own, or an unknown recipe, contributes nothing.
+    assert _recipe_transfer_pairs(requirement, SimpleNamespace(recipe_ownership=[])) == []
+    assert (
+        _recipe_transfer_pairs(
+            requirement,
+            SimpleNamespace(
+                recipe_ownership=[
+                    SimpleNamespace(recipe="not-a-recipe@9", requirement_ids=("reg",))
+                ]
+            ),
+        )
+        == []
+    )
+
+
+def test_a_bundle_part_owns_a_declared_interface(monkeypatch):
+    """A vendored part with no MPN is the identity its reviewed pair names, not a missing part.
+
+    Live seed-43 run (2026-09-26): the power LED -- a vendored bundle, no MPN -- was reported as
+    "needs exactly one identity-matched BOM component with resolved pin inventory", which hid the
+    real complaint (its declared pin sat on the wrong net).
+    """
+    from types import SimpleNamespace
+
+    record = SimpleNamespace(
+        identity="warm-white-led",
+        family="warm-white-led",
+        physical_features=frozenset({"warm-white-led"}),
+    )
+    monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda _part: record)
+    monkeypatch.setattr(
+        validation,
+        "_pin_info_by_ref",
+        lambda _bom: ({"D1": {"1": {"name": "K"}, "2": {"name": "A"}}}, {}),
+    )
+    requirement = SimpleNamespace(
+        id="power_led",
+        sheet="POWER INDICATOR",
+        role="user_io",
+        family="warm-white-led",
+        exact_part=None,
+        obligations=[],
+        declared_interface=SimpleNamespace(
+            ports=[SimpleNamespace(key="drive", pin="1", pin_selector=None, pin_name=None)]
+        ),
+        ports={"drive": "+3V3"},
+    )
+    architecture = SimpleNamespace(requirements=[requirement], power_nets=["+3V3"])
+    led = SimpleNamespace(
+        ref="D1", value="E6C0805WWAY1UDA", mpn=None, symbol="e6c0805wway1uda:L",
+        footprint="e6c0805wway1uda:LED", sheet="POWER INDICATOR",
+    )
+    bom = SimpleNamespace(
+        parts=[led],
+        connections=[
+            SimpleNamespace(net_name="+3V3", endpoints=[SimpleNamespace(ref="D1", pin="2")])
+        ],
+        recipe_ownership=[],
+    )
+
+    result = validation.check_requirement_physical_realization(
+        architecture, bom, declared_interface_scope="model_owned"
+    )
+    # The complaint is now the real one (the claimed pin is not on the claimed net), not
+    # "needs exactly one identity-matched component".
+    assert not result.ok
+    assert "E_DECLARED_INTERFACE" in result.offenders[0]
+    assert "identity-matched" not in result.offenders[0]
+
+
 def test_new_part_category_is_realized_by_a_resolved_part(monkeypatch):
     """A class the reviewed library has never covered is proven by a real resolved part.
 

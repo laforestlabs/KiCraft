@@ -7,6 +7,7 @@ import json
 import re
 import resource
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Callable, Literal
 
@@ -809,6 +810,29 @@ def _auto_default_questions_enabled(
         auto_default_questions = not review_before_commit
         return bool(auto_default_questions) and stage in _AUTO_DEFAULT_QUESTION_STAGES
     return auto_default_questions
+
+
+def _bom_stock_questions(candidate, semantic_state, brief) -> list[dict]:
+    """The questions a BOM draft owes about a part the brief names that is out of stock.
+
+    Empty whenever nothing a person must decide is in play: no parts, no named part among them, or
+    a storefront that cannot be reached (a question is never worth failing a draft over).
+    """
+    from kicraft.design.sourcing_policy import stock_questions
+
+    parts = candidate.get("parts") if isinstance(candidate, Mapping) else None
+    if not parts:
+        return []
+    intent = (semantic_state or {}).get("intent") or {}
+    try:
+        rows = stock_questions(
+            parts,
+            named_parts=tuple(intent.get("named_parts") or ()),
+            brief=str(brief or ""),
+        )
+    except Exception:  # noqa: BLE001 - fail-soft: an audit never blocks a draft
+        return []
+    return _normalize_questions(rows, "bom")
 
 
 def _questions_need_input(
@@ -4780,6 +4804,45 @@ def drive_stage(
                             }
                         )
         severe = [d for d in diagnostics if d.severity in {"repair_required", "fab_gate"}]
+        # A part the brief names by its own order code that cannot be bought today is the owner's
+        # decision, not the pipeline's (owner's rule, 2026-09-26): a person watching is asked
+        # whether to build with it anyway or change it; an unattended run keeps it and records the
+        # shortfall. Either way the part is never an offender -- §9.26 keeps the board buildable.
+        if stage == "bom" and questions_allowed:
+            stock_questions = _bom_stock_questions(obj, semantic_state, brief)
+            if stock_questions and _questions_need_input(
+                stock_questions,
+                stage,
+                auto_default=auto_default,
+                answers=answers,
+                instruction=instruction,
+                auto_default_questions=auto_default_questions,
+            ):
+                if not review_before_commit:
+                    attach_questions(state_path, stage, stock_questions)
+                if progress:
+                    progress({"kind": "question", "stage": stage, "questions": stock_questions})
+                parked = {
+                    "stage": stage,
+                    "commit_ok": False,
+                    "needs_input": True,
+                    "questions": stock_questions,
+                    "cost_usd": total_cost,
+                    "attempts": attempts,
+                }
+                if review_before_commit:
+                    parked.update(
+                        {
+                            "rounds": rounds,
+                            "tool_calls": tool_calls_ct,
+                            "wall_s": round(time.monotonic() - t0, 3),
+                            "cpu_s": round(_child_cpu_s() - cpu0, 3),
+                            "provider_ok": provider_ok,
+                            "schema_ok": schema_ok,
+                            "debug_context": _debug_context(raw),
+                        }
+                    )
+                return parked
         # The external-load current is a physical fact. Interactive policy parks
         # immediately; automatic policy must fail honestly rather than inventing a
         # current or spending another provider call trying to manufacture one.

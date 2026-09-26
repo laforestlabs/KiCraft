@@ -94,6 +94,11 @@ Per design step, in order, with the owner watching:
 | 24 | **A default the intent recorded is not carried into the design.** "Standard UART pins plus ground" is the intent's own default, yet the architecture declared a two-contact UART header, so the shipped header has transmit and receive and no return. | open (`P5`), with the two honest fixes named: add a contact wired to ground, or send the serial pair to an `edge:` peer whose compiler-built header carries ground automatically. |
 | 25 | **A derived function is visible but not marked as a guess.** The functional spec added a power-conversion block (12 V in, 3.3 V logic) without recording it in its assumptions; the check that exists for that duty keys on four literal words (`esd protection`, `ldo`, `buck`, `boost`) and this block said "Convert". | open (`P1`). The machine-readable signal an obvious fix would key on — a block with no requirement attached — does not hold up: seed-40's committed spec leaves its reverse-polarity block unattached for a requirement the brief states in those words, and the replay fixture attaches nothing at all. The durable fix is a marker the pipeline owns. |
 
+| 26 | **A part that is real but out of stock blocked the board.** §9.26 refused a commit for any part whose stock had run dry in either inventory, so a board whose brief names a part that is temporarily unbuyable could not be built at all — no matter that the design was right. | **changed on the owner's call 2026-09-26** (`P8` onward): out of stock is now a *recorded decision*, never a refusal. A part the brief names **by its own order code** is kept (the owner may hold stock or have a second source); a person watching is asked whether to build with it or take an in-stock variation, and an unattended run keeps it. A part the *pipeline* chose for a class the brief names is swapped for an in-stock carrier of the **same family and package**, so no pin or wire moves; a different package is named, never applied silently. The decision, the reading and a substitution ledger entry land on the BOM. Verified live: the seed-43 parts stage saved with the CH32V003 kept and the shortfall recorded, and the run went on to wiring. |
+| 27 | **§9.39 could not see a curated recipe's own conversion.** The transfer check read only reviewed *records*' `power_transfer` mapping, and a converter realized by a curated recipe — the sanctioned way to build one — has no record, so a correct AMS1117 board was refused with "no reviewed source-to-load transfer from 'VIN_PROTECTED' to '+3V3'". | **fixed + tested 2026-09-26** (`P9`): the check now adds the recipe's own declared input→output path (its `Port` definitions, bound through the requirement's ports) before walking the transfer graph. |
+| 28 | **§9.42 could not see a vendored part with no MPN** — twice over: its declared-interface half required a literal MPN, and then compared the requirement's `exact_part` against that absent MPN. A part the pipeline had just proven was reported as "needs exactly one identity-matched BOM component", hiding the real defect. | **fixed + tested 2026-09-26** (`P10`): a part is identified by its MPN *or* its resolved reviewed identity (the symbol/footprint pair), so the complaint is now the real one — "expected '+3V3' on declared pin selector '1' of D1, found 'GND'". |
+| 29 | **An indicator whose declared pin cannot sit on the rail it is bound to.** The architecture names the power LED's `drive` port as the 3.3 V rail and its declared pin as the LED's cathode; the correct wiring grounds that pin and reaches the LED through its series resistor, so no wiring can satisfy the claim and the wiring stage may not reopen an architecture claim. | **open — owner's call** (`P11`). Either realize a rail-driven indicator with the reviewed `status-led` builder (its series element and pin roles are then the builder's business) or let the declared-interface check follow one series element, as §9.41 already does for a load's own series parts. |
+
 ## 6. Making a missing part (the owner's directive, in mechanics)
 
 When the parts step needs a class the library cannot answer:
@@ -315,3 +320,58 @@ unbuildable.
   not hold up — seed-40's committed spec leaves its *reverse-polarity* block unattached for a
   requirement the brief states in those words, and the replayed fixture attaches nothing at all.
   The durable fix is a marker the pipeline owns, which is a schema decision for the owner.
+
+
+## 11. Session of 2026-09-26: a board that gets made even when a part cannot be bought
+
+The owner's directive, in their words: *"if the missing part number was directly called out by the
+user in the brief then kicraft should ask the user if they want to continue building with the
+specified part (maybe the user has a second source or has some in their own inventory) or if the
+part number should be changed to a variation that is in stock … if the run is autodefaulted then
+kicraft should automatically choose itself: stick with the out of stock part if it is specifically
+named in the brief otherwise swap to an in stock alternative. that goal is to make a valid board at
+the end, even if one or two of the parts are out of stock."*
+
+**The rule, in code.** New `kicraft/design/sourcing_policy.py` decides, in one place, what happens
+to a part that is real, matches the design and cannot be bought this week:
+
+- **kept** when the brief calls out that part's own order code (a family name is not the part
+  number — "a CH32V003 development board" leaves the variant to the pipeline). A person watching
+  is **asked** at the parts stage whether to build with it or take an in-stock variation, with the
+  variations the pipeline can honour listed; an unattended run keeps it and records the reading.
+- **swapped** when the pipeline chose the part for a class the brief names, and a reviewed carrier
+  exists in the **same family and the same package** — then every pad number, footprint and wire the
+  design already states means the same thing in the replacement. The swap is written as a
+  substitution (why the fab BOM differs from the draft) plus a `(defaulted)` assumption.
+- **kept, with the reason**, when no such carrier exists — and the reason names the variants that
+  *do* exist in other packages, because switching package re-binds the pins and is a design
+  decision, never a quiet substitution.
+
+Existence is untouched: a fabricated MPN, a C# the catalog does not hold, or a signature that
+contradicts the symbol still refuses the commit. Only *stock* became a decision.
+
+**Proven live, on the run that had stopped.** The seed-43 parts stage — refused the night before on
+the CH32V003's retail stock — **saved** with the part kept as designed and this on the BOM:
+
+> `ch32v003j4m6 (CH32V003J4M6) is out of stock at the lcsc.com retail storefront (0 available, min
+> buy 5) and the pipeline chose it for a class the brief names, but no in-stock carrier shares its
+> package; the library holds no other reviewed variant of this family`
+
+The run then reached the wiring stage, whose first draft was refused by three contracts. Two were
+pipeline bugs, found by reading the refusal rather than guessing, and fixed at the source with
+tests: **§9.39** could not see a curated recipe's own declared transfer (a converter built the
+sanctioned way had no path at all — `P9`), and **§9.42** could not see a vendored part with no MPN,
+reporting it as a missing component instead of its real defect (`P10`). The third refusal was real:
+the power LED's return went nowhere. The repaired wiring is electrically right — cathode to ground,
+anode through its 249 ohm resistor to the rail — and every other gate passes.
+
+**Where it stops** (`P11`): the architecture says the LED's `drive` port is the 3.3 V rail and its
+declared pin is the LED's *cathode*, which the correct wiring grounds. No wiring can satisfy that
+claim, and the wiring stage may not reopen an architecture claim. The library's own answer for this
+shape is the reviewed `status-led` builder, which owns the LED *and* its series element; naming the
+bare class instead is what left a claim the design cannot honour — the same family as the previous
+session's LED finding. That choice is the owner's.
+
+**Cheaper than the failures it replaced:** the whole run cost **$0.035** of its $1.00 cap, and the
+two pipeline bugs it exposed would otherwise have refused *every* board whose converter is a curated
+recipe and every board with a vendored part in a declared interface.

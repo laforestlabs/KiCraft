@@ -114,18 +114,33 @@ report the first gap you find — in plain words, with the evidence beside it.
 
 ---
 
-## Addendum, same night: the first loop run (seed 43)
+## Addendum: the first loop run, and the out-of-stock rule (2026-09-25/26)
 
 The top item above was closed (plan §9: researched parts now carry the catalog's own ratings), and
-then the loop ran unattended on the brief the live site's next click gets — `generate_brief(43)`, a
-CH32V003 development board. It is written up in plan §10; the run's own evidence is in
-`~/.kicraft/debug/surprise-43-ch32v003-devboard-20260925/` (`findings.json`, `run-log.md`, the
-per-stage answers).
+the loop ran unattended on the brief the live site's next click gets — `generate_brief(43)`, a
+CH32V003 development board. It is written up in plan §10 and §11; the run's own evidence is in
+`~/.kicraft/debug/surprise-43-ch32v003-devboard-20260925/` (`findings.json`, `run-log.md`,
+`run-summary.json`, the per-stage answers).
 
-Short version: intent, functional spec and architecture committed; five pipeline defects found and
-fixed at the source with tests (plan table rows 20-22); and the run **stopped** at the parts-stage
-save because the only CH32V003 order code the reviewed library carries (SOP-8, LCSC C5346354) is
-out of stock at the lcsc.com retail storefront, with same-device alternatives only in other
-packages. That is the owner's call, so it is the first thing to settle before any further run on
-this brief. Two findings are open with their evidence: the UART header has no ground contact
-(`P5`), and the functional spec's derived conversion block was never recorded as a guess (`P1`).
+Short version: **intent, functional spec, architecture and parts are committed**; the run is
+stopped at the wiring save. Along the way it produced **seven pipeline fixes with tests** (plan
+table rows 20-22 and 27-28): the parts stage's shared-count arithmetic and its connector-group rule,
+a false family refusal at architecture, two commit gates that could not see a vendored part or a
+curated recipe, and — on the owner's call of 2026-09-26 — the sourcing gate itself, which no longer
+refuses a board for an out-of-stock part (plan §11): a part the brief names by order code is kept and
+the owner is asked, a part the pipeline chose is swapped for an in-stock carrier of the same family
+and package, and either way the reading lands on the BOM.
+
+What is left for the owner, in order:
+
+1. **The wiring stop (`P11`).** The architecture claims the power LED's declared pin carries the
+   3.3 V rail while the correct wiring grounds that pin (the rail reaches the LED through its series
+   resistor). Either realize a rail-driven indicator with the reviewed `status-led` builder, or let
+   the declared-interface check follow one series element. The board's wiring is otherwise correct
+   and every other gate passes.
+2. **The CH32V003 stock question (`P8`), if a buyable SOP-8 matters.** No listing of the SOP-8 the
+   library carries is buyable today (retail 0, floor 100); the SOP-16 variant CH32V003A4M6 (LCSC
+   C5346357) passes both inventories, and the same-family package-swap question is exactly what
+   §11's rule reports rather than takes.
+3. **Two open findings from the run**: the derived conversion block the functional spec never
+   recorded as a guess (`P1`), and the two-contact UART header with no ground (`P5`).

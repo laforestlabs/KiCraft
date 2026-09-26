@@ -2530,10 +2530,59 @@ def _requirement_input_key(requirement, bom) -> str | None:
     )
 
 
+def _recipe_transfer_pairs(requirement, bom) -> list[tuple[str, str]]:
+    """Input/output net pairs that a curated recipe transfers between, from the recipe itself.
+
+    A curated recipe *is* the reviewed carrier for a converter ("a curated recipe owns its
+    connections"): its definition names which port is the power input and which is the output
+    (``Port("input", "power")`` / ``Port("output", "power")``), and the compiler binds those ports
+    to the design's own nets. §9.39 read only the reviewed *records*' ``power_transfer`` mapping, so
+    a regulator built the sanctioned way had no path at all and the board was refused -- live
+    seed-43 run (2026-09-26): ``no reviewed source-to-load transfer from 'VIN_PROTECTED' to
+    '+3V3'`` for an AMS1117 recipe whose pins plainly sit on those two nets.
+    """
+    from kicraft.design.recipes import get_recipe
+
+    recipe_id = next(
+        (
+            str(getattr(row, "recipe", "") or "")
+            for row in getattr(bom, "recipe_ownership", ()) or ()
+            if requirement.id in (getattr(row, "requirement_ids", ()) or ())
+        ),
+        "",
+    )
+    if not recipe_id:
+        return []
+    try:
+        definition = get_recipe(recipe_id)
+    except Exception:  # noqa: BLE001 - an unknown recipe is another gate's business
+        return []
+    names = {str(getattr(port, "name", "")).strip().casefold() for port in definition.ports}
+    source_key = next((name for name in ("input", "vin", "vbus") if name in names), None)
+    if source_key is None:
+        return []
+    ports = requirement.ports or {}
+    source_net = str(ports.get(source_key) or "")
+    if not source_net:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for key in ("output", "vout", "positive", "positive_output", "negative", "negative_output"):
+        if key not in names:
+            continue
+        target_net = str(ports.get(key) or "")
+        if target_net and target_net != source_net:
+            pairs.append((source_net, target_net))
+    return pairs
+
+
 def check_reviewed_power_transfer(architecture, bom) -> CheckResult:
     """§9.39 — conversion obligations require a reviewed input-to-output path."""
     info, _ = _pin_info_by_ref(bom)
     graph = _reviewed_transfer_edges(bom, info, _nets_by_ref(bom))
+    # Recipe-declared conversions are reviewed evidence too: add their paths before the walk.
+    for requirement in architecture.requirements:
+        for source_net, dest_net in _recipe_transfer_pairs(requirement, bom):
+            graph[source_net].add(dest_net)
     bad: list[str] = []
     for requirement in architecture.requirements:
         family = requirement.family.casefold()
@@ -3392,18 +3441,34 @@ def check_requirement_physical_realization(
         claim = requirement.declared_interface
         if claim is None or not bom.connections:
             continue  # BOM commit proves identity; wiring owns pin/net evidence.
+        def _is_named_part(part) -> bool:
+            """Whether this part is the identity the requirement names.
+
+            The requirement's ``exact_part`` is an order code, and a vendored bundle part carries
+            none: its *resolved reviewed identity* is what the requirement named. Comparing only
+            ``part.mpn`` excluded such a part and reported a missing component instead of the real
+            defect (live seed-43 run, 2026-09-26: the power LED, whose declared pin sat on the
+            wrong net).
+            """
+            if requirement.exact_part is None:
+                return True
+            names = {str(getattr(part, "mpn", "") or "").casefold()}
+            record = reviewed.get(part.ref)
+            if record is not None:
+                names.add(str(getattr(record, "identity", "")).casefold())
+            return requirement.exact_part.casefold() in names
+
         interface_parts = [
             part
             for part in bom.parts
             if part.sheet == requirement.sheet
             and part.ref in info
-            and bool(getattr(part, "mpn", None))
+            # A vendored bundle part carries no MPN, and its symbol/footprint pair *is* the
+            # reviewed identity (the parts stage proves it and `reviewed` resolves it by pair).
+            and (bool(getattr(part, "mpn", None)) or part.ref in reviewed)
             and bool(part.symbol)
             and bool(part.footprint)
-            and (
-                requirement.exact_part is None
-                or str(part.mpn).casefold() == requirement.exact_part.casefold()
-            )
+            and _is_named_part(part)
         ]
         deterministic_owned = any(
             _part_is_deterministic_owned(bom, part.ref) for part in interface_parts
