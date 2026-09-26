@@ -1283,6 +1283,10 @@ def test_intent_repair_is_scored_under_first_candidate_normalization(tmp_path):
     obligation class but does not repeat that token used to be charged a spurious
     ``intent_named_part_omitted``; the defect scores tied, the adoption guard
     discarded the repair, and the committed slot kept the flagged class.
+
+    The class is the off-board power source, which the deterministic spelling repair
+    deliberately leaves alone (only the writer can choose the mate class or drop the
+    obligation), so this still exercises the repair path.
     """
     brief = (
         "An ESP32-C3 module controller board powered from a 24 V DC screw terminal, "
@@ -1297,28 +1301,22 @@ def test_intent_repair_is_scored_under_first_candidate_normalization(tmp_path):
         "obligations": [
             {
                 "kind": "physical",
-                "original_obligation_id": "esp32-c3-module",
-                "component_class": "microcontroller-module",
+                "original_obligation_id": "coin-cell",
+                "component_class": "coin-cell-battery",
             },
             {
                 "kind": "physical",
                 "original_obligation_id": "power-terminal",
                 "component_class": "screw-terminal",
             },
-            {
-                "kind": "physical",
-                "original_obligation_id": "reverse-polarity-protection",
-                "component_class": "reverse-polarity-protection",
-            },
         ],
         "project_stem": "ESP32C3_CONTROLLER",
     }
+    # The repair drops the source obligation -- the remedy the diagnostic names -- and omits
+    # `named_parts`, which normalization must re-add so the scores stay comparable.
     repaired = {
-        **flagged,
-        "obligations": [
-            {**flagged["obligations"][0], "component_class": "microcontroller"},
-            *flagged["obligations"][1:],
-        ],
+        **{key: value for key, value in flagged.items() if key != "named_parts"},
+        "obligations": [flagged["obligations"][1]],
     }
 
     def reply(payload):
@@ -1345,8 +1343,8 @@ def test_intent_repair_is_scored_under_first_candidate_normalization(tmp_path):
         for row in stage["slot"]["obligations"]
         if row.get("kind") == "physical"
     ]
-    assert "microcontroller-module" not in classes
-    assert "microcontroller" in classes
+    assert "coin-cell-battery" not in classes
+    assert "screw-terminal" in classes
 
 
 def test_rate_limit_falls_back_once_with_shared_guard_and_pristine_messages(tmp_path):

@@ -453,12 +453,12 @@ Ground flow was a different bug with the same cost: `BNC_INPUT` sources the grou
 never be its own ground *target*, and a valid design was refused. A block is grounded when it is at
 either end of a ground connection.
 
-**The numbers.** Findings on shipped boards 1 882 → 1 328; on fully committed boards 278 → 147. Ten
-checks changed across three batches, each with a test in both directions; no check fires more than
-before. The three live boards — including the seed-43 CH32V003 board from §11 — replay clean. The
-full suite is 4 638 passed.
+**The numbers.** Findings on shipped boards 1 882 → 1 176; on fully committed boards 278 → 147.
+Eleven checks changed across four batches, each with a test in both directions; no check fires more
+than before. The three live boards — including the seed-43 CH32V003 board from §11 — replay clean.
+The full suite is 4 643 passed.
 
-Two of the ten were the same mistake as the words they replaced: `architecture_power_block_as_sheet`
+Three of the eleven were the same mistake as the words they replaced: `architecture_power_block_as_sheet`
 could not match **"regulate"** (the escape hatch read `regulat(?:or|ion)?`), and
 `bom_architecture_role_unsupported` read the pipeline's own `driver` role — relays, LED strings,
 transistor stages — as an IC role. A word list is not the only place literalism hides; a grammar that

@@ -2573,3 +2573,76 @@ def test_a_brief_that_powers_its_motors_discharges_the_external_load_rule():
     assert "functional_spec_external_load_power_assumed" in codes(
         "A robot controller with two DRV8833 motor drivers and motor screw terminals."
     )
+
+
+def test_a_longer_spelling_of_a_reviewed_class_is_renamed_not_refused():
+    """The check's own evidence names the repair; the pipeline makes it instead of asking.
+
+    Live replay 2026-09-26: 150 of 215 `intent_obligation_class_unrealizable` findings are this
+    shape, across 154 runs whose class then reached the parts stage unresolved.
+    """
+    from kicraft.design.stage_semantics import complete_class_spellings
+
+    candidate = {
+        "obligations": [{"kind": "physical", "component_class": "smt-voltage-regulator"}],
+        "assumptions": [],
+    }
+    completed = complete_class_spellings(candidate)
+    assert completed["obligations"][0]["component_class"] == "voltage-regulator"
+    assert any(
+        "read as reviewed class 'voltage-regulator' (defaulted)" in row
+        for row in completed["assumptions"]
+    )
+    assert "intent_obligation_class_unrealizable" not in _codes("intent", completed)
+    # the input is untouched
+    assert candidate["obligations"][0]["component_class"] == "smt-voltage-regulator"
+
+
+def test_a_class_spelling_is_never_renamed_when_it_would_invert_or_distort():
+    """A negation inverts the token-superset relation; a source and a new class have other fixes."""
+    from kicraft.design.stage_semantics import complete_class_spellings
+
+    for demanded in ("no-microcontroller", "coin-cell-battery", "gps-module"):
+        candidate = {"obligations": [{"kind": "physical", "component_class": demanded}], "assumptions": []}
+        assert complete_class_spellings(candidate)["obligations"][0]["component_class"] == demanded
+
+    # The negated class is still reported: the writer must restate or drop it.
+    assert "intent_obligation_class_unrealizable" in _codes(
+        "intent", {"obligations": [{"kind": "physical", "component_class": "no-microcontroller"}],
+                   "assumptions": []}
+    )
+    # A class the library already covers, and a quantity row, are left alone.
+    covered = complete_class_spellings(
+        {"obligations": [
+            {"kind": "physical", "component_class": "pin-header"},
+            {"kind": "quantity", "subject": "pin-header", "minimum": 2},
+        ], "assumptions": []}
+    )
+    assert [row.get("component_class") or row.get("subject") for row in covered["obligations"]] == [
+        "pin-header",
+        "pin-header",
+    ]
+
+
+def test_a_count_row_follows_the_class_it_counts_when_the_spelling_is_repaired():
+    """A count bound by a shared token must not dangle when its class is renamed.
+
+    `buttons = 3` binds to `rotary-encoder-push-button` on the shared `button` token; renaming
+    the class to the reviewed `rotary-encoder` without moving the count made the count unbound
+    (replay 2026-09-26: two runs, and the count is what the brief asked for).
+    """
+    from kicraft.design.stage_semantics import complete_class_spellings
+
+    completed = complete_class_spellings(
+        {
+            "obligations": [
+                {"kind": "physical", "component_class": "rotary-encoder-push-button"},
+                {"kind": "quantity", "subject": "buttons", "minimum": 3},
+            ],
+            "assumptions": [],
+        }
+    )
+    assert completed["obligations"][0]["component_class"] == "rotary-encoder"
+    assert completed["obligations"][1]["subject"] == "rotary-encoder"
+    assert any("count 'buttons' follows part class" in row for row in completed["assumptions"])
+    assert "intent_quantity_subject_unbound" not in _codes("intent", completed)

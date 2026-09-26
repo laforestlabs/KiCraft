@@ -174,6 +174,101 @@ def complete_intent_classification(brief: str, candidate: dict) -> dict:
     return completed
 
 
+#: A class whose wording negates what it names ("no-microcontroller") still contains a reviewed
+#: class as a strict token subset, so the superset relation inverts there.
+_CLASS_NEGATION_RE = re.compile(r"\b(?:no|not|without|non|none)\b", re.IGNORECASE)
+
+
+def complete_class_spellings(candidate: dict) -> dict:
+    """Spell a physical obligation the way the reviewed library does, before diagnosis.
+
+    "A physical obligation spells a reviewed part class differently" is what the intent check
+    reports, and its own evidence already names the repair (``-> reviewed class: flash-memory``).
+    Asking the writer to make that rename costs a repair round, and on 154 archived runs the
+    class then reached the parts stage unresolved. The rename is deterministic -- the reviewed
+    class is a strict subset of the demanded class's tokens and has a reviewed carrier -- and it
+    is recorded as a defaulted assumption, so the operator sees the reading.
+
+    Deliberately skipped, because the rename would invert or distort the demand:
+
+    * a negated class (``no-microcontroller``): the token-superset relation inverts there;
+    * a class that is not a part at all, or that names the off-board power source itself: those
+      have their own repairs (record it as a constraint; demand the mate class) which only the
+      writer can choose;
+    * a variant whose reviewed class has no carrier: renaming onto a second dead class is worse
+      than the honest failure.
+    """
+    from kicraft.design.part_identity import (
+        class_is_not_a_part,
+        off_board_source_class,
+        realizable_physical_features,
+        reviewed_class_variants,
+    )
+
+    obligations = candidate.get("obligations") or []
+    renamed: list[tuple[int, str, str]] = []
+    for index, row in enumerate(obligations):
+        if not isinstance(row, dict) or row.get("kind") != "physical":
+            continue
+        demanded = str(row.get("component_class") or "").strip()
+        if not demanded or realizable_physical_features(demanded):
+            continue
+        if _CLASS_NEGATION_RE.search(demanded.replace("-", " ").replace("_", " ")):
+            continue
+        if class_is_not_a_part(demanded) or off_board_source_class(demanded):
+            continue
+        target = next(
+            (
+                name
+                for name in reviewed_class_variants(demanded)
+                if realizable_physical_features(name)
+            ),
+            None,
+        )
+        if target is not None:
+            renamed.append((index, demanded, target))
+    if not renamed:
+        return candidate
+
+    completed = copy.deepcopy(candidate)
+    completed["obligations"] = list(obligations)
+    notes: list[str] = []
+    for index, demanded, target in renamed:
+        completed["obligations"][index] = {
+            **completed["obligations"][index],
+            "component_class": target,
+        }
+        notes.append(f"part class {demanded!r} read as reviewed class {target!r} (defaulted)")
+    # A count row that bound the old spelling must follow it. `buttons = 3` binds to
+    # `rotary-encoder-push-button` on the shared `button` token; leaving the subject behind would
+    # make the count dangle the moment the class is renamed, which is a repair round bought for
+    # nothing (replay 2026-09-26: two runs).
+    from kicraft.design.part_identity import quantity_subject_binds
+
+    for index, row in enumerate(obligations):
+        if not isinstance(row, dict) or row.get("kind") != "quantity":
+            continue
+        subject = str(row.get("subject") or "")
+        matches = [
+            (demanded, target)
+            for _index, demanded, target in renamed
+            if subject and quantity_subject_binds(subject, demanded)
+        ]
+        if len(matches) != 1:
+            continue
+        demanded, target = matches[0]
+        completed["obligations"][index] = {**completed["obligations"][index], "subject": target}
+        notes.append(
+            f"count {subject!r} follows part class {demanded!r} read as {target!r} (defaulted)"
+        )
+    assumptions = [str(item) for item in completed.get("assumptions") or []]
+    completed["assumptions"] = [
+        *assumptions,
+        *[note for note in notes if note not in assumptions],
+    ]
+    return completed
+
+
 #: The brief's spelled-out layer counts. "four-layer stack-up" and "4 layers" both read here;
 #: the generator's own trailing sentences use the first spelling.
 _STACKUP_COUNT_WORDS = {

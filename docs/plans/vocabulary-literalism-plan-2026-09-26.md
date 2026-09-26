@@ -272,7 +272,7 @@ Three more, found by reading the residual that batch 1 left:
 | `functional_spec_partial_ground_flow` | `category == "mechanical"` blocks (mounting holes) were required to have a ground return; they draw no current and own none | 279 → **262** | 65 → **64** |
 | — | an attempted third rule, "a sheet with no requirements proves nothing", was **reverted**: it broke two deliberate invariants (`GND` net and a requirements-free distribution sheet must still be refused). The writer's own verb (`implements`) closes that case instead, and the two pinned tests pass unchanged | — | — |
 
-Cumulative: total firings 1882 → **1352**, on shipped boards 278 → **158**. Full suite 4638 passed.
+Cumulative: total firings 1882 → **1352**, on shipped boards 278 → **158**. Full suite 4643 passed.
 
 ### Batch 3
 
@@ -282,6 +282,28 @@ Cumulative: total firings 1882 → **1352**, on shipped boards 278 → **158**. 
 | `functional_spec_external_load_power_assumed` | the rule has a `motor\|heater` branch but its "the brief assigned this duty" vocabulary only offered LED/display terms, so a brief that explicitly powers its motors could never discharge it (latent; the corpus's motor briefs do not state the duty, so the count barely moved — the false-refusal path is gone and pinned by a test) | 56 → **54** | 8 → 8 |
 
 Cumulative: total firings 1882 → **1328**, on shipped boards 278 → **147**.
+
+### Batch 4 — the deterministic repair the check was asking for
+
+`intent_obligation_class_unrealizable` (215 findings across 154 runs, none on a shipped board) is
+three shapes, and its own evidence already names the repair for two of them ("the reviewed name is
+the repair", "the board carries the mate"). Nothing performed that repair, so the class was
+committed, and the parts stage then could not resolve it — the runs failed downstream.
+
+`complete_class_spellings` now makes the rename the writer was being asked to make, before the
+decider and the checks, recorded as a defaulted assumption. Guards, each with a test: a negated
+class (`no-microcontroller` — the token-superset relation inverts), a class that is not a part, an
+off-board source class (those have their own repairs), and a variant with no reviewed carrier.
+
+| | firings |
+|---|---|
+| `intent_obligation_class_unrealizable` | 215 → **65** (exactly the guarded residue: 36 not-a-part, 26 source, 3 negation) |
+| `intent_quantity_subject_unbound` | 222 → **220** (see below) |
+
+The first cut **regressed** `intent_quantity_subject_unbound` by 2: a count bound by a shared token
+(`buttons = 3` ↔ `rotary-encoder-push-button`) stopped binding the moment its class was renamed. A
+count row now follows its class, which is why the number ends 2 *better* than before rather than 2
+worse. Total firings 1328 → **1176**.
 
 ### The three live boards are clean
 
@@ -391,8 +413,10 @@ batch 3):
    and a hand label agree that the class already exists (see §10).
 4. `functional_spec_external_load_power_assumed` (8): now a *true* disclosure finding — the spec
    assigned itself a power duty without recording it. Leave it; the remedy is one assumption line.
-5. `intent_obligation_class_unrealizable` (215 total, 0 shipped): confirm the research fallback
-   fires for each and record it, rather than relaxing the check.
+5. ~~`intent_obligation_class_unrealizable`~~: **done in batch 4** — the deterministic rename the
+   check asks for is now performed, with guards. The residual 65 are the not-a-part and
+   off-board-source shapes, whose repair only the writer can choose; add a mate-class table
+   (`battery`/`cell` -> `battery-connector`/`coin-cell-holder`) if the owner wants those done too.
 6. Screen the other ~400 regex sites (`design/synthesis/validation.py` is denser than
    `stage_semantics.py`) with the same harness before picking the next batch.
 

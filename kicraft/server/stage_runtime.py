@@ -22,6 +22,7 @@ from kicraft.design.stage_reference import (
 from kicraft.design.stage_semantics import (
     DETECTOR_VERSION,
     EXTERNAL_LOAD_CURRENT_CODE,
+    complete_class_spellings,
     complete_intent_classification,
     complete_over_rated_supply,
     complete_unavailable_part_classes,
@@ -1479,6 +1480,10 @@ def _normalize_candidate_for_diagnostics(
     if stage == "intent":
         candidate = complete_intent_classification(brief, candidate)
         candidate = complete_unstated_power_input(brief, candidate)
+        # A class the writer spelled longer than the reviewed name is renamed here, before the
+        # decider and the checks: the reviewed spelling is what the parts stage can resolve, and
+        # the rename is recorded as a defaulted assumption.
+        candidate = complete_class_spellings(candidate)
         candidate["project_stem"] = normalize_project_stem(candidate.get("project_stem", ""))
         if decider is not None:
             # An intent class the reviewed library cannot read and a count whose subject names
