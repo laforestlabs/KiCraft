@@ -18,7 +18,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 from kicraft.design.models import (
     GND_NET_PATTERNS,
@@ -3347,6 +3347,60 @@ def _part_implements_physical_class(part, reviewed_record, component_class: str)
     )
 
 
+def _declared_pin_reaches_port_net(
+    *,
+    nets: Mapping[str, Mapping[str, str]],
+    info: Mapping[str, Mapping[str, dict]],
+    own_parts: Mapping[str, object],
+    reviewed: Mapping[str, object],
+    start_net: str | None,
+    target_net: str,
+    max_parts: int = 3,
+) -> bool:
+    """Whether a declared pin sits on the drive path to its port's net, past a series element.
+
+    A series element between the pin and the port is *the same connection*: a power LED driven
+    from a rail is wired rail → current-limiting resistor → anode → cathode → return, and whether
+    the resistor sits before or after the LED changes nothing about the circuit or about the
+    claim that this part's pin is driven from that rail. Comparing net names alone called that
+    design a defect (owner, 2026-09-26: *"you could easily satisfy that if you wanted by moving
+    the series resistor to after the LED but it doesnt matter … our system of checks … is erroring
+    on a valid design over semantics"*).
+
+    Only the requirement's **own** two-terminal parts count (`own_parts`: the parts it owns, its
+    recipe's refs, or the same work unit as its interface part), so a claim wired to an unrelated
+    net with no path of its own still fails.
+    """
+    if not start_net or not target_net:
+        return False
+    if start_net == target_net:
+        return True
+    edges: dict[str, set[str]] = {}
+    for ref, part in own_parts.items():
+        record = reviewed.get(ref)
+        pins = sorted(str(number) for number in (info.get(ref) or {}))
+        if record is None or len(getattr(record, "contacts", ()) or ()) != 2 or len(pins) != 2:
+            continue  # only a reviewed two-terminal part carries a series connection
+        wired = [nets.get(ref, {}).get(pin) for pin in pins]
+        if not all(wired) or wired[0] == wired[1]:
+            continue
+        edges.setdefault(str(wired[0]), set()).add(str(wired[1]))
+        edges.setdefault(str(wired[1]), set()).add(str(wired[0]))
+    seen = {start_net}
+    frontier = [(start_net, 0)]
+    while frontier:
+        net, used = frontier.pop(0)
+        if used >= max_parts:
+            continue
+        for nxt in edges.get(net, ()):
+            if nxt == target_net:
+                return True
+            if nxt not in seen:
+                seen.add(nxt)
+                frontier.append((nxt, used + 1))
+    return False
+
+
 def check_requirement_physical_realization(
     architecture, bom, *, declared_interface_scope: str = "all"
 ) -> CheckResult:
@@ -3509,6 +3563,32 @@ def check_requirement_physical_realization(
                 for part in interface_parts
             }
             if expected_net in found.values():
+                continue
+            # The claim is about the *connection*, not about which side of a series element the
+            # pin happens to sit on: accept a declared pin that reaches the port's net through
+            # this requirement's own parts. The interface part itself is one of them -- a power
+            # LED is the load between its two pins, with the current-limiting resistor on either
+            # side of it.
+            units = {getattr(part, "resolution_id", None) for part in interface_parts} - {None}
+            own_parts = {
+                part.ref: part
+                for part in bom.parts
+                if part.ref in {candidate.ref for candidate in interface_parts}
+                or part.ref in recipe_refs_by_requirement.get(requirement.id, set())
+                or (units and getattr(part, "resolution_id", None) in units)
+                or str(getattr(part, "lowering_requirement_id", "") or "") == requirement.id
+            }
+            if any(
+                _declared_pin_reaches_port_net(
+                    nets=nets,
+                    info=info,
+                    own_parts=own_parts,
+                    reviewed=reviewed,
+                    start_net=pin_net,
+                    target_net=expected_net,
+                )
+                for pin_net in found.values()
+            ):
                 continue
             if len(found) == 1:
                 (part_ref, actual_net) = next(iter(found.items()))

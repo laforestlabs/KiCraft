@@ -45,6 +45,8 @@ Per design step, in order, with the owner watching:
 ## 3. Ground rules the owner set
 
 - Plain language; concrete examples; no internal jargon in status reports.
+- **Checks judge intent, not spelling.** A check must ask what the design *is* — is this pin on the drive path to that rail, does this count hold — not whether the net, word or route matches the one the check happened to expect. A valid design refused over semantics costs a repair round and teaches the model to satisfy the checker instead of the circuit (owner, 2026-09-26).
+- **The first pass should usually be valid.** Repair rounds are a safety net, never the mechanism: shape the design right where it is shaped, and let checks confirm it rather than correct it into existence.
 - The seed reproduces the sentence, not the design: expect variation between drafts of the
   same brief, and never treat draft-to-draft differences as progress or regressions by
   themselves.
@@ -97,7 +99,7 @@ Per design step, in order, with the owner watching:
 | 26 | **A part that is real but out of stock blocked the board.** §9.26 refused a commit for any part whose stock had run dry in either inventory, so a board whose brief names a part that is temporarily unbuyable could not be built at all — no matter that the design was right. | **changed on the owner's call 2026-09-26** (`P8` onward): out of stock is now a *recorded decision*, never a refusal. A part the brief names **by its own order code** is kept (the owner may hold stock or have a second source); a person watching is asked whether to build with it or take an in-stock variation, and an unattended run keeps it. A part the *pipeline* chose for a class the brief names is swapped for an in-stock carrier of the **same family and package**, so no pin or wire moves; a different package is named, never applied silently. The decision, the reading and a substitution ledger entry land on the BOM. Verified live: the seed-43 parts stage saved with the CH32V003 kept and the shortfall recorded, and the run went on to wiring. |
 | 27 | **§9.39 could not see a curated recipe's own conversion.** The transfer check read only reviewed *records*' `power_transfer` mapping, and a converter realized by a curated recipe — the sanctioned way to build one — has no record, so a correct AMS1117 board was refused with "no reviewed source-to-load transfer from 'VIN_PROTECTED' to '+3V3'". | **fixed + tested 2026-09-26** (`P9`): the check now adds the recipe's own declared input→output path (its `Port` definitions, bound through the requirement's ports) before walking the transfer graph. |
 | 28 | **§9.42 could not see a vendored part with no MPN** — twice over: its declared-interface half required a literal MPN, and then compared the requirement's `exact_part` against that absent MPN. A part the pipeline had just proven was reported as "needs exactly one identity-matched BOM component", hiding the real defect. | **fixed + tested 2026-09-26** (`P10`): a part is identified by its MPN *or* its resolved reviewed identity (the symbol/footprint pair), so the complaint is now the real one — "expected '+3V3' on declared pin selector '1' of D1, found 'GND'". |
-| 29 | **An indicator whose declared pin cannot sit on the rail it is bound to.** The architecture names the power LED's `drive` port as the 3.3 V rail and its declared pin as the LED's cathode; the correct wiring grounds that pin and reaches the LED through its series resistor, so no wiring can satisfy the claim and the wiring stage may not reopen an architecture claim. | **open — owner's call** (`P11`). Either realize a rail-driven indicator with the reviewed `status-led` builder (its series element and pin roles are then the builder's business) or let the declared-interface check follow one series element, as §9.41 already does for a load's own series parts. |
+| 29 | **An indicator whose declared pin cannot sit on the rail it is bound to** — the architecture names the power LED's `drive` port as the 3.3 V rail and its declared pin as the LED's cathode, while the correct wiring grounds that pin and reaches the LED through its series resistor. The check compared **net names**, so it called a valid circuit a defect. Owner, 2026-09-26: *"you could easily satisfy that if you wanted by moving the series resistor to after the LED but it doesnt matter … our system of checks seems to have gotten too wound up tight and restrictive that it is erroring on a valid design over semantics."* | **fixed + tested 2026-09-26** (`P11`): the declared-interface half now asks whether the declared pin is on the **drive path** — the port's net reached through the requirement's own reviewed two-terminal parts (its interface part and its series element) — instead of demanding the pin sit literally on the port's net. A pin wired to an unrelated net with no path of its own is still refused. No design change, no re-run: the committed architecture and the existing wiring save as they are. |
 
 ## 6. Making a missing part (the owner's directive, in mechanics)
 
@@ -365,12 +367,42 @@ reporting it as a missing component instead of its real defect (`P10`). The thir
 the power LED's return went nowhere. The repaired wiring is electrically right — cathode to ground,
 anode through its 249 ohm resistor to the rail — and every other gate passes.
 
-**Where it stops** (`P11`): the architecture says the LED's `drive` port is the 3.3 V rail and its
-declared pin is the LED's *cathode*, which the correct wiring grounds. No wiring can satisfy that
-claim, and the wiring stage may not reopen an architecture claim. The library's own answer for this
-shape is the reviewed `status-led` builder, which owns the LED *and* its series element; naming the
-bare class instead is what left a claim the design cannot honour — the same family as the previous
-session's LED finding. That choice is the owner's.
+**The check that was wrong, and why fixing it was the right trade** (`P11`). The wiring was refused
+for one more thing: §9.42's declared-interface half compared **net names** — "does the declared pin
+sit on `+3V3`?" — and the LED's declared pin is its cathode, which the correct wiring grounds (the
+rail reaches the LED *through* its 249 ohm resistor). The circuit was right; the question was wrong.
+The owner's call (2026-09-26) was that this is over-literal:
+
+> *"is it that the architecture stage made a requirement that the status led is on 3.3v rail? i mean
+> you could easily satisfy that if you wanted by moving the series resistor to after the LED but it
+> doesnt matter. i think the point here is that our system of checks seems to have gotten too wound
+> up tight and restrictive that it is erroring on a valid design over semantics. i dont want to pick
+> something that caused stages to rerun, its a waste of money and time. we need to design this so it
+> makes a valid design in one shot the first time through usually. retries are ok to avoid failures
+> but they shouldnt be the foundation of kicraft."*
+
+So the check now asks the question that matters: **is the declared pin on the drive path to the
+port's net** — reachable through this requirement's own reviewed two-terminal parts (its interface
+part and its series element), not necessarily adjacent to it. Only the requirement's own parts
+count (its recipe/lowerer refs, the parts from the same work unit), so a claim wired to an unrelated
+net with no path of its own is still refused; the case is pinned from both sides in
+`tests/test_electrical_invariants.py`. The committed design saved with **no change and no re-run**,
+and the whole board then committed: all five stages.
+
+The rejected alternative was to re-name the LED requirement's family to the reviewed `status-led`
+builder so the pin roles become the builder's business. It is the library's own shape and it would
+have worked — but it means re-running three stages (~$0.02 and minutes) to satisfy a checker about a
+circuit that was already correct, which is exactly the trade the owner ruled out.
+
+**The run finished.** All five stages committed and the deterministic build exited 0:
+**BUILD COMPLETE CH32V003_DEV_BOARD** — 0 shorts, 0 unconnected, 166 traces, 12 vias, 15/15
+components, and a full fab package (gerbers, drill, CPL, BOM, STEP, 3D render). The MCU on that
+board is the order code that is out of stock at retail, kept deliberately and recorded on the BOM —
+which is the whole point of §11's rule: the board got made.
+
+The wiring stage's first draft had one genuine defect (the LED's return went nowhere) and needed one
+repair round; everything else that refused it was a check reading names instead of intent, and those
+are now fixed rather than worked around.
 
 **Cheaper than the failures it replaced:** the whole run cost **$0.035** of its $1.00 cap, and the
 two pipeline bugs it exposed would otherwise have refused *every* board whose converter is a curated

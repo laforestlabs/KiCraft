@@ -557,6 +557,85 @@ def test_a_bundle_part_owns_a_declared_interface(monkeypatch):
     assert "identity-matched" not in result.offenders[0]
 
 
+def test_a_declared_pin_on_the_drive_path_past_a_series_element_is_satisfied(monkeypatch):
+    """A rail-driven indicator: the pin is driven from the rail *through* its resistor.
+
+    Live seed-43 run (2026-09-26): the architecture declares the power LED's `drive` port on the
+    3.3 V rail with pin 1 as its declared contact; the correct wiring is rail -> 249 ohm resistor
+    -> anode (pin 2) -> cathode (pin 1) -> ground. Comparing net names alone called that a defect
+    ("expected '+3V3' on declared pin selector '1' of D1, found 'GND'") although the circuit is
+    exactly right -- owner: *"you could easily satisfy that if you wanted by moving the series
+    resistor to after the LED but it doesnt matter … our system of checks … is erroring on a valid
+    design over semantics"*.
+    """
+    from types import SimpleNamespace
+
+    led = SimpleNamespace(
+        ref="D1", value="E6C0805WWAY1UDA", mpn=None, symbol="led:L", footprint="led:LED",
+        sheet="POWER INDICATOR", resolution_id="bom-s004",
+    )
+    resistor = SimpleNamespace(
+        ref="R2", value="249", mpn="RC0805FR-07249RL", symbol="Device:R",
+        footprint="Resistor_SMD:R_0608Metric", sheet="POWER INDICATOR", resolution_id="bom-s004",
+    )
+    records = {
+        "D1": SimpleNamespace(identity="warm-white-led", family="warm-white-led",
+                              physical_features=frozenset({"warm-white-led"}), contacts=("1", "2")),
+        "R2": SimpleNamespace(identity="chip-resistor", family="chip-resistor",
+                              physical_features=frozenset({"chip-resistor"}), contacts=("1", "2")),
+    }
+    monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda part: records[part.ref])
+    monkeypatch.setattr(
+        validation,
+        "_pin_info_by_ref",
+        lambda _bom: ({"D1": {"1": {"name": "C"}, "2": {"name": "A"}},
+                       "R2": {"1": {"name": "1"}, "2": {"name": "2"}}}, {}),
+    )
+    requirement = SimpleNamespace(
+        id="power_led", sheet="POWER INDICATOR", role="user_io", family="warm-white-led",
+        # Named, exactly as the architecture names it: the requirement's interface is the LED,
+        # not every part on its sheet -- without this the series resistor reads as a second
+        # declared interface.
+        exact_part="warm-white-led",
+        obligations=[],
+        declared_interface=SimpleNamespace(
+            ports=[SimpleNamespace(key="drive", pin="1", pin_selector=None, pin_name=None)]
+        ),
+        ports={"drive": "+3V3"},
+    )
+    architecture = SimpleNamespace(requirements=[requirement], power_nets=["+3V3", "GND"])
+
+    def bom_with(*connections):
+        return SimpleNamespace(
+            parts=[led, resistor], connections=list(connections), recipe_ownership=[]
+        )
+
+    # The LED lit through its resistor: ground -> cathode, anode -> resistor -> rail.
+    lit = bom_with(
+        SimpleNamespace(net_name="+3V3", endpoints=[SimpleNamespace(ref="R2", pin="1")]),
+        SimpleNamespace(
+            net_name="LED_A",
+            endpoints=[SimpleNamespace(ref="R2", pin="2"), SimpleNamespace(ref="D1", pin="2")],
+        ),
+        SimpleNamespace(net_name="GND", endpoints=[SimpleNamespace(ref="D1", pin="1")]),
+    )
+    assert validation.check_requirement_physical_realization(
+        architecture, lit, declared_interface_scope="model_owned"
+    ).ok
+
+    # A declared pin with no path of its own to the port's net still fails.
+    wrong = bom_with(
+        SimpleNamespace(net_name="+3V3", endpoints=[SimpleNamespace(ref="R2", pin="1")]),
+        SimpleNamespace(net_name="LED_A", endpoints=[SimpleNamespace(ref="R2", pin="2")]),
+        SimpleNamespace(net_name="RESET_N", endpoints=[SimpleNamespace(ref="D1", pin="2")]),
+    )
+    refused = validation.check_requirement_physical_realization(
+        architecture, wrong, declared_interface_scope="model_owned"
+    )
+    assert not refused.ok
+    assert "E_DECLARED_INTERFACE" in refused.offenders[0]
+
+
 def test_new_part_category_is_realized_by_a_resolved_part(monkeypatch):
     """A class the reviewed library has never covered is proven by a real resolved part.
 
