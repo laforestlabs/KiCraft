@@ -407,3 +407,21 @@ are now fixed rather than worked around.
 **Cheaper than the failures it replaced:** the whole run cost **$0.035** of its $1.00 cap, and the
 two pipeline bugs it exposed would otherwise have refused *every* board whose converter is a curated
 recipe and every board with a vendored part in a declared interface.
+
+## 12. Next session: vocabulary literalism (plan written 2026-09-26)
+
+Owner's instruction, verbatim: *"yes tackle vocabulary literalism next and to me this sounds like
+exactly the type of task that Jev is built for. consider leaning on Jev to help clarify ambiguity,
+explore multiple paths, test empirically and select the best based on evidence. for now dont do any
+major implementation, i want you to write this to a plan for the next session."*
+
+The plan is **`docs/plans/vocabulary-literalism-plan-2026-09-26.md`**. It carries the verified
+inventory of the 16 places where a check decides by *words* rather than by the thing the words
+describe (V1-V16, with file:line), the rule that settles the approach (structure the fact first, ask
+the pipeline's own fields second, closed-vocabulary-with-a-fallback third, broaden a list only for a
+genuinely closed domain — and never a model call as the sole decider of validity), Jev's exact role
+(discovery and advisory labels, cached as data, with `server/draft_audit.py` and
+`server/reconciliation.py` as the precedents), the empirical method (a replay harness over
+`logs/self_eval` — 26,778 JSONs with per-stage diagnostics and repair counters — plus the 34-brief
+canary), the four acceptance criteria, and what not to do. Step 1 is the measurement harness, before
+any check is touched: the plan's whole point is to choose by evidence.
