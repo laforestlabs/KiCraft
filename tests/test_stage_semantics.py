@@ -2503,3 +2503,38 @@ def test_a_power_named_sheet_that_implements_a_device_is_not_distribution_only()
 
     distributing = _codes("architecture", architecture("Distribute the 3.3 V rail and ground."))
     assert "architecture_power_block_as_sheet" in distributing
+
+
+def test_a_relay_or_led_sheet_is_not_a_missing_ic_implementation():
+    """`driver` is the pipeline's role for relays, LED strings and transistor stages.
+
+    Live replay 2026-09-26: shipped relay-quad and LED-ring boards were asked to add a
+    U-reference for a relay (K1) and a WS2812 string (D1..D12). A sheet *titled* for an IC
+    still needs one.
+    """
+    def candidate(sheet, role, family, ref, function):
+        return {
+            "architecture": {
+                "sheets": [{"name": sheet, "stem": sheet.replace(" ", "_"), "function": function}],
+                "requirements": [
+                    {"id": "r1", "sheet": sheet, "role": role, "family": family}
+                ],
+            },
+            "parts": [{"ref": ref, "sheet": sheet}],
+        }
+
+    def codes(payload):
+        return _codes("bom", {"parts": payload["parts"]}, {"architecture": payload["architecture"]})
+
+    assert "bom_architecture_role_unsupported" not in codes(
+        candidate("RELAY CHANNEL 1", "driver", "relay-spdt-through-hole", "K1",
+                  "Switch the through-hole relay coil for channel 1.")
+    )
+    assert "bom_architecture_role_unsupported" not in codes(
+        candidate("LED RING", "driver", "ws2812-output", "D1",
+                  "Implement twelve addressable WS2812B LEDs in a ring.")
+    )
+    assert "bom_architecture_role_unsupported" in codes(
+        candidate("MOTOR DRIVER", "driver", "dual-dc-motor-driver", "J1",
+                  "Drive the motors.")
+    )

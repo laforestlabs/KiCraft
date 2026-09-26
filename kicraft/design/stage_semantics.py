@@ -2776,28 +2776,35 @@ def _bom(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
         r"level shifter|sensor|bridge|driver|hub)\b",
         re.I,
     )
+    # `driver` is a role the pipeline assigns to a relay, an LED string or a transistor stage --
+    # implemented by K/D/Q references, never a U. Reading it as an IC role refused shipped
+    # relay-quad and LED-ring boards whose relays and WS2812 strings are exactly what the brief
+    # asked for (replay 2026-09-26: 34 shipped boards). The sheet's own *title* keeps the word:
+    # a sheet called MOTOR DRIVER with nothing on it is still worth refusing.
+    ic_role_in_requirements = re.compile(
+        r"\b(?:controller|mcu|regulator|converter|buck|boost|amplifier|"
+        r"level shifter|sensor|bridge|hub)\b",
+        re.I,
+    )
 
-    def _own_role_text(sheet_name: str, requirements: list[dict], connector_owned: bool) -> str:
-        """What the sheet declares about itself: its own title and its typed requirements.
+    def _own_terms(sheet_name: str, requirements: list[dict], connector_owned: bool) -> set[str]:
+        """The IC roles the sheet declares about itself: its own title and its typed requirements.
 
         A physical connector may be named for the external IC it connects to, so a
         connector-owned sheet contributes no title. Prose (`function`) is deliberately absent:
         it describes an *effect* and routinely names a part that lives on another sheet.
         """
-        return " ".join(
-            [
-                "" if connector_owned else sheet_name,
-                *(
-                    re.sub(
-                        r"[-_]",
-                        " ",
-                        f"{requirement.get('role', '')} {requirement.get('family', '')}",
-                    )
-                    for requirement in requirements
-                    if requirement.get("role") != "connector"
-                ),
-            ]
-        )
+        terms: set[str] = set()
+        if not connector_owned:
+            terms.update(match.lower() for match in ic_role.findall(sheet_name))
+        for requirement in requirements:
+            if requirement.get("role") == "connector":
+                continue
+            text = re.sub(
+                r"[-_]", " ", f"{requirement.get('role', '')} {requirement.get('family', '')}"
+            )
+            terms.update(match.lower() for match in ic_role_in_requirements.findall(text))
+        return terms
 
     def _is_connector_owned(requirements: list[dict], sheet_parts: list[dict]) -> bool:
         return (
@@ -2823,8 +2830,9 @@ def _bom(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
         if not any(str(part.get("ref") or "").startswith("U") for part in sheet_parts):
             continue
         requirements = requirements_by_sheet.get(sheet_name, [])
-        own_text = _own_role_text(sheet_name, requirements, _is_connector_owned(requirements, sheet_parts))
-        implemented_terms.update(match.lower() for match in ic_role.findall(own_text))
+        implemented_terms |= _own_terms(
+            sheet_name, requirements, _is_connector_owned(requirements, sheet_parts)
+        )
 
     unsupported_roles: list[str] = []
     for sheet in architecture.get("sheets") or []:
@@ -2834,12 +2842,7 @@ def _bom(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
         sheet_parts = parts_by_sheet.get(sheet_name, [])
         requirements = requirements_by_sheet.get(sheet_name, [])
         connector_owned = _is_connector_owned(requirements, sheet_parts)
-        own_terms = {
-            match.lower()
-            for match in ic_role.findall(
-                _own_role_text(sheet_name, requirements, connector_owned)
-            )
-        }
+        own_terms = _own_terms(sheet_name, requirements, connector_owned)
         # Prose only counts for a role the design implements nowhere: then the sheet promises
         # an active part nothing builds ("Connector and on-board amplifier" with no U anywhere).
         prose_terms = {
