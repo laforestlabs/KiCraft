@@ -2419,3 +2419,87 @@ def test_a_crystal_block_is_functional_while_a_bare_net_block_is_not():
         "assumptions": [],
     }
     assert "functional_spec_nonfunctional_block" in _codes("functional_spec", bare_net)
+
+
+def test_ground_flow_does_not_demand_a_return_from_a_mechanical_block():
+    """A mounting-features block draws no current and owns no return.
+
+    Live replay 2026-09-26: a shipped USB-UART bridge was refused with `mounting_features` as the
+    only ungrounded block.
+    """
+    candidate = {
+        "blocks": [
+            {"name": "USB_INPUT", "category": "interface", "purpose": "USB-C receptacle"},
+            {"name": "BRIDGE", "category": "process", "purpose": "USB to UART"},
+            {"name": "MOUNTING_FEATURES", "category": "mechanical", "purpose": "Mounting holes"},
+        ],
+        "connections": [
+            {
+                "from_block": "USB_INPUT",
+                "to_block": "BRIDGE",
+                "signal_type": "ground",
+                "description": "Signal ground",
+            }
+        ],
+        "assumptions": [],
+    }
+    assert "functional_spec_partial_ground_flow" not in _codes("functional_spec", candidate)
+
+    # A functional block still in no ground connection is still refused.
+    candidate["blocks"].append(
+        {"name": "STATUS_LED", "category": "drive", "purpose": "Show activity"}
+    )
+    diagnostics = diagnose_stage(
+        "functional_spec",
+        brief="A USB to UART bridge",
+        upstream_state={},
+        candidate=candidate,
+    )
+    by_code = {item.code: item for item in diagnostics}
+    assert by_code["functional_spec_partial_ground_flow"].evidence == ["status_led"]
+
+
+def test_a_rail_named_sheet_that_regulates_is_not_a_distribution_sheet():
+    """The escape hatch must read "regulate", not only "regulator"/"regulation".
+
+    Live replay 2026-09-26: a shipped Arduino-shield board was asked to delete its POWER sheet,
+    whose function is "Accept host power rails and regulate VIN to a 3.3 V rail". A sheet that
+    only distributes a rail is still refused.
+    """
+    def architecture(function):
+        return {
+            "sheets": [{"name": "POWER", "stem": "POWER", "function": function}],
+            "requirements": [
+                {"id": "reg", "sheet": "POWER", "role": "regulator", "family": "ams1117-3v3"}
+            ],
+        }
+
+    regulating = _codes("architecture", architecture("Accept host power rails and regulate VIN "
+                                                     "to a 3.3 V rail for shield circuitry."))
+    assert "architecture_power_block_as_sheet" not in regulating
+
+    distributing = _codes("architecture", architecture("Distribute the shield 5 V rail."))
+    assert "architecture_power_block_as_sheet" in distributing
+
+
+def test_a_power_named_sheet_that_implements_a_device_is_not_distribution_only():
+    """The escape hatch must read "implements", not only connector/holder/regulator.
+
+    Live replay 2026-09-26: a shipped hex environmental sensor was asked to delete its POWER
+    INDICATOR sheet, whose function is "Implements the 3.3 V power-status LED and its series
+    current-limiting resistor." A sheet that only distributes a rail is still refused.
+    """
+    def architecture(function):
+        return {
+            "sheets": [{"name": "POWER INDICATOR", "stem": "POWER_INDICATOR", "function": function}],
+            "requirements": [],
+        }
+
+    implementing = _codes(
+        "architecture",
+        architecture("Implements the 3.3 V power-status LED and its series current-limiting resistor."),
+    )
+    assert "architecture_power_block_as_sheet" not in implementing
+
+    distributing = _codes("architecture", architecture("Distribute the 3.3 V rail and ground."))
+    assert "architecture_power_block_as_sheet" in distributing

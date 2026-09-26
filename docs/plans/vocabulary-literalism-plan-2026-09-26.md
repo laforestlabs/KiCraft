@@ -262,6 +262,18 @@ intermediate state matched nothing for "prototyping shield" and read as 0, which
 direction; the shipped regex accepts the shield and the geometry, and rejects the *purpose*
 phrase ("…header row for easy prototyping") that made the 24-pin FPC breakout record a pad field.
 
+### Batch 2 (same session, after the first deploy)
+
+Three more, found by reading the residual that batch 1 left:
+
+| check | what was wrong | firings | on shipped boards |
+|---|---|---|---|
+| `architecture_power_block_as_sheet` | the escape hatch read `regulat(?:or\|ion)?`, which cannot match **"regulate"** — so a POWER sheet that regulates VIN was refused as distribution-only. The grammar is now complete (`regulat\w*`, `convert\w*`, `suppl\w*`, …, `implement\w*`) | 65 → **33** | 10 → **1** |
+| `functional_spec_partial_ground_flow` | `category == "mechanical"` blocks (mounting holes) were required to have a ground return; they draw no current and own none | 279 → **262** | 65 → **64** |
+| — | an attempted third rule, "a sheet with no requirements proves nothing", was **reverted**: it broke two deliberate invariants (`GND` net and a requirements-free distribution sheet must still be refused). The writer's own verb (`implements`) closes that case instead, and the two pinned tests pass unchanged | — | — |
+
+Cumulative: total firings 1882 → **1352**, on shipped boards 278 → **158**. Full suite 4638 passed.
+
 ### The three live boards are clean
 
 Replaying the live sessions (not the archive) after the fixes:

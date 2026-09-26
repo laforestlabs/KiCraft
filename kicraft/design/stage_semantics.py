@@ -1015,7 +1015,12 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
             for field in ("from_block", "to_block")
         }
         expected_ground = {
-            name for name, block in blocks_by_name.items() if block.get("category") != "power"
+            name
+            for name, block in blocks_by_name.items()
+            # A `mechanical` block is a board feature (mounting holes, a logo): it draws no
+            # current and owns no return, so demanding a ground flow refused a shipped
+            # USB-UART bridge whose only "ungrounded" block was MOUNTING_FEATURES.
+            if block.get("category") not in {"power", "mechanical"}
         }
         missing_ground = sorted(expected_ground - ground_members)
         if missing_ground:
@@ -2400,8 +2405,15 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
             continue
         name = str(sheet.get("name") or "")
         function = str(sheet.get("function") or "")
+        # The escape hatch for "this rail-named sheet is actually a function" must accept every
+        # inflected form of its own words. It read `regulat(?:or|ion)?`, which cannot match
+        # "regulate", so a shipped Arduino-shield board whose POWER sheet "accept[ed] host power
+        # rails and regulate[d] VIN to a 3.3 V rail" was refused as distribution-only (replay
+        # 2026-09-26: 10 shipped boards). Same for convert/supply/input/protect/connect.
         physical_power_domain = re.search(
-            r"\b(?:ldo|buck|regulat(?:or|ion)?|convert(?:er|ing)?|supply|input|sink|controller|protection|connector|header|terminal|battery|holder)\b",
+            r"\b(?:ldo|buck|boost|flyback|regulat\w*|convert\w*|suppl\w*|input\w*|sink\w*|"
+            r"controll\w*|protect\w*|connect\w*|header\w*|terminal\w*|batter\w*|holder\w*|"
+            r"implement\w*)\b",
             f"{name} {function}",
             re.I,
         )

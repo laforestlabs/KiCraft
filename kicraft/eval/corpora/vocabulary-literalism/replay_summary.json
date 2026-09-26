@@ -9,15 +9,22 @@
     {
       "code": "functional_spec_partial_ground_flow",
       "fires_before": 589,
-      "fires_after": 279,
+      "fires_after": 262,
       "shipped_before": 115,
-      "shipped_after": 65
+      "shipped_after": 64
     },
     {
       "code": "functional_spec_premature_topology",
       "fires_before": 73,
       "fires_after": 10,
       "shipped_before": 9,
+      "shipped_after": 1
+    },
+    {
+      "code": "architecture_power_block_as_sheet",
+      "fires_before": 65,
+      "fires_after": 33,
+      "shipped_before": 10,
       "shipped_after": 1
     },
     {
@@ -35,13 +42,6 @@
       "shipped_after": 15
     },
     {
-      "code": "intent_prototyping_area_omitted",
-      "fires_before": 52,
-      "fires_after": 32,
-      "shipped_before": 14,
-      "shipped_after": 5
-    },
-    {
       "code": "functional_spec_nonfunctional_block",
       "fires_before": 86,
       "fires_after": 66,
@@ -49,52 +49,17 @@
       "shipped_after": 4
     },
     {
+      "code": "intent_prototyping_area_omitted",
+      "fires_before": 52,
+      "fires_after": 32,
+      "shipped_before": 14,
+      "shipped_after": 5
+    },
+    {
       "code": "architecture_obligation_family_mismatch",
       "fires_before": 169,
       "fires_after": 151,
       "shipped_before": 18,
-      "shipped_after": 0
-    },
-    {
-      "code": "architecture_rail_source_unspecified",
-      "fires_before": 20,
-      "fires_after": 20,
-      "shipped_before": 0,
-      "shipped_after": 0
-    },
-    {
-      "code": "functional_spec_external_load_power_assumed",
-      "fires_before": 56,
-      "fires_after": 56,
-      "shipped_before": 8,
-      "shipped_after": 8
-    },
-    {
-      "code": "architecture_power_block_as_sheet",
-      "fires_before": 65,
-      "fires_after": 65,
-      "shipped_before": 10,
-      "shipped_after": 10
-    },
-    {
-      "code": "architecture_unavailable_core_default",
-      "fires_before": 62,
-      "fires_after": 62,
-      "shipped_before": 4,
-      "shipped_after": 4
-    },
-    {
-      "code": "bom_castellation_placeholder",
-      "fires_before": 2,
-      "fires_after": 2,
-      "shipped_before": 2,
-      "shipped_after": 2
-    },
-    {
-      "code": "functional_spec_unrecorded_assumption",
-      "fires_before": 4,
-      "fires_after": 4,
-      "shipped_before": 0,
       "shipped_after": 0
     },
     {
@@ -105,16 +70,37 @@
       "shipped_after": 6
     },
     {
-      "code": "architecture_mcu_regulator_incomplete",
-      "fires_before": 14,
-      "fires_after": 14,
-      "shipped_before": 3,
-      "shipped_after": 3
+      "code": "architecture_unowned_power_support",
+      "fires_before": 2,
+      "fires_after": 2,
+      "shipped_before": 0,
+      "shipped_after": 0
     },
     {
-      "code": "intent_obligation_class_unrealizable",
-      "fires_before": 215,
-      "fires_after": 215,
+      "code": "bom_castellation_placeholder",
+      "fires_before": 2,
+      "fires_after": 2,
+      "shipped_before": 2,
+      "shipped_after": 2
+    },
+    {
+      "code": "architecture_unowned_power_conversion",
+      "fires_before": 6,
+      "fires_after": 6,
+      "shipped_before": 0,
+      "shipped_after": 0
+    },
+    {
+      "code": "architecture_rail_source_unspecified",
+      "fires_before": 20,
+      "fires_after": 20,
+      "shipped_before": 0,
+      "shipped_after": 0
+    },
+    {
+      "code": "functional_spec_unrecorded_assumption",
+      "fires_before": 4,
+      "fires_after": 4,
       "shipped_before": 0,
       "shipped_after": 0
     },
@@ -126,25 +112,18 @@
       "shipped_after": 5
     },
     {
-      "code": "architecture_external_load_current_unspecified",
-      "fires_before": 15,
-      "fires_after": 15,
+      "code": "functional_spec_external_load_power_assumed",
+      "fires_before": 56,
+      "fires_after": 56,
+      "shipped_before": 8,
+      "shipped_after": 8
+    },
+    {
+      "code": "architecture_mcu_regulator_incomplete",
+      "fires_before": 14,
+      "fires_after": 14,
       "shipped_before": 3,
       "shipped_after": 3
-    },
-    {
-      "code": "architecture_supply_exceeds_part_rating",
-      "fires_before": 7,
-      "fires_after": 7,
-      "shipped_before": 1,
-      "shipped_after": 1
-    },
-    {
-      "code": "architecture_unowned_power_support",
-      "fires_before": 2,
-      "fires_after": 2,
-      "shipped_before": 0,
-      "shipped_after": 0
     },
     {
       "code": "architecture_mcu_supply_rail_missing",
@@ -154,18 +133,39 @@
       "shipped_after": 2
     },
     {
-      "code": "architecture_unowned_power_conversion",
-      "fires_before": 6,
-      "fires_after": 6,
+      "code": "architecture_unavailable_core_default",
+      "fires_before": 62,
+      "fires_after": 62,
+      "shipped_before": 4,
+      "shipped_after": 4
+    },
+    {
+      "code": "architecture_supply_exceeds_part_rating",
+      "fires_before": 7,
+      "fires_after": 7,
+      "shipped_before": 1,
+      "shipped_after": 1
+    },
+    {
+      "code": "intent_obligation_class_unrealizable",
+      "fires_before": 215,
+      "fires_after": 215,
       "shipped_before": 0,
       "shipped_after": 0
+    },
+    {
+      "code": "architecture_external_load_current_unspecified",
+      "fires_before": 15,
+      "fires_after": 15,
+      "shipped_before": 3,
+      "shipped_after": 3
     }
   ],
   "totals": {
     "fires_before": 1882,
-    "fires_after": 1401,
+    "fires_after": 1352,
     "shipped_before": 278,
-    "shipped_after": 168
+    "shipped_after": 158
   },
   "live_boards": {
     "20260926T151624Z_CH32V003_DEV_BOARD": "clean",
@@ -335,5 +335,11 @@
         "failed": {}
       }
     }
+  },
+  "batch2": {
+    "architecture_power_block_as_sheet": "escape grammar was infection-blind (regulate did not match)",
+    "functional_spec_partial_ground_flow": "mechanical blocks are not required to have a ground return",
+    "reverted_rule": "'no requirements proves nothing' broke two deliberate invariants; reverted",
+    "full_suite": "4638 passed, 15 skipped, 1 xfailed"
   }
 }
