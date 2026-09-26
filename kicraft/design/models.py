@@ -593,7 +593,22 @@ OWNERSHIP_EXEMPT_OBLIGATION_KINDS: frozenset[str] = frozenset(
 
 _BOARD_SUBJECT_TERMS = frozenset({"board", "pcb"})
 _BOARD_DIMENSION_TERMS = frozenset(
-    {"width", "height", "length", "diameter", "radius", "perimeter", "area", "thickness"}
+    {
+        "width",
+        "height",
+        "length",
+        "diameter",
+        "radius",
+        "perimeter",
+        "area",
+        "thickness",
+        # A board's own extent said in the brief's words: "keep it under 100 x 100 mm" reaches the
+        # intent as "board maximum dimension" (live cohort 2026-09-26, seed 54), and a writer may
+        # say "board size". Both are outline geometry, not a part limit -- the board/PCB subject
+        # guard above still has to hold, so "connector dimension" never qualifies.
+        "dimension",
+        "size",
+    }
 )
 _BOARD_DIMENSION_UNITS = frozenset(
     {"mm", "cm", "m", "in", "inch", "inches", "mil", "mm2", "cm2", "in2"}

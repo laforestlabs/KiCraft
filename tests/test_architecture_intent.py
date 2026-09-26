@@ -1996,6 +1996,12 @@ def test_a_board_stackup_row_is_board_level_and_an_outline_row_still_is():
     # The original outline shape is unchanged.
     assert is_board_level_quantitative_obligation(quantitative("PCB copper thickness", "mm"))
     assert not is_board_level_quantitative_obligation(quantitative("header pitch", "inch"))
+    # Live cohort 2026-09-26, seed 54: the brief's "under 100 x 100 mm" reached the intent as
+    # "board maximum dimension" in mm, and this predicate refused it as an ownerless part limit.
+    assert is_board_level_quantitative_obligation(quantitative("board maximum dimension", "mm"))
+    assert is_board_level_quantitative_obligation(quantitative("board size", "mm"))
+    # The board/PCB subject guard still holds: a part's own dimension is not board-level.
+    assert not is_board_level_quantitative_obligation(quantitative("component dimension", "mm"))
 
 
 def test_board_fact_obligations_survive_intent_to_architecture_verbatim():
