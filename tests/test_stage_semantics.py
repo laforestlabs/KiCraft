@@ -265,7 +265,7 @@ def test_functional_spec_rejects_a_block_for_the_prototyping_pad_field():
     assert code not in codes([block("ARDUINO_HEADERS"), block("POWER_CONVERSION")])
 
 
-def test_functional_spec_rejects_hidden_topology_and_explicit_defaults():
+def test_functional_spec_flags_explicit_defaults_and_reads_no_topology_prose():
     brief = "USB C PD power configured for 5V to an ESP32-S3-WROOM-1-N16R8 with a speaker output"
     candidate = {
         "blocks": [
@@ -312,17 +312,11 @@ def test_functional_spec_rejects_hidden_topology_and_explicit_defaults():
         candidate=candidate,
     )
     by_code = {diagnostic.code: diagnostic for diagnostic in diagnostics}
-    topology_evidence = by_code["functional_spec_premature_topology"].evidence
-    assert "pwm" in topology_evidence
-    assert "dac-driven" in topology_evidence
-    assert "amplified" in topology_evidence
-    assert "64x64" in topology_evidence
-    assert "ws2812-style" in topology_evidence
-    assert "driven directly" in topology_evidence
-    assert "single-wire" in topology_evidence
-    assert "analog audio" in topology_evidence
-    assert "single data-line" in topology_evidence
-    assert "5v supply to the mcu" in topology_evidence
+    # Behavioural prose is not a technology commitment. This candidate names its technologies
+    # only in `purpose`/`description`/`assumptions`; the check reads the block names the writer
+    # undertakes to realize, so it stays silent here (replay 2026-09-26: 72 of 73 firings were on
+    # boards that shipped).
+    assert "functional_spec_premature_topology" not in by_code
     assert "functional_spec_nonfunctional_block" in by_code
     assert len(by_code["functional_spec_explicit_fact_defaulted"].evidence) == 3
     cleaned = remove_mislabeled_functional_defaults(
@@ -479,6 +473,76 @@ def test_functional_spec_requires_power_and_consistent_ground_for_drives():
     by_code = {item.code: item for item in diagnostics}
     assert by_code["functional_spec_drive_missing_power"].evidence == ["speaker"]
     assert by_code["functional_spec_partial_ground_flow"].evidence == ["speaker"]
+
+
+def _ground_flow_candidate(ground_connections):
+    return {
+        "blocks": [
+            {"name": "BNC_INPUT", "category": "interface", "purpose": "Input connector"},
+            {"name": "RC_FILTER", "category": "process", "purpose": "Adjustable low-pass"},
+            {"name": "BNC_OUTPUT", "category": "interface", "purpose": "Output connector"},
+        ],
+        "connections": [
+            {
+                "from_block": "BNC_INPUT",
+                "to_block": "RC_FILTER",
+                "signal_type": "analog",
+                "description": "Filtered input",
+            },
+            *ground_connections,
+        ],
+        "assumptions": [],
+    }
+
+
+def test_ground_flow_accepts_a_block_that_sources_the_ground_reference():
+    """A block that *originates* the ground net is grounded; it cannot also be its own sink.
+
+    The live false refusal (2026-09-25 passive RC filter, which shipped): the spec listed
+    `BNC_INPUT -> BNC_OUTPUT` and `BNC_INPUT -> RC_FILTER` as ground and recorded the common
+    ground as an assumption. Reading only the `to_block` endpoints made `BNC_INPUT` the one
+    block with no ground flow.
+    """
+    candidate = _ground_flow_candidate(
+        [
+            {
+                "from_block": "BNC_INPUT",
+                "to_block": "BNC_OUTPUT",
+                "signal_type": "ground",
+                "description": "Common ground",
+            },
+            {
+                "from_block": "BNC_INPUT",
+                "to_block": "RC_FILTER",
+                "signal_type": "ground",
+                "description": "Filter ground",
+            },
+        ]
+    )
+    codes = _codes("functional_spec", candidate)
+    assert "functional_spec_partial_ground_flow" not in codes
+
+
+def test_ground_flow_still_refuses_a_block_with_no_ground_participation():
+    """The defect the check exists for: a functional block in no ground connection at all."""
+    candidate = _ground_flow_candidate(
+        [
+            {
+                "from_block": "BNC_INPUT",
+                "to_block": "RC_FILTER",
+                "signal_type": "ground",
+                "description": "Filter ground",
+            }
+        ]
+    )
+    diagnostics = diagnose_stage(
+        "functional_spec",
+        brief="A passive RC low-pass filter breakout with two BNC connectors",
+        upstream_state={},
+        candidate=candidate,
+    )
+    by_code = {item.code: item for item in diagnostics}
+    assert by_code["functional_spec_partial_ground_flow"].evidence == ["bnc_output"]
 
 
 def test_functional_spec_names_a_self_loop_connection():
@@ -2173,3 +2237,185 @@ def test_a_rail_named_sheet_that_holds_a_circuit_is_not_a_distribution_sheet():
         for evidence in diagnostic.evidence
     ]
     assert flagged == ["+3v3"]
+
+
+def test_functional_spec_reads_no_topology_from_behaviour_prose():
+    """The two live false alarms: prose that describes the world, not a committed technology.
+
+    A passive crossover fed by an external amplifier ("Accept the amplifier input ..."), and a
+    buffer describing its signal domain ("analog audio"). Both shipped; both were refused by the
+    whole-candidate scan (replay 2026-09-26).
+    """
+    crossover = {
+        "blocks": [
+            {
+                "name": "INPUT_TERMINAL",
+                "category": "interface",
+                "purpose": "Accept the amplifier input through positive and negative "
+                "binding-post terminals.",
+            }
+        ],
+        "connections": [
+            {
+                "from_block": "INPUT_TERMINAL",
+                "to_block": "INPUT_TERMINAL",
+                "signal_type": "analog",
+                "description": "Amplifier input audio signal to the crossover branches",
+            }
+        ],
+        "assumptions": ["The amplifier is external to the board and is not included (defaulted)."],
+    }
+    codes = _codes("functional_spec", crossover)
+    assert "functional_spec_premature_topology" not in codes
+
+    buffer = {
+        "blocks": [
+            {
+                "name": "POWER_INPUT",
+                "category": "power",
+                "purpose": "Accepts the external supply connections required by the analog audio "
+                "circuitry.",
+            }
+        ],
+        "connections": [],
+        "assumptions": ["Single-supply analog audio operation assumed (defaulted)."],
+    }
+    assert "functional_spec_premature_topology" not in _codes("functional_spec", buffer)
+
+
+def test_functional_spec_rejects_a_technology_committed_by_a_block_name():
+    """The defect the check still owes: the writer undertakes to build a technology unasked."""
+    candidate = {
+        "blocks": [
+            {"name": "LDO_3V3", "category": "power", "purpose": "Regulates 5 V to 3.3 V."},
+            {"name": "MCU", "category": "process", "purpose": "Runs the firmware."},
+        ],
+        "connections": [],
+        "assumptions": [],
+    }
+    diagnostics = diagnose_stage(
+        "functional_spec",
+        brief="A 5 V USB input to a 3.3 V ESP32-S3 board.",
+        upstream_state={},
+        candidate=candidate,
+    )
+    by_code = {item.code: item for item in diagnostics}
+    assert by_code["functional_spec_premature_topology"].evidence == ["ldo"]
+
+
+def test_prototyping_area_is_only_recorded_when_the_brief_asks_for_the_field():
+    """A purpose mention is not a request for a pad field; a named field or its geometry is."""
+    from kicraft.design.synthesis.board_features import prototyping_area_requested
+
+    assert prototyping_area_requested("…a header row for easy prototyping.") is None
+    assert prototyping_area_requested("A prototyping shield with stacking headers.") == (
+        "prototyping shield"
+    )
+    assert prototyping_area_requested("A prototyping area for soldering.") == "prototyping area"
+    assert prototyping_area_requested("A grid of 2.54 mm holes for soldering.") == (
+        "grid of 2.54 mm holes"
+    )
+    assert prototyping_area_requested("A perfboard section.") == "perfboard"
+
+
+def test_a_sheet_that_only_references_another_sheets_ic_is_not_role_unsupported(tmp_path):
+    """Live seed-43 replay: naming the MCU on a connector sheet is not claiming to host it.
+
+    The shipped CH32V003 board was refused for its `UART INTERFACE` and `RESET INPUT` sheets,
+    whose prose names the MCU that lives (with U2) on the MCU sheet.
+    """
+    architecture = {
+        "sheets": [
+            {"name": "MCU", "function": "Provide CH32V003 processing, UART and reset input."},
+            {
+                "name": "UART INTERFACE",
+                "function": "Expose the MCU UART transmit and receive signals with ground on a header.",
+            },
+            {
+                "name": "RESET INPUT",
+                "function": "Provide a momentary pushbutton that pulls the MCU reset input low.",
+            },
+        ],
+        "requirements": [
+            {"id": "mcu", "sheet": "MCU", "role": "mcu_core", "family": "ch32v003"},
+            {
+                "id": "uart_header",
+                "sheet": "UART INTERFACE",
+                "role": "connector",
+                "family": "pin-header",
+                "ports": {"tx": "UART_TX", "rx": "UART_RX", "gnd": "GND"},
+            },
+            {"id": "reset", "sheet": "RESET INPUT", "role": "user_io", "family": "switch-input"},
+        ],
+    }
+    parts = [
+        {"ref": "U2", "sheet": "MCU"},
+        {"ref": "J3", "sheet": "UART INTERFACE"},
+        {"ref": "SW1", "sheet": "RESET INPUT"},
+    ]
+    assert "bom_architecture_role_unsupported" not in _codes(
+        "bom", {"parts": parts}, {"architecture": architecture}
+    )
+
+
+def test_the_adjustable_rc_lowerer_that_builds_the_trimmer_is_not_a_family_mismatch():
+    """`adjustable-rc-lowpass` emits the reviewed 3296W trimmer, so it realizes the class.
+
+    Live replay 2026-09-26: the shipped passive RC low-pass breakout was refused because its
+    `rc_filter` requirement claimed `trim-potentiometer` under an `adjustable-rc-lowpass` family.
+    The lowerer's own graph contains the reviewed 3296W-1-103LF, whose feature is exactly that
+    class. A family that does not build the class is still refused.
+    """
+    from kicraft.design.stage_semantics import _architecture_obligation_family_mismatch
+
+    def candidate(family: str) -> dict:
+        return {
+            "requirements": [
+                {
+                    "id": "rc_filter",
+                    "sheet": "RC FILTER",
+                    "role": "analog_block",
+                    "family": family,
+                    "exact_part": None,
+                    "parameters": {},
+                    "ports": {},
+                    "obligations": [
+                        {
+                            "kind": "physical",
+                            "original_obligation_id": "trim",
+                            "component_class": "trim-potentiometer",
+                        }
+                    ],
+                }
+            ]
+        }
+
+    assert _architecture_obligation_family_mismatch(candidate("adjustable-rc-lowpass")) == []
+    assert [
+        row.code for row in _architecture_obligation_family_mismatch(candidate("pin-header"))
+    ] == ["architecture_obligation_family_mismatch"]
+
+
+def test_a_crystal_block_is_functional_while_a_bare_net_block_is_not():
+    """A brief asks for a crystal; a bare net is not a functional block.
+
+    The shipped STM32 dev board was refused because `crystal` sat in a list of mechanical board
+    features (replay 2026-09-26). `power_distribution` stays on the list.
+    """
+    crystal = {
+        "blocks": [
+            {"name": "CRYSTAL", "category": "process", "purpose": "Provide the 8 MHz MCU clock."}
+        ],
+        "connections": [],
+        "assumptions": [],
+    }
+    assert "functional_spec_nonfunctional_block" not in _codes("functional_spec", crystal)
+
+    bare_net = {
+        "blocks": [
+            {"name": "POWER_DISTRIBUTION", "category": "power", "purpose": "Distributes the rail."}
+        ],
+        "connections": [],
+        "assumptions": [],
+    }
+    assert "functional_spec_nonfunctional_block" in _codes("functional_spec", bare_net)

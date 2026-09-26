@@ -1,0 +1,20 @@
+{
+  "run": "logs/self_eval/canary_20260912T163738Z/run_10_rp2040-min",
+  "stage": "functional_spec",
+  "code": "functional_spec_partial_ground_flow",
+  "question": "This functional specification lists ground flows for some functional blocks but not for: clock_source, qspi_flash, rp2040_core, usb_c_interface. Read the spec's own connections and assumptions. Does the design still provide a ground return for each of those blocks (for example through a shared ground net the connections do not enumerate per block), or is a ground return genuinely missing?",
+  "kind": "choice",
+  "options": [
+    "a ground return is provided elsewhere in the design",
+    "a ground return for that block is genuinely missing",
+    "the candidate does not say"
+  ],
+  "value": "a ground return is provided elsewhere in the design",
+  "confidence": 0.37,
+  "probabilities": {
+    "a ground return for that block is genuinely missing": 0.18,
+    "the candidate does not say": 0.23,
+    "a ground return is provided elsewhere in the design": 0.59
+  },
+  "model": "typesafe/jev-1.13"
+}

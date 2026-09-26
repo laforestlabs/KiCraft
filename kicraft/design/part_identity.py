@@ -3403,6 +3403,13 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     "load-switch": frozenset({"highside-switch"}),
     "selector-switch": frozenset({"three-position-selector", "sp3t-selector"}),
     "audio-jack-3p5mm": frozenset({"audio-jack-3-5mm"}),
+    # The brief says "four 3.5 mm jacks"; the intent carries the class as `audio-jack-3-5mm`.
+    # Without these two keys the count row cannot bind and the intent stage refuses a count it
+    # can enforce, on a board that shipped (replay 2026-09-26: the top fully-committed
+    # `intent_quantity_subject_unbound` group; Jev labelled 11 of 12 "already carries that class
+    # under a different spelling" at 0.85-0.93).
+    "3-5-mm-audio-jack": frozenset({"audio-jack-3-5mm"}),
+    "audio-jack": frozenset({"audio-jack-3-5mm"}),
     "temperature-humidity-pressure-sensor": frozenset({"environmental-sensor", "i2c-sensor"}),
 }
 
@@ -3433,6 +3440,13 @@ _TRUSTED_LOWERER_PHYSICAL_WITNESSES = frozenset(
         # `pushbutton` -- and spent its repair rounds asking for that carrier, while the parts
         # stage then bound exactly this lowerer's SW1 and the board was right.
         ("switch-input@1", "pushbutton"),
+        # The adjustable RC filter builds its own trimmer: `_adjustable_rc_filter` emits the
+        # reviewed 3296W-1-103LF (family `trim-potentiometer`, physical feature
+        # `adjustable-resistor`) as its RV group. Live replay (2026-09-26): the architecture
+        # stage refused requirement `rc_filter` -- "claims 'trim-potentiometer' but its family
+        # 'adjustable-rc-lowpass' cannot realize it" -- on the passive RC low-pass breakout that
+        # shipped, spending the repair round asking for a carrier the lowering already contains.
+        ("adjustable-rc-lowpass@1", "trimpotentiometer"),
     }
 )
 

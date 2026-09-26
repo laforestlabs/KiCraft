@@ -425,3 +425,45 @@ genuinely closed domain — and never a model call as the sole decider of validi
 `logs/self_eval` — 26,778 JSONs with per-stage diagnostics and repair counters — plus the 34-brief
 canary), the four acceptance criteria, and what not to do. Step 1 is the measurement harness, before
 any check is touched: the plan's whole point is to choose by evidence.
+
+## 13. Vocabulary literalism, executed (2026-09-26, evening)
+
+The plan `docs/plans/vocabulary-literalism-plan-2026-09-26.md` was amended and executed; its §10/§11
+hold the numbers and the per-check decisions. In plain words:
+
+**What was measured.** A replay harness (`kicraft/eval/check_replay.py`) re-ran today's checks over
+1 974 archived boards. Before any fix, 1 882 findings fired on boards that shipped — 278 of them on
+**fully committed** boards, i.e. designs the pipeline accepted and a build produced. The top one was
+not on the original inventory: `functional_spec_partial_ground_flow`, 115 times on shipped boards.
+
+**What was wrong, and what it is now.** Three of the worst were the same mistake in different
+clothes — a check reading *words*:
+
+- `bom_architecture_role_unsupported` refused the seed-43 CH32V003 board because two sheets are
+  *described* as carrying the MCU's UART and reset signals. The MCU is on its own sheet. A sheet's
+  own claim is now its title and its typed requirements; prose counts only for an active part the
+  design builds nowhere.
+- `functional_spec_premature_topology` refused a passive crossover because its prose said "accept the
+  amplifier input" (an external amplifier) and a buffer because its prose said "analog audio" (a
+  signal domain). It now reads the block names the writer commits to build.
+- `architecture_obligation_family_mismatch` refused the RC filter because the family
+  `adjustable-rc-lowpass` was not recognised as building the trimmer it in fact emits.
+
+Ground flow was a different bug with the same cost: `BNC_INPUT` sources the ground net, so it could
+never be its own ground *target*, and a valid design was refused. A block is grounded when it is at
+either end of a ground connection.
+
+**The numbers.** Findings on shipped boards 1 882 → 1 401; on fully committed boards 278 → 168. The
+three live boards — including the seed-43 CH32V003 board from §11 — replay clean. No check fires
+more than before.
+
+**What Jev contributed, and the trap it exposed.** Jev labelled the ambiguous cases. Its first
+consensus on the count question ("the design is missing that part class", 0.70–1.00) was **wrong**:
+the class existed, only the spelling differed. The question had offered no way to say so. Adding the
+missing option flipped 11 of 12 answers to the correct reading at 0.85–0.93, and the fix became two
+alias rows. That is the ground rule for this work: a model decides only among the options the
+pipeline offers, and its consensus is not evidence until a human has checked the options.
+
+**Left alone, on purpose.** A demanded part class nothing carries is still researched and added, not
+accepted with a substitute. The eval's verbatim-evidence rule is unchanged; a correct derivation
+should name its inputs, not argue in prose.

@@ -1,0 +1,20 @@
+{
+  "run": "logs/self_eval/20260915T132650Z/run_19_relay-quad",
+  "stage": "bom",
+  "code": "bom_architecture_role_unsupported",
+  "question": "Sheet(s) relay channel 1, relay channel 2 do not carry a U-reference, and a word in the architecture text matches an active-part role. Read each sheet's own title and its typed requirements against the whole BOM. Is the matched role a part the design implements on another sheet (so this sheet only references it), or does the sheet itself promise an active part that no sheet implements?",
+  "kind": "choice",
+  "options": [
+    "the sheet only references that part, which is implemented on another sheet",
+    "the sheet itself promises an active part the design does not build anywhere",
+    "the candidate does not say"
+  ],
+  "value": "the sheet only references that part, which is implemented on another sheet",
+  "confidence": 0.75,
+  "probabilities": {
+    "the candidate does not say": 0.02,
+    "the sheet itself promises an active part the design does not build anywhere": 0.15,
+    "the sheet only references that part, which is implemented on another sheet": 0.83
+  },
+  "model": "typesafe/jev-1.13"
+}

@@ -38,9 +38,13 @@ _TOPOLOGY_RE = re.compile(
     r"powered directly)\b",
     re.I,
 )
+# A mechanical board feature or a bare net is not a functional block. `crystal` is deliberately
+# absent: it is a functional timing component a brief asks for ("an 8 MHz crystal"), not a
+# board feature, and listing it refused a shipped STM32 dev board whose crystal block was
+# exactly what the brief demanded (replay 2026-09-26).
 _NONFUNCTIONAL_RE = re.compile(
     r"\b(?:ground|gnd|rail|power[_ -]distribution|mounting holes?|decoupling|"
-    r"crystal|castellated pads?)\b",
+    r"castellated pads?)\b",
     re.I,
 )
 _POWER_RE = re.compile(r"\b(power|vbus|vcc|vdd|3v3|5v|1v1|ldo|regulat)\b", re.I)
@@ -87,6 +91,31 @@ def _text(value) -> str:
     if isinstance(value, list):
         return " ".join(_text(v) for v in value)
     return str(value or "")
+
+
+def _committed_topology_text(candidate: dict) -> str:
+    """The fields where a spec *commits* to a technology, never the prose that describes behaviour.
+
+    A block's ``purpose`` and a connection's ``description`` say what a function does. Naming a
+    technology there ("accept the amplifier input", "the analog audio circuitry") describes the
+    world; it does not commit the board, and the whole-candidate scan refused valid designs over
+    it — replay 2026-09-26: 72 of 73 firings were on boards that shipped, the live cases being a
+    passive crossover fed by an external amplifier and a spec describing its signal domain. The
+    commitment is the block *name* the writer undertakes to realize (`LDO_3V3`, `BUCK_SUPPLY`) and
+    the typed obligation class, so only those are scanned. Underscores become spaces so a name
+    like `LDO_3V3` matches ``\\bldo\\b``.
+    """
+    parts: list[str] = []
+    for block in candidate.get("blocks") or []:
+        if isinstance(block, dict):
+            parts.append(str(block.get("name") or "").replace("_", " "))
+            parts.append(str(block.get("category") or ""))
+    for obligation in candidate.get("obligations") or []:
+        if isinstance(obligation, dict):
+            parts.extend(
+                str(obligation.get(key) or "") for key in ("kind", "component_class", "feature")
+            )
+    return " ".join(parts)
 
 
 def complete_intent_classification(brief: str, candidate: dict) -> dict:
@@ -828,7 +857,9 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
     assumption_rows = [str(item) for item in candidate.get("assumptions") or []]
     assumptions = " ".join(assumption_rows).lower()
 
-    introduced = sorted({m.group(1).lower() for m in _TOPOLOGY_RE.finditer(_text(candidate))})
+    introduced = sorted(
+        {m.group(1).lower() for m in _TOPOLOGY_RE.finditer(_committed_topology_text(candidate))}
+    )
     premature = [term for term in introduced if term not in allowed]
     if premature:
         diagnostics.append(
@@ -974,13 +1005,19 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
         connection for connection in connections if connection.get("signal_type") == "ground"
     ]
     if ground_connections:
-        ground_targets = {
-            str(connection.get("to_block") or "") for connection in ground_connections
+        # A block is grounded when it appears at *either* end of a ground connection, not only
+        # as the target: a design whose ground reference originates at its input connector
+        # (the BNC/screw-terminal case, recorded as a common-ground assumption) lists that
+        # block as the source, and demanding it also be its own sink refused the valid design.
+        ground_members = {
+            str(connection.get(field) or "")
+            for connection in ground_connections
+            for field in ("from_block", "to_block")
         }
         expected_ground = {
             name for name, block in blocks_by_name.items() if block.get("category") != "power"
         }
-        missing_ground = sorted(expected_ground - ground_targets)
+        missing_ground = sorted(expected_ground - ground_members)
         if missing_ground:
             diagnostics.append(
                 _diag(
@@ -2727,28 +2764,17 @@ def _bom(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
         r"level shifter|sensor|bridge|driver|hub)\b",
         re.I,
     )
-    unsupported_roles: list[str] = []
-    for sheet in architecture.get("sheets") or []:
-        if not isinstance(sheet, dict):
-            continue
-        sheet_name = str(sheet.get("name") or "")
-        sheet_parts = parts_by_sheet.get(sheet_name, [])
-        requirements = requirements_by_sheet.get(sheet_name, [])
-        connector_owned = (
-            bool(requirements)
-            and all(
-                requirement.get("role") == "connector" and requirement.get("ports")
-                for requirement in requirements
-            )
-            and any(str(part.get("ref") or "").startswith(("J", "P")) for part in sheet_parts)
-        )
-        # A physical connector may be named for the external IC it connects to.
-        # Do not infer that IC from its sheet title, but keep explicit active
-        # functions and typed active requirements authoritative.
-        role_text = " ".join(
+
+    def _own_role_text(sheet_name: str, requirements: list[dict], connector_owned: bool) -> str:
+        """What the sheet declares about itself: its own title and its typed requirements.
+
+        A physical connector may be named for the external IC it connects to, so a
+        connector-owned sheet contributes no title. Prose (`function`) is deliberately absent:
+        it describes an *effect* and routinely names a part that lives on another sheet.
+        """
+        return " ".join(
             [
                 "" if connector_owned else sheet_name,
-                str(sheet.get("function") or ""),
                 *(
                     re.sub(
                         r"[-_]",
@@ -2760,7 +2786,54 @@ def _bom(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                 ),
             ]
         )
-        if not ic_role.search(role_text):
+
+    def _is_connector_owned(requirements: list[dict], sheet_parts: list[dict]) -> bool:
+        return (
+            bool(requirements)
+            and all(
+                requirement.get("role") == "connector" and requirement.get("ports")
+                for requirement in requirements
+            )
+            and any(str(part.get("ref") or "").startswith(("J", "P")) for part in sheet_parts)
+        )
+
+    # Terms some sheet actually implements with an IC (a U-reference on the declaring sheet).
+    # A prose mention of one of these on another sheet is a reference to that part, not a claim
+    # about the sheet it appears on: live replay 2026-09-26 refused the shipped seed-43 board
+    # because "Expose the MCU UART … signals on a header" and "pulls the MCU reset input low"
+    # name the MCU, which lives (with its U2) on the MCU sheet.
+    implemented_terms: set[str] = set()
+    for sheet in architecture.get("sheets") or []:
+        if not isinstance(sheet, dict):
+            continue
+        sheet_name = str(sheet.get("name") or "")
+        sheet_parts = parts_by_sheet.get(sheet_name, [])
+        if not any(str(part.get("ref") or "").startswith("U") for part in sheet_parts):
+            continue
+        requirements = requirements_by_sheet.get(sheet_name, [])
+        own_text = _own_role_text(sheet_name, requirements, _is_connector_owned(requirements, sheet_parts))
+        implemented_terms.update(match.lower() for match in ic_role.findall(own_text))
+
+    unsupported_roles: list[str] = []
+    for sheet in architecture.get("sheets") or []:
+        if not isinstance(sheet, dict):
+            continue
+        sheet_name = str(sheet.get("name") or "")
+        sheet_parts = parts_by_sheet.get(sheet_name, [])
+        requirements = requirements_by_sheet.get(sheet_name, [])
+        connector_owned = _is_connector_owned(requirements, sheet_parts)
+        own_terms = {
+            match.lower()
+            for match in ic_role.findall(
+                _own_role_text(sheet_name, requirements, connector_owned)
+            )
+        }
+        # Prose only counts for a role the design implements nowhere: then the sheet promises
+        # an active part nothing builds ("Connector and on-board amplifier" with no U anywhere).
+        prose_terms = {
+            match.lower() for match in ic_role.findall(str(sheet.get("function") or ""))
+        } - own_terms
+        if not own_terms and not (prose_terms - implemented_terms):
             continue
         if not any(str(part.get("ref") or "").startswith("U") for part in sheet_parts):
             unsupported_roles.append(sheet_name)

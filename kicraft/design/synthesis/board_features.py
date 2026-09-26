@@ -22,11 +22,18 @@ from kicraft.design.models import FabricationObligation
 PROTOTYPING_AREA_FEATURE = "prototyping-area"
 PROTOTYPING_AREA_OBLIGATION_ID = "prototyping_area"
 
-# `prototyping` (the gerund) or a named bare-board field. A bare "prototype" is NOT a
-# match: "a prototype of a sensor board" asks for a one-off build, while "a prototyping
-# shield/area" asks for a pad field the user will solder into.
+# `prototyping` must name the field it asks for: "for easy prototyping" is a purpose, not a
+# request for a pad field. Live replay (2026-09-26): the 24-pin FPC breakout was told to record a
+# prototyping area because its goal read "…header row for easy prototyping", and the architecture
+# then derived a pad-field sheet for a board that has none. A bare "prototype" was already
+# excluded for the same reason ("a prototype of a sensor board" is a one-off build).
 _PROTOTYPING_AREA_RE = re.compile(
-    r"\bprototyping\b"
+    r"\bprototyping\s+"
+    r"(?:area|board|grid|field|shield|pads?|holes?|section|region|strip|pattern|footprint)\b"
+    # The same field described by its geometry instead of its name (plan V11: "a grid of 2.54 mm
+    # holes for soldering" recorded nothing at all).
+    r"|\b(?:grid|array|field)\s+of\s+(?:\d+(?:\.\d+)?\s*(?:mm|inch|in)\s*)?"
+    r"(?:through[- ]hole\s+|solder(?:ing)?\s+|plated\s+)?(?:holes?|pads?)\b"
     r"|\bproto[- _]?board\b"
     r"|\bperf(?:orated)?[- _]?board\b"
     r"|\bstrip[- _]?board\b"

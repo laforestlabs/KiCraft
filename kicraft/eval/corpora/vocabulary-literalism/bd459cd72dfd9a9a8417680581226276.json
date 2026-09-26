@@ -1,0 +1,20 @@
+{
+  "run": "logs/self_eval/evidence_loop_round14_pro_budget15_all34_20260911/run_10_rp2040-min",
+  "stage": "functional_spec",
+  "code": "functional_spec_partial_ground_flow",
+  "question": "This functional specification lists ground flows for some functional blocks but not for: crystal_oscillator. Read the spec's own connections and assumptions. Does the design still provide a ground return for each of those blocks (for example through a shared ground net the connections do not enumerate per block), or is a ground return genuinely missing?",
+  "kind": "choice",
+  "options": [
+    "a ground return is provided elsewhere in the design",
+    "a ground return for that block is genuinely missing",
+    "the candidate does not say"
+  ],
+  "value": "a ground return for that block is genuinely missing",
+  "confidence": 0.11,
+  "probabilities": {
+    "the candidate does not say": 0.21,
+    "a ground return for that block is genuinely missing": 0.41,
+    "a ground return is provided elsewhere in the design": 0.38
+  },
+  "model": "typesafe/jev-1.13"
+}

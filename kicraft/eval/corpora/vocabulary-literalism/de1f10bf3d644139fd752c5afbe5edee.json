@@ -1,0 +1,20 @@
+{
+  "run": "logs/self_eval/evidence_loop_round13_pro_budget15_all34_20260911/run_05_usb-pd-trigger",
+  "stage": "bom",
+  "code": "bom_architecture_role_unsupported",
+  "question": "Sheet(s) usb c input do not carry a U-reference, and a word in the architecture text matches an active-part role. Read each sheet's own title and its typed requirements against the whole BOM. Is the matched role a part the design implements on another sheet (so this sheet only references it), or does the sheet itself promise an active part that no sheet implements?",
+  "kind": "choice",
+  "options": [
+    "the sheet only references that part, which is implemented on another sheet",
+    "the sheet itself promises an active part the design does not build anywhere",
+    "the candidate does not say"
+  ],
+  "value": "the sheet only references that part, which is implemented on another sheet",
+  "confidence": 0.56,
+  "probabilities": {
+    "the candidate does not say": 0.24,
+    "the sheet only references that part, which is implemented on another sheet": 0.7,
+    "the sheet itself promises an active part the design does not build anywhere": 0.06
+  },
+  "model": "typesafe/jev-1.13"
+}

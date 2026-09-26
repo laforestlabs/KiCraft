@@ -1,0 +1,22 @@
+{
+  "run": "logs/self_eval/ab_move1a_pinned_after/run_28_audio-jack-buffer__r1",
+  "stage": "intent",
+  "code": "intent_quantity_subject_unbound",
+  "question": "One count row names a subject that matches no part class this design carries: audio jack = 4 -> add the physical obligation for the class it counts (spell the class, e.g. audio-jack), or delete the row if the brief's count was a property of one part. Read the brief and the intent's own obligations. Does the count belong to a part class the design already carries under a different spelling, to a class the design is missing, or is it a property of a single part (for example pins on one header)?",
+  "kind": "choice",
+  "options": [
+    "the design already carries that class under a different spelling",
+    "the count belongs to a part class the design is missing",
+    "the count is a property of one part, not a count of parts",
+    "the candidate does not say"
+  ],
+  "value": "the design already carries that class under a different spelling",
+  "confidence": 0.89,
+  "probabilities": {
+    "the candidate does not say": 0.0,
+    "the count is a property of one part, not a count of parts": 0.0,
+    "the count belongs to a part class the design is missing": 0.08,
+    "the design already carries that class under a different spelling": 0.92
+  },
+  "model": "typesafe/jev-1.13"
+}

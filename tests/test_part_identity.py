@@ -526,6 +526,11 @@ def test_a_contact_numbered_pin_map_names_contacts_the_record_declares():
         ("fpc/ffc connector contacts", "fpc-ffc-connector", False),
         ("relay channels", "through-hole-relay", False),
         ("", "screw-terminal", False),
+        # The brief's own spelling of the jack, against the class the intent carries. Live
+        # replay 2026-09-26 (four of them on boards that shipped): the count could not bind.
+        ("3.5 mm audio jack", "audio-jack-3-5mm", True),
+        ("3.5 mm audio jacks", "audio-jack-3-5mm", True),
+        ("audio jack", "audio-jack-3-5mm", True),
     ],
 )
 def test_quantity_subject_binds_only_the_class_it_names(subject, component_class, binds):

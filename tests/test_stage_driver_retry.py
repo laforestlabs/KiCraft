@@ -1079,7 +1079,9 @@ def test_semantic_repair_is_bounded_to_one_correction(tmp_path):
     }
     blocks = [
         {
-            "name": "CONTROLLER",
+            # The committed technology lives in the block NAME: the topology check reads the
+            # names the writer undertakes to realize, not the behaviour prose it used to scan.
+            "name": "PWM_CONTROLLER",
             "category": "process",
             "purpose": "Generates an amplified PWM audio output.",
         },
@@ -1087,7 +1089,7 @@ def test_semantic_repair_is_bounded_to_one_correction(tmp_path):
         {"name": "POWER", "category": "power", "purpose": "Powers the controller"},
     ]
     connection = {
-        "from_block": "CONTROLLER",
+        "from_block": "PWM_CONTROLLER",
         "to_block": "SPEAKER",
         "signal_type": "analog",
         "description": "Audio output",
@@ -1114,12 +1116,14 @@ def test_semantic_repair_is_bounded_to_one_correction(tmp_path):
             blocks[1],
             blocks[2],
         ],
+        "connections": [{**connection, "from_block": "CONTROLLER"}, power_connection],
     }
     second_repair = {
         **first_repair,
         "connections": [
             {
                 **connection,
+                "from_block": "CONTROLLER",
                 "signal_type": "other",
                 "description": "Speaker control signal",
             },
@@ -1155,9 +1159,10 @@ def test_semantic_repair_is_bounded_to_one_correction(tmp_path):
     assert functional["attempts"] == 2
     assert functional["repair_attempted"] is True
     assert functional["repair_adopted"] is True
-    assert [item["code"] for item in functional["diagnostics"]] == [
-        "functional_spec_premature_topology"
-    ]
+    # The adopted candidate is clean, so the stage's final row set is empty; the defect itself is
+    # recorded on the attempt that raised it (asserted from the events below).
+    assert functional["semantic_clean"] is True
+    assert functional["diagnostics"] == []
     assert len(client.calls) == 3
     assert any(
         event.get("kind") == "stage_diagnostic"
@@ -1187,7 +1192,9 @@ def test_semantic_repair_review_names_the_adopted_attempt(tmp_path):
     }
     blocks = [
         {
-            "name": "CONTROLLER",
+            # The committed technology lives in the block NAME: the topology check reads the
+            # names the writer undertakes to realize, not the behaviour prose it used to scan.
+            "name": "PWM_CONTROLLER",
             "category": "process",
             "purpose": "Generates an amplified PWM audio output.",
         },
@@ -1195,7 +1202,7 @@ def test_semantic_repair_review_names_the_adopted_attempt(tmp_path):
         {"name": "POWER", "category": "power", "purpose": "Powers the controller"},
     ]
     connection = {
-        "from_block": "CONTROLLER",
+        "from_block": "PWM_CONTROLLER",
         "to_block": "SPEAKER",
         "signal_type": "analog",
         "description": "Audio output",
@@ -1213,9 +1220,21 @@ def test_semantic_repair_review_names_the_adopted_attempt(tmp_path):
     }
     repaired = {
         **initial,
+        # The repair drops the committed technology from the block NAME; the topology check
+        # reads names, so this is the change that clears the diagnostic.
+        "blocks": [
+            {
+                "name": "CONTROLLER",
+                "category": "process",
+                "purpose": "Generates the speaker control signal.",
+            },
+            blocks[1],
+            blocks[2],
+        ],
         "connections": [
             {
                 **connection,
+                "from_block": "CONTROLLER",
                 "signal_type": "other",
                 "description": "Speaker control signal",
             },

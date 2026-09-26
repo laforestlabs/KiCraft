@@ -1,0 +1,20 @@
+{
+  "run": "logs/self_eval/recovery_serializer_pass1_20260910T2315Z/run_05_usb-pd-trigger",
+  "stage": "functional_spec",
+  "code": "functional_spec_partial_ground_flow",
+  "question": "This functional specification lists ground flows for some functional blocks but not for: voltage_select. Read the spec's own connections and assumptions. Does the design still provide a ground return for each of those blocks (for example through a shared ground net the connections do not enumerate per block), or is a ground return genuinely missing?",
+  "kind": "choice",
+  "options": [
+    "a ground return is provided elsewhere in the design",
+    "a ground return for that block is genuinely missing",
+    "the candidate does not say"
+  ],
+  "value": "a ground return for that block is genuinely missing",
+  "confidence": 0.2,
+  "probabilities": {
+    "a ground return for that block is genuinely missing": 0.47,
+    "the candidate does not say": 0.34,
+    "a ground return is provided elsewhere in the design": 0.19
+  },
+  "model": "typesafe/jev-1.13"
+}

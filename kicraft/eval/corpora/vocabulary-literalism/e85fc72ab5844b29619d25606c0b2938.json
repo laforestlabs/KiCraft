@@ -1,0 +1,20 @@
+{
+  "run": "logs/self_eval/movea_a2_legacy_bc6a2f8/run_01_rc-lowpass-bnc__r2",
+  "stage": "functional_spec",
+  "code": "functional_spec_partial_ground_flow",
+  "question": "This functional specification lists ground flows for some functional blocks but not for: cutoff_adjustment, rc_lowpass_filter. Read the spec's own connections and assumptions. Does the design still provide a ground return for each of those blocks (for example through a shared ground net the connections do not enumerate per block), or is a ground return genuinely missing?",
+  "kind": "choice",
+  "options": [
+    "a ground return is provided elsewhere in the design",
+    "a ground return for that block is genuinely missing",
+    "the candidate does not say"
+  ],
+  "value": "a ground return is provided elsewhere in the design",
+  "confidence": 0.47,
+  "probabilities": {
+    "a ground return for that block is genuinely missing": 0.23,
+    "the candidate does not say": 0.12,
+    "a ground return is provided elsewhere in the design": 0.65
+  },
+  "model": "typesafe/jev-1.13"
+}

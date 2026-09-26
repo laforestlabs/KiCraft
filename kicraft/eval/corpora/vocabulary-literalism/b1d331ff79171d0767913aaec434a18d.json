@@ -1,0 +1,20 @@
+{
+  "run": "logs/self_eval/yield_recovery_20260921/recovery_full/run_33_star-ornament",
+  "stage": "functional_spec",
+  "code": "functional_spec_partial_ground_flow",
+  "question": "This functional specification lists ground flows for some functional blocks but not for: attiny402_controller, led_point_array, mechanical_ornament, programming_interface. Read the spec's own connections and assumptions. Does the design still provide a ground return for each of those blocks (for example through a shared ground net the connections do not enumerate per block), or is a ground return genuinely missing?",
+  "kind": "choice",
+  "options": [
+    "a ground return is provided elsewhere in the design",
+    "a ground return for that block is genuinely missing",
+    "the candidate does not say"
+  ],
+  "value": "a ground return is provided elsewhere in the design",
+  "confidence": 0.83,
+  "probabilities": {
+    "the candidate does not say": 0.04,
+    "a ground return for that block is genuinely missing": 0.07,
+    "a ground return is provided elsewhere in the design": 0.89
+  },
+  "model": "typesafe/jev-1.13"
+}

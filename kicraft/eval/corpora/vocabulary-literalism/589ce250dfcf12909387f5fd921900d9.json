@@ -1,0 +1,20 @@
+{
+  "run": "logs/self_eval/movea_a2_legacy_bc6a2f8/run_04_speaker-crossover__r2",
+  "stage": "bom",
+  "code": "bom_architecture_role_unsupported",
+  "question": "Sheet(s) high pass network, input terminal, low pass network do not carry a U-reference, and a word in the architecture text matches an active-part role. Read each sheet's own title and its typed requirements against the whole BOM. Is the matched role a part the design implements on another sheet (so this sheet only references it), or does the sheet itself promise an active part that no sheet implements?",
+  "kind": "choice",
+  "options": [
+    "the sheet only references that part, which is implemented on another sheet",
+    "the sheet itself promises an active part the design does not build anywhere",
+    "the candidate does not say"
+  ],
+  "value": "the candidate does not say",
+  "confidence": 0.62,
+  "probabilities": {
+    "the candidate does not say": 0.74,
+    "the sheet only references that part, which is implemented on another sheet": 0.11,
+    "the sheet itself promises an active part the design does not build anywhere": 0.15
+  },
+  "model": "typesafe/jev-1.13"
+}
