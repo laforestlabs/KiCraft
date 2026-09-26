@@ -274,6 +274,15 @@ Three more, found by reading the residual that batch 1 left:
 
 Cumulative: total firings 1882 → **1352**, on shipped boards 278 → **158**. Full suite 4638 passed.
 
+### Batch 3
+
+| check | what was wrong | firings | on shipped boards |
+|---|---|---|---|
+| `bom_architecture_role_unsupported` | the pipeline assigns role **`driver`** to relays, LED strings and transistor stages, all implemented by K/D/Q references; the check read `driver` as an IC role and asked shipped relay-quad and LED-ring boards for a U-reference for K1 and D1..D12 | 62 → **40** | 34 → **23** |
+| `functional_spec_external_load_power_assumed` | the rule has a `motor\|heater` branch but its "the brief assigned this duty" vocabulary only offered LED/display terms, so a brief that explicitly powers its motors could never discharge it (latent; the corpus's motor briefs do not state the duty, so the count barely moved — the false-refusal path is gone and pinned by a test) | 56 → **54** | 8 → 8 |
+
+Cumulative: total firings 1882 → **1328**, on shipped boards 278 → **147**.
+
 ### The three live boards are clean
 
 Replaying the live sessions (not the archive) after the fixes:
@@ -364,20 +373,29 @@ separate a fix from run-to-run noise — the script says so itself (four 2026-09
 | cached Jev labels + agreement numbers, committed as data | **done** — `kicraft/eval/corpora/vocabulary-literalism/`, agreement in `logs/vocab_literalism/`, `tests/test_jev_labels.py` |
 | living plan's §11/ground-rules updated | **done** — `docs/plans/live-debug-skill-plan-2026-09-25.md` §13 |
 
-Next batch, in the order the table ranks them:
+Next batch, in the order the table ranks the residual (numbers are the shipped-board column after
+batch 3):
 
-1. `functional_spec_partial_ground_flow` residual (65 fully-committed): wire the **Tier-B**
-   relaxation — deterministic refusal stands, and a confident Jev answer downgrades it to a recorded
-   assumption. Needs the content-addressed cache in the stage path, the confidence floor, and an
-   eval that counts relaxations. The labels in §10 are the starting point.
-2. `bom_architecture_role_unsupported` residual (34): the same shape on the prose channel; the
-   deterministic rule now covers the live boards, and the residual is the "narrative promises an
-   active part" case, which is a Tier-B or a structure-the-architecture-contract fix, not a word
-   list.
-3. `intent_obligation_class_unrealizable` (215, 0 fully-committed): confirm the research fallback
+1. `functional_spec_partial_ground_flow` (64): **not another word rule.** The remaining cases are
+   representation, not vocabulary — a passive series network whose ground return runs through the
+   signal path, or a spec that enumerates ground once per net instead of per block. Two candidates:
+   (a) count a block as grounded when a *connection* reaches it through a block that is itself
+   grounded, or (b) the Tier-B relaxation. Either needs the owner's reading of two or three cases
+   first; the one case that could be adjudicated from evidence was a recorded disagreement between
+   the hand label and Jev, which is why the relaxation is not wired.
+2. `bom_architecture_role_unsupported` (23): the residual is prose that names a role the design
+   builds nowhere ("touch input", "high speed switch"). Whether that is a claim or a description is
+   the same judgement as (1).
+3. `intent_quantity_subject_unbound` (15): the remaining subjects name a class no spelling relates
+   (a genuinely new class). The research fallback is the honest route; add an alias only where Jev
+   and a hand label agree that the class already exists (see §10).
+4. `functional_spec_external_load_power_assumed` (8): now a *true* disclosure finding — the spec
+   assigned itself a power duty without recording it. Leave it; the remedy is one assumption line.
+5. `intent_obligation_class_unrealizable` (215 total, 0 shipped): confirm the research fallback
    fires for each and record it, rather than relaxing the check.
-4. Screen the other ~400 regex sites (`design/synthesis/validation.py` is denser than
+6. Screen the other ~400 regex sites (`design/synthesis/validation.py` is denser than
    `stage_semantics.py`) with the same harness before picking the next batch.
+
 
 ## 12. Verification notes
 

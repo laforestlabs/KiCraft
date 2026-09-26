@@ -2538,3 +2538,38 @@ def test_a_relay_or_led_sheet_is_not_a_missing_ic_implementation():
         candidate("MOTOR DRIVER", "driver", "dual-dc-motor-driver", "J1",
                   "Drive the motors.")
     )
+
+
+def test_a_brief_that_powers_its_motors_discharges_the_external_load_rule():
+    """The proof vocabulary must cover the load the connection names.
+
+    Live replay 2026-09-26: the rule had a `motor` branch but only LED/display terms, so a brief
+    that explicitly powers its motors could never satisfy it.
+    """
+    candidate = {
+        "blocks": [{"name": "MOTOR_DRIVER", "category": "drive", "purpose": "Drive the motors"}],
+        "connections": [
+            {
+                "from_block": "BATTERY_INPUT",
+                "to_block": "MOTOR_DRIVER",
+                "signal_type": "power",
+                "description": "Battery motor supply",
+            }
+        ],
+        "assumptions": [],
+    }
+
+    def codes(brief):
+        return {
+            item.code
+            for item in diagnose_stage(
+                "functional_spec", brief=brief, upstream_state={}, candidate=dict(candidate)
+            )
+        }
+
+    assert "functional_spec_external_load_power_assumed" not in codes(
+        "A robot controller that powers the two motors from a 2S battery, with DRV8833 drivers."
+    )
+    assert "functional_spec_external_load_power_assumed" in codes(
+        "A robot controller with two DRV8833 motor drivers and motor screw terminals."
+    )

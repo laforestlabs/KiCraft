@@ -900,11 +900,18 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
             re.I,
         ):
             continue
-        target_terms = (
-            r"hub75|display|panel"
-            if re.search(r"hub75|display", target_text, re.I)
-            else r"addressable led|led string|led strip|leds"
-        )
+        # The vocabulary that proves the brief assigned this power duty must cover the load the
+        # connection names. It only ever offered LED/display terms, so a brief that explicitly
+        # powers its motors (or heater) could never satisfy the rule and was refused anyway --
+        # the check's own `motor|heater` branch could not be discharged (replay 2026-09-26).
+        if re.search(r"hub75|display", target_text, re.I):
+            target_terms = r"hub75|display|panel"
+        elif re.search(r"motors?", target_text, re.I):
+            target_terms = r"motors?"
+        elif re.search(r"heaters?", target_text, re.I):
+            target_terms = r"heaters?|heating"
+        else:
+            target_terms = r"addressable led|led string|led strip|leds"
         answer_text = _text(upstream.get("_stage_answers", [])).lower()
         answered_board_power = (
             "board supplies power to both" in answer_text or "power both from board" in answer_text
