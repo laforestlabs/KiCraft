@@ -1268,6 +1268,32 @@ def test_intent_tokens_preserve_exact_variants_without_harvesting_counts_or_pack
     }
 
 
+def test_prose_modifier_is_not_glued_onto_the_part_identity():
+    """``<part>-based`` names the part, not a second one the library cannot own.
+
+    Live cohort 2026-09-26, seeds 52/53/56: the token tail ran under ``re.IGNORECASE`` and
+    swallowed the hyphenated English word after a part name, so ``named_part_tokens`` returned
+    ``"LM358-based"`` / ``"CH32V003-based"`` as exact identities. Intent classification then
+    recorded a phantom named part, and the architecture gate refused the board with
+    ``missing_recipe_requirement`` / ``unsupported_protected_variant`` for a part that does not
+    exist. The upper/digit order-code tail is genuinely part of the identity and stays whole.
+    """
+    from kicraft.design.stage_semantics import complete_intent_classification
+    from kicraft.design.synthesis.validation import named_part_tokens
+
+    assert named_part_tokens(["An LM358-based hall-effect amplifier board"]) == {}
+    assert named_part_tokens(["Build a CH32V003-based LED driver board"]) == {
+        "ch32v003": "CH32V003"
+    }
+    assert named_part_tokens(["An ESP32-S3-WROOM-1-N16R8 module"]) == {
+        "esp32-s3-wroom-1-n16r8": "ESP32-S3-WROOM-1-N16R8"
+    }
+    completed = complete_intent_classification(
+        "An LM358-based hall-effect amplifier board", {"named_parts": ["LM358"]}
+    )
+    assert completed["named_parts"] == ["LM358"]
+
+
 def test_intent_family_separator_spellings_do_not_duplicate_named_parts():
     from kicraft.design.stage_semantics import complete_intent_classification
 

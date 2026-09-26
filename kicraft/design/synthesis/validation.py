@@ -4846,9 +4846,16 @@ def check_named_part_substitutions(intent, bom) -> CheckResult:
 # architecture prose may explain a choice, but cannot silently create a new
 # BOM identity contract.
 
+# The head is case-insensitive (mixed-case MCU names: `ATtiny1614`, `esp32 C3`), and the tail
+# accepts lower case so a directly-attached suffix survives (`atmega328p`). The tail stops at a
+# hyphen that introduces a lower-case letter, because that is prose, not an order code: under
+# the previous global IGNORECASE the tail swallowed the hyphenated English modifier after a part
+# name, so "LM358-based" and "CH32V003-based" (live cohort 2026-09-26, seeds 52/53/56) became
+# phantom named parts that no recipe could own and the architecture stage refused the board. A
+# real upper-case order-code suffix (`-WROOM-1-N16R8`, `-TR`) stays whole.
 _MPN_TOKEN_RE = re.compile(
-    r"\b(?:ESP32[ _-][CS]\d|(?:ATtiny|ATmega)[ _-]?[0-9]{2,}|[A-Z]{2,4}[0-9]{2,})[A-Z0-9.\-]*",
-    re.IGNORECASE,
+    r"\b(?:(?i:ESP32[ _-][CS]\d|(?:ATtiny|ATmega)[ _-]?[0-9]{2,}|[A-Z]{2,4}[0-9]{2,}))"
+    r"(?:[A-Za-z0-9.]|-(?=[A-Z0-9]))*",
 )
 _SHORT_MCU_FAMILY_RE = re.compile(r"^(?:ESP32|STM32|NRF51|NRF52|NRF53|NRF54)$", re.I)
 _MPN_STOPWORD_RE = re.compile(
