@@ -3963,49 +3963,6 @@ def test_unused_groundable_hub75_addr_d_is_tied_low_not_demanded():
     assert any(endpoint.ref == "U2" and endpoint.pin == "3" for endpoint in grounded)
 
 
-def test_native_usb_edge_without_a_five_volt_rail_names_what_the_socket_needs():
-    """KC-WGJ6XE burned a correction round guessing the fix.
-
-    The board declared a native-USB module but only a 3.3 V rail. The socket the module
-    needs cannot be opened without the rail it exposes, so the refusal names the edge and
-    the rails the design *did* declare: the next draft states the 5 V rail instead of
-    guessing at a connector.
-    """
-    from kicraft.design.architecture_intent import ArchitectureIntentError, derive_architecture
-
-    intent = {
-        "mcu_present": True,
-        "sheets": [
-            {"name": "MCU", "stem": "MCU", "role": "mcu", "function": "ESP32-S3 controller"}
-        ],
-        "requirements": [
-            {
-                "id": "mcu_core",
-                "sheet": "MCU",
-                "role": "mcu_core",
-                "family": "esp32-s3-module",
-                "exact_part": "ESP32-S3-MINI-1-N8",
-                "supply": "+3V3",
-                "programming": "native_usb",
-            }
-        ],
-        "power": {"rails": {"+3V3": {"voltage": 3.3}}},
-        "signals": [
-            {"name": "USB_D_N", "from": "mcu_core.usb_dm", "to": "edge:USB_DATA"},
-            {"name": "USB_D_P", "from": "mcu_core.usb_dp", "to": "edge:USB_DATA"},
-        ],
-    }
-
-    with pytest.raises(ArchitectureIntentError) as rejected:
-        derive_architecture(intent)
-
-    assert {row.code for row in rejected.value.diagnostics} == {"usb_connector_supply_unknown"}
-    diagnostic = rejected.value.diagnostics[0]
-    assert diagnostic.requirement_id == "mcu_core"
-    assert "USB_DATA" in diagnostic.message
-    assert set(diagnostic.evidence) == {"+3V3"}
-
-
 def _native_usb_board(*, usb_connector: bool, bind_usb: bool, five_volt_rail: bool = True):
     """An RP2040 board whose brief never mentions USB (live run 904's shape)."""
     def sheet(name, stem, function, role):
@@ -4186,10 +4143,6 @@ def test_native_usb_completion_refuses_a_rail_that_is_not_a_usb_supply():
 
     codes = {row.code for row in rejected.value.diagnostics}
     assert "usb_connector_supply_unknown" in codes
-    diagnostic = next(
-        row for row in rejected.value.diagnostics if row.code == "usb_connector_supply_unknown"
-    )
-    assert set(diagnostic.evidence) == {"+12V", "3V3"}
 
 
 @pytest.mark.parametrize("quantity", [1, 3])

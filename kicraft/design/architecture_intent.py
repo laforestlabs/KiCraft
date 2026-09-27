@@ -443,6 +443,36 @@ class ArchitectureIntent(BaseModel):
                 by_key.get((row.kind, row.original_obligation_id), row)
                 for row in requirement.obligations
             ]
+        # A repeated circuit already demands one physical instance per sheet. When those
+        # instances prove a shared board-wide count, do not charge that count again in
+        # every sheet's BOM unit (four relay sheets previously demanded sixteen relays).
+        from kicraft.design.part_identity import quantity_subject_binds
+
+        replica_groups = {sheet.name: sheet.replication_group for sheet in self.sheets}
+        for quantity in self.obligations:
+            if quantity.kind != "quantity":
+                continue
+            owners: dict[str, list[IntentRequirement]] = {}
+            for requirement in self.requirements:
+                group = replica_groups.get(requirement.sheet)
+                if group and quantity in requirement.obligations and any(
+                    row.kind == "physical"
+                    and quantity_subject_binds(quantity.subject, row.component_class)
+                    for row in requirement.obligations
+                ):
+                    owners.setdefault(group, []).append(requirement)
+            for group, requirements in owners.items():
+                if len({row.sheet for row in requirements}) < quantity.minimum:
+                    continue
+                for requirement in requirements:
+                    requirement.obligations = [
+                        row for row in requirement.obligations if row != quantity
+                    ]
+                self.assumptions.append(
+                    f"{quantity.original_obligation_id}: {group} already requires a physical "
+                    f"instance on {len({row.sheet for row in requirements})} distinct sheets; "
+                    "the shared count is retained once at board level (derived)"
+                )
         return self
 
 
@@ -2005,12 +2035,18 @@ def derive_architecture(
                 _fail(
                     "usb_connector_supply_unknown",
                     (
-                        f"edge {label!r} carries the native USB data pair but no 5 V rail is "
-                        f"declared (named {_USB_VBUS_RAIL_NAMES} or at ~5 V); declare the rail the "
-                        "USB socket exposes under power.rails"
+                        f"edge {label!r} carries the native USB data pair but its 5 V supply "
+                        "cannot be selected unambiguously. Declare the socket's supply under "
+                        "power.rails, then set rails on both USB data signals to exactly that "
+                        "one declared 5 V rail (for example [\"VBUS\"] when VBUS is the socket "
+                        "supply). Separate host VBUS and board +5V rails must not be joined "
+                        "merely because both are 5 V."
                     ),
                     requirement_id=source.requirement.id,
-                    evidence=sorted(rail_names),
+                    evidence=[
+                        f"{name}: voltage={rail.voltage}, from={rail.from_ref!r}"
+                        for name, rail in intent.power.rails.items()
+                    ],
                 )
                 failed_edges.add(label)
                 return None
@@ -2112,6 +2148,23 @@ def derive_architecture(
             )
 
     for signal in signals:
+        if _edge_label(signal.from_ref) is not None:
+            peers = signal.peers()
+            anchor = next((peer for peer in peers if _edge_label(peer) is None), None)
+            if anchor is None:
+                _fail(
+                    "edge_signal_without_board_endpoint",
+                    f"signal {signal.name!r} must connect an off-board source to a board port",
+                )
+                continue
+            # Connectivity is undirected; pin direction belongs to the published port.
+            # Anchor at the board input so the ordinary edge path creates its connector.
+            signal = signal.model_copy(
+                update={
+                    "from_ref": anchor,
+                    "to": [signal.from_ref, *(peer for peer in peers if peer != anchor)],
+                }
+            )
         source = _lookup(signal.from_ref, context=f"signal {signal.name!r}")
         if source is None:
             continue

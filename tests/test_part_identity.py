@@ -35,6 +35,7 @@ from kicraft.server.stage_contracts import (
         ("MCP23017", "MCP23017-E/SO"),
         ("STM32L0", "STM32L031K6T6"),
         ("STM32L0", "STM32L072CZU6"),
+        ("STM32G0", "STM32G030F6P6"),
     ],
 )
 def test_reviewed_candidates_implement_requested_identity(requested, candidate):
@@ -63,6 +64,11 @@ def test_reviewed_candidates_implement_requested_identity(requested, candidate):
         ("BME280", "K2"),
         ("STM32L0", "STM32L0"),
         ("STM32L0", "STM32L0-controller"),
+        ("STM32G0", "STM32G0"),
+        ("STM32G0", "STM32G071CBT6"),
+        ("STM32G0", "STM32F103C8T6"),
+        ("STM32G030F6P6", "STM32G0"),
+        ("STM32G030F6P6", "STM32G030F6P7"),
     ],
 )
 def test_wrong_or_unreviewed_identity_cannot_hide_behind_matching_value(requested, candidate):

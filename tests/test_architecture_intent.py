@@ -1808,6 +1808,50 @@ def test_quantity_obligation_may_stand_alone_at_the_top_level():
     assert not any(row.get("obligations") for row in payload["requirements"])
 
 
+@pytest.mark.parametrize("instances,subject", [(4, "relay"), (3, "relay"), (4, "pin-header")])
+def test_replicated_physical_instances_prove_only_their_shared_count(instances, subject):
+    from kicraft.server.stage_work_units import (
+        BomComponentGroup, _requirement_obligation_defects,
+    )
+
+    physical = {"kind": "physical", "original_obligation_id": "relay",
+                "component_class": "relay"}
+    quantity = {"kind": "quantity", "original_obligation_id": "count",
+                "subject": subject, "minimum": 4}
+    intent = ArchitectureIntent.model_validate({
+        "obligations": [physical, quantity],
+        "sheets": [
+            {"name": f"RELAY {i}", "stem": f"RELAY_{i}", "role": "driver",
+             "function": "One relay channel", "replication_group": "RELAYS",
+             "replication_instance": i}
+            for i in range(1, instances + 1)
+        ],
+        "requirements": [
+            {"id": f"relay{i}", "sheet": f"RELAY {i}", "role": "driver",
+             "family": "srd-05vdc-sl-c", "exact_part": "SRD-05VDC-SL-C",
+             "obligations": [physical, quantity]}
+            for i in range(1, instances + 1)
+        ],
+    })
+    assert next(row.minimum for row in intent.obligations if row.kind == "quantity") == 4
+    for requirement in intent.requirements:
+        group = BomComponentGroup(
+            id="relay", sheet=requirement.sheet, reference_prefix="K", quantity=1,
+            value="SRD-05VDC-SL-C", mpn="SRD-05VDC-SL-C",
+            symbol="srd-05vdc-sl-c:SRD-05VDC-SL-C",
+            footprint="srd-05vdc-sl-c:RELAY-TH_SRD-XXVDC-XL-C",
+        )
+        if instances == 4 and subject == "relay":
+            assert not _requirement_obligation_defects(
+                [requirement.model_dump()], [group]
+            )["physical-obligation-unfulfilled"]
+            assert _requirement_obligation_defects(
+                [requirement.model_dump()], []
+            )["physical-obligation-unfulfilled"]
+        else:
+            # Too few instances or an unrelated class cannot discharge this count.
+            assert any(row.kind == "quantity" for row in requirement.obligations)
+
 def test_one_obligation_may_be_implemented_by_several_requirements():
     """Three binding posts are three requirements, each claiming the one binding-post obligation.
 
@@ -2799,6 +2843,41 @@ def test_power_completion_preserves_an_amplifiers_signal_input():
     assert amp.ports["output"] == header.ports["pin4"] == "AMPLIFIED_OUT"
     assert amp.ports["vdd"] == header.ports["pin1"] == "+5V"
 
+
+@pytest.mark.parametrize("peers", ["amp.input", ["amp.input", "input.pin3"]])
+def test_off_board_source_connects_to_analog_input_and_all_peers(peers):
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    payload = _one_part_intent(
+        {"id": "amp", "role": "analog_block", "family": "mcp6001-follower",
+         "supply": "+5V"},
+        [
+            {"name": "SENSE_IN", "from": "edge:SENSE_INPUT", "to": peers},
+            {"name": "SENSE_OUT", "from": "amp.output", "to": "edge:SENSE_OUTPUT"},
+        ],
+    )
+    architecture = derive_architecture(complete_architecture_payload(payload))
+    amp = _requirement(architecture, "amp")
+    source = _requirement(architecture, "amp_sense_input")
+    sink = _requirement(architecture, "amp_sense_output")
+    assert source.ports["pin1"] == amp.ports["input"] == "SENSE_IN"
+    assert sink.ports["pin1"] == amp.ports["output"] == "SENSE_OUT"
+    if isinstance(peers, list):
+        assert _requirement(architecture, "input").ports["pin3"] == "SENSE_IN"
+    net = next(row for row in architecture.inter_sheet_nets if row.name == "SENSE_IN")
+    assert {(row.sheet, row.direction) for row in net.endpoints} >= {
+        ("PART", "input"), ("SENSE INPUT", "output"),
+    }
+
+
+def test_off_board_signal_requires_a_board_endpoint():
+    payload = _one_part_intent(
+        {"id": "amp", "role": "analog_block", "family": "mcp6001-follower",
+         "supply": "+5V"},
+        [{"name": "UNOWNED", "from": "edge:SOURCE", "to": "edge:SINK"}],
+    )
+    with pytest.raises(ArchitectureIntentError, match="edge_signal_without_board_endpoint"):
+        derive_architecture(payload)
 
 def test_named_switch_keeps_source_ports_and_shared_signal_contact():
     from kicraft.design.architecture_intent import complete_architecture_payload

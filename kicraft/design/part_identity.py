@@ -4033,6 +4033,9 @@ _DEVICE_MEMBERS: dict[str, frozenset[str]] = {
 # https://www.st.com/resource/en/datasheet/stm32l072cz.pdf
 _FAMILY_MEMBERS: dict[str, frozenset[str]] = {
     "stm32l0": frozenset({"stm32l031k6t6", "stm32l072czu6"}),
+    # Existing reviewed TSSOP-20 device; STM32G0 is a family request, not an MPN.
+    # https://www.st.com/en/microcontrollers-microprocessors/stm32g030f6.html
+    "stm32g0": frozenset({"stm32g030f6p6"}),
     # "STM32F103" and "STM32" are design-level family selectors, never
     # construction hardware: every member below is an independently reviewed
     # STM32 identity.  stm32l072czu6 is reviewed identity-only (no library

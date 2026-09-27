@@ -1,7 +1,7 @@
 ---
 name: kicraft-debug
-description: Inspect, debug, or walk through KiCraft's real provider-backed LLM design stages with explicit review before commit. Activate only when the user explicitly asks to debug, inspect, review, or step through KiCraft LLM stage decisions; ordinary PCB design requests use the kicraft skill.
-compatibility: Requires the KiCraft server and design extras, OpenRouter configuration, and an agent capable of reading files, writing temporary files, and running local commands.
+description: Inspect, debug, or walk through KiCraft's real provider-backed LLM design stages with explicit review before commit, and run the unattended live cohort (five `Surprise me` briefs through kicraft.io, repair the pipeline gaps they expose, then rerun all five so a fix is tested against every brief and not only the one it targets). Activate only when the user explicitly asks to debug, inspect, review, or step through KiCraft LLM stage decisions, or to drive the live cohort; ordinary PCB design requests use the kicraft skill.
+compatibility: Requires the KiCraft server and design extras, OpenRouter configuration, and an agent capable of reading files, writing temporary files, and running local commands. Cohort mode additionally needs the production box (its live accounts database, spend ledger and web log), a browser session that can sign in to https://kicraft.io, and permission to restart the production services and spend provider budget.
 ---
 
 # KiCraft stage debugger
@@ -9,6 +9,9 @@ compatibility: Requires the KiCraft server and design extras, OpenRouter configu
 Use the production KiCraft stage driver, paused immediately before durable commit. Guide the user through one stage candidate at a time. Do not emulate a stage, draft slot JSON yourself, or substitute the active agent's own model for the configured production provider.
 
 ## Invariants
+
+These invariants govern the workspace modes (interactive and loop). Cohort mode has no project
+workspace and never drafts a stage itself; see *Running the live cohort* for its own rules.
 
 - Never use `cd`. The current working directory is the project workspace for the entire session.
 - Read `.kicraft/state.json` at the start of every turn. An absent file means no stage has been accepted yet.
@@ -41,12 +44,14 @@ The owner reads every report. The pipeline's internal vocabulary is not an expla
 
 ## Modes
 
-Two ways to run. The owner's words choose; never assume.
+Three ways to run. The owner's words choose; never assume. Naming the live product -- "kicraft.io",
+"Surprise me", "the live cohort", "five briefs", "run them, fix it, run them again" -- means **cohort**
+mode. Naming a stage, a project, or a workspace means **interactive** or **loop**.
 
 - **Interactive** (the default): the owner is watching. Prepare each step, draft, show the review
   one piece at a time, and save a step only on an explicit "accept", "approve" or "commit".
-- **Loop** (unattended): the owner asks for it -- "auto", "unattended", "run it in a loop",
-  "drive it to a finished board", or a wrapper says so. Then:
+- **Loop** (unattended, one design in a workspace): the owner asks for it -- "auto", "unattended", "run
+  it in a loop", "drive it to a finished board", or a wrapper says so. Then:
   1. never wait for the owner, and never ask a question the pipeline's own default can answer
      (see *Default, then analyse*);
   2. run each step's review as a self-check against its checklist, and keep only what looks wrong
@@ -55,9 +60,14 @@ Two ways to run. The owner's words choose; never assume.
      mode, launching it is the owner's acceptance;
   4. keep going through steps, repairs and redrafts until one of the documented stop conditions;
   5. finish with the end-of-run summary and the machine-readable last line.
+- **Cohort** (unattended, five live briefs through the real product): run five `Surprise me` briefs
+  live on kicraft.io, repair the pipeline gaps they expose at the source, then rerun all five -- the
+  other four briefs are the guard against a fix that trades one board for another. See *Running the
+  live cohort*. Cohort mode is the one mode that uses no project workspace and never drafts with
+  `kicraft-stage-debug`; the workspace invariants at the top scope to the other two.
 
-Nothing else changes between modes: the same provider, the same caps, the same workspace rules,
-the same plain-language reporting, and the same running record of findings.
+Nothing else changes between modes: the same provider, the same caps, the same plain-language
+reporting, and the same running record of findings.
 
 ## Default, then analyse
 
@@ -104,12 +114,33 @@ often, in plain words, and never let a long stretch pass unaccounted for.
   restatement of the plan, no internal vocabulary (see *Say it plainly*).
 - **Say the direction, not just the event**: "the parts step refused the connector we invented, so I
   am adding a real reviewed part and will draft again" beats "draft failed".
-- **In loop mode this matters more, not less.** Loops run unattended, so the notes are the only
+- **In loop mode this matters more, not less** -- and most of all in cohort mode, where five runs are
+  in flight and the owner sees only what you write. Loops run unattended, so the notes are the only
   account of the run while it is happening: write one per step boundary and per repair into the run
   log as the run goes, keep the running record (`findings.json`, `assumptions_taken`) current, and
   still finish with the end-of-run summary. Never batch a whole run into one report at the end.
 - **Flag trouble early**: the first sign of a failing step, an unexpected refusal, a cost that
   looks wrong, or a decision you had to guess gets its own note, before you work around it.
+
+## Session change totals (all modes)
+
+Every debug session MUST end with a summary containing
+**`Session changes: +N lines added, -M lines removed.`**
+This applies to interactive, loop, and cohort modes, including failed, stopped,
+and read-only sessions. Report `+0` and `-0` when no changes remain.
+
+- Before the first edit, preserve the starting contents of each file you touch and
+  record which files are new. Keep this baseline across commits and session resumes.
+- Measure the final diff against that baseline using `git diff --numstat` or an
+  equivalent content comparison. Sum additions and removals separately across the
+  session's source, tests, documentation, and other maintained project files.
+- Include both committed and uncommitted session changes, new text files, and
+  deleted text files. Exclude pre-existing or unrelated edits by others, generated
+  board/run artifacts, and temporary probes. Report binary changes separately.
+- These are start-to-finish counts, not editing churn: reverted edits contribute
+  zero. Do not substitute a diff against the current `HEAD` or estimate the totals.
+- Include `"changes": {"lines_added": N, "lines_removed": M}` in every
+  machine-readable end summary as well.
 
 ## Resume selection
 
@@ -233,7 +264,7 @@ kicraft-stage-debug debug-commit --workspace . --stage <stage> \
 
 If deterministic commit rejects the candidate, show the exact `errors` and `offenders`, connect them to the piece of the review they invalidate, and wait for guidance. Never silently retry, auto-correct, or commit a replacement.
 
-## Running in a loop
+## Running one design in a loop
 
 For repeated unattended runs -- one board per brief, started by a wrapper, read afterwards by a
 human:
@@ -257,12 +288,14 @@ human:
   Nothing about the run may exist only in the chat.
 - **End-of-run summary** (one screen, plain words): each step saved or stopped, the cost, the
   guesses taken with the ones worth a second look, the gaps found with their patch status, and
-  the first thing a human should check.
+  the first thing a human should check, and the session's lines added and removed
+  (see *Session change totals*).
 - **Last line, machine-readable**, so a wrapper can iterate without parsing prose:
 
 ```text
 {"run": "<workspace path>", "stem": "<board name>", "stages": {"intent": "committed", ...},
  "cost_usd": <n>, "assumptions_taken": <n>, "findings": {"validated": <n>, "open": <n>},
+ "changes": {"lines_added": <n>, "lines_removed": <n>},
  "stopped": "<reason, or null>"}
 ```
 
@@ -271,6 +304,191 @@ human:
 - **The build is not this skill's job** (see the completion boundary). A loop wrapper chains it
   after a fully saved run: `kicraft build .kicraft/state.json generated --quality good`, and reads
   that command's exit status as the run's final verdict.
+
+## Running the live cohort: five briefs, then fix, then rerun all five
+
+The owner's words for this mode are the product's own -- "run five `Surprise me` briefs live on
+kicraft.io", "auto through the site", "run them, fix it, run them again". Launching it is the
+acceptance for what it does, exactly as launching loop mode is; everything else in this file still
+applies except where this section says otherwise.
+
+**Why five, and why all five again.** One brief can only show that a fix helps the case it targets.
+The other four are the guard: a change that repairs one brief and breaks another is an unintended
+consequence, and the cheapest moment to see it is the pass that introduced it. A fix is therefore
+never validated on its own brief -- it is validated on the whole cohort, in the same pass, and a fix
+that trades one brief for another is not accepted.
+
+**"Live" is not negotiable.** The five briefs go through the public product: a browser session on
+`https://kicraft.io`, the composer’s `Design` handler, the running web process and build worker, the
+real provider budget and the real per-run cap. Generate and diversity-check the briefs before
+launching them, as described below; `Surprise me` starts spending immediately and cannot preflight
+a cohort. Never substitute `kicraft-stage-debug`, `kicraft.server.stage_driver run`, or the self-eval
+batch for a pass: those tools are for diagnosis *between* passes, never for the passes themselves.
+
+### Cohort 1. Surfaces and account
+
+- Site: `https://kicraft.io` (Caddy in front of NiceGUI on `127.0.0.1:8080`). Read and drive it in a
+  browser tab. A frozen or closed tab does not stop a run -- reopen it from the project page.
+- Account: the drive account `ui-drive@kicraft-test.dev` (id 44, Max tier, verified) is a real row in
+  `~/.kicraft/accounts.db`, so the cohort spends and meters the way a user's does. Keep its credential
+  in `~/.kicraft/debug/live-cred.json` (mode 600, never in the repo); a session that created it may have
+  left a copy at `/tmp/ui-cred.json`, which is readable as `{"email": ..., "pw": ...}`. If neither
+  exists, set a fresh password with `kicraft-accounts reset-password ui-drive@kicraft-test.dev --set`
+  and store it. The shared site password, if a fresh browser profile asks for it, is
+  `KICRAFT_ACCESS_PASSWORD` in `.env`.
+- Quota: Max is 20 designs per trailing 7 days, and only `running`, `ok` and `awaiting_input` rows
+  consume a slot -- a `failed` run frees its slot. Five live briefs per pass is therefore cheap in
+  quota; check the account's quota before the first pass and before every rerun, and never start a
+  pass that cannot finish inside the window.
+- Where each run writes itself down: `~/.kicraft/projects/<user_id>/<project_id>/.kicraft/state.json`
+  (`stage_status[].diagnostics` carries the gate sentence), `~/.kicraft/accounts.db` (`projects` for
+  status and cost, `build_jobs` for the build), `~/.kicraft/spend_ledger.db` (`stage_runs`, keyed by
+  `run_id` `p<project_id>-…`, for per-stage attempts, wall time and cost), and `logs/kicraft_web.log`
+  (`[surprise] seed=N brief='…'` on every click, plus one line per stage).
+
+### Cohort 2. A pass: five diverse briefs, started through the live composer
+
+1. **Select before spending.** `generate_brief(seed)` in `kicraft.server.examples` chooses a family
+   independently for each seed, with replacement. Different seeds guarantee neither different
+   families nor different text. Five consecutive `Surprise me` clicks are NOT a diverse cohort.
+   Generate candidates without starting designs, using the product's generator unchanged. Recover
+   the family from the generator's current selection logic (currently the first
+   `random.Random(seed).choice(BRIEF_TEMPLATES)`); do not infer it from keyword regexes.
+   - Freeze five distinct families, at most one of each: controller, sensors, display_led, power,
+     analog, actuator. Take the first eligible candidate for each new family in seed order.
+   - Also inspect the actual functions: reject near-duplicates differing only in output count,
+     supply, MCU, connector, size, or stack-up. Different family labels alone are not sufficient.
+   - Reject text already used by this drive account or a previous/discarded cohort. Use a fresh
+     recorded seed range; do not reset or edit the product's persistent seed counter.
+   - Do not filter for expected success, supported parts, simplicity, or convenient debugging.
+     Diversity is the selection criterion, not a way to remove difficult briefs.
+   - Save every considered seed, family, verbatim brief and acceptance/rejection reason in
+     `selection.json`, and show the five chosen functions before launching. Freeze the accepted
+     seed/text/family list in `cohort.json`. A replacement cohort starts its pass count at one;
+     retain the discarded cohort's results and costs separately.
+2. Sign in at `https://kicraft.io/login`; wait for the composer to be live. For each frozen brief:
+   - use `New design` to detach from the previous run without stopping it;
+   - replace the composer text with the exact generated brief; assert the DOM value equals it
+     before pressing `Design` (a fill that appends silently changes the experiment);
+   - press `Design` and record its board code and project id. This is the same live start handler
+     that `Surprise me` invokes after generating its text.
+   Start all five without waiting for their designs to finish; the build queue owns concurrency.
+3. Assert exactly five new project rows, each with the corresponding frozen brief verbatim.
+   A lost click is not a smaller cohort: recover the missing frozen submission, never pad with a
+   newly drawn brief. If text was corrupted, preserve the excluded run and its cost, then restart
+   the full pass with the same frozen five.
+4. Wait for all five to reach a terminal status (`ok` or `failed`), watching the database rather than
+   the page -- one `projects.status` row per brief, plus `build_jobs` and `stage_runs` for the finished
+   ones:
+
+```bash
+# Confirm the five frozen submissions and their live statuses.
+.venv/bin/python -c "
+import sqlite3; a=sqlite3.connect('/home/kicraft/.kicraft/accounts.db')
+print(a.execute('select id,status,board_code,cost_usd from projects where id between ? and ?', (<first>, <last>)).fetchall())"
+```
+
+   Post one short note per status change (*Keep the owner oriented*). A long `running` row is not stuck
+   until the orphan reaper says so (`[reap] project <id> …` in the web log).
+5. For each finished brief, capture the **outcome triple**: the terminal status; the last stage reached
+   with its `failure_kind`; and the gate sentence from `stage_status[].diagnostics` (the run panel
+   shows the same words, and for a `contract_rejected` failure the sentence names the thing that
+   refused it). A brief that built is not fab-ready until its build job exits 0 and the fab outputs are
+   in the generated tree.
+
+### Cohort 3. Write the pass down before touching the source
+
+One directory per cohort, `~/.kicraft/debug/cohort-<date>/`, holding:
+
+- `cohort.json` -- the frozen five: seed, generator family, brief text verbatim, board code, project
+  id, and the pipeline each row used (`projects.pipeline`); `selection.json` records diversity
+  preflight and rejected draws. Backend switches and brief substitutions cannot masquerade as fixes.
+- `pass_<n>.json` -- each brief's outcome triple, attempts, wall time and cost, and whether it reached
+  fab-ready;
+- `findings.json` -- one entry per gap: the briefs that showed it, the stage, the observed failure and
+  its gate sentence, the suspected root cause, the production patch, the focused regression test, the
+  status (`observed`, `patching`, `validated`, `unresolved`), and the before/after evidence for **every**
+  brief in the cohort;
+- `run-log.md` -- the short notes, in order, as the passes happened.
+
+Nothing about the cohort may exist only in the chat; the pass record is what the comparison reads.
+
+### Cohort 4. Fix, restart, rerun all five
+
+1. **Triage.** For each failing brief, separate the generalizable pipeline gap (a contract, prompt,
+   resolver or validator defect a patch can fix) from the capability request (a brief asking for
+   something the curated library has no reviewed representation for -- a topology, a part class, a
+   stack-up). Patch the first; record and surface the second for the owner's call, and never widen the
+   library silently to make a brief pass.
+2. **Patch at the source, with the smallest focused test.** Change production code, and add or update
+   the test that reproduces the failure. Never patch a run's saved state, and never "fix" a failure by
+   telling the model in an instruction to avoid it -- the rerun must show the unchanged brief passing
+   on its own.
+3. **One root cause per pass.** A pass can only attribute what it changed. When several fixes must land
+   together they must share one class, and the pass still reruns all five as a set.
+4. **Restart the product, so the rerun exercises the patch.** Nothing in a running web process changes
+   under it. With no cohort run in flight -- a restart kills the design stages mid-flight, while a
+   queued build survives -- use the canonical path:
+
+```bash
+./deploy/deploy-production.sh      # restarts both services, verifies web 200 + [build-worker] ready
+```
+
+   Re-login afterwards, because a restart drops sessions, and record the working-tree state in the pass
+   record: these are uncommitted-tree fixes, and the restart runs what the tree holds.
+5. **Rerun all five, same briefs, same order.** A fresh `Surprise me` click would draw five *different*
+   briefs and void the comparison -- so `Surprise me` is not used at all in a rerun. Instead, put each
+   recorded brief back into the composer verbatim and press `Design`, with the same `New design` between
+   briefs and the same five-row assertion as in cohort 2: the composer's own handler does exactly what a
+   `Surprise me` click does after it sets the text (compose the brief, then `start()`), so the entry
+   point, the auto-defaulted questions, the caps and the queues are identical. Do all five, then wait
+   and capture as in cohort 2.
+6. **Compare every brief, not just the target.** Order the outcomes
+   `intent < functional_spec < architecture < bom < wiring < build < fab-ready`, and mark each brief
+   `improved`, `unchanged` or `regressed` against the previous pass. Anything that moved backwards -- an
+   earlier stage now failing, a new failure kind on a brief that was already failing, a built board that
+   no longer builds -- is an unintended consequence of the fix. Revert or refine it and say so, with both
+   briefs' evidence.
+7. **Iterate.** Repeat from cohort 2 with the cohort unchanged until all five are fab-ready or a stop
+   condition below fires. State the pass cap before pass 1: the product's per-run budget bounds each
+   brief, and when the owner sets no number of passes, default to at most three fix passes and say so in
+   the first note.
+
+### Cohort 5. Cohort stop conditions
+
+The loop's stop conditions above still hold, plus these for a cohort:
+
+1. all five briefs reach fab-ready -- the loop is done;
+2. a brief whose failure reproduces identically twice with no generalizable cause found -- record the
+   evidence, mark the finding `unresolved`, and move on rather than guessing;
+3. a brief that needs a capability the curated library cannot express -- the owner's call, not a silent
+   change;
+4. the cohort's spend cap (state it before pass 1) -- on reaching it, stop cleanly and report what is
+   saved;
+5. a fix that has caused a regression twice, after a revert -- stop and hand the owner both passes,
+   rather than iterating on a change that cannot be made to hold.
+
+Never raise a cap, never widen the cohort, never drop a brief from the rerun to make the pass look
+better, and never change a brief's text between passes -- a cohort whose five briefs changed proves
+nothing about the four that were supposed to guard the fix.
+
+### Cohort 6. End of cohort
+
+One screen, in plain words: the five briefs and what each produced, the passes run, every fix with what
+it targeted and what the guard briefs did, the guesses and capability requests awaiting the owner, and
+the first thing a human should check, and the session's lines added and removed
+(see *Session change totals*). Then the machine-readable last line, so a wrapper
+can iterate without parsing prose:
+
+```text
+{"cohort": "<dir>", "passes": <n>, "briefs": [{"seed": <n>, "board": "KC-XXXXXX", "stem": "...", "outcome": "..."}],
+ "fab_ready": <n>/5, "regressions": <n>, "findings": {"validated": <n>, "open": <n>},
+ "changes": {"lines_added": <n>, "lines_removed": <n>},
+ "cost_usd": <n>, "stopped": "<reason, or null>"}
+```
+
+Exit status 0 only when all five are fab-ready. A cohort that stopped early is never reported as
+finished.
 
 ## Forensic requests
 
@@ -285,5 +503,9 @@ Reveal only the requested pending-artifact field:
 Showing forensic data never changes state.
 
 ## Completion boundary
+
+This boundary is the workspace modes' (interactive and loop). In cohort mode the live product authors,
+builds and exports the boards itself, and the cohort's verdict is the five briefs' own fab-readiness
+(see *Cohort 6*); nothing is handed to another skill for it.
 
 After wiring acceptance, report that all five LLM stages are committed. Do not synthesize or build in this skill. Hand control back to the ordinary `kicraft` skill for the deterministic build.

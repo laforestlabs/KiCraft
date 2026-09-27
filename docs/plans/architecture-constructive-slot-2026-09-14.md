@@ -860,3 +860,59 @@ effect — it belongs to the next increment, measured the way stage 2 was, not s
 
 Live spend for the whole exercise: $2.82 + $0.601 (the killed run) + $0.599 = **$4.02 of the
 operator's $4.50 ceiling**.
+
+### 10.12 External signal sources (2026-09-27)
+
+Live diverse cohort project 1015 declared `edge:SENSE_INPUT -> opamp.input`.
+The compiler accepted an edge only as a peer and rejected this connection as
+`malformed_signal_ref`, leaving the amplifier input unbound. Signal derivation now
+anchors such connections at the first board endpoint and uses the existing connector
+path for the external endpoint. All peers remain connected; pin directions still come
+from the part interface. Edge-to-edge signals without a board endpoint remain invalid.
+
+Verification: the frozen rejected architecture now binds both amplifier input and
+connector pin 1 to `SENSE_IN`; 94 architecture tests pass, including input fan-out and
+the no-board-endpoint boundary. Live cohort comparisons are recorded under
+`~/.kicraft/debug/cohort-20260927-diverse/`; this deterministic repair alone does not
+establish that the complete analog design is electrically correct.
+
+### 10.13 USB supply ambiguity feedback (2026-09-27)
+
+Projects 1012 and 1017 declared separate 5 V `VBUS` and `+5V` rails without choosing
+one on the USB data signals. The refusal incorrectly said no 5 V rail was declared.
+It now explains the ambiguity, lists each rail's voltage and source, and asks for
+one explicit `signals[].rails` selection for the USB pair. Supply selection and
+the refusal itself are unchanged; equal voltage never authorizes shorting sources.
+The frozen project 1012 answer exercises the corrected feedback. Live effect is
+measured in diverse cohort pass 3 rather than inferred from diagnostic wording.
+
+### 10.14 Repeated circuits already prove their physical count (2026-09-27)
+
+Project 1018 placed the same board-wide count of four relays on each of four
+replicated relay sheets. Each parts unit then demanded four, producing sixteen.
+Architecture normalization now retains the count at board level without repeating
+it locally when one replication group already has enough distinct sheets, each
+carrying both that count and a matching physical-part obligation. Each sheet still
+has to prove its physical instance. Insufficient instances, unrelated classes,
+and non-replicated requirements keep their local count checks.
+
+The frozen answer previously rejected one relay on RELAY 1 as requiring four;
+it now accepts one while retaining the board-wide minimum of four. Missing physical
+instances remain rejected. The architecture, work-unit and electrical-invariant
+suites pass (247 tests). This does not enforce an exact upper count, add relay coil
+drivers, or enforce the brief's board-size maximum; those are separate open gaps.
+
+### 10.15 Existing STM32G0 hardware recognizes a family request (2026-09-27)
+
+The reviewed inventory already contains STM32G030F6P6, its TSSOP-20 symbol and
+footprint, and its STM32G0 family. The separate family-membership table omitted
+STM32G0, so a parts unit choosing this device for `exact_part: STM32G0` was refused.
+The explicit family selector now admits only this already-reviewed member.
+No new device, package inference or prefix matching was added; a family label
+alone, an unreviewed G0 device, another STM32 family and a different exact ordering
+code remain rejected. Manufacturer: https://www.st.com/en/microcontrollers-microprocessors/stm32g030f6.html.
+
+The real controller-ownership check changes from false to true for the reviewed
+part/footprint pair. Identity, work-unit, electrical-invariant and recipe suites
+pass (418 tests). Obsolete diagnostic-text assertions exposed by the USB feedback
+change were removed; the unsafe USB-voltage rejection test remains.
