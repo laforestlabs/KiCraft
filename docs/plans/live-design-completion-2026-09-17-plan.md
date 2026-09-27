@@ -625,3 +625,73 @@ The next moves (split the architecture answer into small steps, let the compiler
 for families we have reviewed, run the build tail on the briefs that commit, and give non-part
 requirements their own obligation kinds) are planned in
 `docs/plans/design-completion-followup-2026-09-17-plan.md`, with §12's measurement as their baseline.
+
+### Live cohort correction — 2026-09-27
+
+Seeds 58 and 62 explicitly connected their sensor signal to an amplifier's `input`,
+but `complete_architecture_payload` dropped it as a duplicate power connection.
+The normalizer now uses the same published supply-port selection as architecture
+derivation: the MCP6001 follower takes power on `vdd`, not its signal `input`.
+Regulator `input` power connections still normalize through their actual contract.
+The frozen seed-62 answer now derives `input=SENSOR_IN`, `vdd=+5V`; all 90
+architecture-intent tests pass. This verifies wire preservation, not fab readiness;
+live cohort results are recorded under `~/.kicraft/debug/cohort-2026-09-27/`.
+
+The next live pass exposed a second wire-loss case: reviewed-part interface
+completion scanned only signal destinations, dropping a named reset switch's
+`signal` source contact. It now includes both ends and reuses one contact for
+repeated references to the same port. The frozen seed-58 answer derives
+`reset_button.signal=RESET_N`; all 91 architecture-intent tests pass.
+
+Pass 3 reached BOM for both amplifiers. Seed 62 then exposed a grouping-dependent
+pin check: two identical JST-XH groups failed, while one group of quantity two
+passed. BOM interface validation now checks one shared symbol/footprint/MPN
+identity across matching groups, still refusing mixed identities, invalid pins,
+and insufficient quantities. The frozen complete BOM unit now validates with
+both connectors retained. The architecture and work-unit suites pass 209 tests;
+an obsolete mock-response test that expected a reviewed JST-XH class to be
+reclassified was removed rather than changing production class handling.
+
+Final live result: baseline plus three fix passes, all five frozen briefs submitted
+through kicraft.io each time, **0/5 fab-ready** and no build jobs. The battery
+amplifier advances from architecture failure to BOM failure; the USB amplifier
+reaches BOM in pass 3 but returns to architecture failure in pass 4 after the model
+omits every signal. The current-sensor brief regresses from BOM to architecture.
+Nine frozen sensor answers normalize identically under baseline and repaired
+code. The connector grouping fix is smoke-verified but its comparable live unit
+is not reached in the final pass. Recorded total spend is $0.30600508, including
+$0.02169020 for two excluded launches after a browser text-entry mismatch.
+The three-fix-pass cap stopped the cohort; no stable end-to-end yield gain is claimed.
+
+Continuation loop 1 corrects USB host-rail resolution: the existing USB-rail
+completion runs before architecture derivation, and an explicit rail on a USB
+data edge disambiguates host `VBUS` from a separate regulated `+5V`. Explicit
+non-5 V selections remain refused. Frozen project 961 answer 2 now derives the
+USB connector with `vbus=VBUS`; other genuine circuit errors remain blocking.
+359 architecture, recipe, and stage-semantics tests pass. An obsolete
+class-spelling test tied to an incidental inventory choice was removed.
+
+Continuation loop 3 reached build exit 0 and exported project 994, but the required
+enable jumper was absent: AP63203 U1 itself satisfied the uncovered `jumper` class
+through generic real-part evidence. This is a false acceptance, not a correct
+completed brief. BOM-unit and synthesis physical checks now consult a resolved
+reviewed identity before the uncovered-class fallback; a known regulator cannot
+claim unrelated hardware functionality. The frozen complete gate changes from
+pass to missing-jumper rejection without changing saved state; 463 focused tests
+pass. The existing fallback for parts without reviewed identities is unchanged.
+
+The regex/Jev audit and counterexamples are recorded in the cohort directory's
+`regex-jev-audit.json`. Three real Jev quantity probes resolved synonyms excluded
+by lexical shortlists; three descriptive-part-name probes did not pass the
+existing confidence threshold. Both experiments were isolated and removed;
+neither changes production interpretation.
+
+The continuation stopped at the five-additional-loop cap (nine total passes,
+45 comparison runs). Final seeds 58–61 stop at BOM; seed 62 stops at architecture.
+Seed 60 advances beyond its former best saved stage, but no brief has a correct
+fab-ready result. Project 994 is the sole exit-0 fab export and is noncompliant
+because its enable jumper is missing; do not count it as design success. Fresh
+regulator runs 999 and 1004 reject missing jumpers at BOM. Total project spend is
+$0.678584455 plus $0.000258258 for isolated Jev probes ($0.678842713 combined).
+Per-pass regressions and final gate sentences remain in the cohort evidence;
+no consistent five-board yield improvement is claimed.

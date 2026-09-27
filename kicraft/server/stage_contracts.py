@@ -1245,10 +1245,11 @@ def _derive_intent_payload(payload: dict, functional_spec: object | None = None)
         complete_architecture_payload,
         derive_architecture,
     )
+    from kicraft.design.stage_semantics import complete_usb_socket_rail
 
     try:
         return derive_architecture(
-            complete_architecture_payload(payload), functional_spec
+            complete_architecture_payload(complete_usb_socket_rail(payload)), functional_spec
         ).model_dump(exclude_none=True)
     except ArchitectureIntentError as exc:
         raise StageSchemaError(

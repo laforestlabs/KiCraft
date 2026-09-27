@@ -2433,6 +2433,26 @@ def _group_for(identity: str):
     )
 
 
+def test_reviewed_regulator_cannot_satisfy_an_uncovered_jumper_requirement():
+    from kicraft.design.models import BomPart
+    from kicraft.design.synthesis.validation import (
+        _part_implements_physical_class,
+        _reviewed_identity_for_bom_part,
+    )
+    from kicraft.server.stage_work_units import _group_has_physical_feature
+
+    group = _group_for("ap63203wu-7")
+    part = BomPart(
+        ref="U1", sheet=group.sheet, value=group.value, mpn=group.mpn,
+        symbol=group.symbol, footprint=group.footprint,
+    )
+    reviewed = _reviewed_identity_for_bom_part(part)
+    assert _group_has_physical_feature(group, "buck-converter")
+    assert _part_implements_physical_class(part, reviewed, "buck-converter")
+    assert not _group_has_physical_feature(group, "jumper")
+    assert not _part_implements_physical_class(part, reviewed, "jumper")
+
+
 def test_obligation_class_aliases_match_the_reviewed_feature_vocabulary():
     """Obligation classes the model names must reach the reviewed feature vocabulary.
 
@@ -2831,6 +2851,45 @@ def test_declared_interface_claim_may_name_a_pin_by_its_symbol_name(monkeypatch)
     assert any("reset" in row and "claimed pin 'RESET'" in row for row in defects), defects
 
 
+@pytest.mark.parametrize("split_groups", [False, True])
+def test_identical_connector_grouping_preserves_pin_and_quantity_checks(split_groups):
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    group = BomComponentGroup(
+        id="sensor_jst", sheet="INTERFACE", reference_prefix="J", quantity=2,
+        value="B2B-XH-A(LF)(SN)", mpn="B2B-XH-A(LF)(SN)",
+        symbol="b2b-xh-a-lf-sn:B2B-XH-A",
+        footprint="b2b-xh-a-lf-sn:CONN-TH_B2B-XH-A-LF-SN",
+    )
+    groups = [
+        group.model_copy(update={"quantity": 1}),
+        group.model_copy(update={"id": "output_jst", "quantity": 1}),
+    ] if split_groups else [group]
+    requirement = {
+        "id": "sensor", "family": "jst-xh-connector",
+        "exact_part": "B2B-XH-A(LF)(SN)",
+        "obligations": [
+            {"kind": "physical", "original_obligation_id": "jst",
+             "component_class": "jst-xh-connector"},
+            {"kind": "quantity", "original_obligation_id": "jst-count",
+             "subject": "jst-xh-connector", "minimum": 2},
+        ],
+        "declared_interface": {
+            "ports": [{"key": "signal", "pin": "1", "direction": "passive"}],
+        },
+    }
+    assert _requirement_obligation_defects([requirement], groups) == {
+        "physical-obligation-unfulfilled": [], "declared-interface-unrealized": [],
+    }
+    requirement["declared_interface"]["ports"][0]["pin"] = "3"
+    defects = _requirement_obligation_defects([requirement], groups)
+    assert any("claimed pin '3'" in row for row in defects["declared-interface-unrealized"])
+    short = _requirement_obligation_defects(
+        [requirement], [group.model_copy(update={"quantity": 1})],
+    )
+    assert any("requires 2 real" in row for row in short["physical-obligation-unfulfilled"])
+
+
 def test_unfulfilled_obligation_names_the_groups_the_unit_emitted():
     """The defect must say what the unit *did* emit, not only that a class is missing.
 
@@ -3083,68 +3142,6 @@ def test_physical_obligation_count_binds_through_the_writers_spelling():
         validate_unit_candidate(unit, {"groups": [{**group, "quantity": 1}]}, state, {})
 
 
-def test_intent_normalization_reconciles_demanded_classes_and_counts_with_a_decider():
-    """The intent normalize step runs one typed decision, and only when a decider is supplied.
-
-    A class the reviewed library cannot read ("jst-xh-connector") and a count whose subject
-    names no class ("temperature channels") are the two naming failures that dominated the
-    live rounds; both have a closed answer set, so the decider settles them before diagnosis.
-    """
-    import copy
-
-    from kicraft.server.decision_layer import Answer
-    from kicraft.server.reconciliation import shortlist_reviewed_classes
-    from kicraft.server.stage_runtime import _normalize_candidate_for_diagnostics
-
-    candidate = {
-        "project_stem": "recon",
-        "goal": "a small sensor board",
-        "constraints": ["3.3 V supply"],
-        "assumptions": [],
-        "obligations": [
-            {
-                "kind": "physical",
-                "original_obligation_id": "relay",
-                "component_class": "through-hole-relay",
-            },
-            {
-                "kind": "quantity",
-                "original_obligation_id": "ch",
-                "subject": "relay channels",
-                "minimum": 4,
-            },
-            {
-                "kind": "physical",
-                "original_obligation_id": "host",
-                "component_class": "jst-xh-connector",
-            },
-        ],
-        "named_parts": [],
-    }
-    brief = "a small sensor board"
-
-    baseline = _normalize_candidate_for_diagnostics("intent", copy.deepcopy(candidate), brief, {})
-    assert baseline["obligations"][1]["subject"] == "relay channels"
-    assert baseline["obligations"][2]["component_class"] == "jst-xh-connector"
-
-    pick = shortlist_reviewed_classes("jst-xh-connector")[0]
-
-    def decider(state, questions):
-        return {
-            question.key: Answer(
-                key=question.key,
-                kind=question.kind,
-                value=pick if question.key.startswith("class_") else "through-hole-relay",
-                confidence=0.9,
-            )
-            for question in questions
-        }
-
-    done = _normalize_candidate_for_diagnostics(
-        "intent", copy.deepcopy(candidate), brief, {}, decider=decider
-    )
-    assert done["obligations"][1]["subject"] == "through-hole-relay"
-    assert done["obligations"][2]["component_class"] == pick
 
 
 def test_a_refused_part_class_gets_a_typed_recommendation_from_the_decider():

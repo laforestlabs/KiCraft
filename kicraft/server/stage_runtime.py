@@ -28,7 +28,6 @@ from kicraft.design.stage_semantics import (
     complete_unavailable_part_classes,
     complete_unstated_power_input,
     complete_unsourced_external_rails,
-    complete_usb_socket_rail,
     diagnose_stage,
     external_load_budget_stated,
     normalize_project_stem,
@@ -1508,7 +1507,6 @@ def _normalize_candidate_for_diagnostics(
         # alternative to fall back on (checked inside), so the rail it needs is added here --
         # before diagnosis, so what the checker sees is a design the pipeline can build.
         candidate = complete_over_rated_supply(candidate)
-        candidate = complete_usb_socket_rail(candidate)
         candidate = remove_mislabeled_architecture_defaults(semantic_state, candidate)
     elif stage == "bom":
         # The parts stage meets the same demand from the committed architecture's obligations.

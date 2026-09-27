@@ -773,11 +773,10 @@ def _adopt_reviewed_library_pair(group: BomComponentGroup) -> BomComponentGroup:
 def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
     """Whether one BOM group implements a demanded physical class.
 
-    A reviewed record answers from its own features. A class with no reviewed coverage
-    anywhere — a part category the library has never heard of — falls back to real-part
-    evidence instead (exact MPN, resolvable symbol, footprint): the library cannot answer
-    for a class it never covered, and refusing the demand would block exactly the new
-    designs the pipeline exists to build (see part_identity.has_reviewed_coverage).
+    A reviewed identity's own features are authoritative, even for a requested
+    class without reviewed coverage. Only an unidentified part may use the
+    existing real-part fallback; known hardware must not become an unrelated
+    component merely because its MPN and library assets resolve.
     """
     from kicraft.design.part_identity import (
         canonical_physical_features,
@@ -786,8 +785,6 @@ def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
         resolved_part_evidence,
     )
 
-    if not has_reviewed_coverage(feature):
-        return resolved_part_evidence(mpn=group.mpn, symbol=group.symbol, footprint=group.footprint)
     reviewed = physical_inventory_record(
         mpn=group.mpn,
         symbol=group.symbol,
@@ -795,8 +792,10 @@ def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
     )
     if reviewed is None:
         reviewed = _bundled_reviewed_record(group)
-    return reviewed is not None and bool(
-        canonical_physical_features(feature).intersection(reviewed.physical_features)
+    if reviewed is not None:
+        return bool(canonical_physical_features(feature).intersection(reviewed.physical_features))
+    return not has_reviewed_coverage(feature) and resolved_part_evidence(
+        mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
     )
 
 
@@ -1708,12 +1707,11 @@ def _requirement_obligation_defects(
                 )
             ):
                 owners.append(group)
-        # One owning hardware family per declared interface.  A bank of identical
-        # instances (four relays, sixteen servo headers) is a single owned family:
-        # every instance carries the same symbol, so the claimed port-to-pin map
-        # holds per instance.  Split ownership across several groups is still
-        # refused, as is an owner with no physical instance at all.
-        if len(owners) != 1 or owners[0].quantity < 1:
+        # Validate the pin map against one physical identity, not one grouping:
+        # two identical single connectors and one quantity-two group publish
+        # the same contacts. Distinct hardware identities remain ambiguous.
+        identities = {(group.symbol, group.footprint, group.mpn) for group in owners}
+        if len(identities) != 1 or any(group.quantity < 1 for group in owners):
             defects["declared-interface-unrealized"].append(
                 f"{requirement['id']}: declared interface needs one identified hardware owner"
             )

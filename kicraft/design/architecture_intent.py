@@ -707,17 +707,21 @@ def _declared_ports_from_signals(payload: dict, requirement_id: str, contacts: t
     names are the draft's, the contacts are the part's, and the function names its own signal.
     """
     ports: list[dict] = []
+    seen: set[str] = set()
     index = 0
     for signal in payload.get("signals") or []:
         if not isinstance(signal, dict):
             continue
         peers = signal.get("to")
-        references = peers if isinstance(peers, list) else [peers]
+        references = [signal.get("from"), *(peers if isinstance(peers, list) else [peers])]
         for reference in references:
             text = str(reference or "")
             if not text.startswith(f"{requirement_id}."):
                 continue
             key = text.split(".", 1)[1]
+            if key in seen:
+                continue
+            seen.add(key)
             pin = str(contacts[index]) if index < len(contacts) else key
             ports.append(
                 {
@@ -870,6 +874,18 @@ def complete_architecture_payload(payload: dict) -> dict:
     if not requirements or not signals:
         return payload
     by_id = {str(row.get("id") or ""): row for row in requirements}
+    recipes = tuple(registered_recipes())
+    lowerers = {family: row for row in registered_lowerers() for family in row.families}
+    supply_ports: dict[str, str] = {}
+    for requirement in requirements:
+        rail = requirement.get("supply")
+        if not rail:
+            continue
+        catalog = _catalog(IntentRequirement.model_validate(requirement), recipes, lowerers)
+        if catalog is not None:
+            port = _supply_port(catalog, rail)
+            if port is not None:
+                supply_ports[requirement["id"]] = port
 
     def _endpoint(reference) -> tuple[str, str] | None:
         text = str(reference)
@@ -894,10 +910,9 @@ def complete_architecture_payload(payload: dict) -> dict:
         key = port.casefold()
         if _reference_port_name(key):
             return True
-        # The compiler's own notion of a supply input, not just the token list: a regulator's
-        # `input` is one, so `_supply_port_name` alone would miss it.
-        supply_shaped = _supply_port_name(key) or key in _SUPPLY_PORTS
-        return bool(requirement.get("supply")) and supply_shaped
+        # Only the port actually fed by `supply` is redundant. An amplifier's
+        # `input` carries a signal while its `vdd` carries the supply.
+        return key == supply_ports.get(requirement_id)
 
     kept: list[dict] = []
 
@@ -917,7 +932,7 @@ def complete_architecture_payload(payload: dict) -> dict:
             if requirement is None:
                 continue
             key = parts[1].casefold()
-            if (_supply_port_name(key) or key in _SUPPLY_PORTS) and requirement.get("supply"):
+            if key == supply_ports.get(parts[0]):
                 rail = str(requirement["supply"])
         if rail is None:
             return None
@@ -2617,6 +2632,22 @@ def _usb_vbus_rail(intent: ArchitectureIntent) -> str | None:
     ]
     if len(from_input) == 1:
         return from_input[0]
+    # A self-powered board may have both regulated +5V and the host's VBUS.
+    # The USB data edge's explicit rail declaration disambiguates them without
+    # joining the two supplies merely because their voltages happen to match.
+    explicit = {
+        name
+        for signal in intent.signals
+        if signal.from_ref.rsplit(".", 1)[-1].lower() in _USB_DATA_PORTS
+        and any(peer.startswith(EDGE_PREFIX) for peer in signal.peers())
+        for name in signal.rails
+    }
+    if explicit:
+        if len(explicit) != 1:
+            return None
+        name = next(iter(explicit))
+        rail = intent.power.rails.get(name)
+        return name if rail is not None and abs(rail.voltage - 5.0) <= 0.5 else None
     named = [name for name in _USB_VBUS_RAIL_NAMES if name in intent.power.rails]
     if len(named) == 1:
         return named[0]

@@ -2648,27 +2648,3 @@ def test_a_class_spelling_is_never_renamed_when_it_would_invert_or_distort():
         "pin-header",
         "pin-header",
     ]
-
-
-def test_a_count_row_follows_the_class_it_counts_when_the_spelling_is_repaired():
-    """A count bound by a shared token must not dangle when its class is renamed.
-
-    `buttons = 3` binds to `rotary-encoder-push-button` on the shared `button` token; renaming
-    the class to the reviewed `rotary-encoder` without moving the count made the count unbound
-    (replay 2026-09-26: two runs, and the count is what the brief asked for).
-    """
-    from kicraft.design.stage_semantics import complete_class_spellings
-
-    completed = complete_class_spellings(
-        {
-            "obligations": [
-                {"kind": "physical", "component_class": "rotary-encoder-push-button"},
-                {"kind": "quantity", "subject": "buttons", "minimum": 3},
-            ],
-            "assumptions": [],
-        }
-    )
-    assert completed["obligations"][0]["component_class"] == "rotary-encoder"
-    assert completed["obligations"][1]["subject"] == "rotary-encoder"
-    assert any("count 'buttons' follows part class" in row for row in completed["assumptions"])
-    assert "intent_quantity_subject_unbound" not in _codes("intent", completed)

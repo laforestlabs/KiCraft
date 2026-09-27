@@ -4088,6 +4088,49 @@ def _native_usb_board(*, usb_connector: bool, bind_usb: bool, five_volt_rail: bo
         "signals": signals,
     }
 
+def test_architecture_decode_completes_usb_host_rail_before_derivation():
+    payload = _native_usb_board(
+        usb_connector=False, bind_usb=False, five_volt_rail=False,
+    )
+    payload["signals"] = [
+        {"name": "USB_DM", "from": "rp2040.usb_dm", "to": "edge:USB_DATA"},
+        {"name": "USB_DP", "from": "rp2040.usb_dp", "to": "edge:USB_DATA"},
+    ]
+    canonical, _ = _normalize_stage_response("architecture", payload, {})
+    requirements = {row["id"]: row for row in canonical["requirements"]}
+    socket = next(row for row in requirements.values() if row["family"] == "usb-c-usb2-device")
+    assert socket["ports"]["vbus"] == "VBUS"
+    assert canonical["rail_voltages"]["VBUS"] == 5.0
+    assert requirements["buck"]["ports"]["input"] == "+12V"
+    assert requirements["rp2040"]["ports"]["vdd"] == "3V3"
+    assert socket["ports"]["usb_dm"] == requirements["rp2040"]["ports"]["usb_dm"]
+    assert socket["ports"]["usb_dp"] == requirements["rp2040"]["ports"]["usb_dp"]
+    assert "VBUS" not in payload["power"]["rails"]
+
+@pytest.mark.parametrize("usb_rail", ["VBUS", "+5V"])
+def test_usb_edge_rail_disambiguates_two_independent_five_volt_supplies(usb_rail):
+    payload = _native_usb_board(
+        usb_connector=False, bind_usb=False, five_volt_rail=False,
+    )
+    payload["power"]["rails"].update({
+        "VBUS": {"voltage": 5.0, "from": None},
+        "+5V": {"voltage": 5.0, "from": None},
+    })
+    payload["signals"] = [
+        {"name": "USB_DM", "from": "rp2040.usb_dm", "to": "edge:USB", "rails": [usb_rail]},
+        {"name": "USB_DP", "from": "rp2040.usb_dp", "to": "edge:USB", "rails": [usb_rail]},
+    ]
+    canonical, _ = _normalize_stage_response("architecture", payload, {})
+    socket = next(row for row in canonical["requirements"] if row["family"] == "usb-c-usb2-device")
+    assert socket["ports"]["vbus"] == usb_rail
+    assert {"+5V", "VBUS", "+12V"} <= set(canonical["power_nets"])
+    for signal in payload["signals"]:
+        signal["rails"] = ["+12V"]
+    with pytest.raises(StageSchemaError, match="usb_connector_supply_unknown"):
+        _normalize_stage_response("architecture", payload, {})
+
+
+
 
 def test_native_usb_mcu_gains_exactly_one_derived_data_connector():
     """Live run 904 (KC-SGYXF5) died on a port the brief never asked for.

@@ -2780,6 +2780,48 @@ def test_duplicate_power_statements_are_dropped_before_the_compiler_refuses_them
     assert derive_architecture(completed, None) is not None
 
 
+def test_power_completion_preserves_an_amplifiers_signal_input():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    payload = _one_part_intent(
+        {"id": "amp", "role": "analog_block", "family": "mcp6001-follower",
+         "supply": "+5V"},
+        [
+            {"name": "SENSOR_IN", "from": "input.pin3", "to": "amp.input"},
+            {"name": "AMPLIFIED_OUT", "from": "amp.output", "to": "input.pin4"},
+            {"name": "AMP_SUPPLY", "from": "input.pin1", "to": "amp.vdd"},
+        ],
+    )
+    architecture = derive_architecture(complete_architecture_payload(payload))
+    amp = _requirement(architecture, "amp")
+    header = _requirement(architecture, "input")
+    assert amp.ports["input"] == header.ports["pin3"] == "SENSOR_IN"
+    assert amp.ports["output"] == header.ports["pin4"] == "AMPLIFIED_OUT"
+    assert amp.ports["vdd"] == header.ports["pin1"] == "+5V"
+
+
+def test_named_switch_keeps_source_ports_and_shared_signal_contact():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    payload = _one_part_intent(
+        {"id": "button", "role": "user_io", "family": "switch-input",
+         "exact_part": "TL3342F260QG", "supply": "+5V"},
+        [
+            {"name": "BUTTON_SUPPLY", "from": "input.pin1", "to": "button.vdd"},
+            {"name": "BUTTON_SIGNAL", "from": "button.signal", "to": "input.pin3"},
+            {"name": "BUTTON_MONITOR", "from": "button.signal", "to": ["input.pin4"]},
+        ],
+    )
+    architecture = derive_architecture(complete_architecture_payload(payload))
+    button = _requirement(architecture, "button")
+    header = _requirement(architecture, "input")
+    assert button.ports["signal"] == header.ports["pin3"] == header.ports["pin4"]
+    assert button.ports["vdd"] == "+5V"
+    assert {port.key: port.pin for port in button.declared_interface.ports} == {
+        "vdd": "1", "signal": "2",
+    }
+
+
 def test_a_tie_field_on_a_port_that_carries_a_signal_is_cleared():
     """The signal is what names that net; the tie field names a second one on the same pin."""
     from kicraft.design.architecture_intent import complete_architecture_payload

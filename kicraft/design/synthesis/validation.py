@@ -3324,23 +3324,19 @@ def _has_trusted_lowerer_topology_witness(requirement, bom, component_class: str
 def _part_implements_physical_class(part, reviewed_record, component_class: str) -> bool:
     """Whether one BOM part implements a demanded physical class.
 
-    A reviewed record answers from its own family and reviewed features. A demanded class
-    with no reviewed coverage anywhere falls back to real-part evidence — an exact MPN, a
-    symbol whose pin inventory resolves, and a footprint (part_identity.
-    resolved_part_evidence). The library cannot answer for a class it has never covered,
-    and refusing such a demand would block exactly the new designs the pipeline exists to
-    build; the part must still be real and resolvable, never a family label or a bare value.
+    A reviewed identity's family and features take precedence over generic
+    real-part evidence, including when the requested class is unreviewed.
+    Only a part without a reviewed identity can use the existing real-part
+    fallback for an uncovered class.
     """
     from kicraft.design.part_identity import has_reviewed_coverage, resolved_part_evidence
 
-    if not has_reviewed_coverage(component_class):
-        return resolved_part_evidence(
+    if reviewed_record is None:
+        return not has_reviewed_coverage(component_class) and resolved_part_evidence(
             mpn=getattr(part, "mpn", None),
             symbol=getattr(part, "symbol", None),
             footprint=getattr(part, "footprint", None),
         )
-    if reviewed_record is None:
-        return False
     canonical = canonical_physical_features(component_class)
     return component_class == reviewed_record.family or bool(
         canonical & reviewed_record.physical_features
