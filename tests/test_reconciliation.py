@@ -109,10 +109,34 @@ def test_a_count_is_bound_to_its_class_or_declared_a_property():
     assert completed["obligations"][1]["subject"] == "through-hole-relay"
     assert notes and "(defaulted)" in completed["assumptions"][-1]
 
-    # "a property of one part" leaves the row (and the stage's own refusal) alone.
-    property_decider = _decider({"count_1": (PROPERTY, 0.95)})
-    untouched, notes = resolve_quantity_subjects(candidate, decider=property_decider)
-    assert untouched == candidate and notes == []
+
+def test_header_contacts_stay_geometry_while_plural_headers_stay_components():
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.part_identity import quantity_subject_binds
+
+    candidate = {
+        "obligations": [
+            {"kind": "physical", "original_obligation_id": "header", "component_class": "pin-header"},
+            {"kind": "quantity", "original_obligation_id": "contacts", "subject": "pin-header pins", "minimum": 8},
+            {"kind": "quantity", "original_obligation_id": "headers", "subject": "pin-headers", "minimum": 2},
+        ]
+    }
+    completed, _ = resolve_quantity_subjects(
+        candidate, decider=_decider({"count_1": (PROPERTY, 0.99)})
+    )
+    assert completed["obligations"][2] == candidate["obligations"][2]
+    assert quantity_subject_binds(completed["obligations"][2]["subject"], "pin-header")
+    requirement = CircuitRequirement(
+        id="header", sheet="MAIN", role="connector", family="pin-header",
+        parameters={"rows": 1, "gender": "male"},
+        ports={"pin1": "SIGNAL", "pin2": "GND"},
+        obligations=completed["obligations"],
+    )
+    artifact = lower_requirement(requirement)
+    assert artifact.groups[0].symbol == "Connector_Generic:Conn_01x08"
+    assert {row.pin for row in artifact.no_connects} == {"3", "4", "5", "6", "7", "8"}
+    assert candidate["obligations"][1]["kind"] == "quantity"
 
 
 def test_a_group_that_implements_the_class_is_named_when_it_is_the_only_one():

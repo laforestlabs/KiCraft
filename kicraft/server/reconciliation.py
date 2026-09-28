@@ -221,18 +221,16 @@ def resolve_quantity_subjects(
 ) -> tuple[dict, list[str]]:
     """Bind a count to the class it counts, or record that it counts a property.
 
-    A count line whose subject names no class in the slot is refused today, which costs a
-    correction round and leaves the count unenforced until the writer re-spells it. The classes
-    are already listed in the slot, so which one the count belongs to is a closed question — and
-    so is the honest third answer, "a property of one part" (pins on a header), which leaves the
-    refusal standing rather than mis-binding eight pins to eight headers.
+    A property count is retained as a quantitative minimum, not rebound to a
+    component class. Connector geometry consumes that typed constraint while
+    the component-count gates continue to enforce actual plural component counts.
     """
     rows = candidate.get("obligations") or []
-    classes = [
+    classes = list(dict.fromkeys(
         str(row.get("component_class") or "")
         for row in rows
         if isinstance(row, dict) and row.get("kind") == "physical"
-    ]
+    ))
     pending: list[tuple[int, str, tuple[str, ...]]] = []
     for index, row in enumerate(rows):
         if not isinstance(row, dict) or row.get("kind") != "quantity":
@@ -250,11 +248,22 @@ def resolve_quantity_subjects(
         Question(
             key=f"count_{index}",
             prompt=(
-                f"A count row says {subject!r}. Which class in this design does the count belong "
-                "to?"
+                f"A quantity row has subject={subject!r} and minimum="
+                f"{rows[index].get('minimum')!r}. Does it count separate physical components, "
+                "or a property of a component? Read the goal and constraints as context. "
+                "Pins, contacts, positions, or channels belonging to one component are NOT "
+                "a count of that component. An eight-pin header is one header with eight "
+                "contacts; eight headers are eight components; two eight-pin headers are "
+                "two components with eight contacts each. Choose a class only when the "
+                "number counts separate components of that class. Otherwise choose the "
+                "property answer; do not discard the property's numerical requirement."
             ),
             kind="choice",
             options=(*options, PROPERTY),
+            descriptions={
+                **{option: f"separate physical components of class {option}" for option in options},
+                PROPERTY: "a characteristic of a component, such as contacts per connector",
+            },
         )
         for index, subject, options in pending
     ]
@@ -267,18 +276,29 @@ def resolve_quantity_subjects(
         if answer is None or not answer.is_confident(confidence):
             continue
         chosen = str(answer.value)
-        if chosen not in options:
+        if chosen not in (*options, PROPERTY):
             continue
         if completed is None:
             import copy
 
             completed = copy.deepcopy(candidate)
             completed["obligations"] = list(rows)
-        completed["obligations"][index] = {
-            **completed["obligations"][index],
-            "subject": chosen,
-        }
-        notes.append(f"count {subject!r} read as a count of {chosen!r} (defaulted)")
+        if chosen == PROPERTY:
+            completed["obligations"][index] = {
+                "kind": "quantitative",
+                "original_obligation_id": rows[index]["original_obligation_id"],
+                "quantity": subject,
+                "relation": "minimum",
+                "value": rows[index]["minimum"],
+                "unit": "count",
+            }
+            notes.append(f"count {subject!r} retained as a property minimum (defaulted)")
+        else:
+            completed["obligations"][index] = {
+                **completed["obligations"][index],
+                "subject": chosen,
+            }
+            notes.append(f"count {subject!r} read as a count of {chosen!r} (defaulted)")
     if completed is None:
         return candidate, []
     assumptions = [str(item) for item in completed.get("assumptions") or []]

@@ -14,7 +14,7 @@ from typing import Callable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from kicraft.design.models import CircuitRequirement, JsonScalar
+from kicraft.design.models import CircuitRequirement, JsonScalar, RequirementObligation
 from kicraft.design.part_identity import reviewed_part
 
 
@@ -1183,17 +1183,21 @@ def _usb_c_breakout(requirement: CircuitRequirement) -> LoweringArtifact | None:
     )
 
 
-def _stated_contact_count(requirement: CircuitRequirement) -> int:
+def _stated_contact_count(obligations: list[RequirementObligation]) -> int:
     """The contact count the requirement's own obligations state, or 0.
 
     A brief's "6-pin 0.1 inch header" reaches the parts step as a quantitative row owned by the
     header requirement ("header pins = 6"). The connector's physical size otherwise comes from the
     contacts the circuit happens to use -- two of six here, so the parts step emitted a 2-way
-    header for a brief that demands six, and no gate anywhere said a word (live 2026-09-25). Only
-    an equality row about the connector's own contacts counts, and it only ever grows the part.
+    header for a brief that demands six, and no gate anywhere said a word (live 2026-09-25).
+    Equality and minimum rows about the connector's own contacts set its minimum size.
     """
-    for row in requirement.obligations:
-        if row.kind != "quantitative" or row.relation != "equal" or row.value is None:
+    for row in obligations:
+        if row.kind != "quantitative" or row.relation not in {"equal", "minimum"} or row.value is None:
+            continue
+        if str(row.unit or "").strip().casefold() not in {
+            "count", "pin", "pins", "contact", "contacts", "position", "positions",
+        }:
             continue
         quantity = str(row.quantity or "").casefold()
         if not any(term in quantity for term in ("pin", "contact", "position")):
@@ -1232,7 +1236,7 @@ def _numbered_connector_ports(
 
 
 def _pin_header(requirement: CircuitRequirement) -> LoweringArtifact | None:
-    stated = _stated_contact_count(requirement)
+    stated = _stated_contact_count(requirement.obligations)
     ports = _numbered_connector_ports(requirement, fill_gaps=True, minimum=stated)
     if ports is None:
         return None
@@ -1705,6 +1709,17 @@ def _pullup(requirement: CircuitRequirement) -> LoweringArtifact | None:
 
 
 def _switch_input(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    from kicraft.design.part_identity import canonical_physical_features, class_key
+
+    for obligation in requirement.obligations:
+        if obligation.kind == "adjustability" and "momentary-button" not in (
+            canonical_physical_features(class_key(obligation.mechanism))
+        ):
+            raise ValueError(
+                f"switch-input@1 implements a momentary pushbutton, not the requested "
+                f"adjustment mechanism {obligation.mechanism!r}; retain that mechanism "
+                "and select hardware that actually implements it"
+            )
     ports = _require_ports(requirement, ("signal", "gnd", "vdd"))
     policy = str(requirement.parameters.get("pull_policy", ""))
     active_level = str(requirement.parameters.get("active_level", "low"))

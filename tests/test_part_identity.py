@@ -614,3 +614,41 @@ def test_the_selection_lookups_see_every_reviewed_set_and_researched_records(tmp
     assert "researched-diode" in {
         part.identity for part in part_identity.reviewed_parts_for_feature("schottky-diode")
     }
+
+
+@pytest.mark.parametrize(
+    ("record_feature", "demand", "accepted"),
+    [
+        ("button", "pushbutton", True),
+        ("pushbutton", "button", True),
+        ("push-button", "momentary-button", True),
+        ("momentary-pushbutton", "push-button", True),
+        ("header", "pin-socket", False),
+        ("wireless-module", "wifi-module", False),
+        ("status-led", "led-0603", False),
+    ],
+)
+def test_researched_feature_synonyms_preserve_physical_acceptance(
+    tmp_path, monkeypatch, record_feature, demand, accepted
+):
+    import json
+
+    from kicraft.server.stage_work_units import _group_has_physical_feature
+
+    records = tmp_path / "researched.json"
+    monkeypatch.setenv("KICRAFT_RESEARCHED_RECORDS", str(records))
+    records.write_text(json.dumps([{
+        "identity": "researched-feature",
+        "family": record_feature,
+        "symbol": "Switch:SW_Push",
+        "footprint": "Button_Switch_SMD:SW_SPST_TL3342",
+        "physical_features": [record_feature],
+        "contacts": ["1", "2"],
+    }]))
+    group = BomComponentGroup(
+        id="input", reference_prefix="SW", quantity=1, value="input",
+        symbol="Switch:SW_Push",
+        footprint="Button_Switch_SMD:SW_SPST_TL3342",
+        mpn="researched-feature", sheet="INPUT",
+    )
+    assert _group_has_physical_feature(group, demand) is accepted

@@ -2047,6 +2047,34 @@ def test_typed_header_cannot_be_replaced_by_passive_footprint():
     assert caught.value.defects["missing-requirement-implementation"] == ["header"]
 
 
+def test_unused_required_header_contacts_cannot_disappear():
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    requirement = {
+        "id": "header", "sheet": "A", "role": "connector", "family": "pin-header",
+        "parameters": {"rows": 1, "gender": "male"},
+        "ports": {"pin1": "SIGNAL", "pin2": "GND"},
+        "obligations": [{
+            "kind": "quantitative", "original_obligation_id": "contacts",
+            "quantity": "header pins", "relation": "minimum", "value": 8, "unit": "count",
+        }],
+    }
+    for contacts in (2, 8):
+        group = BomComponentGroup.model_validate({
+            **_group("header", "A", prefix="J"),
+            "value": f"PinHeader_1x{contacts:02d}",
+            "symbol": f"Connector_Generic:Conn_01x{contacts:02d}",
+            "footprint": f"Connector_PinHeader_2.54mm:PinHeader_1x{contacts:02d}_P2.54mm_Vertical",
+        })
+        errors = _requirement_obligation_defects(
+            [requirement], [group], compiler_requirements=[requirement]
+        )
+        if contacts == 2:
+            assert {key for key, value in errors.items() if value} == {"declared-interface-unrealized"}
+        else:
+            assert errors == {"physical-obligation-unfulfilled": [], "declared-interface-unrealized": []}
+
+
 def test_fpc_header_misimplementation_recovers_real_24_contact_connector():
     from kicraft.design.part_identity import reviewed_part
     from kicraft.design.synthesis.symbol_pinout import lookup_pins

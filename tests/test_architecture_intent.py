@@ -1808,8 +1808,13 @@ def test_quantity_obligation_may_stand_alone_at_the_top_level():
     assert not any(row.get("obligations") for row in payload["requirements"])
 
 
-@pytest.mark.parametrize("instances,subject", [(4, "relay"), (3, "relay"), (4, "pin-header")])
-def test_replicated_physical_instances_prove_only_their_shared_count(instances, subject):
+@pytest.mark.parametrize("group_kind", ["shared", "distinct", None])
+@pytest.mark.parametrize("instances,subject,same_sheet", [
+    (4, "relay", False), (3, "relay", False), (4, "pin-header", False), (4, "relay", True),
+])
+def test_distributed_physical_instances_prove_only_their_shared_count(
+    instances, subject, same_sheet, group_kind,
+):
     from kicraft.server.stage_work_units import (
         BomComponentGroup, _requirement_obligation_defects,
     )
@@ -1822,12 +1827,15 @@ def test_replicated_physical_instances_prove_only_their_shared_count(instances, 
         "obligations": [physical, quantity],
         "sheets": [
             {"name": f"RELAY {i}", "stem": f"RELAY_{i}", "role": "driver",
-             "function": "One relay channel", "replication_group": "RELAYS",
-             "replication_instance": i}
+             "function": "One relay channel",
+             "replication_group": (
+                 "RELAYS" if group_kind == "shared" else f"RELAY_{i}" if group_kind else None
+             ),
+             "replication_instance": i if group_kind else None}
             for i in range(1, instances + 1)
         ],
         "requirements": [
-            {"id": f"relay{i}", "sheet": f"RELAY {i}", "role": "driver",
+            {"id": f"relay{i}", "sheet": "RELAY 1" if same_sheet else f"RELAY {i}", "role": "driver",
              "family": "srd-05vdc-sl-c", "exact_part": "SRD-05VDC-SL-C",
              "obligations": [physical, quantity]}
             for i in range(1, instances + 1)
@@ -1841,7 +1849,7 @@ def test_replicated_physical_instances_prove_only_their_shared_count(instances, 
             symbol="srd-05vdc-sl-c:SRD-05VDC-SL-C",
             footprint="srd-05vdc-sl-c:RELAY-TH_SRD-XXVDC-XL-C",
         )
-        if instances == 4 and subject == "relay":
+        if instances == 4 and subject == "relay" and not same_sheet:
             assert not _requirement_obligation_defects(
                 [requirement.model_dump()], [group]
             )["physical-obligation-unfulfilled"]
@@ -2732,6 +2740,144 @@ def _one_part_intent(requirement: dict, signals: list[dict] | None = None) -> di
         "signals": signals or [],
         "assumptions": [],
     }
+
+
+@pytest.mark.parametrize("selector,expected", [("4", "4"), ("VDD", "4"), ("VSS", "5")])
+def test_reviewed_declared_contact_preserves_unique_published_selectors(selector, expected):
+    intent = _one_part_intent({
+        "id": "mcu", "role": "mcu_core", "family": "stm32g0",
+        "exact_part": "STM32G030F6P6",
+        "declared_ports": [
+            {"key": "supply", "direction": "power", "function": "Supply", "pin": selector},
+        ],
+    })
+    result = derive_architecture(intent)
+    mcu = next(row for row in result.requirements if row.id == "mcu")
+    assert mcu.declared_interface.ports[0].pin == expected
+
+
+def test_reviewed_declared_contact_rejects_nonexistent_package_pin():
+    intent = _one_part_intent({
+        "id": "mcu", "role": "mcu_core", "family": "stm32g0",
+        "exact_part": "STM32G030F6P6",
+        "declared_ports": [
+            {"key": "signal", "direction": "output", "function": "Signal", "pin": "21"},
+        ],
+    })
+    with pytest.raises(ArchitectureIntentError) as exc:
+        derive_architecture(intent)
+    diagnostic = next(d for d in exc.value.diagnostics if d.code == "declared_port_unknown_contact")
+    assert diagnostic.requirement_id == "mcu"
+    assert "4=VDD" in diagnostic.evidence
+    assert "5=VSS" in diagnostic.evidence
+
+
+@pytest.mark.parametrize(
+    ("selector", "expected"),
+    [("COIL_A", "1"), ("COIL_B", "4"), ("COM", "5"), ("NC", "3"), ("NO", "2")],
+)
+def test_relay_function_names_resolve_to_real_coil_and_switched_contacts(selector, expected):
+    architecture = derive_architecture(_one_part_intent({
+        "id": "relay", "role": "driver", "family": "relay",
+        "exact_part": "SRD-05VDC-SL-C",
+        "declared_ports": [
+            {"key": "contact", "direction": "passive", "function": selector, "pin": selector},
+        ],
+    }))
+    relay = _requirement(architecture, "relay")
+    assert relay.declared_interface.ports[0].pin == expected
+
+
+def _reviewed_connector_intent(
+    *,
+    family: str,
+    exact_part: str,
+    quantity: str,
+    relation: str = "equal",
+    value: float = 4.0,
+) -> dict:
+    return _one_part_intent(
+        {
+            "id": "connector",
+            "role": "connector",
+            "family": family,
+            "exact_part": exact_part,
+            "declared_ports": [
+                {
+                    "key": "pin1",
+                    "pin": "1",
+                    "direction": "passive",
+                    "function": "first external contact",
+                },
+                {
+                    "key": "pin2",
+                    "pin": "2",
+                    "direction": "passive",
+                    "function": "second external contact",
+                },
+            ],
+            "obligations": [
+                {
+                    "kind": "quantitative",
+                    "original_obligation_id": "connector-contact-count",
+                    "quantity": quantity,
+                    "relation": relation,
+                    "value": value,
+                    "unit": "pins",
+                }
+            ],
+        }
+    )
+
+
+@pytest.mark.parametrize("relation", ["equal", "minimum"])
+def test_reviewed_two_contact_connector_cannot_satisfy_four_contact_obligation(relation):
+    intent = _reviewed_connector_intent(
+        family="jst-xh-connector",
+        exact_part="B2B-XH-A(LF)(SN)",
+        quantity="connector contacts",
+        relation=relation,
+    )
+
+    with pytest.raises(ArchitectureIntentError) as exc:
+        derive_architecture(intent)
+
+    diagnostic = next(
+        row for row in exc.value.diagnostics if row.code == "reviewed_part_insufficient_contacts"
+    )
+    assert diagnostic.requirement_id == "connector"
+    assert "B2B-XH-A" in diagnostic.message
+
+
+@pytest.mark.parametrize("relation", ["equal", "minimum"])
+def test_reviewed_four_contact_connector_allows_unused_contacts(relation):
+    architecture = derive_architecture(
+        _reviewed_connector_intent(
+            family="qwiic-i2c-connector",
+            exact_part="SM04B-SRSS-TB",
+            quantity="connector contacts",
+            relation=relation,
+        )
+    )
+
+    connector = _requirement(architecture, "connector")
+    assert [port.pin for port in connector.declared_interface.ports] == ["1", "2"]
+
+
+@pytest.mark.parametrize("quantity,unit", [
+    ("input voltage", "V"), ("connector pin voltage", "V"), ("contact current", "mA"),
+])
+def test_noncontact_quantitative_obligation_does_not_constrain_reviewed_connector_size(quantity, unit):
+    intent = _reviewed_connector_intent(
+        family="jst-xh-connector",
+        exact_part="B2B-XH-A(LF)(SN)",
+        quantity=quantity,
+        value=5.0,
+    )
+    intent["requirements"][-1]["obligations"][0]["unit"] = unit
+    architecture = derive_architecture(intent)
+
+    assert _requirement(architecture, "connector").exact_part == "B2B-XH-A(LF)(SN)"
 
 
 def test_published_return_contact_is_answered_with_the_design_ground():

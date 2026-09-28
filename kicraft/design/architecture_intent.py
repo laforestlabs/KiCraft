@@ -30,6 +30,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .lowering import (
+    _stated_contact_count,
     RegisteredLowerer,
     lowerer_contract_diagnostic,
     lowerer_port_direction,
@@ -443,36 +444,34 @@ class ArchitectureIntent(BaseModel):
                 by_key.get((row.kind, row.original_obligation_id), row)
                 for row in requirement.obligations
             ]
-        # A repeated circuit already demands one physical instance per sheet. When those
-        # instances prove a shared board-wide count, do not charge that count again in
-        # every sheet's BOM unit (four relay sheets previously demanded sixteen relays).
+        # Distinct sheets already demand distinct physical instances. When those
+        # instances prove a shared board-wide count, do not charge that count again
+        # in each BOM unit; optional replication hints are not quantity evidence.
         from kicraft.design.part_identity import quantity_subject_binds
 
-        replica_groups = {sheet.name: sheet.replication_group for sheet in self.sheets}
         for quantity in self.obligations:
             if quantity.kind != "quantity":
                 continue
-            owners: dict[str, list[IntentRequirement]] = {}
-            for requirement in self.requirements:
-                group = replica_groups.get(requirement.sheet)
-                if group and quantity in requirement.obligations and any(
+            owners = [
+                requirement for requirement in self.requirements
+                if quantity in requirement.obligations and any(
                     row.kind == "physical"
                     and quantity_subject_binds(quantity.subject, row.component_class)
                     for row in requirement.obligations
-                ):
-                    owners.setdefault(group, []).append(requirement)
-            for group, requirements in owners.items():
-                if len({row.sheet for row in requirements}) < quantity.minimum:
-                    continue
-                for requirement in requirements:
-                    requirement.obligations = [
-                        row for row in requirement.obligations if row != quantity
-                    ]
-                self.assumptions.append(
-                    f"{quantity.original_obligation_id}: {group} already requires a physical "
-                    f"instance on {len({row.sheet for row in requirements})} distinct sheets; "
-                    "the shared count is retained once at board level (derived)"
                 )
+            ]
+            sheet_count = len({row.sheet for row in owners})
+            if sheet_count < quantity.minimum:
+                continue
+            for requirement in owners:
+                requirement.obligations = [
+                    row for row in requirement.obligations if row != quantity
+                ]
+            self.assumptions.append(
+                f"{quantity.original_obligation_id}: its owners already require a physical "
+                f"instance on {sheet_count} distinct sheets; "
+                "the shared count is retained once at board level (derived)"
+            )
         return self
 
 
@@ -1319,6 +1318,56 @@ def derive_architecture(
         if catalog is None:
             continue  # model-owned, or refused below once we know whether a signal needs its pins
         catalogs[row.id] = catalog
+        declared_ports = list(row.declared_ports)
+        if catalog.source == "declared" and row.exact_part:
+            from kicraft.design.part_identity import reviewed_part
+            from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+            record = reviewed_part(row.exact_part)
+            pinout = lookup_pins(record.symbol) if record is not None else None
+            symbol_pins = (pinout or {}).get("pins", [])
+            if symbol_pins:
+                numbers = {pin["number"] for pin in symbol_pins}
+                stated_contacts = _stated_contact_count(row.obligations) if row.role == "connector" else 0
+                if stated_contacts > len(numbers):
+                    _fail(
+                        "reviewed_part_insufficient_contacts",
+                        (
+                            f"requirement {row.id!r} retains a {stated_contacts}-contact "
+                            f"obligation, but {row.exact_part!r}'s reviewed symbol "
+                            f"{record.symbol!r} has only {len(numbers)} contacts. Its declared "
+                            "interface may leave unused contacts unbound, but it cannot make "
+                            "the exact part larger. Choose a real part that meets the retained "
+                            "obligation; no family or exact part was substituted."
+                        ),
+                        requirement_id=row.id,
+                        sheet=row.sheet,
+                        evidence=[f"{pin['number']}={pin['name']}" for pin in symbol_pins],
+                    )
+                names: dict[str, set[str]] = {}
+                for pin in symbol_pins:
+                    names.setdefault(pin["name"], set()).add(pin["number"])
+                invalid = []
+                for index, port in enumerate(declared_ports):
+                    if port.pin is None or port.pin in numbers:
+                        continue
+                    matches = names.get(port.pin, set())
+                    if len(matches) == 1:
+                        declared_ports[index] = port.model_copy(update={"pin": next(iter(matches))})
+                    else:
+                        invalid.append(f"{port.key}={port.pin}")
+                if invalid:
+                    _fail(
+                        "declared_port_unknown_contact",
+                        f"requirement {row.id!r} claims contacts {invalid} on "
+                        f"{row.exact_part!r}, but its reviewed symbol {record.symbol!r} "
+                        f"has only {sorted(numbers)}. Use actual contact numbers or unique "
+                        "published pin names; choose a different real part if the required "
+                        "contacts are absent. No family or exact part was substituted.",
+                        requirement_id=row.id,
+                        sheet=row.sheet,
+                        evidence=[f"{pin['number']}={pin['name']}" for pin in symbol_pins],
+                    )
         requirements[row.id] = CircuitRequirement(
             id=row.id,
             sheet=row.sheet,
@@ -1333,7 +1382,7 @@ def derive_architecture(
             interfaces=list(row.interfaces),
             functional_blocks=list(row.functional_blocks),
             declared_interface=(
-                DeclaredInterfaceClaim(ports=row.declared_ports)
+                DeclaredInterfaceClaim(ports=declared_ports)
                 if catalog.source == "declared"
                 else None
             ),

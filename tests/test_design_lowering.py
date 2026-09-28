@@ -629,6 +629,40 @@ def test_button_lowerer_refuses_ambiguous_supply_or_actuation(parameters, ports)
         lower_requirement(_requirement("switch-input", parameters=parameters, ports=ports))
 
 
+@pytest.mark.parametrize("mechanism", ["jumper", "rotary switch", "potentiometer"])
+def test_button_cannot_replace_a_different_adjustment_mechanism(mechanism):
+    requirement = CircuitRequirement(
+        id="enable", sheet="MAIN", role="user_io", family="switch-input",
+        parameters={"pull_policy": "external", "active_level": "high"},
+        ports={"signal": "ENABLE", "gnd": "GND", "vdd": "VIN"},
+        obligations=[{
+            "kind": "adjustability", "original_obligation_id": "enable",
+            "parameter": "enable", "mechanism": mechanism,
+        }],
+    )
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
+    assert lowerer_contract_diagnostic(requirement) is not None
+
+
+@pytest.mark.parametrize("mechanism", ["pushbutton", "momentary button", "push-button"])
+def test_button_adjustment_retains_momentary_contacts(mechanism):
+    requirement = CircuitRequirement(
+        id="enable", sheet="MAIN", role="user_io", family="switch-input",
+        parameters={"pull_policy": "external", "active_level": "high"},
+        ports={"signal": "ENABLE", "gnd": "GND", "vdd": "VIN"},
+        obligations=[{
+            "kind": "adjustability", "original_obligation_id": "enable",
+            "parameter": "enable", "mechanism": mechanism,
+        }],
+    )
+    artifact = lower_requirement(requirement)
+    assert artifact.groups[0].symbol == "Switch:SW_Push"
+    assert {(p.pin, p.net) for p in artifact.pins if p.role == "switch"} == {
+        ("1", "ENABLE"), ("2", "VIN"),
+    }
+
+
 def test_coin_cell_holder_lowers_real_source_and_preserves_battery_polarity():
     from pathlib import Path
 
@@ -1787,7 +1821,8 @@ def test_a_trimmer_with_no_ports_is_told_which_contact_it_needs():
     assert diagnostic is not None and "wiper" in diagnostic.message
 
 
-def test_a_stated_contact_count_sizes_the_header_the_circuit_only_partly_uses():
+@pytest.mark.parametrize("relation", ["equal", "minimum"])
+def test_a_stated_contact_count_sizes_the_header_the_circuit_only_partly_uses(relation):
     """The brief's "6-pin header" must not become a 2-pin header because two pins are used.
 
     Live 2026-09-25 (5 V to 3.3 V converter): the intent and the committed architecture both carry
@@ -1807,7 +1842,7 @@ def test_a_stated_contact_count_sizes_the_header_the_circuit_only_partly_uses():
                 "kind": "quantitative",
                 "original_obligation_id": "header-pin-count",
                 "quantity": "header pins",
-                "relation": "equal",
+                "relation": relation,
                 "value": 6.0,
                 "minimum": None,
                 "maximum": None,

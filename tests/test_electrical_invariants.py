@@ -439,6 +439,37 @@ def test_one_amp_led_feedback_refuses_unknown_reviewed_topology(reviewed, monkey
     assert "high_side_sense_low_side_switch" in result.offenders[0]
 
 
+@pytest.mark.parametrize(
+    "identity,component_class,accepted",
+    [
+        ("ESP32-C3-MINI-1-N4", "esp32-c3-module", True),
+        ("ESP32-C3-MINI-1-N4", "wireless-module", True),
+        ("ESP32-S3-WROOM-1-N8R8", "esp32-c3-module", False),
+        ("NRF52840-QIAA-R", "wireless-module", False),
+        ("AP63203WU-7", "wireless-module", False),
+    ],
+)
+def test_module_class_requires_the_reviewed_module_not_an_unrelated_ic(identity, component_class, accepted):
+    from kicraft.design.part_identity import reviewed_part
+
+    record = reviewed_part(identity)
+    part = SimpleNamespace(
+        ref="U1", sheet="MCU", value=record.identity, mpn=record.identity,
+        symbol=record.symbol, footprint=record.footprint,
+    )
+    requirement = SimpleNamespace(
+        id="mcu", sheet="MCU", exact_part=None, family=component_class,
+        declared_interface=None,
+        obligations=[SimpleNamespace(kind="physical", component_class=component_class)],
+    )
+    result = validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=[requirement]), _bom([part], {})
+    )
+    assert result.ok is accepted
+    if not accepted:
+        assert all(row.startswith("E_PHYSICAL_REALIZATION") for row in result.offenders)
+
+
 def test_physical_quantity_requires_exact_reviewed_identity_evidence(monkeypatch):
     record = SimpleNamespace(
         identity="reviewed-bnc",
@@ -1031,3 +1062,52 @@ def test_motor_supply_over_rating_is_refused_on_the_reviewed_vm_domain(reviewed)
     assert validation.check_reviewed_input_operating_ranges(
         SimpleNamespace(rail_voltages={"+18V": 9.0}), bom
     ).ok
+
+
+@pytest.mark.parametrize(
+    ("positive", "negative", "rating", "accepted"),
+    [(18.0, 0.0, "10V", False), (18.0, 0.0, "25V", True),
+     (12.0, -12.0, "16V", False), (12.0, 5.0, "10V", True),
+     (10.0, 0.0, "10V", True), (18.0, 0.0, None, False)],
+)
+def test_selected_capacitor_rating_covers_actual_terminal_difference(
+    reviewed, monkeypatch, positive, negative, rating, accepted
+):
+    from kicraft.parts_library import jlcparts
+
+    monkeypatch.setattr(
+        jlcparts, "parameters",
+        lambda cid: {"attributes": {"Voltage Rating": rating} if rating else {}},
+    )
+    cap = _part("C1", "10uF")
+    cap.sourcing_note = "LCSC C19702"
+    bom = _bom([cap], {"POS": [("C1", "1")], "RETURN": [("C1", "2")]})
+    result = validation.check_reviewed_input_operating_ranges(
+        SimpleNamespace(rail_voltages={"POS": positive, "RETURN": negative}), bom,
+    )
+    assert result.ok is accepted
+    if not accepted:
+        assert any("E_CAPACITOR_VOLTAGE C1" in row for row in result.offenders)
+
+
+def test_same_capacitor_identity_does_not_share_voltage_stress_between_rails(
+    reviewed, monkeypatch,
+):
+    from kicraft.parts_library import jlcparts
+
+    monkeypatch.setattr(
+        jlcparts, "parameters", lambda cid: {"attributes": {"Voltage Rating": "10V"}},
+    )
+    parts = [_part("C1", "10uF"), _part("C2", "10uF")]
+    for part in parts:
+        part.sourcing_note = "LCSC C19702"
+    bom = _bom(parts, {
+        "LOW": [("C1", "1")], "HIGH": [("C2", "1")],
+        "GND": [("C1", "2"), ("C2", "2")],
+    })
+    result = validation.check_reviewed_input_operating_ranges(
+        SimpleNamespace(rail_voltages={"LOW": 3.3, "HIGH": 18.0, "GND": 0.0}), bom,
+    )
+    assert not result.ok
+    assert all("C2" in row for row in result.offenders)
+    assert any("18V" in row for row in result.offenders)

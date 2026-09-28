@@ -1689,6 +1689,24 @@ def _requirement_obligation_defects(
                 )
             consumed[feature] = consumed.get(feature, 0) + 1
         claim = requirement.get("declared_interface")
+        if (
+            not claim
+            and requirement.get("role") == "connector"
+            and (requirement.get("ports") or any(row.get("kind") == "quantitative" for row in obligations))
+        ):
+            from kicraft.design.lowering import lower_requirement
+            from kicraft.design.models import CircuitRequirement
+
+            artifact = lower_requirement(CircuitRequirement.model_validate(requirement))
+            if artifact is not None and len(artifact.groups) == 1:
+                # The compiler's connector geometry is just as binding as a
+                # model-declared interface, including unused physical contacts.
+                contacts = {str(pin.pin) for pin in artifact.pins}
+                contacts.update(str(pin.pin) for pin in artifact.no_connects)
+                claim = {"ports": [
+                    {"key": f"pin{pin}", "pin": pin, "function": "connector contact"}
+                    for pin in sorted(contacts)
+                ]}
         if not claim:
             continue
         owners = [

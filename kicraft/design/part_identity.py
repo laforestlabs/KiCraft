@@ -1382,7 +1382,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="esp32-c3-mini-1-n4",
         symbol="esp32-c3-mini-1-n4:ESP32-C3-MINI-1-N4",
         footprint="esp32-c3-mini-1-n4:WIFIM-SMD_ESP32-C3-MINI-1",
-        physical_features=frozenset({"microcontroller", "wifi-module", "bluetooth-le-soc"}),
+        physical_features=frozenset({"microcontroller", "wifi-module", "bluetooth-le-soc", "esp32-c3-module"}),
         contacts=tuple(str(number) for number in range(1, 54)),
         manufacturer_sources=(
             "https://www.espressif.com/sites/default/files/documentation/esp32-c3-mini-1_datasheet_en.pdf",
@@ -1549,7 +1549,7 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         contacts=("1", "2", "3", "4", "5"),
         manufacturer_sources=(
             "https://lcsc.com/product-detail/Relays_SRD-05VDC-SL-C_C35449.html",
-            "https://www.songlerelay.com/public/uploads/product_pdf/20200914/5f5ec4b110c1e.pdf",
+            "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588886957702832128",
         ),
         lcsc="C35449",
         operating_limits={
@@ -1558,6 +1558,15 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "contact_voltage_vac": 250.0,
             "contact_voltage_vdc": 30.0,
             "contact_form": "SPDT",
+        },
+        # C-form bottom view, matched to this bundle's numbered pads and symbol.
+        # The coil is non-polarized; A/B identify contacts, not required polarity.
+        port_pins={
+            "coil_a": "1",
+            "coil_b": "4",
+            "common": "5",
+            "normally_closed": "3",
+            "normally_open": "2",
         },
     ),
     ReviewedPart(
@@ -2349,6 +2358,16 @@ def _researched_parts() -> tuple[ReviewedPart, ...]:
     return _RESEARCHED_CACHE[1]
 
 
+# Equivalent spellings, unlike demand alternatives such as header/socket or
+# wireless/Wi-Fi. Only equivalences may add facts to a researched part record.
+_PHYSICAL_FEATURE_SYNONYMS = {
+    "button": "momentary-button",
+    "pushbutton": "momentary-button",
+    "push-button": "momentary-button",
+    "momentary-pushbutton": "momentary-button",
+}
+
+
 def _reviewed_part_from_record(row: Mapping[str, object]) -> ReviewedPart:
     """One stored record as a ReviewedPart. Raises ValueError when it names no part or class."""
 
@@ -2378,7 +2397,11 @@ def _reviewed_part_from_record(row: Mapping[str, object]) -> ReviewedPart:
         bundle=None if bundle is None else str(bundle),
         symbol=None if symbol is None else str(symbol),
         footprint=None if footprint is None else str(footprint),
-        physical_features=frozenset(_texts("physical_features")),
+        physical_features=frozenset(
+            name
+            for feature in _texts("physical_features")
+            for name in (feature, _PHYSICAL_FEATURE_SYNONYMS.get(feature, feature))
+        ),
         function_keys=frozenset(_texts("function_keys")),
         contacts=_texts("contacts"),
         manufacturer_sources=_texts("manufacturer_sources"),
@@ -3345,11 +3368,11 @@ def _stock_library_physical_record(symbol: str, footprint: str) -> ReviewedPart 
 # aliased in one gate and unknown in the other (three-position-selector-switch passed neither until
 # it was aliased here).
 _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
+    **{key: frozenset({value}) for key, value in _PHYSICAL_FEATURE_SYNONYMS.items()},
     # The model's own shorthands for a class it names elsewhere in full.
     "fpc": frozenset({"fpc-connector"}),
     "header": frozenset({"pin-header", "pin-socket"}),
-    "button": frozenset({"momentary-button"}),
-    "pushbutton": frozenset({"momentary-button"}),
+    "wireless-module": frozenset({"wifi-module"}),
     "selector": frozenset({"three-position-selector", "sp3t-selector"}),
     "usb-c-connector": frozenset({"usb-c-receptacle"}),
     "usb-a-connector": frozenset({"usb-a-receptacle", "usb-connector"}),
@@ -3362,7 +3385,6 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     "dc-power-jack": frozenset({"barrel-jack-connector"}),
     "fpc-ffc-connector": frozenset({"fpc-connector", "ffc-connector"}),
     "voltage-regulator-ic": frozenset({"voltage-regulator"}),
-    "momentary-pushbutton": frozenset({"momentary-button"}),
     "status-led": frozenset({"indicator-led", "led-0603", "led-0805"}),
     "led": frozenset({"indicator-led", "led-0603", "led-0805"}),
     "power-led": frozenset({"indicator-led", "led-0603", "led-0805"}),
@@ -3388,7 +3410,6 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     # The rest of the audit's list (jst-connector, and the device/board classes with
     # no reviewed carrier at all) is deliberately NOT aliased: no reviewed record
     # implements them, so the fallback is the honest route.
-    "push-button": frozenset({"momentary-button"}),
     "op-amp": frozenset({"operational-amplifier"}),
     "gpio-expander": frozenset({"io-expander", "i2c-gpio-expander"}),
     "gpio-expander-ic": frozenset({"io-expander", "i2c-gpio-expander"}),

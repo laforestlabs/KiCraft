@@ -2110,7 +2110,7 @@ def _complete_load_supply_rails(candidate: dict) -> dict:
         converter_family, voltage = reviewed
         new_rail = f"{str(requirement.get('id') or 'load').upper()}_RAIL"
         converter_id = f"{str(requirement.get('id') or 'load')}_regulator"
-        sheet_name = f"{str(requirement.get('id') or 'load').upper()} REGULATOR"
+        sheet_name = re.sub(r"[^A-Z0-9]+", " ", str(requirement.get("id") or "load").upper()).strip() + " REGULATOR"
         completed = dict(candidate)
         completed["requirements"] = [dict(row) if isinstance(row, dict) else row for row in requirements]
         offending = {*over, *on_logic}
@@ -2237,7 +2237,7 @@ def _complete_load_supply_rails(candidate: dict) -> dict:
             _REVIEWED_RAIL_FAMILIES, key=lambda row: abs(row[1] - rail_voltage)
         )
         converter_id = f"{rail_name.strip('+').replace(' ', '_').lower()}_regulator"
-        sheet_name = f"{rail_name.strip('+').upper()} REGULATOR"
+        sheet_name = re.sub(r"[^A-Z0-9]+", " ", rail_name.upper()).strip() + " REGULATOR"
         completed = dict(candidate)
         rail_voltages = dict(completed.get("rail_voltages") or {})
         rail_voltages[rail_name] = rail_voltage

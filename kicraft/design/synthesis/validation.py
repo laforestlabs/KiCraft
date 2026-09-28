@@ -2349,11 +2349,53 @@ def check_reviewed_device_support_networks(bom) -> CheckResult:
     )
 
 
+def _catalog_capacitor_voltage_defects(architecture, bom, nets) -> list[str]:
+    """Check selected capacitors across two typed DC rails, not guessed signal peaks."""
+    from kicraft.design.part_research import catalog_ratings
+    from kicraft.design.synthesis.fab_export import extract_lcsc_pin
+    from kicraft.parts_library import jlcparts
+
+    ratings: dict[str, float | None] = {}
+    bad: list[str] = []
+    for part in bom.parts:
+        if _ref_prefix(part.ref) != "C":
+            continue
+        pair = _two_terminal_part_nets(part, nets)
+        if pair is None:
+            continue
+        try:
+            stress = abs(
+                float(architecture.rail_voltages[pair[0]])
+                - float(architecture.rail_voltages[pair[1]])
+            )
+        except (KeyError, TypeError, ValueError):
+            continue  # AC/signal stress is not proved by a DC rail declaration.
+        cid = extract_lcsc_pin(getattr(part, "sourcing_note", None) or "")
+        if not cid or stress == 0:
+            continue  # No selected catalog identity to compare.
+        if cid not in ratings:
+            attributes = (jlcparts.parameters(cid) or {}).get("attributes")
+            ratings[cid] = catalog_ratings(attributes)[0].get("voltage_v")
+        rating = ratings[cid]
+        if rating is None or rating <= 0:
+            bad.append(
+                f"E_CAPACITOR_VOLTAGE {part.ref}: selected {cid} has no verified voltage "
+                f"rating for {stress:g}V across {pair[0]!r}/{pair[1]!r}"
+            )
+        elif not stress <= rating:
+            bad.append(
+                f"E_CAPACITOR_VOLTAGE {part.ref}: selected {cid} is rated {rating:g}V "
+                f"but spans {stress:g}V across {pair[0]!r}/{pair[1]!r}; select a "
+                "capacitor rated for the actual voltage before committing wiring"
+            )
+    return bad
+
+
 def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
-    """§9.38 — compare actual typed VIN rails with reviewed device ranges."""
+    """§9.38 — compare typed rails with device and selected capacitor ratings."""
     info, _ = _pin_info_by_ref(bom)
     nets = _nets_by_ref(bom)
-    bad: list[str] = []
+    bad = _catalog_capacitor_voltage_defects(architecture, bom, nets)
     for part in bom.parts:
         fact = _reviewed_fact_for_part(part)
         if fact is None:
@@ -2417,7 +2459,7 @@ def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
     return CheckResult(
         "9.38 reviewed input operating ranges",
         not bad,
-        "typed input rails are within reviewed operating ranges"
+        "typed rails are within available device and capacitor ratings"
         if not bad
         else f"{len(bad)} reviewed operating-range violation(s)",
         bad,

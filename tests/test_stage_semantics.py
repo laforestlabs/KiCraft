@@ -1971,6 +1971,35 @@ def test_the_rail_rewrite_neither_mangles_words_nor_skips_the_part():
     assert bridge_rail in fixed["sheets"][0]["function"]
 
 
+@pytest.mark.parametrize("source_name", ["led_output", "motor-driver"])
+@pytest.mark.parametrize("declared_rail", [False, True])
+def test_generated_regulator_sheet_is_valid_and_owns_its_connections(source_name, declared_rail):
+    from kicraft.design.models import Sheet
+    from kicraft.design.stage_semantics import _complete_load_supply_rails
+
+    rail = source_name.upper() if declared_rail else "VIN"
+    candidate = {
+        "rail_voltages": {"VIN": 18.0, "GND": 0.0, **({rail: 5.0} if declared_rail else {})},
+        "sheets": [{"name": "LOAD", "stem": "LOAD", "function": "Drive load"}],
+        "requirements": [{
+            "id": source_name, "sheet": "LOAD", "role": "driver",
+            "family": "dual-dc-motor-driver", "exact_part": "DRV8833PWPR",
+            "ports": {"vm": rail, "gnd": "GND"}, "functional_blocks": [],
+        }],
+        "assumptions": [],
+    }
+    fixed = _complete_load_supply_rails(candidate)
+    sheets = {
+        row["name"]: Sheet.model_validate({k: row[k] for k in ("name", "stem", "function")})
+        for row in fixed["sheets"]
+    }
+    converter = next(row for row in fixed["requirements"] if row["role"] == "regulator")
+    assert converter["sheet"] in sheets
+    assert converter["ports"]["input"] == "VIN"
+    assert converter["ports"]["output"] == fixed["requirements"][0]["ports"]["vm"]
+    assert fixed["rail_voltages"][converter["ports"]["output"]] == 5.0
+
+
 def test_a_declared_load_rail_nothing_generates_gets_its_converter():
     """The same fault one step later: the writer declared the rail and left the converter out.
 
@@ -2006,7 +2035,6 @@ def test_a_declared_load_rail_nothing_generates_gets_its_converter():
     assert converter["parameters"]["output_voltage"] == 5.0
     assert converter["family"] == "ap63205-5v"
     assert fixed["rail_voltages"]["MOTOR_VIN"] == 5.0
-    assert any(row["name"] == "MOTOR_VIN REGULATOR" for row in fixed["sheets"])
     assert any("motor_vin_regulator" in row and "(defaulted)" in row for row in fixed["assumptions"])
     # The board input and the 3.3 V rail already have their sources; only the bare rail is filled.
     assert not any(row["id"] == "vin_regulator" for row in fixed["requirements"])
