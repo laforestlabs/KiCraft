@@ -31,8 +31,22 @@ def test_a_draft_earns_a_question_for_each_rule_it_touches():
     # No part-choice question for the driver: the catalogue holds no other motor driver, so the
     # deterministic refusal states the remedy instead of the audit asking a degenerate question.
     assert "part_choice_driver" not in keys
-    assert "identity_jst_a" in keys           # a class no curated family carries
-    assert "carrier_exists_jst_a" in keys
+    # `jst-xh-connector` is a reviewed family, so the compiler builds it and the audit has nothing
+    # to ask: asking anyway produced a confident "no carrier in catalogue" finding on a board the
+    # pipeline resolves (58 such findings per measured campaign, 26 of 28 provably false).
+    assert "identity_jst_a" not in keys
+    assert "carrier_exists_jst_a" not in keys
+    # A family the pipeline really cannot build still earns both questions.
+    unknown = _draft()
+    unknown["requirements"][1] = {
+        "id": "jst_a",
+        "family": "unobtainium-sensor",
+        "exact_part": None,
+        "supply": None,
+    }
+    unknown_keys = [question.key for question in draft_audit.architecture_questions(unknown)]
+    assert "identity_jst_a" in unknown_keys
+    assert "carrier_exists_jst_a" in unknown_keys
     # A draft that breaks nothing gets no questions, so the audit costs nothing.
     clean = {
         "power": {"rails": {"+3V3": {"voltage": 3.3, "from": "reg.output"}}},
@@ -61,7 +75,21 @@ def test_findings_follow_the_answers_and_only_above_the_threshold(monkeypatch):
 
     codes = [finding.code for finding in draft_audit.audit_architecture(_draft())]
 
-    assert codes == ["audit_part_over_rating", "audit_no_carrier_in_catalogue"]
+    # The carrier answer is a claim about catalogue coverage the compiler settles itself: the
+    # reviewed JST-XH family builds `jst_a`, so no finding is reported whatever the auditor says.
+    assert codes == ["audit_part_over_rating"]
+
+    unknown = _draft()
+    unknown["requirements"][1] = {
+        "id": "jst_a",
+        "family": "unobtainium-sensor",
+        "exact_part": None,
+        "supply": None,
+    }
+    assert [f.code for f in draft_audit.audit_architecture(unknown)] == [
+        "audit_part_over_rating",
+        "audit_no_carrier_in_catalogue",
+    ]
 
 
 def test_an_unavailable_auditor_yields_no_findings(monkeypatch):

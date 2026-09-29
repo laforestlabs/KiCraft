@@ -43,17 +43,30 @@ _NOT_LISTED = "none of these"
 
 
 def _curated_families() -> frozenset[str]:
-    """Every family the compiler can build with: the recipes plus the generic lowerers.
+    """Every family the compiler can build with: recipes, lowerers, and reviewed parts.
 
     Asking `get_recipe` is not the test — an unknown name raises, and a lowerer family (a screw
     terminal, a pin header) is not a recipe at all while being perfectly buildable. The audit
-    needs one set of "families the pipeline knows", so it composes it from both registries.
+    needs one set of "families the pipeline knows", so it composes it from both registries *and*
+    the reviewed inventory: a requirement whose family names a reviewed part's family
+    (`warm-white-led`, `pushbutton`, `mcp23017`) or its identity spelling (`srd-05vdc-sl-c`,
+    `pc817c-s`, `bme280`) resolves without any new part research. Leaving those out asked the
+    auditor about requirements the compiler already builds, and a confident "no carrier" answer
+    then carried 58 repair-required findings per campaign on boards whose families were all
+    registered (measured over the 2026-09-29 arm: 26 of 28 flagged requirements had a carrier the
+    compiler proves).
     """
     from kicraft.design.lowering import lowerer_summaries
+    from kicraft.design.part_identity import reviewed_inventory
 
     families = {str(row["family"]) for row in recipe_summaries() if row.get("family")}
     for row in lowerer_summaries():
         families.update(str(name) for name in row.get("families") or [] if name)
+    for record in reviewed_inventory():
+        if record.family:
+            families.add(str(record.family))
+        if record.identity:
+            families.add(str(record.identity))
     return frozenset(families)
 
 
@@ -249,6 +262,54 @@ def _finding(code: str, message: str, evidence: Sequence[str]) -> models.StageDi
     )
 
 
+def _compiler_can_build(candidate: Mapping[str, Any], requirement_id: str) -> bool:
+    """Whether the compiler resolves this requirement without new part research.
+
+    The audit asks the model questions it cannot answer better than the compiler: this is the
+    deterministic answer, used to suppress a "no carrier in catalogue" finding that contradicts
+    the registries. A requirement resolves when its family is one the pipeline builds, its
+    identity spelling names a reviewed record, it pins a reviewed exact part, or one of its
+    demanded physical classes has a reviewed carrier.
+    """
+    from kicraft.design.part_identity import (
+        canonical_physical_features,
+        has_reviewed_coverage,
+        reviewed_part,
+        reviewed_parts_for_feature,
+    )
+
+    requirement = next(
+        (
+            row
+            for row in candidate.get("requirements") or []
+            if isinstance(row, Mapping) and str(row.get("id")) == requirement_id
+        ),
+        None,
+    )
+    if requirement is None:
+        return False
+    exact = str(requirement.get("exact_part") or "").strip()
+    if exact and reviewed_part(exact) is not None:
+        return True
+    family = str(requirement.get("family") or "").strip()
+    if family and (family in _curated_families() or reviewed_part(family) is not None):
+        return True
+    for obligation in requirement.get("obligations") or []:
+        if not isinstance(obligation, Mapping) or obligation.get("kind") != "physical":
+            continue
+        component_class = str(obligation.get("component_class") or "")
+        if not component_class:
+            continue
+        if has_reviewed_coverage(component_class):
+            return True
+        if any(
+            reviewed_parts_for_feature(feature)
+            for feature in canonical_physical_features(component_class)
+        ):
+            return True
+    return False
+
+
 def audit_architecture(
     candidate: Mapping[str, Any],
     *,
@@ -294,6 +355,12 @@ def audit_architecture(
             )
         elif answer.key.startswith("carrier_exists_") and answer.value is False:
             requirement_id = answer.key[len("carrier_exists_") :]
+            if _compiler_can_build(candidate, requirement_id):
+                # The auditor's opinion is not the authority on catalogue coverage. When the
+                # compiler can prove a carrier (a registered family/lowerer, a reviewed family or
+                # identity, or a reviewed part for one of the requirement's demanded classes),
+                # a "no carrier" answer is wrong and must not drive a repair round.
+                continue
             findings.append(
                 _finding(
                     "audit_no_carrier_in_catalogue",
