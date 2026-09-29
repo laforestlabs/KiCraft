@@ -658,7 +658,7 @@ def _buck(
     feedback_top: str = "100k",
     feedback_bottom: str = "22k",
     fixed_output: bool = False,
-    enable_divider: bool = False,
+    catch_diode: Group | None = None,
     no_connect_pins: tuple[str, ...] = (),
 ) -> RecipeDefinition:
     parts = [
@@ -669,6 +669,8 @@ def _buck(
         _passive("feedback_top", "R", feedback_top),
         _passive("feedback_bottom", "R", feedback_bottom),
     ]
+    if catch_diode is not None:
+        parts.append(catch_diode)
     pins = [
         Pin(role="converter", pin=pins_map["vin"], net="input"),
         Pin(role="converter", pin=pins_map["gnd"], net="gnd"),
@@ -685,27 +687,16 @@ def _buck(
         Pin(role="feedback_bottom", pin="1", net="feedback"),
         Pin(role="feedback_bottom", pin="2", net="gnd"),
     ]
+    if catch_diode is not None:
+        pins.extend(
+            (
+                Pin(role="catch_diode", pin="1", net="switch"),
+                Pin(role="catch_diode", pin="2", net="gnd"),
+            )
+        )
     internal_nets = ["switch", "feedback"]
-    if pin := pins_map.get("en"):
-        if enable_divider:
-            internal_nets.append("enable")
-            parts.extend(
-                (
-                    _passive("enable_top", "R", "511k"),
-                    _passive("enable_bottom", "R", "100k"),
-                )
-            )
-            pins.extend(
-                (
-                    Pin(role="converter", pin=pin, net="enable"),
-                    Pin(role="enable_top", pin="1", net="input"),
-                    Pin(role="enable_top", pin="2", net="enable"),
-                    Pin(role="enable_bottom", pin="1", net="enable"),
-                    Pin(role="enable_bottom", pin="2", net="gnd"),
-                )
-            )
-        else:
-            pins.append(Pin(role="converter", pin=pin, net="enable"))
+    if (pin := pins_map.get("en")) and pin not in no_connect_pins:
+        pins.append(Pin(role="converter", pin=pin, net="enable"))
     if fixed_output:
         parts = [part for part in parts if part.role not in {"feedback_top", "feedback_bottom"}]
         pins = [
@@ -763,7 +754,7 @@ def _buck(
             Port(name="output", direction="power"),
             *(
                 (Port(name="enable", direction="input", required=False, default_tie="input"),)
-                if pins_map.get("en") and not enable_divider
+                if pins_map.get("en") and pins_map["en"] not in no_connect_pins
                 else ()
             ),
         ),
@@ -843,10 +834,18 @@ TPS54331_ADJUSTABLE = _buck(
     inductor="15uH",
     feedback_top="68.1k",
     feedback_bottom="22k",
-    enable_divider=True,
+    catch_diode=_part(
+        "catch_diode",
+        "D",
+        "SS34",
+        "Device:D_Schottky",
+        "Diode_SMD:D_SMA",
+        mpn="SS34",
+    ),
+    no_connect_pins=("3",),
+
+
 )
-
-
 def expand_usb_c_usb2_device(resolved):
     """Drop the connector-owned 22R pair when the MCU already owns it."""
     from .registry import expand_static_definition

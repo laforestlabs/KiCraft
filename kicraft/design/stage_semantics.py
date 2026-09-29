@@ -2011,6 +2011,31 @@ def _resolve_added_requirements(completed: dict) -> dict:
         return completed
 
 
+def _generated_regulator_requirement_id(source: object, requirements: list[object]) -> str:
+    """Return a schema-valid, collision-free identifier for a compiler-added regulator."""
+    stem = re.sub(r"[^a-z0-9_-]+", "_", str(source).lower()).strip("_-")
+    if not stem:
+        stem = "rail"
+    elif not stem[0].isalpha():
+        stem = f"rail_{stem}"
+    suffix = "_regulator"
+    base = f"{stem[: 64 - len(suffix)].rstrip('_-')}{suffix}"
+    used = {
+        str(requirement.get("id"))
+        for requirement in requirements
+        if isinstance(requirement, dict) and requirement.get("id") is not None
+    }
+    if base not in used:
+        return base
+    index = 2
+    while True:
+        collision_suffix = f"_{index}"
+        identifier = f"{base[: 64 - len(collision_suffix)].rstrip('_-')}{collision_suffix}"
+        if identifier not in used:
+            return identifier
+        index += 1
+
+
 def _complete_load_supply_rails(candidate: dict) -> dict:
     """Give an over-rated load part its own regulated rail, before it is diagnosed.
 
@@ -2109,7 +2134,9 @@ def _complete_load_supply_rails(candidate: dict) -> dict:
             continue
         converter_family, voltage = reviewed
         new_rail = f"{str(requirement.get('id') or 'load').upper()}_RAIL"
-        converter_id = f"{str(requirement.get('id') or 'load')}_regulator"
+        converter_id = _generated_regulator_requirement_id(
+            requirement.get("id") or "load", requirements
+        )
         sheet_name = re.sub(r"[^A-Z0-9]+", " ", str(requirement.get("id") or "load").upper()).strip() + " REGULATOR"
         completed = dict(candidate)
         completed["requirements"] = [dict(row) if isinstance(row, dict) else row for row in requirements]
@@ -2236,7 +2263,7 @@ def _complete_load_supply_rails(candidate: dict) -> dict:
         converter_family, rail_voltage = min(
             _REVIEWED_RAIL_FAMILIES, key=lambda row: abs(row[1] - rail_voltage)
         )
-        converter_id = f"{rail_name.strip('+').replace(' ', '_').lower()}_regulator"
+        converter_id = _generated_regulator_requirement_id(rail_name, requirements)
         sheet_name = re.sub(r"[^A-Z0-9]+", " ", rail_name.upper()).strip() + " REGULATOR"
         completed = dict(candidate)
         rail_voltages = dict(completed.get("rail_voltages") or {})

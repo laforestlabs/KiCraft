@@ -78,8 +78,10 @@ def _stage_extra(stage: str) -> str:
         )
     if stage == "functional_spec":
         return (
-            "\n- Retain every committed intent.obligations row unchanged. Functional "
-            "blocks must cover their required functions without replacing physical "
+            "\n- The typed obligation rows are written for you from the committed intent; do NOT "
+            "emit or repeat them. Name which obligations each block implements in that block's "
+            "`obligation_ids` (`original_obligation_id` values), so ownership is explicit. "
+            "Functional blocks must cover their required functions without replacing physical "
             "classes, quantities, operating limits, or adjustability with prose."
             "\n- A board feature that names no component function is NOT a block: do not emit a "
             "block for a prototyping pad field (a prototyping shield, board, perfboard or pad "
@@ -89,14 +91,15 @@ def _stage_extra(stage: str) -> str:
         )
     if stage == "architecture":
         return (
-            "\n- Retain all original typed obligations unchanged, and attach each one to the "
-            "requirement that implements it through that requirement's own `obligations` rows "
-            "(`kind` + `original_obligation_id` identify them, and the row content is copied "
-            "verbatim; several requirements may carry the same row when the design implements the "
-            "obligation in more than one place). The architecture's top-level `obligations` list is "
-            "written for you from the committed intent and functional spec, so do NOT copy the rows "
-            "into it: an obligation attached to no requirement is refused, and a paraphrased or "
-            "trimmed copy is restored from the committed row. A `quantity`, `fabrication`, or "
+            "\n- The typed obligation rows are the compiler's to write: the architecture's "
+            "top-level `obligations` list and each requirement's resolved rows come from the "
+            "committed intent and functional spec. Name which obligations each requirement "
+            "implements in that requirement's `obligation_ids` (`original_obligation_id` values); "
+            "several requirements may name the same id when the design implements one obligation "
+            "in more than one place. Never emit an obligation row or a paraphrase of one: a "
+            "requirement that names an id no committed stage carries is refused. A unique reviewed "
+            "physical owner is assigned for you when the evidence proves exactly one candidate. "
+            "A `quantity`, `fabrication`, or "
             "`negative` board-wide fact needs no owner. A `quantitative` row needs an owner unless "
             "it explicitly measures the board/PCB outline with a geometric unit (for example board "
             "width in mm) or names the board's own build stack-up in `layers`/`plies`; voltage, "
@@ -354,9 +357,11 @@ _WORKED_EXAMPLES = {
     "functional_spec": (
         '{"blocks": ['
         '{"name": "POWER INPUT", "category": "power", "purpose": "Accept the 5V '
-        'DC input and protect against reverse polarity", "count": 1}, '
+        'DC input and protect against reverse polarity", "count": 1, '
+        '"obligation_ids": []}, '
         '{"name": "3V3 REGULATOR", "category": "power", "purpose": "Regulate the '
-        '5V rail down to a clean 3.3V logic rail", "count": 1}], '
+        '5V rail down to a clean 3.3V logic rail", "count": 1, '
+        '"obligation_ids": []}], '
         '"connections": [{"from_block": "POWER INPUT", "to_block": '
         '"3V3 REGULATOR", "signal_type": "power", "description": "5V rail to the '
         'regulator input"}], '
@@ -374,11 +379,13 @@ _WORKED_EXAMPLES = {
         '"POWER", "role": "power_input", "family": "pin-header", "exact_part": '
         'null, "parameters": {"rows": 1, "gender": "female"}, "supply": null, '
         '"programming": null, "interfaces": [], "functional_blocks": '
-        '["POWER INPUT"], "ties": {"pin2": "GND"}, "declared_ports": []}, '
+        '["POWER INPUT"], "obligation_ids": [], "ties": {"pin2": "GND"}, '
+        '"declared_ports": []}, '
         '{"id": "reg", "sheet": "POWER", "role": "regulator", "family": '
         '"me6211-3v3", "exact_part": "ME6211C33M5G-N", "parameters": {}, '
         '"supply": "+5V", "programming": null, "interfaces": [], '
-        '"functional_blocks": ["3V3 REGULATOR"], "ties": {}, "declared_ports": []}], '
+        '"functional_blocks": ["3V3 REGULATOR"], "obligation_ids": [], "ties": {}, '
+        '"declared_ports": []}], '
         '"signals": [], "assumptions": ["Linear regulator chosen for the low '
         'current (defaulted)"]}'
     ),

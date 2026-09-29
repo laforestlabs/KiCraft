@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from kicraft.design.part_identity import physical_inventory_record
 from kicraft.design.synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
-from .electrical_artifact_evidence import extract_electrical_facts
+from . import electrical_artifact_evidence
 from .geometry_artifact_evidence import extract_geometry_facts
 import json
 from collections.abc import Mapping
@@ -138,7 +138,7 @@ def _board_facts(board_path: Path, facts: dict[str, Any]) -> Any | None:
         # board may carry no library nickname, so record "nickname:item" only
         # when a nickname is present and the bare item name otherwise.  Reviewed
         # pairs are compared item-exact with the nickname required only when the
-        # board actually carries one (see :func:`_reviewed_footprint_agrees`).
+        # board actually carries one.
         try:
             footprint_item = str(fp.GetFPID().GetLibItemName())
             footprint_library = str(fp.GetFPID().GetLibNickname())
@@ -178,22 +178,6 @@ def _bom_parts_digest(parts: list[dict[str, Any]]) -> str:
     ).hexdigest()
 
 
-def _reviewed_footprint_agrees(reviewed: str, recorded: str) -> bool:
-    """Whether a recorded board footprint is the reviewed library pair.
-
-    The library item name must agree exactly; the nickname must agree only when
-    the board carries one, because a saved board can drop it.  A prefix or family
-    match is never enough: the reviewed pair is the land pattern the record's
-    symbol and contacts were reviewed against.
-    """
-    reviewed_library, _, reviewed_item = str(reviewed or "").partition(":")
-    recorded_library, separator, recorded_item = str(recorded or "").partition(":")
-    if not separator:  # the board carried no library nickname
-        recorded_library, recorded_item = "", recorded_library
-    if not reviewed_item or not recorded_item:
-        return False
-    return recorded_item == reviewed_item and (not recorded_library or recorded_library == reviewed_library)
-
 
 def _reconcile_inventory(facts: dict[str, Any]) -> None:
     """Reconcile board pads with semantic records and stock-independent pin maps."""
@@ -227,7 +211,9 @@ def _reconcile_inventory(facts: dict[str, Any]) -> None:
         ref = str(part.get("ref") or "")
         contacts = record.contacts if record is not None else _standard_pin_contacts(part)
         expected_footprint = record.footprint if record is not None else str(part.get("footprint") or "")
-        if not contacts or not _reviewed_footprint_agrees(expected_footprint, str(board_footprints.get(ref) or "")):
+        if not contacts or not electrical_artifact_evidence._reviewed_footprint_agrees(
+            expected_footprint, str(board_footprints.get(ref) or "")
+        ):
             unclassified.append(ref or "<unreferenced>")
             continue
         if record is not None:
@@ -327,7 +313,7 @@ def _delivered_board_path(rundir: Path, state: Mapping[str, Any], generated: Pat
 def _specialized_fact_deltas(rundir: Path, state: dict[str, Any], board: Any, contract: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     """Extract electrical and geometry facts from one already-loaded board."""
     return (
-        extract_electrical_facts(rundir, state, board, contract),
+        electrical_artifact_evidence.extract_electrical_facts(rundir, state, board, contract),
         extract_geometry_facts(rundir, state, board, contract),
     )
 

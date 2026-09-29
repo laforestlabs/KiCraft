@@ -14,8 +14,10 @@ reports status "ok".
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -912,3 +914,1135 @@ def maybe_bom_reconcile(
                 )
             passes = BOM_RECONCILE_MAX_PASSES
     return rr, passes
+
+
+# --------------------------------------------------------------------------- #
+# Shared build-to-design recovery (phase D)
+#
+# Web, headless generation, and batch self-evaluation previously differed here:
+# web had a single ERC-only wiring retry, the other two had none. The build
+# worker still only runs the deterministic build and returns its exit code plus
+# durable evidence; THIS module owns the design revision decision and cannot be
+# a second autonomous designer.
+#
+# The recovery budget lives in ``stage_status["build_recovery"]`` (see
+# ``models.BuildRecoveryEvent``): a resumed or re-entered run reads the same
+# durable counter, so a cap can never reset by re-entry.
+# --------------------------------------------------------------------------- #
+BUILD_RECOVERY_STATUS_KEY = "build_recovery"
+# Total design-revision actions (model re-drives) one project state may spend on
+# build feedback. Mirrors BOM_RECONCILE_MAX_PASSES' philosophy: enough for a
+# genuine chain, cut short by the unchanged/repeated/oscillating checks below.
+BUILD_RECOVERY_MAX_ATTEMPTS = 3
+# Bound the persisted history so a pathological project cannot grow state.json
+# without limit; the newest rows are the ones the policy reads.
+_BUILD_RECOVERY_MAX_EVENTS = 12
+
+# Build exit codes (kicraft.design.cli_app): 5 = synthesis gate (ERC and the
+# other deterministic checks), 6 = place/route or tooling abort, 7 = verify/DRC
+# rejection with a produced board. 0 is a completed build. Everything else is a
+# setup/tooling/process failure with no attributable design evidence.
+_INFRA_BUILD_RCS = frozenset({1, 2, 3, 4, 8})
+
+# Gate code -> owning choice. Codes are the stable ``§9.x`` ids carried in the
+# deterministic check name; the choice that can actually change the failing fact
+# belongs to the stage named here. Wiring owns nets/connections/no-connects and
+# their electrical coverage; BOM owns parts, footprints, support circuits,
+# quantities, sourcing; architecture owns sheets, ownership, realization
+# topology, and reviewed recipe selection; "compiler" means a reviewed
+# deterministic implementation owns the fact and the model may not re-author it.
+_BUILD_OWNER_BY_GATE = {
+    "9.9": "wiring",
+    "9.10": "wiring",
+    "9.11": "wiring",
+    "9.12": "wiring",
+    "9.14": "wiring",
+    "9.15": "wiring",
+    "9.16": "wiring",
+    "9.17": "wiring",
+    "9.18": "wiring",
+    "9.19": "wiring",
+    "9.20": "wiring",
+    "9.31": "wiring",
+    "9.36": "wiring",
+    "9.2": "bom",
+    "9.6": "bom",
+    "9.13": "bom",
+    "9.21": "bom",
+    "9.23": "bom",
+    "9.25": "bom",
+    "9.26": "bom",
+    "9.27": "bom",
+    "9.28": "bom",
+    "9.29": "bom",
+    "9.32": "bom",
+    "9.33": "bom",
+    "9.34": "bom",
+    "9.35": "bom",
+    "9.3": "architecture",
+    "9.4": "architecture",
+    "9.7": "architecture",
+    "9.8": "architecture",
+    "9.22": "architecture",
+    "9.24": "architecture",
+    "9.42": "architecture",
+    "9.37": "compiler",
+    "9.38": "compiler",
+    "9.39": "compiler",
+    "9.40": "compiler",
+    "9.41": "compiler",
+}
+# Checks that validate a REVIEWED implementation's own construction. A failure
+# whose named refs are recipe/lowerer-owned is a protected compiler defect: the
+# model may not be asked to re-author the recipe's pins or parts.
+_COMPILER_OWNED_GATES = frozenset({"9.37", "9.38", "9.39", "9.40", "9.41"})
+# Checks whose failure means the REQUIRED implementation is not constructible
+# within the allowed envelope (part availability, footprint reality, physical
+# realization, unsurfaced substitution). Those may justify a permitted reviewed
+# alternative -- and nothing at all when the user fixed the part/limit.
+_AVAILABILITY_GATES = frozenset({"9.13", "9.23", "9.26", "9.28", "9.33", "9.34", "9.35", "9.42"})
+# Built-in PCB error codes that name deterministic design defects we can act on
+# by revising an allowed choice (never by relaxing DRC or rewriting geometry).
+_LAYOUT_DESIGN_CODES = frozenset(
+    {
+        "unconnected",
+        "shorts",
+        "courtyards_overlap",
+        "keepout_intrusion",
+        "missing_refs",
+        "malformed_board_geometry",
+        "empty_board",
+        "layout_failure",
+        "verification_failed",
+    }
+)
+# Tooling/transport failures: never a reason to change the circuit.
+_LAYOUT_INFRA_CODES = frozenset(
+    {"drc_timeout", "drc_unavailable", "drc_failed", "board_missing"}
+)
+
+_BUILD_GATE_RE = re.compile(r"^§?\s*(\d+\.\d+)\b")
+_PIN_TOKEN_RE = re.compile(r"\b([A-Z]{1,4}\d{1,4})\s*[.\s]\s*(?:pin\s*)?(\d{1,3}[A-Za-z0-9_]*)\b")
+_NON_ALNUM_RE = re.compile(r"[^A-Z0-9]")
+
+# Recovery actions, and the choice invalidation each one requires. The second
+# element is the LAST stage kept: ``null_downstream`` clears everything after it,
+# so intent and functional_spec always survive and wiring-only repair keeps the
+# committed BOM parts (its own connections are cleared).
+_RECOVERY_PLAN = {
+    "repair_wiring": ("bom", ("wiring",)),
+    "backtrack_bom": ("bom", ("bom", "wiring")),
+    "backtrack_architecture": ("functional_spec", ("architecture", "bom", "wiring")),
+    "try_reviewed_alternative": ("bom", ("bom", "wiring")),
+}
+_ARCHITECTURE_ALTERNATIVE = ("functional_spec", ("architecture", "bom", "wiring"))
+
+
+@dataclass(frozen=True)
+class BuildFailure:
+    """Attributable evidence from one failed deterministic build."""
+
+    kind: str  # design_defect | compiler_defect | capability_gap | infrastructure | unattributable
+    action: str  # repair_wiring | backtrack_bom | backtrack_architecture | try_reviewed_alternative | rebuild | none
+    owner_stage: str | None
+    fingerprint: str
+    reason: str
+    evidence: tuple[str, ...] = ()
+    gate_codes: tuple[str, ...] = ()
+    requirement_ids: tuple[str, ...] = ()
+    refs: tuple[str, ...] = ()
+    diagnostics: tuple[dict, ...] = ()
+    user_required: bool = False
+
+
+@dataclass
+class BuildRecoveryState:
+    """Durable, re-entry-proof recovery budget and history."""
+
+    ok: bool | None = None
+    failure_kind: str | None = None
+    run_id: str | None = None
+    attempts: int = 0
+    max_attempts: int = BUILD_RECOVERY_MAX_ATTEMPTS
+    # False when no durable record exists yet, so the caller's explicit
+    # ``max_attempts`` still applies to a fresh project state.
+    present: bool = False
+    choice_fingerprints: list[str] = field(default_factory=list)
+    events: list[dict] = field(default_factory=list)
+
+    @property
+    def failure_fingerprints(self) -> set[str]:
+        return {
+            str(event.get("failure_fingerprint"))
+            for event in self.events
+            if event.get("failure_fingerprint")
+        }
+
+
+def build_recovery_state_path(ws) -> Path:
+    return _state_path(Path(ws))
+
+
+def read_build_recovery(ws) -> BuildRecoveryState:
+    """Load the durable recovery budget from ``stage_status[build_recovery]``."""
+    try:
+        state = json.loads(build_recovery_state_path(ws).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return BuildRecoveryState()
+    entry = (state.get("stage_status") or {}).get(BUILD_RECOVERY_STATUS_KEY)
+    if not isinstance(entry, dict):
+        return BuildRecoveryState()
+    events = [event for event in (entry.get("recovery_events") or []) if isinstance(event, dict)]
+    choices = [fp for fp in (entry.get("recovery_choice_fingerprints") or []) if isinstance(fp, str)]
+    max_attempts = entry.get("recovery_max_attempts")
+    return BuildRecoveryState(
+        ok=entry.get("ok"),
+        failure_kind=entry.get("failure_kind"),
+        run_id=entry.get("recovery_run_id"),
+        attempts=int(entry.get("recovery_attempts") or 0),
+        max_attempts=(
+            int(max_attempts) if isinstance(max_attempts, int) else BUILD_RECOVERY_MAX_ATTEMPTS
+        ),
+        present=True,
+        choice_fingerprints=choices,
+        events=events,
+    )
+
+
+def write_build_recovery(
+    ws,
+    *,
+    ok: bool,
+    failure_kind: str | None = None,
+    run_id: str | None = None,
+    attempts: int | None = None,
+    max_attempts: int | None = None,
+    choice_fingerprints: list[str] | None = None,
+    events: list[dict] | None = None,
+    diagnostics: list[dict] | None = None,
+) -> dict:
+    """Persist the recovery record under the existing durable status carrier.
+
+    Read-modify-write over the raw state.json so a concurrent writer of another
+    stage_status key is preserved and the record round-trips through
+    ``models.StageStatus`` (the typed fields live there, not in a side database).
+    """
+    state_path = build_recovery_state_path(ws)
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    block = state.get("stage_status")
+    if not isinstance(block, dict):
+        block = {}
+    prior = block.get(BUILD_RECOVERY_STATUS_KEY)
+    prior = prior if isinstance(prior, dict) else {}
+    merged_attempts = int(prior.get("recovery_attempts") or 0) if attempts is None else attempts
+    merged_max = (
+        int(prior.get("recovery_max_attempts") or BUILD_RECOVERY_MAX_ATTEMPTS)
+        if max_attempts is None
+        else max_attempts
+    )
+    merged_choices = (
+        list(prior.get("recovery_choice_fingerprints") or [])
+        if choice_fingerprints is None
+        else list(choice_fingerprints)
+    )
+    merged_events = (
+        list(prior.get("recovery_events") or []) if events is None else list(events)
+    )[-_BUILD_RECOVERY_MAX_EVENTS:]
+    entry: dict = {
+        "ok": bool(ok),
+        "finished_at": _utc_now(),
+        "repair_required": not ok,
+        "repair_attempted": bool(merged_attempts),
+        "repair_adopted": bool(merged_attempts) and bool(ok),
+        "diagnostics": list(diagnostics or []),
+        "recovery_attempts": merged_attempts,
+        "recovery_max_attempts": merged_max,
+        "recovery_choice_fingerprints": merged_choices,
+        "recovery_events": merged_events,
+    }
+    if run_id:
+        entry["recovery_run_id"] = run_id
+    elif prior.get("recovery_run_id"):
+        entry["recovery_run_id"] = prior["recovery_run_id"]
+    if failure_kind:
+        entry["failure_kind"] = failure_kind
+    block[BUILD_RECOVERY_STATUS_KEY] = entry
+    state["stage_status"] = block
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(state_path, json.dumps(state, indent=2) + "\n")
+    return entry
+
+
+def _utc_now() -> str:
+    import datetime as dt
+
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def read_build_evidence(ws) -> tuple[list[dict], list[dict]]:
+    """Deterministic build failure evidence: (synthesis diagnostics, pcb errors).
+
+    Synthesis rows are normalized StageDiagnostic dicts whose ``gate_codes``
+    carry the stable ``§9.x`` id. PCB rows are the durable
+    ``artifacts.pcb_errors`` payload. Both are the carriers build already writes;
+    recovery invents no parallel exception hierarchy.
+    """
+    ws = Path(ws)
+    diagnostics: list[dict] = []
+    checks_path = ws / ".kicraft" / "synthesis_check.json"
+    try:
+        summary = json.loads(checks_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        summary = None
+    if isinstance(summary, dict):
+        for check in summary.get("checks") or []:
+            if not isinstance(check, dict) or check.get("ok"):
+                continue
+            name = str(check.get("name") or "")
+            offenders = [str(o) for o in (check.get("offenders") or []) if str(o).strip()]
+            code = _gate_code(name)
+            diagnostics.append(
+                {
+                    "code": f"build_gate_{(code or 'unknown').replace('.', '_')}",
+                    "severity": "repair_required",
+                    "message": (str(check.get("message") or "").strip() or name)[:400],
+                    "evidence": offenders[:20],
+                    "gate_codes": [code] if code else [],
+                }
+            )
+    pcb_errors: list[dict] = []
+    try:
+        state = json.loads(build_recovery_state_path(ws).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    artifacts = state.get("artifacts") if isinstance(state, dict) else None
+    if isinstance(artifacts, dict):
+        for error in artifacts.get("pcb_errors") or []:
+            if isinstance(error, dict):
+                pcb_errors.append(error)
+    return diagnostics, pcb_errors
+
+
+def _gate_code(name: str) -> str | None:
+    match = _BUILD_GATE_RE.match(name.strip())
+    return match.group(1) if match else None
+
+
+def _evidence_tokens(*texts) -> tuple[str, ...]:
+    tokens: set[str] = set()
+    for text in texts:
+        for chunk in text if isinstance(text, (list, tuple)) else [text]:
+            value = str(chunk or "")
+            tokens.update(match.group(0) for match in _REF_TOKEN_RE.finditer(value))
+            tokens.update(
+                f"{m.group(1)}.{m.group(2)}" for m in _PIN_TOKEN_RE.finditer(value)
+            )
+            code = _gate_code(value)
+            if code:
+                tokens.add(code)
+    return tuple(sorted(tokens))
+
+
+def _failure_fingerprint(gate_codes, refs, texts) -> str:
+    """Stable identity of a build failure: gate id + named ref/pin tokens.
+
+    Deliberately NOT raw prose: a reworded report of the same unresolved defect
+    must still read as unchanged, while a genuinely different defect (different
+    gate or different named parts/pins) reads as new.
+    """
+    payload = json.dumps(
+        {
+            "gates": sorted(set(gate_codes)),
+            "refs": sorted(set(refs)),
+            "tokens": sorted(set(_evidence_tokens(*texts))),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalized(text: str) -> str:
+    return _NON_ALNUM_RE.sub("", str(text or "").upper())
+
+
+def user_required_parts(state: dict) -> set[str]:
+    """Normalized tokens of the parts the user named explicitly.
+
+    ``intent.named_parts`` is the stage that records every exact MPN/IC/module
+    the brief named; those may never be silently swapped for an easier
+    implementation.
+    """
+    intent = state.get("intent") if isinstance(state, dict) else None
+    named = (intent or {}).get("named_parts") or []
+    return {token for token in (_normalized(p) for p in named) if len(token) >= 3}
+
+
+def user_required_requirement_ids(state: dict) -> set[str]:
+    """Original obligation ids the user stated, plus protected identities."""
+    if not isinstance(state, dict):
+        return set()
+    ids: set[str] = set()
+    for slot in ("intent", "functional_spec"):
+        payload = state.get(slot) or {}
+        for row in payload.get("obligations") or []:
+            if isinstance(row, dict) and row.get("original_obligation_id"):
+                ids.add(str(row["original_obligation_id"]))
+    architecture = state.get("architecture") or {}
+    ids.update(str(item) for item in architecture.get("protected_identities") or [])
+    return ids
+
+
+def _part_ownership(state: dict) -> dict[str, str]:
+    """ref -> resolution_source ("recipe"/"lowerer"/"llm"/"reuse"/"")."""
+    bom = (state.get("bom") or {}) if isinstance(state, dict) else {}
+    out: dict[str, str] = {}
+    for part in bom.get("parts") or []:
+        if isinstance(part, dict) and part.get("ref"):
+            out[str(part["ref"])] = str(part.get("resolution_source") or "")
+    return out
+
+
+def _part_values(state: dict) -> dict[str, str]:
+    """ref -> committed part value/MPN, for matching user-named parts."""
+    bom = (state.get("bom") or {}) if isinstance(state, dict) else {}
+    out: dict[str, str] = {}
+    for part in bom.get("parts") or []:
+        if isinstance(part, dict) and part.get("ref"):
+            out[str(part["ref"])] = " ".join(
+                str(part.get(key) or "") for key in ("value", "mpn")
+            ).strip()
+    return out
+
+
+def classify_build_failure(ws, *, rc: int | None = None) -> BuildFailure:
+    """Attribute one failed build to the smallest choice that can change it."""
+    ws = Path(ws)
+    diagnostics, pcb_errors = read_build_evidence(ws)
+    try:
+        state = json.loads(build_recovery_state_path(ws).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+
+    gate_codes = [
+        code for diag in diagnostics for code in (diag.get("gate_codes") or []) if code
+    ]
+    texts = [str(diag.get("message") or "") for diag in diagnostics]
+    texts += [str(item) for diag in diagnostics for item in (diag.get("evidence") or [])]
+    pcb_codes = [str(error.get("code") or "") for error in pcb_errors]
+    texts += [str(error.get("title") or "") + " " + str(error.get("explanation") or "")
+              for error in pcb_errors]
+    texts += [str(item) for error in pcb_errors for item in (error.get("details") or [])]
+    refs = _evidence_tokens(*texts)
+    refs = tuple(token for token in refs if not _gate_code(token))
+
+    fingerprint = _failure_fingerprint(gate_codes or pcb_codes, refs, texts)
+    if not diagnostics and not pcb_errors:
+        kind = "infrastructure" if rc in _INFRA_BUILD_RCS else "unattributable"
+        return BuildFailure(
+            kind=kind,
+            action="none",
+            owner_stage=None,
+            fingerprint=fingerprint,
+            reason=(
+                "the build failed without attributable deterministic evidence"
+                + (f" (exit {rc})" if rc is not None else "")
+            ),
+            diagnostics=tuple(diagnostics),
+            refs=refs,
+        )
+
+    ownership = _part_ownership(state)
+    named = user_required_parts(state)
+    required_ids = user_required_requirement_ids(state)
+    evidence_refs = tuple(ref for ref in refs if ref in ownership)
+    # The requirement is user-required when the evidence names a user-supplied
+    # part (by the part's committed value, or by literal text) or when the
+    # failure scope intersects the user's obligations / protected identities.
+    values = _part_values(state)
+    user_pinned = any(_normalized(values.get(ref, "")) in named for ref in evidence_refs)
+    if not user_pinned:
+        user_pinned = any(token in _normalized(text) for token in named for text in texts)
+    if not user_pinned and required_ids:
+        diag_ids = {
+            str(diag["requirement_id"]) for diag in diagnostics if diag.get("requirement_id")
+        }
+        user_pinned = bool(diag_ids & required_ids)
+
+    owner = None
+    for code in gate_codes:
+        owner = _BUILD_OWNER_BY_GATE.get(code)
+        if owner:
+            break
+    if owner is None and pcb_errors:
+        owner = "bom"
+
+    # (1) A reviewed implementation failing its own construction check is a
+    # protected compiler defect when the named refs are recipe/lowerer-owned.
+    compiler_owned = any(
+        ownership.get(ref) in ("recipe", "lowerer") for ref in evidence_refs
+    )
+    if compiler_owned and (
+        set(gate_codes) & _COMPILER_OWNED_GATES
+        or (owner == "compiler")
+    ):
+        return BuildFailure(
+            kind="compiler_defect",
+            action="none",
+            owner_stage="compiler",
+            fingerprint=fingerprint,
+            reason=(
+                "a reviewed deterministic implementation failed its own construction "
+                f"check ({', '.join(sorted(set(gate_codes))) or 'reviewed invariant'})"
+            ),
+            evidence=tuple(texts[:20]),
+            gate_codes=tuple(gate_codes),
+            refs=refs,
+            diagnostics=tuple(diagnostics),
+            user_required=user_pinned,
+        )
+
+    # (2) An immutable user-required part/limit with no safe constructible
+    # implementation is a capability gap: state it, never loop on it.
+    if user_pinned and (set(gate_codes) & _AVAILABILITY_GATES):
+        return BuildFailure(
+            kind="capability_gap",
+            action="none",
+            owner_stage=None,
+            fingerprint=fingerprint,
+            reason=(
+                "a user-required part/limit has no constructible implementation within "
+                "the allowed envelope"
+            ),
+            evidence=tuple(texts[:20]),
+            gate_codes=tuple(gate_codes),
+            refs=refs,
+            requirement_ids=tuple(sorted(required_ids))[:20],
+            diagnostics=tuple(diagnostics),
+            user_required=True,
+        )
+    if user_pinned and all(code in _LAYOUT_INFRA_CODES for code in pcb_codes) and pcb_codes:
+        return BuildFailure(
+            kind="infrastructure",
+            action="none",
+            owner_stage=None,
+            fingerprint=fingerprint,
+            reason="the place/route or verification tooling failed; not a circuit change",
+            evidence=tuple(texts[:20]),
+            refs=refs,
+            diagnostics=tuple(diagnostics),
+        )
+
+    # (3) Placement/routing/verification failure: revise an ALLOWED choice only.
+    if pcb_errors and not gate_codes:
+        design_codes = [code for code in pcb_codes if code in _LAYOUT_DESIGN_CODES]
+        if not design_codes and all(code in _LAYOUT_INFRA_CODES for code in pcb_codes):
+            return BuildFailure(
+                kind="infrastructure",
+                action="none",
+                owner_stage=None,
+                fingerprint=fingerprint,
+                reason="the place/route or verification tooling failed; not a circuit change",
+                evidence=tuple(texts[:20]),
+                refs=refs,
+                diagnostics=tuple(diagnostics),
+            )
+        if not evidence_refs:
+            return BuildFailure(
+                kind="infrastructure",
+                action="none",
+                owner_stage=None,
+                fingerprint=fingerprint,
+                reason=(
+                    "the layout failed without a named component/net to attribute to a "
+                    "design choice"
+                ),
+                evidence=tuple(texts[:20]),
+                refs=refs,
+                diagnostics=tuple(diagnostics),
+            )
+        if user_pinned:
+            return BuildFailure(
+                kind="capability_gap",
+                action="none",
+                owner_stage=None,
+                fingerprint=fingerprint,
+                reason=(
+                    "the user-required geometry/parts cannot be placed and routed within "
+                    "the allowed layout freedom"
+                ),
+                evidence=tuple(texts[:20]),
+                refs=refs,
+                diagnostics=tuple(diagnostics),
+                user_required=True,
+            )
+        if all(ownership.get(ref) in ("recipe", "lowerer") for ref in evidence_refs):
+            return BuildFailure(
+                kind="compiler_defect",
+                action="none",
+                owner_stage="compiler",
+                fingerprint=fingerprint,
+                reason=(
+                    "reviewed deterministic parts could not be laid out; the constraint is "
+                    "internal, not a free model choice"
+                ),
+                evidence=tuple(texts[:20]),
+                refs=refs,
+                diagnostics=tuple(diagnostics),
+            )
+        # Exhausted routing may only revise a proven allowed choice with concrete
+        # evidence -- never arbitrary geometry and never a relaxed DRC gate.
+        return BuildFailure(
+            kind="design_defect",
+            action="try_reviewed_alternative",
+            owner_stage="bom",
+            fingerprint=fingerprint,
+            reason=(
+                "attributable place/route constraint on model-selected parts "
+                f"({', '.join(design_codes) or 'layout'})"
+            ),
+            evidence=tuple(texts[:20]),
+            gate_codes=tuple(gate_codes),
+            refs=refs,
+            diagnostics=tuple(diagnostics),
+        )
+
+    # (4) Ordinary design defect: repair the smallest owning choice.
+    if owner == "compiler":
+        return BuildFailure(
+            kind="compiler_defect",
+            action="none",
+            owner_stage="compiler",
+            fingerprint=fingerprint,
+            reason="a reviewed deterministic invariant failed; not model-repairable",
+            evidence=tuple(texts[:20]),
+            gate_codes=tuple(gate_codes),
+            refs=refs,
+            diagnostics=tuple(diagnostics),
+        )
+    if owner is None:
+        return BuildFailure(
+            kind="unattributable",
+            action="none",
+            owner_stage=None,
+            fingerprint=fingerprint,
+            reason="the failing check has no owning stage mapping",
+            evidence=tuple(texts[:20]),
+            gate_codes=tuple(gate_codes),
+            refs=refs,
+            diagnostics=tuple(diagnostics),
+        )
+    if set(gate_codes) & _AVAILABILITY_GATES:
+        return BuildFailure(
+            kind="design_defect",
+            action="try_reviewed_alternative",
+            owner_stage="architecture" if owner == "architecture" else "bom",
+            fingerprint=fingerprint,
+            reason=(
+                "the selected implementation is not constructible; a permitted reviewed "
+                f"alternative must be resolved ({', '.join(sorted(set(gate_codes) & _AVAILABILITY_GATES))})"
+            ),
+            evidence=tuple(texts[:20]),
+            gate_codes=tuple(gate_codes),
+            refs=refs,
+            diagnostics=tuple(diagnostics),
+        )
+    action = {
+        "wiring": "repair_wiring",
+        "bom": "backtrack_bom",
+        "architecture": "backtrack_architecture",
+    }[owner]
+    return BuildFailure(
+        kind="design_defect",
+        action=action,
+        owner_stage=owner,
+        fingerprint=fingerprint,
+        reason=f"{owner}-owned deterministic constraint ({', '.join(sorted(set(gate_codes)))})",
+        evidence=tuple(texts[:20]),
+        gate_codes=tuple(gate_codes),
+        refs=refs,
+        diagnostics=tuple(diagnostics),
+    )
+
+
+def _owner_choice_fingerprint(ws, owner: str | None) -> str | None:
+    """Identity of the owning CHOICE, for the unchanged/oscillation guards.
+
+    Only the stages that own a *choice* (the BOM's parts and the architecture's
+    requirements/recipe selections) have one. Wiring is the derived connection
+    set of a choice, not a choice itself: its identity legitimately changes when
+    the repair invalidates and re-derives it, so an unchanged-wiring check would
+    be meaningless. A repeated wiring failure is instead caught by the identical
+    failure fingerprint.
+    """
+    if owner not in ("bom", "architecture"):
+        return None
+    try:
+        state = json.loads(build_recovery_state_path(ws).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if owner == "bom":
+        bom = state.get("bom") or {}
+        payload = {
+            "parts": sorted(
+                f"{p.get('ref')}|{p.get('symbol')}|{p.get('footprint')}|{p.get('value')}"
+                for p in (bom.get("parts") or [])
+                if isinstance(p, dict)
+            ),
+            "ic_groups": bom.get("ic_groups") or {},
+        }
+    else:
+        architecture = state.get("architecture") or {}
+        payload = {
+            "requirements": sorted(
+                str(r.get("id")) for r in (architecture.get("requirements") or []) if isinstance(r, dict)
+            ),
+            "recipes": sorted(
+                f"{s.get('recipe')}@{s.get('instance')}"
+                for s in (architecture.get("recipe_selections") or [])
+                if isinstance(s, dict)
+            ),
+            "sheets": sorted(
+                str(s.get("name")) for s in (architecture.get("sheets") or []) if isinstance(s, dict)
+            ),
+        }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _snapshot_state(ws) -> bytes | None:
+    """Bytes of the current accepted state.json, for an adopt-or-restore probe."""
+    try:
+        return build_recovery_state_path(ws).read_bytes()
+    except OSError:
+        return None
+
+
+def _restore_state(ws, snapshot: bytes | None) -> None:
+    """Put the last accepted state back after a revision that did not commit."""
+    if snapshot is None:
+        return
+    try:
+        atomic_write_text(build_recovery_state_path(ws), snapshot.decode("utf-8"))
+    except (OSError, UnicodeDecodeError):
+        pass
+
+
+def _budget_allows_recovery(client) -> bool:
+    """Whether the shared ceilings leave room for one more design revision.
+
+    Reads the SAME persistent guard the calls themselves consult; a mock/replay
+    client without a guard imposes no ceiling (it spends nothing).
+    """
+    guard = getattr(client, "guard", None)
+    if guard is None or not hasattr(guard, "status"):
+        return True
+    try:
+        status = guard.status() or {}
+    except Exception:  # noqa: BLE001 - a guard hiccup must not fake a refusal
+        return True
+    if status.get("kill_switch"):
+        return False
+    # A ceiling of 0/None means that scope is UNCONFIGURED (the mock/replay
+    # guard reports all-zero ceilings and spends nothing) -- not exhausted.
+    for remaining_key, ceiling_key in (
+        ("daily_remaining_usd", "daily_ceiling_usd"),
+        ("total_remaining_usd", "total_ceiling_usd"),
+    ):
+        ceiling = status.get(ceiling_key)
+        remaining = status.get(remaining_key)
+        if not isinstance(ceiling, (int, float)) or ceiling <= 0:
+            continue
+        if isinstance(remaining, (int, float)) and remaining <= 0.0:
+            return False
+    return True
+
+
+def _recovery_instruction(failure: BuildFailure) -> str:
+    """Concrete, constraint-scoped instruction naming the evidence and owner."""
+    lines = [f"- {line}" for line in list(failure.evidence)[:12]]
+    body = "\n".join(lines) or f"- {failure.reason}"
+    scope = {
+        "repair_wiring": "Fix ONLY the connections/no-connect pins that violate these constraints",
+        "backtrack_bom": "Fix ONLY the parts these constraints name",
+        "backtrack_architecture": "Revise ONLY the architecture choice these constraints name",
+        "try_reviewed_alternative": (
+            "Resolve a different COMPATIBLE reviewed implementation for the named choice"
+        ),
+    }.get(failure.action, "Resolve the constraints")
+    return (
+        f"The deterministic build failed with these concrete constraints:\n{body}\n"
+        f"{scope}; keep every other requirement, net, and part unchanged. "
+        "Do NOT drop required parts, do NOT relax any electrical or fabrication limit, "
+        "and do NOT ask the user."
+    )
+
+
+def _emit_recovery_event(progress, *, action: str, reason: str, outcome: str,
+                         requirement_ids=(), evidence=(), failure: BuildFailure | None = None) -> None:
+    if progress is None:
+        return
+    progress(
+        {
+            "kind": "recovery_action",
+            "action": action,
+            "reason": reason,
+            "requirement_ids": list(requirement_ids),
+            "evidence": list(evidence)[:20],
+            "outcome": outcome,
+            "failure_kind": failure.kind if failure is not None else None,
+            "owner_stage": failure.owner_stage if failure is not None else None,
+        }
+    )
+    progress({"kind": "build_log", "text": f"[recover] {action}: {reason}"[:500]})
+
+
+def _record_recovery_event(
+    ws,
+    *,
+    failure: BuildFailure,
+    action: str,
+    outcome: str,
+    choice_fingerprint: str | None,
+    run_id: str | None,
+    ok: bool,
+    failure_kind: str | None,
+    attempts: int,
+    state: BuildRecoveryState,
+    choice_fingerprints: list[str] | None = None,
+) -> BuildRecoveryState:
+    event = {
+        "action": action,
+        "reason": failure.reason,
+        "outcome": outcome,
+        "failure_fingerprint": failure.fingerprint,
+        "requirement_ids": list(failure.requirement_ids),
+        "evidence": list(failure.evidence)[:20],
+        "diagnostics": list(failure.diagnostics),
+    }
+    if choice_fingerprint:
+        event["choice_fingerprint"] = choice_fingerprint
+    events = [*state.events, event]
+    # The policy list is the set of choices already tried as a repair starting
+    # point; the event's own choice_fingerprint is provenance and must not be
+    # folded into it, or a re-entry would refuse its own starting choice.
+    choices = list(state.choice_fingerprints if choice_fingerprints is None else choice_fingerprints)
+    write_build_recovery(
+        ws,
+        ok=ok,
+        failure_kind=failure_kind,
+        run_id=run_id,
+        attempts=attempts,
+        max_attempts=state.max_attempts,
+        choice_fingerprints=choices,
+        events=events,
+        diagnostics=list(failure.diagnostics),
+    )
+    return BuildRecoveryState(
+        ok=ok,
+        failure_kind=failure_kind,
+        run_id=run_id or state.run_id,
+        attempts=attempts,
+        max_attempts=state.max_attempts,
+        choice_fingerprints=choices,
+        events=events,
+    )
+
+
+def run_build_recovery(
+    ws,
+    brief: str,
+    build,
+    *,
+    progress=None,
+    run_id: str | None = None,
+    client=None,
+    core_defaults=None,
+    auto_default_questions: bool | None = None,
+    redrive=None,
+    max_attempts: int = BUILD_RECOVERY_MAX_ATTEMPTS,
+) -> dict:
+    """Build once, then apply the shared bounded build-to-design policy.
+
+    ``build`` is the caller's deterministic build worker (web build queue or the
+    batch runner); it returns the build exit code and writes the durable
+    evidence. This function owns the design revision: it may re-drive the
+    smallest owning stage through ``run_session`` (or the caller's ``redrive``),
+    invalidating only that stage's downstream, and rebuilds. It never edits
+    geometry, never relaxes a gate, and never restarts the budget.
+
+    Returns ``{rc, attempts, max_attempts, status, failure_kind, events,
+    needs_input, questions}`` where status is ``ok`` (a build completed),
+    ``recovered`` (a revision rebuilt successfully), ``blocked``,
+    ``exhausted``, or ``awaiting_input``.
+    """
+    ws = Path(ws)
+    state = read_build_recovery(ws)
+    max_attempts = int(state.max_attempts) if state.present else int(max_attempts)
+    attempts = state.attempts
+    seen_failures = state.failure_fingerprints
+    seen_choices = set(state.choice_fingerprints)
+    rc = build()
+    if rc == 0:
+        write_build_recovery(
+            ws,
+            ok=True,
+            run_id=run_id,
+            attempts=attempts,
+            max_attempts=max_attempts,
+            choice_fingerprints=list(seen_choices),
+            events=state.events,
+        )
+        return {
+            "rc": rc,
+            "attempts": attempts,
+            "max_attempts": max_attempts,
+            "status": "ok" if attempts == 0 else "recovered",
+            "failure_kind": None,
+            "events": state.events,
+            "needs_input": False,
+            "questions": [],
+        }
+
+    while True:
+        failure = classify_build_failure(ws, rc=rc)
+        if failure.kind in ("infrastructure", "unattributable"):
+            state = _record_recovery_event(
+                ws, failure=failure, action="none", outcome="blocked",
+                choice_fingerprint=None, run_id=run_id, ok=False,
+                failure_kind=failure.kind, attempts=attempts, state=state,
+            )
+            _emit_recovery_event(
+                progress, action="none", reason=failure.reason, outcome="blocked", failure=failure
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "blocked", "failure_kind": failure.kind,
+                "events": state.events, "needs_input": False, "questions": [],
+            }
+        if failure.kind in ("compiler_defect", "capability_gap"):
+            state = _record_recovery_event(
+                ws, failure=failure, action="none", outcome="exhausted",
+                choice_fingerprint=None, run_id=run_id, ok=False,
+                failure_kind=failure.kind, attempts=attempts, state=state,
+            )
+            _emit_recovery_event(
+                progress, action="none", reason=failure.reason, outcome="exhausted",
+                requirement_ids=failure.requirement_ids, evidence=failure.evidence, failure=failure,
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "exhausted", "failure_kind": failure.kind,
+                "events": state.events, "needs_input": False, "questions": [],
+            }
+        if attempts >= max_attempts:
+            reason = f"recovery budget exhausted ({attempts}/{max_attempts})"
+            state = _record_recovery_event(
+                ws, failure=failure, action=failure.action, outcome="exhausted",
+                choice_fingerprint=None, run_id=run_id, ok=False,
+                failure_kind="recovery_exhausted", attempts=attempts, state=state,
+            )
+            _emit_recovery_event(
+                progress, action=failure.action, reason=reason, outcome="exhausted",
+                evidence=failure.evidence, failure=failure,
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "exhausted", "failure_kind": "recovery_exhausted",
+                "events": state.events, "needs_input": False, "questions": [],
+            }
+        if failure.fingerprint in seen_failures:
+            reason = "the same build failure repeated; no identical request is re-issued"
+            state = _record_recovery_event(
+                ws, failure=failure, action=failure.action, outcome="exhausted",
+                choice_fingerprint=None, run_id=run_id, ok=False,
+                failure_kind="recovery_repeated", attempts=attempts, state=state,
+            )
+            _emit_recovery_event(
+                progress, action=failure.action, reason=reason, outcome="exhausted",
+                evidence=failure.evidence, failure=failure,
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "exhausted", "failure_kind": "recovery_repeated",
+                "events": state.events, "needs_input": False, "questions": [],
+            }
+        if not _budget_allows_recovery(client):
+            reason = "remaining project/global budget cannot cover another design revision"
+            state = _record_recovery_event(
+                ws, failure=failure, action=failure.action, outcome="exhausted",
+                choice_fingerprint=None, run_id=run_id, ok=False,
+                failure_kind="budget_refused", attempts=attempts, state=state,
+            )
+            _emit_recovery_event(
+                progress, action=failure.action, reason=reason, outcome="exhausted",
+                evidence=failure.evidence, failure=failure,
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "exhausted", "failure_kind": "budget_refused",
+                "events": state.events, "needs_input": False, "questions": [],
+            }
+
+        owner = failure.owner_stage
+        invalidate_from, stages = _RECOVERY_PLAN.get(failure.action, (None, ()))
+        if failure.action == "try_reviewed_alternative" and owner == "architecture":
+            invalidate_from, stages = _ARCHITECTURE_ALTERNATIVE
+        if not stages:
+            state = _record_recovery_event(
+                ws, failure=failure, action="none", outcome="blocked",
+                choice_fingerprint=None, run_id=run_id, ok=False,
+                failure_kind="unattributable", attempts=attempts, state=state,
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "blocked", "failure_kind": "unattributable",
+                "events": state.events, "needs_input": False, "questions": [],
+            }
+
+        choice_before = _owner_choice_fingerprint(ws, owner)
+        if choice_before is not None and choice_before in seen_choices:
+            reason = (
+                "this choice was already tried and did not resolve the failure "
+                "(oscillation); terminating instead of repeating it"
+            )
+            state = _record_recovery_event(
+                ws, failure=failure, action=failure.action, outcome="exhausted",
+                choice_fingerprint=choice_before, run_id=run_id, ok=False,
+                failure_kind="recovery_oscillation", attempts=attempts, state=state,
+            )
+            _emit_recovery_event(
+                progress, action=failure.action, reason=reason, outcome="exhausted",
+                evidence=failure.evidence, failure=failure,
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "exhausted", "failure_kind": "recovery_oscillation",
+                "events": state.events, "needs_input": False, "questions": [],
+            }
+        # The choice we are about to leave is recorded as tried-and-insufficient,
+        # so returning to it later (A -> B -> A) is refused rather than repeated.
+        if choice_before is not None:
+            seen_choices.add(choice_before)
+
+        # The last accepted design stays on disk until a revision validates: the
+        # revision is probed in place (the stage driver only commits a candidate
+        # that passed its gates), and any non-committing outcome restores the
+        # snapshot. Reuses the existing state.json commit mechanism -- no second
+        # transaction store.
+        snapshot = _snapshot_state(ws)
+        try:
+            null_downstream(ws, invalidate_from)
+        except RuntimeError as exc:
+            state = _record_recovery_event(
+                ws, failure=failure, action=failure.action, outcome="blocked",
+                choice_fingerprint=choice_before, run_id=run_id, ok=False,
+                failure_kind="state_unreadable", attempts=attempts, state=state,
+            )
+            _emit_recovery_event(
+                progress, action=failure.action, reason=str(exc), outcome="blocked",
+                evidence=failure.evidence, failure=failure,
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "blocked", "failure_kind": "state_unreadable",
+                "events": state.events, "needs_input": False, "questions": [],
+            }
+
+        instruction = _recovery_instruction(failure)
+        _emit_recovery_event(
+            progress, action=failure.action, reason=failure.reason, outcome="applied",
+            requirement_ids=failure.requirement_ids, evidence=failure.evidence, failure=failure,
+        )
+        if redrive is not None:
+            result = redrive(list(stages), instruction)
+        else:
+            result = run_session(
+                ws,
+                brief,
+                list(stages),
+                instruction=instruction,
+                client=client,
+                progress=progress,
+                run_id=run_id,
+                core_defaults=core_defaults,
+                auto_default_questions=auto_default_questions,
+            )
+        status = (result or {}).get("status")
+        if status == "awaiting_input":
+            _restore_state(ws, snapshot)
+            state = _record_recovery_event(
+                ws, failure=failure, action=failure.action, outcome="blocked",
+                choice_fingerprint=choice_before, run_id=run_id, ok=False,
+                failure_kind="awaiting_input", attempts=attempts, state=state,
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "awaiting_input", "failure_kind": "awaiting_input",
+                "events": state.events, "needs_input": True,
+                "questions": (result or {}).get("questions") or [],
+            }
+        if status != "ok":
+            _restore_state(ws, snapshot)
+            state = _record_recovery_event(
+                ws, failure=failure, action=failure.action, outcome="blocked",
+                choice_fingerprint=choice_before, run_id=run_id, ok=False,
+                failure_kind=(result or {}).get("failure_kind") or "redrive_failed",
+                attempts=attempts, state=state,
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "blocked",
+                "failure_kind": (result or {}).get("failure_kind") or "redrive_failed",
+                "events": state.events, "needs_input": False, "questions": [],
+            }
+
+        attempts += 1
+        choice_after = _owner_choice_fingerprint(ws, owner)
+        seen_failures.add(failure.fingerprint)
+        state = _record_recovery_event(
+            ws, failure=failure, action=failure.action, outcome="applied",
+            choice_fingerprint=choice_after, run_id=run_id, ok=False,
+            failure_kind=None, attempts=attempts, state=state,
+            choice_fingerprints=list(seen_choices),
+        )
+        if choice_after is not None and choice_after == choice_before:
+            reason = (
+                "the owning choice did not change after the repair; "
+                "stopping instead of rebuilding an unchanged candidate"
+            )
+            state = _record_recovery_event(
+                ws, failure=failure, action=failure.action, outcome="exhausted",
+                choice_fingerprint=choice_after, run_id=run_id, ok=False,
+                failure_kind="recovery_stalled", attempts=attempts, state=state,
+            )
+            _emit_recovery_event(
+                progress, action=failure.action, reason=reason, outcome="exhausted",
+                evidence=failure.evidence, failure=failure,
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "exhausted", "failure_kind": "recovery_stalled",
+                "events": state.events, "needs_input": False, "questions": [],
+            }
+        rc = build()
+        if rc == 0:
+            write_build_recovery(
+                ws, ok=True, run_id=run_id, attempts=attempts,
+                max_attempts=max_attempts, choice_fingerprints=list(seen_choices),
+                events=state.events,
+            )
+            _emit_recovery_event(
+                progress, action=failure.action,
+                reason=f"recovered: {failure.reason}", outcome="applied",
+                requirement_ids=failure.requirement_ids, failure=failure,
+            )
+            return {
+                "rc": rc, "attempts": attempts, "max_attempts": max_attempts,
+                "status": "recovered", "failure_kind": None,
+                "events": state.events, "needs_input": False, "questions": [],
+            }
+

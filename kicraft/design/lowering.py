@@ -743,6 +743,103 @@ def _contact_nets(
         return None
     return tuple(indexed[index] for index in range(1, len(indexed) + 1))
 
+#: DE-9 names that intentionally denote this nine-contact connector class.  The
+#: `dsub-9` spelling is the architecture's existing CAN-interface requirement;
+#: the others are precise DE-9/DB9 connector spellings, not a catch-all for serial
+#: D-Sub connectors with an unspecified contact convention.
+_REVIEWED_DE9_FAMILIES = (
+    "dsub-9",
+    "dsub9",
+    "db9-connector",
+    "de-9-connector",
+    "de9-connector",
+)
+_REVIEWED_DE9_IDENTITY = "ds1034-09funsi44"
+_DE9_CAN_PORTS = frozenset({"can_h", "can_l", "gnd"})
+
+
+def _reviewed_de9_connector(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """Realize the reviewed DE-9, never infer an arbitrary serial protocol.
+
+    A CAN binding is limited to the published CiA 303-1 map in the reviewed
+    record.  Other uses must name every numbered signal contact, including every
+    unused one as ``NC``; a partially specified D-Sub has no safe generic
+    serial convention to infer.  The record's 9 signal contacts are distinct
+    from its two mechanical mounting posts, which have pad number 0 and no
+    schematic contact.
+    """
+    record = reviewed_part(_REVIEWED_DE9_IDENTITY)
+    contacts = tuple(str(contact) for contact in record.contacts) if record is not None else ()
+    mapping = {str(key): str(value) for key, value in dict(record.port_pins or {}).items()} if record else {}
+    if (
+        record is None
+        or record.family != "de-9-connector"
+        or not record.symbol
+        or not record.footprint
+        or contacts != tuple(str(number) for number in range(1, 10))
+        or {mapping.get(port) for port in _DE9_CAN_PORTS} != {"2", "3", "7"}
+    ):
+        return None
+    if requirement.exact_part and requirement.exact_part.casefold() != record.identity:
+        return None
+
+    ports = {str(key): str(net) for key, net in requirement.ports.items()}
+    by_contact: dict[str, str]
+    assumption: str
+    if set(ports) == _DE9_CAN_PORTS:
+        if (
+            any(not ports[port].strip() or ports[port] == "NC" for port in _DE9_CAN_PORTS)
+            or len({ports[port] for port in _DE9_CAN_PORTS}) != len(_DE9_CAN_PORTS)
+        ):
+            return None
+        by_contact = {mapping[port]: ports[port] for port in _DE9_CAN_PORTS}
+        assumption = (
+            f"{record.identity}: CiA 303-1 CAN-over-DE-9 maps CAN_H to contact "
+            f"{mapping['can_h']}, CAN_L to contact {mapping['can_l']}, and CAN_GND "
+            f"to contact {mapping['gnd']}"
+        )
+    else:
+        numbered = _contact_net_map(ports, prefixes=("pin",))
+        if numbered is None or set(numbered) != set(range(1, 10)):
+            return None
+        by_contact = {str(contact): net for contact, net in numbered.items()}
+        assumption = (
+            f"{record.identity}: every DE-9 signal contact is explicitly bound by "
+            "the requirement; no serial protocol was inferred"
+        )
+
+    group = LoweringGroup(
+        role="connector",
+        reference_prefix="J",
+        value=record.identity.upper(),
+        mpn=record.identity.upper(),
+        symbol=record.symbol,
+        footprint=record.footprint,
+        datasheet=record.manufacturer_sources[0] if record.manufacturer_sources else None,
+    )
+    pins = tuple(
+        LoweringPin(role="connector", pin=contact, net=by_contact[contact])
+        for contact in contacts
+        if contact in by_contact and by_contact[contact] != "NC"
+    )
+    no_connects = tuple(
+        LoweringNoConnect(
+            role="connector",
+            pin=contact,
+            reason="unused DE-9 signal contact is intentionally unconnected",
+        )
+        for contact in contacts
+        if contact not in by_contact or by_contact[contact] == "NC"
+    )
+    return _artifact(
+        "reviewed-de9-connector@1",
+        requirement,
+        (group,),
+        pins,
+        no_connects=no_connects,
+        assumptions=(assumption,),
+    )
+
 
 #: Families whose reviewed record is a two-contact DC power inlet (centre pin plus barrel).
 #: Distinct families so a draft that names this connector family reaches this build instead of
@@ -2054,6 +2151,24 @@ for _lowerer in (
         required_port_keys=("sleeve", "tip", "ring"),
         reference_port_keys=("sleeve",),
         required_exact_part="SJ1-3533NG",
+    ),
+    RegisteredLowerer(
+        "reviewed-de9-connector@1",
+        frozenset(_REVIEWED_DE9_FAMILIES),
+        _reviewed_de9_connector,
+        ("positions", "gender"),
+        (
+            "<can_h, can_l, gnd: CiA 303-1 CAN contacts>",
+            "<pin1..pin9: every physical signal contact, with unused contacts spelled NC>",
+        ),
+        parameter_choices=(("positions", (9,)), ("gender", ("female",))),
+        port_directions=(
+            ("can_h", "bidirectional"),
+            ("can_l", "bidirectional"),
+            ("gnd", "bidirectional"),
+        ),
+        port_patterns=((r"pin[1-9]", "bidirectional"),),
+        reviewed_exact_part="DS1034-09FUNSi44",
     ),
     RegisteredLowerer(
         "pin-header@1",

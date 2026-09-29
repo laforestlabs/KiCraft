@@ -7306,7 +7306,7 @@
               "quantity": 1,
               "value": "DE-9 female CAN connector",
               "symbol": "Connector:DE9_Socket",
-              "footprint": "Connector_Dsub:DSUB-9_Socket_Vertical_P2.77x2.84mm",
+              "footprint": "Connector_Dsub:DSUB-9_Socket_Vertical_P2.77x2.84mm_MountingHoles",
               "sheet": "CAN",
               "mpn": "DS1034-09FUNSi44",
               "datasheet": "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8563423381518241792",

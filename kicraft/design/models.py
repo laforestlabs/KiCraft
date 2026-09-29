@@ -230,8 +230,8 @@ class FunctionalSpec(BaseModel):
     blocks: list[FunctionalBlock]
     connections: list[BlockConnection] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
-    # The functional decomposition carries the same typed original facts into
-    # architecture; the architecture model verifies requirement ownership.
+    # The committed typed facts, written here by the compiler from the intent slot: blocks name
+    # `obligation_ids` and never copy a row. Ownership is verified at the architecture stage.
     obligations: "list[RequirementObligation]" = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -736,7 +736,8 @@ class CircuitRequirement(BaseModel):
     # A complete pin-level claim for uncurated hardware. This is canonical
     # architecture data, rather than an advisory architecture-level id list.
     declared_interface: DeclaredInterfaceClaim | None = None
-    # Requirement-local links to original acceptance obligations. Validators
+    # The committed acceptance obligations this requirement implements, resolved by the compiler
+    # from the intent's own rows (the draft names `obligation_ids`, never a copy). Validators
     # consume these facts rather than trying to recover them from prose.
     obligations: list[RequirementObligation] = Field(default_factory=list)
     # Exact committed FunctionalSpec block names, never inferred from sheet prose.
@@ -858,8 +859,9 @@ class Architecture(BaseModel):
     standard_form_factor: str | None = None
     recipe_selections: list[RecipeSelection] = Field(default_factory=list)
     requirements: list[CircuitRequirement] = Field(default_factory=list)
-    # Canonical original facts survive recipe resolution and all later stage
-    # normalization. Every row must be retained verbatim by one requirement.
+    # Canonical original facts survive recipe resolution and all later stage normalization. The
+    # compiler writes them from the committed intent/spec set; each owner-requiring row was named
+    # by the requirement that implements it.
     obligations: list[RequirementObligation] = Field(default_factory=list)
     recipe_resolution: list[RecipeResolutionRecord] = Field(default_factory=list)
     unresolved_requirement_ids: list[str] = Field(default_factory=list)
@@ -1685,6 +1687,33 @@ class StageDiagnostic(BaseModel):
         ]
 
 
+class BuildRecoveryEvent(BaseModel):
+    """One owner-directed response to deterministic build evidence.
+
+    Stored under ``stage_status["build_recovery"]`` so restart/reopen sees the
+    same bounded history that selected the next action.  Diagnostics remain the
+    canonical carrier for concrete constraint evidence and ownership IDs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal[
+        "repair_wiring",
+        "backtrack_bom",
+        "backtrack_architecture",
+        "try_reviewed_alternative",
+        "rebuild",
+        "none",
+    ]
+    reason: str
+    outcome: Literal["applied", "blocked", "exhausted"]
+    failure_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    choice_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    requirement_ids: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    diagnostics: list[StageDiagnostic] = Field(default_factory=list)
+
+
 class StageStatus(BaseModel):
     """Durable outcome of one pipeline stage, keyed by stage name in
     ConversationState.stage_status. Written by the server stage driver at
@@ -1709,6 +1738,13 @@ class StageStatus(BaseModel):
     cpu_s: float | None = None
     rounds: int | None = None  # BOM tool-loop rounds (None for single-shot stages)
     tool_calls: int | None = None  # total BOM tool calls (None for non-BOM stages)
+    # Build feedback is not a sixth design stage.  It shares the established
+    # durable status map so a resumed run cannot reset its repair/choice budget.
+    recovery_run_id: str | None = None
+    recovery_attempts: int | None = Field(default=None, ge=0)
+    recovery_max_attempts: int | None = Field(default=None, ge=0)
+    recovery_choice_fingerprints: list[str] = Field(default_factory=list)
+    recovery_events: list[BuildRecoveryEvent] = Field(default_factory=list)
     # Terminal failure classification for a failed stage: one of
     # collection_limit / reasoning_loop / truncated_json / invalid_json /
     # invalid_schema / contract_rejected / commit_rejected / provider_error /

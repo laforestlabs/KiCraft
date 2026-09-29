@@ -35,6 +35,45 @@ amber for active or parked, green for complete, red for failure, and yellow for
 warning. Icons and accessible status names distinguish states independently of
 color, including on mobile.
 
+### What the page claims: assurance and export labels
+
+Every project carries one derived **assurance** reading, shown next to its status
+and above any download. It is derived from that project's own persisted evidence
+(committed stages, stage outcomes and diagnostics, review findings, the build
+gate and synthesis-check summaries, and any independent verification recorded for
+the run) — it is not a separate status database, so reopening a project derives
+the same answer.
+
+- **Software-verified complete export** — a *current*, artifact-hash-bound
+  independent verification (an acceptance audit or filled acceptance evidence)
+  matches this exact export. Hardware qualification is still the user's to get.
+- **Fabrication-ready package · independently unverified** — a clean,
+  fabrication-gate-passing export with nothing recorded to review. Downloadable,
+  but *not* independently verified as fulfilling the original brief. Parts
+  coverage, a committed review stage, or the presence of a downloadable package
+  never make an export "verified".
+- **Generated with recorded gaps · review required** — the same export plus
+  recorded limitations (compiler advisories, model-declared pin claims for
+  unreviewed parts, unresolved requirements, review blockers, fabrication
+  cautions, unapproved changes to a required part).
+- **Recorded capability limitation** — a design stage stopped on a requirement
+  KiCraft could not realize with the reviewed library. The wording is the
+  recorded finding, and it names a part, range or choice that may resolve it —
+  a failed search is not proof the circuit is impossible.
+- **Incomplete or failed preview** / **Stale preview** — the build failed or
+  exhausted its recovery, or the board on disk belongs to an earlier accepted
+  design (an upstream edit invalidated it). The artifacts stay viewable as
+  history; the page does not offer them as this design's export.
+- **Waiting for your answer** — the run is parked on an unanswered blocking
+  question.
+
+Part changes are reported honestly. A substitution the BOM ledger records for a
+part the **user required** is a change, not consent: unless a recorded answer
+from the user approves it, the export is labelled review-required and the change
+is listed as having no recorded approval. An automatic default recorded on a
+cosmetic question, and a model-selected part's automatic alternative, are listed
+as actions KiCraft took — never as the user's approval.
+
 ## Installation
 
 ```bash

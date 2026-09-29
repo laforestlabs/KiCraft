@@ -64,10 +64,9 @@ from .stage_work_units import (
     StageDraftStore,
     StageWorkUnit,
     WorkUnitValidationError,
+    aggregate_stage_work_units,
     deterministic_bom_candidate,
     deterministic_wiring_candidate,
-    merge_bom_units,
-    merge_wiring_units,
     plan_stage_work_units,
     route_work_unit_ids,
     stage_draft_fingerprint,
@@ -2374,10 +2373,56 @@ def _drive_work_unit_stage(
                     ],
                 }
             )
-    # Deterministic lowerings that fail their own unit's validation: the unit is
-    # re-driven by the model with the refusal as its first feedback, instead of
-    # aborting the stage at attempts=0 before any provider call.
-    refused_deterministic: dict[str, str] = {}
+    def deterministic_construction_failure(unit: StageWorkUnit, exc: Exception) -> dict:
+        failure = (
+            exc
+            if isinstance(exc, WorkUnitValidationError)
+            else WorkUnitValidationError(
+                unit.unit_id,
+                {
+                    "deterministic-construction": [
+                        *(
+                            f"requirement {requirement_id}"
+                            for requirement_id in unit.requirement_ids
+                        ),
+                        str(exc),
+                    ]
+                },
+            )
+        )
+        diagnostic = unit_defect_diagnostic(failure, str(failure))
+        if unit.requirement_ids:
+            diagnostic["evidence"].append("requirement_ids: " + ", ".join(unit.requirement_ids))
+        return finalize_stage(
+            client,
+            run_id=run_id,
+            stage=stage,
+            state_path=state_path,
+            progress=progress,
+            ok=False,
+            t0=t0,
+            cpu0=cpu0,
+            cost_usd=0.0,
+            attempts=0,
+            rounds=(0 if stage == "bom" else None),
+            tool_calls=(0 if stage == "bom" else None),
+            emitted_collection_count=0,
+            expanded_component_count=0,
+            outcome={
+                "failure_kind": "deterministic_construction_invalid",
+                "error": str(failure),
+                "schema_error": _redacted_schema_error(failure),
+                "diagnostic": diagnostic,
+                "provider_ok": False,
+                "schema_ok": False,
+                "work_units": len(units),
+                "reused_work_units": reused_work_units,
+                "aggregate_repair_rounds": 0,
+            },
+        )
+
+    # A deterministic construction error is compiler-owned. It must never be
+    # reframed as model-owned repair work or spend a provider call.
     for unit in units:
         if unit.unit_id in candidates:
             if progress:
@@ -2406,11 +2451,14 @@ def _drive_work_unit_stage(
                     }
                 )
             continue
-        deterministic = (
-            deterministic_bom_candidate(unit, prompt_state)
-            if stage == "bom"
-            else deterministic_wiring_candidate(unit, prompt_state, extras)
-        )
+        try:
+            deterministic = (
+                deterministic_bom_candidate(unit, prompt_state)
+                if stage == "bom"
+                else deterministic_wiring_candidate(unit, prompt_state, extras)
+            )
+        except (WorkUnitValidationError, TypeError, ValueError) as exc:
+            return deterministic_construction_failure(unit, exc)
         if deterministic is None:
             if progress:
                 progress(
@@ -2451,14 +2499,7 @@ def _drive_work_unit_stage(
                 decider=decider,
             )
         except (WorkUnitValidationError, TypeError, ValueError) as exc:
-            # The lowering could not satisfy its own reviewed obligations (a real
-            # refusal — see _validate_bom_unit's defect text). The unit is handed to
-            # the model with that refusal as its first feedback, so the stage spends
-            # its bounded unit attempts instead of failing the whole stage at
-            # attempts=0. The work_unit_plan event above stays; work_unit_done is
-            # emitted only by the path that actually produced the unit.
-            refused_deterministic[unit.unit_id] = str(exc)
-            continue
+            return deterministic_construction_failure(unit, exc)
         unit_sources[unit.unit_id] = "lowerer"
         if progress:
             progress(
@@ -2884,12 +2925,6 @@ def _drive_work_unit_stage(
                     prompt_state,
                     extras,
                     decider=decider,
-                    # A unit whose own lowering was already refused gets its
-                    # answer judged on its own merits: adopting the refused
-                    # lowering could only re-raise that lowering's defect and
-                    # hide the model's, so the repair feedback would repeat
-                    # itself instead of naming what to fix.
-                    allow_deterministic_fallback=unit.unit_id not in refused_deterministic,
                 )
             except (WorkUnitValidationError, TypeError, ValueError) as exc:
                 record(
@@ -3232,7 +3267,7 @@ def _drive_work_unit_stage(
     for unit in units:
         if unit.unit_id in candidates:
             continue
-        kind, payload = draft(unit, feedback=refused_deterministic.get(unit.unit_id))
+        kind, payload = draft(unit)
         if kind == "questions":
             return stop_for_question(payload)
         if kind != "candidate":
@@ -3244,47 +3279,21 @@ def _drive_work_unit_stage(
     else:
         last = {}
 
-    def aggregate():
-        nonlocal expanded_component_count
-        if stage == "bom":
+    if not last:
+        try:
             (
-                merged,
+                candidate,
                 ref_to_unit,
-                ref_to_lowering,
-                trusted_lowering_group_ids,
-            ) = merge_bom_units(
+                pin_to_unit,
+                ref_to_unit_ids,
+                expanded_component_count,
+            ) = aggregate_stage_work_units(
+                stage,
                 units,
                 candidates,
                 prompt_state,
-                trusted_unit_ids=frozenset(
-                    unit_id for unit_id, source in unit_sources.items() if source == "lowerer"
-                ),
+                unit_sources=unit_sources,
             )
-            normalization_state = {
-                **prompt_state,
-                "_trusted_lowering_group_ids": trusted_lowering_group_ids,
-            }
-            normalized, expanded_component_count = _normalize_stage_response(
-                stage, merged, normalization_state
-            )
-            for part in normalized.get("parts") or []:
-                if part.get("recipe_id"):
-                    continue
-                unit_id = ref_to_unit.get(str(part.get("ref")))
-                if unit_id:
-                    part["resolution_source"] = unit_sources.get(unit_id, "llm")
-                    part["resolution_id"] = unit_id
-                    lowering = ref_to_lowering.get(str(part.get("ref")))
-                    if lowering:
-                        part.update(lowering)
-            return normalized, ref_to_unit, {}, {}
-        merged, pin_to_unit, ref_to_unit_ids = merge_wiring_units(units, candidates)
-        normalized, _expanded = _normalize_stage_response(stage, merged, prompt_state)
-        return normalized, {}, pin_to_unit, ref_to_unit_ids
-
-    if not last:
-        try:
-            candidate, ref_to_unit, pin_to_unit, ref_to_unit_ids = aggregate()
             schema_ok = True
         except (StageSchemaError, TypeError, ValueError) as exc:
             diagnostic = getattr(exc, "diagnostic", None)
@@ -3366,7 +3375,19 @@ def _drive_work_unit_stage(
             candidates[unit_id] = payload
             draft_store.save(draft_fingerprint, units, candidates)
         else:
-            repaired, new_ref_map, new_pin_map, new_ref_units = aggregate()
+            (
+                repaired,
+                new_ref_map,
+                new_pin_map,
+                new_ref_units,
+                expanded_component_count,
+            ) = aggregate_stage_work_units(
+                stage,
+                units,
+                candidates,
+                prompt_state,
+                unit_sources=unit_sources,
+            )
             repaired_diagnostics = diagnose_stage(
                 stage,
                 brief=brief,
@@ -3588,7 +3609,19 @@ def _drive_work_unit_stage(
             draft_store.save(draft_fingerprint, units, candidates)
         else:
             try:
-                candidate, ref_to_unit, pin_to_unit, ref_to_unit_ids = aggregate()
+                (
+                    candidate,
+                    ref_to_unit,
+                    pin_to_unit,
+                    ref_to_unit_ids,
+                    expanded_component_count,
+                ) = aggregate_stage_work_units(
+                    stage,
+                    units,
+                    candidates,
+                    prompt_state,
+                    unit_sources=unit_sources,
+                )
             except (StageSchemaError, TypeError, ValueError) as exc:
                 candidates = prior_candidates
                 diagnostic = getattr(exc, "diagnostic", None)

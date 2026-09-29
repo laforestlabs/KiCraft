@@ -80,12 +80,13 @@ Slot shape:
     `parallel_<i>` ports you bind. You do not have to get the list exactly right; the ports decide.
   - `functional_blocks`: the exact committed Functional Spec block names this part implements.
     Every block needs an owner; several requirements may implement one block.
-  - `obligations`: the committed intent/functional-spec obligation rows this part implements,
-    copied verbatim (`kind` and `original_obligation_id` identify them). Attach each committed
-    obligation to the requirement that implements it — several requirements may carry the same row
-    when your design implements one obligation in more than one place (three binding posts), and a
-    `quantity` count over the whole design may stay at the top level. The top-level `obligations`
-    list itself is written for you from the committed set: do not copy the rows into it.
+  - `obligation_ids`: the committed intent/functional-spec obligations this part implements, named
+    by their `original_obligation_id` values. Name each committed obligation on the requirement
+    that implements it — several requirements may name the same id when your design implements one
+    obligation in more than one place (three binding posts), and a `quantity` count over the whole
+    design may stay at the top level unowned. Do not emit the row itself: the rows, and the
+    top-level `obligations` list, are written for you from the committed set, and a paraphrased or
+    copied row is not accepted. An id no committed stage carries is refused.
   - `ties`: rare. The compiler already ties the family's ground, its unused groundable ports, its
     default-tied control ports, and a standard template's stacking pin map. State a tie only for a
     direct connection no signal names and no rule derives: a connector shell to `GND`, an enable

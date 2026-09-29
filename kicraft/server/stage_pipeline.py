@@ -163,18 +163,62 @@ def run_pipeline(
     )
     all_committed = len(results) == len(stages) and all(r.get("commit_ok") for r in results)
     build_rc = None
+    recovery = None
     if build and all_committed:
-        build_rc = run_design_cli(
-            KICRAFT
-            + ["build", ".kicraft/state.json", "generated", "--no-archive", "--quality", quality],
-            cwd=Path(workspace),
-        ).returncode
+        # Same shared build-to-design policy as the web worker and the batch
+        # driver: the deterministic build returns evidence; this session owner
+        # decides whether to revise the design and rebuild. Imported here
+        # because kicraft.server.session builds on this module.
+        from .session import run_build_recovery
+
+        def _build() -> int:
+            return run_design_cli(
+                KICRAFT
+                + ["build", ".kicraft/state.json", "generated", "--no-archive", "--quality", quality],
+                cwd=Path(workspace),
+            ).returncode
+
+        def _redrive(stage_list, instruction: str):
+            rows, _guard, _path = drive_chain(
+                list(stage_list),
+                brief,
+                workspace,
+                max_tokens=max_tokens,
+                max_retries=max_retries,
+                client=client,
+                progress=progress,
+                instruction=instruction,
+                core_defaults=core_defaults,
+            )
+            ok = bool(rows) and all(row.get("commit_ok") for row in rows)
+            return {"status": "ok" if ok else "failed", "results": rows}
+
+        recovery = run_build_recovery(
+            workspace,
+            brief,
+            _build,
+            progress=progress,
+            client=client,
+            core_defaults=core_defaults,
+            redrive=_redrive,
+        )
+        build_rc = recovery.get("rc")
     return {
         "stages": results,
         "all_committed": all_committed,
         "guard": guard,
         "state_path": str(state_path),
         "build_rc": build_rc,
+        "build_recovery": (
+            {
+                "status": recovery.get("status"),
+                "attempts": recovery.get("attempts"),
+                "max_attempts": recovery.get("max_attempts"),
+                "failure_kind": recovery.get("failure_kind"),
+            }
+            if recovery is not None
+            else None
+        ),
     }
 
 

@@ -889,6 +889,20 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "switch": "PH",
             "feedback": "VSENSE",
         },
+        support_network={
+            "catch_diode": {
+                "anode_pin": "GND",
+                "cathode_pin": "PH",
+                "minimum_forward_current_a": 3.0,
+                "minimum_reverse_voltage_v": 28.0,
+            },
+            "enable": {
+                "pin": "EN",
+                "float_enables": True,
+                "on_threshold_max_v": 1.35,
+                "absolute_max_voltage_v": 6.0,
+            },
+        },
     ),
     ReviewedPart(
         identity="tps5430",
@@ -2689,20 +2703,48 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
             "dc_resistance_ohm": 0.1,
         },
     ),
+    # CONNFLY's primary DS1034 series page confirms the straight 9-contact,
+    # 2.77 mm-pitch family.  The exact C77831-linked DS1034 drawing (page 1)
+    # identifies the two extra positions as mounting holes in its 9-position
+    # recommended PCB layout: B = 24.99 ±0.2 mm and 2 x Ø3.20 mm, with the
+    # layout tolerance ±0.05 mm.  C77831's supplier-provided model likewise
+    # labels the two non-electrical positions MH1/MH2 (pins 10/11).
+    #
+    # The selected stock `..._MountingHoles` footprint matches that layout:
+    # 2.77 x 2.84 mm signal-contact pitch, pad-0 mounting holes at 25.00 mm
+    # centres, and 3.2 mm drills.  The similarly named nine-pad-only footprint
+    # cannot receive the posts and is not this part's reviewed pair.  This
+    # establishes the PCB hole pattern, not physical assembly, mating-hardware,
+    # 3D-clearance, or fab finished-hole validation.
+    #
+    # The can_h/can_l/gnd map is the CiA 303-1 CAN-over-DE-9 interface convention,
+    # not a claim about an arbitrary serial D-Sub protocol.  It is stored with the
+    # reviewed physical record so the lowerer can prove the contact mapping rather
+    # than make an application-specific pin assignment from connector prose.
     ReviewedPart(
         identity="ds1034-09funsi44",
         family="de-9-connector",
-        package="CONNFLY DS1034-09FUNSi44 through-hole 9-position standard D-Sub socket",
+        package=(
+            "CONNFLY DS1034-09FUNSi44 through-hole female standard DE-9 socket: "
+            "9 signal contacts and 2 mechanical mounting posts"
+        ),
         bundle="kicad-standard",
         symbol="Connector:DE9_Socket",
-        footprint="Connector_Dsub:DSUB-9_Socket_Vertical_P2.77x2.84mm",
-        physical_features=frozenset({"db9-connector", "d-sub-connector"}),
+        footprint="Connector_Dsub:DSUB-9_Socket_Vertical_P2.77x2.84mm_MountingHoles",
+        physical_features=frozenset({"db9-connector", "d-sub-connector", "de-9-connector"}),
         contacts=tuple(str(number) for number in range(1, 10)),
         manufacturer_sources=(
+            "https://www.connfly.com/static/upload/file/DS1034.pdf",
+            "https://www.connfly.com/list_131/446.html",
+            "https://datasheet.lcsc.com/datasheet/pdf/"
+            "ae451d35fb59d99ccde45ddd856a4f83.pdf?productCode=C77831",
             "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8563423381518241792",
+            "https://www.lcsc.com/product-detail/"
+            "D-Sub-VGA-connector_CONNFLY-Elec-DS1034-09FUNSi44_C77831.html",
         ),
         lcsc="C77831",
         operating_limits={"temperature_min_c": -40.0, "temperature_max_c": 105.0},
+        port_pins={"can_h": "7", "can_l": "2", "gnd": "3"},
     ),
     ReviewedPart(
         identity="frc0603f1002ts",

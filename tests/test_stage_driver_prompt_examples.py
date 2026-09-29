@@ -70,8 +70,110 @@ def test_functional_spec_example_validates_against_the_model_contract():
     models.FunctionalSpec.model_validate(json.loads(_WORKED_EXAMPLES["functional_spec"]))
 
 
-@pytest.mark.parametrize("replacement", [None, "header"])
+_BNC_OBLIGATION = {
+    "kind": "physical",
+    "original_obligation_id": "input_bnc",
+    "component_class": "bnc-connector",
+}
+
+
+def _header_architecture() -> dict:
+    """A draft whose only requirement cannot realize the brief's BNC jack."""
+    return {
+        "sheets": [
+            {
+                "name": "INPUT",
+                "stem": "INPUT",
+                "role": "connector",
+                "function": "Bring the input on board.",
+            }
+        ],
+        "requirements": [
+            {
+                "id": "input",
+                "sheet": "INPUT",
+                "role": "connector",
+                "family": "pin-header",
+                "parameters": {"rows": 1, "gender": "female"},
+            }
+        ],
+        "signals": [],
+    }
+
+
+def _bnc_architecture() -> dict:
+    """The same draft with the requirement the brief's `input_bnc` row asks for."""
+    return {
+        "topologies": {"INPUT": "BNC input jack into the board"},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [
+            {
+                "name": "INPUT",
+                "stem": "INPUT",
+                "role": "connector",
+                "function": "Bring the BNC input on board.",
+            }
+        ],
+        "requirements": [
+            {
+                "id": "input",
+                "sheet": "INPUT",
+                "role": "connector",
+                "family": "bnc-connector",
+                "obligation_ids": ["input_bnc"],
+                "ties": {"gnd": "GND"},
+            }
+        ],
+        "signals": [{"name": "RF_IN", "from": "input.signal", "to": "edge:RF_INPUT"}],
+    }
+
+
+@pytest.mark.parametrize("replacement", [None, "input_header"])
 def test_original_physical_obligation_cannot_be_dropped_or_substituted(replacement):
+    """The committed row is the compiler's; the draft only names the requirement that owns it.
+
+    The rows a requirement carries are gone from the provider slot (`obligation_ids` names the
+    committed `original_obligation_id` instead), so a draft can no longer drop or paraphrase the
+    row itself: a requirement that names nothing leaves the owner-requiring fact unowned, and one
+    that names an id no committed stage carries has substituted a different fact of its own.
+    Both are refused with the committed row in evidence; naming the committed id commits the row
+    the compiler writes. The substitution here is deliberately the *id*, not a part: the value
+    compared against is the committed row's, never the draft's copy of it.
+    """
+    from kicraft.server.stage_contracts import StageSchemaError
+
+    intent = models.IntentSlot(goal="A BNC input", obligations=[dict(_BNC_OBLIGATION)])
+    prompt_state = {"intent": intent.model_dump()}
+    header = _header_architecture()
+    if replacement is None:
+        expected = "source_obligation_not_retained"
+    else:
+        header["requirements"][0]["obligation_ids"] = [replacement]
+        expected = "unknown_source_obligation"
+    with pytest.raises(StageSchemaError) as rejected:
+        _normalize_stage_response("architecture", header, prompt_state)
+    assert rejected.value.diagnostic["code"] == expected
+    if replacement is None:
+        assert rejected.value.diagnostic["evidence"] == [dict(_BNC_OBLIGATION)]
+
+    # The accepted shape: a requirement that can realize the row names the committed id, and the
+    # committed slot carries the committed row itself.
+    payload, _expanded = _normalize_stage_response(
+        "architecture", _bnc_architecture(), prompt_state
+    )
+    committed = next(row for row in payload["requirements"] if row["id"] == "input")
+    assert committed["obligations"] == [dict(_BNC_OBLIGATION)]
+    models.Architecture.model_validate(payload)
+
+
+def test_spec_block_naming_an_unknown_obligation_is_refused_without_mutating_state():
+    """`_apply_slot` names the repair for a substituted id and leaves the state untouched.
+
+    The spec stage's own refusals are about the id a block names; the row itself is written from
+    the committed intent, so a manual slot edit that names an id no committed stage carries is
+    refused before the state is touched.
+    """
     from kicraft.design.cli_app import _apply_slot
     from kicraft.server.stage_contracts import StageSchemaError
 
@@ -84,17 +186,14 @@ def test_original_physical_obligation_cannot_be_dropped_or_substituted(replaceme
     state = models.ConversationState(intent=intent)
     before = state.model_dump()
     spec = json.loads(_WORKED_EXAMPLES["functional_spec"])
-    spec["obligations"] = (
-        [] if replacement is None else [{**original, "component_class": replacement}]
-    )
+    block = spec["blocks"][0]
+    block["obligation_ids"] = ["input_header"]
     with pytest.raises(StageSchemaError) as rejected:
-        _normalize_stage_response("functional_spec", spec, {"intent": intent.model_dump()})
-    assert rejected.value.diagnostic["code"] == "source_obligation_not_retained"
-    assert rejected.value.diagnostic["evidence"] == [original]
-    with pytest.raises(StageSchemaError):
         _apply_slot(state, "functional_spec", spec, project_stem=None)
+    assert rejected.value.diagnostic["code"] == "unknown_source_obligation"
     assert state.model_dump() == before
-    spec["obligations"] = [original]
+    # The committed id commits the committed row onto the block that named it.
+    block["obligation_ids"] = ["input_bnc"]
     _apply_slot(state, "functional_spec", spec, project_stem=None)
     assert state.functional_spec.obligations[0].component_class == "bnc-connector"
 

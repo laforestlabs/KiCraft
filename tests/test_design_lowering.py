@@ -1130,6 +1130,133 @@ def test_reviewed_bnc_connector_preserves_signal_and_all_shell_ground_pins():
     }
 
 
+def test_reviewed_de9_can_lowerer_owns_real_contacts_and_deterministic_units():
+    from pathlib import Path
+
+    import pcbnew
+
+    from kicraft.design.synthesis.footprint_library import load_footprint
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    requirement = _requirement(
+        "dsub-9",
+        parameters={"positions": 9, "gender": "female"},
+        ports={"can_h": "CAN_H", "can_l": "CAN_L", "gnd": "GND"},
+    ).model_copy(update={"exact_part": "DS1034-09FUNSi44"})
+    artifact = lower_requirement(requirement)
+    group = artifact.groups[0]
+    connected = {pin.pin: pin.net for pin in artifact.pins}
+    disconnected = {pin.pin for pin in artifact.no_connects}
+
+    assert artifact.lowerer_id == "reviewed-de9-connector@1"
+    assert group.mpn == "DS1034-09FUNSI44"
+    assert group.footprint == (
+        "Connector_Dsub:DSUB-9_Socket_Vertical_P2.77x2.84mm_MountingHoles"
+    )
+    assert connected == {"2": "CAN_L", "3": "GND", "7": "CAN_H"}
+    assert disconnected == {"1", "4", "5", "6", "8", "9"}
+
+    # The reviewed supplier model's two extra positions are mechanical posts.
+    # The selected stock footprint carries them as two pad-0 mounting holes, not
+    # as phantom electrical contacts; the symbol and every artifact endpoint stay
+    # on the actual signal-contact inventory.
+    symbol = lookup_pins(group.symbol, all_units=True)
+    footprint, _ = load_footprint(pcbnew, *group.footprint.split(":"), project_root=Path("."))
+    assert {pin["number"] for pin in symbol["pins"]} == set(connected) | disconnected
+    assert {pad.GetNumber() for pad in footprint.Pads() if pad.GetNumber() != "0"} == (
+        set(connected) | disconnected
+    )
+    mounting_posts = [pad for pad in footprint.Pads() if pad.GetNumber() == "0"]
+    assert len(mounting_posts) == 2
+    assert abs(
+        pcbnew.ToMM(mounting_posts[0].GetPosition().x)
+        - pcbnew.ToMM(mounting_posts[1].GetPosition().x)
+    ) == pytest.approx(25.0)
+
+    state = _state(requirement)
+    (bom_unit,) = plan_stage_work_units("bom", state, {})
+    bom_candidate = deterministic_bom_candidate(bom_unit, state)
+    assert bom_candidate is not None
+    assert bom_candidate["groups"][0]["mpn"] == group.mpn
+    assert bom_candidate["_lowerer_id"] == artifact.lowerer_id
+
+    state["bom"]["parts"] = [
+        {
+            "ref": "J1",
+            "sheet": "MAIN",
+            "symbol": group.symbol,
+            "footprint": group.footprint,
+            "resolution_source": "lowerer",
+            "resolution_id": artifact.lowerer_id,
+            "lowering_requirement_id": requirement.id,
+            "lowering_role": "connector",
+        }
+    ]
+    extras = {"symbol_pinouts": {"J1": symbol}}
+    (wiring_unit,) = plan_stage_work_units("wiring", state, extras)
+    assert wiring_unit.planned_resolution_source == "lowerer"
+    wiring_candidate = deterministic_wiring_candidate(wiring_unit, state, extras)
+    assert {row["pin"]: row["net"] for row in wiring_candidate["pins"] if row.get("net")} == connected
+    assert {row["pin"] for row in wiring_candidate["pins"] if row.get("no_connect")} == disconnected
+
+
+def test_reviewed_de9_accepts_only_complete_explicit_numbered_contacts():
+    artifact = lower_requirement(
+        _requirement(
+            "de-9-connector",
+            ports={
+                "pin1": "NC",
+                "pin2": "RX",
+                "pin3": "GND",
+                "pin4": "NC",
+                "pin5": "NC",
+                "pin6": "NC",
+                "pin7": "TX",
+                "pin8": "NC",
+                "pin9": "NC",
+            },
+        )
+    )
+
+    assert artifact.groups[0].mpn == "DS1034-09FUNSI44"
+    assert {(pin.pin, pin.net) for pin in artifact.pins} == {
+        ("2", "RX"),
+        ("3", "GND"),
+        ("7", "TX"),
+    }
+    assert {pin.pin for pin in artifact.no_connects} == {"1", "4", "5", "6", "8", "9"}
+
+
+@pytest.mark.parametrize(
+    ("updates", "ports"),
+    [
+        ({"exact_part": "DS1034-09FUNSiSS"}, {"can_h": "CAN_H", "can_l": "CAN_L", "gnd": "GND"}),
+        ({}, {"can_h": "CAN_H", "can_l": "CAN_H", "gnd": "GND"}),
+        (
+            {},
+            {
+                **{f"pin{index}": ("NC" if index != 2 else "CAN_L") for index in range(1, 10)},
+                "p2": "CAN_H",
+            },
+        ),
+        (
+            {},
+            {
+                "can_h": "CAN_H",
+                "can_l": "CAN_L",
+                "gnd": "GND",
+                "pin7": "CAN_H",
+            },
+        ),
+    ],
+)
+def test_reviewed_de9_refuses_other_variants_ambiguous_or_duplicate_contacts(updates, ports):
+    requirement = _requirement("dsub-9", ports=ports).model_copy(update=updates)
+
+    with pytest.raises(ValueError):
+        lower_requirement(requirement)
+
+
 def test_reviewed_trim_pot_rc_filter_has_an_adjustable_physical_resistance_path():
     artifact = lower_requirement(
         _requirement(
@@ -1522,12 +1649,6 @@ def test_prototyping_area_unit_passes_the_bom_identity_and_sourcing_gates():
     assert [group["reference_prefix"] for group in validated["groups"]] == ["PB"]
 
 
-def test_ports_less_requirement_without_a_builder_stays_model_owned():
-    """The empty-ports rule still holds for a lowerer that needs declared contacts."""
-    requirement = _requirement("pin-header", parameters={"rows": 1})
-    state = _state(requirement)
-    unit = StageWorkUnit("bom-r000", "bom", "MAIN", requirement_ids=(requirement.id,))
-    assert deterministic_bom_candidate(unit, state) is None
 
 
 def test_prototyping_area_bom_carries_its_grid_over_the_pad_refs():

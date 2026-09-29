@@ -115,6 +115,7 @@ PRESENTATION_STATUSES = (
     "finalizing",
     "complete",
     "complete_with_warnings",
+    "stale",
     "failed",
     "interrupted",
     "unavailable",

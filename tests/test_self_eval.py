@@ -1100,6 +1100,91 @@ def test_run_build_timeout_restarts_at_slot_acquired_marker(tmp_path, monkeypatc
     assert se.run_build(tmp_path, events.append, timeout_s=0.4) < 0
 
 
+def test_compile_report_summarizes_recovery_separately(tmp_path):
+    """Recovery effectiveness is reported on its own line: recovered / blocked /
+    exhausted, attempts, extra spend, and terminal causes — never folded into the
+    coverage or delivery counts."""
+    records = [
+        _fake_rec(1, {"slug": "a", "archetype": "x", "brief": "b1"}, tmp_path,
+                  build_recovery={"status": "recovered", "attempts": 1, "max_attempts": 3,
+                                  "failure_kind": None, "cost_usd": 0.02}),
+        _fake_rec(2, {"slug": "b", "archetype": "x", "brief": "b2"}, tmp_path,
+                  build_recovery={"status": "exhausted", "attempts": 3, "max_attempts": 3,
+                                  "failure_kind": "capability_gap", "cost_usd": 0.05}),
+        _fake_rec(3, {"slug": "c", "archetype": "x", "brief": "b3"}, tmp_path,
+                  build_recovery={"status": "ok", "attempts": 0, "max_attempts": 3,
+                                  "failure_kind": None, "cost_usd": 0.0}),
+    ]
+    summary = se.compile_report(records, tmp_path, {"repeats": 1})
+    recovery = summary["recovery"]
+    assert recovery["status_counts"] == {"exhausted": 1, "ok": 1, "recovered": 1}
+    assert recovery["recovered"] == 1
+    assert recovery["attempts"] == 4
+    assert recovery["extra_cost_usd"] == 0.07
+    assert recovery["failure_kinds"] == {"capability_gap": 1}
+
+
+def test_evaluate_one_uses_shared_build_to_design_recovery(tmp_path, monkeypatch):
+    """The batch driver must recover a build failure through the SAME shared
+    policy the web worker uses: durable evidence, the owning stage re-driven
+    once, then a rebuild -- never a second, eval-only repair branch."""
+    attempts = {"builds": 0}
+    redrives: list[list[str]] = []
+
+    def fake_run_session(ws, brief, stages, **kw):
+        redrives.append(list(stages))
+        Path(ws, ".kicraft", "state.json").write_text(json.dumps(_FULL_STATE))
+        # the wiring repair clears the failing deterministic evidence
+        (Path(ws) / ".kicraft" / "synthesis_check.json").write_text(
+            json.dumps({"status": "ok", "failed_checks": [], "checks": []}), encoding="utf-8"
+        )
+        return {"status": "ok", "results": [{"cost_usd": 0.0}], "last_stage": "wiring"}
+
+    def fake_run_build(rundir, progress, timeout_s=2400):
+        attempts["builds"] += 1
+        if attempts["builds"] == 1:
+            (Path(rundir) / ".kicraft").mkdir(parents=True, exist_ok=True)
+            (Path(rundir) / ".kicraft" / "synthesis_check.json").write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "failed_checks": ["9.12 ERC"],
+                        "checks": [
+                            {
+                                "name": "9.12 ERC",
+                                "ok": False,
+                                "message": "ERC",
+                                "offenders": ["Pin R1.1 not connected"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return 5
+        return 0
+
+    monkeypatch.setattr(se, "run_session", fake_run_session)
+    monkeypatch.setattr(se, "run_build", fake_run_build)
+    monkeypatch.setattr(se, "run_post_wiring_lifecycle", lambda *a, **k: {})
+    monkeypatch.setattr(se, "evaluate_project", lambda rd, client, **kw: _fake_report())
+    monkeypatch.setattr(se, "generate_artifact_evidence", lambda *a, **k: {})
+
+    rec = se.evaluate_one(
+        object(),
+        1,
+        {"slug": "b1", "archetype": "x", "brief": "a USB LED"},
+        tmp_path,
+        judge_model=None,
+        skip_judge=True,
+    )
+    assert attempts["builds"] == 2  # failed build + one rebuild after the repair
+    assert redrives[-1] == ["wiring"]  # the wiring-owned defect re-drove wiring
+    assert rec["build_rc"] == 0
+    assert rec["build_recovery"]["status"] == "recovered"
+    assert rec["build_recovery"]["attempts"] == 1
+
+
 def test_main_parallel_overlaps_briefs_and_orders_records(tmp_path, monkeypatch):
     monkeypatch.setattr(
         se,

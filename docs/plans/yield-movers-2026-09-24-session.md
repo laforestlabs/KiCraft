@@ -196,12 +196,15 @@ carry the 3.3 V class. One module-level path added for the isolated converter
 is item 2 of the plan: a complete module proves the conversion on its own and supplies the
 isolated reference-domain model §9.39 reads.
 
-**Not done, with the reason.** A catch-diode hop (`PH → GND`) was NOT added. The recipes'
-bucks are synchronous (no catch diode is emitted at all: `_buck` has no diode role), and the
-graph is undirected, so a `PH → GND` edge would let *any* input reach the reference net and
-then any ground-referenced net — manufacturing reachability the gate deliberately does not
-accept ("capacitors, control pins, and unreviewed placeholders are not power paths"). The
-series hop the chain needs is already the generic inductor edge.
+**Correction (2026-09-28).** No catch-diode hop (`PH → GND`) was added to the
+undirected transfer graph: that would manufacture input-to-ground reachability,
+not prove a converter's required support network. The original rationale here
+incorrectly called every recipe buck synchronous. TPS54331 is **non-synchronous**
+(TI SLVS839H) and requires an external catch diode; `_buck`'s missing diode role
+was a construction defect, not evidence that none was needed. The consolidation
+prerequisite repair adds the reviewed SS34 with A→GND/K→PH and checks its actual
+orientation and ratings independently in §9.37. It does not add a ground-transfer
+edge. The series transfer hop remains the generic inductor edge.
 
 **Coverage report (item 3).** `kicraft/cli/transfer_coverage_report.py`, entry point
 `transfer-coverage-report` (`pyproject.toml`), with `tests/test_transfer_coverage_report.py`.

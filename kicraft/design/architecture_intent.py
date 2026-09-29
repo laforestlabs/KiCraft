@@ -27,7 +27,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .lowering import (
     _stated_contact_count,
@@ -309,7 +309,20 @@ class IntentRequirement(BaseModel):
     ties: dict[str, str] = Field(default_factory=dict)
     # Only for a part with no curated recipe: the interface the model claims. Recorded as a claim.
     declared_ports: list[IntentDeclaredPort] = Field(default_factory=list)
-    obligations: list[RequirementObligation] = Field(default_factory=list)
+    # The original typed obligations this requirement implements, named by
+    # `original_obligation_id`. The row content is written once, by the stage that owns it, and
+    # restored from there: the model states *which* requirement owns an obligation, never a copy
+    # of the user's own fact.
+    obligation_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("obligation_ids")
+    @classmethod
+    def _obligation_ids_unique(cls, ids: list[str]) -> list[str]:
+        if any(not str(identifier).strip() for identifier in ids):
+            raise ValueError("IntentRequirement.obligation_ids entries must be nonempty")
+        if len(ids) != len(set(ids)):
+            raise ValueError("IntentRequirement.obligation_ids must be unique")
+        return ids
 
 
 class IntentSignal(BaseModel):
@@ -397,75 +410,76 @@ class ArchitectureIntent(BaseModel):
     obligations: "list[RequirementObligation]" = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _obligations_are_owned_once(self):
-        owned_keys = [
-            (row.kind, row.original_obligation_id)
+    def _obligation_owners_resolve(self):
+        """Every named obligation id must exist, and every owner-requiring fact must be claimed."""
+        by_id = {row.original_obligation_id: row for row in self.obligations}
+        if len(by_id) != len(self.obligations):
+            raise ValueError(
+                "ArchitectureIntent obligations must have a unique original_obligation_id"
+            )
+        unknown = sorted(
+            {
+                identifier
+                for requirement in self.requirements
+                for identifier in requirement.obligation_ids
+                if identifier not in by_id
+            }
+        )
+        if unknown:
+            raise ValueError(
+                "ArchitectureIntent requirement obligation_ids must name a committed "
+                f"obligation; unknown_obligation_ids={unknown}"
+            )
+        claimed = {
+            identifier
             for requirement in self.requirements
-            for row in requirement.obligations
-        ]
-        listed = {(row.kind, row.original_obligation_id) for row in self.obligations}
+            for identifier in requirement.obligation_ids
+        }
         # Board-wide counts, fabrication/negative facts, and evidence-backed board-outline
         # measurements are top-level facts. A quantitative component or electrical limit must
         # remain on the requirement that can prove it.
         unowned = sorted(
-            key
-            for key in listed - set(owned_keys)
-            if obligation_requires_requirement_owner(
-                next(
-                    row for row in self.obligations if (row.kind, row.original_obligation_id) == key
-                )
-            )
+            row.original_obligation_id
+            for row in self.obligations
+            if obligation_requires_requirement_owner(row)
+            and row.original_obligation_id not in claimed
         )
         if unowned:
             raise ValueError(
-                "ArchitectureIntent obligations must be owned exactly once: each top-level "
-                "`obligations` row must also appear on the requirement that implements it, "
-                "because the top-level list is the union of the requirements' own rows. "
-                f"listed_at_top_level_only={unowned} (attach each to its implementing requirement)"
+                "ArchitectureIntent obligations must be owned by a requirement: name each "
+                "owner-requiring obligation in the implementing requirement's `obligation_ids`. "
+                f"listed_at_top_level_only={unowned}"
             )
-        # Several requirements may carry the *same* row when the design implements one obligation
-        # in more than one place (three binding posts, three identical axis drivers): the rows are
-        # identical, so ownership is unambiguous and each requirement's copy is normalised from the
-        # design's own row below.
-        rows = {
-            (row.kind, row.original_obligation_id): row
-            for requirement in self.requirements
-            for row in requirement.obligations
-        }
-        missing = [rows[key] for key in dict.fromkeys(owned_keys) if key not in listed]
-        if missing:
-            self.obligations = [*self.obligations, *missing]
-        # A typed obligation is written once, by the stage that owns it. Restore the requirement's
-        # copy from the design's own row, so a paraphrased or trimmed copy commits the obligation
-        # the user actually stated rather than a markdown summary of it.
-        by_key = {(row.kind, row.original_obligation_id): row for row in self.obligations}
-        for requirement in self.requirements:
-            requirement.obligations = [
-                by_key.get((row.kind, row.original_obligation_id), row)
-                for row in requirement.obligations
-            ]
         # Distinct sheets already demand distinct physical instances. When those
         # instances prove a shared board-wide count, do not charge that count again
         # in each BOM unit; optional replication hints are not quantity evidence.
         from kicraft.design.part_identity import quantity_subject_binds
 
+        owned_rows = {
+            requirement.id: [by_id[identifier] for identifier in requirement.obligation_ids]
+            for requirement in self.requirements
+        }
         for quantity in self.obligations:
             if quantity.kind != "quantity":
                 continue
             owners = [
-                requirement for requirement in self.requirements
-                if quantity in requirement.obligations and any(
+                requirement
+                for requirement in self.requirements
+                if quantity in owned_rows[requirement.id]
+                and any(
                     row.kind == "physical"
                     and quantity_subject_binds(quantity.subject, row.component_class)
-                    for row in requirement.obligations
+                    for row in owned_rows[requirement.id]
                 )
             ]
-            sheet_count = len({row.sheet for row in owners})
+            sheet_count = len({requirement.sheet for requirement in owners})
             if sheet_count < quantity.minimum:
                 continue
             for requirement in owners:
-                requirement.obligations = [
-                    row for row in requirement.obligations if row != quantity
+                requirement.obligation_ids = [
+                    identifier
+                    for identifier in requirement.obligation_ids
+                    if identifier != quantity.original_obligation_id
                 ]
             self.assumptions.append(
                 f"{quantity.original_obligation_id}: its owners already require a physical "
@@ -779,6 +793,26 @@ def _adopt_carrier_families(payload: dict) -> dict:
     requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
     if not requirements:
         return payload
+    # The typed rows live once, on the payload's own top-level `obligations`; a requirement names
+    # the ones it implements by `original_obligation_id`. A pre-cutover payload still carrying the
+    # rows on the requirement itself is read the same way.
+    source_rows = {
+        str(row.get("original_obligation_id")): row
+        for row in payload.get("obligations") or []
+        if isinstance(row, dict) and row.get("original_obligation_id")
+    }
+
+    def _physical_obligations(requirement: dict) -> list[dict]:
+        named = [
+            row
+            for identifier in requirement.get("obligation_ids") or []
+            if isinstance((row := source_rows.get(str(identifier))), dict)
+        ]
+        copied = [
+            row for row in requirement.get("obligations") or [] if isinstance(row, dict)
+        ]
+        return [*named, *copied]
+
     changed = False
     lowerers = _lowerer_families()
     for requirement in requirements:
@@ -810,8 +844,8 @@ def _adopt_carrier_families(payload: dict) -> dict:
         ):
             target = record.family
         else:
-            for obligation in requirement.get("obligations") or []:
-                if not isinstance(obligation, dict) or obligation.get("kind") != "physical":
+            for obligation in _physical_obligations(requirement):
+                if obligation.get("kind") != "physical":
                     continue
                 component_class = str(obligation.get("component_class") or "")
                 carrier_family = _carrier_family_for_class(component_class) if component_class else None
@@ -1299,6 +1333,17 @@ def derive_architecture(
                 requirement_id=row.id,
             )
         models_by_id[row.id] = row
+    # The immutable row content lives once, on the intent's own top-level obligations; a
+    # requirement names the ones it implements. Every consumer below reads the resolved rows,
+    # never a model-authored copy.
+    obligations_by_id = {row.original_obligation_id: row for row in intent.obligations}
+
+    def _owned_obligations(requirement: IntentRequirement) -> list[RequirementObligation]:
+        return [
+            obligations_by_id[identifier]
+            for identifier in requirement.obligation_ids
+            if identifier in obligations_by_id
+        ]
     for row in intent.requirements:
         if row.sheet not in sheet_names:
             _fail(
@@ -1328,7 +1373,9 @@ def derive_architecture(
             symbol_pins = (pinout or {}).get("pins", [])
             if symbol_pins:
                 numbers = {pin["number"] for pin in symbol_pins}
-                stated_contacts = _stated_contact_count(row.obligations) if row.role == "connector" else 0
+                stated_contacts = (
+                    _stated_contact_count(_owned_obligations(row)) if row.role == "connector" else 0
+                )
                 if stated_contacts > len(numbers):
                     _fail(
                         "reviewed_part_insufficient_contacts",
@@ -1386,7 +1433,7 @@ def derive_architecture(
                 if catalog.source == "declared"
                 else None
             ),
-            obligations=list(row.obligations),
+            obligations=_owned_obligations(row),
         )
     standard_port_bindings: dict[str, dict[str, str]] = {}
     # Requirements whose stacking pin/net map was refused: their authored `ties` are the same
@@ -1974,7 +2021,7 @@ def derive_architecture(
     # (`fabrication` owns no requirement).
     stated_obligations = [
         *intent.obligations,
-        *(row for requirement in intent.requirements for row in requirement.obligations),
+        *(row for requirement in intent.requirements for row in _owned_obligations(requirement)),
     ]
     modelled_prototyping_area = any(
         row.id == PROTOTYPING_AREA_OBLIGATION_ID or row.family == PROTOTYPING_AREA_FAMILY

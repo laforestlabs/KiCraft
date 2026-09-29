@@ -48,6 +48,22 @@ def _footprint_id(fp: object) -> str:
     return f"{nickname}:{item}" if nickname and item else item
 
 
+def _reviewed_footprint_agrees(reviewed: str, recorded: str) -> bool:
+    """Whether a recorded board footprint is the reviewed library pair.
+
+    The library item name must agree exactly; the nickname must agree only when
+    the board carries one, because a saved board can drop it.  A prefix or family
+    match is never enough: the reviewed pair is the land pattern the record's
+    symbol and contacts were reviewed against.
+    """
+    reviewed_library, _, reviewed_item = str(reviewed or "").partition(":")
+    recorded_library, separator, recorded_item = str(recorded or "").partition(":")
+    if not separator:  # the board carried no library nickname
+        recorded_library, recorded_item = "", recorded_library
+    if not reviewed_item or not recorded_item:
+        return False
+    return recorded_item == reviewed_item and (not recorded_library or recorded_library == reviewed_library)
+
 def _board_graph(
     board: object,
 ) -> tuple[
@@ -111,7 +127,7 @@ def _reconcile_connection_terminals(
     for ref, pin in sorted(required | deliberate_nc):
         part = parts.get(ref)
         expected_footprint = str(part.footprint) if part is not None else ""
-        if not expected_footprint or footprints.get(ref) != expected_footprint:
+        if not _reviewed_footprint_agrees(expected_footprint, footprints.get(ref, "")):
             reasons.append(f"{ref}: delivered footprint identity does not match BOM")
             continue
         endpoint = (ref, pin)
@@ -149,7 +165,9 @@ def _parts(state: dict[str, Any], footprints: dict[str, str]) -> list[dict[str, 
         p for p in rows or []
         if isinstance(p, dict)
         and str(p.get("ref") or "") in footprints
-        and str(p.get("footprint") or "") == footprints[str(p.get("ref"))]
+        and _reviewed_footprint_agrees(
+            str(p.get("footprint") or ""), footprints[str(p.get("ref"))]
+        )
     ]
 
 
@@ -168,6 +186,10 @@ def _symbol_kind(part: dict[str, Any]) -> str:
         return "crystal"
     if symbol == "Device:LED":
         return "led"
+    if symbol in {"Jumper:SolderJumper_2_Open", "Jumper:SolderJumper_2_Closed"} and str(
+        part.get("footprint") or ""
+    ).startswith("Jumper:SolderJumper-2_"):
+        return "jumper"
     return ""
 
 
@@ -815,6 +837,41 @@ def _functional_facts(parts, names, pad_nets, state) -> dict[str, Any]:
             paths["uln2003_coil_drive"] = True
             if com and _is_rail(com[1]):
                 paths["relay_flyback"] = True
+    # A removable 120-ohm CAN termination is a series resistor/switch branch
+    # between the actual CANH/CANL pads, not a claimed recipe role or net label.
+    terminals = list(_two_terminal(parts, pad_nets))
+    for transceiver in _device(parts, "sn65hvd230", "can transceiver"):
+        high = _one_pin(str(transceiver["ref"]), names, pad_nets, r"CAN.?H|^H$")
+        low = _one_pin(str(transceiver["ref"]), names, pad_nets, r"CAN.?L|^L$")
+        if not high or not low or high[1] == low[1]:
+            continue
+        bus = {high[1], low[1]}
+        terminators = [
+            (part, left[1], right[1])
+            for part, left, right in terminals
+            if _is_kind(part, "resistor")
+            and (resistance := _resistance_ohms(str(part.get("value") or ""))) is not None
+            and 114.0 <= resistance <= 126.0
+        ]
+        if any({left, right} == bus for _, left, right in terminators):
+            continue  # An unswitched parallel terminator cannot be disconnected.
+        for resistor, left, right in terminators:
+            branch = {left, right}
+            if len(branch & bus) != 1 or len(branch) != 2:
+                continue
+            middle = next(iter(branch - bus))
+            other_bus = next(iter(bus - branch))
+            if any(
+                switch["ref"] != resistor["ref"]
+                and {a[1], b[1]} == {middle, other_bus}
+                and (
+                    _is_kind(switch, "jumper")
+                    or bool({"switch", "jumper"} & _physical_features(switch))
+                )
+                for switch, a, b in terminals
+            ):
+                paths["switchable_can_termination"] = True
+                break
     # MAX485 DE and /RE must meet on a physical jumper/switch net, not simply
     # share a textual control-net label in state.
     for max485 in _device(parts, "max485"):

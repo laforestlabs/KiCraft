@@ -1094,7 +1094,9 @@ def test_typed_original_obligation_must_be_owned_and_persists_on_requirement():
         "component_class": "status-led",
     }
     intent["obligations"] = [obligation]
-    next(row for row in intent["requirements"] if row["id"] == "led")["obligations"] = [obligation]
+    next(row for row in intent["requirements"] if row["id"] == "led")["obligation_ids"] = [
+        "status_led"
+    ]
 
     architecture = derive_architecture(intent)
     requirement = _requirement(architecture, "led")
@@ -1342,8 +1344,8 @@ def test_obligation_ownership_refusal_names_the_fix():
     """An obligation listed only at the top level must be refused with an actionable message.
 
     The draft has to be repairable from the error alone: name the obligation and the
-    invariant (the top-level `obligations` list is the union of the requirements' own
-    rows), not just "ownership mismatch", which the model cannot act on.
+    invariant (the implementing requirement names the committed row's id in
+    `obligation_ids`), not just "ownership mismatch", which the model cannot act on.
     """
     from pydantic import ValidationError
 
@@ -1360,7 +1362,7 @@ def test_obligation_ownership_refusal_names_the_fix():
     message = str(excinfo.value)
     assert "single-sensor-input" in message
     assert "listed_at_top_level_only" in message
-    assert "union of the requirements" in message
+    assert "obligation_ids" in message
 
 
 def test_two_rails_from_one_source_port_merge_into_one_node():
@@ -1710,8 +1712,8 @@ def test_architecture_top_level_obligations_are_written_from_the_committed_set()
 
     The canary (2026-09-17, `r2r-dac`, `round-led-ring`, `rounded-c3-devboard`,
     `snowman-ornament`) refused six drafts per run for an obligation list the compiler can
-    write. The draft's job is to attach each committed row, once and verbatim, to the
-    requirement that implements it.
+    write. The draft's job is to name the committed id on the requirement that implements
+    it; the row itself is never the draft's copy to get right.
     """
     obligation = {
         "kind": "physical",
@@ -1723,8 +1725,8 @@ def test_architecture_top_level_obligations_are_written_from_the_committed_set()
         "functional_spec": {"obligations": [obligation]},
     }
     intent = _hub75_intent()
-    next(row for row in intent["requirements"] if row["id"] == "led")["obligations"] = [
-        {**obligation, "component_class": "led"}
+    next(row for row in intent["requirements"] if row["id"] == "led")["obligation_ids"] = [
+        "status-led"
     ]
 
     payload, _expanded = _normalize_stage_response("architecture", intent, prompt_state)
@@ -1837,11 +1839,12 @@ def test_distributed_physical_instances_prove_only_their_shared_count(
         "requirements": [
             {"id": f"relay{i}", "sheet": "RELAY 1" if same_sheet else f"RELAY {i}", "role": "driver",
              "family": "srd-05vdc-sl-c", "exact_part": "SRD-05VDC-SL-C",
-             "obligations": [physical, quantity]}
+             "obligation_ids": ["relay", "count"]}
             for i in range(1, instances + 1)
         ],
     })
     assert next(row.minimum for row in intent.obligations if row.kind == "quantity") == 4
+    rows_by_id = {row.original_obligation_id: row for row in intent.obligations}
     for requirement in intent.requirements:
         group = BomComponentGroup(
             id="relay", sheet=requirement.sheet, reference_prefix="K", quantity=1,
@@ -1849,16 +1852,29 @@ def test_distributed_physical_instances_prove_only_their_shared_count(
             symbol="srd-05vdc-sl-c:SRD-05VDC-SL-C",
             footprint="srd-05vdc-sl-c:RELAY-TH_SRD-XXVDC-XL-C",
         )
+        # The physical check reads resolved rows, exactly as the compiled requirement carries
+        # them; the intent names ids, so resolve them here the way `derive_architecture` does.
+        resolved = {
+            **requirement.model_dump(),
+            "obligations": [
+                rows_by_id[name].model_dump(mode="json", exclude_none=True)
+                for name in requirement.obligation_ids
+            ],
+        }
         if instances == 4 and subject == "relay" and not same_sheet:
+            # Distinct sheets already demand distinct instances, so the shared count is retained
+            # once at board level and no requirement charges it again.
+            assert "count" not in requirement.obligation_ids
             assert not _requirement_obligation_defects(
-                [requirement.model_dump()], [group]
+                [resolved], [group]
             )["physical-obligation-unfulfilled"]
             assert _requirement_obligation_defects(
-                [requirement.model_dump()], []
+                [resolved], []
             )["physical-obligation-unfulfilled"]
         else:
-            # Too few instances or an unrelated class cannot discharge this count.
-            assert any(row.kind == "quantity" for row in requirement.obligations)
+            # Too few instances or an unrelated class cannot discharge this count: the
+            # requirement still owns the shared quantity row.
+            assert "count" in requirement.obligation_ids
 
 def test_one_obligation_may_be_implemented_by_several_requirements():
     """Three binding posts are three requirements, each claiming the one binding-post obligation.
@@ -1877,6 +1893,7 @@ def test_one_obligation_may_be_implemented_by_several_requirements():
         "functional_spec": {"obligations": [obligation]},
     }
     intent = _hub75_intent()
+    intent["obligations"] = [obligation]
     intent["sheets"].append(
         {
             "name": "OUT",
@@ -1892,7 +1909,7 @@ def test_one_obligation_may_be_implemented_by_several_requirements():
                 "sheet": "OUT",
                 "role": "connector",
                 "family": "binding-post",
-                "obligations": [obligation],
+                "obligation_ids": ["binding_post_terminal"],
                 "declared_ports": [
                     {
                         "key": "signal",
@@ -2060,9 +2077,9 @@ def test_board_fact_obligations_survive_intent_to_architecture_verbatim():
     """Retention is keyed by `(kind, original_obligation_id)`, so the new kinds flow through.
 
     Measured with the real helpers rather than assumed: the intent row is canonicalised once,
-    `restore_source_obligations` writes the top-level list from the committed set, the
-    functional_spec copy is compared row-for-row and still refuses a dropped row, and the
-    architecture stage commits both rows with no owner.
+    `restore_source_obligations` writes the top-level list from the committed set, a spec draft
+    that carries no row (or a shortened copy) commits the committed set anyway, and two committed
+    stages that disagree about one row are still refused.
     """
     from kicraft.server.stage_contracts import (
         StageSchemaError,
@@ -2088,13 +2105,30 @@ def test_board_fact_obligations_survive_intent_to_architecture_verbatim():
     )
     assert committed["obligations"] == rows
 
-    with pytest.raises(StageSchemaError) as dropped:
-        _normalize_stage_response(
-            "functional_spec",
-            {**spec, "obligations": rows[:1]},
-            {"intent": prompt_state["intent"]},
-        )
-    assert dropped.value.diagnostic["evidence"] == [_NEGATIVE_CANONICAL]
+    # The rows are the compiler's to write: a draft that copies only its own shortened list
+    # (or none at all) commits the committed set rather than a paraphrase of it.
+    repaired, _expanded = _normalize_stage_response(
+        "functional_spec",
+        {**spec, "obligations": rows[:1]},
+        {"intent": prompt_state["intent"]},
+    )
+    assert repaired["obligations"] == rows
+
+    # The refusal that remains is a real disagreement between committed stages, not a draft
+    # that dropped or paraphrased a row. The architecture stage reads both committed slots, so
+    # that is where two stages disagreeing about one row is caught.
+    conflicting = {
+        "intent": {"goal": "reference board", "obligations": [*rows]},
+        "functional_spec": {
+            "obligations": [
+                {**_FABRICATION_CANONICAL, "minimum": 400},
+                _NEGATIVE_CANONICAL,
+            ]
+        },
+    }
+    with pytest.raises(StageSchemaError) as conflicted:
+        _normalize_stage_response("architecture", _hub75_intent(), conflicting)
+    assert conflicted.value.diagnostic["code"] == "conflicting_source_obligation"
     # Neither row needs a requirement, in the retention check or in the committed architecture.
     validate_obligation_retention("architecture", {}, prompt_state)
 
@@ -2134,7 +2168,9 @@ def test_ownership_exemption_is_per_row_and_does_not_shield_a_physical_row():
         "functional_spec": {"obligations": [physical, _FABRICATION_CANONICAL]},
     }
     intent = _hub75_intent()
-    next(row for row in intent["requirements"] if row["id"] == "led")["obligations"] = [physical]
+    next(row for row in intent["requirements"] if row["id"] == "led")["obligation_ids"] = [
+        "status_led"
+    ]
 
     payload, _expanded = _normalize_stage_response("architecture", intent, prompt_state)
 
@@ -2142,7 +2178,7 @@ def test_ownership_exemption_is_per_row_and_does_not_shield_a_physical_row():
     assert [row["id"] for row in payload["requirements"] if row.get("obligations")] == ["led"]
 
     for row in intent["requirements"]:
-        row.pop("obligations", None)
+        row.pop("obligation_ids", None)
     with pytest.raises(StageSchemaError) as refused:
         _normalize_stage_response("architecture", intent, prompt_state)
     assert refused.value.diagnostic["evidence"] == [physical]
@@ -2188,9 +2224,10 @@ def test_board_outline_measurement_may_stand_alone_but_electrical_limit_may_not(
     assert rejected.value.diagnostic["evidence"] == [output_voltage]
 
     implementing_intent = _hub75_intent()
+    implementing_intent["obligations"] = [output_voltage]
     next(row for row in implementing_intent["requirements"] if row["id"] == "buck")[
-        "obligations"
-    ] = [output_voltage]
+        "obligation_ids"
+    ] = ["output_voltage"]
     retained, _expanded = _normalize_stage_response(
         "architecture",
         implementing_intent,
@@ -2260,8 +2297,7 @@ def test_only_unique_reviewed_physical_owner_is_attached():
         {"requirements": [{"id": "indicator", "exact_part": exact_led}]},
         source,
     )
-    assert unique["requirements"][0]["obligations"] == [obligation]
-    assert "unique reviewed recipe/lowerer evidence" in unique["assumptions"][0]
+    assert unique["requirements"][0]["obligation_ids"] == ["warm_white_led"]
 
     ambiguous = {
         "requirements": [
@@ -2282,6 +2318,61 @@ def test_only_unique_reviewed_physical_owner_is_attached():
     assert rejected.value.diagnostic["candidate_requirement_ids"] == {
         "warm_white_led": ["indicator_a", "indicator_b"]
     }
+
+
+def test_unique_connector_owner_replaces_duplicate_mcu_claim_without_mutating_input():
+    from copy import deepcopy
+    from kicraft.server.stage_contracts import (
+        attach_uniquely_provable_physical_obligations,
+        physical_obligation_candidate_requirement_ids,
+    )
+
+    obligation = {
+        "kind": "physical", "original_obligation_id": "i2c_header",
+        "component_class": "pin-header",
+    }
+    payload = {"requirements": [
+        {
+            "id": "rp2040", "sheet": "CONTROL", "role": "mcu_core",
+            "family": "rp2040", "exact_part": "RP2040",
+            "obligation_ids": ["i2c_header"],
+        },
+        {
+            "id": "i2c_header", "sheet": "INTERFACE", "role": "connector",
+            "family": "pin-header",
+            "ports": {"pin1": "3V3", "pin2": "GND", "pin3": "SDA", "pin4": "SCL"},
+            "obligation_ids": ["i2c_header"],
+        },
+    ]}
+    source = {"intent": {"obligations": [obligation]}}
+    original = deepcopy(payload)
+    assert physical_obligation_candidate_requirement_ids(payload, obligation) == ["i2c_header"]
+    normalized = attach_uniquely_provable_physical_obligations(payload, source)
+    assert normalized["requirements"][0]["obligation_ids"] == []
+    assert normalized["requirements"][1]["obligation_ids"] == ["i2c_header"]
+    assert payload == original
+    assert attach_uniquely_provable_physical_obligations(normalized, source) == normalized
+
+
+@pytest.mark.parametrize("exact_part", [None, "STM32F103C8T6"])
+def test_incidental_programming_header_is_not_an_automatic_external_header_owner(exact_part):
+    from kicraft.server.stage_contracts import (
+        attach_uniquely_provable_physical_obligations,
+        physical_obligation_candidate_requirement_ids,
+    )
+
+    obligation = {
+        "kind": "physical", "original_obligation_id": "external_i2c_header",
+        "component_class": "pin-header",
+    }
+    payload = {"requirements": [{
+        "id": "controller", "sheet": "CONTROL", "role": "mcu_core",
+        "family": "stm32f103c8", "exact_part": exact_part,
+    }]}
+    assert physical_obligation_candidate_requirement_ids(payload, obligation) == []
+    assert attach_uniquely_provable_physical_obligations(
+        payload, {"intent": {"obligations": [obligation]}},
+    ) == payload
 
 
 def test_unique_physical_owner_is_attached_before_architecture_commit():
@@ -2462,8 +2553,9 @@ def test_derived_pad_field_clears_the_commit_gates_with_no_spec_block():
 def test_a_requirement_owned_fabrication_row_still_derives_the_pad_field():
     """`fabrication` may ride a requirement (it is ownership-exempt); the fact still counts."""
     intent = _hub75_intent()
-    next(row for row in intent["requirements"] if row["id"] == "led")["obligations"] = [
-        dict(_PROTOTYPING_AREA_OBLIGATION)
+    intent["obligations"] = [dict(_PROTOTYPING_AREA_OBLIGATION)]
+    next(row for row in intent["requirements"] if row["id"] == "led")["obligation_ids"] = [
+        "prototyping_area"
     ]
 
     architecture = derive_architecture(intent, _prototyping_area_spec())
@@ -2557,13 +2649,14 @@ def test_unreviewed_exact_part_for_a_covered_class_is_recorded_with_its_options(
     intent = _hub75_intent()
     buck = next(row for row in intent["requirements"] if row["id"] == "buck")
     buck["exact_part"] = "AMS1117-3.3"
-    buck["obligations"] = [
+    intent["obligations"] = [
         {
             "kind": "physical",
             "original_obligation_id": "regulator",
             "component_class": "voltage-regulator",
         }
     ]
+    buck["obligation_ids"] = ["regulator"]
     architecture = derive_architecture(intent)
     recorded = [a for a in architecture.advisories if a.code == "unreviewed_exact_part"]
     assert len(recorded) == 1
@@ -2796,7 +2889,15 @@ def _reviewed_connector_intent(
     relation: str = "equal",
     value: float = 4.0,
 ) -> dict:
-    return _one_part_intent(
+    obligation = {
+        "kind": "quantitative",
+        "original_obligation_id": "connector-contact-count",
+        "quantity": quantity,
+        "relation": relation,
+        "value": value,
+        "unit": "pins",
+    }
+    intent = _one_part_intent(
         {
             "id": "connector",
             "role": "connector",
@@ -2816,18 +2917,11 @@ def _reviewed_connector_intent(
                     "function": "second external contact",
                 },
             ],
-            "obligations": [
-                {
-                    "kind": "quantitative",
-                    "original_obligation_id": "connector-contact-count",
-                    "quantity": quantity,
-                    "relation": relation,
-                    "value": value,
-                    "unit": "pins",
-                }
-            ],
+            "obligation_ids": ["connector-contact-count"],
         }
     )
+    intent["obligations"] = [obligation]
+    return intent
 
 
 @pytest.mark.parametrize("relation", ["equal", "minimum"])
@@ -2874,7 +2968,7 @@ def test_noncontact_quantitative_obligation_does_not_constrain_reviewed_connecto
         quantity=quantity,
         value=5.0,
     )
-    intent["requirements"][-1]["obligations"][0]["unit"] = unit
+    intent["obligations"][0]["unit"] = unit
     architecture = derive_architecture(intent)
 
     assert _requirement(architecture, "connector").exact_part == "B2B-XH-A(LF)(SN)"
@@ -3109,8 +3203,11 @@ def test_a_lowerer_family_is_replaced_by_the_reviewed_carriers_family():
              "parameters": {"rows": 1}},
             {"id": "motor_a", "role": "connector", "family": "pin-header",
              "parameters": {"rows": 1, "gender": "female"},
-             "obligations": [{"kind": "physical", "original_obligation_id": "xh",
-                              "component_class": "jst-xh-connector"}]},
+             "obligation_ids": ["xh"]},
+        ],
+        "obligations": [
+            {"kind": "physical", "original_obligation_id": "xh",
+             "component_class": "jst-xh-connector"}
         ],
         "signals": [
             {"name": "MOTOR_A1", "from": "hbridge.aout1", "to": "motor_a.pin1"},
@@ -3177,8 +3274,11 @@ def test_a_lowerer_family_is_replaced_by_the_reviewed_carriers_family():
              "parameters": {"rows": 1}},
             {"id": "motor_a", "role": "connector", "family": "pin-header",
              "parameters": {"rows": 1, "gender": "female"},
-             "obligations": [{"kind": "physical", "original_obligation_id": "xh",
-                              "component_class": "jst-xh-connector"}]},
+             "obligation_ids": ["xh"]},
+        ],
+        "obligations": [
+            {"kind": "physical", "original_obligation_id": "xh",
+             "component_class": "jst-xh-connector"}
         ],
         "signals": [
             {"name": "MOTOR_A1", "from": "hbridge.aout1", "to": "motor_a.pin1"},
@@ -3287,9 +3387,11 @@ def test_a_lowerer_that_denotes_the_named_part_keeps_its_family():
                         "target_current_ma": 2.0,
                         "color": "green",
                     },
-                    "obligations": [{"kind": "physical", "original_obligation_id": "led",
-                                     "component_class": "led"}],
+                    "obligation_ids": ["led"],
                 }
+            ],
+            "obligations": [
+                {"kind": "physical", "original_obligation_id": "led", "component_class": "led"}
             ],
             "signals": [],
         }

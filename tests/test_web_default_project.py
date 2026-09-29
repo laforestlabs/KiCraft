@@ -520,10 +520,21 @@ def test_recovery_question_stops_manufacturing(tmp_path, live_runs, monkeypatch,
         else:
             rewire("Repair wiring")
 
+    if path == "erc":
+        # The shared build-to-design policy acts on durable deterministic
+        # evidence, not on a helper's return value: a real failing ERC check is
+        # what makes the build failure attributable to wiring.
+        (tmp_path / ".kicraft").mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".kicraft" / "synthesis_check.json").write_text(
+            json.dumps({"status": "failed", "failed_checks": ["9.12 ERC"],
+                        "checks": [{"name": "9.12 ERC", "ok": False,
+                                    "message": "ERC", "offenders": ["Unconnected power pin"]}]}),
+            encoding="utf-8",
+        )
+
     monkeypatch.setattr(web, "run_session", run_session)
     monkeypatch.setattr(cli_app, "run_post_wiring_lifecycle", lifecycle)
     monkeypatch.setattr(web, "_drive_build_queue", lambda *a: builds.append("build") or 5)
-    monkeypatch.setattr(web, "_erc_offenders", lambda ws: ["Unconnected power pin"])
     monkeypatch.setattr(web, "_persist_project", lambda state: None)
     web._run_design(state, ["wiring"])
     assert state["awaiting_input"] is True
@@ -531,6 +542,39 @@ def test_recovery_question_stops_manufacturing(tmp_path, live_runs, monkeypatch,
     assert state["ok"] is None
     assert builds == (["build"] if path == "erc" else [])
     assert all(call["auto_default_questions"] is False for call in calls)
+
+
+def test_rebuild_parks_instead_of_reporting_failure(tmp_path, live_runs, monkeypatch):
+    """A Rebuild whose build-to-design recovery parks on a question must wait for
+    the answer: not a failed build, no stale zip, and no failure report filed."""
+    state = web._fresh_run_state()
+    state.update(ws=str(tmp_path), brief="a USB LED")
+    builds = []
+    reports = []
+    question = {"text": "Which regulator?", "stage": "wiring", "blocking": True}
+
+    monkeypatch.setattr(web, "_drive_build_queue",
+                        lambda *a, **kw: builds.append("build") or 5)
+    monkeypatch.setattr(web, "run_session",
+                        lambda *a, **kw: {"status": "awaiting_input", "questions": [question]})
+    monkeypatch.setattr(web, "_file_failure_report", lambda st: reports.append(st))
+    monkeypatch.setattr(web, "_persist_project", lambda st: None)
+    monkeypatch.setattr(web, "_finish_attempt", lambda st: None)
+    (tmp_path / ".kicraft").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".kicraft" / "synthesis_check.json").write_text(
+        json.dumps({"status": "failed", "failed_checks": ["9.12 ERC"],
+                    "checks": [{"name": "9.12 ERC", "ok": False, "message": "ERC",
+                                "offenders": ["Unconnected power pin"]}]}),
+        encoding="utf-8",
+    )
+
+    web._rerun_build_worker(state, "build")
+    assert state["status"] == "awaiting_input"
+    assert state["awaiting_input"] is True
+    assert state["questions"] == [question]
+    assert builds == ["build"]  # no rebuild while parked
+    assert reports == []  # a parked rebuild is not a failure
+    assert state.get("failed") is not True
 
 
 def test_build_target_derives_the_first_build_from_a_committed_design(tmp_path):

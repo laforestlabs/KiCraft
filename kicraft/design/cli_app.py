@@ -3456,17 +3456,19 @@ def _apply_slot(
       wiring          -> state.bom.connections + state.bom.no_connect_pins
     """
     if stage in {"functional_spec", "architecture"}:
-        from kicraft.server.stage_contracts import validate_obligation_retention
-
-        validate_obligation_retention(
-            stage,
-            slot_data,
-            {
-                slot: value.model_dump(exclude_none=True) if value is not None else None
-                for slot in ("intent", "functional_spec")
-                if (value := getattr(state, slot, None)) is not None
-            },
+        from kicraft.server.stage_contracts import (
+            restore_source_obligations,
+            validate_obligation_retention,
         )
+
+        prompt_state = {
+            slot: value.model_dump(exclude_none=True) if value is not None else None
+            for slot in ("intent", "functional_spec")
+            if (value := getattr(state, slot, None)) is not None
+        }
+        validate_obligation_retention(stage, slot_data, prompt_state)
+        # The immutable rows are the compiler's to write; a manual slot edit names owners only.
+        slot_data = restore_source_obligations(slot_data, prompt_state, stage=stage)
     if stage == "intent":
         state.intent = IntentSlot.model_validate(slot_data)
         if project_stem is not None:
@@ -4079,6 +4081,25 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             )
             return 3
 
+        from kicraft.server.stage_contracts import (
+            StageSchemaError,
+            _validate_constructed_architecture,
+        )
+
+        try:
+            _validate_constructed_architecture(
+                state.architecture.model_dump(exclude_none=True),
+                state.model_dump(exclude_none=True),
+                project_root=str(state_path.resolve().parent.parent),
+            )
+        except StageSchemaError as exc:
+            print(json.dumps({
+                "ok": False,
+                "errors": [str(exc)],
+                "diagnostics": [exc.diagnostic] if exc.diagnostic else [],
+            }, indent=2))
+            return 3
+
     # §9.25 capacitor polarity -- parts-only, so it fires at BOM commit (before
     # the wiring stage adds connections). A non-polarized Device:C on a polarized
     # CP_/tantalum footprint (the KC-U2VAA8 film caps) is fixed by re-picking the
@@ -4163,52 +4184,11 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             return 3
 
     if stage == "wiring" and state.bom is not None and state.bom.connections:
-        checks = [
-            check_pin_existence(state.bom),
-            check_net_coverage(state.bom),
-            check_power_pin_polarity(state.bom),
-            check_two_terminal_self_short(state.bom),
-            check_rf_feed_isolation(state.bom),
-            check_single_net_per_pin(state.bom),
-            check_family_wiring_contracts(state.bom),
-            # §9.29 reachability half: with connections present, a UPDI MCU's
-            # programming pin must reach an access part (header/test pad). The
-            # BOM-commit gate above guaranteed such a part exists, so this is
-            # always winnable by adding one connection -- never a whack-a-mole.
-            check_mcu_programming_access(state.bom),
-            # §9.31/§9.32 at COMMIT time (not only in the build-time
-            # collect_validations): the model must see "J3/J4/J5 are inert
-            # duplicates" / "divider gives 8.2V not 5V" while it still has
-            # retries -- discovered at build 1/5 it is an unrecoverable rc=5
-            # (self-eval 2026-07-19 run_28).
-            check_repeated_block_coverage(state.bom),
-            check_regulator_feedback_vout(state.bom),
-            check_reviewed_device_support_networks(state.bom),
-        ]
-        if state.architecture is not None:
-            # Architecture declared these inter-sheet nets; the wiring stage
-            # must realize each signal endpoint, or the emitter leaves a sheet
-            # pin with no hierarchical label (caught only by §9.12 ERC at
-            # synthesis time otherwise).
-            checks.append(check_inter_sheet_nets_realized(state.architecture, state.bom))
-            checks.append(check_typed_led_current_paths(state.architecture, state.bom))
-            checks.extend(
-                [
-                    check_reviewed_input_operating_ranges(state.architecture, state.bom),
-                    check_reviewed_power_transfer(state.architecture, state.bom),
-                    check_typed_passive_crossover_values(state.architecture, state.bom),
-                    check_reviewed_constant_current_led_feedback(state.architecture, state.bom),
-                    check_requirement_physical_realization(
-                        state.architecture,
-                        state.bom,
-                        declared_interface_scope="model_owned",
-                    ),
-                ]
-            )
-            # The inverse failure: a signal net wired to a single pin that was
-            # never declared inter-sheet dangles ("Label not connected to
-            # anything") -- the SOIL_MOISTURE_BLE USB D+/D- build failure.
-            checks.append(check_no_dangling_signal_nets(state.architecture, state.bom))
+        from .synthesis.validation import check_composed_wiring
+
+        checks = check_composed_wiring(
+            state.architecture, state.bom, declared_interface_scope="model_owned",
+        )
         failing = [check for check in checks if not check.ok]
         if failing:
             # ALL failing wiring checks in one rejection: each retry costs one
@@ -5908,6 +5888,65 @@ def _maybe_electrical_review(
         return {"ran": False, "findings": [], "blocked": False, "cost_usd": 0.0}
 
 
+_REVIEW_BOM_RE = re.compile(
+    r"bom|part|component|value|footprint|package|rating|capacitor|resistor|"
+    r"inductor|diode|regulator|voltage\s+rating|decoupl",
+    re.IGNORECASE,
+)
+_REVIEW_ARCHITECTURE_RE = re.compile(
+    r"topolog|sheet|ownership|interface|block\s|stack|power\s+tree|rail\s+assignment",
+    re.IGNORECASE,
+)
+
+
+def _call_rewire(rewire, instruction: str, stages: list[str]) -> None:
+    """Invoke the caller's re-drive with the owner scope when it accepts one.
+
+    New callers take ``(instruction, stages)`` so a review blocker that belongs
+    to the BOM or the architecture is not forced through a wiring-only repair.
+    A legacy one-argument callable (or a bare ``list.append`` recorder) still
+    works.
+    """
+    import inspect
+    from inspect import Parameter
+
+    try:
+        parameters = [
+            parameter
+            for parameter in inspect.signature(rewire).parameters.values()
+            if parameter.kind
+            in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+    except (TypeError, ValueError):
+        parameters = []
+    if len(parameters) >= 2:
+        rewire(instruction, stages)
+    else:
+        rewire(instruction)
+
+
+def _review_repair_scope(blockers: list[dict]) -> tuple[str, list[str]]:
+    """Attribute review blockers to the owning stage and its re-drive scope.
+
+    Review findings carry an ``area`` (and a ``category`` for the typed ones such
+    as ``programming-path``); the area is the only durable ownership hint the
+    review produces. Parts/values/footprints/ratings are BOM choices, sheets and
+    interfaces are architectural, and everything else the review can name
+    (nets, connections, no-connects) is wiring-owned. ``stages`` is what the
+    caller re-drives: changing a BOM or architecture choice requires the
+    downstream stages to be re-derived too.
+    """
+    areas = " ".join(
+        f"{f.get('area') or ''} {f.get('category') or ''} {f.get('issue') or ''}"
+        for f in blockers
+    )
+    if _REVIEW_BOM_RE.search(areas):
+        return "bom", ["bom", "wiring"]
+    if _REVIEW_ARCHITECTURE_RE.search(areas):
+        return "architecture", ["architecture", "bom", "wiring"]
+    return "wiring", ["wiring"]
+
+
 def _emit_review_findings(progress, findings: list[dict]) -> None:
     """One build_log line per finding, in the exact format the GUI's tab
     classifier (`review BLOCKER/WARNING/NOTE`) and the reopen-time parser
@@ -6002,26 +6041,35 @@ def run_post_wiring_review(
         _emit_review_findings(progress, review["findings"])
         findings = review["findings"]
         if review["blocked"] and rewire is not None:
-            blockers = "; ".join(f["issue"] for f in findings if f.get("severity") == "blocker")
+            blockers = [f for f in findings if f.get("severity") == "blocker"]
+            blocker_text = "; ".join(f["issue"] for f in blockers)
+            owner, stages = _review_repair_scope(blockers)
             progress(
                 {
                     "kind": "build_log",
                     "text": "[build]     electrical review found a blocker; "
-                    "re-driving wiring once to fix",
+                    f"re-driving {owner} once to fix it",
                 }
             )
-            # Close this review segment: the wiring re-drive emits its own
+            # Close this review segment: the re-drive emits its own
             # stage events, then a fresh stage_start reopens this tab for
             # the (minutes-long) second pass.
             progress(
                 {"kind": "stage_done", "stage": "electrical_review", "ok": True, "cost": total_cost}
             )
-            rewire(
-                f"The electrical review found a blocker: {blockers}. "
-                "Adjust the BOM/wiring to resolve it, keeping "
-                "everything else consistent."
+            # Review is evidence, not permission to rewrite the whole board:
+            # scope the repair to the owning stage the finding attributes to.
+            _call_rewire(
+                rewire,
+                f"The electrical review found a blocker: {blocker_text}. "
+                f"Change only the {owner} decision these constraints name "
+                "(nets/connections, parts, or the owning architecture choice), "
+                "keeping every other requirement, net, and part unchanged. "
+                "Do NOT drop required parts, do NOT relax any electrical or "
+                "fabrication limit, and do NOT ask the user.",
+                stages,
             )
-            state = _load_state(state_path)  # wiring commit rewrote state.json
+            state = _load_state(state_path)  # the re-drive rewrote state.json
             progress({"kind": "stage_start", "stage": "electrical_review", "model": model})
             progress(
                 {

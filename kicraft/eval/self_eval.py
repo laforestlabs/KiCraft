@@ -67,9 +67,11 @@ from kicraft.design.cli_app import run_post_wiring_lifecycle
 from kicraft.server.session import (
     bom_reconcile_deficits,
     maybe_bom_reconcile,
+    null_downstream,
     read_state,
     record_answers,
     remaining_stages,
+    run_build_recovery,
     run_session,
 )
 from kicraft.server.stage_runtime import NONINTERACTIVE_DEFAULTS_INSTRUCTION
@@ -89,6 +91,22 @@ from .acceptance_contracts import (
 )
 from .external_briefs import load_external_manifest, validate_external_bundle
 from .product_acceptance import evaluate_product, summarize_product, verify_product_audit
+
+
+def _design_spend(guard, run_id: str) -> float:
+    """Designer spend billed to ``run_id`` so far (0.0 without a ledger guard)."""
+    if guard is None or not hasattr(guard, "spent_by_stage_for_run"):
+        return 0.0
+    try:
+        return float(
+            sum(
+                cost
+                for stage, cost in guard.spent_by_stage_for_run(run_id).items()
+                if stage in _DESIGN_STAGES
+            )
+        )
+    except Exception:  # noqa: BLE001 - ledger trouble must never fail a run
+        return 0.0
 
 
 def _find_parent_board(rundir: Path) -> Path | None:
@@ -994,11 +1012,17 @@ def evaluate_one(
             rec["stage_cost_usd"] = stage_costs
         if not design_only and d["status"] == "ok":
 
-            def _rewire(instruction: str) -> None:
+            def _rewire(instruction: str, stages=None) -> None:
+                stage_list = list(stages or ["wiring"])
+                if stage_list and stage_list[0] != "wiring":
+                    try:
+                        null_downstream(rundir, stage_list[0])
+                    except RuntimeError:
+                        pass
                 run_session(
                     rundir,
                     prompt,
-                    ["wiring"],
+                    stage_list,
                     instruction=instruction,
                     client=client,
                     progress=progress,
@@ -1068,8 +1092,60 @@ def evaluate_one(
             return rec
         else:
             if d["status"] == "ok":
-                with build_gate or contextlib.nullcontext():
-                    build_rc = run_build(rundir, progress, timeout_s=build_timeout_s)
+
+                def _redrive(stages, instruction: str):
+                    return run_session(
+                        rundir,
+                        prompt,
+                        stages,
+                        instruction=instruction,
+                        client=client,
+                        progress=progress,
+                        run_id=run_id,
+                    )
+
+                def _gated_build() -> int:
+                    # The host-wide build slot is held for the BUILD only, never
+                    # across the (blocking-HTTP) design re-drive.
+                    with build_gate or contextlib.nullcontext():
+                        return run_build(rundir, progress, timeout_s=build_timeout_s)
+
+                # Same shared build-to-design policy as the web worker: the
+                # deterministic build returns evidence, this session owner
+                # decides whether to revise the design and rebuild.
+                spend_before_recovery = _design_spend(guard, run_id)
+                recovery = run_build_recovery(
+                    rundir,
+                    prompt,
+                    _gated_build,
+                    progress=progress,
+                    run_id=run_id,
+                    client=client,
+                    redrive=_redrive,
+                    auto_default_questions=True,
+                )
+                build_rc = recovery.get("rc")
+                rec["build_recovery"] = {
+                    "status": recovery.get("status"),
+                    "attempts": recovery.get("attempts"),
+                    "max_attempts": recovery.get("max_attempts"),
+                    "failure_kind": recovery.get("failure_kind"),
+                    # The EXTRA designer spend this recovery caused: the calls it
+                    # made are billed to the same run, so the delta is honest.
+                    "cost_usd": round(
+                        max(0.0, _design_spend(guard, run_id) - spend_before_recovery), 6
+                    ),
+                }
+                # Recovery re-drives are designer spend; refresh the per-stage
+                # figures rather than reporting the pre-build snapshot.
+                if guard is not None and hasattr(guard, "spent_by_stage_for_run"):
+                    stage_costs = {
+                        stage: cost
+                        for stage, cost in guard.spent_by_stage_for_run(run_id).items()
+                        if stage in _DESIGN_STAGES
+                    }
+                    rec["stage_cost_usd"] = stage_costs
+                    rec["design_cost_usd"] = round(sum(stage_costs.values()), 6)
             else:
                 build_rc = None
             rec["build_rc"] = build_rc
@@ -1305,6 +1381,26 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         for code in record.get("advisories") or ():
             advisory_codes[code] = advisory_codes.get(code, 0) + 1
 
+    # Build-to-design recovery effectiveness, measured separately from coverage:
+    # how many failed builds the shared policy recovered, how many attempts and
+    # how much EXTRA designer spend that cost, and what the terminal cause was.
+    # The recovery calls are also inside each record's stage_cost_usd/design_cost_usd,
+    # so this section reports the recovery-attributable slice, never an addition
+    # to the campaign total.
+    recovery_status: dict[str, int] = {}
+    recovery_failure_kinds: dict[str, int] = {}
+    recovery_attempts = 0
+    recovery_extra_cost = 0.0
+    for record in records:
+        block = record.get("build_recovery") or {}
+        status = str(block.get("status") or "not-run")
+        recovery_status[status] = recovery_status.get(status, 0) + 1
+        recovery_attempts += int(block.get("attempts") or 0)
+        recovery_extra_cost += float(block.get("cost_usd") or 0.0)
+        if status not in ("ok", "recovered", "not-run") and block.get("failure_kind"):
+            kind = str(block["failure_kind"])
+            recovery_failure_kinds[kind] = recovery_failure_kinds.get(kind, 0) + 1
+
     def _lifecycle_status(phase: str) -> str:
         statuses = [
             ((record.get("lifecycle") or {}).get(phase) or {}).get("status") for record in records
@@ -1352,6 +1448,15 @@ def compile_report(records: list[dict], out_dir: Path, meta: dict) -> dict:
         # so a downgrade is auditable over time (design-yield-recovery plan §4.2 step 3).
         "boards_with_advisories": sum(1 for r in records if r.get("advisories")),
         "advisory_codes": dict(sorted(advisory_codes.items())),
+        # Phase D recovery effectiveness: recovered / blocked / exhausted counts,
+        # attempts, the extra designer spend they cost, and the terminal causes.
+        "recovery": {
+            "status_counts": dict(sorted(recovery_status.items())),
+            "recovered": recovery_status.get("recovered", 0),
+            "attempts": recovery_attempts,
+            "extra_cost_usd": round(recovery_extra_cost, 6),
+            "failure_kinds": dict(sorted(recovery_failure_kinds.items())),
+        },
         "archetype_stats": _archetype_stats(records),
         "outline_stats": _outline_stats(records),
         "per_brief": per_brief,
@@ -1515,6 +1620,20 @@ def _render_md(s: dict) -> str:
         L.append(
             f"- advisory-flagged designs: **{s['boards_with_advisories']}/{s['n']}**  ·  codes: "
             + ", ".join(f"{c}×{n}" for c, n in (s.get("advisory_codes") or {}).items())
+        )
+    recovery = s.get("recovery") or {}
+    if recovery.get("status_counts"):
+        L.append(
+            f"- build-to-design recovery: recovered **{recovery.get('recovered', 0)}**  ·  "
+            f"attempts **{recovery.get('attempts', 0)}**  ·  extra designer spend "
+            f"**${recovery.get('extra_cost_usd', 0.0):.6f}**  ·  outcomes "
+            + ", ".join(f"{k}×{v}" for k, v in recovery["status_counts"].items())
+            + (
+                "  ·  causes "
+                + ", ".join(f"{k}×{v}" for k, v in (recovery.get("failure_kinds") or {}).items())
+                if recovery.get("failure_kinds")
+                else ""
+            )
         )
     L.append("")
 

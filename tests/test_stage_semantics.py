@@ -2050,6 +2050,121 @@ def test_a_declared_load_rail_nothing_generates_gets_its_converter():
     assert complete_over_rated_supply(sourced) == sourced
 
 
+def test_compiler_generated_regulator_id_normalizes_numeric_rail_and_avoids_collision():
+    """A declared rail name is an electrical net, not a requirement identifier."""
+    from kicraft.design.models import Architecture
+    from kicraft.design.stage_semantics import _complete_load_supply_rails
+
+    rail = "+3.3 V/Logic"
+    candidate = {
+        "topologies": {},
+        "rail_voltages": {"VIN": 18.0, rail: 3.3, "GND": 0.0},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [
+            {"name": "POWER INPUT", "stem": "POWER_INPUT", "role": "power_input", "function": "Input"},
+            {"name": "LOAD", "stem": "LOAD", "role": "driver", "function": "Drive"},
+            {"name": "RESERVED", "stem": "RESERVED", "role": "connector", "function": "Reserve"},
+        ],
+        "power_nets": ["VIN", rail, "GND"],
+        "inter_sheet_nets": [
+            {"name": "VIN", "endpoints": [{"sheet": "POWER INPUT", "direction": "output"}]},
+            {"name": rail, "endpoints": [{"sheet": "LOAD", "direction": "input"}]},
+            {
+                "name": "GND",
+                "endpoints": [
+                    {"sheet": "POWER INPUT", "direction": "bidirectional"},
+                    {"sheet": "LOAD", "direction": "bidirectional"},
+                ],
+            },
+        ],
+        "requirements": [
+            {
+                "id": "input",
+                "sheet": "POWER INPUT",
+                "role": "power_input",
+                "family": "screw-terminal",
+                "parameters": {"rows": 1},
+                "ports": {"positive": "VIN", "negative": "GND"},
+            },
+            {
+                "id": "load",
+                "sheet": "LOAD",
+                "role": "driver",
+                "family": "dual-dc-motor-driver",
+                "exact_part": "DRV8833PWPR",
+                "ports": {"vm": rail, "gnd": "GND"},
+            },
+            {
+                "id": "rail_3_3_v_logic_regulator",
+                "sheet": "RESERVED",
+                "role": "connector",
+                "family": "screw-terminal",
+                "parameters": {"rows": 1},
+                "ports": {"positive": "RESERVED", "negative": "GND"},
+            },
+        ],
+        "assumptions": [],
+    }
+    source_requirements = json.loads(json.dumps(candidate["requirements"]))
+    source_nets = {row["name"] for row in candidate["inter_sheet_nets"]}
+
+    fixed = _complete_load_supply_rails(candidate)
+    architecture = Architecture.model_validate(fixed)
+
+    converter = next(
+        row for row in fixed["requirements"] if row["id"] == "rail_3_3_v_logic_regulator_2"
+    )
+    assert converter["ports"] == {"input": "VIN", "output": rail, "gnd": "GND"}
+    assert fixed["requirements"][:len(source_requirements)] == source_requirements
+    assert source_nets <= {net.name for net in architecture.inter_sheet_nets}
+    assert rail in architecture.power_nets
+    assert fixed["rail_voltages"][rail] == 3.3
+    assert len({requirement.id for requirement in architecture.requirements}) == len(
+        architecture.requirements
+    )
+
+
+def test_compiler_generated_regulator_id_is_bounded_for_long_requirement_id():
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.stage_semantics import _complete_load_supply_rails
+
+    source_id = "load_" + "x" * 59
+    colliding_id = "load_" + "x" * 49 + "_regulator"
+    candidate = {
+        "rail_voltages": {"VIN": 18.0, "GND": 0.0},
+        "sheets": [{"name": "LOAD", "stem": "LOAD", "role": "driver", "function": "Drive"}],
+        "requirements": [
+            {
+                "id": source_id,
+                "sheet": "LOAD",
+                "role": "driver",
+                "family": "dual-dc-motor-driver",
+                "exact_part": "DRV8833PWPR",
+                "ports": {"vm": "VIN", "gnd": "GND"},
+            },
+            {
+                "id": colliding_id,
+                "sheet": "LOAD",
+                "role": "connector",
+                "family": "screw-terminal",
+                "parameters": {"rows": 1},
+                "ports": {"positive": "RESERVED", "negative": "GND"},
+            },
+        ],
+        "assumptions": [],
+    }
+
+    fixed = _complete_load_supply_rails(candidate)
+    converter = fixed["requirements"][-1]
+
+    assert converter["id"].endswith("_2")
+    assert len(converter["id"]) == 64
+    assert converter["id"] not in {source_id, colliding_id}
+    assert len({row["id"] for row in fixed["requirements"]}) == len(fixed["requirements"])
+    CircuitRequirement.model_validate(converter)
+
+
 def test_the_rail_completion_keeps_the_derived_nets_consistent():
     """The commit gate reads the derived nets, so a rebound rail must not leave a stale endpoint.
 

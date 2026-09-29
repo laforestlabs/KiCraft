@@ -20,6 +20,7 @@ from .stage_contracts import (
     ConnectedPinAssignment,
     NoConnectPinAssignment,
     _expand_bom_groups,
+    _normalize_stage_response,
     _requirement_owns_protected_group,
     _sheet_owns_usb_c_connector,
     _validate_power_requirement_contracts,
@@ -296,36 +297,41 @@ def plan_stage_work_units(
             # sheet-scoped unit per sheet, where the model sees the sheet's
             # function text and can emit a coherent part set.
             determinable_ids: set[str] = set()
+            lowerer_ids_by_requirement: dict[str, str | None] = {}
             for requirement in requirements:
                 if str(requirement.get("id")) in selected:
                     continue
+                requirement_id = str(requirement.get("id") or "<unknown>")
                 try:
-                    if (
-                        lower_requirement(CircuitRequirement.model_validate(requirement))
-                        is not None
-                    ):
-                        determinable_ids.add(str(requirement["id"]))
+                    artifact = lower_requirement(CircuitRequirement.model_validate(requirement))
                 except (TypeError, ValueError):
-                    # A known lowerer's refusal is reported at architecture
-                    # ownership, where the requirement is claimed. Planning is a
-                    # filter, not a gate: an unrealizable requirement stays
-                    # model-owned work rather than crashing the unit plan.
+                    # Keep a known lowerer as compiler-owned work so its own
+                    # attributed candidate validation reports the defect rather
+                    # than silently turning it into a model-owned sheet.
+                    determinable_ids.add(requirement_id)
+                    lowerer_ids_by_requirement[requirement_id] = None
                     continue
+                if artifact is not None:
+                    determinable_ids.add(requirement_id)
+                    lowerer_ids_by_requirement[requirement_id] = artifact.lowerer_id
 
             units: list[StageWorkUnit] = []
             for requirement in requirements:
                 if str(requirement.get("id")) not in determinable_ids:
                     continue
+                requirement_id = str(requirement["id"])
                 sheet = str(requirement["sheet"])
+                lowerer_id = lowerer_ids_by_requirement[requirement_id]
                 units.append(
                     StageWorkUnit(
                         unit_id=f"bom-r{len(units):03d}",
                         stage="bom",
                         sheet=sheet,
-                        requirement_ids=(str(requirement["id"]),),
+                        requirement_ids=(requirement_id,),
                         owned_roles=(str(requirement["role"]),),
-                        planned_resolution_source="llm",
+                        planned_resolution_source="lowerer",
                         recipe_ids=tuple(sorted(recipe_ids_by_sheet.get(sheet, set()))),
+                        lowerer_ids=((lowerer_id,) if lowerer_id else ()),
                     )
                 )
 
@@ -1229,18 +1235,13 @@ def deterministic_bom_candidate(
 
     requirement = _unit_requirement(unit, prompt_state)
     if requirement is not None:
-        if not requirement.ports:
-            # A known-lowerer family with no declared ports publishes nothing for
-            # the lowerer to refuse: the requirement is simply unfinished work
-            # for this unit, not a contract claim the lowerer must reject. A
-            # board-fabricated feature (the prototyping pad field) owns no
-            # contact at all, so the artifact -- not the port list -- decides.
-            try:
-                artifact = lower_requirement(requirement)
-            except ValueError:
-                return None
-        else:
+        try:
             artifact = lower_requirement(requirement)
+        except (TypeError, ValueError) as exc:
+            raise WorkUnitValidationError(
+                unit.unit_id,
+                {"deterministic-lowering": [f"{requirement.id}: {exc}"]},
+            ) from exc
         if artifact is not None:
             return {
                 "groups": [
@@ -2433,18 +2434,10 @@ def validate_unit_candidate(
     prompt_state: dict,
     extras: dict,
     *,
-    allow_deterministic_fallback: bool = True,
     decider=None,
     reconciliation_confidence: float = 0.7,
 ) -> dict:
-    """Validate one complete unit replacement before it can enter the aggregate.
-
-    ``allow_deterministic_fallback=False`` makes a BOM unit's answer stand on
-    its own: the "determinism wins" adoption is skipped. The driver passes it
-    for a unit whose own lowering was already refused -- adopting that lowering
-    again can only re-raise its known defect and hide the model's, which is what
-    the repair feedback has to name.
-    """
+    """Validate one complete unit replacement before it can enter the aggregate."""
     if not isinstance(payload, dict):
         raise TypeError("work-unit payload must be an object")
     if unit.stage == "bom":
@@ -2453,7 +2446,6 @@ def validate_unit_candidate(
             payload,
             prompt_state,
             extras,
-            _allow_deterministic_fallback=allow_deterministic_fallback,
             decider=decider,
             reconciliation_confidence=reconciliation_confidence,
         )
@@ -2593,6 +2585,174 @@ def merge_wiring_units(
         pin_to_unit,
         {ref: tuple(unit_ids) for ref, unit_ids in ref_to_unit_ids.items()},
     )
+
+
+def aggregate_stage_work_units(
+    stage: Literal["bom", "wiring"],
+    units: tuple[StageWorkUnit, ...],
+    candidates: dict[str, dict],
+    prompt_state: dict,
+    *,
+    unit_sources: dict[str, str],
+) -> tuple[
+    dict,
+    dict[str, str],
+    dict[tuple[str, str], str],
+    dict[str, tuple[str, ...]],
+    int,
+]:
+    """Merge validated units into the canonical stage payload and ownership maps."""
+    if stage == "bom":
+        (
+            merged,
+            ref_to_unit,
+            ref_to_lowering,
+            trusted_lowering_group_ids,
+        ) = merge_bom_units(
+            units,
+            candidates,
+            prompt_state,
+            trusted_unit_ids=frozenset(
+                unit_id for unit_id, source in unit_sources.items() if source == "lowerer"
+            ),
+        )
+        normalized, expanded_component_count = _normalize_stage_response(
+            stage,
+            merged,
+            {
+                **prompt_state,
+                "_trusted_lowering_group_ids": trusted_lowering_group_ids,
+            },
+        )
+        for part in normalized.get("parts") or []:
+            if part.get("recipe_id"):
+                continue
+            unit_id = ref_to_unit.get(str(part.get("ref")))
+            if unit_id:
+                part["resolution_source"] = unit_sources.get(unit_id, "llm")
+                part["resolution_id"] = unit_id
+                lowering = ref_to_lowering.get(str(part.get("ref")))
+                if lowering:
+                    part.update(lowering)
+        return normalized, ref_to_unit, {}, {}, expanded_component_count
+
+    merged, pin_to_unit, ref_to_unit_ids = merge_wiring_units(units, candidates)
+    normalized, expanded_component_count = _normalize_stage_response(stage, merged, prompt_state)
+    return normalized, {}, pin_to_unit, ref_to_unit_ids, expanded_component_count
+
+
+def _deterministic_wiring_extras(bom: dict) -> dict:
+    """Build the same exact per-reference pin inventory as wiring stage preparation."""
+    from kicraft.design.synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
+
+    by_symbol: dict[str, dict] = {}
+    pinouts: dict[str, dict] = {}
+    for part in bom.get("parts") or []:
+        if not isinstance(part, dict) or not part.get("ref"):
+            continue
+        ref = str(part["ref"])
+        symbol = str(part.get("symbol") or "")
+        if symbol not in by_symbol:
+            try:
+                info = lookup_pins(symbol, all_units=True)
+            except (SymbolNotFoundError, ValueError) as exc:
+                requirement_id = part.get("lowering_requirement_id")
+                detail = f"{ref}: symbol {symbol!r} did not resolve ({exc})"
+                if requirement_id:
+                    detail = f"{requirement_id}: {detail}"
+                raise WorkUnitValidationError(
+                    f"wiring-inventory:{ref}", {"deterministic-inventory": [detail]}
+                ) from exc
+            if not info.get("pins"):
+                if symbol.partition(":")[0] == "Mechanical":
+                    by_symbol[symbol] = {}
+                else:
+                    requirement_id = part.get("lowering_requirement_id")
+                    detail = f"{ref}: symbol {symbol!r} exposes no pins"
+                    if requirement_id:
+                        detail = f"{requirement_id}: {detail}"
+                    raise WorkUnitValidationError(
+                        f"wiring-inventory:{ref}", {"deterministic-inventory": [detail]}
+                    )
+            else:
+                by_symbol[symbol] = info
+        info = by_symbol[symbol]
+        if info:
+            pinouts[ref] = {**info, "symbol": symbol}
+    return {"symbol_pinouts": pinouts}
+
+
+def _attributed_deterministic_error(
+    unit: StageWorkUnit, exc: WorkUnitValidationError | TypeError | ValueError
+) -> WorkUnitValidationError:
+    """Attach requirement ownership to a deterministic compiler refusal."""
+    if isinstance(exc, WorkUnitValidationError):
+        defects = {name: list(rows) for name, rows in exc.defects.items()}
+    else:
+        defects = {"deterministic-construction": [str(exc)]}
+    if unit.requirement_ids:
+        defects.setdefault("requirement-ids", list(unit.requirement_ids))
+    return WorkUnitValidationError(unit.unit_id, defects)
+
+
+def probe_architecture_construction(prompt_state: dict) -> dict | None:
+    """Compile all deterministic architecture work without state, files, or providers.
+
+    ``None`` means at least one unit is genuinely model-owned. Deterministic
+    candidates are validated and merged through the production compiler; a
+    malformed lowerer or locked-pin contradiction therefore raises its existing
+    attributed validation error instead of becoming model work.
+    """
+    bom_units = plan_stage_work_units("bom", prompt_state, {})
+    bom_candidates: dict[str, dict] = {}
+    bom_sources: dict[str, str] = {}
+    for unit in bom_units:
+        try:
+            candidate = deterministic_bom_candidate(unit, prompt_state)
+            if candidate is None:
+                return None
+            candidate["_trusted_deterministic_candidate"] = True
+            bom_candidates[unit.unit_id] = validate_unit_candidate(
+                unit,
+                candidate,
+                prompt_state,
+                {},
+            )
+        except (WorkUnitValidationError, TypeError, ValueError) as exc:
+            raise _attributed_deterministic_error(unit, exc) from exc
+        bom_sources[unit.unit_id] = "lowerer"
+    bom, _ref_to_unit, _pin_to_unit, _ref_to_unit_ids, _expanded = aggregate_stage_work_units(
+        "bom",
+        bom_units,
+        bom_candidates,
+        prompt_state,
+        unit_sources=bom_sources,
+    )
+
+    wiring_state = {**prompt_state, "bom": bom}
+    wiring_extras = _deterministic_wiring_extras(bom)
+    wiring_units = plan_stage_work_units("wiring", wiring_state, wiring_extras)
+    wiring_candidates: dict[str, dict] = {}
+    wiring_sources: dict[str, str] = {}
+    for unit in wiring_units:
+        try:
+            candidate = deterministic_wiring_candidate(unit, wiring_state, wiring_extras)
+            if candidate is None:
+                return None
+            wiring_candidates[unit.unit_id] = validate_unit_candidate(
+                unit, candidate, wiring_state, wiring_extras
+            )
+        except (WorkUnitValidationError, TypeError, ValueError) as exc:
+            raise _attributed_deterministic_error(unit, exc) from exc
+        wiring_sources[unit.unit_id] = "lowerer"
+    wiring, _ref_to_unit, _pin_to_unit, _ref_to_unit_ids, _expanded = aggregate_stage_work_units(
+        "wiring",
+        wiring_units,
+        wiring_candidates,
+        wiring_state,
+        unit_sources=wiring_sources,
+    )
+    return {**bom, **wiring}
 
 
 def route_work_unit_ids(

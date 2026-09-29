@@ -151,6 +151,63 @@ def test_missing_state_is_a_silent_skip(tmp_path, monkeypatch):
     assert res["ran"] is False and events == []
 
 
+def test_review_blocker_scope_follows_the_findings_owner(tmp_path, monkeypatch):
+    """A review blocker is repaired at the owning stage, not always at wiring."""
+    monkeypatch.delenv("KICRAFT_ELECTRICAL_REVIEW", raising=False)
+
+    def _run(blocker, name):
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        sp = _write_state(case_dir)
+        passes = iter([
+            {"ran": True, "blocked": True, "findings": [blocker], "cost_usd": 0.01},
+            {"ran": True, "blocked": False, "findings": [], "cost_usd": 0.01},
+        ])
+        monkeypatch.setattr(cli_app, "_maybe_electrical_review", lambda st, pd, **_: next(passes))
+        calls: list[tuple[str, list[str]]] = []
+
+        def rewire(instruction: str, stages=None) -> None:
+            calls.append((instruction, list(stages or [])))
+
+        run_post_wiring_review(sp, case_dir, lambda event: None, rewire)
+        return calls[0]
+
+    instruction, stages = _run(
+        {"severity": "blocker", "area": "bom", "issue": "C1 value too small",
+         "suggestion": "use 10uF"},
+        "bom_case",
+    )
+    assert stages == ["bom", "wiring"]
+    assert "bom" in instruction
+
+    instruction, stages = _run(
+        {"severity": "blocker", "area": "wiring", "issue": "VBUS net missing",
+         "suggestion": "connect it"},
+        "wiring_case",
+    )
+    assert stages == ["wiring"]
+
+    instruction, stages = _run(
+        {"severity": "blocker", "area": "topology", "issue": "power tree broken",
+         "suggestion": "re-derive"},
+        "topology_case",
+    )
+    assert stages == ["architecture", "bom", "wiring"]
+
+
+def test_legacy_one_argument_rewire_still_works(tmp_path, monkeypatch):
+    monkeypatch.delenv("KICRAFT_ELECTRICAL_REVIEW", raising=False)
+    sp = _write_state(tmp_path)
+    passes = iter([
+        {"ran": True, "blocked": True, "findings": [BLOCKER], "cost_usd": 0.01},
+        {"ran": True, "blocked": False, "findings": [], "cost_usd": 0.01},
+    ])
+    monkeypatch.setattr(cli_app, "_maybe_electrical_review", lambda st, pd, **_: next(passes))
+    calls: list[str] = []
+    run_post_wiring_review(sp, tmp_path, lambda event: None, calls.append)
+    assert len(calls) == 1 and "VSENSE divider swapped" in calls[0]
+
+
 def test_lifecycle_records_execution_mode_and_buckets_spend_separately(tmp_path, monkeypatch):
     """Batch and web share one lifecycle; the mode is durable provenance and each
     phase's spend is its own bucket, so review/silk cost can never be read as

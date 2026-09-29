@@ -109,12 +109,12 @@ def test_absent_class_is_counted_as_zero_but_active_parts_are_counted():
 def test_recorded_footprint_agrees_with_a_nickname_less_board():
     """Saved boards can drop the library nickname; that must not unclassify parts."""
     reviewed = "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
-    assert artifact_evidence._reviewed_footprint_agrees(reviewed, "CONN-TH_WJ126V-5.0-2P")
-    assert artifact_evidence._reviewed_footprint_agrees(reviewed, reviewed)
-    assert not artifact_evidence._reviewed_footprint_agrees(reviewed, "other-lib:CONN-TH_WJ126V-5.0-2P")
-    assert not artifact_evidence._reviewed_footprint_agrees(reviewed, "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-3P")
-    assert not artifact_evidence._reviewed_footprint_agrees(reviewed, "")
-    assert not artifact_evidence._reviewed_footprint_agrees("", "CONN-TH_WJ126V-5.0-2P")
+    assert electrical_artifact_evidence._reviewed_footprint_agrees(reviewed, "CONN-TH_WJ126V-5.0-2P")
+    assert electrical_artifact_evidence._reviewed_footprint_agrees(reviewed, reviewed)
+    assert not electrical_artifact_evidence._reviewed_footprint_agrees(reviewed, "other-lib:CONN-TH_WJ126V-5.0-2P")
+    assert not electrical_artifact_evidence._reviewed_footprint_agrees(reviewed, "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-3P")
+    assert not electrical_artifact_evidence._reviewed_footprint_agrees(reviewed, "")
+    assert not electrical_artifact_evidence._reviewed_footprint_agrees("", "CONN-TH_WJ126V-5.0-2P")
 
 
 def test_reconciliation_classifies_a_nickname_less_board_and_counts_zero_classes():
@@ -485,10 +485,10 @@ def _led_current_artifact(
     terminal_footprint = "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P"
     rows = [
         ("U1", "al8860:MSOP-8_L3.0-W3.0-P0.65-LS4.9-BL-EP1.8", (("1", "LED_ANODE"), ("2", "GND"), ("3", "GND"), ("5", "SW"), ("6", "SW"), ("8", "VBUS"), ("9", ep_net))),
-        ("R3", "R_2512", (("1", "VBUS"), ("2", "LED_ANODE"))),
-        ("C1", "C_1206", (("1", "VBUS"), ("2", "GND"))),
-        ("D1", "D_SMA", diode_pads),
-        ("L1", "L_6x6", (("1", "LED_CATHODE"), ("2", "SW"))),
+        ("R3", "Resistor_SMD:R_2512_6432Metric", (("1", "VBUS"), ("2", "LED_ANODE"))),
+        ("C1", "Capacitor_SMD:C_1206_3216Metric", (("1", "VBUS"), ("2", "GND"))),
+        ("D1", "Diode_SMD:D_SMA", diode_pads),
+        ("L1", "Inductor_SMD:L_6.3x6.3_H3", (("1", "LED_CATHODE"), ("2", "SW"))),
         ("J1", terminal_footprint, (("1", "VBUS"), ("2", "GND"))),
         ("J2", terminal_footprint, (("1", "LED_ANODE"), ("2", output_cathode))),
     ]
@@ -552,6 +552,20 @@ def _terminal_reconciliation_artifact(
             (("1", "NC_NET" if nc_net else ""), ("2", "")),
         ),
     ])
+
+
+@pytest.mark.parametrize(("footprint", "accepted"), [
+    ("R_0603_1608Metric", True),
+    ("Resistor_SMD:R_0603_1608Metric", True),
+    ("R_0805_2012Metric", False),
+    ("Other_Library:R_0603_1608Metric", False),
+])
+def test_electrical_terminal_proof_matches_exact_saved_land_pattern(
+    tmp_path, footprint, accepted,
+):
+    state, board = _terminal_reconciliation_artifact(footprint=footprint)
+    facts = electrical_artifact_evidence.extract_electrical_facts(tmp_path, state, board, {})
+    assert (facts.get("gates", {}).get("complete_required_connections") == "pass") is accepted
 
 
 def test_complete_required_connections_reconciles_every_required_terminal(tmp_path):
@@ -635,3 +649,42 @@ def test_led_current_artifact_requires_complete_external_high_side_loop(tmp_path
         },
         artifact_root=tmp_path,
     ) == "led_current_a is above required maximum"
+
+
+@pytest.mark.parametrize("defect", [
+    None, "wrong_resistance", "fixed_termination", "not_a_switch", "missing_switch_pad",
+])
+def test_can_termination_is_proved_from_actual_switch_and_resistor_pads(tmp_path, defect):
+    from kicraft.design.part_identity import reviewed_part
+
+    device = reviewed_part("SN65HVD230")
+    resistor_fp = "Resistor_SMD:R_0603_1608Metric"
+    jumper_fp = "Jumper:SolderJumper-2_P1.3mm_Open_RoundedPad1.0x1.5mm"
+    parts = [
+        {
+            "ref": "U1", "value": "SN65HVD230", "mpn": "SN65HVD230",
+            "symbol": device.symbol, "footprint": device.footprint, "sheet": "CAN",
+        },
+        {
+            "ref": "R1", "value": "1k" if defect == "wrong_resistance" else "120",
+            "symbol": "Device:R", "footprint": resistor_fp, "sheet": "CAN",
+        },
+        {
+            "ref": "JP1", "value": "TERM", "sheet": "CAN",
+            "symbol": "Device:R" if defect == "not_a_switch" else "Jumper:SolderJumper_2_Open",
+            "footprint": resistor_fp if defect == "not_a_switch" else jumper_fp,
+        },
+    ]
+    resistor_end = "BUS_B" if defect == "fixed_termination" else "MID"
+    switch_pads = [("1", "MID")]
+    if defect != "missing_switch_pad":
+        switch_pads.append(("2", "BUS_B"))
+    board = _EvidenceBoard([
+        _EvidenceFootprint("U1", device.footprint, [("7", "BUS_A"), ("6", "BUS_B")]),
+        _EvidenceFootprint("R1", resistor_fp, [("1", "BUS_A"), ("2", resistor_end)]),
+        _EvidenceFootprint("JP1", parts[2]["footprint"], switch_pads),
+    ])
+    facts = electrical_artifact_evidence.extract_electrical_facts(
+        tmp_path, {"bom": {"parts": parts}}, board, {},
+    )
+    assert (facts["net_paths"].get("switchable_can_termination") is True) is (defect is None)

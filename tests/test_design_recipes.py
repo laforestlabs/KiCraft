@@ -2369,6 +2369,34 @@ def test_wave_b_power_recipes_own_every_symbol_pin():
                 )
 
 
+def test_tps54331_recipe_uses_a_freewheel_diode_and_floating_enable():
+    definition = get_recipe("tps54331-adjustable@1")
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe=definition.recipe,
+            instance="usb_5v_buck",
+            sheets={"power": "POWER"},
+            port_bindings={"input": "USB5V", "gnd": "GND", "output": "+3V3"},
+        )
+    )
+    parts = {part.recipe_role: part for part in expansion.parts}
+    diode = parts["catch_diode"]
+    converter = parts["converter"]
+    nets = {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in expansion.connections
+        for endpoint in connection.endpoints
+    }
+
+    assert [port.name for port in definition.ports] == ["input", "gnd", "output"]
+    assert diode.mpn == "SS34"
+    assert nets[(diode.ref, "1")] == nets[(converter.ref, "8")]
+    assert nets[(diode.ref, "2")] == nets[(converter.ref, "7")] == "GND"
+    assert (converter.ref, "3") in {
+        (endpoint.ref, endpoint.pin) for endpoint in expansion.no_connect_pins
+    }
+    assert not {"enable_top", "enable_bottom"} & set(parts)
+
 def test_wave_c_interface_recipes_own_every_symbol_pin():
     from pathlib import Path
 

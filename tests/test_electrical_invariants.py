@@ -1111,3 +1111,112 @@ def test_same_capacitor_identity_does_not_share_voltage_stress_between_rails(
     assert not result.ok
     assert all("C2" in row for row in result.offenders)
     assert any("18V" in row for row in result.offenders)
+
+
+def _nonsynchronous_buck_support(*, diode_identity="SS34"):
+    """Independent TI SLVS839H support circuit; not generated from a recipe."""
+    from kicraft.design.models import BomPart
+
+    parts = [
+        BomPart(
+            ref="U1", value="TPS54331DDAR", mpn="TPS54331DDAR", sheet="POWER",
+            symbol="tps54331:TPS54331DDAR",
+            footprint="tps54331:SOIC-8_L4.9-W3.9-P1.27-LS6.0-BL-EP",
+        ),
+        BomPart(
+            ref="C1", value="100nF", sheet="POWER",
+            symbol="Device:C", footprint="Capacitor_SMD:C_0603_1608Metric",
+        ),
+        BomPart(
+            ref="D1", value=diode_identity, mpn=diode_identity, sheet="POWER",
+            symbol="Device:D_Schottky", footprint="Diode_SMD:D_SMA",
+        ),
+    ]
+    bom = _bom(parts, {
+        "VIN": [("U1", "2")],
+        "BOOT": [("U1", "1"), ("C1", "1")],
+        "PH": [("U1", "8"), ("C1", "2"), ("D1", "1")],
+        "GND": [("U1", "7"), ("U1", "9"), ("D1", "2")],
+    })
+    bom.no_connect_pins = [SimpleNamespace(ref="U1", pin="3")]
+    return bom
+
+
+@pytest.mark.parametrize("identity", ["SS34", "B340A"])
+def test_nonsynchronous_buck_accepts_reviewed_equivalent_rectifiers(identity):
+    bom = _nonsynchronous_buck_support(diode_identity=identity)
+    assert validation.check_reviewed_device_support_networks(bom).ok
+
+
+@pytest.mark.parametrize("defect", ["missing", "reversed", "unrated"])
+def test_nonsynchronous_buck_rejects_missing_or_unproven_freewheel_path(defect):
+    bom = _nonsynchronous_buck_support()
+    if defect == "missing":
+        bom.parts = [part for part in bom.parts if part.ref != "D1"]
+    elif defect == "reversed":
+        for connection in bom.connections:
+            for endpoint in connection.endpoints:
+                if endpoint.ref == "D1":
+                    endpoint.pin = "2" if endpoint.pin == "1" else "1"
+    else:
+        diode = next(part for part in bom.parts if part.ref == "D1")
+        diode.mpn = diode.value = "unreviewed Schottky"
+    result = validation.check_reviewed_device_support_networks(bom)
+    assert not result.ok
+    assert any("E_CATCH_DIODE_SUPPORT" in offender for offender in result.offenders)
+
+
+@pytest.mark.parametrize(
+    ("enable_voltage", "accepted"),
+    [(None, True), (3.3, True), (5.0, True), (0.0, False), (12.0, False)],
+)
+def test_reviewed_enable_respects_floating_mode_threshold_and_absolute_maximum(
+    enable_voltage, accepted,
+):
+    bom = _nonsynchronous_buck_support()
+    rails = {"VIN": 5.0, "GND": 0.0}
+    if enable_voltage is not None:
+        rails["ENABLE"] = enable_voltage
+        bom.no_connect_pins = []
+        bom.connections.append(SimpleNamespace(
+            net_name="ENABLE", endpoints=[SimpleNamespace(ref="U1", pin="3")],
+        ))
+    assert validation.check_reviewed_input_operating_ranges(
+        SimpleNamespace(rail_voltages=rails), bom,
+    ).ok is accepted
+
+
+@pytest.mark.parametrize(("top", "bottom", "accepted"), [
+    ("511k", "100k", False),
+    ("10k", "10k", True),
+])
+def test_usb_powered_buck_enable_bias_does_not_rely_on_typical_pullup_current(
+    top, bottom, accepted,
+):
+    from kicraft.design.models import BomPart
+
+    bom = _nonsynchronous_buck_support()
+    bom.no_connect_pins = []
+    bom.parts.extend(
+        BomPart(
+            ref=ref, value=value, sheet="POWER", symbol="Device:R",
+            footprint="Resistor_SMD:R_0603_1608Metric",
+        )
+        for ref, value in (("R1", top), ("R2", bottom))
+    )
+    for connection in bom.connections:
+        if connection.net_name == "VIN":
+            connection.endpoints.append(SimpleNamespace(ref="R1", pin="1"))
+        elif connection.net_name == "GND":
+            connection.endpoints.append(SimpleNamespace(ref="R2", pin="2"))
+    bom.connections.append(SimpleNamespace(
+        net_name="ENABLE",
+        endpoints=[
+            SimpleNamespace(ref="U1", pin="3"),
+            SimpleNamespace(ref="R1", pin="2"),
+            SimpleNamespace(ref="R2", pin="1"),
+        ],
+    ))
+    assert validation.check_reviewed_input_operating_ranges(
+        SimpleNamespace(rail_voltages={"VIN": 5.0, "GND": 0.0}), bom,
+    ).ok is accepted

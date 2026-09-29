@@ -701,22 +701,28 @@ def build_stage_response_contract(
     schema = _response_schema(stage) if allow_questions else _slot_response_schema(stage)
     apply_collection_bounds(schema, STAGE_COLLECTION_BOUNDS.get(stage, ()))
     if stage in {"functional_spec", "architecture"}:
+        # The immutable obligation rows are written once, by the stage that owns them, and the
+        # compiler restores them here. The provider must not ask the model to copy a row it does
+        # not own: it names owners by `original_obligation_id`, constrained to the committed ids
+        # so an invented id cannot even be emitted.
         source_slots = ("intent",) if stage == "functional_spec" else ("intent", "functional_spec")
-        source_keys = {
-            (row["kind"], row["original_obligation_id"])
-            for slot in source_slots
-            for row in (prompt_state.get(slot) or {}).get("obligations") or []
-        }
-        if source_keys:
-            for variant in schema.get("anyOf") or [schema]:
-                properties = variant.get("properties") or {}
-                if "obligations" not in properties:
-                    continue
-                properties["obligations"]["minItems"] = len(source_keys)
-                required = list(variant.get("required") or [])
-                if "obligations" not in required:
-                    required.append("obligations")
-                variant["required"] = required
+        source_ids = sorted(
+            {
+                str(row["original_obligation_id"])
+                for slot in source_slots
+                for row in (prompt_state.get(slot) or {}).get("obligations") or []
+            }
+        )
+        for variant in schema.get("anyOf") or [schema]:
+            properties = variant.get("properties") or {}
+            properties.pop("obligations", None)
+            variant["required"] = [
+                name for name in variant.get("required") or [] if name != "obligations"
+            ]
+        if source_ids:
+            container = "IntentRequirement" if stage == "architecture" else "FunctionalBlock"
+            ids_schema = schema["$defs"][container]["properties"]["obligation_ids"]
+            ids_schema["items"] = {"type": "string", "enum": source_ids}
     if stage == "architecture":
         functional_spec = prompt_state.get("functional_spec")
         if isinstance(functional_spec, dict):
@@ -907,16 +913,19 @@ def source_obligation_rows(prompt_state: dict, *, slots: tuple[str, ...]) -> lis
     return rows
 
 
-def restore_source_obligations(payload: dict, prompt_state: dict) -> dict:
-    """Write the architecture's top-level `obligations` from the committed intent/spec set.
+def restore_source_obligations(
+    payload: dict, prompt_state: dict, *, stage: str = "architecture"
+) -> dict:
+    """Write the stage's typed `obligations` from the committed intent/spec set.
 
-    That list is the design's typed obligation set, and the draft's job is to say *where* each row
-    is implemented, so the verbatim copy is the compiler's to write. What the draft has to get right
-    — every committed row attached to the requirement that implements it — is checked by
-    `validate_obligation_retention` below.
+    That list is the design's typed obligation set; a draft's job is to say *where* each row is
+    implemented (by `original_obligation_id`), so the verbatim copy is the compiler's to write.
+    What the draft has to get right — every committed row attached to the owner that implements
+    it — is checked by `validate_obligation_retention` below.
     """
+    slots = ("intent",) if stage == "functional_spec" else ("intent", "functional_spec")
     try:
-        rows = source_obligation_rows(prompt_state, slots=("intent", "functional_spec"))
+        rows = source_obligation_rows(prompt_state, slots=slots)
     except ValueError:
         return payload  # an unreadable source row is reported by validate_obligation_retention
     if not rows:
@@ -944,8 +953,12 @@ def _requirement_proves_physical_obligation(requirement: dict, component_class: 
 
     exact_part = str(requirement.get("exact_part") or "").strip()
     exact_record = reviewed_part(exact_part) if exact_part else None
-    if exact_record is not None and wanted & exact_record.physical_features:
-        return True
+    if exact_record is not None:
+        # A reviewed device's incidental support hardware is not a separately
+        # requested physical interface (for example SWD is not an I2C header).
+        # Explicit composition ownership is checked on its expanded circuit;
+        # automatic ownership must identify the requested physical device itself.
+        return bool(wanted & exact_record.physical_features)
 
     family = str(requirement.get("family") or "")
     for registered in registered_recipes():
@@ -956,8 +969,11 @@ def _requirement_proves_physical_obligation(requirement: dict, component_class: 
             and definition.exact_part.casefold() != exact_part.casefold()
         ):
             continue
-        if exact_part and definition.exact_part and realizes(mpn=definition.exact_part):
-            return True
+        primary = reviewed_part(definition.exact_part) if definition.exact_part else None
+        if primary is not None:
+            if wanted & primary.physical_features:
+                return True
+            continue
         if any(
             realizes(mpn=part.mpn, symbol=part.symbol, footprint=part.footprint)
             for part in definition.parts
@@ -965,7 +981,13 @@ def _requirement_proves_physical_obligation(requirement: dict, component_class: 
             return True
 
     try:
-        artifact = lower_requirement(requirement)
+        # The payload's requirement may carry provider-only intent fields (`obligation_ids`,
+        # `supply`, `ties`, ...) that `CircuitRequirement` forbids; the lowering probe reads the
+        # canonical fields only.
+        canonical_fields = models.CircuitRequirement.model_fields
+        artifact = lower_requirement({
+            key: value for key, value in requirement.items() if key in canonical_fields
+        })
     except (TypeError, ValueError):
         return False
     return artifact is not None and any(
@@ -987,41 +1009,61 @@ def physical_obligation_candidate_requirement_ids(payload: dict, row: dict) -> l
     )
 
 
-def attach_uniquely_provable_physical_obligations(payload: dict, prompt_state: dict) -> dict:
-    """Attach an omitted physical row only when one reviewed implementation proves it."""
+def attach_uniquely_provable_physical_obligations(
+    payload: dict, prompt_state: dict, *, intent_shaped: bool = True
+) -> dict:
+    """Assign a unique reviewed physical owner, removing contradictory authored claims.
+
+    The provider names owners by `obligation_ids`; a canonical payload already carries resolved
+    `obligations` rows. Each shape is rewritten in its own vocabulary.
+    """
     try:
         source_rows = source_obligation_rows(prompt_state, slots=("intent", "functional_spec"))
     except (StageSchemaError, ValueError):
         return payload
     normalized = dict(payload)
     requirements = list(normalized.get("requirements") or [])
-    owned = {
-        (row["kind"], row["original_obligation_id"])
-        for requirement in requirements
-        if isinstance(requirement, dict)
-        for row in _canonical_obligations(requirement.get("obligations"))
-    }
     derived_notes: list[str] = []
     for row in source_rows:
-        key = (row["kind"], row["original_obligation_id"])
-        if row["kind"] != "physical" or key in owned:
+        if row["kind"] != "physical":
             continue
+        identifier = str(row["original_obligation_id"])
         candidate_ids = physical_obligation_candidate_requirement_ids(normalized, row)
         if len(candidate_ids) != 1:
             continue
         requirement_id = candidate_ids[0]
+        changed = False
         for index, requirement in enumerate(requirements):
-            if isinstance(requirement, dict) and requirement.get("id") == requirement_id:
-                requirements[index] = {
-                    **requirement,
-                    "obligations": [*(requirement.get("obligations") or []), row],
-                }
-                owned.add(key)
-                derived_notes.append(
-                    f"{requirement_id}: physical obligation {row['original_obligation_id']!r} "
-                    "attached from unique reviewed recipe/lowerer evidence (derived)"
-                )
-                break
+            if not isinstance(requirement, dict):
+                continue
+            owns = requirement.get("id") == requirement_id
+            if intent_shaped:
+                prior = [str(name) for name in requirement.get("obligation_ids") or []]
+                retained = [name for name in prior if name != identifier]
+                if owns:
+                    retained.append(identifier)
+                if retained != prior:
+                    requirements[index] = {**requirement, "obligation_ids": retained}
+                    changed = True
+            else:
+                prior = [item for item in requirement.get("obligations") or []]
+                retained = [
+                    item for item in prior
+                    if not (
+                        isinstance(item, dict)
+                        and str(item.get("original_obligation_id")) == identifier
+                    )
+                ]
+                if owns:
+                    retained.append(row)
+                if retained != prior:
+                    requirements[index] = {**requirement, "obligations": retained}
+                    changed = True
+        if changed:
+            derived_notes.append(
+                f"{requirement_id}: physical obligation {identifier!r} "
+                "assigned to its unique reviewed physical owner (derived)"
+            )
     if not derived_notes:
         return normalized
     normalized["requirements"] = requirements
@@ -1030,11 +1072,12 @@ def attach_uniquely_provable_physical_obligations(payload: dict, prompt_state: d
 
 
 def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict) -> None:
-    """Reject a slot that drops or misplaces the obligations the committed stages carry.
+    """Reject a candidate whose ownership of the committed obligations cannot be honored.
 
-    `functional_spec` must repeat the committed rows verbatim; `architecture` carries the same rows
-    at the top level (written by `restore_source_obligations`) and must attach each one to the
-    requirement that implements it.
+    The rows themselves are compiler-written: `functional_spec` carries the committed intent set
+    verbatim, and `architecture` writes its top-level list from the committed intent + spec. What
+    a draft owns is *which* requirement or block claims each obligation, named by
+    ``original_obligation_id``; the compiler resolves those ids to the committed rows.
     """
     if stage not in {"functional_spec", "architecture"}:
         return
@@ -1045,67 +1088,80 @@ def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict)
     }
     if not expected:
         return
-    if stage == "architecture":
-        # The top-level list is written from the sources before this runs; what the draft owns is
-        # where each obligation is implemented, so check the requirement rows instead of asking the
-        # model to copy the same rows twice.
-        owned: dict[tuple[str, str], int] = {}
-        for requirement in payload.get("requirements") or []:
-            if not isinstance(requirement, dict):
-                continue
-            for row in _canonical_obligations(requirement.get("obligations")):
-                key = (row["kind"], row["original_obligation_id"])
-                owned[key] = owned.get(key, 0) + 1
-        # Only board-wide facts may remain ownerless. Quantitative rows qualify only when their
-        # subject and unit prove they are board-outline geometry; electrical and part limits stay
-        # on their realizing requirement.
-        unowned = [
-            row
-            for key, row in expected.items()
-            if key not in owned and models.obligation_requires_requirement_owner(row)
+    known_ids = {row["original_obligation_id"] for row in expected.values()}
+    if stage == "functional_spec":
+        owners = [
+            block for block in payload.get("blocks") or [] if isinstance(block, dict)
         ]
-        if unowned:
-            raise StageSchemaError(
-                "source obligations must be owned by a requirement",
-                diagnostic={
-                    "code": "source_obligation_not_retained",
-                    "message": (
-                        "Attach every committed typed obligation to the requirement that implements "
-                        "it through `requirements[].obligations`; the architecture's top-level "
-                        "`obligations` list is written from the committed intent and functional "
-                        "spec, and a paraphrased copy is restored from the committed row. A "
-                        "`quantity`, `fabrication`, or `negative` board-wide fact may stay at the "
-                        "top level. A `quantitative` row may do so only when it explicitly measures "
-                        "a board/PCB outline in a geometric unit or names the board's own build "
-                        "stack-up in `layers`/`plies`; electrical and part limits need "
-                        "their realizing requirement."
-                    ),
-                    "evidence": unowned,
-                    "candidate_requirement_ids": {
-                        row[
-                            "original_obligation_id"
-                        ]: physical_obligation_candidate_requirement_ids(payload, row)
-                        for row in unowned
-                        if row["kind"] == "physical"
-                    },
-                },
-            )
-        return
-    actual = {}
-    duplicates = []
-    for row in _canonical_obligations(payload.get("obligations")):
-        key = (row["kind"], row["original_obligation_id"])
-        if key in actual:
-            duplicates.append(row)
-        actual[key] = row
-    missing_or_changed = [row for key, row in expected.items() if actual.get(key) != row]
-    if missing_or_changed or duplicates:
+    else:
+        owners = [
+            requirement
+            for requirement in payload.get("requirements") or []
+            if isinstance(requirement, dict)
+        ]
+
+    def _claimed_ids(owner: dict) -> set[str]:
+        """Owner ids from either shape: the provider names `obligation_ids`, and the canonical
+        slot the compiler writes carries the resolved rows themselves."""
+        ids = {str(name) for name in owner.get("obligation_ids") or []}
+        ids.update(
+            str(row["original_obligation_id"])
+            for row in owner.get("obligations") or []
+            if isinstance(row, dict) and row.get("original_obligation_id")
+        )
+        return ids
+
+    claimed = {identifier for owner in owners for identifier in _claimed_ids(owner)}
+    unknown = sorted(claimed - known_ids)
+    if unknown:
         raise StageSchemaError(
-            "mandatory source obligations were omitted, changed, or duplicated",
+            "an obligation owner names an origin id no committed stage carries",
+            diagnostic={
+                "code": "unknown_source_obligation",
+                "message": (
+                    "`obligation_ids` must be the committed `original_obligation_id` values. The "
+                    "row itself is written by the compiler, so name the id and never a copy of "
+                    "the row."
+                ),
+                "evidence": unknown,
+            },
+        )
+    if stage != "architecture":
+        return
+    # Only board-wide facts may remain ownerless. Quantitative rows qualify only when their
+    # subject and unit prove they are board-outline geometry; electrical and part limits stay
+    # on their realizing requirement.
+    unowned = [
+        row
+        for key, row in expected.items()
+        if row["original_obligation_id"] not in claimed
+        and models.obligation_requires_requirement_owner(row)
+    ]
+    if unowned:
+        raise StageSchemaError(
+            "source obligations must be owned by a requirement",
             diagnostic={
                 "code": "source_obligation_not_retained",
-                "message": "Retain the complete original typed obligation at this stage.",
-                "evidence": missing_or_changed + duplicates,
+                "message": (
+                    "Name each committed obligation on the requirement that implements it through "
+                    "that requirement's `obligation_ids` (`original_obligation_id` values); the "
+                    "architecture's top-level `obligations` list and the requirement rows are "
+                    "written from the committed intent and functional spec by the compiler. "
+                    "Several requirements may name the same id when the design implements one "
+                    "obligation in more than one place. A `quantity`, `fabrication`, or `negative` "
+                    "board-wide fact may stay at the top level. A `quantitative` row may do so only "
+                    "when it explicitly measures a board/PCB outline in a geometric unit or names "
+                    "the board's own build stack-up in `layers`/`plies`; electrical and part limits "
+                    "need their realizing requirement."
+                ),
+                "evidence": unowned,
+                "candidate_requirement_ids": {
+                    row["original_obligation_id"]: physical_obligation_candidate_requirement_ids(
+                        payload, row
+                    )
+                    for row in unowned
+                    if row["kind"] == "physical"
+                },
             },
         )
 
@@ -1282,6 +1338,142 @@ def _schema_error_detail(exc: Exception) -> str:
     return str(exc)
 
 
+def _validate_constructed_architecture(
+    architecture: dict, prompt_state: dict, *, project_root: str,
+) -> None:
+    """Probe the actual covered composition without adopting downstream state."""
+    from pathlib import Path
+    from kicraft.design.cli_app import (
+        _symbol_footprint_pin_mismatches,
+        _unresolved_footprints,
+        _unresolved_symbols,
+    )
+    from kicraft.design.synthesis.validation import (
+        CheckResult,
+        check_bom_parts_reference_architecture_sheets,
+        check_bom_size,
+        check_capacitor_polarity_consistency,
+        check_composed_wiring,
+        check_sheets_have_parts,
+    )
+    from .stage_work_units import (
+        WorkUnitValidationError,
+        probe_architecture_construction,
+        unit_defect_diagnostic,
+    )
+
+    try:
+        constructed = probe_architecture_construction({
+            **prompt_state, "architecture": architecture,
+        })
+    except WorkUnitValidationError as exc:
+        raise StageSchemaError(
+            str(exc), diagnostic=unit_defect_diagnostic(exc, str(exc)),
+        ) from exc
+    except ValueError as exc:
+        raise StageSchemaError(str(exc), diagnostic={
+            "code": "constructed_plan_invalid",
+            "severity": "repair_required",
+            "message": str(exc),
+        }) from exc
+    if constructed is None:
+        return  # A genuine model-owned remainder is not a resolved composition.
+    bom = models.BOM.model_validate(constructed)
+    arch = models.Architecture.model_validate(architecture)
+    checks = [
+        check_bom_size(bom),
+        check_capacitor_polarity_consistency(bom),
+        check_sheets_have_parts(arch, bom),
+        check_bom_parts_reference_architecture_sheets(arch, bom),
+        *check_composed_wiring(arch, bom),
+    ]
+    for gate, offenders in (
+        ("footprint_inventory", _unresolved_footprints(bom, Path(project_root))),
+        ("symbol_inventory", _unresolved_symbols(bom)),
+        ("9.27", _symbol_footprint_pin_mismatches(bom, Path(project_root))),
+    ):
+        checks.append(CheckResult(
+            name=gate, ok=not offenders, message="constructed component inventory",
+            offenders=offenders,
+        ))
+    failures = [check for check in checks if not check.ok]
+    if not failures:
+        return
+    owners_by_ref: dict[str, set[str]] = {}
+    for ownership in bom.recipe_ownership:
+        for ref in ownership.refs:
+            owners_by_ref.setdefault(ref, set()).update(ownership.requirement_ids)
+    for part in bom.parts:
+        if part.lowering_requirement_id:
+            owners_by_ref.setdefault(part.ref, set()).add(part.lowering_requirement_id)
+    findings = []
+    for check in failures:
+        affected = {
+            owner
+            for offender in check.offenders
+            for ref in re.findall(r"\b[A-Z]+[0-9]+[A-Z0-9_-]*\b", offender)
+            for owner in owners_by_ref.get(ref, ())
+        }
+        affected.update(
+            requirement.id
+            for requirement in arch.requirements
+            if any(repr(requirement.id) in offender for offender in check.offenders)
+        )
+        gate = check.name.split()[0]
+        findings.append({
+            "code": "constructed_circuit_gate",
+            "severity": "repair_required",
+            "message": f"{check.name}: {check.message}",
+            "gate_codes": [gate],
+            "evidence": list(check.offenders),
+            "candidate_requirement_ids": {gate: sorted(affected)},
+            **({"requirement_id": next(iter(affected))} if len(affected) == 1 else {}),
+        })
+    message = "Constructed circuit violates " + "; ".join(check.name for check in failures)
+    raise StageSchemaError(message, diagnostic={
+        "code": "constructed_circuit_invalid",
+        "severity": "repair_required",
+        "message": message,
+        "findings": findings,
+    })
+
+
+def _fold_legacy_requirement_obligations(payload: dict) -> dict:
+    """Read a pre-cutover intent-shaped draft whose requirements carried resolved obligation rows.
+
+    Ownership moved to `obligation_ids`: the row content is the committed stage's to write, and
+    the provider schema no longer publishes a requirement-level `obligations` field. Recorded
+    drafts and reference transcripts predate that, so their rows are read once for their
+    `original_obligation_id` and dropped instead of refusing the whole candidate. A canonical
+    payload is untouched: it is not intent-shaped and its rows are the compiler's own.
+    """
+    requirements = payload.get("requirements")
+    if not isinstance(requirements, list):
+        return payload
+    changed = False
+    folded: list = []
+    for requirement in requirements:
+        rows = requirement.get("obligations") if isinstance(requirement, dict) else None
+        if not isinstance(rows, list) or not rows:
+            folded.append(requirement)
+            continue
+        ids = [
+            str(row["original_obligation_id"])
+            for row in rows
+            if isinstance(row, dict) and row.get("original_obligation_id")
+        ]
+        updated = {
+            **requirement,
+            "obligation_ids": list(
+                dict.fromkeys([*[str(name) for name in requirement.get("obligation_ids") or []], *ids])
+            ),
+        }
+        updated.pop("obligations", None)
+        folded.append(updated)
+        changed = True
+    return {**payload, "requirements": folded} if changed else payload
+
+
 def _normalize_stage_response(
     stage: str,
     payload: dict,
@@ -1301,10 +1493,20 @@ def _normalize_stage_response(
             # slot response carries `questions: []`. It is not part of the slot.
             payload = {key: value for key, value in payload.items() if key != "questions"}
         payload = normalize_board_outline_obligations(payload)
+        intent_shaped = False
         if stage == "architecture":
             payload = _apply_authoritative_standard_form_factor(payload, prompt_state)
-            payload = attach_uniquely_provable_physical_obligations(payload, prompt_state)
-            payload = restore_source_obligations(payload, prompt_state)
+            intent_shaped = _intent_shaped(payload)
+            if intent_shaped:
+                payload = _fold_legacy_requirement_obligations(payload)
+            payload = attach_uniquely_provable_physical_obligations(
+                payload, prompt_state, intent_shaped=intent_shaped
+            )
+            payload = restore_source_obligations(payload, prompt_state, stage=stage)
+        elif stage == "functional_spec":
+            # The spec's own `obligations` are the committed intent set, written here rather than
+            # copied by the model; only the block→obligation ownership is the draft's.
+            payload = restore_source_obligations(payload, prompt_state, stage=stage)
         validate_obligation_retention(stage, payload, prompt_state)
         if stage == "intent":
             return IntentStageResponse.model_validate(payload).model_dump(exclude_none=True), 0
@@ -1319,7 +1521,7 @@ def _normalize_stage_response(
                 "declared_interfaces",
             )
             payload = {key: value for key, value in payload.items() if key not in server_derived}
-            if _intent_shaped(payload):
+            if intent_shaped:
                 # The answer states the design; the canonical shape (net names, port
                 # bindings, endpoints, connector exposure) is derived from it here.
                 payload = _derive_intent_payload(payload, prompt_state.get("functional_spec"))
@@ -1349,7 +1551,8 @@ def _normalize_stage_response(
                     }
                 )
                 raise StageSchemaError(str(exc), diagnostic=diagnostic) from exc
-            return resolved.model_dump(exclude_none=True), 0
+            constructed_architecture = resolved.model_dump(exclude_none=True)
+            return constructed_architecture, 0
         if stage == "bom":
             return _normalize_bom_stage_response(payload, prompt_state)
         if stage == "wiring":

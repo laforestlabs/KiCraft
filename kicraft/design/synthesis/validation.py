@@ -2261,13 +2261,70 @@ def _two_terminal_part_nets(part, nets) -> tuple[str, str] | None:
     return (wired[0], wired[1]) if len(wired) == 2 and wired[0] != wired[1] else None
 
 
+def _reviewed_catch_diode_defects(part, fact, bom, info, nets) -> list[str]:
+    """Prove the actual rectifier terminals and reviewed ratings, not recipe provenance."""
+    support = (fact.get("support_network") or {}).get("catch_diode")
+    if not isinstance(support, dict):
+        return []
+    pin_nets = nets.get(part.ref) or {}
+    terminals = {
+        terminal: pin_nets.get(
+            _pin_number_named(info, part.ref, str(support.get(f"{terminal}_pin") or "").upper())
+        )
+        for terminal in ("anode", "cathode")
+    }
+    if not all(terminals.values()) or terminals["anode"] == terminals["cathode"]:
+        return [
+            f"E_CATCH_DIODE_SUPPORT {part.ref}: required rectifier endpoints "
+            "must resolve to distinct connected device pins"
+        ]
+    minimum_current = _fact_number(support, "minimum_forward_current_a")
+    minimum_voltage = _fact_number(support, "minimum_reverse_voltage_v")
+    for diode in bom.parts:
+        if _ref_prefix(diode.ref) != "D":
+            continue
+        diode_nets = nets.get(diode.ref) or {}
+        if any(
+            diode_nets.get(_pin_number_named(info, diode.ref, pin)) != terminals[terminal]
+            for terminal, pin in (("anode", "A"), ("cathode", "K"))
+        ):
+            continue
+        if minimum_current is not None or minimum_voltage is not None:
+            diode_fact = _reviewed_fact_for_part(diode)
+            if diode_fact is None or diode_fact.get("family") != "schottky-diode":
+                continue
+            limits = diode_fact.get("operating_limits") or {}
+            current = _fact_number(limits, "forward_current_a")
+            voltage = _fact_number(limits, "reverse_voltage_v")
+            if minimum_current is not None and (
+                current is None or current < minimum_current
+            ):
+                continue
+            if minimum_voltage is not None and (
+                voltage is None or voltage < minimum_voltage
+            ):
+                continue
+        return []
+    return [
+        f"E_CATCH_DIODE_SUPPORT {part.ref}: needs a correctly oriented rectifier "
+        f"with anode at {terminals['anode']!r}, cathode at {terminals['cathode']!r}"
+        + (
+            f", reviewed forward current >= {minimum_current:g}A"
+            if minimum_current is not None else ""
+        )
+        + (
+            f", reviewed reverse voltage >= {minimum_voltage:g}V"
+            if minimum_voltage is not None else ""
+        )
+    ]
+
+
 def check_reviewed_device_support_networks(bom) -> CheckResult:
     """§9.37 — prove direct mandatory support networks for reviewed devices.
 
-    At present this covers a reviewed bootstrap specification.  The capacitor
-    must directly span the actual BOOT and PH pin nets and meet the reviewed
-    value; a capacitor to ground, a same-net BOOT/PH short, or a merely
-    adjacent control network cannot establish bootstrap support.
+    Bootstrap capacitance and required rectifier topology are checked against
+    the device's manufacturer-backed support record. Compiler ownership is not
+    evidence that these actual parts, ratings, or connections are correct.
     """
     info, _ = _pin_info_by_ref(bom)
     nets = _nets_by_ref(bom)
@@ -2276,6 +2333,7 @@ def check_reviewed_device_support_networks(bom) -> CheckResult:
         fact = _reviewed_fact_for_part(part)
         if fact is None:
             continue
+        bad.extend(_reviewed_catch_diode_defects(part, fact, bom, info, nets))
         bootstrap = fact.get("bootstrap") or {}
         boot = (
             _fact_pin_name(fact, "boot") or str(bootstrap.get("positive_pin") or "").upper() or None
@@ -2391,6 +2449,73 @@ def _catalog_capacitor_voltage_defects(architecture, bom, nets) -> list[str]:
     return bad
 
 
+def _reviewed_enable_defects(architecture, part, fact, bom, info, nets) -> list[str]:
+    """Check static enable bias without treating a typical pull-up current as a guarantee."""
+    contract = (fact.get("support_network") or {}).get("enable")
+    if not isinstance(contract, dict):
+        return []
+    pin = _pin_number_named(info, part.ref, str(contract.get("pin") or "").upper())
+    net = (nets.get(part.ref) or {}).get(pin)
+    if pin is not None and net is None and contract.get("float_enables") is True:
+        if any(
+            endpoint.ref == part.ref and endpoint.pin == pin
+            for endpoint in getattr(bom, "no_connect_pins", ())
+        ):
+            return []
+    minimum = _fact_number(contract, "on_threshold_max_v")
+    maximum = _fact_number(contract, "absolute_max_voltage_v")
+    if pin is None or net is None or minimum is None or maximum is None:
+        return [f"E_ENABLE_SUPPORT {part.ref}: enable state lacks reviewed pin/bias evidence"]
+    voltage = _fact_number(architecture.rail_voltages, net)
+    if voltage is not None:
+        if minimum <= voltage <= maximum:
+            return []
+        return [
+            f"E_ENABLE_SUPPORT {part.ref}.{pin}: static enable rail {net!r} is "
+            f"{voltage:g}V; enabled operation requires {minimum:g}–{maximum:g}V"
+        ]
+    conductance = 0.0
+    weighted_voltage = 0.0
+    source_voltages = []
+    for peer in bom.parts:
+        if peer.ref == part.ref or net not in (nets.get(peer.ref) or {}).values():
+            continue
+        if any(
+            pin_info.get("type") in {"output", "bidirectional", "open_collector", "open_emitter"}
+            and (nets.get(peer.ref) or {}).get(number) == net
+            for number, pin_info in (info.get(peer.ref) or {}).items()
+        ):
+            # A controllable enable is not an always-on bias. Its operating modes
+            # belong to the design; a low commanded state is not a broken supply.
+            return []
+        if _ref_prefix(peer.ref) == "C":
+            continue  # A timing/bypass capacitor supplies no DC bias.
+        pair = _two_terminal_part_nets(peer, nets)
+        resistance = _resistance_ohms(peer.value) if _ref_prefix(peer.ref) == "R" else None
+        other = next((name for name in pair or () if name != net), None)
+        source = _fact_number(architecture.rail_voltages, other) if other else None
+        if pair is None or resistance is None or source is None:
+            return [
+                f"E_ENABLE_SUPPORT {part.ref}.{pin}: static enable network "
+                f"on {net!r} has unproven DC bias"
+            ]
+        conductance += 1.0 / resistance
+        weighted_voltage += source / resistance
+        source_voltages.append(source)
+    # The documented internal pull-up can only raise this passive-divider value.
+    # Its typical current is not a guaranteed minimum, so it cannot rescue a
+    # divider that falls below the maximum enable threshold.
+    if conductance and weighted_voltage / conductance >= minimum and all(
+        0.0 <= source <= maximum for source in source_voltages
+    ):
+        return []
+    return [
+        f"E_ENABLE_SUPPORT {part.ref}.{pin}: static enable bias on {net!r} "
+        f"does not establish {minimum:g}–{maximum:g}V without an unbounded "
+        "internal pull-up-current assumption"
+    ]
+
+
 def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
     """§9.38 — compare typed rails with device and selected capacitor ratings."""
     info, _ = _pin_info_by_ref(bom)
@@ -2400,6 +2525,7 @@ def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
         fact = _reviewed_fact_for_part(part)
         if fact is None:
             continue
+        bad.extend(_reviewed_enable_defects(architecture, part, fact, bom, info, nets))
         limits = fact.get("operating_limits") or {}
         vin = _fact_input_pin_name(fact)
         vin_min = _fact_number(fact, *_INPUT_MIN_KEYS)
@@ -5377,3 +5503,36 @@ def check_fs_connections_mapped(functional_spec: FunctionalSpec, architecture) -
         ),
         offenders=bad,
     )
+
+
+def check_composed_wiring(
+    architecture, bom, *, declared_interface_scope: str = "all"
+) -> list[CheckResult]:
+    """The same electrical/terminal gates at early construction and wiring commit."""
+    checks = [
+        check_pin_existence(bom),
+        check_net_coverage(bom),
+        check_power_pin_polarity(bom),
+        check_two_terminal_self_short(bom),
+        check_rf_feed_isolation(bom),
+        check_single_net_per_pin(bom),
+        check_family_wiring_contracts(bom),
+        check_mcu_programming_access(bom),
+        check_repeated_block_coverage(bom),
+        check_regulator_feedback_vout(bom),
+        check_reviewed_device_support_networks(bom),
+    ]
+    if architecture is not None:
+        checks.extend([
+            check_inter_sheet_nets_realized(architecture, bom),
+            check_typed_led_current_paths(architecture, bom),
+            check_reviewed_input_operating_ranges(architecture, bom),
+            check_reviewed_power_transfer(architecture, bom),
+            check_typed_passive_crossover_values(architecture, bom),
+            check_reviewed_constant_current_led_feedback(architecture, bom),
+            check_requirement_physical_realization(
+                architecture, bom, declared_interface_scope=declared_interface_scope,
+            ),
+            check_no_dangling_signal_nets(architecture, bom),
+        ])
+    return checks

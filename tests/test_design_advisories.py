@@ -107,14 +107,9 @@ def _regulator_intent(
     }
     if obligation:
         # The obligation is what makes the family match a curated recipe: without it the part
-        # is genuinely uncurated, which is the case the advisory is about.
-        regulator["obligations"] = [
-            {
-                "kind": "physical",
-                "original_obligation_id": "regulator",
-                "component_class": "voltage-regulator",
-            }
-        ]
+        # is genuinely uncurated, which is the case the advisory is about. Ownership is named by
+        # id; the row itself is carried once at the top level.
+        regulator["obligation_ids"] = ["regulator"]
     if exact_part is not None:
         regulator["exact_part"] = exact_part
     signals = [{"name": "RAIL_3V3", "from": "reg.output", "to": "edge:POWER_OUT"}]
@@ -125,11 +120,22 @@ def _regulator_intent(
             {"key": "gnd", "direction": "power", "function": "ground", "reference_domain": "GND"},
         ]
         signals.append({"name": "GND", "from": "reg.gnd", "to": "input.pin2"})
-    return {
+    payload = {
         "topologies": {"POWER": "5 V input header"},
         "comms_protocols": [],
         "mcu_present": False,
         "power": {"rails": {"+5V": {"voltage": 5.0, "from": "input.pin1"}}},
+        "obligations": (
+            [
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "regulator",
+                    "component_class": "voltage-regulator",
+                }
+            ]
+            if obligation
+            else []
+        ),
         "sheets": [
             {
                 "name": "INPUT",
@@ -159,6 +165,7 @@ def _regulator_intent(
         "signals": signals,
         "assumptions": [],
     }
+    return payload
 
 
 def test_unreviewed_exact_part_is_recorded_on_the_artifact_not_refused():

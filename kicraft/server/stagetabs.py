@@ -1222,6 +1222,9 @@ def _render_section(sec: dict, accent: str) -> None:
     elif kind == "issues":
         _render_issues(sec)
 
+    elif kind == "assurance":
+        _render_assurance(sec.get("assurance") or {})
+
     elif kind == "progress":
         pct = max(0, min(100, int(float(sec.get("percent", 0)))))
         phase = sec.get("phase", "")
@@ -1283,6 +1286,69 @@ _SEV_STYLE = {
     "warning": (_WARN, "rgba(234,179,8,0.10)", "rgba(234,179,8,0.40)", "warning"),
     "info": (_DIMMER, "rgba(100,116,139,0.08)", "rgba(100,116,139,0.30)", "info"),
 }
+
+
+def _assurance_group(title: str, items: list[str], color: str = _DIM) -> None:
+    if not items:
+        return
+    ui.label(title).classes("text-xs font-semibold uppercase tracking-wide mt-1").style(
+        f"color:{_DIMMER}")
+    with ui.column().classes("w-full gap-0.5"):
+        for item in items:
+            with ui.row().classes("w-full no-wrap gap-1 items-start"):
+                ui.label("•").style(f"color:{_DIMMER}")
+                ui.label(str(item)).classes(
+                    "text-xs whitespace-pre-wrap min-w-0").style(f"color:{color}")
+
+
+def _render_assurance(a: dict) -> None:
+    """The derived assurance reading: what is established, what was assumed, what
+    was done automatically, and what still limits the claim.
+
+    Rendered from the page's derived spec only -- this module never derives or
+    stores an assurance value of its own."""
+    if not a:
+        return
+    color = str(a.get("color") or _DIM)
+    with ui.column().classes("w-full gap-1"):
+        with ui.row().classes("w-full no-wrap gap-2 items-center"):
+            ui.icon("fact_check").style(f"color:{color};font-size:1rem")
+            ui.label(str(a.get("label") or "Assurance")).classes("text-sm font-semibold") \
+                .style(f"color:{color}")
+        if a.get("summary"):
+            ui.label(str(a["summary"])).classes(
+                "text-xs leading-snug whitespace-pre-wrap").style(f"color:{_DIM}")
+        if a.get("stale_preview"):
+            ui.label("These artifacts are a stale preview: they do not match the current "
+                     "accepted design.").classes("text-xs font-semibold") \
+                .style(f"color:{_WARN}")
+        _assurance_group("Established now", a.get("evidence") or [], _OK)
+        capability = a.get("capability") or []
+        if capability:
+            _assurance_group("Capability limitation", capability, _WARN)
+        _assurance_group("Recorded limitations / review required", a.get("limitations") or [], _WARN)
+        _assurance_group("Recorded assumptions and defaults", a.get("assumptions") or [], _DIM)
+        _assurance_group("Actions KiCraft took automatically", a.get("auto_actions") or [], _DIM)
+        deviations = [d for d in (a.get("deviations") or []) if isinstance(d, dict)]
+        if deviations:
+            ui.label("Part changes").classes(
+                "text-xs font-semibold uppercase tracking-wide mt-1").style(f"color:{_DIMMER}")
+            with ui.column().classes("w-full gap-0.5"):
+                for d in deviations:
+                    required = "user-required" if d.get("required") else "model-selected"
+                    consent = d.get("consent")
+                    if consent:
+                        state = f"approved by the user's recorded answer: {consent}"
+                    elif d.get("required"):
+                        state = "NO recorded user approval"
+                    else:
+                        state = "chosen automatically"
+                    line = (f"{d.get('wanted') or '?'} → {d.get('got') or '?'} "
+                            f"[{required}] — {state}")
+                    if d.get("reason"):
+                        line += f" · {d['reason']}"
+                    ui.label(line).classes("text-xs whitespace-pre-wrap") \
+                        .style(f"color:{_WARN if d.get('required') and not consent else _DIM}")
 
 
 def issues_section(items: list[dict], *, title: str = "Issues",

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import hmac
 import importlib
 import json
@@ -76,14 +77,17 @@ from .session import (
     derive_stage_statuses,
     downstream_stages,
     maybe_bom_reconcile,
+    null_downstream,
     read_state,
     record_answers,
     remaining_stages,
+    run_build_recovery,
     run_session,
 )
 from .spend_guard import SpendGuard
 from kicraft import __version__ as KICRAFT_VERSION
 from kicraft.build_slots import ACQUIRED_MARKER, slot_count
+from kicraft.design.advisories import advisory_code
 from kicraft.fsutil import atomic_write_text
 
 from . import activity as _activity
@@ -1379,7 +1383,8 @@ def _bom_position_mismatch_refs(parts: list, project_dir: Path | None) -> set[st
 
 
 def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | None,
-                    build_lines: list[str], *, prices: dict | None = None) -> list[dict]:
+                    build_lines: list[str], *, prices: dict | None = None,
+                    assurance: dict | None = None) -> list[dict]:
     """Build the structured project-state spec for a stage's inspector window.
 
     Pure-data stages read their committed slot from `sj` (state.json); the build
@@ -1389,6 +1394,10 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
     `prices` is the part-price lookup the BOM cost column reads (defaults to the
     process-wide `_PRICE_CACHE`; the demo passes a canned map so it needs no
     network).
+
+    `assurance` is the page's derived assurance reading (see _project_assurance);
+    when given it leads the Fab inspector, so the export tab states what the
+    package is and is not before the download button.
     """
     prices = _PRICE_CACHE if prices is None else prices
     if stage == "intent":
@@ -1619,6 +1628,8 @@ def _inspector_spec(stage: str, sj: dict, run_status: dict, project_dir: Path | 
 
     if stage == "fab":
         secs = []
+        if assurance:
+            secs.append({"type": "assurance", "assurance": assurance})
         arts = sj.get("artifacts") or {}
         if arts:
             secs.append({"type": "kv", "title": "Artifacts", "rows": [
@@ -2410,6 +2421,11 @@ _EMPTY_SIGNALS: dict = {
     "checks_failed": False, "synth_failures": [], "zip_ok": False, "history": False,
     "build_warnings": [], "pcb_errors": [], "review_findings": [],
     "stage_status": {}, "state_mtime": None, "attempt_outcome": {},
+    # Assurance evidence: the structured build verdict, the synthesis-check summary
+    # and any independent fulfilment verification recorded for this run. All three
+    # are read from the run's own persisted files (never a second database).
+    "build_gate": {}, "synth_check": {}, "fulfillment": {},
+    "brief": None,
 }
 
 # Disk-derived readings keyed by project root: the My-projects list polls every
@@ -2525,20 +2541,29 @@ def _durable_attempt_outcome(root: Path | None) -> dict:
 def _project_signals(root: Path | None) -> dict:
     """The durable facts a presentation needs for one project root.
 
-    Cached by (state.json, generated/, zip, board) mtimes, so a poll that
-    changed nothing does no file reading. A mid-write state.json keeps the
-    previous reading rather than blanking the row."""
+    Cached by (state.json, generated/, zip, board, transcript, build verdict,
+    synthesis summary, recorded verification) mtimes, so a poll that changed
+    nothing does no file reading -- including no re-hashing of a verified export.
+    A mid-write state.json keeps the previous reading rather than blanking the
+    row."""
     if root is None:
         return dict(_EMPTY_SIGNALS)
     key = str(root)
     prior = _DISK_SIGNALS.get(key)
     gen_root = root / "generated"
     zip_path = root / "kicraft_project.zip"
+    build_gate_path = root / _BUILD_GATE_REL
+    synth_check_path = root / _SYNTH_CHECK_REL
+    audit_path = root / _FULFILLMENT_AUDIT_REL
+    evidence_path = root / _ACCEPTANCE_EVIDENCE_REL
+    brief_path = root / "brief.txt"
     prior_gen = prior[1]["generated"] if prior else None
     probe = (Path(prior_gen) / f"{Path(prior_gen).name}.kicad_pcb") if prior_gen else None
     sig = (_mtime(_state_path(root)), _mtime(gen_root), _mtime(zip_path),
            _mtime(probe) if probe is not None else None,
-           _mtime(root / "events.jsonl"))
+           _mtime(root / "events.jsonl"),
+           _mtime(build_gate_path), _mtime(synth_check_path),
+           _mtime(audit_path), _mtime(evidence_path), _mtime(brief_path))
     if prior is not None and prior[0] == sig:
         return prior[1]
     sj = _read_state_json(root)
@@ -2554,6 +2579,11 @@ def _project_signals(root: Path | None) -> dict:
     if generated is None:
         generated = _discover_generated_dir(root)
     artifacts = sj.get("artifacts") or {}
+    brief = None
+    try:
+        brief = brief_path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        brief = None  # no recorded brief: the verification's brief binding can't be checked
     info = {
         "state": sj,
         "stem": stem or (generated.name if generated else None),
@@ -2574,9 +2604,526 @@ def _project_signals(root: Path | None) -> dict:
         # Why the newest attempt ended, from its own transcript: the only durable
         # statement of a stage that never committed (see _durable_attempt_outcome).
         "attempt_outcome": _durable_attempt_outcome(root),
+        "build_gate": _json_dict(build_gate_path),
+        "synth_check": _json_dict(synth_check_path),
+        "fulfillment": _verified_fulfillment(root, brief),
+        "brief": brief,
     }
     _DISK_SIGNALS[key] = (sig, info)
     return info
+
+
+# --------------------------------------------------------------------------- #
+# Assurance: what a project's OWN current evidence does and does not support
+# --------------------------------------------------------------------------- #
+# ONE derived reading, shared by the workspace summary, the project list and the
+# export/download surfaces. It is deliberately not a second status store: every
+# fact comes from persisted evidence (committed slots, stage_status, review
+# findings, the build verdict files, and any independent fulfilment verification
+# recorded for this run), so a reopen derives exactly the same answer.
+#
+# What may NOT promote assurance: parts coverage, a committed review stage, the
+# presence of a package on disk, or an accepted substitution/assumption ledger
+# entry -- a ledger records a change, not the user's consent to it.
+_FULFILLMENT_AUDIT_REL = Path("eval") / "product_acceptance.json"
+_ACCEPTANCE_EVIDENCE_REL = Path("eval") / "acceptance_evidence.json"
+_BUILD_GATE_REL = Path(".kicraft") / "build_gate.json"
+_SYNTH_CHECK_REL = Path(".kicraft") / "synthesis_check.json"
+
+# Assurance level -> (short label, colour). One table so every surface badges the
+# same reading the same way.
+_ASSURANCE_LEVELS: dict[str, tuple[str, str]] = {
+    "verified": ("Software-verified complete export", "#34d399"),
+    "generated": ("Fabrication-ready package · independently unverified", "#60a5fa"),
+    "review_required": ("Generated with recorded gaps · review required", "#eab308"),
+    "limited": ("Recorded capability limitation", "#f59e0b"),
+    "partial": ("Incomplete or failed preview", "#f87171"),
+    "clarification": ("Waiting for your answer", "#a78bfa"),
+    "working": ("Work in progress", "#94a3b8"),
+    "none": ("No design evidence yet", "#64748b"),
+}
+
+# RecoveryPolicy's durable action vocabulary, in plain user-facing words (plan
+# §9.2: explain the action actually taken, never an internal contract name).
+_RECOVERY_ACTION_TEXT: dict[str, str] = {
+    "repair_wiring": "repaired the wiring the evidence pointed at",
+    "backtrack_bom": "reassigned the responsible component choice",
+    "backtrack_architecture": "reassigned the responsible architecture choice",
+    "try_reviewed_alternative": "switched to an available reviewed alternative",
+    "rebuild": "rebuilt the affected board",
+    "none": "stopped without changing the design",
+}
+
+_MAX_ASSURANCE_LINES = 24
+
+
+def _json_dict(path: Path) -> dict:
+    """A JSON object read from disk, or {} when absent/unreadable/invalid."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _stable_hash(value) -> str:
+    """The evaluator's own stable-hash convention (kicraft.eval.design_acceptance)."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _verified_artifact_staleness(payload: dict, root: Path) -> str | None:
+    """Why a recorded verification's hashed artifacts no longer describe this run."""
+    rows = payload.get("artifacts")
+    if not isinstance(rows, list) or not rows:
+        return "the recorded verification hashes no artifacts"
+    for row in rows:
+        if not isinstance(row, dict):
+            return "the recorded verification has an invalid artifact row"
+        rel = row.get("path")
+        if not isinstance(rel, str) or not rel or Path(rel).is_absolute():
+            return "the recorded verification names a non-local artifact"
+        path = root / rel
+        if not path.is_file():
+            return f"verified artifact {rel} is no longer on disk"
+        if _file_sha256(path) != row.get("sha256"):
+            return f"verified artifact {rel} changed since it was verified"
+    return None
+
+
+def _product_acceptance_current(payload: dict, root: Path,
+                               brief: str | None) -> tuple[bool, str]:
+    """(current, why-not) for an independent product-acceptance audit.
+
+    Every check re-verifies the recorded success against the files on disk; the
+    audit's own frozen-input hashes are not recomputable here, but a changed
+    artifact, a changed delivered-artifact selection or a different brief makes
+    the recorded success stale, and a stale success never counts.
+    """
+    if payload.get("schema_version") != 2:
+        return False, "the recorded verification uses an unsupported schema"
+    if payload.get("product_success") is not True or payload.get("errors"):
+        return False, "the recorded verification does not certify successful fulfilment"
+    verdicts = payload.get("obligations")
+    if not isinstance(verdicts, dict) or not verdicts:
+        return False, "the recorded verification carries no obligation verdicts"
+    for row in verdicts.values():
+        if not isinstance(row, dict) or row.get("status") != "pass" \
+                or row.get("reason") is not None:
+            return False, "the recorded verification has an unmet obligation"
+    why = _verified_artifact_staleness(payload, root)
+    if why:
+        return False, why
+    from kicraft.eval.product_acceptance import _artifact_inventory
+    if payload.get("artifact_inventory") != _artifact_inventory(root):
+        return False, "the delivered artifact selection changed since it was verified"
+    if brief and (payload.get("context") or {}).get("original_brief_hash") != _stable_hash(brief):
+        return False, "the recorded verification is for a different brief"
+    return True, ""
+
+
+def _acceptance_evidence_current(payload: dict, root: Path,
+                                 brief: str | None) -> tuple[bool, str]:
+    """(current, why-not) for filled acceptance evidence recorded for this run."""
+    if payload.get("schema_version") != 1:
+        return False, "the recorded acceptance evidence uses an unsupported schema"
+    for phase in ("generation", "fabrication", "software_fulfillment"):
+        record = payload.get(phase)
+        if not isinstance(record, dict) or record.get("status") != "pass":
+            return False, f"the recorded acceptance evidence does not verify {phase}"
+    gates = payload.get("common_gates")
+    if not isinstance(gates, dict) or any(gates.get(g) != "pass" for g in ("erc", "drc")):
+        return False, "the recorded acceptance evidence has no passing ERC/DRC verdicts"
+    results = payload.get("obligations")
+    if not isinstance(results, dict) or not results:
+        return False, "the recorded acceptance evidence carries no obligation results"
+    for row in results.values():
+        if not isinstance(row, dict) or row.get("status") != "pass":
+            return False, "the recorded acceptance evidence has an unmet obligation"
+    paths = (payload.get("fabrication") or {}).get("artifact_paths")
+    if not isinstance(paths, list) or not paths:
+        return False, "the recorded acceptance evidence names no delivered artifacts"
+    for rel in paths:
+        if not isinstance(rel, str) or not rel or Path(rel).is_absolute() \
+                or not (root / rel).is_file():
+            return False, f"the recorded acceptance evidence names a missing artifact {rel!r}"
+    if brief and payload.get("brief_hash") != _stable_hash(brief):
+        return False, "the recorded acceptance evidence is for a different brief"
+    return True, ""
+
+
+def _verified_fulfillment(root: Path, brief: str | None) -> dict:
+    """Independent fulfilment verification recorded FOR THIS RUN and still current.
+
+    Two existing carriers are read: an independent product-acceptance audit
+    (``eval/product_acceptance.json``, whose artifact hashes bind the recorded
+    success to the delivered files) and filled acceptance evidence
+    (``eval/acceptance_evidence.json``). A recording whose artifacts, delivered
+    selection or brief no longer match is reported as STALE, never counted.
+    """
+    stale = ""
+    audit = _json_dict(root / _FULFILLMENT_AUDIT_REL)
+    if audit:
+        ok, why = _product_acceptance_current(audit, root, brief)
+        if ok:
+            return {"verified": True, "carrier": "an independent product-acceptance audit",
+                    "stale": None}
+        stale = why
+    evidence = _json_dict(root / _ACCEPTANCE_EVIDENCE_REL)
+    if evidence:
+        ok, why = _acceptance_evidence_current(evidence, root, brief)
+        if ok:
+            return {"verified": True, "carrier": "the recorded acceptance evidence",
+                    "stale": None}
+        stale = stale or why
+    return {"verified": False, "carrier": None, "stale": stale or None}
+
+
+def _normalized_token(value) -> str:
+    """Case/punctuation-insensitive identity token for part-name comparison."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _user_required_tokens(intent: dict, arch: dict) -> list[str]:
+    """Identity tokens for parts the USER required (never a model-selected one)."""
+    raw = [str(part) for part in (intent.get("named_parts") or [])]
+    raw.extend(str(identity) for identity in (arch.get("protected_identities") or []))
+    for row in arch.get("requirements") or []:
+        if isinstance(row, dict) and row.get("exact_part"):
+            raw.append(str(row["exact_part"]))
+    return [token for token in (_normalized_token(item) for item in raw) if token]
+
+
+def _deviation_consent(questions, wanted: str, got: str) -> str | None:
+    """The recorded user answer that approves substituting `wanted`, or None.
+
+    A substitution LEDGER entry records that a change happened; it is never the
+    user's consent. Only an answer the user actually gave (persisted on the
+    question row) counts as consent, and it must name the part being changed --
+    so an absent match reports "no recorded approval" rather than assuming one.
+    """
+    tokens = [token for token in (_normalized_token(wanted), _normalized_token(got)) if token]
+    if not tokens:
+        return None
+    for question in questions or []:
+        if not isinstance(question, dict):
+            continue
+        answer = str(question.get("answer") or "").strip()
+        if not answer:
+            continue
+        haystack = _normalized_token(f"{question.get('text') or ''} {answer}")
+        if any(token in haystack for token in tokens):
+            return answer
+    return None
+
+
+def _project_assurance(*, status: str, derived: dict, signals: dict) -> dict:
+    """The honest assurance reading of one project, from its own persisted evidence.
+
+    Levels, strongest first:
+
+    ``verified``         a CURRENT independent verification of this exact export
+    ``generated``        a completed, fabrication-gate-clean export with no
+                         recorded review gap -- still not independently verified
+    ``review_required``  design committed, but recorded gaps must be reviewed
+    ``limited``          a recorded requirement KiCraft could not realize
+    ``partial``          build failed/exhausted, or the design never completed
+    ``clarification``    waiting on the user's answer
+    ``working``          work in flight (no assurance claim yet)
+    ``none``             nothing to assess
+
+    ``stale_preview`` is True when board artifacts exist that the CURRENT accepted
+    design no longer matches (an upstream edit invalidated them, or the attempt
+    that produced them failed): those artifacts stay on disk as history but are
+    never presented as this design's delivery.
+    """
+    sj = signals.get("state") or {}
+    ss = signals.get("stage_status") or {}
+    arts = sj.get("artifacts") or {}
+    intent = sj.get("intent") or {}
+    spec = sj.get("functional_spec") or {}
+    arch = sj.get("architecture") or {}
+    bom = sj.get("bom") or {}
+    questions = [q for q in (sj.get("open_questions") or []) if isinstance(q, dict)]
+    gate = signals.get("build_gate") or {}
+    flow = signals.get("fulfillment") or {}
+    design_complete = all(derived.get(s) in ("done", "warning") for s in DESIGN_STAGES)
+    artifacts_present = bool(
+        signals.get("sheets") or signals.get("pcb") or signals.get("zip_ok"))
+
+    evidence: list[str] = []
+    assumptions: list[str] = []
+    limitations: list[str] = []
+    auto_actions: list[str] = []
+    # A gap that must be resolved by a human (consent, a blocking finding, a
+    # broken verification) or by the design itself. Advisories alone do not block
+    # verification -- they are recorded properties the export did not prove.
+    blocking_notes: list[str] = []
+
+    def limit(note: str, *, blocking: bool = False) -> None:
+        limitations.append(note)
+        if blocking:
+            blocking_notes.append(note)
+
+    committed = [s for s in DESIGN_STAGES if derived.get(s) in ("done", "warning")]
+    if design_complete:
+        evidence.append("All five design stages committed")
+    elif committed:
+        evidence.append("Committed stages: "
+                        + ", ".join(_activity.stage_label(s) or s for s in committed))
+
+    # Recorded assumptions/defaults. An assumption or auto-defaulted answer is
+    # what KiCraft decided, never what the user approved.
+    for label, rows in (
+        ("Intent", intent.get("assumptions")),
+        ("Functional spec", spec.get("assumptions")),
+        ("Architecture", arch.get("assumptions")),
+        ("BOM", bom.get("assumptions")),
+    ):
+        for line in rows or []:
+            text = str(line).strip()
+            if not text or advisory_code(text):
+                continue  # advisories are reported below, as recorded gaps
+            assumptions.append(f"{label}: {text}")
+
+    # Advisory findings: properties the derivation could not prove about an
+    # otherwise buildable design (kicraft.design.advisories is the one reader).
+    for row in arch.get("advisories") or []:
+        if isinstance(row, dict) and row.get("code"):
+            limit(f"Advisory {row['code']}: {row.get('message') or ''}".strip())
+    for line in bom.get("assumptions") or []:
+        if advisory_code(line):
+            limit(str(line).strip())
+
+    declared = [str(name) for name in (arch.get("declared_interfaces") or [])]
+    if declared:
+        limit("Pin functions declared by the model for parts no reviewed recipe covers "
+              "(not independently verified): " + ", ".join(declared))
+    unresolved = [str(name) for name in (arch.get("unresolved_requirement_ids") or [])]
+    if unresolved:
+        limit("Requirements with no reviewed implementation yet (model-owned remainder): "
+              + ", ".join(unresolved))
+
+    # Part substitutions: a required part keeps its own consent requirement; a
+    # model-selected part's automatic alternative is reported as an action, not
+    # as a limitation.
+    required_tokens = _user_required_tokens(intent, arch)
+    deviations: list[dict] = []
+    for row in bom.get("substitutions") or []:
+        if not isinstance(row, dict):
+            continue
+        wanted, got = str(row.get("wanted") or ""), str(row.get("got") or "")
+        reason = str(row.get("reason") or "")
+        token = _normalized_token(wanted)
+        required = bool(token) and any(
+            other and (other in token or token in other) for other in required_tokens)
+        consent = _deviation_consent(questions, wanted, got)
+        deviations.append({"wanted": wanted, "got": got, "reason": reason,
+                           "required": required, "consent": consent})
+        if required and consent is None:
+            limit(f"Change to a required part with no recorded user approval: "
+                  f"{wanted} → {got}" + (f" ({reason})" if reason else ""), blocking=True)
+        elif required:
+            evidence.append(
+                f"User-approved change to a required part: {wanted} → {got} "
+                f"(recorded answer: {consent})")
+        else:
+            auto_actions.append(
+                f"Chose an available alternative automatically: {wanted} → {got}"
+                + (f" ({reason})" if reason else ""))
+
+    # Auto-defaulted questions: recorded, and explicitly not consent.
+    for question in questions:
+        default = str(question.get("default_applied") or "").strip()
+        answered = bool(str(question.get("answer") or "").strip())
+        if default and not answered and not question.get("reconcile_target"):
+            auto_actions.append(
+                f"Defaulted a cosmetic choice automatically: "
+                f"{question.get('text') or ''} → {default}")
+
+    # Build/verification evidence: the routed-board verdict, the synthesis checks
+    # and the recorded independent verification (if any).
+    if gate:
+        if gate.get("fab_acceptable") is True:
+            counts = ", ".join(f"{gate.get(key, 0)} {key}"
+                               for key in ("shorts", "unconnected", "courtyard", "keepout"))
+            evidence.append(f"Routed-board fabrication gate passed ({counts})")
+        else:
+            reasons = ", ".join(str(r) for r in (gate.get("reasons") or [])[:4])
+            limit("The routed board is not fabrication-acceptable"
+                  + (f": {reasons}" if reasons else ""), blocking=True)
+    for warning in gate.get("warnings") or []:
+        limit(f"Fabrication caution: {warning}")
+    synth_check = signals.get("synth_check") or {}
+    if synth_check:
+        if str(synth_check.get("status")) == "ok":
+            evidence.append("Synthesis checks passed")
+        else:
+            failures = ", ".join(str(name) for name in (synth_check.get("failed_checks") or []))
+            limit("Synthesis checks did not pass"
+                  + (f": {failures}" if failures else ""), blocking=True)
+    if design_complete and not signals.get("checks_failed") and not synth_check \
+            and signals.get("generated"):
+        limit("No synthesis-check summary is recorded for this export")
+
+    findings = [f for f in (signals.get("review_findings") or []) if isinstance(f, dict)]
+    blockers = [f for f in findings if str(f.get("severity")) == "blocker"]
+    if blockers:
+        limit(f"Electrical review recorded {len(blockers)} blocker(s) the pipeline did not clear; "
+              "each needs a human review before fabrication", blocking=True)
+
+    # Durable stage findings: a stage that committed with a blocking finding, or
+    # a stage that terminally failed on one (the recorded capability limitation).
+    capability: list[str] = []
+    for stage in (*DESIGN_STAGES, "electrical_review"):
+        entry = ss.get(stage)
+        if not isinstance(entry, dict):
+            continue
+        label = _activity.stage_label(stage) or stage
+        if entry.get("repair_required") or entry.get("semantic_clean") is False:
+            limit(f"{label}: committed with findings that still need review", blocking=True)
+        for diagnostic in entry.get("diagnostics") or []:
+            if not isinstance(diagnostic, dict):
+                continue
+            severity = str(diagnostic.get("severity") or "")
+            if severity not in ("repair_required", "fab_gate"):
+                continue
+            detail = (f"{diagnostic.get('code') or 'finding'}: "
+                      f"{diagnostic.get('message') or 'a required property could not be established'}")
+            scope = (f" (requirement {diagnostic['requirement_id']})"
+                     if diagnostic.get("requirement_id") else "")
+            if entry.get("ok") is False:
+                # Terminal: the pipeline stopped on this requirement.
+                capability.append(f"{label}: {detail}{scope}")
+                limit(f"{label} stopped on: {detail}{scope}", blocking=True)
+            else:
+                limit(f"{label}: {detail}{scope}", blocking=True)
+        if entry.get("fab_safe") is False:
+            limit(f"{label}: recorded as not fabrication-safe", blocking=True)
+
+    # A recorded verification that no longer matches this export.
+    if flow.get("stale"):
+        limit(f"Recorded independent verification is stale: {flow['stale']}", blocking=True)
+
+    # Build-recovery history (RecoveryPolicy's durable stage_status entry).
+    recovery = ss.get("build_recovery") if isinstance(ss.get("build_recovery"), dict) else {}
+    recovery_events = [e for e in (recovery.get("recovery_events") or [])
+                       if isinstance(e, dict)]
+    for event in recovery_events:
+        action = str(event.get("action") or "")
+        auto_actions.append(
+            f"Recovered automatically: {_RECOVERY_ACTION_TEXT.get(action, action or 'recovery action')}"
+            f" — {event.get('reason') or ''} ({event.get('outcome') or 'unknown'})")
+    recovered = any(str(event.get("outcome")) == "applied" for event in recovery_events)
+    exhausted_reason = next(
+        (str(event.get("reason") or "") for event in reversed(recovery_events)
+         if str(event.get("outcome")) == "exhausted"), "")
+
+    open_unanswered = [q for q in questions
+                       if not str(q.get("answer") or "").strip() and not q.get("reconcile_target")]
+    blocking_open = [q for q in open_unanswered if q.get("blocking", True)]
+    for question in open_unanswered:
+        if question in blocking_open:
+            continue
+        if not str(question.get("default_applied") or "").strip():
+            limit("A recorded question was never answered or defaulted: "
+                  f"{question.get('text') or ''}")
+
+    verified = bool(flow.get("verified")) and design_complete
+    stale_preview = artifacts_present and not design_complete
+    zip_fresh = bool(signals.get("zip_ok")) and derived.get("fab") in ("done", "warning")
+
+    if status in ("running", "retrying", "queued", "starting", "finalizing"):
+        level = "working"
+    elif status == "awaiting_input" or blocking_open:
+        level = "clarification"
+    elif not design_complete:
+        level = "limited" if capability else "partial"
+    elif status in ("failed", "interrupted") or not zip_fresh:
+        level = "partial"
+    elif capability:
+        level = "limited"
+    elif verified and not blocking_notes:
+        level = "verified"
+    elif limitations:
+        level = "review_required"
+    else:
+        level = "generated"
+
+    # The one line every download/status surface shows. Recorded ASSUMPTIONS and
+    # automatic actions do not by themselves downgrade the label (they are
+    # decisions KiCraft made and records); a recorded LIMITATION or a blocking
+    # finding does, and leads the sentence.
+    lead = (blocking_notes or limitations or [""])[0]
+    if level == "verified":
+        summary = (f"Independently verified by {flow.get('carrier')} against this exact "
+                   "export. Hardware qualification is still the user's to obtain.")
+        if limitations:
+            summary += " Recorded, unproven properties are listed in the details."
+    elif level == "generated":
+        summary = ("A current, fabrication-gate-clean package exists. No independent "
+                   "fulfilment verification is recorded for this export.")
+    elif level == "review_required":
+        summary = f"Generated, but review is required before fabrication: {lead}"
+    elif level == "limited":
+        summary = ("KiCraft stopped on a requirement it could not realize with the reviewed "
+                   f"library: {capability[0] if capability else lead}. A different part, range "
+                   "or board choice — or your explicit approval — may resolve it.")
+    elif level == "partial":
+        if stale_preview:
+            summary = ("The board on disk is a preview of an earlier design and does not match "
+                       "the current accepted design. Nothing here is fabrication-ready.")
+        elif exhausted_reason:
+            summary = (f"The build exhausted its allowed recovery and did not deliver: "
+                       f"{exhausted_reason}")
+        elif lead:
+            summary = f"The build did not produce a current, fabrication-ready package: {lead}"
+        else:
+            summary = "The build did not produce a current, fabrication-ready package."
+    elif level == "clarification":
+        summary = "The design is waiting on your answer before it can continue."
+    elif level == "working":
+        summary = "Work is in progress; no assurance claim is made yet."
+    else:
+        summary = "No design evidence is available for this project yet."
+
+    if recovered and level in ("verified", "generated", "review_required"):
+        applied = next((str(event.get("action") or "") for event in recovery_events
+                        if str(event.get("outcome")) == "applied"), "")
+        summary += (" It was recovered automatically after a recorded failure ("
+                    f"{_RECOVERY_ACTION_TEXT.get(applied, applied or 'recovery action')}); "
+                    "see the actions below.")
+
+    def _capped(lines: list[str]) -> list[str]:
+        if len(lines) <= _MAX_ASSURANCE_LINES:
+            return lines
+        return [*lines[:_MAX_ASSURANCE_LINES],
+                f"… {len(lines) - _MAX_ASSURANCE_LINES} more recorded item(s) in state.json"]
+
+    label, color = _ASSURANCE_LEVELS[level]
+    return {
+        "level": level,
+        "label": label,
+        "color": color,
+        "summary": summary,
+        "evidence": _capped(evidence),
+        "assumptions": _capped(assumptions),
+        "limitations": _capped(limitations),
+        "auto_actions": _capped(auto_actions),
+        "capability": _capped(capability),
+        "deviations": deviations,
+        "recovered": recovered,
+        "exhausted_reason": exhausted_reason,
+        "stale_preview": stale_preview,
+        "verified_export": level == "verified",
+    }
 
 
 def _project_field(p, name: str, default=None):
@@ -2790,6 +3337,8 @@ def _headline_for(status: str, stage: str | None, act: dict, issues=()) -> str:
         return "Design complete"
     if status == "complete_with_warnings":
         return "Complete, with cautions"
+    if status == "stale":
+        return "Stale preview: the board on disk is not this design's delivery"
     if status == "failed":
         failure = act.get("failure") or {}
         if failure.get("message"):
@@ -2828,6 +3377,12 @@ def _plan_from(status: str, derived: dict, signals: dict) -> str | None:
         return "answer"
     if status in ("complete", "complete_with_warnings"):
         return "download"
+    if status == "stale":
+        # The artifacts on disk are not this design's delivery: finish (or rebuild
+        # from) the current design state before any download is offered again.
+        if not recoverable:
+            return "new_from_brief"
+        return "continue" if design_left else "rebuild"
     if status in ("failed", "interrupted"):
         if recoverable:
             return "continue" if design_left else "rebuild"
@@ -2956,6 +3511,14 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
             stage = stage or _relevant_stage(derived, act)
             detail = detail or ("This project's finished package is no longer on "
                                 "disk.")
+        elif not all(derived.get(s) in ("done", "warning") for s in DESIGN_STAGES):
+            # `ok` says an earlier attempt finished, not that the CURRENT accepted
+            # design produced the artifacts on disk: an upstream edit invalidated
+            # them. They stay viewable as history, never as this design's delivery.
+            status = "stale"
+            stage = stage or _relevant_stage(derived, act)
+            detail = detail or ("A board from an earlier accepted design is on disk; "
+                               "it does not match the current design state.")
         else:
             has_warnings = bool(derived.get("fab") == "warning"
                                 or derived.get("place_route") == "warning"
@@ -2996,17 +3559,23 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
 
     headline = _headline_for(status, stage, act, issues)
     action = _plan_from(status, derived, sig)
+    # The honest assurance reading of this project's own evidence (see
+    # _project_assurance). Derived, never stored: a reopen reads the same files
+    # and reaches the same answer, and no surface may claim more than this.
+    assurance = _project_assurance(status=status, derived=derived, signals=sig)
 
     if status in ("complete", "complete_with_warnings"):
         # A download is offered only for the CURRENT validated package: the
         # attempt's own zip, no work in flight, and a fab stage that actually
-        # produced it. Never a leftover filename discovered on disk.
+        # produced it. Never a leftover filename discovered on disk, and never a
+        # stale preview whose artifacts no longer match the accepted design.
         if live_running or job_active:
             zip_ref = None
         elif live is not None and live.get("zip"):
             zip_ref = str(live["zip"])
         download_ready = bool(
-            zip_ref and Path(zip_ref).is_file() and derived.get("fab") in ("done", "warning"))
+            zip_ref and Path(zip_ref).is_file() and derived.get("fab") in ("done", "warning")
+            and not assurance["stale_preview"])
     else:
         zip_ref = None
 
@@ -3022,6 +3591,10 @@ def _project_presentation(p, *, live=None, job=None, activity=None,
         "download_ready": download_ready,
         "zip_path": zip_ref if download_ready else None,
         "queue_note": queue_note,
+        # What this project's evidence does and does not support: the label and
+        # the recorded evidence/assumptions/limitations every surface shows next
+        # to a status or a download.
+        "assurance": assurance,
         # The artifact-derived per-stage outcomes this reading was based on, so a
         # caller (the workspace's replay selection) can reuse it instead of
         # re-deriving.
@@ -3065,6 +3638,9 @@ def _fallback_detail(status: str, sig: dict, act: dict, issues=()) -> str:
         return "Run stopped; no detailed cause was saved."
     if status in ("complete", "complete_with_warnings"):
         return "Design complete."
+    if status == "stale":
+        return ("The board on disk is a preview of an earlier design and does not match "
+                "the current one; continue or rebuild before downloading.")
     return ""
 
 
@@ -3080,6 +3656,7 @@ _STATUS_BADGE: dict[str, tuple[str, str, str]] = {
     "finalizing": ("hourglass_bottom", "#94a3b8", "Finalizing"),
     "complete": ("check_circle", "#4ade80", "Complete"),
     "complete_with_warnings": ("warning", "#eab308", "Complete with cautions"),
+    "stale": ("history_toggle_off", "#eab308", "Stale preview"),
     "failed": ("cancel", "#f87171", "Failed"),
     "interrupted": ("link_off", "#94a3b8", "Interrupted"),
     "unavailable": ("folder_off", "#94a3b8", "Files unavailable"),
@@ -3285,7 +3862,47 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
         def progress(ev):
             _record_progress_event(state, ev, run_id=run_id)
 
-        rc = _drive_build_queue(ws, state, progress, kind=kind)
+        def _run_build() -> int:
+            return _drive_build_queue(ws, state, progress, kind=kind)
+
+        recovery = None
+        if kind == "build":
+            # A user-requested rebuild shares the same build-to-design policy as
+            # the initial design: the durable recovery budget lives in
+            # state.json, so this cannot reset it. A manual route is the user's
+            # explicit instruction and never triggers a design revision.
+            brief = state.get("brief") or ((read_state(ws).get("intent") or {}).get("goal") or "")
+
+            def _redrive(stages, instruction: str):
+                rr = run_session(
+                    ws, brief, stages, instruction=instruction, progress=progress,
+                    run_id=run_id,
+                    auto_default_questions=state.get("auto_default_questions", True),
+                )
+                if rr.get("guard"):
+                    state["spend"] = _project_spend_usd(state.get("project_id"))
+                return rr
+
+            if brief:
+                recovery = run_build_recovery(
+                    ws, brief, _run_build, progress=progress, run_id=run_id,
+                    auto_default_questions=state.get("auto_default_questions", True),
+                    redrive=_redrive,
+                )
+        rc = recovery.get("rc") if recovery is not None else _run_build()
+        if recovery is not None:
+            state["build_recovery"] = {
+                "status": recovery.get("status"),
+                "attempts": recovery.get("attempts"),
+                "max_attempts": recovery.get("max_attempts"),
+                "failure_kind": recovery.get("failure_kind"),
+            }
+            if recovery.get("status") == "awaiting_input":
+                state["questions"] = recovery.get("questions") or []
+                state["awaiting_input"] = True
+                state["status"] = "awaiting_input"
+                state["ok"] = None
+                return
         # Surface whatever board the build left behind -- on a failed verify
         # the promote tail keeps the failed candidate, and inspecting it is
         # the whole point of showing failures.
@@ -3302,9 +3919,11 @@ def _rerun_build_worker(state: dict, kind: str) -> None:
         _record_run_error(state, e)
         state["ok"] = False
     finally:
-        if not state.get("ok"):
+        if state.get("status") != "awaiting_input" and not state.get("ok"):
             # A failed (re)build has no valid package: drop any stale zip so
             # the persisted row offers no download that mismatches the board.
+            # A PARKED rebuild is not a failure: it waits for the user's answer,
+            # so it keeps its accepted state and files no failure report.
             state["zip"] = None
             state["failed"] = True
             _file_failure_report(state)  # filed before the terminal event
@@ -3491,12 +4110,20 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
         try:
             from kicraft.design.cli_app import run_post_wiring_lifecycle
 
-            def _rewire(instr: str) -> None:
+            def _rewire(instr: str, stages=None) -> None:
                 nonlocal pending_post_wiring_result
+                stage_list = list(stages or ["wiring"])
+                if stage_list and stage_list[0] != "wiring":
+                    # A review-directed change above wiring invalidates its
+                    # dependent wiring data; rebuild it from the new choice.
+                    try:
+                        null_downstream(ws, stage_list[0])
+                    except RuntimeError:
+                        pass
                 rr = run_session(
                     ws,
                     state.get("brief", ""),
-                    ["wiring"],
+                    stage_list,
                     instruction=instr,
                     progress=progress,
                     run_id=run_id,
@@ -3545,39 +4172,47 @@ def _run_design(state: dict, stages, answers=None, *, mode: str = "design") -> N
         def _run_build() -> int:
             return _drive_build_queue(ws, state, progress)
 
-        rc = _run_build()
-        # Bounded ERC recovery: build fails (exit 5) at the §9.12 ERC gate when the
-        # wiring slot leaves a real electrical error. Feed the concrete ERC errors
-        # back into ONE wiring re-drive, then rebuild once. Capped at a single pass
-        # (a flag, not a loop) so recovery can never run away on cost.
-        if rc != 0 and not state.get("erc_recovered"):
-            offenders = _erc_offenders(ws)
-            if offenders:
-                state["erc_recovered"] = True
-                progress({"kind": "build_log",
-                          "text": f"[erc-recover] {len(offenders)} ERC error(s); "
-                                  "re-driving wiring once to fix them"})
-                instr = ("The synthesized board failed KiCad ERC with the errors below. "
-                         "Adjust connections / no_connect_pins to resolve them, keeping "
-                         "every other net consistent:\n- " + "\n- ".join(offenders[:20]))
-                rr = run_session(
-                    ws, state.get("brief", ""), ["wiring"],
-                    instruction=instr, progress=progress, run_id=run_id,
-                    auto_default_questions=auto_default_questions,
-                )
-                if rr.get("guard"):
-                    state["spend"] = _project_spend_usd(state.get("project_id"))
-                if rr.get("status") == "awaiting_input":
-                    _adopt_awaiting_input(rr)
-                    return
-                if rr.get("status") == "ok":
-                    rc = _run_build()
+        def _redrive(stages, instruction: str):
+            """Session owns the revision; the worker only returns build evidence."""
+            rr = run_session(
+                ws, state.get("brief", ""), stages,
+                instruction=instruction, progress=progress, run_id=run_id,
+                auto_default_questions=auto_default_questions,
+            )
+            if rr.get("guard"):
+                state["spend"] = _project_spend_usd(state.get("project_id"))
+            return rr
+
+        # Shared build-to-design recovery (web / headless / self-eval parity):
+        # the deterministic build worker returns the exit code and durable
+        # evidence; this session owner selects the smallest owning choice and
+        # re-drives it under the run's existing spend/time ceilings. The
+        # per-project budget is durable, so a rebuild/re-entry cannot reset it.
+        recovery = run_build_recovery(
+            ws, state.get("brief", ""), _run_build,
+            progress=progress, run_id=run_id,
+            auto_default_questions=auto_default_questions,
+            redrive=_redrive,
+        )
+        state["build_recovery"] = {
+            "status": recovery.get("status"),
+            "attempts": recovery.get("attempts"),
+            "max_attempts": recovery.get("max_attempts"),
+            "failure_kind": recovery.get("failure_kind"),
+        }
+        if recovery.get("status") == "awaiting_input":
+            _adopt_awaiting_input(
+                {"status": "awaiting_input", "questions": recovery.get("questions") or []}
+            )
+            return
+        rc = recovery.get("rc")
         # Surface whatever board the build left behind: on a failed verify the
         # promote tail keeps the failed candidate so it can be inspected.
         pd = _discover_generated_dir(ws)
         if pd is not None:
             state["pcb_ready"] = (pd / f"{pd.name}.kicad_pcb").is_file()
         if rc != 0:
+            state["failure_kind"] = recovery.get("failure_kind") or state.get("failure_kind")
             state["ok"] = False
             return
 
@@ -4468,6 +5103,12 @@ def projects_page():
                         .style("color:#e2e8f0")
                 handles["detail"] = ui.label().classes("text-xs min-w-0 w-full") \
                     .style("color:#64748b;white-space:normal")
+                # What the evidence supports, next to the status: the list must not
+                # imply a fabrication-ready board from a status badge or a Download.
+                handles["assurance"] = ui.label().classes(
+                    "text-xs min-w-0 w-full font-semibold") \
+                    .style("white-space:normal")
+                handles["assurance"].set_visibility(False)
                 handles["issues"] = ui.row().classes("w-full items-center gap-2")
                 handles["issues_sig"] = None
                 # Visibility is only meaningful for a completed board -- the
@@ -4479,10 +5120,12 @@ def projects_page():
             return handles
 
         def _paint_row(handles, p, pres, live) -> None:
+            assurance = pres.get("assurance") or {}
             key = (pres["title"], pres["status"], pres["stage"], pres["headline"],
                    pres["detail"], pres["last_event_at"], pres["action"],
                    pres["download_ready"], len(pres["issues"]),
-                   tuple(i.get("message") for i in pres["issues"]))
+                   tuple(i.get("message") for i in pres["issues"]),
+                   assurance.get("level"), assurance.get("summary"))
             if key == handles["key"]:
                 return  # nothing observable changed: leave the widgets alone
             handles["key"] = key
@@ -4507,6 +5150,24 @@ def projects_page():
             detail = pres["detail"] if pres["detail"] != pres["headline"] else ""
             handles["detail"].text = detail
             handles["detail"].set_visibility(bool(detail))
+
+            # Assurance: shown whenever it qualifies the status/detail line, i.e.
+            # for every state except "work in flight / nothing to judge".
+            assurance = pres.get("assurance") or {}
+            if assurance.get("level") in (None, "working", "none"):
+                handles["assurance"].set_visibility(False)
+            else:
+                label = str(assurance.get("label") or "")
+                summary = str(assurance.get("summary") or "")
+                handles["assurance"].text = (f"{label} — {summary}" if label and summary
+                                             else label or summary)
+                handles["assurance"].style(
+                    f"color:{assurance.get('color') or '#94a3b8'}")
+                handles["assurance"].set_visibility(bool(label or summary))
+                detail_lines = [str(line) for line in
+                                [*(assurance.get("capability") or ()),
+                                 *(assurance.get("limitations") or ())]]
+                handles["assurance"].tooltip("\n".join(detail_lines))
 
             sig = _actions_sig(p, pres, live)
             if sig != handles["actions_sig"]:
@@ -4574,9 +5235,16 @@ def projects_page():
                               f"/?prompt={quote(pp.brief or '')}")) \
                     .props("flat dense no-caps")
             if pres["download_ready"] and pres["zip_path"]:
-                ui.button("Download", icon="download",
-                          on_click=lambda zp=pres["zip_path"]: ui.download(zp)) \
+                assurance = pres.get("assurance") or {}
+                btn = ui.button("Download", icon="download",
+                                on_click=lambda zp=pres["zip_path"]: ui.download(zp)) \
                     .props("flat dense no-caps")
+                if assurance.get("level") == "verified":
+                    btn.tooltip("Download the package whose export was independently verified.")
+                else:
+                    btn.tooltip("Download the generated KiCad package. Independent fulfilment "
+                                "verification is not recorded for this export — review before "
+                                "fabrication.")
             if p.dir_path and is_admin(user):
                 ui.button("Evaluate", icon="fact_check",
                           on_click=lambda pp=p: open_eval_dialog(
@@ -6460,6 +7128,18 @@ def index(prompt: str = "", project: str = ""):
             summary_actions_sig = [None]
             issues_box = ui.column().classes("w-full gap-2")
             issues_box_sig = [None]
+            # WHAT the evidence does and does not support: always next to the
+            # status, so a status line or a download button is never read as more
+            # than the artifacts prove. Details (recorded evidence, assumptions,
+            # limitations, automatic actions, deviations) fold under one
+            # disclosure; only the honest label and the one-line summary show.
+            summary_assurance = ui.label().classes("text-xs w-full") \
+                .style("white-space:normal")
+            with ui.expansion("Evidence, assumptions and limitations", icon="fact_check") \
+                    .classes("w-full").props('dense header-class="text-xs text-grey-5"') as assurance_exp:
+                assurance_box = ui.column().classes("w-full gap-1")
+            assurance_exp.set_visibility(False)
+            assurance_sig = [None]
 
             def _copy_summary_code():
                 code = state.get("board_code")
@@ -7225,9 +7905,15 @@ def index(prompt: str = "", project: str = ""):
                     .props("dense outline no-caps")
             elif action == "download":
                 if pres.get("zip_path"):
-                    ui.button("Download KiCad project (.zip)", icon="download",
-                              on_click=lambda z=pres["zip_path"]: ui.download(z)) \
+                    assurance = pres.get("assurance") or {}
+                    btn = ui.button("Download KiCad project (.zip)", icon="download",
+                                    on_click=lambda z=pres["zip_path"]: ui.download(z)) \
                         .props("dense no-caps color=positive")
+                    btn.tooltip(
+                        "Download the package whose export was independently verified."
+                        if assurance.get("level") == "verified" else
+                        "Generated KiCad package. Independent fulfilment verification is not "
+                        "recorded for this export — review before fabrication.")
             elif action == "new_from_brief":
                 brief_text = state.get("brief") or ""
                 if brief_text:
@@ -7265,11 +7951,13 @@ def index(prompt: str = "", project: str = ""):
             units = (f"{len(set(act.get('completed_units') or ()) & planned)}/"
                      f"{len(planned)} units") if planned else ""
             detail = view.get("place_route_detail") or {}
+            assurance = pres.get("assurance") or {}
             sig = (pres["title"], pres["status"], pres["stage"], pres["headline"],
                    pres["detail"], pres["last_event_at"], pres["action"],
                    pres["download_ready"], len(pres["issues"]), units,
                    detail.get("percent"), detail.get("phase"),
-                   state.get("journal_failed"), state.get("board_code"))
+                   state.get("journal_failed"), state.get("board_code"),
+                   assurance.get("level"), assurance.get("summary"))
             if sig == view.get("summary_sig"):
                 return
             previous_sig = view.get("summary_sig")
@@ -7316,6 +8004,37 @@ def index(prompt: str = "", project: str = ""):
                 "color:#eab308" if state.get("journal_failed") else "color:#94a3b8")
 
             owner = _failure_card_shows(pres)
+            # Assurance: the honest label + one-line summary always visible, the
+            # recorded evidence/assumptions/limitations/actions folded away. A
+            # download or a green status must never be read as more than this.
+            a_sig = (assurance.get("level"), assurance.get("label"), assurance.get("summary"),
+                     assurance.get("stale_preview"), tuple(assurance.get("capability") or ()),
+                     tuple(assurance.get("limitations") or ()),
+                     tuple(assurance.get("evidence") or ()),
+                     tuple(assurance.get("assumptions") or ()),
+                     tuple(assurance.get("auto_actions") or ()),
+                     tuple((d.get("wanted"), d.get("got"), d.get("required"), d.get("consent"))
+                           for d in (assurance.get("deviations") or [])))
+            if a_sig != assurance_sig[0]:
+                assurance_sig[0] = a_sig
+                label = str(assurance.get("label") or "")
+                summary = str(assurance.get("summary") or "")
+                summary_assurance.text = (f"{label} — {summary}" if label and summary
+                                          else label or summary)
+                summary_assurance.style(
+                    f"color:{assurance.get('color') or '#94a3b8'}")
+                summary_assurance.set_visibility(bool(label or summary))
+                has_details = bool(
+                    assurance.get("evidence") or assurance.get("assumptions")
+                    or assurance.get("limitations") or assurance.get("auto_actions")
+                    or assurance.get("deviations") or assurance.get("capability")
+                    or assurance.get("stale_preview"))
+                assurance_exp.set_visibility(has_details)
+                assurance_box.clear()
+                if has_details:
+                    with assurance_box:
+                        _render_section({"type": "assurance", "assurance": assurance},
+                                        "#94a3b8")
             actions_sig = (pres["action"], pres["download_ready"],
                            bool(state.get("retryable")), bool(state.get("brief")), owner)
             if actions_sig != summary_actions_sig[0]:
@@ -7817,11 +8536,24 @@ def index(prompt: str = "", project: str = ""):
                             (sj.get("artifacts") or {}).get("build_warnings") or []
                         )
                         view["fab_caution"] = bool(build_warnings)
+                        fab_pres = _workspace_presentation() or {}
+                        fab_assurance = fab_pres.get("assurance") or {}
                         for stg in ("synthesize", "place_route", "electrical_review", "fab"):  # finalize build logs
                             tabs.set_inspector(stg, _inspector_spec(
-                                stg, sj, rs, project_dir, view["build_lines"]))
+                                stg, sj, rs, project_dir, view["build_lines"],
+                                assurance=fab_assurance if stg == "fab" else None))
                         if state["zip"]:
                             with tabs.view_slot("fab"):
+                                # The honest export label: what this package is and is
+                                # not, directly above the download that used to imply
+                                # fabrication readiness on its own.
+                                if fab_assurance:
+                                    ui.label(str(fab_assurance.get("label") or "")).classes(
+                                        "text-sm font-semibold").style(
+                                            f"color:{fab_assurance.get('color') or '#94a3b8'}")
+                                    ui.label(str(fab_assurance.get("summary") or "")).classes(
+                                        "text-xs w-full max-w-3xl"
+                                    ).style("color:#94a3b8;white-space:normal")
                                 if build_warnings:
                                     with ui.element("div").classes(
                                         "w-full max-w-3xl q-mb-sm q-pa-sm rounded-borders"
@@ -7843,9 +8575,20 @@ def index(prompt: str = "", project: str = ""):
                                         f"/project/{state['token']}/render/fab/"
                                         f"board_3d.png?v={int(png.stat().st_mtime)}"
                                     ).classes("w-full max-w-3xl rounded-borders q-mb-sm")
-                                ui.button("Download KiCad project (.zip)", icon="download",
-                                          on_click=lambda: ui.download(state["zip"])) \
-                                    .props("color=positive")
+                                if fab_pres.get("download_ready"):
+                                    ui.button("Download KiCad project (.zip)", icon="download",
+                                              on_click=lambda: ui.download(state["zip"])) \
+                                        .props("color=positive")
+                                else:
+                                    # state["zip"] exists but is not the CURRENT
+                                    # design's export (a stale preview): offering it
+                                    # would present a superseded board as this design.
+                                    ui.label(
+                                        "This package is not offered for download: it is not "
+                                        "the current design's export. "
+                                        + str(fab_assurance.get("summary") or "")
+                                    ).classes("text-xs w-full max-w-3xl") \
+                                        .style("color:#eab308;white-space:normal")
                 elif state["ok"] is False:
                     # The failure is reported by the shared presentation: an inline
                     # card with the cause, what survived, and the actions that are

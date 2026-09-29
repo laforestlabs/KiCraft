@@ -9,6 +9,10 @@ Slot shape (`FunctionalSpec`):
   - `category` — one of `sense` / `process` / `drive` / `power` / `interface`.
   - `purpose` — one sentence.
   - `count` — number of identical instances (default 1). Set `count: N` on ONE block when the design asks for N copies of the SAME function (e.g. "3 axes of stepper outputs" → one `STEPPER_AXIS` block with `count: 3`, NOT three near-duplicate blocks). The architecture stage expands a `count`-N block into N grouped sheets that the layout solves once and replicates. Keep genuinely distinct functions as separate blocks.
+  - `obligation_ids` — the committed `intent.obligations` rows this block is responsible for, named
+    by their `original_obligation_id` values. Do not emit the rows themselves: the slot's own
+    `obligations` list is written for you from the committed intent, and a copied or paraphrased
+    row is not accepted. An id the committed intent does not carry is refused.
 - `connections`: list of `BlockConnection`, each with `from_block`, `to_block`, `signal_type` (`power` / `ground` / `digital` / `analog` / `clock` / `bus` / `rf` / `other`), and a short description.
 - `assumptions`: list of defaults applied, each ending with `(defaulted)`.
 
