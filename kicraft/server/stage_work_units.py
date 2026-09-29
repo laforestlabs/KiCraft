@@ -652,9 +652,16 @@ def _bundled_reviewed_record(group: BomComponentGroup):
     easyeda). It is one MPN and one device, so the group must classify: otherwise the
     physical-obligation check reports a part the BOM did resolve as "requires 1 real
     <class>, found 0". The group's MPN is not trusted here -- the bundle manifest's own
-    MPN selects the record.
+    MPN selects the record, resolved through the same reviewed order-code equivalences
+    ``physical_inventory_record`` uses. A bundle whose manifest names an equivalent
+    spelling of a reviewed order code (the machine's ``max31855`` bundle names
+    ``MAX31855KASA+T``, the tape-and-reel carrier of the reviewed ``MAX31855KASA+``) is
+    otherwise left unclassifiable although the two are the same device.
     """
-    from kicraft.design.part_identity import reviewed_part
+    from kicraft.design.part_identity import (
+        reviewed_identity_for_order_code,
+        reviewed_part,
+    )
 
     library = (group.symbol or "").partition(":")[0]
     if not library:
@@ -668,7 +675,9 @@ def _bundled_reviewed_record(group: BomComponentGroup):
     if group.footprint != f"{library}:{loaded.manifest.footprint_name}":
         return None
     mpn = str(loaded.manifest.mpn or "").strip()
-    return reviewed_part(mpn) if mpn else None
+    if not mpn:
+        return None
+    return reviewed_part(reviewed_identity_for_order_code(mpn))
 
 
 def _group_matches_requirement_identity(group: BomComponentGroup, requirement: dict) -> bool:

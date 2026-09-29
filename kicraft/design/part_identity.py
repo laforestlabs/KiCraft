@@ -2455,13 +2455,34 @@ def reviewed_part(identity: str) -> ReviewedPart | None:
     return next((part for part in reviewed_inventory() if part.identity == key), None)
 
 
-# A small number of reviewed rows are selected by the manufacturer's bare order
-# code while the inventory identity retains its vendor-qualified name.  These
-# are explicit aliases, not normalization rules: physical_inventory_record()
-# still requires the reviewed symbol/footprint pair before accepting either
-# spelling, so a coincidental catalog code cannot bless another part.
+# A small number of reviewed rows are selected by an order-code spelling the
+# inventory identity does not carry verbatim: the manufacturer's bare order code
+# (Keystone 8734, Dayton LW18-50) or a shipping-suffix variant of the reviewed
+# order code (ADI MAX31855KASA+T, whose trailing T is the tape-and-reel carrier
+# of MAX31855KASA+).  Every key is an explicitly reviewed spelling of the SAME
+# device, package, ratings and capabilities as its target -- same-family
+# membership is never enough, and a different grade, package, or memory density
+# is not an equivalent spelling.  These are explicit aliases, not normalization
+# rules: physical_inventory_record() still requires the reviewed
+# symbol/footprint pair (or a curated bundle whose own manifest names the same
+# reviewed part) before accepting either spelling, so a coincidental catalog
+# code cannot bless another part.
 _REVIEWED_ORDER_CODE_IDENTITIES: dict[str, str] = {
+    # Keystone Electronics 8734 miniature metric PCB binding post.
+    # kicraft/parts_library/keystone-8734-binding-post/manifest.json
     "8734": "keystone-8734",
+    # Analog Devices MAX31855 data sheet, Ordering Information: "+" is the
+    # lead-free/RoHS order code and the trailing "T" adds only the tape-and-reel
+    # shipping carrier -- the same K-type, 8-pin SO device (SOIC-8 3.9 x 4.9 mm,
+    # 1.27 mm pitch) with the same 3.0-3.6 V supply rating.  The MAX31855EASA+/
+    # SASA+/NASA+ variants are OTHER thermocouple types and are deliberately not
+    # equivalent spellings.
+    # https://www.analog.com/en/products/max31855.html
+    "max31855kasa+t": "max31855kasa+",
+    # Dayton Audio's reviewed bundle manifest names the order code "LW18-50"
+    # (kicraft/parts_library/dayton-lw18-50/manifest.json); the reviewed
+    # inventory row keeps its vendor-qualified identity.
+    "lw18-50": "dayton-lw18-50",
 }
 
 

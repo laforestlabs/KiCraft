@@ -10,6 +10,7 @@ from kicraft.design.part_identity import (
     reviewed_part,
     reviewed_inventory,
     reviewed_parts_for_feature,
+    reviewed_record_realizes_class,
     physical_inventory_record,
 )
 from kicraft.design.models import BomPart
@@ -398,6 +399,117 @@ def test_binding_post_catalog_order_code_requires_the_reviewed_pair():
         )
         is None
     )
+
+
+def test_an_equivalent_reviewed_order_code_resolves_to_the_record_and_its_class():
+    """An emitted equivalent order code is the reviewed part, never a different one.
+
+    Live cohort run (thermocouple-amp, revision 4d23ac3): the requirement named the reviewed
+    MAX31855KASA+ while the machine's ``max31855`` bundle emits the MAX31855KASA+T order code
+    -- the same ADI device, package and 3.0-3.6 V rating, differing only in the tape-and-reel
+    carrier -- so the BOM gate proved no thermocouple-amplifier for the part the library
+    actually carries.
+    """
+    record = reviewed_part("MAX31855KASA+")
+    resolved = physical_inventory_record(
+        mpn="MAX31855KASA+T",
+        symbol=record.symbol,
+        footprint=record.footprint,
+    )
+    assert resolved is not None and resolved.identity == "max31855kasa+"
+    assert reviewed_record_realizes_class(resolved, "thermocouple-amplifier")
+
+
+def test_a_different_order_code_of_the_same_family_never_rides_the_equivalence():
+    """Same family is not an equivalent spelling: another grade or type stays unresolved.
+
+    MAX31855EASA+/SASA+/NASA+ are the E-, S- and N-type thermocouple variants of the same
+    family and SO package; each is a different device and must never claim the reviewed
+    K-type record. The equivalence also never widens the pair.
+    """
+    record = reviewed_part("MAX31855KASA+")
+    for other in ("MAX31855EASA+T", "MAX31855SASA+", "MAX31855NASA+", "MAX31855KASA"):
+        assert (
+            physical_inventory_record(
+                mpn=other, symbol=record.symbol, footprint=record.footprint
+            )
+            is None
+        )
+    assert (
+        physical_inventory_record(
+            mpn="MAX31855KASA+T",
+            symbol="max31855:MAX31855KASA+T",
+            footprint="max31855:SO-8_L4.9-W3.9-P1.27-LS5.9-BL",
+        )
+        is None
+    )
+
+
+def test_a_bare_reviewed_order_code_resolves_to_the_record_it_names():
+    """The reviewed row keeps the vendor-qualified identity; the catalog names it bare.
+
+    Live cohort run (speaker-crossover, revision 4d23ac3): the unit emitted the reviewed
+    ``dayton-lw18-50:Dayton_LW18-50`` pair, whose manifest order code is the bare
+    ``LW18-50``, and ``reviewed_parts_for_feature('air-core-inductor')`` already held the
+    record -- but the bare spelling left ``physical_inventory_record`` unresolved, so the
+    BOM gate proved no inductor.
+    """
+    resolved = physical_inventory_record(
+        mpn="LW18-50",
+        symbol="dayton-lw18-50:Dayton_LW18-50",
+        footprint="dayton-lw18-50:Dayton_LW18-50",
+    )
+    assert resolved is not None and resolved.identity == "dayton-lw18-50"
+    assert resolved in reviewed_parts_for_feature("air-core-inductor")
+    assert reviewed_record_realizes_class(resolved, "inductor")
+
+    # A series prefix, a vendor name, and a family label name no single reviewed identity;
+    # an equivalent order code with a foreign pair is not the reviewed part either.
+    for mpn in ("LW18", "Dayton", "MAX31855"):
+        assert (
+            physical_inventory_record(
+                mpn=mpn,
+                symbol="dayton-lw18-50:Dayton_LW18-50",
+                footprint="dayton-lw18-50:Dayton_LW18-50",
+            )
+            is None
+        )
+    assert (
+        physical_inventory_record(
+            mpn="LW18-50",
+            symbol="dayton-lw18-50:Dayton_LW18-50",
+            footprint="dayton-lw18-50:Dayton_LW18-65",
+        )
+        is None
+    )
+
+
+def test_a_curated_bundle_classifies_through_its_manifest_order_code():
+    """A bundle whose pair differs from the reviewed record's still resolves by its manifest.
+
+    The BOM gate's ``_bundled_reviewed_record`` bridges an emitted bundle pair to the reviewed
+    record through the manifest's own order code, so that bridge must use the same reviewed
+    equivalences ``physical_inventory_record`` does -- otherwise a bundle selected by an
+    equivalent order code (the machine's ``max31855`` bundle, naming ``MAX31855KASA+T``) is
+    unclassifiable although the device is reviewed.
+    """
+    from kicraft.server.stage_work_units import _bundled_reviewed_record
+
+    group = BomComponentGroup(
+        id="crossover_inductor",
+        reference_prefix="L",
+        quantity=1,
+        value="0.50mH Dayton LW18-50",
+        symbol="dayton-lw18-50:Dayton_LW18-50",
+        footprint="dayton-lw18-50:Dayton_LW18-50",
+        mpn="LW18-50",
+        sheet="CROSSOVER",
+    )
+    record = _bundled_reviewed_record(group)
+    assert record is not None and record.identity == "dayton-lw18-50"
+
+    # A pair that is not the bundle's own manifest pair is not that bundle's record.
+    assert _bundled_reviewed_record(group.model_copy(update={"footprint": "No:Such"})) is None
 
 
 def test_accepted_identities_are_explicit_and_package_bounded():
