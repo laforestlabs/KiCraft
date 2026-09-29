@@ -576,11 +576,14 @@ revision and in every runtime (`skipping 1 broken parts: ['vendored:srd-05vdc-sl
 
 Preregistered target: three fresh 34-brief campaigns per arm, `--parallel 1 --build-slots 1`,
 original corpus and contracts, judge on, 2400 s build timeout. The baseline arm is running from the
-frozen safety-prerequisite checkout (`baseline_safety_r1`). The remaining campaigns are queued
-(one at a time — the host has two cores and two concurrent routing builds would trip the build
-timeout) by `logs/self_eval/pipeline_consolidation_20260928/run_campaigns.sh`:
+frozen safety-prerequisite checkout (`baseline_safety_r1`). The candidate revision measured by the
+implementation arm is commit `20f4147` on `simplify/bom-wiring-pipeline` (the frozen baseline arm
+stays at `b40ee8f` plus the safety prerequisites in its own checkout). The remaining campaigns are
+queued (one at a time — the host has two cores and two concurrent routing builds would trip the
+build timeout) by `logs/self_eval/pipeline_consolidation_20260928/run_campaigns.sh`:
 `consolidation_r1`, `baseline_safety_r2`, `consolidation_r2`, `baseline_safety_r3`,
-`consolidation_r3`.
+`consolidation_r3`. The supervisor waits for the in-flight baseline campaign and then runs each
+campaign to completion, recording to `campaign_supervisor.log`.
 
 A three-brief live smoke on the candidate (`consolidation_smoke`) exercised the whole cutover
 against the real provider: all stages ran on the new contract, and it produced no fabrication
