@@ -3482,6 +3482,11 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     # board whose reviewed part implements the demand -- and pushed the model to a different
     # family it did not choose.
     "motor-driver": frozenset({"motor-driver", "stepper-driver"}),
+    # The corpus also spells the same demand in full. The reviewed A4988SETTR-T carries
+    # `stepper-driver`, and 30 saved states demand `stepper-motor-driver`; without this the
+    # demand has no carrier at all and the parts stage can only refuse it.
+    "stepper-motor-driver": frozenset({"stepper-driver", "motor-driver"}),
+    "stepper-driver-ic": frozenset({"stepper-driver", "motor-driver"}),
     # `switch` is the writer's word for a board's own selector. The usb-pd-trigger brief asks for
     # a "switch-selectable" output and its reviewed part is SS13D07VG4 (family
     # `three-position-selector`); the stepper-a4988 brief names its microstep "DIP switches" and
@@ -3509,6 +3514,115 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     # AONR21357, whose reviewed features are `p-channel-mosfet`/`highside-switch`. No n-channel
     # MOSFET is reviewed, so `mosfet` resolves to the one physical class the library carries.
     "mosfet": frozenset({"p-channel-mosfet"}),
+    # The 2026-09-29 demanded-class scan (2 205 saved states, 10 169 `physical` obligation
+    # occurrences, 264 distinct demanded classes) found the top uncovered classes are the
+    # library's OWN reviewed part under a purpose name: the design pins the exact reviewed
+    # part that implements the demand and the realization gate refuses it because the demand's
+    # spelling resolves to no reviewed feature. Each target below is carried by an emittable
+    # record (identity + symbol + footprint), named on the line, so the alias never turns a
+    # class's real-part fallback into a permanent refusal; and each demand is realized by a
+    # specific reviewed record through `reviewed_record_realizes_class`, never by a spelling
+    # heuristic. Classes with no reviewed carrier (`snowman-shaped-board`, `qfn-56-package`,
+    # `hang-hole`, `capacitive-touch-pad`, `ground-connector`, ...) are deliberately NOT
+    # aliased: they are board fabrication features, package descriptors or wiring facts, not a
+    # part the library carries.
+    # -- QSPI NOR flash: W25Q16JVSS is the reviewed QSPI part ----------------------
+    "qspi-flash": frozenset({"flash-memory"}),
+    "qspi-flash-memory": frozenset({"flash-memory"}),
+    "qspi-nor-flash": frozenset({"flash-memory"}),
+    # -- PCA9685PW,118: a 16-channel I2C PWM driver IC IS a servo/PWM driver -------
+    "servo-driver-ic": frozenset({"pwm-driver", "i2c-pwm-driver"}),
+    "servo-controller-ic": frozenset({"pwm-driver", "i2c-pwm-driver"}),
+    "pwm-controller": frozenset({"pwm-driver", "i2c-pwm-driver"}),
+    "pwm-controller-ic": frozenset({"pwm-driver", "i2c-pwm-driver"}),
+    "pca9685-controller": frozenset({"pwm-driver", "i2c-pwm-driver"}),
+    "pca9685-pwm-controller": frozenset({"pwm-driver", "i2c-pwm-driver"}),
+    "pca9685-ic": frozenset({"pwm-driver", "i2c-pwm-driver"}),
+    # -- MAX31855KASA+ (K-type thermocouple amplifier), ULN2003ADR (Darlington
+    #    transistor array), PC817C-S (the one-word spelling of `opto-isolator`) ----
+    "thermocouple-amplifier": frozenset({"thermocouple-converter"}),
+    "thermocouple-amplifier-ic": frozenset({"thermocouple-converter"}),
+    "k-type-thermocouple-input": frozenset({"thermocouple-converter"}),
+    "optoisolator": frozenset({"optocoupler"}),
+    "transistor-array": frozenset({"darlington-array"}),
+    "smt-uln2003-driver": frozenset({"darlington-array"}),
+    "smt-uln2003": frozenset({"darlington-array"}),
+    # A relay's DRIVER is the ULN2003, not the relay: `smt-relay-driver` must not be repaired
+    # to the `relay` variant (`srd-05vdc-sl-c`), which is the switched load.
+    "smt-relay-driver": frozenset({"darlington-array"}),
+    # The corpus's `driver-ic` is always the ULN2003ADR (the relay-quad/stepper briefs).
+    "driver-ic": frozenset({"darlington-array"}),
+    # -- DL-RFM95-868M (the library's only standalone radio module), NRF52840-QIAA-R
+    "radio-module": frozenset({"sx1276-module", "lora-module", "spi-radio-module"}),
+    "bluetooth-low-energy-radio": frozenset({"bluetooth-le-soc"}),
+    "ble-radio": frozenset({"bluetooth-le-soc"}),
+    # -- Connectors.  A motor's flying leads land on a wire-to-board header; the live
+    #    stepper-a4988 run declared its requirement family `pin-header`, and the reviewed
+    #    JST-PH (S2B-PH-SM4-TB) is `wire-to-board-connector`, so both must resolve rather
+    #    than the token-subset rename to the generic `connector`.
+    "motor-connector": frozenset({"pin-header", "wire-to-board-connector"}),
+    # Qwiic is a 1.0 mm JST-SH 4-pin (SM04B-SRSS-TB), not a 0.1 in header: pre-empts the
+    # `header` rename.
+    "qwiic-header": frozenset({"qwiic-connector", "i2c-connector"}),
+    # -- Passives.  A bare demand is under-specified, but every target IS that passive:
+    #    Dayton LW18-50 (air-core), CD54-100M (power), kicad-inductor-0402, ERJ-3EKF1002V
+    #    (resistor-0603), C0805C103J5GACTU, GRM188R71C104KA01D, MKP1848510924K2 (film).
+    "inductor": frozenset(
+        {
+            "air-core-inductor",
+            "power-inductor",
+            "filter-inductor",
+            "buck-inductor",
+            "inductor-0402",
+        }
+    ),
+    "resistor": frozenset(
+        {
+            "resistor-0603",
+            "resistor-0402",
+            "resistor-1206",
+            "resistor-1210",
+            "resistor-2512",
+        }
+    ),
+    "capacitor": frozenset(
+        {
+            "capacitor-0603",
+            "capacitor-0402",
+            "capacitor-0805",
+            "capacitor-1210",
+            "film-capacitor",
+            "timing-capacitor",
+            "electrolytic-capacitor",
+            "tantalum-capacitor",
+        }
+    ),
+    "termination-resistor": frozenset({"resistor-0603", "resistor-1206"}),
+    # -- Electromechanical.  The EC11 encoder carries an integrated push switch, so the
+    #    demand must not be repaired to a momentary `push-button` (`yza-032-5.0w`); the
+    #    SS13D07VG4 is a latching 3-position selector, not a momentary `switch`.
+    "rotary-encoder-push-button": frozenset({"rotary-encoder"}),
+    "three-position-switch": frozenset({"three-position-selector", "sp3t-selector"}),
+    # -- MCU modules and power.  A module is the reviewed SoM (ESP32-C3-MINI-1 /
+    #    ESP32-S3-WROOM-1 / NRF52840), not a bare `microcontroller` ATtiny.
+    "microcontroller-module": frozenset(
+        {"esp32-c3-module", "wifi-module", "bluetooth-le-soc"}
+    ),
+    "isolated-power-supply": frozenset({"isolated-dc-dc-converter"}),
+    "switching-regulator-ic": frozenset({"buck-regulator", "voltage-regulator"}),
+    "buck-regulator-ic": frozenset({"buck-regulator"}),
+    # -- Display, LED and power-path classes.
+    "smt-i2c-oled": frozenset({"i2c-oled-display"}),
+    "constant-current-driver": frozenset({"constant-current-led-driver"}),
+    "pd-trigger-controller": frozenset({"usb-pd-controller"}),
+    "per-port-current-limiter": frozenset({"current-limited-power-switch"}),
+    # The space spelling (`0805 led`) resolves through `class_key` in
+    # `canonical_physical_features`; this key carries the hyphenated one.
+    "0805-led": frozenset({"led-0805"}),
+    "warm-white-led-group": frozenset({"warm-white-led"}),
+    # -- The CR2032 cell itself is off-board; the board carries its holder (BS-07-A1BJ001).
+    "cr2032-holder": frozenset({"coin-cell-holder"}),
+    "cr2032-battery-holder": frozenset({"coin-cell-holder"}),
 }
 
 
@@ -3517,9 +3631,26 @@ def canonical_physical_features(feature: str) -> frozenset[str]:
 
     The demand is the caller's own wording (a brief says "a three-position selector switch"); the
     reviewed vocabulary spells the class its own way. A class with no verified alias is itself.
+
+    The lookup resolves through ``class_key`` -- the same fold (case, separators, a trailing
+    plural per token) the rest of the vocabulary uses -- so a plural or space spelling reaches the
+    alias key it denotes (``0805 led`` -> ``0805-led``) or the reviewed feature itself
+    (``warm-white leds`` -> ``warm-white-led``). The caller's own spelling is kept alongside the
+    folded one: two reviewed features differ from their folded key (``2.4ghz-antenna``,
+    ``jst-xh connector``), and folding must never turn a demand the library already answers into
+    an uncovered one.
     """
-    key = str(feature or "").strip().casefold()
-    return _DEMANDED_CLASS_ALIASES.get(key, frozenset({key}))
+    raw = str(feature or "").strip().casefold()
+    aliased = _DEMANDED_CLASS_ALIASES.get(raw)
+    if aliased is not None:
+        return aliased
+    key = class_key(raw)
+    if key and key != raw:
+        aliased = _DEMANDED_CLASS_ALIASES.get(key)
+        if aliased is not None:
+            return aliased
+        return frozenset({raw, key})
+    return frozenset({raw})
 
 
 def reviewed_record_realizes_class(record: ReviewedPart | None, component_class: str) -> bool:
@@ -3554,6 +3685,11 @@ _TRUSTED_LOWERER_PHYSICAL_WITNESSES = frozenset(
     {
         ("r2r-ladder@1", "resistorladder"),
         ("r2r-ladder@1", "resistornetwork"),
+        # `r-2r-resistor-ladder` folds to `r2rresistorladder`, which the witness keys above
+        # (exact normalised strings) do not match, so a demand spelled that way was refused a
+        # topology the lowerer implements. The lowerer's own `families` gained the same two
+        # spellings, so `lowerer_witnesses_physical_class` and `_FAMILIES` agree.
+        ("r2r-ladder@1", "r2rresistorladder"),
         ("screw-terminal@1", "thermocoupleinput"),
         # A momentary-switch input builds its button: `_switch_input` emits the SW_Push symbol on
         # the tactile-button footprint, with the pull the requirement asks for. Live seed-43 run

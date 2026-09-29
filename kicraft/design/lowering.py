@@ -2264,6 +2264,12 @@ for _lowerer in (
                 "resistor_ladder",
                 "resistor-network",
                 "resistor_network",
+                # The corpus also names this topology `r-2r-resistor-ladder`; the family key is
+                # exact, so the hyphenated and unhyphenated spellings must both be listed or the
+                # requirement resolves to no lowerer (`part_identity`'s witness set carries the
+                # matching normalised key).
+                "r-2r-resistor-ladder",
+                "r2r-resistor-ladder",
             }
         ),
         _r2r,

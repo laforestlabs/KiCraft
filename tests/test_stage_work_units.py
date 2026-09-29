@@ -2733,24 +2733,23 @@ def test_a_design_wide_count_still_refuses_a_unit_that_emits_no_realizing_part()
 
 
 def test_a_role_class_no_reviewed_part_carries_stays_refused():
-    """(c) coverage gap: `motor-connector` names a role, not one reviewed physical class.
+    """(c) coverage gap: `solder-jumper` is a part class no reviewed record carries.
 
-    Live stepper-a4988 (2026-09-29): requirement `motor_connector` claimed
-    `motor-connector` and its unit emitted a stock generic 4-pin socket; no reviewed record
-    carries the class, so the demand is an honest gap and a real part of another class must
-    not satisfy it.
+    The CAN-termination reference asks for a `SolderJumper_2_Open`; the library's header and
+    connector records are a different physical class, so the demand is an honest gap and a real
+    part of another class must not satisfy it.
     """
     from kicraft.design.part_identity import realizable_physical_features
 
-    assert realizable_physical_features("motor-connector") == frozenset()
+    assert realizable_physical_features("solder-jumper") == frozenset()
     requirement = {
-        "id": "motor_connector",
+        "id": "jumper_cfg",
         "sheet": "A",
         "role": "connector",
-        "family": "motor-connector",
-        "obligations": [_physical("motor-connector", "motor-connector")],
+        "family": "solder-jumper",
+        "obligations": [_physical("solder-jumper", "solder-jumper")],
     }
-    unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("motor_connector",))
+    unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("jumper_cfg",))
     payload = {
         "groups": [
             {
@@ -2769,7 +2768,7 @@ def test_a_role_class_no_reviewed_part_carries_stays_refused():
         validate_unit_candidate(unit, payload, _bom_state([requirement]), {})
 
     assert any(
-        "motor_connector:motor-connector: requires 1 real motor-connector, found 0" in row
+        "jumper_cfg:solder-jumper: requires 1 real solder-jumper, found 0" in row
         for row in refused.value.defects["physical-obligation-unfulfilled"]
     )
 

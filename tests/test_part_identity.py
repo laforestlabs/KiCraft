@@ -294,11 +294,20 @@ def test_the_librarys_own_record_decides_whether_it_realizes_a_class(tmp_path, m
     assert reviewed_record_realizes_class(reviewed_part("AONR21357"), "mosfet")
     assert not reviewed_record_realizes_class(reviewed_part("A4988SETTR-T"), "mosfet")
 
-    # A class no reviewed record implements stays unrealized: `motor-connector` names a role
-    # (motor interface), not one physical class, and no vendored record carries it.
-    assert realizable_physical_features("motor-connector") == frozenset()
+    # A motor's flying leads land on a wire-to-board header: the reviewed JST-PH record
+    # (`wire-to-board-connector`) and the stock pin-header pattern both realize the demand,
+    # while an unrelated reviewed part of another class still does not.
+    assert canonical_physical_features("motor-connector") == frozenset(
+        {"pin-header", "wire-to-board-connector"}
+    )
+    assert reviewed_record_realizes_class(reviewed_part("S2B-PH-SM4-TB(LF)(SN)"), "motor-connector")
     assert not reviewed_record_realizes_class(stepper, "motor-connector")
     assert not reviewed_record_realizes_class(reviewed_part("TPS2553DBVR"), "motor-connector")
+
+    # A class no reviewed record implements stays unrealized: `solder-jumper` names a part the
+    # library carries no record for, so a reviewed part of another class cannot answer it.
+    assert realizable_physical_features("solder-jumper") == frozenset()
+    assert not reviewed_record_realizes_class(reviewed_part("S2B-PH-SM4-TB(LF)(SN)"), "solder-jumper")
 
 
 def test_physical_inventory_is_exact_and_never_text_classified():
