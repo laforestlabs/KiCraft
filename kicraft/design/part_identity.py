@@ -3474,6 +3474,41 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     "3-5-mm-audio-jack": frozenset({"audio-jack-3-5mm"}),
     "audio-jack": frozenset({"audio-jack-3-5mm"}),
     "temperature-humidity-pressure-sensor": frozenset({"environmental-sensor", "i2c-sensor"}),
+    # The A4988SETTR-T is a bipolar stepper motor driver; its reviewed record carries
+    # `stepper-driver` as its ONLY physical feature, and a stepper driver IS a motor driver.
+    # Live walkthrough (stepper-a4988, 2026-09-29): the architecture pinned the exact reviewed
+    # part A4988SETTR-T in family `a4988-stepper-driver` and claimed `motor-driver`, but the raw
+    # carrier lookup knew only the DRV8833, so the family-mismatch audit and §9.42 both refused a
+    # board whose reviewed part implements the demand -- and pushed the model to a different
+    # family it did not choose.
+    "motor-driver": frozenset({"motor-driver", "stepper-driver"}),
+    # `switch` is the writer's word for a board's own selector. The usb-pd-trigger brief asks for
+    # a "switch-selectable" output and its reviewed part is SS13D07VG4 (family
+    # `three-position-selector`); the stepper-a4988 brief names its microstep "DIP switches" and
+    # its reviewed part is DSHP03TSGET (`dip-switch`). Both are switches. The momentary spellings
+    # (`momentary-button`, `tactile-switch`, `spst-switch`) are deliberately NOT targets: a
+    # momentary part cannot realize a generic `switch` demand that may have to latch, and those
+    # momentary classes are already the targets of the `button`/`pushbutton` aliases.
+    "switch": frozenset(
+        {
+            "switch",
+            "three-position-selector",
+            "sp3t-selector",
+            "dip-switch",
+            "three-channel-selector",
+        }
+    ),
+    # The usb-a-power-splitter brief asks for "per-port current limiting"; the physical
+    # realization is the reviewed TPS2553DBVR, which the library spells
+    # `current-limited-power-switch` -- the same target as `current-limiting-switch` above.
+    # `current-limiting-circuit` is the third spelling of that one class (the corpus's
+    # per-port limiter rows), so it resolves to the same reviewed feature.
+    "per-port-current-limiting": frozenset({"current-limited-power-switch"}),
+    "current-limiting-circuit": frozenset({"current-limited-power-switch"}),
+    # A plain `mosfet` demand (highside-switch-10a) is realized by the only reviewed MOSFET:
+    # AONR21357, whose reviewed features are `p-channel-mosfet`/`highside-switch`. No n-channel
+    # MOSFET is reviewed, so `mosfet` resolves to the one physical class the library carries.
+    "mosfet": frozenset({"p-channel-mosfet"}),
 }
 
 
@@ -3485,6 +3520,30 @@ def canonical_physical_features(feature: str) -> frozenset[str]:
     """
     key = str(feature or "").strip().casefold()
     return _DEMANDED_CLASS_ALIASES.get(key, frozenset({key}))
+
+
+def reviewed_record_realizes_class(record: ReviewedPart | None, component_class: str) -> bool:
+    """Whether ONE reviewed record's own evidence implements a demanded obligation class.
+
+    The library's records decide, never text similarity: a demand is realized when the record's
+    reviewed family IS the class, or when any of the reviewed physical features the class
+    resolves to (through :func:`canonical_physical_features`) is one the record carries. Both
+    consumers of the vocabulary -- the architecture family audit and the §9.42 physical
+    realization gate -- ask this one question, so a class can never be realized in one gate and
+    unknown in the other.
+
+    A record with no such evidence does not implement the class, whoever emitted it: known
+    hardware must not become an unrelated component merely because its MPN and library assets
+    resolve.
+    """
+    if record is None:
+        return False
+    key = str(component_class or "").strip().casefold()
+    if not key:
+        return False
+    return record.family == key or bool(
+        canonical_physical_features(key) & record.physical_features
+    )
 
 
 # A topology lowerer can prove only the physical class its independently

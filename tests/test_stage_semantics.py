@@ -2275,6 +2275,85 @@ def test_a_requirement_family_that_cannot_implement_its_class_is_refused_here():
     ) == []
 
 
+def test_a_pinned_reviewed_part_realizes_its_demanded_class():
+    """The requirement's own reviewed exact part decides, whatever the lowerer family is.
+
+    Live walkthrough (stepper-a4988, 2026-09-29): a requirement pinned A4988SETTR-T in family
+    `a4988-stepper-driver` and claimed `motor-driver`. The library's only raw `motor-driver`
+    carrier was the DRV8833, so the audit refused the board and pushed a family the writer had
+    not chosen -- though the pinned reviewed part IS a motor driver.
+    """
+    from kicraft.design.stage_semantics import _architecture_obligation_family_mismatch
+
+    def requirement(exact_part):
+        return {
+            "id": "driver",
+            "sheet": "DRIVER",
+            "role": "driver",
+            "family": "a4988-stepper-driver",
+            "exact_part": exact_part,
+            "parameters": {},
+            "ports": {},
+            "obligations": [
+                {"kind": "physical", "original_obligation_id": "motor-driver",
+                 "component_class": "motor-driver"}
+            ],
+        }
+
+    assert _architecture_obligation_family_mismatch(
+        {"requirements": [requirement("A4988SETTR-T")]}
+    ) == []
+    # An exact part that does not implement the class is still refused here.
+    assert [
+        row.code
+        for row in _architecture_obligation_family_mismatch(
+            {"requirements": [requirement("SS13D07VG4")]}
+        )
+    ] == ["architecture_obligation_family_mismatch"]
+
+
+def test_the_selected_recipes_own_reviewed_part_realizes_the_demand():
+    """A bound recipe that emits a reviewed part of the class is a realization, not a substitute.
+
+    Live walkthrough (usb-pd-trigger, 2026-09-29): the `pd_trigger` requirement claimed a
+    `switch` and the audit refused its bound `ch224k-pd-selectable@1` family, although the
+    recipe's own reviewed SS13D07VG4 selector is that switch. Only the recipe the architecture
+    actually selected counts, and only its own exact parts.
+    """
+    from kicraft.design.stage_semantics import _architecture_obligation_family_mismatch
+
+    def requirement(component_class):
+        return {
+            "id": "pd_trigger",
+            "sheet": "PD",
+            "role": "power_input",
+            "family": "usb-pd-selectable-trigger",
+            "exact_part": "CH224K",
+            "parameters": {},
+            "ports": {},
+            "obligations": [
+                {"kind": "physical", "original_obligation_id": "selector",
+                 "component_class": component_class}
+            ],
+        }
+
+    selection = {
+        "recipe": "ch224k-pd-selectable@1",
+        "instance": "pd",
+        "requirement_ids": ["pd_trigger"],
+    }
+    assert _architecture_obligation_family_mismatch(
+        {"requirements": [requirement("switch")], "recipe_selections": [selection]}
+    ) == []
+    # The same recipe does not emit a relay, so the class it truly cannot realize is refused.
+    assert [
+        row.code
+        for row in _architecture_obligation_family_mismatch(
+            {"requirements": [requirement("relay")], "recipe_selections": [selection]}
+        )
+    ] == ["architecture_obligation_family_mismatch"]
+
+
 def test_a_lowerer_that_builds_the_class_itself_is_not_a_family_mismatch(monkeypatch):
     """`switch-input` builds the reset button, so it satisfies a `pushbutton` demand.
 

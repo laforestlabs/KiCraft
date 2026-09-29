@@ -672,19 +672,38 @@ def _bundled_reviewed_record(group: BomComponentGroup):
 
 
 def _group_matches_requirement_identity(group: BomComponentGroup, requirement: dict) -> bool:
-    """Match a reviewed exact_part through its complete physical record."""
-    from kicraft.design.part_identity import physical_inventory_record, reviewed_part
+    """Match a reviewed exact_part through its complete physical record.
+
+    ``exact_part`` may name the brief's unqualified device or family (``MAX31855``,
+    ``STM32F103``) rather than the order code the library carries (``MAX31855KASA+``);
+    both denote the same reviewed hardware, so every accepted concrete identity for that
+    name is compared against the group's own resolved identity. A group that resolves to
+    none of them is not this requirement's implementation, and a group with no reviewed
+    record still needs the compiler's verified lowerer/recipe provenance.
+    """
+    from kicraft.design.part_identity import (
+        accepted_part_identities,
+        physical_inventory_record,
+        reviewed_part,
+    )
 
     exact_part = str(requirement.get("exact_part") or "").strip()
-    exact_reviewed = reviewed_part(exact_part) if exact_part else None
-    if exact_reviewed is None:
+    if not exact_part:
         return _requirement_owns_protected_group(group, (requirement,))
+    exact_reviewed = reviewed_part(exact_part)
     record = physical_inventory_record(
         mpn=group.mpn,
         symbol=group.symbol,
         footprint=group.footprint,
     ) or _bundled_reviewed_record(group)
-    return record is not None and record.identity == exact_reviewed.identity
+    if exact_reviewed is not None:
+        return record is not None and record.identity == exact_reviewed.identity
+    accepted = {
+        str(identity).casefold() for identity in accepted_part_identities(exact_part)
+    }
+    if record is not None and str(record.identity).casefold() in accepted:
+        return True
+    return _requirement_owns_protected_group(group, (requirement,))
 
 
 def _keep_one_connector_group(
@@ -779,16 +798,20 @@ def _adopt_reviewed_library_pair(group: BomComponentGroup) -> BomComponentGroup:
 def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
     """Whether one BOM group implements a demanded physical class.
 
-    A reviewed identity's own features are authoritative, even for a requested
-    class without reviewed coverage. Only an unidentified part may use the
-    existing real-part fallback; known hardware must not become an unrelated
-    component merely because its MPN and library assets resolve.
+    A reviewed identity's own evidence is authoritative, even for a requested
+    class without reviewed coverage: whether the record's reviewed family IS the
+    class or a reviewed feature the class resolves to is one the record carries
+    is the same question the §9.42 commit gate and the architecture family audit
+    ask (:func:`reviewed_record_realizes_class`), so a demand can never be
+    realized in one gate and unknown in the other. Only an unidentified part may
+    use the existing real-part fallback; known hardware must not become an
+    unrelated component merely because its MPN and library assets resolve.
     """
     from kicraft.design.part_identity import (
-        canonical_physical_features,
         has_reviewed_coverage,
         physical_inventory_record,
         resolved_part_evidence,
+        reviewed_record_realizes_class,
     )
 
     reviewed = physical_inventory_record(
@@ -799,7 +822,7 @@ def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
     if reviewed is None:
         reviewed = _bundled_reviewed_record(group)
     if reviewed is not None:
-        return bool(canonical_physical_features(feature).intersection(reviewed.physical_features))
+        return reviewed_record_realizes_class(reviewed, feature)
     return not has_reviewed_coverage(feature) and resolved_part_evidence(
         mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
     )
@@ -1589,6 +1612,87 @@ def _compiler_lowerer_matches(group: BomComponentGroup, requirements) -> list[tu
     return matches
 
 
+def _requirement_reviewed_records(requirement: dict) -> list:
+    """The reviewed record(s) a requirement's own naming resolves to.
+
+    ``exact_part`` may be the brief's unqualified device or family (``MAX31855``,
+    ``STM32F103``), and the library carries only its reviewed order codes; both name the
+    same hardware, so every accepted concrete identity is resolved to its record.
+    """
+    from kicraft.design.part_identity import accepted_part_identities, reviewed_part
+
+    exact_part = str(requirement.get("exact_part") or "").strip()
+    if not exact_part:
+        return []
+    record = reviewed_part(exact_part)
+    if record is not None:
+        return [record]
+    return [
+        member
+        for member in (reviewed_part(identity) for identity in accepted_part_identities(exact_part))
+        if member is not None
+    ]
+
+
+def _requirement_can_realize_class(requirement: dict, feature: str) -> bool:
+    """Whether a requirement's own reviewed evidence can implement a physical class.
+
+    The same capability question the architecture family audit asks: the requirement's
+    family IS the class, a reviewed carrier of the class shares its family, or its pinned
+    exact part resolves to a record that realizes the class. A requirement that answers
+    False cannot grow that hardware however long its unit is repaired.
+    """
+    from kicraft.design.part_identity import (
+        reviewed_parts_for_feature,
+        reviewed_record_realizes_class,
+    )
+
+    family = str(requirement.get("family") or "").strip().casefold()
+    key = str(feature or "").strip().casefold()
+    if family and family == key:
+        return True
+    if family and any(part.family == family for part in reviewed_parts_for_feature(feature)):
+        return True
+    return any(
+        reviewed_record_realizes_class(record, feature)
+        for record in _requirement_reviewed_records(requirement)
+    )
+
+
+def _requirements_claiming_class(feature: str, compiler_requirements) -> set[str]:
+    """The committed requirement ids that carry a physical obligation of one class."""
+    return {
+        str(row.get("id"))
+        for row in compiler_requirements or ()
+        if isinstance(row, dict)
+        and any(
+            isinstance(obligation, dict)
+            and obligation.get("kind") == "physical"
+            and str(obligation.get("component_class") or "") == feature
+            for obligation in row.get("obligations") or []
+        )
+    }
+
+
+def _class_is_owned_by_a_capable_sibling(requirement: dict, feature: str, compiler_requirements) -> bool:
+    """Whether another requirement both claims ``feature`` and can realize it.
+
+    The class then has a real owner, and this requirement's claim is the ownership
+    defect: charging it here asks a unit to invent hardware its own family cannot build.
+    The capable requirement's unit gate still enforces the demand, so nothing is waived
+    design-wide -- live relay-quad (2026-09-29): the ULN2003 ``driver`` requirement carried
+    the intent's mis-named ``relay`` obligation, and its unit exhausted its repair rounds
+    asking for a part the board already builds on the four relay sheets.
+    """
+    requirement_id = str(requirement.get("id"))
+    sibling_ids = _requirements_claiming_class(feature, compiler_requirements) - {requirement_id}
+    return any(
+        str(row.get("id")) in sibling_ids and _requirement_can_realize_class(row, feature)
+        for row in compiler_requirements or ()
+        if isinstance(row, dict)
+    )
+
+
 def _requirement_obligation_defects(
     requirements,
     groups: list[BomComponentGroup],
@@ -1653,7 +1757,21 @@ def _requirement_obligation_defects(
             )
             outstanding = max(total - consumed.get(feature, 0), 0)
             witnessed = lowerer_witnesses(requirement, obligation)
-            if minimum > 1 and feature not in counted:
+            # A count the brief states once ("four 3.5 mm jacks") is one demand on the whole
+            # *design*, and the architecture contract lets every requirement implementing the
+            # class carry the same committed row: when requirements this unit does NOT own also
+            # claim the class, each unit only owes its own instance, and the board-wide total is
+            # compared where the whole BOM exists (§9.42 aggregate realization). Charging the
+            # design total to one per-instance unit is unsatisfiable by construction -- the live
+            # audio-jack unit `jack1` (2026-09-29) was refused "requires 4 real
+            # audio-jack-3-5mm, found 1" although the brief's other three jack units each emit
+            # their own jack. A class every claiming requirement of which is in this unit is the
+            # unit's own demand, and its total is still compared below.
+            claiming_ids = _requirements_claiming_class(feature, compiler_requirements)
+            design_wide = minimum > 1 and bool(
+                claiming_ids - {str(row.get("id")) for row in requirements}
+            )
+            if minimum > 1 and not design_wide and feature not in counted:
                 # A count the brief states once ("two JST-XH connectors") is one demand on the
                 # whole unit, and every requirement implementing the class may carry the same
                 # committed row: compare it once against the groups the unit emitted, then each
@@ -1670,6 +1788,15 @@ def _requirement_obligation_defects(
             else:
                 needed, available = 1, outstanding
             if available < needed and not witnessed:
+                if _class_is_owned_by_a_capable_sibling(
+                    requirement, feature, compiler_requirements
+                ) and not _requirement_can_realize_class(requirement, feature):
+                    # An ownership defect, not a parts defect: this requirement's own reviewed
+                    # evidence cannot build the class, and another requirement both claims it
+                    # and can. The capable requirement's own unit gate enforces the demand, so
+                    # refusing this unit only burns repair rounds on hardware its family cannot
+                    # realize.
+                    continue
                 # Name the groups the unit emitted, with the identity each one resolved to: the
                 # repair (and the next diagnosis) needs to tell "the draft picked an unreviewed
                 # part" from "the draft emitted no part at all".

@@ -248,6 +248,59 @@ def test_every_demanded_class_alias_names_an_emittable_reviewed_feature():
         assert targets & emittable, demanded
 
 
+def test_the_librarys_own_record_decides_whether_it_realizes_a_class(tmp_path, monkeypatch):
+    """A reviewed record realizes only the class its own evidence implements -- never text.
+
+    Live walkthrough (stepper-a4988, 2026-09-29): A4988SETTR-T is a bipolar stepper motor
+    driver whose reviewed record carries `stepper-driver` as its only physical feature, but a
+    `motor-driver` demand was refused because the raw carrier list held only the DRV8833.
+    """
+    from kicraft.design.part_identity import (
+        canonical_physical_features,
+        reviewed_record_realizes_class,
+    )
+
+    # The absence assertions below are about the vendored library, so no per-machine
+    # researched record may stand in for a class it does not cover.
+    monkeypatch.setenv("KICRAFT_RESEARCHED_RECORDS", str(tmp_path / "researched.json"))
+
+    stepper = reviewed_part("A4988SETTR-T")
+    assert stepper.family == "a4988"
+    assert stepper.physical_features == frozenset({"stepper-driver"})
+    assert canonical_physical_features("motor-driver") == frozenset(
+        {"motor-driver", "stepper-driver"}
+    )
+    assert reviewed_record_realizes_class(stepper, "motor-driver")
+
+    # The selector the usb-pd-trigger brief asks for is a `switch`; a momentary button is a
+    # different physical class (it cannot latch), so it must NOT answer a `switch` demand.
+    assert reviewed_record_realizes_class(reviewed_part("SS13D07VG4"), "switch")
+    assert not reviewed_record_realizes_class(reviewed_part("TL3342F260QG"), "switch")
+
+    # The physical realization of per-port current limiting is the current-limited power
+    # switch, and nothing else claims that class.
+    assert canonical_physical_features("per-port-current-limiting") == frozenset(
+        {"current-limited-power-switch"}
+    )
+    assert canonical_physical_features("current-limiting-circuit") == frozenset(
+        {"current-limited-power-switch"}
+    )
+    assert reviewed_record_realizes_class(reviewed_part("TPS2553DBVR"), "per-port-current-limiting")
+    assert reviewed_record_realizes_class(reviewed_part("TPS2553DBVR"), "current-limiting-circuit")
+
+    # The one reviewed MOSFET is the p-channel high-side part; a plain `mosfet` demand resolves
+    # to it, and to nothing else the library carries.
+    assert canonical_physical_features("mosfet") == frozenset({"p-channel-mosfet"})
+    assert reviewed_record_realizes_class(reviewed_part("AONR21357"), "mosfet")
+    assert not reviewed_record_realizes_class(reviewed_part("A4988SETTR-T"), "mosfet")
+
+    # A class no reviewed record implements stays unrealized: `motor-connector` names a role
+    # (motor interface), not one physical class, and no vendored record carries it.
+    assert realizable_physical_features("motor-connector") == frozenset()
+    assert not reviewed_record_realizes_class(stepper, "motor-connector")
+    assert not reviewed_record_realizes_class(reviewed_part("TPS2553DBVR"), "motor-connector")
+
+
 def test_physical_inventory_is_exact_and_never_text_classified():
     header = physical_inventory_record(
         mpn=None,

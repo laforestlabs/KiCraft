@@ -498,6 +498,41 @@ def test_physical_quantity_requires_exact_reviewed_identity_evidence(monkeypatch
     assert result.offenders[0].startswith("E_PHYSICAL_REALIZATION")
 
 
+def test_a_class_with_no_reviewed_carrier_is_not_realized_by_a_reviewed_part_of_another_class(
+    tmp_path, monkeypatch
+):
+    """A coverage gap stays refused: known hardware must not become an unrelated component.
+
+    `motor-connector` names a role (a motor interface), not one physical class: no reviewed
+    record carries it, so the reviewed A4988 -- a real part of a different class -- must not
+    satisfy the demand, and the gate reports the class as uncovered ("real" evidence) rather
+    than pretending the library can answer it.
+    """
+    from kicraft.design.part_identity import realizable_physical_features
+
+    monkeypatch.setenv("KICRAFT_RESEARCHED_RECORDS", str(tmp_path / "researched.json"))
+    assert realizable_physical_features("motor-connector") == frozenset()
+    stepper = _part("U1", "A4988SETTR-T", mpn="A4988SETTR-T")
+    stepper.symbol = "a4988:A4988SETTR-T"
+    stepper.footprint = "a4988:WQFN-28_L5.0-W5.0-P0.50-BL-EP3.2"
+    requirement = SimpleNamespace(
+        id="motor_a",
+        sheet="POWER",
+        exact_part=None,
+        family="motor-connector",
+        declared_interface=None,
+        obligations=[
+            SimpleNamespace(kind="physical", component_class="motor-connector"),
+        ],
+    )
+    result = validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=[requirement]), _bom([stepper], {})
+    )
+    assert not result.ok
+    assert all(row.startswith("E_PHYSICAL_REALIZATION") for row in result.offenders)
+    assert "requires 1 real 'motor-connector'" in result.offenders[0]
+
+
 def test_a_recipe_realized_regulator_is_a_reviewed_transfer_path():
     """A curated recipe is reviewed evidence: §9.39 must read its declared input/output ports.
 

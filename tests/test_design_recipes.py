@@ -3559,6 +3559,126 @@ def test_two_explicit_mcu_cores_are_not_coalesced():
     assert sum(part.mpn == "RP2040" for row in expansions for part in row.parts) == 2
 
 
+def test_a_reviewed_stepper_driver_realizes_a_motor_driver_demand_end_to_end():
+    """The A4988's own reviewed record decides: `stepper-driver` IS a `motor-driver`.
+
+    Live walkthrough (stepper-a4988, 2026-09-29): the architecture pinned the exact reviewed part
+    A4988SETTR-T in family `a4988-stepper-driver` and claimed a `motor-driver` obligation. The
+    library's raw `motor-driver` carrier list held only the DRV8833, so the family audit and
+    §9.42 both refused the board -- and pushed a family the writer had not chosen. Both must read
+    the pinned part's own reviewed evidence instead.
+    """
+    from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+    from kicraft.design.stage_semantics import _architecture_obligation_family_mismatch
+    from kicraft.design.synthesis.validation import check_requirement_physical_realization
+
+    payload = {
+        "topologies": {"driver": "A4988 stepper driver"},
+        "rail_voltages": {"+12V": 12.0},
+        "power_nets": ["+12V", "GND"],
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [{"name": "DRIVER", "stem": "DRIVER", "function": "A4988 stepper driver"}],
+        "inter_sheet_nets": [],
+        "requirements": [
+            {
+                "id": "driver",
+                "sheet": "DRIVER",
+                "role": "driver",
+                "family": "a4988-stepper-driver",
+                "exact_part": "A4988SETTR-T",
+                "ports": {
+                    "vm": "+12V", "vdd": "+12V", "gnd": "GND",
+                    "step": "STEP", "dir": "DIR", "ms1": "MS1", "ms2": "MS2", "ms3": "MS3",
+                    "out1a": "OUT1A", "out1b": "OUT1B", "out2a": "OUT2A", "out2b": "OUT2B",
+                },
+                "obligations": [
+                    {"kind": "physical", "original_obligation_id": "motor-driver",
+                     "component_class": "motor-driver"}
+                ],
+            }
+        ],
+        "recipe_selections": [
+            {
+                "recipe": "a4988-stepper@1",
+                "instance": "driver",
+                "sheets": {"interface": "DRIVER"},
+                "requirement_ids": ["driver"],
+                "port_bindings": {
+                    "vm": "+12V", "vdd": "+12V", "gnd": "GND",
+                    "step": "STEP", "dir": "DIR", "ms1": "MS1", "ms2": "MS2", "ms3": "MS3",
+                    "out1a": "OUT1A", "out1b": "OUT1B", "out2a": "OUT2A", "out2b": "OUT2B",
+                },
+            }
+        ],
+        "assumptions": [],
+    }
+    architecture = apply_architecture_recipe_resolution(payload)
+    assert [
+        row.code for row in _architecture_obligation_family_mismatch(architecture.model_dump())
+    ] == []
+    bom_payload, _ = _normalize_stage_response(
+        "bom", {"groups": [], "arrays": []}, {"architecture": architecture.model_dump()}
+    )
+    bom = BOM.model_validate(bom_payload)
+    assert any(part.mpn == "A4988SETTR-T" for part in bom.parts)
+    verdict = check_requirement_physical_realization(architecture, bom)
+    assert verdict.ok, verdict.offenders
+
+
+def test_the_pd_selectable_recipes_own_selector_realizes_a_switch_demand():
+    """`ch224k-pd-selectable@1` emits the reviewed SS13D07VG4, so its `switch` demand is met.
+
+    Live walkthrough (usb-pd-trigger, 2026-09-29): §9.42 refused the requirement with
+    "requires 1 reviewed 'switch' physical part(s), found 0" although the bound recipe's own
+    selector is that switch and the class resolves to the selector's reviewed features.
+    """
+    from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+    from kicraft.design.synthesis.validation import check_requirement_physical_realization
+
+    payload = {
+        "topologies": {"PD": "CH224K USB-PD sink with selectable output"},
+        "rail_voltages": {"VBUS": 5.0},
+        "power_nets": ["VBUS", "GND"],
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [{"name": "PD", "stem": "PD", "function": "CH224K PD controller"}],
+        "inter_sheet_nets": [],
+        "requirements": [
+            {
+                "id": "pd_trigger",
+                "sheet": "PD",
+                "role": "power_input",
+                "family": "usb-pd-selectable-trigger",
+                "exact_part": "CH224K",
+                "ports": {"vbus": "VBUS", "gnd": "GND", "cc1": "CC1", "cc2": "CC2"},
+                "obligations": [
+                    {"kind": "physical", "original_obligation_id": "selector",
+                     "component_class": "switch"}
+                ],
+            }
+        ],
+        "recipe_selections": [
+            {
+                "recipe": "ch224k-pd-selectable@1",
+                "instance": "pd",
+                "sheets": {"power": "PD"},
+                "requirement_ids": ["pd_trigger"],
+                "port_bindings": {"vbus": "VBUS", "gnd": "GND", "cc1": "CC1", "cc2": "CC2"},
+            }
+        ],
+        "assumptions": [],
+    }
+    architecture = apply_architecture_recipe_resolution(payload)
+    bom_payload, _ = _normalize_stage_response(
+        "bom", {"groups": [], "arrays": []}, {"architecture": architecture.model_dump()}
+    )
+    bom = BOM.model_validate(bom_payload)
+    assert any(part.mpn == "SS13D07VG4" for part in bom.parts)
+    verdict = check_requirement_physical_realization(architecture, bom)
+    assert not any("'switch'" in offender for offender in verdict.offenders), verdict.offenders
+
+
 def test_stm32_recipe_crystal_has_realizable_reviewed_identity():
     from kicraft.design.models import Architecture
     from kicraft.design.synthesis.validation import check_requirement_physical_realization

@@ -1819,6 +1819,45 @@ def _lowerer_family_witnesses_class(family: str, component_class: str) -> bool:
     )
 
 
+def _selected_recipe_realizes_class(candidate: dict, requirement: dict, component_class: str) -> bool:
+    """Whether the recipe selected for this requirement emits a reviewed part of the class.
+
+    A recipe family that constructs the class out of its own reviewed parts is a realization, not
+    a substitute -- the same standard :func:`_lowerer_family_witnesses_class` applies to a
+    lowerer. Live walkthrough (usb-pd-trigger, 2026-09-29): the ``pd_trigger`` requirement
+    claimed a ``switch`` and the selected ``ch224k-pd-selectable@1`` emits the reviewed
+    SS13D07VG4 selector, but the audit knew only the raw carrier list and refused the writer's
+    own binding family. Only the recipe the architecture actually selected for this requirement
+    counts, and only that recipe's own exact MPN/symbol/footprint parts, resolved through the
+    same fail-closed inventory the parts stage uses.
+    """
+    from kicraft.design.part_identity import (
+        physical_inventory_record,
+        reviewed_record_realizes_class,
+    )
+    from kicraft.design.recipes.registry import get_recipe
+
+    requirement_id = str(requirement.get("id") or "")
+    if not requirement_id:
+        return False
+    for selection in candidate.get("recipe_selections") or []:
+        if not isinstance(selection, dict):
+            continue
+        if requirement_id not in {str(row) for row in (selection.get("requirement_ids") or ())}:
+            continue
+        try:
+            definition = get_recipe(str(selection.get("recipe") or ""))
+        except ValueError:
+            continue
+        for part in definition.parts:
+            record = physical_inventory_record(
+                mpn=part.mpn, symbol=part.symbol, footprint=part.footprint
+            )
+            if reviewed_record_realizes_class(record, component_class):
+                return True
+    return False
+
+
 def _architecture_obligation_family_mismatch(candidate: dict) -> list[StageDiagnostic]:
     """A requirement's family cannot implement a part class that requirement claims.
 
@@ -1832,19 +1871,35 @@ def _architecture_obligation_family_mismatch(candidate: dict) -> list[StageDiagn
     A class with no reviewed carrier is legitimate and is left alone: the intent contract says a
     class the library does not cover yet may be named plainly, and the parts step resolves it.
     """
-    from kicraft.design.part_identity import reviewed_parts_for_feature
+    from kicraft.design.part_identity import (
+        reviewed_part,
+        reviewed_parts_for_feature,
+        reviewed_record_realizes_class,
+    )
 
     diagnostics: list[StageDiagnostic] = []
     for requirement in candidate.get("requirements") or []:
         if not isinstance(requirement, dict):
             continue
         family = str(requirement.get("family") or "")
-        exact = str(requirement.get("exact_part") or "").strip().casefold()
+        exact_part = str(requirement.get("exact_part") or "").strip()
+        exact = exact_part.casefold()
+        # The requirement's own pinned exact part is the library's evidence: a reviewed record
+        # whose reviewed family or physical features (through the demanded-class alias map)
+        # implement the class realizes it, whatever the lowerer family is called. Live
+        # walkthrough (stepper-a4988, 2026-09-29): family `a4988-stepper-driver` with exact part
+        # A4988SETTR-T and a `motor-driver` obligation was refused here and pushed toward the
+        # DRV8833's family, though the pinned reviewed part IS a motor driver.
+        named = reviewed_part(exact_part) if exact_part else None
         for obligation in requirement.get("obligations") or []:
             if not isinstance(obligation, dict) or obligation.get("kind") != "physical":
                 continue
             component_class = str(obligation.get("component_class") or "")
             if not component_class:
+                continue
+            if reviewed_record_realizes_class(named, component_class):
+                continue
+            if _selected_recipe_realizes_class(candidate, requirement, component_class):
                 continue
             carriers = reviewed_parts_for_feature(component_class)
             if not carriers:

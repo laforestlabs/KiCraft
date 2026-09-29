@@ -32,7 +32,6 @@ from kicraft.design.models import (
     obligation_requires_requirement_owner,
 )
 from kicraft.design.part_identity import (
-    canonical_physical_features,
     quantity_subject_binds,
     reviewed_supply_port_limits,
 )
@@ -3497,7 +3496,11 @@ def _part_implements_physical_class(part, reviewed_record, component_class: str)
     Only a part without a reviewed identity can use the existing real-part
     fallback for an uncovered class.
     """
-    from kicraft.design.part_identity import has_reviewed_coverage, resolved_part_evidence
+    from kicraft.design.part_identity import (
+        has_reviewed_coverage,
+        resolved_part_evidence,
+        reviewed_record_realizes_class,
+    )
 
     if reviewed_record is None:
         return not has_reviewed_coverage(component_class) and resolved_part_evidence(
@@ -3505,10 +3508,7 @@ def _part_implements_physical_class(part, reviewed_record, component_class: str)
             symbol=getattr(part, "symbol", None),
             footprint=getattr(part, "footprint", None),
         )
-    canonical = canonical_physical_features(component_class)
-    return component_class == reviewed_record.family or bool(
-        canonical & reviewed_record.physical_features
-    )
+    return reviewed_record_realizes_class(reviewed_record, component_class)
 
 
 def _declared_pin_reaches_port_net(

@@ -2371,6 +2371,409 @@ def test_obligation_class_aliases_match_the_reviewed_feature_vocabulary():
     assert _group_has_physical_feature(_group_for("adum1301arwz-rl"), "opto-isolator") is False
 
 
+def _reviewed_bom_group(
+    identity: str,
+    *,
+    group_id: str,
+    sheet: str,
+    prefix: str = "U",
+    quantity: int = 1,
+    **overrides,
+) -> dict:
+    """A BOM payload group naming a real reviewed part, for the real gate to resolve."""
+    from kicraft.design.part_identity import reviewed_part
+
+    record = reviewed_part(identity)
+    return {
+        "id": group_id,
+        "sheet": sheet,
+        "reference_prefix": prefix,
+        "quantity": quantity,
+        "value": record.identity,
+        "symbol": record.symbol,
+        "footprint": record.footprint,
+        "mpn": record.identity,
+        **overrides,
+    }
+
+
+def _bom_state(requirements, *, sheets=("A",)):
+    state = _state()
+    state["architecture"]["sheets"] = [{"name": name} for name in sheets]
+    state["architecture"]["requirements"] = list(requirements)
+    return state
+
+
+def _physical(requirement_id, component_class):
+    return {
+        "kind": "physical",
+        "original_obligation_id": requirement_id,
+        "component_class": component_class,
+    }
+
+
+def test_mosfet_demand_is_realized_by_the_reviewed_p_channel_mosfet():
+    """(a) matching: a `mosfet` obligation is the reviewed P-channel MOSFET's own class.
+
+    Live highside-switch-10a (2026-09-29): requirement `switch` (family `p-channel-mosfet`)
+    claimed the class `mosfet`; its unit emitted the reviewed AONR21357, whose reviewed family
+    is `p-channel-highside-mosfet` and whose reviews features include `p-channel-mosfet`, and
+    the gate refused it as "requires 1 real mosfet, found 0" until the class reached the
+    record's own vocabulary.
+    """
+    requirement = {
+        "id": "switch",
+        "sheet": "A",
+        "role": "driver",
+        "family": "p-channel-mosfet",
+        # The requirement pins the reviewed implementation so the demand's own identity is
+        # unambiguous; AONR21357 is also a production recipe's exact part, which would
+        # otherwise raise the unrelated `model_authored_protected_identity` question.
+        "exact_part": "AONR21357",
+        "obligations": [_physical("p_channel_mosfet", "mosfet")],
+    }
+    unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("switch",))
+    payload = {"groups": [_reviewed_bom_group("aonr21357", group_id="load_switch", sheet="A")]}
+
+    validated = validate_unit_candidate(unit, payload, _bom_state([requirement]), {})
+
+    assert validated["groups"][0]["symbol"] == "aonr21357:AONR21357"
+    # A part of another class is still refused: the class reaches the record's own evidence,
+    # never a nearby component.
+    with pytest.raises(WorkUnitValidationError) as refused:
+        validate_unit_candidate(
+            unit,
+            {"groups": [_group("resistor", "A", quantity=1)]},
+            _bom_state([requirement]),
+            {},
+        )
+    assert any(
+        "requires 1 real mosfet, found 0" in row
+        for row in refused.value.defects["physical-obligation-unfulfilled"]
+    )
+
+
+def test_current_limiting_circuit_demand_is_realized_by_the_reviewed_load_switch():
+    """(a) matching: a third spelling of the reviewed current-limited-power-switch class.
+
+    Live usb-a-power-splitter (2026-09-29): requirement `port_one_limiter` (family
+    `usb-port-current-limiter`) claimed `current-limiting-circuit`; its unit emitted the
+    reviewed TPS2553DBVR plus the ILIM resistor and was refused "requires 1 real
+    current-limiting-circuit, found 0".
+    """
+    requirement = {
+        "id": "port_one_limiter",
+        "sheet": "A",
+        "role": "driver",
+        "family": "usb-port-current-limiter",
+        "obligations": [_physical("per-port-current-limiting", "current-limiting-circuit")],
+    }
+    unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("port_one_limiter",))
+    payload = {
+        "groups": [
+            _reviewed_bom_group("tps2553dbvr", group_id="current_limiter", sheet="A"),
+            _group("limit_set_resistor", "A", prefix="R", quantity=1),
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, _bom_state([requirement]), {})
+
+    assert {group["symbol"] for group in validated["groups"]} == {
+        "tps2553dbvr:TPS2553DBVR",
+        "Device:R",
+    }
+    # Without the limiter itself the unit is still refused.
+    with pytest.raises(WorkUnitValidationError) as refused:
+        validate_unit_candidate(
+            unit,
+            {"groups": [_group("limit_set_resistor", "A", prefix="R", quantity=1)]},
+            _bom_state([requirement]),
+            {},
+        )
+    assert any(
+        "requires 1 real current-limiting-circuit, found 0" in row
+        for row in refused.value.defects["physical-obligation-unfulfilled"]
+    )
+
+
+def test_a_device_named_exact_part_owns_its_reviewed_order_code():
+    """(a) matching: `exact_part` `MAX31855` is the reviewed order code `MAX31855KASA+`.
+
+    Live thermocouple-amp (2026-09-29): requirement `max31855` pinned the brief's
+    unqualified device as `MAX31855` and the unit emitted the reviewed ``MAX31855KASA+``
+    pair (no order-code MPN), so the declared interface reported
+    "declared interface needs one identified hardware owner" even though the requirement's
+    own reviewed hardware was on the sheet.
+    """
+    requirement = {
+        "id": "max31855",
+        "sheet": "A",
+        "role": "sensor",
+        "family": "max31855",
+        "exact_part": "MAX31855",
+        "ports": {
+            "tc_plus": "TC_PLUS",
+            "tc_minus": "TC_MINUS",
+            "sclk": "SPI_SCLK",
+            "so": "SPI_MISO",
+            "gnd": "GND",
+        },
+        # The contacts the emitted symbol publishes by number (the display names ``V_{CC}``
+        # and ``~{CS}`` are the naming reconciliation's question, not this demand's ownership).
+        "declared_interface": {
+            "ports": [
+                {"key": "tc_plus", "direction": "input", "pin": "T+", "function": "Thermocouple positive input"},
+                {"key": "tc_minus", "direction": "input", "pin": "T-", "function": "Thermocouple negative input"},
+                {"key": "sclk", "direction": "input", "pin": "SCK", "function": "SPI clock input"},
+                {"key": "so", "direction": "output", "pin": "SO", "function": "SPI serial data output"},
+                {"key": "gnd", "direction": "power", "pin": "GND", "function": "Ground reference"},
+            ]
+        },
+        "obligations": [
+            {
+                "kind": "conversion",
+                "original_obligation_id": "thermocouple_to_spi",
+                "input_kind": "K-type thermocouple signal",
+                "output_kind": "SPI digital data",
+                "behavior": "Digitize the K-type thermocouple signal and provide it over SPI.",
+            }
+        ],
+    }
+    unit = StageWorkUnit("bom-s000", "bom", "A", requirement_ids=("max31855",))
+    # The emitted group carries the pair and display value, not the order-code MPN.
+    payload = {
+        "groups": [
+            {
+                "id": "converter",
+                "sheet": "A",
+                "reference_prefix": "U",
+                "quantity": 1,
+                "value": "MAX31855KASA",
+                "symbol": "Sensor_Temperature:MAX31855KASA",
+                "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+            }
+        ]
+    }
+
+    validated = validate_unit_candidate(unit, payload, _bom_state([requirement]), {})
+
+    assert validated["groups"][0]["symbol"] == "Sensor_Temperature:MAX31855KASA"
+    # Another part does not own the declared interface.
+    wrong = {
+        "groups": [
+            _reviewed_bom_group("mcp6001t-i/ot", group_id="converter", sheet="A")
+        ]
+    }
+    with pytest.raises(WorkUnitValidationError) as refused:
+        validate_unit_candidate(unit, wrong, _bom_state([requirement]), {})
+    assert any(
+        "declared interface needs one identified hardware owner" in row
+        for row in refused.value.defects["declared-interface-unrealized"]
+    )
+
+
+def _relay_channel(requirement_id: str, sheet: str) -> dict:
+    return {
+        "id": requirement_id,
+        "sheet": sheet,
+        "role": "driver",
+        "family": "srd-05vdc-sl-c",
+        "exact_part": "SRD-05VDC-SL-C",
+        "obligations": [_physical("relay", "relay")],
+    }
+
+
+def test_a_relay_demand_on_the_uln2003_driver_unit_is_owned_by_the_relay_units():
+    """(b) ownership: the ULN2003 driver requirement cannot build the `relay` it claims.
+
+    Live relay-quad (2026-09-29): the intent read the driver's `relay-driver-ic` class as
+    the reviewed class `relay`, so requirement `driver` (family `uln2003`, exact part
+    `ULN2003`) carried a `relay` obligation and its unit exhausted its repair rounds on
+    "requires 1 real relay, found 0" while the four relay sheets each build their own
+    SRD-05VDC-SL-C. The class has a capable owner, so the driver unit is not asked for
+    hardware its family cannot build; the relay requirement's own unit still is.
+    """
+    driver = {
+        "id": "driver",
+        "sheet": "A",
+        "role": "driver",
+        "family": "uln2003",
+        "exact_part": "ULN2003",
+        "obligations": [_physical("uln2003_driver", "relay")],
+    }
+    siblings = [_relay_channel(f"relay{index}", f"R{index}") for index in range(1, 5)]
+    state = _bom_state([driver, *siblings], sheets=("A", "R1", "R2", "R3", "R4"))
+    unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("driver",))
+    payload = {"groups": [_reviewed_bom_group("uln2003adr", group_id="driver", sheet="A")]}
+
+    validated = validate_unit_candidate(unit, payload, state, {})
+
+    assert validated["groups"][0]["symbol"] == "uln2003adr:ULN2003ADR"
+    # The capable owner's unit is still refused when it emits no relay.
+    relay_unit = StageWorkUnit("bom-r001", "bom", "R1", requirement_ids=("relay1",))
+    with pytest.raises(WorkUnitValidationError) as refused:
+        validate_unit_candidate(
+            relay_unit,
+            {"groups": [_group("resistor", "R1", quantity=1)]},
+            state,
+            {},
+        )
+    assert any(
+        "relay1:relay: requires 1 real relay, found 0" in row
+        for row in refused.value.defects["physical-obligation-unfulfilled"]
+    )
+    # With no capable owner anywhere in the design the demand stays a refusal.
+    no_owner = _bom_state(
+        [
+            driver,
+            {**_relay_channel("relay2", "R2"), "family": "uln2003", "exact_part": "ULN2003"},
+        ],
+        sheets=("A", "R2"),
+    )
+    with pytest.raises(WorkUnitValidationError):
+        validate_unit_candidate(unit, payload, no_owner, {})
+
+
+def _audio_jack(requirement_id: str, sheet: str, *, counted: bool) -> dict:
+    obligations = [_physical("four-audio-jacks", "audio-jack-3-5mm")]
+    if counted:
+        obligations.append(
+            {
+                "kind": "quantity",
+                "original_obligation_id": "four-jacks",
+                "subject": "audio-jack-3-5mm",
+                "minimum": 4,
+            }
+        )
+    return {
+        "id": requirement_id,
+        "sheet": sheet,
+        "role": "connector",
+        "family": "audio-jack",
+        "exact_part": "SJ1-3533NG",
+        "ports": {
+            "tip": f"{requirement_id.upper()}_TIP",
+            "sleeve": f"{requirement_id.upper()}_RETURN",
+            "ring": f"{requirement_id.upper()}_RING",
+        },
+        "obligations": obligations,
+    }
+
+
+def test_a_design_wide_jack_count_is_not_charged_to_one_per_instance_unit():
+    """(b) ownership: "four 3.5 mm jacks" is one board-wide count, not one per jack unit.
+
+    Live audio-jack-buffer (2026-09-29): the intent's `four-jacks` row was carried by
+    requirement `jack1` alone while `jack2`..`jack4` each implement the same class; the
+    single-jack unit was refused "requires 4 real audio-jack-3-5mm, found 1" for a board
+    whose other three jack units each emit their own SJ1-3533NG. The unit owes its own
+    instance; the board-wide total is compared where the whole BOM exists (§9.42).
+    """
+    requirements = [_audio_jack("jack1", "A", counted=True)]
+    requirements.extend(_audio_jack(f"jack{index}", f"J{index}", counted=False) for index in range(2, 5))
+    state = _bom_state(requirements, sheets=("A", "J2", "J3", "J4"))
+    unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("jack1",))
+    payload = {
+        "groups": [_reviewed_bom_group("sj1-3533ng", group_id="audio_jack", sheet="A", prefix="J")]
+    }
+
+    validated = validate_unit_candidate(unit, payload, state, {})
+
+    assert validated["groups"][0]["symbol"] == "sj1-3533ng:SJ1-3533NG"
+    # A count no unit shares stays the unit's own demand: one jack for four is refused.
+    solo = _bom_state([_audio_jack("jacks", "A", counted=True)], sheets=("A",))
+    solo_unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("jacks",))
+    with pytest.raises(WorkUnitValidationError) as refused_solo:
+        validate_unit_candidate(solo_unit, payload, solo, {})
+    assert any(
+        "requires 4 real audio-jack-3-5mm, found 1" in row
+        for row in refused_solo.value.defects["physical-obligation-unfulfilled"]
+    )
+
+
+def test_a_design_wide_count_still_refuses_a_unit_that_emits_no_realizing_part():
+    """The board-wide exception never waives the part itself.
+
+    A class four requirements share is each unit's own instance, but a unit that emits no
+    part realizing the class is refused exactly as before. ``bnc-connector`` has no
+    deterministic lowerer, so the empty payload is not rescued by the compiler.
+    """
+    requirements = [
+        {
+            "id": f"panel{index}",
+            "sheet": "A",
+            "role": "connector",
+            "family": "custom-input-panel",
+            "obligations": [_physical("bnc", "bnc-connector")]
+            + (
+                [
+                    {
+                        "kind": "quantity",
+                        "original_obligation_id": "four_bnc",
+                        "subject": "bnc-connector",
+                        "minimum": 4,
+                    }
+                ]
+                if index == 1
+                else []
+            ),
+        }
+        for index in range(1, 5)
+    ]
+    state = _bom_state(requirements, sheets=("A",))
+    unit = StageWorkUnit("bom-s000", "bom", "A", requirement_ids=("panel1",))
+
+    with pytest.raises(WorkUnitValidationError) as refused:
+        validate_unit_candidate(unit, {"groups": []}, state, {})
+
+    assert any(
+        "requires 1 real bnc-connector, found 0" in row
+        for row in refused.value.defects["physical-obligation-unfulfilled"]
+    )
+
+
+def test_a_role_class_no_reviewed_part_carries_stays_refused():
+    """(c) coverage gap: `motor-connector` names a role, not one reviewed physical class.
+
+    Live stepper-a4988 (2026-09-29): requirement `motor_connector` claimed
+    `motor-connector` and its unit emitted a stock generic 4-pin socket; no reviewed record
+    carries the class, so the demand is an honest gap and a real part of another class must
+    not satisfy it.
+    """
+    from kicraft.design.part_identity import realizable_physical_features
+
+    assert realizable_physical_features("motor-connector") == frozenset()
+    requirement = {
+        "id": "motor_connector",
+        "sheet": "A",
+        "role": "connector",
+        "family": "motor-connector",
+        "obligations": [_physical("motor-connector", "motor-connector")],
+    }
+    unit = StageWorkUnit("bom-r000", "bom", "A", requirement_ids=("motor_connector",))
+    payload = {
+        "groups": [
+            {
+                "id": "connector",
+                "sheet": "A",
+                "reference_prefix": "J",
+                "quantity": 1,
+                "value": "PinSocket_1x04",
+                "symbol": "Connector_Generic:Conn_01x04",
+                "footprint": "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical",
+            }
+        ]
+    }
+
+    with pytest.raises(WorkUnitValidationError) as refused:
+        validate_unit_candidate(unit, payload, _bom_state([requirement]), {})
+
+    assert any(
+        "motor_connector:motor-connector: requires 1 real motor-connector, found 0" in row
+        for row in refused.value.defects["physical-obligation-unfulfilled"]
+    )
+
+
 def test_unit_refusal_is_written_as_a_loadable_stage_diagnostic():
     """A unit-stage refusal must survive a state round trip.
 
