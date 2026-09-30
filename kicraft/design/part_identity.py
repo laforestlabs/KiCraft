@@ -3526,6 +3526,14 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     # board whose reviewed part implements the demand -- and pushed the model to a different
     # family it did not choose.
     "motor-driver": frozenset({"motor-driver", "stepper-driver"}),
+    # An analog-to-digital converter *is* an ADC. The reviewed ADS1115IDGSR carries `adc` and
+    # `i2c-adc` and nothing else, so a held-out brief that demands the class in full words got
+    # `requires 1 real 'analog-to-digital-converter', found 0` on the very part it asked for
+    # (measured: 9 saved states demand the full spelling, 6 demand `ads1115-adc`).
+    "analog-to-digital-converter": frozenset({"adc", "i2c-adc"}),
+    "analog-digital-converter": frozenset({"adc", "i2c-adc"}),
+    "a/d-converter": frozenset({"adc", "i2c-adc"}),
+    "ads1115-adc": frozenset({"adc", "i2c-adc"}),
     # The corpus also spells the same demand in full. The reviewed A4988SETTR-T carries
     # `stepper-driver`, and 30 saved states demand `stepper-motor-driver`; without this the
     # demand has no carrier at all and the parts stage can only refuse it.
