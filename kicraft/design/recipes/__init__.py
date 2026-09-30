@@ -1,6 +1,7 @@
 """Versioned deterministic circuit recipes."""
 
 from .registry import (
+    complete_unused_published_ports,
     expand_recipe,
     expand_selections,
     get_recipe,
@@ -64,6 +65,7 @@ __all__ = [
     "RecipeResolutionError",
     "ResolutionResult",
     "apply_architecture_recipe_resolution",
+    "complete_unused_published_ports",
     "expand_recipe",
     "expand_selections",
     "get_recipe",

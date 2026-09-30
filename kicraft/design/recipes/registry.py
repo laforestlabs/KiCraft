@@ -432,6 +432,100 @@ def expand_selections(selections: Iterable[object]) -> list[RecipeExpansion]:
     ]
 
 
+def _referenced_net_names(architecture: object) -> set[str]:
+    """Every net name the design itself declares.
+
+    A name here is claimed by an authored signal, an inter-sheet contract, a
+    requirement port or a rail, so no completion may treat a pin on it as unused.
+    """
+    if architecture is None:
+        return set()
+    payload = architecture.model_dump() if hasattr(architecture, "model_dump") else architecture
+    if not isinstance(payload, dict):
+        return set()
+    names = {str(name) for name in payload.get("power_nets") or []}
+    names.update(str(name) for name in (payload.get("rail_voltages") or {}))
+    for net in payload.get("inter_sheet_nets") or []:
+        if isinstance(net, dict) and net.get("name") is not None:
+            names.add(str(net["name"]))
+    for requirement in payload.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        names.update(
+            str(net) for net in (requirement.get("ports") or {}).values() if net is not None
+        )
+    return names
+
+
+def complete_unused_published_ports(
+    expansions: Iterable[RecipeExpansion],
+    architecture: object,
+) -> list[RecipeExpansion]:
+    """Finish the netlist a design implies for recipe pins nobody wired.
+
+    A recipe pin whose net is one of its own recipe's port names is on the board
+    only because something bound that port -- the authored signal, an
+    inter-sheet contract, another requirement's port, or the recipe's own
+    default tie. When none of those claim it, the name is the recipe's private
+    label for a pin this design never used; emitting it as a net wires one pin
+    with nowhere to go, which §9.15 refuses (the held-out STM32F103 board:
+    PA11/PA12 published as ``usb_dm``/``usb_dp`` by a brief that asked for no
+    USB data, and the ADS1115 ``interrupt`` pads).
+
+    So the compiler completes the design here: such a pin becomes an explicit
+    no-connect, exactly as the recipe's own unallocated pads already are. Two
+    cases keep their endpoints untouched, because they are not orphans:
+
+      * a name the design does reference (``_referenced_net_names``) -- an
+        authored signal, an inter-sheet net or another port's binding;
+      * a port several of the recipe's own pins share -- that is the recipe's
+        internal tie (the STM32 recipe ties BOOT0 to its pulldown resistor and
+        the programming header), not a pin connecting to nothing.
+
+    Model-authored connections never pass through here: an orphan the model
+    wrote still reaches §9.15 and is still refused.
+    """
+    referenced = _referenced_net_names(architecture)
+    completed: list[RecipeExpansion] = []
+    for expansion in expansions:
+        definition = get_recipe(expansion.selection.recipe)
+        bound = set(expansion.selection.port_bindings)
+        unused = {
+            port.name for port in definition.ports if port.name not in bound
+        } - referenced
+        dropped: set[tuple[str, str]] = set()
+        connections: list[NetConnection] = []
+        no_connect_pins = list(expansion.no_connect_pins)
+        for connection in expansion.connections:
+            if connection.net_name in unused and len(connection.endpoints) < 2:
+                no_connect_pins.extend(connection.endpoints)
+                dropped.update((endpoint.ref, endpoint.pin) for endpoint in connection.endpoints)
+                continue
+            connections.append(connection)
+        if not dropped:
+            completed.append(expansion)
+            continue
+        completed.append(
+            expansion.model_copy(
+                update={
+                    "connections": connections,
+                    "no_connect_pins": no_connect_pins,
+                    "ownership": expansion.ownership.model_copy(
+                        update={
+                            "pins": [
+                                row.model_copy(update={"net": None})
+                                if (row.ref, row.pin) in dropped
+                                else row
+                                for row in expansion.ownership.pins
+                            ]
+                        }
+                    ),
+                }
+            )
+        )
+    return completed
+
+
 def locked_pin_assignments(bom: dict) -> dict[tuple[str, str], str]:
     """Read deterministic connected ownership from the canonical BOM manifest."""
     locked: dict[tuple[str, str], str] = {}

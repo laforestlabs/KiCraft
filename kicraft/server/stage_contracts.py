@@ -376,6 +376,7 @@ def _expand_bom_groups(
         raise ValueError(f"BOM has {total} parts; maximum is {BOM_TOTAL_PART_LIMIT}")
 
     from kicraft.design.recipes import (
+        complete_unused_published_ports,
         expand_selections,
         protected_identity_matches,
     )
@@ -383,7 +384,15 @@ def _expand_bom_groups(
 
     architecture = (prompt_state or {}).get("architecture") or {}
     trusted_lowering_groups = set((prompt_state or {}).get("_trusted_lowering_group_ids") or ())
-    expansions = expand_selections(architecture.get("recipe_selections") or [])
+    # A recipe publishes every pin its part has, including ports this design never
+    # bound (an STM32's PA11/PA12 when no USB data is wanted). Those pins are
+    # unused, not signals that connect to nothing: complete them as no-connects
+    # here, where the whole design's net namespace is known, so §9.15 still
+    # refuses a genuinely orphaned authored signal.
+    expansions = complete_unused_published_ports(
+        expand_selections(architecture.get("recipe_selections") or []),
+        architecture,
+    )
     recipe_parts = _recipe_parts_with_identity(expansions, get_recipe)
     if not response.groups and not recipe_parts:
         raise ValueError("BOM must contain at least one component group or circuit-recipe part")

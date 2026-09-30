@@ -630,6 +630,242 @@ def test_an_unbound_feedback_port_expands_onto_the_output():
     assert _shared_net(expansion, "U1", "1", "4") == ["AOUT"]
 
 
+def _stm32_without_usb_architecture() -> dict:
+    """The held-out shape: a recipe publishes usb_dm/usb_dp, no design wires them.
+
+    Mirrors the committed architecture of the held-out STM32F103C8T6 board: the
+    MCU requirement binds only its supply and programming ports, the brief asks
+    for no USB data, and no other requirement names those nets.
+    """
+    return {
+        "topologies": {"CONTROLLER": "STM32F103C8T6 controller"},
+        "rail_voltages": {"GND": 0.0, "+3V3": 3.3},
+        "comms_protocols": ["SWD"],
+        "mcu_present": True,
+        "sheets": [
+            {"name": "CONTROLLER", "stem": "CONTROLLER", "function": "STM32F103 controller"},
+            {"name": "SWD HEADER", "stem": "SWD_HEADER", "function": "SWD programming header"},
+            {"name": "RESET", "stem": "RESET", "function": "Physical reset button"},
+        ],
+        "power_nets": ["GND", "+3V3"],
+        "inter_sheet_nets": [
+            {
+                "name": "GND",
+                "endpoints": [
+                    {"sheet": "CONTROLLER", "direction": "bidirectional"},
+                    {"sheet": "SWD HEADER", "direction": "bidirectional"},
+                ],
+            },
+            {
+                "name": "+3V3",
+                "endpoints": [
+                    {"sheet": "CONTROLLER", "direction": "input"},
+                    {"sheet": "SWD HEADER", "direction": "input"},
+                ],
+            },
+            {
+                "name": "SWDIO",
+                "endpoints": [
+                    {"sheet": "CONTROLLER", "direction": "bidirectional"},
+                    {"sheet": "SWD HEADER", "direction": "bidirectional"},
+                ],
+            },
+            {
+                "name": "SWCLK",
+                "endpoints": [
+                    {"sheet": "CONTROLLER", "direction": "bidirectional"},
+                    {"sheet": "SWD HEADER", "direction": "bidirectional"},
+                ],
+            },
+            {
+                "name": "NRST",
+                "endpoints": [
+                    {"sheet": "CONTROLLER", "direction": "bidirectional"},
+                    {"sheet": "SWD HEADER", "direction": "bidirectional"},
+                ],
+            },
+        ],
+        "recipe_selections": [
+            {
+                "recipe": "stm32f103c8t6-minimal@1",
+                "instance": "mcu",
+                "sheets": {"mcu": "CONTROLLER"},
+                "parameters": {"can_remap": "pb8-pb9"},
+                "port_bindings": {
+                    "gnd": "GND",
+                    "vdd": "+3V3",
+                    "swdio": "SWDIO",
+                    "swclk": "SWCLK",
+                    "nrst": "NRST",
+                },
+                "requirement_ids": ["mcu"],
+            }
+        ],
+        "requirements": [
+            {
+                "id": "mcu",
+                "sheet": "CONTROLLER",
+                "role": "mcu_core",
+                "family": "stm32f103c8",
+                "exact_part": "STM32F103C8T6",
+                "parameters": {"can_remap": "pb8-pb9"},
+                "ports": {
+                    "gnd": "GND",
+                    "vdd": "+3V3",
+                    "swdio": "SWDIO",
+                    "swclk": "SWCLK",
+                    "nrst": "NRST",
+                },
+            }
+        ],
+    }
+
+
+def _stm32_usb_free_board(groups=()):
+    """Compose the recorded shape through the real BOM stage normalizer."""
+    from kicraft.design.models import Architecture
+    from kicraft.design.synthesis.validation import check_no_dangling_signal_nets
+
+    architecture = _stm32_without_usb_architecture()
+    canonical, _count = _normalize_stage_response(
+        "bom",
+        {"groups": list(groups), "arrays": [], "assumptions": [], "substitutions": []},
+        {"architecture": architecture},
+    )
+    bom = BOM.model_validate(canonical)
+    verdict = check_no_dangling_signal_nets(Architecture.model_validate(architecture), bom)
+    return canonical, bom, verdict
+
+
+def test_unused_published_recipe_pins_compose_as_no_connects():
+    """The held-out blocker: PA11/PA12 published as usb_dm/usb_dp, bound by nothing.
+
+    An unused published pin is unused, not a signal that connects to nothing:
+    the compiler completes it as an explicit no-connect, so §9.15 passes where
+    the recorded run was refused for two dangling single-pin nets.
+    """
+    canonical, bom, verdict = _stm32_usb_free_board()
+
+    assert verdict.ok, verdict.offenders
+    assert not {"usb_dm", "usb_dp"} & {c.net_name for c in bom.connections}
+    assert {"ref": "U1", "pin": "32"} in canonical["no_connect_pins"]
+    assert {"ref": "U1", "pin": "33"} in canonical["no_connect_pins"]
+    # The recipe still owns those pins -- as no-connects, so the wiring stage cannot
+    # re-open them and §9.11 coverage still sees them.
+    manifest = next(row for row in canonical["recipe_ownership"] if row["instance"] == "mcu")
+    owned = {(row["ref"], row["pin"]): row.get("net") for row in manifest["pins"]}
+    assert owned[("U1", "32")] is None and owned[("U1", "33")] is None
+    # The pins the design does use keep their wiring.
+    assert owned[("U1", "34")] == "SWDIO" and owned[("U1", "7")] == "NRST"
+
+
+@pytest.mark.parametrize("claim", ["inter_sheet_net", "another_requirement_port"])
+def test_published_pin_a_design_references_is_never_dropped(claim):
+    """Rule: only a pin nothing references may complete as a no-connect.
+
+    `usb_dm` is claimed by the design two ways a recipe cannot see, so its pin
+    must stay wired; `usb_dp`, which nothing claims, still completes as unused.
+    """
+    from kicraft.design.recipes import complete_unused_published_ports
+
+    architecture = _stm32_without_usb_architecture()
+    if claim == "inter_sheet_net":
+        architecture["inter_sheet_nets"].append(
+            {
+                "name": "usb_dm",
+                "endpoints": [
+                    {"sheet": "CONTROLLER", "direction": "bidirectional"},
+                    {"sheet": "SWD HEADER", "direction": "bidirectional"},
+                ],
+            }
+        )
+    else:
+        architecture["requirements"].append(
+            {
+                "id": "usb_monitor",
+                "sheet": "SWD HEADER",
+                "role": "sensor",
+                "family": "usb-monitor",
+                "ports": {"signal": "usb_dm"},
+            }
+        )
+    expansions = complete_unused_published_ports(
+        expand_selections(architecture["recipe_selections"]),
+        architecture,
+    )
+    (expansion,) = expansions
+
+    usb = [c for c in expansion.connections if c.net_name == "usb_dm"]
+    assert [f"{e.ref}.{e.pin}" for c in usb for e in c.endpoints] == ["U1.32"]
+    unconnected = {pin.pin for pin in expansion.no_connect_pins if pin.ref == "U1"}
+    assert "32" not in unconnected  # referenced by the design: the pin stays wired
+    assert "33" in unconnected  # nobody references it: the pin completes as unused
+
+
+def test_a_published_port_the_recipe_ties_itself_stays_wired():
+    """A port several of the recipe's own pins share is its internal tie, not a dangle."""
+    from kicraft.design.recipes import complete_unused_published_ports
+
+    architecture = _stm32_without_usb_architecture()  # boot0 is bound by nothing
+    (expansion,) = complete_unused_published_ports(
+        expand_selections(architecture["recipe_selections"]),
+        architecture,
+    )
+
+    # BOOT0 still ties the MCU pin, its pulldown and the programming header together:
+    # the design did not bind the port, but the recipe's own wiring is not an orphan.
+    boot0 = next(c for c in expansion.connections if c.net_name == "boot0")
+    assert sorted(f"{endpoint.ref}.{endpoint.pin}" for endpoint in boot0.endpoints) == [
+        "J1.4",
+        "R1.1",
+        "U1.44",
+    ]
+    assert {
+        f"{pin.ref}.{pin.pin}" for pin in expansion.no_connect_pins
+    }.isdisjoint({"U1.44", "J1.4", "R1.1"})
+
+
+def test_an_authored_orphan_signal_is_still_refused():
+    """The negative control: model-authored wiring that connects to nothing stays a defect."""
+    from kicraft.design.models import Architecture
+    from kicraft.design.synthesis.validation import check_no_dangling_signal_nets
+    from kicraft.server.stage_contracts import _normalize_wiring_stage_response
+
+    canonical, _bom, verdict = _stm32_usb_free_board(
+        groups=[
+            {
+                "id": "reset_button",
+                "reference_prefix": "SW",
+                "quantity": 1,
+                "value": "TL3342",
+                "symbol": "kicad-tl3342-button:TL3342",
+                "footprint": "Button_Switch_SMD:SW_SPST_TL3342",
+                "sheet": "RESET",
+            }
+        ]
+    )
+    assert verdict.ok, verdict.offenders
+
+    wired = _normalize_wiring_stage_response(
+        {
+            "pins": [
+                {"ref": "SW1", "pin": "1", "net": "NRST"},
+                {"ref": "SW1", "pin": "2", "net": "SPARE"},
+            ]
+        },
+        {"bom": canonical},
+    )
+    bom = BOM.model_validate({**canonical, **wired})
+
+    orphan = check_no_dangling_signal_nets(Architecture.model_validate(
+        _stm32_without_usb_architecture()
+    ), bom)
+    assert not orphan.ok
+    assert any("'SPARE'" in offender for offender in orphan.offenders), orphan.offenders
+    # The recipe-owned unused pins stayed no-connects, not nets.
+    assert not {"usb_dm", "usb_dp"} & {c.net_name for c in bom.connections}
+
+
 def test_a_default_tie_must_name_another_port_of_its_recipe():
     """A typo'd or self-referential tie is refused at definition time, never a dangling net."""
     from kicraft.design.recipes.models import RecipeDefinition, RecipePort
