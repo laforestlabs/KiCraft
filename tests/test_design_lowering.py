@@ -1876,6 +1876,9 @@ def test_a_connector_refusal_names_the_shape_it_needs():
         ports={f"pin{i}": f"N{i}" for i in range(1, 14)},
     )
     assert "declares 13" in too_many
+    # No reviewed block carries more than twelve positions, so a bigger demand is a
+    # composition; the refusal names that shape instead of an unreachable single block.
+    assert "split the demand across several terminal requirements" in too_many
 
     wrong_width = message(
         family="screw-terminal", parameters={"rows": 1},

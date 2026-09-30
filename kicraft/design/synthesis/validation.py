@@ -3839,7 +3839,11 @@ def check_requirement_physical_realization(
     complete. A declared interface is never silently unchecked: each stage
     evaluates the half it can prove, with the same offenders.
     """
-    from kicraft.design.part_identity import has_reviewed_coverage
+    from kicraft.design.part_identity import (
+        class_counts_contacts,
+        has_reviewed_coverage,
+        reviewed_realization_units,
+    )
 
     info, _ = _pin_info_by_ref(bom)
     nets = _nets_by_ref(bom)
@@ -3871,6 +3875,7 @@ def check_requirement_physical_realization(
         }
         local_demands = {component_class: 1 for component_class in physical_classes}
         count_rows: dict[str, str] = {}
+        stated_counts: dict[str, int] = {}
         for obligation in requirement.obligations:
             if obligation.kind != "quantity":
                 continue
@@ -3880,17 +3885,28 @@ def check_requirement_physical_realization(
             # silently dropped.
             for component_class in local_demands:
                 if quantity_subject_binds(obligation.subject, component_class):
-                    local_demands[component_class] = max(
-                        local_demands[component_class], obligation.minimum
+                    stated_counts[component_class] = max(
+                        stated_counts.get(component_class, 0), obligation.minimum
                     )
+                    # A count on a position-array terminal class is a *contact* demand: the
+                    # requirement still needs one implementing block of its own, and the count
+                    # is charged once per sheet below, in the class's own count unit. Charging
+                    # the whole count to every requirement that carries the shared row refused
+                    # a correct board (2026-09-30: three reviewed blocks, 4+4+2 positions, for a
+                    # nine-contact demand each read "requires 9 ... found 2").
+                    if not class_counts_contacts(component_class):
+                        local_demands[component_class] = max(
+                            local_demands[component_class], obligation.minimum
+                        )
                     count_rows[component_class] = str(
                         getattr(obligation, "original_obligation_id", None) or obligation.subject
                     )
                     break
         for component_class, minimum in local_demands.items():
+            witness = _has_trusted_lowerer_topology_witness(requirement, bom, component_class)
             matching = (
                 [requirement]
-                if _has_trusted_lowerer_topology_witness(requirement, bom, component_class)
+                if witness
                 else [
                     part
                     for part in requirement_parts
@@ -3899,17 +3915,29 @@ def check_requirement_physical_realization(
                     )
                 ]
             )
-            if len(matching) < minimum:
+            realized = (
+                1
+                if witness
+                else sum(
+                    reviewed_realization_units(reviewed.get(part.ref), component_class)
+                    for part in matching
+                )
+            )
+            if realized < minimum:
                 # "reviewed" only where the library could answer; a class it has never
                 # covered is proven by a real resolved part instead.
                 evidence = "reviewed" if has_reviewed_coverage(component_class) else "real"
                 bad.append(
                     f"E_PHYSICAL_REALIZATION {requirement.id!r}: requires {minimum} {evidence} "
-                    f"{component_class!r} physical part(s), found {len(matching)} with exact "
+                    f"{component_class!r} physical part(s), found {realized} with exact "
                     "MPN/symbol/footprint evidence"
                 )
             aggregate_demands[(requirement.sheet, component_class)].append(
-                (requirement.id, minimum, count_rows.get(component_class))
+                (
+                    requirement.id,
+                    stated_counts.get(component_class, minimum),
+                    count_rows.get(component_class),
+                )
             )
         claim = requirement.declared_interface
         if claim is None or not bom.connections:
@@ -4053,15 +4081,19 @@ def check_requirement_physical_realization(
                 )
                 if _part_implements_physical_class(part, reviewed.get(part.ref), component_class)
             )
-        available = len(candidate_refs) + topology_witnesses
+        available = topology_witnesses + sum(
+            reviewed_realization_units(reviewed.get(ref), component_class)
+            for ref in candidate_refs
+        )
         if available < demanded:
             owners = ", ".join(
                 f"{requirement_id}×{minimum}" for requirement_id, minimum, _row in demand_rows
             )
             evidence = "reviewed" if has_reviewed_coverage(component_class) else "real"
+            unit = "contact(s)" if class_counts_contacts(component_class) else "part(s)"
             bad.append(
                 f"E_PHYSICAL_REALIZATION {sheet!r}/{component_class!r}: {owners} demand "
-                f"{demanded} distinct part(s), but only {available} exact {evidence} "
+                f"{demanded} distinct {unit}, but only {available} exact {evidence} "
                 "MPN/symbol/footprint realization(s) exist"
             )
     return CheckResult(

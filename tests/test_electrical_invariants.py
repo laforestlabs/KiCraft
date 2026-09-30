@@ -810,6 +810,124 @@ def test_a_count_two_requirements_share_is_one_demand_on_the_sheet(monkeypatch):
     assert any("demand 2 distinct" in offender for offender in result.offenders)
 
 
+def _terminal_requirement(ident: str, *, minimum: int, exact_part: str | None = None):
+    """One screw-terminal requirement carrying the brief's shared terminal-count row."""
+    return SimpleNamespace(
+        id=ident,
+        sheet="ANALOG INPUTS",
+        exact_part=exact_part,
+        family="screw-terminal",
+        declared_interface=None,
+        obligations=[
+            SimpleNamespace(kind="physical", original_obligation_id="screw-terminals",
+                            component_class="screw-terminal"),
+            SimpleNamespace(kind="quantity", original_obligation_id="eight-input-terminals",
+                            subject="screw-terminal", minimum=minimum),
+        ],
+    )
+
+
+def _reviewed_terminal_part(ref: str, identity: str):
+    """A BOM part carrying a reviewed terminal record's own symbol/footprint/mpn."""
+    from kicraft.design.part_identity import reviewed_part
+
+    record = reviewed_part(identity)
+    assert record is not None
+    return SimpleNamespace(
+        ref=ref, value=record.identity, mpn=record.identity,
+        symbol=record.symbol, footprint=record.footprint, sheet="ANALOG INPUTS",
+        datasheet=None, sourcing_note=None,
+    )
+
+
+def _generic_terminal_part(ref: str, contacts: int):
+    """A BOM part carrying the stock multi-position block the lowerer emits."""
+    return SimpleNamespace(
+        ref=ref, value=f"ScrewTerminal_1x{contacts:02d}", mpn=None,
+        symbol=f"Connector:Screw_Terminal_01x{contacts:02d}",
+        footprint=("TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-"
+                   f"{contacts}_1x{contacts:02d}_P5.00mm_Horizontal"),
+        sheet="ANALOG INPUTS", datasheet=None, sourcing_note=None,
+    )
+
+
+def test_a_multi_position_terminal_realizes_one_terminal_per_contact():
+    """A nine-contact terminal demand is met by the contacts the reviewed blocks publish.
+
+    The held-out analog briefs demand "eight single-ended analog inputs plus ground on screw
+    terminals" and the reviewed terminal vocabulary carries only multi-position blocks
+    (WJ126V-5.0-{02,03,04}P, KiCad-stock Phoenix MKDS-1,5 1x02..1x12). Counting parts made the
+    recorded r2 commit unrepairable: ``terminals_a×9, terminals_b×9, terminals_ground×9 demand
+    9 distinct part(s), but only 3 exact reviewed MPN/symbol/footprint realization(s) exist``
+    for a board holding 4+4+2 positions. The count is in contacts, so the nine-position block
+    and the 4+4+2 composition pass, and an eight-contact design is still refused.
+    """
+    nine = _terminal_requirement("terminals", minimum=9)
+    assert validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=[nine]), _bom([_generic_terminal_part("J1", 9)], {})
+    ).ok
+
+    short = validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=[nine]), _bom([_generic_terminal_part("J1", 8)], {})
+    )
+    assert not short.ok
+    assert any(
+        "demand 9 distinct contact(s), but only 8 exact reviewed" in row
+        for row in short.offenders
+    )
+
+    requirements = [
+        _terminal_requirement("terminals_a", minimum=9, exact_part="WJ126V-5.0-04P-14-00A"),
+        _terminal_requirement("terminals_b", minimum=9, exact_part="WJ126V-5.0-04P-14-00A"),
+        _terminal_requirement("terminals_ground", minimum=9, exact_part="WJ126V-5.0-02P-14-00A"),
+    ]
+    composed = _bom(
+        [
+            _reviewed_terminal_part("J1", "wj126v-5.0-04p-14-00a"),
+            _reviewed_terminal_part("J2", "wj126v-5.0-04p-14-00a"),
+            _reviewed_terminal_part("J3", "wj126v-5.0-02p-14-00a"),
+        ],
+        {},
+    )
+    assert validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=requirements), composed
+    ).ok
+
+    # The same composition one contact short of the demand is still refused.
+    short_composition = _bom(
+        [
+            _reviewed_terminal_part("J1", "wj126v-5.0-04p-14-00a"),
+            _reviewed_terminal_part("J2", "wj126v-5.0-04p-14-00a"),
+        ],
+        {},
+    )
+    result = validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=requirements[:2]), short_composition
+    )
+    assert not result.ok
+    assert any("demand 9 distinct contact(s), but only 8" in row for row in result.offenders)
+
+    # The STM32 brief's sixteen inputs plus ground (seventeen contacts) is the same shape one
+    # size up: 4+4+4+4+2 reviewed positions meet it, and four four-position blocks do not.
+    sixteen = [
+        _terminal_requirement(f"terminals_{suffix}", minimum=17,
+                              exact_part=f"WJ126V-5.0-{contacts:02d}P-14-00A")
+        for suffix, contacts in (("a", 4), ("b", 4), ("c", 4), ("d", 4), ("ground", 2))
+    ]
+    full = _bom(
+        [_reviewed_terminal_part(f"J{index}", identity) for index, identity in enumerate(
+            ["wj126v-5.0-04p-14-00a"] * 4 + ["wj126v-5.0-02p-14-00a"], 1
+        )],
+        {},
+    )
+    assert validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=sixteen), full
+    ).ok
+    assert not validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=sixteen[:4]), _bom(full.parts[:4], {})
+    ).ok
+
+
 def test_distinct_requirement_owners_cannot_share_one_reviewed_connector(monkeypatch):
     record = SimpleNamespace(
         identity="reviewed-bnc",

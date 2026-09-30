@@ -2371,6 +2371,220 @@ def test_obligation_class_aliases_match_the_reviewed_feature_vocabulary():
     assert _group_has_physical_feature(_group_for("adum1301arwz-rl"), "opto-isolator") is False
 
 
+def _terminal_requirement(contacts: int, minimum: int, **kwargs):
+    """A screw-terminal requirement declaring ``contacts`` numbered contacts."""
+    from kicraft.design.models import CircuitRequirement
+
+    return CircuitRequirement(
+        id="terminals",
+        sheet="ANALOG INPUTS",
+        role="connector",
+        family="screw-terminal",
+        parameters={"rows": 1},
+        ports={f"pin{i}": ("GND" if i == contacts else f"AIN{i}") for i in range(1, contacts + 1)},
+        obligations=[
+            {
+                "kind": "physical",
+                "original_obligation_id": "screw-terminal",
+                "component_class": "screw-terminal",
+            },
+            {
+                "kind": "quantity",
+                "original_obligation_id": "eight-input-terminals",
+                "subject": "screw-terminal",
+                "minimum": minimum,
+            },
+        ],
+        **kwargs,
+    )
+
+
+def _lowered_terminal_group(requirement):
+    """The BOM group the screw-terminal lowerer emits for one requirement."""
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.server.stage_contracts import BomComponentGroup
+
+    artifact = lower_requirement(requirement)
+    assert artifact is not None
+    group = artifact.groups[0]
+    return BomComponentGroup(
+        id=group.role,
+        sheet=requirement.sheet,
+        reference_prefix=group.reference_prefix,
+        quantity=group.quantity,
+        value=group.value,
+        symbol=group.symbol,
+        footprint=group.footprint,
+        **({"mpn": group.mpn} if group.mpn else {}),
+    )
+
+
+def test_a_multi_position_terminal_realizes_one_terminal_per_contact():
+    """A nine-contact screw-terminal demand is met by the nine positions of one reviewed block.
+
+    The held-out rp2040/stm32 analog briefs demand "eight single-ended analog inputs plus ground
+    on screw terminals", and the reviewed terminal vocabulary carries only multi-position blocks
+    (WJ126V-5.0-{02,03,04}P and the KiCad-stock Phoenix MKDS-1,5 1x02..1x12). Counting *parts*
+    made every correct design unrepairable: the recorded r1 reading is
+    ``requires 9 real screw-terminal, found 1`` for one 8-position block, and r2's committed
+    architecture -- three reviewed blocks, 4+4+2 positions -- read ``terminals_a×9, terminals_b×9,
+    terminals_ground×9 demand 9 distinct part(s), but only 3 ... exist``. A block's contacts ARE
+    its terminals, so the count is in contacts: the one nine-position block and the 4+4+2
+    composition are accepted, and a design exposing only eight contacts is still refused.
+    """
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    nine = _terminal_requirement(9, 9)
+    payload = nine.model_dump()
+    nine_group = _lowered_terminal_group(nine)
+    assert nine_group.symbol == "Connector:Screw_Terminal_01x09"
+
+    assert _requirement_obligation_defects(
+        [payload], [nine_group], compiler_requirements=[payload]
+    ) == {
+        "physical-obligation-unfulfilled": [],
+        "declared-interface-unrealized": [],
+    }
+
+    # One 8-position block exposes eight contacts, one short of the demand: still refused.
+    eight_group = _lowered_terminal_group(_terminal_requirement(8, 9))
+    defects = _requirement_obligation_defects([payload], [eight_group])
+    assert defects["physical-obligation-unfulfilled"] == [
+        "terminals:screw-terminal: requires 9 real screw-terminal contact(s), found 8; "
+        "the unit emitted: connector=Connector:Screw_Terminal_01x08 mpn=ScrewTerminal_1x08"
+    ]
+
+    # The same block DOES realize an eight-contact demand: the count is the block's positions.
+    eight = _terminal_requirement(8, 8)
+    assert _requirement_obligation_defects(
+        [eight.model_dump()], [eight_group], compiler_requirements=[eight.model_dump()]
+    ) == {"physical-obligation-unfulfilled": [], "declared-interface-unrealized": []}
+
+    # A composition of reviewed blocks -- 4+4+2 positions across three requirements, the
+    # shape the recorded r2 architecture committed -- realizes the same nine contacts.
+    def composed_requirement(rid: str, contacts: int, nets: tuple[str, ...]):
+        from kicraft.design.models import CircuitRequirement
+
+        return CircuitRequirement(
+            id=rid,
+            sheet="ANALOG INPUTS",
+            role="connector",
+            family="screw-terminal",
+            exact_part=f"WJ126V-5.0-{contacts:02d}P-14-00A",
+            parameters={"rows": 1},
+            ports={f"pin{i}": net for i, net in enumerate(nets, 1)},
+            obligations=[
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "screw-terminals",
+                    "component_class": "screw-terminal",
+                },
+                {
+                    "kind": "quantity",
+                    "original_obligation_id": "eight-input-terminals",
+                    "subject": "screw-terminal",
+                    "minimum": 9,
+                },
+            ],
+        )
+
+    composed_requirements = [
+        composed_requirement("terminals_a", 4, ("ANALOG_0", "ANALOG_1", "ANALOG_2", "ANALOG_3")),
+        composed_requirement("terminals_b", 4, ("ANALOG_4", "ANALOG_5", "ANALOG_6", "ANALOG_7")),
+        composed_requirement("terminals_ground", 2, ("ANALOG_GND", "GND")),
+    ]
+    composed_payloads = [row.model_dump() for row in composed_requirements]
+    composed_groups = [_lowered_terminal_group(row) for row in composed_requirements]
+    assert [len(group.mpn or "") and group.mpn for group in composed_groups] == [
+        "WJ126V-5.0-04P-14-00A",
+        "WJ126V-5.0-04P-14-00A",
+        "WJ126V-5.0-02P-14-00A",
+    ]
+    assert _requirement_obligation_defects(
+        composed_payloads, composed_groups, compiler_requirements=composed_payloads
+    ) == {
+        "physical-obligation-unfulfilled": [],
+        "declared-interface-unrealized": [],
+    }
+
+    # ...but a composition that exposes only eight contacts is still refused.
+    short = _requirement_obligation_defects(
+        composed_payloads[:2], composed_groups[:2], compiler_requirements=composed_payloads[:2]
+    )
+    assert any(
+        "requires 9 real screw-terminal contact(s), found 8" in row
+        for row in short["physical-obligation-unfulfilled"]
+    )
+
+
+def test_a_sixteen_input_terminal_demand_is_realizable_as_a_composition():
+    """The STM32 brief's sixteen analog inputs plus ground need 4+4+4+4+2 positions.
+
+    A single block is bounded by the reviewed contract (WJ126V-5.0-04P carries four, the
+    KiCad-stock MKDS-1,5 1x02..1x12 carries at most twelve), so the realizable shape for the
+    sixteen-input board is several reviewed blocks whose positions sum to at least the
+    seventeen contacts the brief demands. The count is in contacts, so the composition passes.
+    """
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    def requirement(rid: str, contacts: int, nets: tuple[str, ...], minimum: int):
+        return CircuitRequirement(
+            id=rid,
+            sheet="ANALOG INPUTS",
+            role="connector",
+            family="screw-terminal",
+            exact_part=f"WJ126V-5.0-{contacts:02d}P-14-00A",
+            parameters={"rows": 1},
+            ports={f"pin{i}": net for i, net in enumerate(nets, 1)},
+            obligations=[
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "screw-terminals",
+                    "component_class": "screw-terminal",
+                },
+                {
+                    "kind": "quantity",
+                    "original_obligation_id": "sixteen-input-terminals",
+                    "subject": "screw-terminal",
+                    "minimum": minimum,
+                },
+            ],
+        )
+
+    requirements = [
+        requirement("terminals_a", 4, ("AIN1", "AIN2", "AIN3", "AIN4"), 17),
+        requirement("terminals_b", 4, ("AIN5", "AIN6", "AIN7", "AIN8"), 17),
+        requirement("terminals_c", 4, ("AIN9", "AIN10", "AIN11", "AIN12"), 17),
+        requirement("terminals_d", 4, ("AIN13", "AIN14", "AIN15", "AIN16"), 17),
+        requirement("terminals_ground", 2, ("ANALOG_GND", "GND"), 17),
+    ]
+    payloads = [row.model_dump() for row in requirements]
+    groups = [_lowered_terminal_group(row) for row in requirements]
+    assert _requirement_obligation_defects(
+        payloads, groups, compiler_requirements=payloads
+    ) == {"physical-obligation-unfulfilled": [], "declared-interface-unrealized": []}
+
+
+def test_a_part_count_class_still_counts_parts_not_contacts():
+    """Only a position-array terminal class counts contacts: two connectors are two parts.
+
+    The same reviewed-contact arithmetic must not leak into a class whose unit is the whole
+    part -- two JST-XH connectors are two connectors, not their four contacts. `power-connector`
+    is a role a barrel jack carries too, so it counts parts even when a terminal block answers
+    it; the terminal classes proper (`screw-terminal`, `terminal-block`, `screw-clamp-terminal`)
+    count contacts.
+    """
+    from kicraft.server.stage_work_units import _group_realization_units
+
+    jst = _group_for("b2b-xh-a(lf)(sn)")
+    assert _group_realization_units(jst, "jst-xh-connector") == 1
+    assert _group_realization_units(_group_for("wj126v-5.0-04p-14-00a"), "screw-terminal") == 4
+    assert _group_realization_units(_group_for("wj126v-5.0-04p-14-00a"), "terminal-block") == 4
+    assert _group_realization_units(_group_for("wj126v-5.0-02p-14-00a"), "power-connector") == 1
+    assert _group_realization_units(jst, "screw-terminal") == 0
+
+
 def _reviewed_bom_group(
     identity: str,
     *,

@@ -3808,6 +3808,42 @@ def realizable_physical_features(component_class: str) -> frozenset[str]:
     return canonical_physical_features(component_class) & reviewed_feature_vocabulary()
 
 
+#: Demanded classes whose reviewed parts are an array of interchangeable *positions* rather
+#: than one indivisible commodity: an N-position terminal block IS N screw terminals, so a
+#: count of the class counts contacts. Every other class realizes one unit per part whatever
+#: its pin count (two ADS1115 are two parts; two JST-XH connectors are two connectors, not
+#: their four contacts). The reviewed vocabulary carries exactly these as multi-position
+#: blocks -- WJ126V-5.0-{02,03,04}P and the KiCad-stock MKDS-1,5 1x02..1x12 -- so a demand
+#: of N terminals is realized by the N positions one block publishes, never by N parts.
+_POSITION_ARRAY_FEATURES = frozenset(
+    {"screw-terminal", "terminal-block", "screw-clamp-terminal", "binding-post"}
+)
+
+
+def class_counts_contacts(component_class: str) -> bool:
+    """Whether a quantity demand on this class counts contacts, not whole parts.
+
+    One question, one answer, for both count consumers -- the BOM work-unit obligation check
+    and the §9.42 physical-realization gate -- so a count can never bind in one gate and
+    dangle in the other.
+    """
+    return bool(canonical_physical_features(component_class) & _POSITION_ARRAY_FEATURES)
+
+
+def reviewed_realization_units(record: ReviewedPart | None, component_class: str) -> int:
+    """How many units of ``component_class`` ONE reviewed part realizes.
+
+    A position-array terminal block realizes one unit per reviewed contact (a 4-position
+    block is four screw terminals); every other part realizes exactly one unit, whatever
+    its pin count. A record that publishes no contacts is one unit: the count is evidence
+    the record itself carries, never inferred from a symbol name.
+    """
+    if not class_counts_contacts(component_class):
+        return 1
+    contacts = getattr(record, "contacts", ()) if record is not None else ()
+    return len(contacts) if contacts else 1
+
+
 def has_reviewed_coverage(component_class: str) -> bool:
     """Whether the reviewed library can answer for a demanded obligation class.
 

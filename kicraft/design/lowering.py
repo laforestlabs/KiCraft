@@ -1103,8 +1103,18 @@ def _connector(
         if not 2 <= count <= 12:
             raise ValueError(
                 f"a screw terminal block carries 2 to 12 contacts and this requirement declares "
-                f"{count}; spell a two-wire terminal as `positive`/`negative`, or an N-position "
-                "block as `pin1..pinN`"
+                f"{count}; "
+                + (
+                    # No reviewed block is larger than twelve positions, so a bigger demand is a
+                    # composition: several reviewed blocks whose positions cover it. Naming the
+                    # realizable shape is what lets the draft repair itself (the sixteen-input
+                    # held-out brief declares 16 analog inputs plus ground).
+                    "split the demand across several terminal requirements, each a reviewed "
+                    "block of at most 12 contacts, so that their positions cover it"
+                    if count > 12
+                    else "spell a two-wire terminal as `positive`/`negative`, or an N-position "
+                    "block as `pin1..pinN`"
+                )
             )
         lowerer_id = "screw-terminal@1"
         if requirement.exact_part is not None:

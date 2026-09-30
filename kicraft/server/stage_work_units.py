@@ -818,23 +818,50 @@ def _group_has_physical_feature(group: BomComponentGroup, feature: str) -> bool:
     """
     from kicraft.design.part_identity import (
         has_reviewed_coverage,
-        physical_inventory_record,
         resolved_part_evidence,
         reviewed_record_realizes_class,
     )
+
+    reviewed = _reviewed_record_for_group(group)
+    if reviewed is not None:
+        return reviewed_record_realizes_class(reviewed, feature)
+    return not has_reviewed_coverage(feature) and resolved_part_evidence(
+        mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
+    )
+
+
+def _reviewed_record_for_group(group: BomComponentGroup):
+    """The reviewed record a BOM group resolves to, or None when it is unidentified.
+
+    One resolution shared by the physical-feature question and the realization-unit count, so
+    a group can never implement a class in one and publish a different contact count in the
+    other.
+    """
+    from kicraft.design.part_identity import physical_inventory_record
 
     reviewed = physical_inventory_record(
         mpn=group.mpn,
         symbol=group.symbol,
         footprint=group.footprint,
     )
-    if reviewed is None:
-        reviewed = _bundled_reviewed_record(group)
-    if reviewed is not None:
-        return reviewed_record_realizes_class(reviewed, feature)
-    return not has_reviewed_coverage(feature) and resolved_part_evidence(
-        mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
-    )
+    return reviewed if reviewed is not None else _bundled_reviewed_record(group)
+
+
+def _group_realization_units(group: BomComponentGroup, feature: str) -> int:
+    """How many units of ``feature`` this group realizes, in the class's own count unit.
+
+    A multi-position terminal block realizes one unit per reviewed contact (a 9-position block
+    is nine screw terminals), so a demand of N terminals is met by the block's positions and
+    never by counting one part as N parts or N parts as one. Every other class realizes one
+    unit per part. A group that does not implement the class realizes none.
+    """
+    from kicraft.design.part_identity import class_counts_contacts, reviewed_realization_units
+
+    if not _group_has_physical_feature(group, feature):
+        return 0
+    if not class_counts_contacts(feature):
+        return group.quantity
+    return group.quantity * reviewed_realization_units(_reviewed_record_for_group(group), feature)
 
 
 def _group_implements_controller(group: BomComponentGroup, requirement: dict) -> bool:
@@ -1720,6 +1747,7 @@ def _requirement_obligation_defects(
     """
     from kicraft.design.synthesis.symbol_pinout import lookup_pins
     from kicraft.design.part_identity import (
+        class_counts_contacts,
         lowerer_witnesses_physical_class,
         quantity_subject_binds,
     )
@@ -1761,9 +1789,7 @@ def _requirement_obligation_defects(
                 ),
                 default=1,
             )
-            total = sum(
-                group.quantity for group in groups if _group_has_physical_feature(group, feature)
-            )
+            total = sum(_group_realization_units(group, feature) for group in groups)
             outstanding = max(total - consumed.get(feature, 0), 0)
             witnessed = lowerer_witnesses(requirement, obligation)
             # A count the brief states once ("four 3.5 mm jacks") is one demand on the whole
@@ -1815,9 +1841,10 @@ def _requirement_obligation_defects(
                 ]
                 if feature not in unfilled_classes:
                     unfilled_classes.append(feature)
+                unit = " contact(s)" if class_counts_contacts(feature) else ""
                 defects["physical-obligation-unfulfilled"].append(
                     f"{requirement['id']}:{obligation['original_obligation_id']}: "
-                    f"requires {needed} real {feature}, found {available}"
+                    f"requires {needed} real {feature}{unit}, found {available}"
                     + (
                         "; the unit emitted: " + " | ".join(emitted)
                         if emitted
