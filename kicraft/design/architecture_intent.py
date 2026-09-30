@@ -731,6 +731,33 @@ def _lowerer_families() -> frozenset[str]:
     )
 
 
+def _lowerer_realizes_exact_part(family: str, identity: str) -> bool:
+    """Whether the lowerer that owns `family` builds this reviewed ordering code itself.
+
+    A requirement may name a reviewed part whose own record class differs from the family that
+    builds it: the `adjustable-rc-lowpass` composition is the reviewed builder of the
+    `3296W-1-103LF` trimmer it carries, exactly as it publishes that code as its
+    `reviewed_exact_part`. Rewriting such a requirement to the record's class
+    (`trim-potentiometer`) would replace the composition that owns the part with a bare trimmer
+    that rejects the composition's own parameters and publishes none of its ports (live
+    rc-lowpass runs r13/r14/r15).
+    """
+    from kicraft.design.lowering import registered_lowerers
+
+    wanted = str(identity or "").strip().casefold()
+    if not wanted:
+        return False
+    return any(
+        family in lowerer.families
+        and wanted
+        in {
+            str(lowerer.required_exact_part or "").casefold(),
+            str(lowerer.reviewed_exact_part or "").casefold(),
+        }
+        for lowerer in registered_lowerers()
+    )
+
+
 def _carrier_family_for_class(component_class: str) -> str | None:
     """The family that realizes this class, when the library has exactly one carrier family."""
     from kicraft.design.part_identity import reviewed_parts_for_feature
@@ -830,6 +857,12 @@ def _adopt_carrier_families(payload: dict) -> dict:
             continue
         exact = str(requirement.get("exact_part") or "").strip()
         record = reviewed_part(exact) if exact else None
+        if record is not None and _lowerer_realizes_exact_part(family, record.identity):
+            # This family's own lowerer builds exactly this reviewed part. The record's class is
+            # not another spelling of the family, it is the bare part inside the composition the
+            # lowerer already owns, so the family stays (and with it the ports and parameters
+            # that composition publishes).
+            continue
         target = None
         if (
             record is not None
@@ -882,13 +915,33 @@ def _adopt_carrier_families(payload: dict) -> dict:
     return payload
 
 
+def _unsourced_rail(payload: dict) -> str | None:
+    """The one declared rail nothing on the board sources, or None when that is not unique."""
+    rails = ((payload.get("power") or {}).get("rails") or {})
+    candidates = sorted(
+        str(name)
+        for name, row in rails.items()
+        if isinstance(row, dict) and not str(row.get("from") or "").strip()
+    )
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _complete_terminal_returns(payload: dict) -> dict:
     """Give a screw terminal its return contact when the draft names only the live one.
 
     The compiler refuses a terminal whose contacts cannot be numbered, and a board input terminal
     has two: the live contact and the return. The return is the ground net, so it is a tie, and it
     keeps the spelling the draft already used ("positive" -> "negative", "pin1" -> "pin2").
+
+    A board power input the draft never wired at all is the same statement one step earlier: the
+    terminal names its reviewed ordering code (two contacts), the board declares the one rail
+    nothing else sources, and a two-contact block's contacts are its live wire and its return. The
+    contact pair is completed with those two names -- `positive` on that rail, `negative` on
+    ground -- rather than refusing a design whose power entry the compiler already knows
+    (live relay-quad r13: `power_input` declared `WJ126V-5.0-02P-14-00A` and no contacts).
     """
+    from kicraft.design.part_identity import reviewed_part
+
     requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
     for requirement in requirements:
         if "screw" not in _token(str(requirement.get("family") or "")):
@@ -897,6 +950,24 @@ def _complete_terminal_returns(payload: dict) -> dict:
         if len(referenced) >= 2:
             continue
         if not referenced:
+            record = reviewed_part(str(requirement.get("exact_part") or "").strip())
+            role = _token(str(requirement.get("role") or ""))
+            # The requirement's own declared supply outranks the board-level reading: a draft that
+            # states which rail this entry feeds has already made the choice.
+            rail = str(requirement.get("supply") or "").strip() or _unsourced_rail(payload)
+            if (
+                record is None
+                or record.family != "screw-terminal"
+                or len(record.contacts) != 2
+                or "power" not in role
+                or "input" not in role
+                or not rail
+            ):
+                continue
+            ties = dict(requirement.get("ties") or {})
+            for port, net in (("positive", rail), ("negative", "GND")):
+                ties.setdefault(port, net)
+            requirement["ties"] = ties
             continue
         live = referenced[0]
         if live.startswith("pin") and live[3:].isdigit():
@@ -1007,14 +1078,41 @@ def complete_architecture_payload(payload: dict) -> dict:
             return None
         return rail, source[0], source[1]
 
+    def _ground_contact_the_signal_returns(signal: dict) -> tuple[str, str] | None:
+        """(requirement id, port) when this dropped duplicate signal *is* a contact's ground.
+
+        A signal whose every peer is a return pin is that peer's own ground connection, so the
+        signal statement is redundant -- but only for the peers. Its source is a real contact on
+        the board (a connector's return screw, a switch's ground pin), and no other part of the
+        design says what that contact carries. Dropping the signal therefore dropped the contact
+        and left the part unbuildable (live servo-driver-16 runs r13/r14/r15: the power terminal's
+        `negative` contact disappeared and the reviewed 2-contact terminal refused for declaring
+        one contact). The tie keeps the one fact the signal stated.
+        """
+        parts = [_endpoint(peer) for peer in _peers(signal)]
+        if not parts or any(part is None for part in parts):
+            return None
+        if not all(_reference_port_name(part[1].casefold()) for part in parts):
+            return None
+        source = _endpoint(signal.get("from"))
+        if source is None or source[0] not in by_id:
+            return None
+        if _reference_port_name(source[1].casefold()) or _supply_port_name(source[1].casefold()):
+            return None
+        return source[0], source[1]
+
     dropped: list[str] = []
     rail_entries: list[tuple[str, str, str]] = []
+    ground_entries: list[tuple[str, str]] = []
     for signal in signals:
         peers = _peers(signal)
         if peers and all(_duplicates_a_binding(peer) for peer in peers):
             entry = _rail_entry_the_signal_carries(signal)
             if entry is not None:
                 rail_entries.append(entry)
+            ground = _ground_contact_the_signal_returns(signal)
+            if ground is not None:
+                ground_entries.append(ground)
             dropped.append(str(signal.get("name") or ""))
             continue
         kept.append(signal)
@@ -1042,6 +1140,16 @@ def complete_architecture_payload(payload: dict) -> dict:
         ties = by_id[requirement_id].setdefault("ties", {})
         if isinstance(ties, dict):
             ties.setdefault(port, rail)
+    # The same rule for a return contact: the dropped signal named a real contact on the board and
+    # the grounded peers it reached, so the contact keeps ground as its tie. A contact a kept signal
+    # or a stated tie still names is left exactly as written.
+    for requirement_id, port in ground_entries:
+        requirement = by_id.get(requirement_id)
+        if requirement is None or (requirement_id.casefold(), port.casefold()) in carried:
+            continue
+        ties = requirement.setdefault("ties", {})
+        if isinstance(ties, dict):
+            ties.setdefault(port, GND_NET)
     completed_requirements: list[dict] = []
     for requirement in requirements:
         declared = requirement.get("declared_ports")

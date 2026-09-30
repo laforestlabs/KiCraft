@@ -3403,3 +3403,151 @@ def test_a_lowerer_that_denotes_the_named_part_keeps_its_family():
     # A lowerer that cannot answer the named part's class still adopts the carrier's family.
     replaced = complete_architecture_payload(_payload("pin-header", "B2B-XH-A(LF)(SN)"))
     assert replaced["requirements"][0]["family"] == "jst-xh-connector"
+
+
+def _with_power_terminal(*, role: str, exact_part: str, referenced: bool) -> dict:
+    """The hub75 reference intent plus a board power terminal on its own declared rail.
+
+    `referenced` wires the terminal's live contact to a rail that names no other source, which is
+    how a board states its own power entry; without it the draft never names the terminal's
+    contacts at all. Both shapes are the ones the measured campaigns wrote (relay-quad r13 and
+    servo-driver-16 r13/r14/r15).
+    """
+    intent = _hub75_intent()
+    intent["power"]["rails"]["VIN24"] = {"voltage": 24.0, "from": None}
+    intent["requirements"].append(
+        {
+            "id": "power_terminal",
+            "sheet": "POWER",
+            "role": role,
+            "family": "screw-terminal",
+            "exact_part": exact_part,
+            "parameters": {"rows": 1},
+            "functional_blocks": ["POWER_DISTRIBUTION"],
+        }
+    )
+    if referenced:
+        intent["power"]["rails"]["VIN24"]["from"] = "power_terminal.positive"
+        intent["signals"].append(
+            {
+                "name": "VIN_RETURN",
+                "from": "power_terminal.negative",
+                "to": "buck.gnd",
+            }
+        )
+    return intent
+
+
+def test_power_input_terminal_is_completed_from_its_reviewed_two_contact_part():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    """A power entry the draft never wired is derived, not refused.
+
+    The breaker's own record: relay-quad r13 declared `power_input` with the reviewed two-contact
+    ordering code `WJ126V-5.0-02P-14-00A` and no contacts at all. The two contacts a two-position
+    block has are its live wire and its return, and the board declares the one rail nothing else
+    sources, so the contact set is derived from what the draft already states.
+    """
+    architecture = derive_architecture(
+        complete_architecture_payload(
+            _with_power_terminal(
+                role="power_input", exact_part="WJ126V-5.0-02P-14-00A", referenced=False
+            )
+        )
+    )
+    assert _requirement(architecture, "power_terminal").ports == {
+        "positive": "VIN24",
+        "negative": "GND",
+    }
+
+
+def test_an_unwired_terminal_that_is_not_a_power_input_is_still_refused():
+    """The completion is the power entry's, not every unwired two-contact block's.
+
+    A signal terminal's contacts carry signals the draft never named, so there is nothing to
+    derive them from: the refusal stands.
+    """
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    with pytest.raises(ArchitectureIntentError, match="unsupported_lowerer_contract"):
+        derive_architecture(
+            complete_architecture_payload(
+                _with_power_terminal(
+                    role="connector", exact_part="WJ126V-5.0-02P-14-00A", referenced=False
+                )
+            )
+        )
+
+
+def test_an_unwired_power_terminal_with_a_three_contact_part_is_still_refused():
+    """Two contacts are the pair a two-position block has; three are a choice the draft owes.
+
+    Which relay contact lands on which screw is the designer's statement, not the compiler's, so
+    the three-contact reviewed part stays refused (relay-quad r14 declared exactly that).
+    """
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    with pytest.raises(ArchitectureIntentError, match="unsupported_lowerer_contract"):
+        derive_architecture(
+            complete_architecture_payload(
+                _with_power_terminal(
+                    role="power_input", exact_part="WJ126V-5.0-03P-14-00A", referenced=False
+                )
+            )
+        )
+
+
+def test_a_dropped_ground_restatement_keeps_its_contact_tie():
+    """The signal that says "this contact is the return" survives its own de-duplication.
+
+    `VIN_RETURN` runs from the terminal's `negative` contact to a part's own ground pin, so the
+    statement is the ground binding the peer already has -- and the only place the design says
+    what the terminal's return contact carries. De-duplicating it without the tie dropped the
+    contact (servo-driver-16 r13/r14/r15 left the reviewed two-contact terminal declaring one).
+    """
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    architecture = derive_architecture(
+        complete_architecture_payload(
+            _with_power_terminal(
+                role="power_input", exact_part="WJ126V-5.0-02P-14-00A", referenced=True
+            )
+        )
+    )
+    assert _requirement(architecture, "power_terminal").ports == {
+        "positive": "VIN24",
+        "negative": "GND",
+    }
+
+
+def test_a_composition_that_owns_the_named_reviewed_part_keeps_its_family():
+    """`adjustable-rc-lowpass` builds the `3296W-1-103LF` it publishes, so it keeps it.
+
+    The breaker's record: rc-lowpass-bnc r13/r14/r15 declared the reviewed composition (the
+    trimmer plus its 10 nF capacitor) and named the reviewed trimmer's own ordering code. The
+    carrier-family rewrite replaced the composition with the bare `trim-potentiometer`, which
+    publishes none of the composition's ports and accepts none of its parameters — the draft was
+    then refused for the ports the rewrite itself had taken away.
+    """
+    intent = _hub75_intent()
+    intent["requirements"].append(
+        {
+            "id": "filter",
+            "sheet": "POWER",
+            "role": "analog_block",
+            "family": "adjustable-rc-lowpass",
+            "exact_part": "3296W-1-103LF",
+            "parameters": {"capacitance_f": 1e-08, "capacitor_exact_part": "C0805C103J5GACTU"},
+            "functional_blocks": ["POWER_DISTRIBUTION"],
+        }
+    )
+    intent["signals"].append(
+        {"name": "FILTER_IN", "from": "esp32.output_dac", "to": "filter.input"}
+    )
+    intent["signals"].append(
+        {"name": "FILTER_OUT", "from": "filter.output", "to": "edge:FILTERED"}
+    )
+    architecture = derive_architecture(intent)
+    filter_requirement = _requirement(architecture, "filter")
+    assert filter_requirement.family == "adjustable-rc-lowpass"
+    assert set(filter_requirement.ports) == {"input", "output", "gnd"}

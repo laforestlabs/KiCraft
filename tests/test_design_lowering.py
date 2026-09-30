@@ -1991,3 +1991,143 @@ def test_a_stated_contact_count_sizes_the_header_the_circuit_only_partly_uses(re
     assert lower_requirement(
         requirement.model_copy(update={"obligations": [], "ports": {"pin1": "A", "pin2": "B"}})
     ).groups[0].symbol == "Connector_Generic:Conn_01x02"
+
+
+def test_r2r_ladder_takes_its_published_output_spelling_with_the_expanded_bits():
+    """The ladder's two contact spellings are one contract; a draft may spell the output either way.
+
+    The breaker's own record: r2r-dac r13 declared `bit0..bit7` (the expanded contacts) with the
+    output spelled `analog_output` (the compact form's name for the same contact) and was refused
+    even though the published contract is exactly "<bit0..bitN/output/gnd or
+    digital_inputs/analog_output>". The build takes the published spelling instead of refusing a
+    draft whose contacts the family publishes.
+    """
+    requirement = _requirement(
+        "r2r-ladder",
+        parameters={"bits": 8, "r_value": 10_000, "two_r_value": 20_000},
+        ports={
+            **{f"bit{index}": f"BIT{index}" for index in range(8)},
+            "analog_output": "DAC_OUT",
+            "gnd": "GND",
+        },
+    )
+    assert lower_requirement(requirement).lowerer_id == "r2r-ladder@1"
+    assert lowerer_contract_diagnostic(requirement) is None
+
+
+def test_r2r_ladder_still_takes_its_compact_contact_form():
+    """The compact spelling keeps working: the synonym is a second spelling, not a replacement."""
+    requirement = _requirement(
+        "r2r-ladder",
+        parameters={"bits": 4, "r_value": 10_000},
+        ports={"digital_inputs": "BIT0-BIT3", "analog_output": "DAC_OUT"},
+    )
+    assert lower_requirement(requirement).lowerer_id == "r2r-ladder@1"
+
+
+def test_r2r_ladder_still_refuses_an_unknown_contact():
+    """A contact the contract does not publish is still refused."""
+    diagnostic = lowerer_contract_diagnostic(
+        _requirement(
+            "r2r-ladder",
+            parameters={"bits": 4, "r_value": 10_000},
+            ports={
+                **{f"bit{index}": f"BIT{index}" for index in range(4)},
+                "analog_output": "DAC_OUT",
+                "gnd": "GND",
+                "vref": "REF",
+            },
+        )
+    )
+    assert diagnostic is not None
+    assert "vref" in diagnostic.message
+
+
+def test_touch_pad_takes_the_electrode_pin_count():
+    """A pad field's `pins` may be the count its `count` already states.
+
+    chamfered-badge r13/r14/r15 declared `count: 2, pins: 2, no_copper_underlay: true` and was
+    refused for a parameter-shape the published contract never stated. One electrode needs one
+    pin, so the count is the same statement; the electrodes-on-one-net defect is still refused,
+    because that is the one the netlist can be wrong about.
+    """
+    requirement = _requirement(
+        "capacitive-touch-pad",
+        parameters={"count": 2, "pins": 2, "no_copper_underlay": True},
+        ports={"touch1": "TOUCH_A", "touch2": "TOUCH_B"},
+    )
+    assert lower_requirement(requirement).lowerer_id == "capacitive-touch-pad@1"
+    assert lowerer_contract_diagnostic(requirement) is None
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"count": 2, "pins": 3, "no_copper_underlay": True},
+        {"count": 2, "pins": 2, "no_copper_underlay": False},
+    ],
+)
+def test_touch_pad_still_refuses_a_pin_count_that_contradicts_its_electrodes(parameters):
+    """The completion is bounded: a different count, or a permitted underlay, still refuses."""
+    with pytest.raises(ValueError):
+        lower_requirement(
+            _requirement(
+                "capacitive-touch-pad",
+                parameters=parameters,
+                ports={"touch1": "TOUCH_A", "touch2": "TOUCH_B"},
+            )
+        )
+
+
+def test_a_contact_bound_under_a_published_spelling_is_not_reported_unbound():
+    """`output` is the trimmer's published wiper spelling, so the wiper *is* bound.
+
+    The build reads the spelling groups; the contract check read none, so a draft that bound
+    `output` (and nothing else wrong) would have been told its `wiper` was unbound.
+    """
+    requirement = _requirement(
+        "trim-potentiometer",
+        ports={"gnd": "GND", "output": "FILTERED_SIGNAL", "end_a": "GND"},
+    ).model_copy(update={"exact_part": "3296W-1-103LF"})
+    assert lower_requirement(requirement).lowerer_id == "trim-potentiometer@1"
+    assert lowerer_contract_diagnostic(requirement) is None
+
+
+def test_a_parameter_the_lowerer_does_not_publish_is_named_with_the_accepted_keys():
+    """The refusal names the repair: the parameter the contract rejects, not a bound contact.
+
+    Live rc-lowpass r13/r14/r15: the draft stated the composition's `capacitance_f` /
+    `capacitor_exact_part` on a bare trimmer and bound its wiper as `output`. The refusal said
+    "['wiper'] is unbound" -- a contact that was bound -- while what actually stopped the build was
+    the parameter key, so three repair rounds changed the ports and never the parameters.
+    """
+    requirement = _requirement(
+        "trim-potentiometer",
+        parameters={"resistance_ohm": 10_000},
+        ports={"gnd": "GND", "output": "FILTERED_SIGNAL"},
+    ).model_copy(update={"exact_part": "3296W-1-103LF"})
+    diagnostic = lowerer_contract_diagnostic(requirement)
+    assert diagnostic is not None
+    assert "does not accept parameters" in diagnostic.message
+    assert "resistance_ohm" in diagnostic.message
+    assert "wiper" not in diagnostic.message
+    # The trimmer's accepted key set is empty, and the message says so.
+    assert "takes no parameters" in diagnostic.message
+
+
+def test_a_trimmer_with_no_end_bound_is_still_refused_by_name():
+    """A genuinely unbound travel end is still refused, and still names the missing contact."""
+    diagnostic = lowerer_contract_diagnostic(
+        _requirement(
+            "trim-potentiometer", ports={"gnd": "GND", "output": "FILTERED_SIGNAL"}
+        ).model_copy(update={"exact_part": "3296W-1-103LF"})
+    )
+    assert diagnostic is None  # gnd is itself a published end spelling: the rheostat builds
+
+    bare = lowerer_contract_diagnostic(
+        _requirement("trim-potentiometer", ports={"vcc": "RAIL"}).model_copy(
+            update={"exact_part": "3296W-1-103LF"}
+        )
+    )
+    assert bare is not None
+    assert "wiper" in bare.message

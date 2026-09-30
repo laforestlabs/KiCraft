@@ -161,6 +161,12 @@ class RegisteredLowerer:
     # model-owned merely because its contract was malformed.
     port_directions: tuple[tuple[str, str], ...] = ()
     port_patterns: tuple[tuple[str, str], ...] = ()
+    #: Spelling groups a build accepts for one published contact: canonical key -> every spelling
+    #: that denotes it. A required contact bound under any of its spellings *is* bound, so the
+    #: contract diagnostic must read the same groups instead of reporting the canonical key
+    #: unbound while the build itself accepts the draft (live rc-lowpass: `output` *is* the
+    #: trimmer's published wiper spelling, and the refusal named `wiper`).
+    port_aliases: tuple[tuple[str, tuple[str, ...]], ...] = ()
     #: Published contacts that *are* the part's return, spelled as the family names them.
     #: `_reference_port_name` reads the conventional tokens (`gnd`, `vss`); a family whose
     #: contract names its return something else (`negative` on a coin cell, `sleeve` on a
@@ -263,6 +269,15 @@ def lowerer_summaries() -> list[dict]:
             **(
                 {"port_patterns": [pattern for pattern, _direction in lowerer.port_patterns]}
                 if lowerer.port_patterns
+                else {}
+            ),
+            **(
+                {
+                    "port_aliases": {
+                        key: list(spellings) for key, spellings in lowerer.port_aliases
+                    }
+                }
+                if lowerer.port_aliases
                 else {}
             ),
             **(
@@ -402,9 +417,17 @@ def lowerer_contract_diagnostic(
         evidence.append("reviewed_exact_part=" + lowerer.reviewed_exact_part)
     if failure:
         evidence.append(failure)
+    # A published contact is bound when the draft spells it any way its own build accepts: the
+    # alias groups are the build's, published, so the check reads them instead of reporting the
+    # canonical key unbound while the build would take the draft.
+    bound = {str(name).lower() for name in requirement.ports}
+    for canonical, spellings in lowerer.port_aliases:
+        if any(str(spelling).lower() in bound for spelling in (*spellings, canonical)):
+            bound.add(str(canonical).lower())
     missing_required = sorted(
-        key for key in lowerer.required_port_keys if key not in requirement.ports
+        key for key in lowerer.required_port_keys if str(key).lower() not in bound
     )
+    unpublished_parameters = sorted(set(requirement.parameters) - set(lowerer.parameter_keys))
     if not requirement.ports and (
         lowerer.required_port_keys or lowerer.port_directions or lowerer.port_patterns
     ):
@@ -425,6 +448,28 @@ def lowerer_contract_diagnostic(
         message = (
             f"known lowerer {lowerer_id} does not support ports {unknown_ports}; "
             "use its published port contract or choose a genuinely model-owned family"
+        )
+    elif unpublished_parameters:
+        # A parameter the published contract does not hold is what `lower_requirement` refuses
+        # *before* it ever builds, so it is the repair the draft owes. Name the keys, the accepted
+        # keys, and the accepted values: the live rc-lowpass drafts stated
+        # `capacitance_f`/`capacitor_exact_part` on a bare trimmer and were told their `wiper` was
+        # unbound instead, which is not what stopped the build.
+        accepted = ", ".join(lowerer.parameter_keys) or "none — this part takes no parameters"
+        choices = (
+            "; accepted values: "
+            + ", ".join(f"{key}={list(values)}" for key, values in lowerer.parameter_choices)
+            if lowerer.parameter_choices
+            else (
+                "; required parameters: " + ", ".join(lowerer.required_parameter_keys)
+                if lowerer.required_parameter_keys
+                else ""
+            )
+        )
+        message = (
+            f"known lowerer {lowerer_id} does not accept parameters "
+            f"{', '.join(unpublished_parameters)}; it accepts {accepted}{choices} "
+            "— delete each parameter this part's published contract does not hold"
         )
     elif missing_required:
         # The draft named part of the contract and left a contact unbound. Name the ports the
@@ -924,6 +969,14 @@ _REVIEWED_TRIMMER_FAMILIES = ("trim-potentiometer", "trimpot", "trimmer-pot", "t
 _TRIMMER_END_A_PORTS = ("end_a", "end1", "contact1", "ccw", "a", "gnd", "vss")
 _TRIMMER_END_B_PORTS = ("end_b", "end2", "contact3", "cw", "b", "vcc", "vdd")
 _TRIMMER_WIPER_PORTS = ("wiper", "wipe", "out", "output", "signal", "sig")
+
+#: The same groups as the build reads them, published: each is one physical contact, spelled the
+#: way the corpus spells it. The build takes any spelling; so does the contract check.
+_TRIMMER_PORT_ALIASES = (
+    ("wiper", _TRIMMER_WIPER_PORTS),
+    ("end_a", _TRIMMER_END_A_PORTS),
+    ("end_b", _TRIMMER_END_B_PORTS),
+)
 
 
 def _reviewed_potentiometer(requirement: CircuitRequirement) -> LoweringArtifact | None:
@@ -1493,6 +1546,21 @@ def _r2r(requirement: CircuitRequirement) -> LoweringArtifact | None:
     names = (*(f"bit{i}" for i in range(bits)), "output", "gnd")
     ports = _require_ports(requirement, names)
     if ports is None:
+        # The ladder's published contract names its two spellings of the output contact: the
+        # expanded form's `output` and the compact form's `analog_output`. A draft that binds the
+        # expanded bit contacts and spells the output `analog_output` states exactly that part, so
+        # the published synonym is taken rather than refused (live r2r-dac r13: `bit0..bit7` plus
+        # `analog_output`). The compact form below is untouched: it is only reached when the
+        # expanded bit contacts are absent.
+        if "analog_output" in requirement.ports and "digital_inputs" not in requirement.ports:
+            spelt = {
+                key: value for key, value in requirement.ports.items() if key != "analog_output"
+            }
+            spelt["output"] = requirement.ports["analog_output"]
+            ports = _require_ports(
+                requirement.model_copy(update={"ports": spelt}), names
+            )
+    if ports is None:
         compact_ports = {name.lower(): value for name, value in requirement.ports.items()}
         if set(compact_ports) != {"digital_inputs", "analog_output"}:
             return None
@@ -2034,12 +2102,20 @@ def _capacitive_touch_pad(requirement: CircuitRequirement) -> LoweringArtifact |
     no_underlay = requirement.parameters.get("no_copper_underlay")
     if type(count) is not int or not 1 <= count <= 500 or no_underlay is not True:
         return None
-    if not isinstance(pin_names, str):
-        return None
-    pins = tuple(name.strip() for name in pin_names.split(","))
-    if len(pins) != count or len(set(pins)) != count or any(
-        not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name) for name in pins
-    ):
+    if type(pin_names) is int:
+        # `pins` is the number of electrode pins the field needs, which is one per electrode. A
+        # draft that states that number instead of spelling each pin's own name states the same
+        # requirement: the pad field owns no connector pin, and the two-electrodes-on-one-contact
+        # defect is still refused below, on distinct nets.
+        if pin_names != count:
+            return None
+    elif isinstance(pin_names, str):
+        pins = tuple(name.strip() for name in pin_names.split(","))
+        if len(pins) != count or len(set(pins)) != count or any(
+            not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name) for name in pins
+        ):
+            return None
+    else:
         return None
     port_names = tuple(f"touch{index}" for index in range(1, count + 1))
     ports = _require_ports(requirement, port_names)
@@ -2216,6 +2292,7 @@ for _lowerer in (
             (name, "bidirectional")
             for name in (*_TRIMMER_WIPER_PORTS, *_TRIMMER_END_A_PORTS, *_TRIMMER_END_B_PORTS)
         ),
+        port_aliases=_TRIMMER_PORT_ALIASES,
         # A trimmer always has its wiper on a net; naming it makes the "declares no ports"
         # refusal say the one thing the draft has to add (live run KC-5UG8UR's `gain_pot`).
         required_port_keys=("wiper",),
