@@ -909,7 +909,7 @@ def source_obligation_rows(prompt_state: dict, *, slots: tuple[str, ...]) -> lis
 
 
 def restore_source_obligations(
-    payload: dict, prompt_state: dict, *, stage: str = "architecture"
+    payload: dict, prompt_state: dict, *, stage: str = "architecture", replace: bool = False
 ) -> dict:
     """Write the stage's typed `obligations` from the committed intent/spec set.
 
@@ -917,6 +917,14 @@ def restore_source_obligations(
     implemented (by `original_obligation_id`), so the verbatim copy is the compiler's to write.
     What the draft has to get right — every committed row attached to the owner that implements
     it — is checked by `validate_obligation_retention` below.
+
+    ``replace`` makes that ownership literal for a provider draft: the committed set *is* the
+    list, including when it is empty. Without it a draft that invents top-level rows while the
+    committed set is empty keeps them, and the architecture validator then refuses the draft for
+    an obligation no requirement can own — a design-contract refusal the driver classified as
+    `invalid_schema` (unusable provider output) instead of a repairable design defect (measured
+    live: `listed_at_top_level_only=[('physical', 'mounting-holes')]` and `[('physical',
+    'motor-connector')]`, non-part or unresolvable classes the draft should never have written).
     """
     slots = ("intent",) if stage == "functional_spec" else ("intent", "functional_spec")
     try:
@@ -924,7 +932,7 @@ def restore_source_obligations(
     except ValueError:
         return payload  # an unreadable source row is reported by validate_obligation_retention
     if not rows:
-        return payload
+        return {**payload, "obligations": []} if replace else payload
     return {**payload, "obligations": rows}
 
 
@@ -1066,6 +1074,79 @@ def attach_uniquely_provable_physical_obligations(
     return normalized
 
 
+def _unowned_owner_requiring_rows(payload: dict, prompt_state: dict) -> list[dict]:
+    """Committed rows that require an owner and that no requirement names."""
+    expected = {
+        (row["kind"], row["original_obligation_id"]): row
+        for row in source_obligation_rows(prompt_state, slots=("intent", "functional_spec"))
+    }
+    if not expected:
+        return []
+    claimed: set[str] = set()
+    for requirement in payload.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        claimed.update(str(name) for name in requirement.get("obligation_ids") or [])
+        claimed.update(
+            str(row.get("original_obligation_id"))
+            for row in requirement.get("obligations") or []
+            if isinstance(row, dict) and row.get("original_obligation_id")
+        )
+    return [
+        row
+        for row in expected.values()
+        if row["original_obligation_id"] not in claimed
+        and models.obligation_requires_requirement_owner(row)
+    ]
+
+
+def _ownership_refusal(
+    exc: Exception, payload: dict, prompt_state: dict
+) -> StageSchemaError | None:
+    """Turn a validator's ownership refusal into the repairable contract diagnostic.
+
+    The same defect is already reported by `validate_obligation_retention` when the payload is
+    inspected there, but a row that survives into the derived model surfaces as a pydantic
+    ``ValidationError`` instead, which the driver classifies as ``invalid_schema`` -- unusable
+    provider output -- and answers with a generic re-emit rather than the targeted
+    attach-this-obligation-to-that-requirement repair (measured live on two briefs that failed
+    every campaign this way).
+    """
+    from pydantic import ValidationError
+
+    if not isinstance(exc, ValidationError):
+        return None
+    if not any(
+        "obligations must be owned by a requirement" in str(row.get("msg") or "")
+        for row in exc.errors()
+    ):
+        return None
+    unowned = _unowned_owner_requiring_rows(payload, prompt_state)
+    if not unowned:
+        return None
+    return StageSchemaError(
+        "source obligations must be owned by a requirement",
+        diagnostic={
+            "code": "source_obligation_not_retained",
+            "severity": "repair_required",
+            "message": (
+                "Name each committed obligation on the requirement that implements it through "
+                "that requirement's `obligation_ids` (`original_obligation_id` values). The rows "
+                "themselves are written by the compiler from the committed intent and functional "
+                "spec, so never emit a row of your own."
+            ),
+            "evidence": unowned,
+            "candidate_requirement_ids": {
+                row[
+                    "original_obligation_id"
+                ]: physical_obligation_candidate_requirement_ids(payload, row)
+                for row in unowned
+                if row["kind"] == "physical"
+            },
+        },
+    )
+
+
 def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict) -> None:
     """Reject a candidate whose ownership of the committed obligations cannot be honored.
 
@@ -1126,12 +1207,7 @@ def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict)
     # Only board-wide facts may remain ownerless. Quantitative rows qualify only when their
     # subject and unit prove they are board-outline geometry; electrical and part limits stay
     # on their realizing requirement.
-    unowned = [
-        row
-        for key, row in expected.items()
-        if row["original_obligation_id"] not in claimed
-        and models.obligation_requires_requirement_owner(row)
-    ]
+    unowned = _unowned_owner_requiring_rows(payload, prompt_state)
     if unowned:
         raise StageSchemaError(
             "source obligations must be owned by a requirement",
@@ -1497,7 +1573,12 @@ def _normalize_stage_response(
             payload = attach_uniquely_provable_physical_obligations(
                 payload, prompt_state, intent_shaped=intent_shaped
             )
-            payload = restore_source_obligations(payload, prompt_state, stage=stage)
+            # A provider draft's top-level list is the committed set, including when that set is
+            # empty: a row the draft invented is not the design's, and it would otherwise be
+            # refused later as an obligation no requirement can own.
+            payload = restore_source_obligations(
+                payload, prompt_state, stage=stage, replace=intent_shaped
+            )
         elif stage == "functional_spec":
             # The spec's own `obligations` are the committed intent set, written here rather than
             # copied by the model; only the block→obligation ownership is the draft's.
@@ -1519,8 +1600,20 @@ def _normalize_stage_response(
             if intent_shaped:
                 # The answer states the design; the canonical shape (net names, port
                 # bindings, endpoints, connector exposure) is derived from it here.
-                payload = _derive_intent_payload(payload, prompt_state.get("functional_spec"))
-            response = models.Architecture.model_validate(payload)
+                try:
+                    payload = _derive_intent_payload(payload, prompt_state.get("functional_spec"))
+                except Exception as exc:
+                    refusal = _ownership_refusal(exc, payload, prompt_state)
+                    if refusal is None:
+                        raise
+                    raise refusal from exc
+            try:
+                response = models.Architecture.model_validate(payload)
+            except Exception as exc:
+                refusal = _ownership_refusal(exc, payload, prompt_state)
+                if refusal is None:
+                    raise
+                raise refusal from exc
             _validate_lowerer_parameter_contracts(response)
             canonical = response.model_dump(exclude_none=True)
             _validate_power_requirement_contracts(canonical, prompt_state)
