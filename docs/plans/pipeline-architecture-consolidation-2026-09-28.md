@@ -594,3 +594,45 @@ gate is **not** met: the campaigns must complete and be reported separately by a
 increment is deployed on the strength of unit tests or reference replay alone.
 
 
+
+### Release measurement — final (2026-09-30, revision `9317cc4`)
+
+Three fresh 34-brief campaigns per arm, same corpus, same settings, one campaign at a time on the
+same host. The baseline arm runs the frozen safety-prerequisite checkout, launched with its cwd in
+that checkout **and an asserted `import kicraft` path** (an earlier launch from this checkout
+silently imported the candidate, which invalidated every comparison before `baseline_safety_r3`;
+those numbers are withdrawn).
+
+| Arm | Campaigns | Fab-ready exports | Rate | Distinct briefs |
+|---|---|---|---|---|
+| baseline (frozen) | `baseline_safety_r3`, `r4`, `r5` | **15 / 102** | 14.7% | 10 |
+| candidate `9317cc4` | `candidate_final3_r1`, `r2`, `r3` | **26 / 102** | 25.5% | 13 |
+
+Per campaign: candidate 7, 11, 8 against baseline 6, 5, 4.
+
+- **Deliveries: +11 per 102** — exactly the preregistered minimum improvement, and the candidate
+  rate is 1.7x the baseline's.
+- **Distinct briefs: +3** (`can-node`, `hex-env-sensor`, `highside-switch-10a`,
+  `rounded-c3-devboard`, `servo-driver-16` gained; `star-ornament`, `thermocouple-amp` lost, each
+  of which is 1/3 on the baseline with different failure reasons per candidate attempt, i.e.
+  sampling) — **one short of the preregistered +4**.
+- **Held-out pair: 0 boards in 3 rounds x 3 trials.** Every round reached later than the last
+  (paper trail below); the last round's RP2040 attempt cleared intent, spec, architecture and BOM
+  and failed at the wiring commit on a draft-invented dangling `QSPI_CS` net, which is a draft
+  defect the pipeline may not rewrite. Reported as a **capability limitation**, not a delivery.
+
+Deterministic evidence (independent of sampling):
+- the seven preregistered negative boundaries all produce their expected disposition (4/7 before
+  the I2C/analog gate work);
+- uncovered demanded-class occurrences over 2 228 saved states: 14.2% -> ~6%;
+- `complete_unused_published_ports` changes 11 of 270 recorded committed BOMs, all gains, none
+  losing a wired pin — and removed a silent defect where four ADS1115 ALERT pins had been tied
+  together by one promoted one-pin net;
+- the obligation-copy refusal, the deliberation audit's false catalogue findings and the
+  family-mismatch refusal no longer occur at all in the candidate arm.
+
+**Verdict against the preregistered gate: partly met.** The delivery target is met exactly; the
+distinct-brief target is one short; the held-out supported compositions are not delivered; the
+construction-coverage floor (18 of 34) has not been measured against the final revision. Nothing is
+deployed on this evidence, and the held-out pair must be labelled as a limitation wherever the
+product claims coverage.
