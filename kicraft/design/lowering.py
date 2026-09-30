@@ -1099,6 +1099,13 @@ def _connector(
         raise ValueError(f"{count} declared contacts do not divide into rows={rows}")
     per_row = count // rows
     mpn: str | None = None
+    # How many physical parts of `block_contacts` contacts realize the declared contacts: one
+    # for a single part that exactly covers them, `ceil(count / block_contacts)` when the part
+    # the draft pinned carries fewer positions than it declares (an eight-contact demand on a
+    # four-position block is two blocks). The last block's surplus positions are reserved
+    # unconnected, exactly as a fixed reviewed part with unused contacts is handled elsewhere.
+    blocks = 1
+    block_contacts = count
     if terminal:
         if not 2 <= count <= 12:
             raise ValueError(
@@ -1124,11 +1131,16 @@ def _connector(
                     f"{requirement.exact_part!r} is not a reviewed screw terminal; name a reviewed "
                     "ordering code or omit `exact_part` for the generic part"
                 )
-            if selected[0] != count:
-                raise ValueError(
-                    f"the reviewed terminal {requirement.exact_part!r} carries {selected[0]} "
-                    f"contacts and this requirement declares {count}"
-                )
+            # A reviewed position-array block IS its contacts, so a requirement declaring more
+            # contacts than one block carries is a composition of that block, and one declaring
+            # fewer leaves the surplus positions reserved. Refusing the width mismatch made the
+            # recorded held-out drafts unrepairable (r3 rp2040-dual-adc-usb: an eight-contact
+            # `terminals` requirement pinning the four-position WJ126V-5.0-04P, and a two-contact
+            # `terminal-ground` pinning the three-position WJ126V-5.0-03P). Nothing is invented:
+            # the draft's own pinned reviewed part is instantiated as many times as its positions
+            # require, the same way `test-points@1`/`connector_bank` publish N parts in one group.
+            block_contacts = selected[0]
+            blocks = -(-count // block_contacts)
             _, mpn, symbol, footprint = selected
             value = mpn
         else:
@@ -1155,25 +1167,40 @@ def _connector(
     group = LoweringGroup(
         role="connector",
         reference_prefix="J",
+        quantity=blocks,
         value=value,
         symbol=symbol,
         footprint=footprint,
         mpn=mpn,
     )
-    pins = tuple(
-        LoweringPin(role="connector", pin=str(index), net=net)
-        for index, net in enumerate(ordered_nets, 1)
-        if net != "NC"
-    )
-    no_connects = tuple(
-        LoweringNoConnect(
-            role="connector",
-            pin=str(index),
-            reason="reserved contact is intentionally unconnected",
+    # Each declared contact binds to one contact of one block; a block's surplus trailing
+    # positions are reserved unconnected, exactly as a reviewed fixed-size part's unused
+    # contacts already are.
+    placements: list[LoweringPin | LoweringNoConnect] = []
+    for number in range(1, blocks * block_contacts + 1):
+        index, contact = divmod(number - 1, block_contacts)
+        net = ordered_nets[number - 1] if number <= count else "NC"
+        if net == "NC":
+            placements.append(
+                LoweringNoConnect(
+                    role="connector",
+                    index=index,
+                    pin=str(contact + 1),
+                    reason="reserved contact is intentionally unconnected",
+                )
+            )
+        else:
+            placements.append(
+                LoweringPin(role="connector", index=index, pin=str(contact + 1), net=net)
+            )
+    pins = tuple(item for item in placements if isinstance(item, LoweringPin))
+    no_connects = tuple(item for item in placements if isinstance(item, LoweringNoConnect))
+    if blocks > 1 or block_contacts != count:
+        assumptions = (
+            *assumptions,
+            f"{count} declared contact(s) are realized by {blocks} reviewed "
+            f"{value} block(s) of {block_contacts} position(s) each",
         )
-        for index, net in enumerate(ordered_nets, 1)
-        if net == "NC"
-    )
     return _artifact(
         lowerer_id, requirement, (group,), pins, no_connects=no_connects, assumptions=assumptions
     )

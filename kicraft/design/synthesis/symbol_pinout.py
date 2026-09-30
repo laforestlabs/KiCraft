@@ -37,6 +37,21 @@ _AT_RE = re.compile(r"\(at\s+(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\s+(-?\d+\.?\d*)\)")
 _LENGTH_RE = re.compile(r"\(length\s+(-?\d+\.?\d*)\)")
 _NAME_RE = re.compile(r'\(name\s+"([^"]*)"')
 _NUMBER_RE = re.compile(r'\(number\s+"([^"]+)"')
+# KiCad spells an active-low pin name with an overbar (`~{CS}`) and a subscripted one with a
+# braced suffix (`V_{CC}`); the engineering name the same contact carries is `CS` and `VCC`.
+_PIN_NAME_MARKUP_RE = re.compile(r"[~_]?\{([^{}]*)\}")
+
+
+def normalize_pin_name(name: str) -> str:
+    """The comparable spelling of a symbol's OWN published pin name.
+
+    Folding the symbol markup is a normalization of the name the part publishes -- never a guess
+    at a different contact -- so a declared interface that states the name its datasheet uses
+    (`CS`, `VCC`) resolves to the one contact that publishes it, while an unknown name stays
+    unknown. Live `thermocouple-amp` (2026-09-30): the claim `cs` was refused against
+    `Sensor_Temperature:MAX31855KASA` although that symbol's pin 6 IS `~{CS}`.
+    """
+    return _PIN_NAME_MARKUP_RE.sub(r"\1", str(name or "")).strip()
 
 
 _LEGACY_SYMBOL_IDS = {

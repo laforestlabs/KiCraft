@@ -1745,7 +1745,7 @@ def _requirement_obligation_defects(
     to a registered physical class.  Model payload provenance is never supplied
     here: callers derive these arguments from an artifact-equal candidate.
     """
-    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins, normalize_pin_name
     from kicraft.design.part_identity import (
         class_counts_contacts,
         lowerer_witnesses_physical_class,
@@ -1878,6 +1878,24 @@ def _requirement_obligation_defects(
             for group in groups
             if _group_matches_requirement_identity(group.model_copy(update={"id": ""}), requirement)
         ]
+        if not owners and not str(requirement.get("exact_part") or "").strip():
+            # A requirement that names a physical *class* rather than a device owns any group
+            # whose resolved reviewed record implements that class -- the same evidence the
+            # obligation and missing-implementation halves of this check already read, so one
+            # question has one answer. Without it the owner resolver compared the family token
+            # against the group's MPN/value string and found nothing: held-out r3
+            # `stm32-four-adc-usb` (2026-09-30) met `reset`'s `push-button` obligation with the
+            # researched YZA-032-5.0W button yet reported "declared interface needs one
+            # identified hardware owner", exhausting the unit's repair rounds. A requirement
+            # that pins an exact part still resolves by identity only, so a named device is
+            # never swapped for a different part of the same class.
+            required_feature = _required_physical_feature(requirement)
+            if required_feature is not None:
+                owners = [
+                    group
+                    for group in groups
+                    if _group_has_physical_feature(group, required_feature)
+                ]
         declared_nets = {str(net) for net in (requirement.get("ports") or {}).values() if str(net)}
         for group in groups:
             if group in owners:
@@ -1916,9 +1934,18 @@ def _requirement_obligation_defects(
         for pin in inventory.get("pins") or []:
             if not isinstance(pin, dict) or pin.get("number") is None:
                 continue
-            name = str(pin.get("name") or "").strip().casefold()
+            name = normalize_pin_name(str(pin.get("name") or "")).casefold()
             if name:
                 by_name.setdefault(name, []).append(str(pin["number"]))
+        # The symbol's own published contacts, number and name, so both refusals below tell the
+        # draft exactly what it may state instead of only that its claim did not resolve.
+        published = sorted(
+            {
+                str(pin["number"]): normalize_pin_name(str(pin.get("name") or ""))
+                for pin in inventory.get("pins") or []
+                if isinstance(pin, dict) and pin.get("number") is not None
+            }.items()
+        )
         for port in claim["ports"]:
             claimed = port.get("pin")
             if not claimed:
@@ -1927,14 +1954,14 @@ def _requirement_obligation_defects(
                 # are refused by name instead of reading as "claimed pin None is not in <symbol>".
                 defects["declared-interface-unrealized"].append(
                     f"{requirement['id']}:{port['key']}: claim states no pin number; name the "
-                    f"actual contact of {owners[0].symbol} (available pins={sorted(pins)}) so the "
-                    "claimed function can be verified"
+                    f"actual contact of {owners[0].symbol} (available pins={sorted(pins)}; "
+                    f"contacts={published}) so the claimed function can be verified"
                 )
                 continue
             claimant = str(claimed)
             if claimant in pins:
                 continue
-            named = by_name.get(claimant.strip().casefold()) or []
+            named = by_name.get(normalize_pin_name(claimant).casefold()) or []
             if len(named) == 1:
                 continue
             pending_claims.append(
@@ -1947,18 +1974,13 @@ def _requirement_obligation_defects(
                     "pins": sorted(str(pin) for pin in pins),
                     # The symbol's own published contacts, so the reading can be reasoned about
                     # (a pin number alone says nothing about which contact is the UART TX).
-                    "contacts": sorted(
-                        {
-                            str(pin["number"]): str(pin.get("name") or "")
-                            for pin in inventory.get("pins") or []
-                            if isinstance(pin, dict) and pin.get("number") is not None
-                        }.items()
-                    ),
+                    "contacts": published,
                 }
             )
             defects["declared-interface-unrealized"].append(
                 f"{requirement['id']}:{port['key']}: claimed pin {claimed!r} "
-                f"is not in {owners[0].symbol}; available pins={sorted(pins)}"
+                f"is not in {owners[0].symbol}; available pins={sorted(pins)}; "
+                f"contacts={published}"
                 + (
                     f" (its name matches {sorted(named)}, so it is not a unique contact either)"
                     if len(named) > 1

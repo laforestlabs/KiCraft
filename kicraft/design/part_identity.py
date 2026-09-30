@@ -3477,6 +3477,15 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     "power-screw-terminal": frozenset({"screw-terminal", "terminal-block", "screw-clamp-terminal"}),
     "binding-post-terminal": frozenset({"binding-post", "screw-clamp-terminal"}),
     "buck-converter-ic": frozenset({"buck-converter", "buck-regulator"}),
+    # One physical class, two reviewed spellings: the LCSC category spelling `buck-converter`
+    # (TPS5430/TPS54331/AP63203/AP63205) and the reviewed `buck-regulator` (TLV62569DBVR and
+    # the AP63x parts) that `buck-converter-ic` above already equates. Held-out rp1
+    # `stm32-four-adc-usb` (2026-09-30) classed the brief's TLV62569DBVR buck as
+    # `buck-converter`; its reviewed record carries `buck-regulator`, so the design committed at
+    # architecture and then died at BOM commit with `E_PHYSICAL_REALIZATION 'buck': requires 1
+    # reviewed 'buck-converter' physical part(s), found 0` -- a class spelling, not a missing
+    # part. Declaring the pair here is the one place every gate reads.
+    "buck-converter": frozenset({"buck-converter", "buck-regulator"}),
     "thermocouple-input": frozenset({"thermocouple-converter"}),
     "high-side-load-switch": frozenset({"highside-switch"}),
     "opto-isolator": frozenset({"optocoupler"}),

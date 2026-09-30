@@ -1880,11 +1880,52 @@ def test_a_connector_refusal_names_the_shape_it_needs():
     # composition; the refusal names that shape instead of an unreachable single block.
     assert "split the demand across several terminal requirements" in too_many
 
-    wrong_width = message(
-        family="screw-terminal", parameters={"rows": 1},
-        ports={"pin1": "A", "pin2": "B"}, exact_part="wj126v-5.0-04p-14-00a",
+
+def test_a_terminal_demand_wider_or_narrower_than_its_pinned_block_composes():
+    """The pinned reviewed block is the unit: a wider demand instantiates it, a narrower leaves spare.
+
+    Held-out r3 `rp2040-dual-adc-usb` (2026-09-30) refused two drafts at the pinned width:
+    an eight-contact `terminals` requirement pinning the four-position WJ126V-5.0-04P
+    ("carries 4 contacts and this requirement declares 8") and a two-contact `terminal-ground`
+    pinning the three-position WJ126V-5.0-03P. A position-array block IS its contacts, so the
+    realizable shape is `ceil(count / block positions)` blocks of the *same* reviewed part,
+    with the last block's surplus positions reserved unconnected -- never a refusal, and no
+    other part invented.
+    """
+    def build(ports, exact_part):
+        requirement = CircuitRequirement(
+            id="terminals", sheet="ANALOG INPUTS", role="connector", family="screw-terminal",
+            parameters={"rows": 1}, ports=ports,
+        ).model_copy(update={"exact_part": exact_part})
+        assert lowerer_contract_diagnostic(requirement) is None
+        return lower_requirement(requirement)
+
+    wider = build({f"pin{i}": f"AIN{i - 1}" for i in range(1, 9)}, "wj126v-5.0-04p-14-00a")
+    (group,) = wider.groups
+    assert group.quantity == 2 and group.mpn == "WJ126V-5.0-04P-14-00A"
+    # Contacts 1-4 land on the first block, 5-8 on the second; nothing is left over.
+    assert sorted((pin.index, pin.pin, pin.net) for pin in wider.pins) == [
+        (0, "1", "AIN0"), (0, "2", "AIN1"), (0, "3", "AIN2"), (0, "4", "AIN3"),
+        (1, "1", "AIN4"), (1, "2", "AIN5"), (1, "3", "AIN6"), (1, "4", "AIN7"),
+    ]
+    assert not wider.no_connects
+
+    narrower = build({"pin1": "AIN_GND", "pin2": "GND"}, "wj126v-5.0-03p-14-00a")
+    (group,) = narrower.groups
+    assert group.quantity == 1 and group.mpn == "WJ126V-5.0-03P-14-00A"
+    assert sorted((pin.index, pin.pin, pin.net) for pin in narrower.pins) == [
+        (0, "1", "AIN_GND"), (0, "2", "GND"),
+    ]
+    assert [(row.index, row.pin) for row in narrower.no_connects] == [(0, "3")]
+
+    # An unreviewed exact part is still refused, and the 2..12 contact bound still holds.
+    unreviewed = lowerer_contract_diagnostic(
+        CircuitRequirement(
+            id="terminals", sheet="ANALOG INPUTS", role="connector", family="screw-terminal",
+            parameters={"rows": 1}, ports={f"pin{i}": f"AIN{i}" for i in range(1, 9)},
+        ).model_copy(update={"exact_part": "Connector:Screw_Terminal_01x08"})
     )
-    assert "carries 4 contacts and this requirement declares 2" in wrong_width
+    assert unreviewed is not None and "is not a reviewed screw terminal" in unreviewed.message
 
 
 def test_the_shapes_a_screw_terminal_publishes_still_build():

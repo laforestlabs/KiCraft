@@ -927,6 +927,28 @@ def test_a_multi_position_terminal_realizes_one_terminal_per_contact():
         SimpleNamespace(requirements=sixteen[:4]), _bom(full.parts[:4], {})
     ).ok
 
+    # One requirement may own the whole composition: the pinned reviewed block is the unit,
+    # so an eight-contact requirement realized by two four-position blocks of that same part
+    # is eight contacts, and a single block is four. Held-out r3 `rp2040-dual-adc-usb`
+    # (2026-09-30) declared exactly that shape in one `terminals` requirement.
+    one = _terminal_requirement("terminals", minimum=8, exact_part="WJ126V-5.0-04P-14-00A")
+    assert validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=[one]),
+        _bom(
+            [
+                _reviewed_terminal_part("J1", "wj126v-5.0-04p-14-00a"),
+                _reviewed_terminal_part("J2", "wj126v-5.0-04p-14-00a"),
+            ],
+            {},
+        ),
+    ).ok
+    single_block = validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=[one]),
+        _bom([_reviewed_terminal_part("J1", "wj126v-5.0-04p-14-00a")], {}),
+    )
+    assert not single_block.ok
+    assert any("demand 8 distinct contact(s), but only 4" in row for row in single_block.offenders)
+
 
 def test_distinct_requirement_owners_cannot_share_one_reviewed_connector(monkeypatch):
     record = SimpleNamespace(

@@ -3522,6 +3522,44 @@ def test_mcu_support_requirements_realize_one_complete_physical_circuit():
     assert not check_requirement_physical_realization(architecture, bom).ok
 
 
+def test_the_rp2040_recipes_bootsel_button_realizes_a_pushbutton_obligation():
+    """The BOOTSEL obligation the brief names on the MCU circuit commits end to end.
+
+    Held-out rp1 `rp2040-dual-adc-usb` (2026-09-30): the draft put the brief's BOOTSEL button
+    obligation on the `rp2040` requirement -- the RP2040 recipe owns that button -- and the
+    architecture family audit refused it. The recipe's `bootsel` group named a land pattern that
+    resolves to no reviewed record, so §9.42 could not prove the part either. It now names the
+    reviewed momentary-button stock pair (`Switch:SW_Push` / `SW_SPST_TL3342`) every other
+    compiler-owned button group uses, so both gates prove the same part.
+    """
+    from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+    from kicraft.design.synthesis.validation import check_requirement_physical_realization
+
+    payload = _rp2040_support_architecture()
+    processor = payload["requirements"][0]
+    processor["obligations"].append(
+        {"kind": "physical", "original_obligation_id": "bootsel_button",
+         "component_class": "pushbutton"}
+    )
+    architecture = apply_architecture_recipe_resolution(payload)
+    bom_payload, _ = _normalize_stage_response(
+        "bom", {"groups": [], "arrays": []}, {"architecture": architecture.model_dump()}
+    )
+    bom = BOM.model_validate(bom_payload)
+    verdict = check_requirement_physical_realization(architecture, bom)
+    assert verdict.ok, verdict.offenders
+    bootsel = next(part for part in bom.parts if part.value == "BOOTSEL")
+    assert (bootsel.symbol, bootsel.footprint) == (
+        "Switch:SW_Push",
+        "Button_Switch_SMD:SW_SPST_TL3342",
+    )
+
+    # Negative control: a button land pattern the reviewed inventory does not carry cannot
+    # realize the demand, so the gate still refuses it.
+    bootsel.footprint = "Button_Switch_SMD:SW_Push_1P1T_NO_E-Switch_TL3301NxxxxxG"
+    assert not check_requirement_physical_realization(architecture, bom).ok
+
+
 @pytest.mark.parametrize("conflict", ["second_core", "different_usb_net", "different_sheet"])
 def test_mcu_support_cannot_choose_an_ambiguous_or_different_core(conflict):
     from copy import deepcopy

@@ -2394,6 +2394,131 @@ def test_a_lowerer_that_builds_the_class_itself_is_not_a_family_mismatch(monkeyp
     ) != []
 
 
+def test_the_buck_converter_class_spelling_resolves_to_the_reviewed_buck_regulator():
+    """The brief's TLV62569DBVR buck is a reviewed `buck-regulator`; `buck-converter` is its alias.
+
+    Held-out rp1 `stm32-four-adc-usb` (2026-09-30): the brief names the TLV62569DBVR buck, the
+    intent classed it `buck-converter`, and the requirement pinned the reviewed part. The
+    architecture audit passed but the BOM commit then died with `E_PHYSICAL_REALIZATION 'buck':
+    requires 1 reviewed 'buck-converter' physical part(s), found 0` -- unrepairable, because the
+    obligation class is committed from intent. The two spellings are one reviewed class (the
+    library's own `buck-converter-ic` alias already equates them), so the demand now resolves to
+    the record the brief actually names, and a part that is not a buck is still refused.
+    """
+    from kicraft.design.part_identity import (
+        canonical_physical_features,
+        reviewed_part,
+        reviewed_record_realizes_class,
+    )
+    from kicraft.design.stage_semantics import _architecture_obligation_family_mismatch
+
+    assert canonical_physical_features("buck-converter") == frozenset(
+        {"buck-converter", "buck-regulator"}
+    )
+    assert reviewed_record_realizes_class(reviewed_part("TLV62569DBVR"), "buck-converter")
+
+    def requirement(exact_part, family="tlv62569-3v3"):
+        return {
+            "id": "buck",
+            "sheet": "POWER",
+            "role": "regulator",
+            "family": family,
+            "exact_part": exact_part,
+            "parameters": {},
+            "ports": {},
+            "obligations": [
+                {"kind": "physical", "original_obligation_id": "buck",
+                 "component_class": "buck-converter"}
+            ],
+        }
+
+    assert _architecture_obligation_family_mismatch(
+        {"requirements": [requirement("TLV62569DBVR")]}
+    ) == []
+    # Negative control: a pinned part that is not a buck converter is still refused.
+    assert [
+        row.code
+        for row in _architecture_obligation_family_mismatch(
+            {"requirements": [requirement("SS13D07VG4")]}
+        )
+    ] == ["architecture_obligation_family_mismatch"]
+
+
+def test_the_rp2040_recipes_own_bootsel_button_realizes_a_pushbutton_demand():
+    """The RP2040 recipe's BOOTSEL group is a reviewed momentary button, so the demand is met.
+
+    Held-out rp1 `rp2040-dual-adc-usb` (2026-09-30): the draft named the brief's BOOTSEL button
+    obligation on the `rp2040` requirement itself -- the RP2040 circuit *does* own that button --
+    and the family audit refused `rp2040` for claiming `pushbutton`, spending every repair round
+    asking for a family the selected recipe already builds. The recipe's `bootsel` group named the
+    `Switch:SW_Push` / `Button_Switch_SMD:SW_Push_1P1T_NO_E-Switch_TL3301NxxxxxG` pair, which
+    resolves to no reviewed record, so neither this audit nor §9.42 could prove the part. The
+    recipe now names the reviewed momentary-button stock pair every other compiler-owned button
+    group uses, so the same observed draft commits without loosening the audit.
+    """
+    from kicraft.design.part_identity import (
+        physical_inventory_record,
+        reviewed_record_realizes_class,
+    )
+    from kicraft.design.stage_semantics import (
+        _architecture_obligation_family_mismatch,
+        _selected_recipe_realizes_class,
+    )
+
+    requirement = {
+        "id": "rp2040",
+        "sheet": "RP2040",
+        "role": "mcu_core",
+        "family": "rp2040",
+        "exact_part": "RP2040",
+        "parameters": {},
+        "ports": {"vdd": "+3V3", "gnd": "GND"},
+        "obligations": [
+            {"kind": "physical", "original_obligation_id": "rp2040",
+             "component_class": "microcontroller"},
+            {"kind": "physical", "original_obligation_id": "bootsel_button",
+             "component_class": "pushbutton"},
+        ],
+    }
+    candidate = {
+        "requirements": [requirement],
+        "recipe_selections": [
+            {"recipe": "rp2040-minimal@2", "instance": "rp2040",
+             "requirement_ids": ["rp2040"]}
+        ],
+    }
+
+    bootsel = physical_inventory_record(
+        mpn=None, symbol="Switch:SW_Push", footprint="Button_Switch_SMD:SW_SPST_TL3342"
+    )
+    assert bootsel is not None
+    assert reviewed_record_realizes_class(bootsel, "pushbutton")
+    assert _selected_recipe_realizes_class(candidate, requirement, "pushbutton")
+    assert _architecture_obligation_family_mismatch(candidate) == []
+
+    # The land pattern the recipe named before resolves to no reviewed record at all, which is
+    # the evidence the fix is keyed on.
+    assert physical_inventory_record(
+        mpn=None,
+        symbol="Switch:SW_Push",
+        footprint="Button_Switch_SMD:SW_Push_1P1T_NO_E-Switch_TL3301NxxxxxG",
+    ) is None
+
+    # Negative control: a selected recipe that owns no momentary switch is still refused.
+    assert [
+        row.code
+        for row in _architecture_obligation_family_mismatch(
+            {
+                "requirements": [{**requirement, "family": "tlv62569-3v3"}],
+                "recipe_selections": [
+                    {"recipe": "tlv62569-3v3@1", "instance": "rp2040",
+                     "requirement_ids": ["rp2040"]}
+                ],
+            }
+        )
+    ] == ["architecture_obligation_family_mismatch"]
+
+
 def test_a_regulator_family_with_no_instance_at_its_voltage_is_retargeted():
     """The resolver falls back to the instance default, so the divider comes out for 3.3 V.
 

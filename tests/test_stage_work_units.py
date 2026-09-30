@@ -2566,6 +2566,67 @@ def test_a_sixteen_input_terminal_demand_is_realizable_as_a_composition():
     ) == {"physical-obligation-unfulfilled": [], "declared-interface-unrealized": []}
 
 
+def test_one_terminal_requirement_wide_than_its_block_composes_the_same_reviewed_part():
+    """A single requirement's wider demand is met by several copies of the block it pinned.
+
+    Held-out r3 `rp2040-dual-adc-usb` (2026-09-30): the draft declared ONE `terminals`
+    requirement with eight contacts and pinned the four-position WJ126V-5.0-04P, so the
+    lowerer refused "carries 4 contacts and this requirement declares 8" and the run died
+    with `unsupported_lowerer_contract` after four attempts. The pinned reviewed block IS the
+    unit: eight contacts are two blocks, and the one group it lowers to publishes both (the
+    same `quantity=N` vocabulary `test-points@1` already uses). A demand the composition does
+    not cover is still refused.
+    """
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    def requirement(contacts: int, minimum: int, exact_part: str, nets: tuple[str, ...]):
+        return CircuitRequirement(
+            id="terminals",
+            sheet="ANALOG INPUTS",
+            role="connector",
+            family="screw-terminal",
+            exact_part=exact_part,
+            parameters={"rows": 1},
+            ports={f"pin{i}": net for i, net in enumerate(nets, 1)},
+            obligations=[
+                {
+                    "kind": "physical",
+                    "original_obligation_id": "screw-terminals",
+                    "component_class": "screw-terminal",
+                },
+                {
+                    "kind": "quantity",
+                    "original_obligation_id": "eight-input-terminals",
+                    "subject": "screw-terminal",
+                    "minimum": minimum,
+                },
+            ],
+        )
+
+    eight = requirement(
+        8, 8, "WJ126V-5.0-04P-14-00A", ("GND", *(f"AIN{i}" for i in range(7)))
+    )
+    group = _lowered_terminal_group(eight)
+    assert group.quantity == 2
+    assert _requirement_obligation_defects(
+        [eight.model_dump()], [group], compiler_requirements=[eight.model_dump()]
+    ) == {"physical-obligation-unfulfilled": [], "declared-interface-unrealized": []}
+
+    # The composition covers the declared contacts and no more: a count the block does not
+    # expose is still short, so the arithmetic was not loosened into "any terminal will do".
+    short = requirement(4, 8, "WJ126V-5.0-04P-14-00A", ("GND", "A", "B", "C"))
+    defects = _requirement_obligation_defects(
+        [short.model_dump()],
+        [_lowered_terminal_group(short)],
+        compiler_requirements=[short.model_dump()],
+    )
+    assert any(
+        "requires 8 real screw-terminal contact(s), found 4" in row
+        for row in defects["physical-obligation-unfulfilled"]
+    )
+
+
 def test_a_part_count_class_still_counts_parts_not_contacts():
     """Only a position-array terminal class counts contacts: two connectors are two parts.
 
@@ -3214,6 +3275,155 @@ def test_declared_interface_accepts_only_a_compiler_matched_fpc_owner():
     ]
 
 
+def test_a_class_family_requirement_owns_the_reviewed_part_that_implements_it():
+    """A `reset` requirement that names a class (not a device) is owned by the button the draft emits.
+
+    Held-out r3 `stm32-four-adc-usb` (2026-09-30): the architecture declared requirement `reset`
+    (`family: push-button`, `exact_part: null`) with a one-port declared interface, and the BOM
+    unit emitted a real reviewed push-button for it. The physical-obligation half passed, yet the
+    declared-interface half reported "needs one identified hardware owner" because the owner
+    resolver compared the family token `push-button` against the group's MPN `YZA-032-5.0W` and
+    never resolved the group through its reviewed record; four repair rounds exhausted on it. The
+    owner is now resolved with the same class evidence the sibling obligation checks read.
+    """
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    reset = {
+        "id": "reset",
+        "sheet": "MCU",
+        "role": "user_io",
+        "family": "push-button",
+        "exact_part": None,
+        "ports": {"signal": "RESET_N"},
+        "obligations": [
+            {"kind": "physical", "original_obligation_id": "reset-button",
+             "component_class": "push-button"}
+        ],
+        "declared_interface": {
+            "ports": [{"key": "signal", "pin": "1", "direction": "passive"}]
+        },
+    }
+
+    def button(**overrides):
+        fields = {
+            "id": "reset_button",
+            "sheet": "MCU",
+            "reference_prefix": "SW",
+            "quantity": 1,
+            "value": "K2-1109DF-E4SW-04",
+            "symbol": "pushbutton-c2909684:K2-1109DF-E4SW-04",
+            "footprint": "pushbutton-c2909684:SW-TH_HRO_K2-1109DF-EXXW-XX",
+            "mpn": "K2-1109DF-E4SW-04",
+            **overrides,
+        }
+        return BomComponentGroup(**fields)
+
+    assert _requirement_obligation_defects([reset], [button()]) == {
+        "physical-obligation-unfulfilled": [],
+        "declared-interface-unrealized": [],
+    }
+
+    # A group whose symbol/footprint resolve to no reviewed record does not implement the class,
+    # so there is still no identified owner.
+    unreviewed = button(
+        value="reset button",
+        symbol="Switch:SW_Push",
+        footprint="Button_Switch_SMD:SW_Push_1P1T_NO_E-Switch_TL3301NxxxxxG",
+        mpn=None,
+    )
+    assert _requirement_obligation_defects([reset], [unreviewed])[
+        "declared-interface-unrealized"
+    ] == ["reset: declared interface needs one identified hardware owner"]
+
+    # A requirement that pins a device keeps identity-only resolution: a different part of the
+    # same class must not be adopted as the named device's implementation.
+    pinned = {**reset, "exact_part": "S2B-PH-SM4-TB(LF)(SN)"}
+    assert _requirement_obligation_defects([pinned], [button()])[
+        "declared-interface-unrealized"
+    ] == ["reset: declared interface needs one identified hardware owner"]
+
+
+def test_a_claimed_pin_name_resolves_against_the_symbols_own_published_contacts():
+    """A claim that states the name its datasheet uses resolves to that one published contact.
+
+    Live `thermocouple-amp` (2026-09-30, three campaigns apart): the MAX31855 requirement's
+    declared interface claimed `cs` on pin `'CS'` and `vcc` on pin `'3V'`. The symbol
+    (`Sensor_Temperature:MAX31855KASA`) publishes `~{CS}` and `V_{CC}`, so an exact comparison
+    refused both, the unit exhausted its repair rounds, and the design never delivered. The
+    symbol's own markup is now folded for comparison -- a normalization of the name the part
+    publishes, never a guess at a different contact -- and a claim that still resolves to
+    nothing is refused with the published contact set named, so the repair is mechanical.
+    """
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    def requirement(pin: str | None, key: str = "cs", family: str = "thermocouple-converter"):
+        return {
+            "id": "max31855",
+            "sheet": "SENSOR",
+            "role": "sensor",
+            "family": family,
+            "exact_part": None,
+            "ports": {"vcc": "+3V3"},
+            "obligations": [
+                {"kind": "physical", "original_obligation_id": family,
+                 "component_class": family}
+            ],
+            "declared_interface": {
+                "ports": [{"key": key, "pin": pin, "direction": "passive",
+                           "function": "carries the signal"}]
+            },
+        }
+
+    converter = BomComponentGroup(
+        id="max31855",
+        sheet="SENSOR",
+        reference_prefix="U",
+        quantity=1,
+        value="MAX31855KASA+",
+        symbol="Sensor_Temperature:MAX31855KASA",
+        footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+        mpn="MAX31855KASA+",
+    )
+    published = (
+        "contacts=[('1', 'GND'), ('2', 'T-'), ('3', 'T+'), ('4', 'VCC'), "
+        "('5', 'SCK'), ('6', 'CS'), ('7', 'SO'), ('8', 'NC')]"
+    )
+
+    for pin, key in (("6", "cs"), ("CS", "cs"), ("~{CS}", "cs"), ("VCC", "vcc")):
+        assert _requirement_obligation_defects([requirement(pin, key)], [converter])[
+            "declared-interface-unrealized"
+        ] == [], (pin, key)
+
+    # A rail voltage is not a published contact: still refused, and the refusal names the
+    # contacts the draft may state instead.
+    refused = _requirement_obligation_defects([requirement("3V", "vcc")], [converter])[
+        "declared-interface-unrealized"
+    ]
+    assert len(refused) == 1 and "claimed pin '3V' is not in" in refused[0]
+    assert published in refused[0]
+
+    absent = _requirement_obligation_defects([requirement(None, "vcc")], [converter])[
+        "declared-interface-unrealized"
+    ]
+    assert len(absent) == 1 and "claim states no pin number" in absent[0]
+    assert published in absent[0]
+
+    # A name two published contacts share is still ambiguous and refused, markup or not.
+    resistor = BomComponentGroup(
+        id="r1",
+        sheet="SENSOR",
+        reference_prefix="R",
+        quantity=1,
+        value="10k",
+        symbol="Device:R",
+        footprint="Resistor_SMD:R_0603_1608Metric",
+    )
+    ambiguous = _requirement_obligation_defects(
+        [requirement("~", "load", family="resistor-0603")], [resistor]
+    )["declared-interface-unrealized"]
+    assert len(ambiguous) == 1 and "is not a unique contact either" in ambiguous[0]
+
+
 def test_unreviewed_part_class_is_proven_by_a_real_resolved_part():
     """A class the library has never covered is satisfied by a real part, not refused.
 
@@ -3311,7 +3521,10 @@ def test_declared_interface_claim_may_name_a_pin_by_its_symbol_name(monkeypatch)
             "ports": [
                 {"key": "vdd", "pin": "VDD", "direction": "power", "function": "logic supply"},
                 {"key": "gnd", "pin": "9", "direction": "power", "function": "ground"},
-                {"key": "reset", "pin": "RESET", "direction": "input", "function": "not a pin"},
+                # `RESET` IS this symbol's own published name for pin 18 (`~{RESET}`), so the
+                # markup-folded comparison resolves it; only a string that names no contact at
+                # all is refused.
+                {"key": "reset", "pin": "NRESET", "direction": "input", "function": "not a pin"},
             ]
         },
     }
@@ -3322,7 +3535,7 @@ def test_declared_interface_claim_may_name_a_pin_by_its_symbol_name(monkeypatch)
 
     assert not any("vdd" in row for row in defects), defects
     assert not any("gnd" in row for row in defects), defects
-    assert any("reset" in row and "claimed pin 'RESET'" in row for row in defects), defects
+    assert any("reset" in row and "claimed pin 'NRESET'" in row for row in defects), defects
 
 
 @pytest.mark.parametrize("split_groups", [False, True])

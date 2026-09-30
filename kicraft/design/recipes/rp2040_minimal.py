@@ -70,8 +70,17 @@ RP2040_MINIMAL = RecipeDefinition(
             role="bootsel",
             reference_prefix="SW",
             value="BOOTSEL",
+            # The reviewed momentary-button stock pair every other compiler-owned button group
+            # names (``Switch:SW_Push`` on ``Button_Switch_SMD:SW_SPST_TL3342``, the
+            # ``kicad-tl3342-button`` record whose physical features include ``momentary-button``,
+            # i.e. the reviewed class ``pushbutton``). The previous TL3301 land pattern is a real
+            # KiCad footprint but resolves to no reviewed record, so a BOOTSEL obligation on the
+            # RP2040 was unrealizable in *both* gates that ask the same question
+            # (:func:`reviewed_record_realizes_class`): the architecture family audit refused
+            # requirement 'rp2040' for claiming 'pushbutton' (held-out rp1 rp2040-dual-adc-usb)
+            # and §9.42 could never prove the emitted button either.
             symbol="Switch:SW_Push",
-            footprint="Button_Switch_SMD:SW_Push_1P1T_NO_E-Switch_TL3301NxxxxxG",
+            footprint="Button_Switch_SMD:SW_SPST_TL3342",
             sheet_role="mcu",
         ),
         Group(

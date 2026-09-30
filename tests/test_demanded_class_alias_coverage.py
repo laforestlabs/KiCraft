@@ -75,6 +75,9 @@ ALIASES = [
     ("isolated-power-supply", "B0509S-1WR3", {"isolated-dc-dc-converter"}),
     ("switching-regulator-ic", "TLV62569DBVR", {"buck-regulator", "voltage-regulator"}),
     ("buck-regulator-ic", "TLV62569DBVR", {"buck-regulator"}),
+    # The LCSC category spelling of the same reviewed class: the TLV62569DBVR's own record
+    # carries `buck-regulator`, so a `buck-converter` demand the brief states for it resolves.
+    ("buck-converter", "TLV62569DBVR", {"buck-converter", "buck-regulator"}),
     ("smt-i2c-oled", "HS96L03W2C03", {"i2c-oled-display"}),
     ("constant-current-driver", "AL8860MP-13", {"constant-current-led-driver"}),
     ("pd-trigger-controller", "CH224K", {"usb-pd-controller"}),
