@@ -3721,6 +3721,88 @@ def test_real_usb_lowerer_candidate_keeps_an_mpn_equal_to_its_value():
     assert validated["groups"][0]["mpn"] == expected["mpn"]
 
 
+@pytest.mark.parametrize("exact_part", ["12401610e4#2a", "12401610e4-2a"])
+def test_breakout_receptacle_requirement_is_compiler_owned_work(exact_part):
+    """The recorded shape: the breakout's receptacle is the compiler's, not the model's.
+
+    usb-c-full-breakout runs consolidation_r15 (code `12401610e4#2a`) and consolidation_r7 (the
+    hyphen spelling) planned this requirement as an *llm* unit, so the parts stage asked the model
+    to author the one reviewed receptacle identity no part catalogue exposes: the unreviewed
+    candidate failed `missing-requirement-implementation` + `physical-obligation-unfulfilled`,
+    and the reviewed `TYPE-C-31-M-12` substitution failed `model_authored_protected_identity` --
+    a refusal that names no reachable shape, so the unit exhausted its repairs and the brief
+    never delivered. The family rewrite dropped `usb-c-breakout@1`; with it kept, the same state
+    plans the requirement as a lowerer unit and compiles both stages without a provider.
+    """
+    state = _probe_usb_breakout_state()
+    requirement = state["architecture"]["requirements"][0]
+    requirement["exact_part"] = exact_part
+    requirement["ports"] = {"vbus": "VBUS", "gnd": "GND", "cc1": "CC1", "cc2": "CC2"}
+    requirement["obligations"] = [_physical("usb_c_receptacle", "usb-c-receptacle")]
+
+    (unit,) = plan_stage_work_units("bom", state, {})
+    assert unit.requirement_ids == ("usb",)
+    assert unit.planned_resolution_source == "lowerer"
+    assert unit.lowerer_ids == ("usb-c-breakout@1",)
+
+    candidate = deterministic_bom_candidate(unit, state)
+    assert candidate is not None
+    (group,) = validate_unit_candidate(unit, candidate, state, {})["groups"]
+    assert (group["symbol"], group["footprint"]) == (
+        "Connector:USB_C_Receptacle",
+        "Connector_USB:USB_C_Receptacle_Amphenol_12401610E4-2A",
+    )
+    # The design's own spelling of the one reviewed device is carried.
+    assert group["mpn"] == exact_part.upper()
+
+    # The receptacle's pins are the compiler's too: the whole brief compiles with no provider.
+    probed = probe_architecture_construction(state)
+    assert probed is not None
+    assert {part["ref"] for part in probed["parts"]} == {"J1"}
+
+
+def test_a_model_receptacle_still_cannot_take_the_recipe_owned_identity():
+    """Negative control: the rule stays narrow -- only the pinned reviewed part is owned.
+
+    The pin that fixes this brief must not become a licence for a model-authored group to take
+    over an identity a reviewed recipe owns (here `TYPE-C-31-M-12`, the USB-C sink connector), nor
+    to substitute a different reviewed part for the one the requirement names.
+    """
+    from kicraft.design.recipes import protected_identity_matches
+    from kicraft.server.stage_contracts import (
+        BomComponentGroup,
+        _requirement_owns_protected_group,
+    )
+
+    requirement = {
+        "id": "usb",
+        "role": "connector",
+        "family": "usb-c-breakout",
+        "exact_part": "12401610e4#2a",
+    }
+    substitution = BomComponentGroup.model_validate(
+        {
+            "id": "usb_c_receptacle",
+            "reference_prefix": "J",
+            "quantity": 1,
+            "value": "12401610e4#2a USB-C full-contact receptacle",
+            "symbol": "usb-c-16p:TYPE-C-31-M-12",
+            "footprint": "usb-c-16p:USB-C_SMD-TYPE-C-31-M-12_1",
+            "sheet": "A",
+            "mpn": "TYPE-C-31-M-12",
+        }
+    )
+    assert protected_identity_matches(substitution.mpn, substitution.symbol)
+    assert not _requirement_owns_protected_group(substitution, [requirement])
+
+    # The requirement does own its own pinned reviewed receptacle, and nothing else.
+    pinned = _group_for("12401610e4#2a")
+    assert _requirement_owns_protected_group(pinned, [requirement])
+    assert not _requirement_owns_protected_group(
+        pinned, [{**requirement, "exact_part": "USB4085-GF-A"}]
+    )
+
+
 def test_canonical_r2r_realization_requires_the_complete_lowered_topology():
     from kicraft.design.lowering import lower_requirement
     from kicraft.design.models import BOM, Architecture, BomPart, CircuitRequirement, Sheet

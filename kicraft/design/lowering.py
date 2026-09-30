@@ -1269,6 +1269,38 @@ def _audio_jack(requirement: CircuitRequirement) -> LoweringArtifact | None:
     return _artifact("audio-jack@1", requirement, (jack,), pins, no_connects=no_connects)
 
 
+#: The reviewed receptacle this build places, and every documented spelling the library carries
+#: for it. Amphenol documents one 12401610E4 receptacle whose order code appears as both
+#: ``12401610E4#2A`` and ``12401610E4-2A``; the reviewed inventory keeps a record per spelling on
+#: one symbol/footprint pair ("the same part and the same pair, deliberately separate identities
+#: so a design may assert either documented order code"), so either spelling names this device.
+_REVIEWED_USB_C_RECEPTACLE_CODES = ("12401610E4#2A", "12401610E4-2A")
+
+
+def _reviewed_usb_c_receptacle_code(identity: object) -> str | None:
+    """The reviewed receptacle a stated ``exact_part`` names, in the design's own spelling.
+
+    Only the one device this build places answers: any other stated code -- a different reviewed
+    connector, or an unreviewed one -- returns None, and the build then declines the requirement
+    exactly as before.
+    """
+    from kicraft.design.part_identity import reviewed_part
+
+    stated = str(identity or "").strip()
+    if not stated:
+        return None
+    record = reviewed_part(stated)
+    published = reviewed_part(_REVIEWED_USB_C_RECEPTACLE_CODES[0])
+    if (
+        record is None
+        or published is None
+        or record.family != published.family
+        or (record.symbol, record.footprint) != (published.symbol, published.footprint)
+    ):
+        return None
+    return stated.upper()
+
+
 def _usb_c_breakout(requirement: CircuitRequirement) -> LoweringArtifact | None:
     """Expose declared contacts of a verified receptacle, without terminations."""
     ports = requirement.ports
@@ -1294,18 +1326,18 @@ def _usb_c_breakout(requirement: CircuitRequirement) -> LoweringArtifact | None:
         # Missing bindings are not rails; unknown hardware constraints stay unresolved.
         return None
     superspeed_mpn = "12401610E4#2A"
-    use_superspeed = bool(ports.keys() & superspeed.keys()) or (
-        requirement.exact_part is not None
-        and requirement.exact_part.casefold() == superspeed_mpn.casefold()
-    )
+    stated_receptacle = _reviewed_usb_c_receptacle_code(requirement.exact_part)
+    use_superspeed = bool(ports.keys() & superspeed.keys()) or stated_receptacle is not None
     if use_superspeed:
         # Amphenol drawing C12401610 rev C contact table; the installed land
-        # pattern uses A1..A12/B1..B12 and four shell pads sharing S1.
+        # pattern uses A1..A12/B1..B12 and four shell pads sharing S1. The design's own
+        # spelling of the order code is carried, so the group states the identity asserted.
+        group_mpn = stated_receptacle or superspeed_mpn
         group = LoweringGroup(
             role="connector",
             reference_prefix="J",
-            value=superspeed_mpn,
-            mpn=superspeed_mpn,
+            value=group_mpn,
+            mpn=group_mpn,
             symbol="Connector:USB_C_Receptacle",
             footprint="Connector_USB:USB_C_Receptacle_Amphenol_12401610E4-2A",
             datasheet="https://cdn.amphenol-cs.com/media/wysiwyg/files/drawing/c12401610_c.pdf",
@@ -2244,6 +2276,7 @@ for _lowerer in (
             "rx2n",
         ),
         required_port_keys=("vbus", "gnd"),
+        reviewed_exact_part="12401610E4#2A",
     ),
     RegisteredLowerer(
         "bnc-connector@1",

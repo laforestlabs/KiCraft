@@ -242,13 +242,37 @@ def test_exact_superspeed_subset_disconnects_every_omitted_contact(exposed):
     assert {row["pin"]: row["net"] for row in candidate["pins"] if row.get("net")} == connected
 
 
-@pytest.mark.parametrize("exact_part", ["TYPE-C-31-M-12", "USB4085", "12401610E4-2A"])
+@pytest.mark.parametrize("exact_part", ["TYPE-C-31-M-12", "USB4085"])
 def test_superspeed_never_substitutes_for_another_exact_connector(exact_part):
     requirement = _requirement(
         "usb-c-breakout", ports={"vbus": "VBUS", "gnd": "GND", "tx1p": "TX1+"}
     ).model_copy(update={"exact_part": exact_part})
     with pytest.raises(ValueError):
         lower_requirement(requirement)
+
+
+@pytest.mark.parametrize("exact_part", ["12401610E4#2A", "12401610E4-2A"])
+def test_either_documented_order_code_names_the_reviewed_superspeed_receptacle(exact_part):
+    """Amphenol documents one 12401610E4 receptacle under both order-code spellings.
+
+    The reviewed inventory keeps a record per spelling on one symbol/footprint pair ("the same
+    part and the same pair, deliberately separate identities so a design may assert either
+    documented order code"), so a draft naming the hyphen spelling is asking for the device this
+    build places -- not for another connector. Live usb-c-full-breakout runs
+    consolidation_r7/consolidation_r15 asserted one spelling each, and the build refused the
+    hyphen one, so the only accepted shape was an identity no catalogue exposes.
+    """
+    requirement = _requirement(
+        "usb-c-breakout", ports={"vbus": "VBUS", "gnd": "GND", "tx1p": "TX1+"}
+    ).model_copy(update={"exact_part": exact_part})
+    artifact = lower_requirement(requirement)
+    (group,) = artifact.groups
+    assert (group.symbol, group.footprint) == (
+        "Connector:USB_C_Receptacle",
+        "Connector_USB:USB_C_Receptacle_Amphenol_12401610E4-2A",
+    )
+    # The design's own spelling of the one device is carried, so the BOM states what was asked.
+    assert group.mpn == group.value == exact_part
 
 
 @pytest.mark.parametrize(
@@ -1464,6 +1488,10 @@ def test_lowerer_summary_publishes_the_reviewed_part_and_parameter_choices():
     assert rows["audio-jack@1"]["required_exact_part"] == "SJ1-3533NG"
     assert rows["bnc-connector@1"]["reviewed_exact_part"] == "KH-BNC50-3511"
     assert rows["fpc-connector@1"]["reviewed_exact_part"] == "KH-FG0.5-H2.0-24PIN"
+    # The breakout build places the reviewed USB-C receptacle and no other connector, so a draft
+    # that reaches for the demanded class can name the code it builds (and the architecture stage
+    # keeps this family instead of rewriting it to the bare record's class).
+    assert rows["usb-c-breakout@1"]["reviewed_exact_part"] == "12401610E4#2A"
     assert rows["adjustable-rc-lowpass@1"]["parameter_choices"] == {
         "capacitance_f": [10e-9],
         "capacitor_exact_part": ["C0805C103J5GACTU"],

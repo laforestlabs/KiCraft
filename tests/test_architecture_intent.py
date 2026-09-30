@@ -3551,3 +3551,105 @@ def test_a_composition_that_owns_the_named_reviewed_part_keeps_its_family():
     filter_requirement = _requirement(architecture, "filter")
     assert filter_requirement.family == "adjustable-rc-lowpass"
     assert set(filter_requirement.ports) == {"input", "output", "gnd"}
+
+
+def _receptacle_intent(exact_part: str) -> dict:
+    """A breakout sheet whose receptacle requirement names one reviewed order code."""
+    return {
+        "sheets": [
+            {
+                "name": "USB INTERFACE",
+                "stem": "USB_INTERFACE",
+                "role": "interface",
+                "function": "Expose the USB-C receptacle to 0.1-inch headers.",
+            }
+        ],
+        "requirements": [
+            {
+                "id": "usb",
+                "sheet": "USB INTERFACE",
+                "role": "connector",
+                "family": "usb-c-breakout",
+                "exact_part": exact_part,
+                "ports": {
+                    "vbus": "VBUS",
+                    "gnd": "GND",
+                    "cc1": "CC1",
+                    "cc2": "CC2",
+                    "tx1p": "TX1P",
+                    "tx1n": "TX1N",
+                    "rx1p": "RX1P",
+                    "rx1n": "RX1N",
+                },
+                "obligation_ids": ["usb_c_receptacle"],
+            }
+        ],
+        "obligations": [
+            {
+                "kind": "physical",
+                "original_obligation_id": "usb_c_receptacle",
+                "component_class": "usb-c-receptacle",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("exact_part", ["12401610e4#2a", "12401610e4-2a"])
+def test_a_receptacle_requirement_keeps_the_lowerer_that_builds_its_named_part(exact_part):
+    """`usb-c-breakout@1` builds the reviewed receptacle, so the family is not rewritten away.
+
+    The parts stage may not change a family later, and the carrier-family rewrite replaced
+    `usb-c-breakout` with the bare record's class (`usb-c-receptacle`), which no lowerer answers
+    to. The requirement then became model-owned work at the parts stage, and the only shape the
+    gates accept is the reviewed symbol/footprint pair no part catalogue exposes: live
+    usb-c-full-breakout runs consolidation_r15 (code `12401610e4#2a`) and consolidation_r7 (the
+    hyphen spelling) each exhausted the unit on `model_authored_protected_identity` instead of
+    committing the receptacle the compiler was always going to write.
+    """
+    from kicraft.design.architecture_intent import complete_architecture_payload
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.models import CircuitRequirement
+
+    completed = complete_architecture_payload(_receptacle_intent(exact_part))
+    (requirement,) = completed["requirements"]
+    assert requirement["family"] == "usb-c-breakout"
+    artifact = lower_requirement(
+        CircuitRequirement.model_validate(
+            {key: value for key, value in requirement.items() if key in CircuitRequirement.model_fields}
+        )
+    )
+    assert artifact is not None
+    assert artifact.lowerer_id == "usb-c-breakout@1"
+    (group,) = artifact.groups
+    assert (group.symbol, group.footprint) == (
+        "Connector:USB_C_Receptacle",
+        "Connector_USB:USB_C_Receptacle_Amphenol_12401610E4-2A",
+    )
+
+
+def test_a_requirement_naming_another_reviewed_connector_still_adopts_its_family():
+    """Only the part this build places keeps the family; another connector is still rewritten.
+
+    The rewrite exists so a demanded class reaches the carrier that implements it, and it stays
+    as narrow as the lowerer's own published code: naming a different reviewed receptacle does
+    not make `usb-c-breakout@1` its builder.
+    """
+    from kicraft.design.architecture_intent import complete_architecture_payload
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.models import CircuitRequirement
+
+    completed = complete_architecture_payload(_receptacle_intent("TYPE-C-31-M-12"))
+    (requirement,) = completed["requirements"]
+    assert requirement["family"] == "usb-c-receptacle"
+    assert (
+        lower_requirement(
+            CircuitRequirement.model_validate(
+                {
+                    key: value
+                    for key, value in requirement.items()
+                    if key in CircuitRequirement.model_fields
+                }
+            )
+        )
+        is None
+    )

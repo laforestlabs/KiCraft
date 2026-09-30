@@ -741,20 +741,41 @@ def _lowerer_realizes_exact_part(family: str, identity: str) -> bool:
     (`trim-potentiometer`) would replace the composition that owns the part with a bare trimmer
     that rejects the composition's own parameters and publishes none of its ports (live
     rc-lowpass runs r13/r14/r15).
+
+    A reviewed *device* can also be carried under more than one documented order-code spelling:
+    the inventory keeps a record per spelling of Amphenol's 12401610E4 receptacle, and states
+    those records are one part on one symbol/footprint pair. A requirement asserting either
+    spelling names the part the published code builds, so it keeps that lowerer rather than
+    being rewritten to the bare record's class (live usb-c-full-breakout runs consolidation_r7
+    and consolidation_r15: the rewrite dropped `usb-c-breakout@1`, and the parts stage was left
+    asking the model for a receptacle identity only the compiler can state).
     """
+    from kicraft.design.part_identity import reviewed_part
     from kicraft.design.lowering import registered_lowerers
 
-    wanted = str(identity or "").strip().casefold()
+    wanted = str(identity or "").strip()
     if not wanted:
         return False
-    return any(
-        family in lowerer.families
-        and wanted
-        in {
-            str(lowerer.required_exact_part or "").casefold(),
-            str(lowerer.reviewed_exact_part or "").casefold(),
-        }
+    published = [
+        str(code)
         for lowerer in registered_lowerers()
+        if family in lowerer.families
+        for code in (lowerer.required_exact_part, lowerer.reviewed_exact_part)
+        if code
+    ]
+    if wanted.casefold() in {code.casefold() for code in published}:
+        return True
+    record = reviewed_part(wanted)
+    if record is None:
+        return False
+    # One physical device is one reviewed class on one reviewed symbol/footprint pair; a record
+    # that differs in either is a different part and never this lowerer's.
+    return any(
+        (published_record := reviewed_part(code)) is not None
+        and published_record.family == record.family
+        and (published_record.symbol, published_record.footprint)
+        == (record.symbol, record.footprint)
+        for code in published
     )
 
 
