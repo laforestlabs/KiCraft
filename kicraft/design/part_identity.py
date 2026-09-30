@@ -3535,6 +3535,13 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     # board whose reviewed part implements the demand -- and pushed the model to a different
     # family it did not choose.
     "motor-driver": frozenset({"motor-driver", "stepper-driver"}),
+    # A tactile button IS a momentary push button, and the reviewed records prove both spellings of
+    # the same physical class: `ts-1088-ar02016` carries `tactile-button`, while the momentary
+    # button our own RP2040/ESP32 recipes emit (`kicad-tl3342-button`, `tl3342f260qg`) carries
+    # `momentary-button`. Without this, a demand for `tactile-button` could not be proven for the
+    # button the compiler itself places (held-out rp2040-dual-adc-usb, all three trials:
+    # `requires 1 reviewed 'tactile-button' physical part(s), found 0`).
+    "tactile-button": frozenset({"tactile-button", "momentary-button"}),
     # An analog-to-digital converter *is* an ADC. The reviewed ADS1115IDGSR carries `adc` and
     # `i2c-adc` and nothing else, so a held-out brief that demands the class in full words got
     # `requires 1 real 'analog-to-digital-converter', found 0` on the very part it asked for
