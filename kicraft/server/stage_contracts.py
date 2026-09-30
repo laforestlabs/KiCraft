@@ -1147,6 +1147,150 @@ def _ownership_refusal(
     )
 
 
+def _obligation_row_at(payload: object, loc) -> dict | None:
+    """The draft row a validator's location names, when it sits in an obligation list.
+
+    A discriminated-union row reports its tag as the location's last part (``obligations.13
+    .quantitative``), so the walk stops at the first part the current node does not carry and
+    answers with the row it already reached -- and only when it passed through an ``obligations``
+    list, so a refusal of a slot field can never be read as one of a row.
+    """
+    node = payload
+    row: dict | None = None
+    in_obligations = False
+    for part in loc or ():
+        if isinstance(node, dict):
+            if part not in node:
+                return row if in_obligations else None
+            node = node[part]
+            in_obligations = in_obligations or part == "obligations"
+        elif isinstance(node, list):
+            if not isinstance(part, int) or not 0 <= part < len(node):
+                return row if in_obligations else None
+            node = node[part]
+            row = node if in_obligations and isinstance(node, dict) else None
+        else:
+            return None
+    return row
+
+
+def _quantitative_shape_repair(row: dict) -> str:
+    """The restatement one wrongly shaped ``quantitative`` row owes, and its home.
+
+    A row that states no number at all is not a measurement: it is a set (an address set, a name
+    or mode list, a strap table) the brief stated, and the slot's home for a stated interface or
+    enumeration fact is `constraints`. A row that states a number in the wrong fields needs that
+    number kept and the extra fields dropped.
+    """
+    identifier = str(row.get("original_obligation_id") or "<row>")
+    stated = ", ".join(
+        f"`{field}` {json.dumps(row[field])}"
+        for field in ("value", "minimum", "maximum", "unit")
+        if row.get(field) is not None
+    )
+    if all(row.get(field) is None for field in ("value", "minimum", "maximum")):
+        repair = (
+            "No number is stated, so this is not a measurement: keep the brief's own wording in "
+            "`constraints` (the slot's home for a stated interface or enumeration fact) and "
+            "delete the row. Never invent a value for a demand the brief does not measure."
+        )
+    else:
+        repair = (
+            "Keep the number the brief states in the field its `relation` publishes: `value` "
+            "alone for `equal`, `minimum` or `maximum`, and ordered `minimum` and `maximum` "
+            "alone for `range`."
+        )
+    return (
+        f"`quantitative` obligation {identifier!r} ({row.get('quantity')!r}) states `relation` "
+        f"{row.get('relation')!r} with {stated or 'no field'}: a `quantitative` row is ONE "
+        f"numeric limit. {repair}"
+    )
+
+
+def _fabrication_shape_repair(row: dict) -> str:
+    """The restatement a ``fabrication`` row owes when its `unit` states no `minimum`."""
+    identifier = str(row.get("original_obligation_id") or "<row>")
+    return (
+        f"`fabrication` obligation {identifier!r} ({row.get('feature')!r}) states `unit` "
+        f"{json.dumps(row.get('unit'))} and no `minimum`, so it states no limit: state the "
+        "`minimum` the brief gives in that unit, or drop the `unit` -- the feature alone still "
+        "demands the board carry it."
+    )
+
+
+#: Cross-field refusals of ONE obligation row that are a defect in the *design data* a draft
+#: stated, not unusable provider output: the row's own content is in the wrong shape for the
+#: `kind` it chose, so only its writer can restate it. Keyed by the wording each validator
+#: publishes, with the row kind that wording belongs to and the restatement the row owes. A
+#: refusal whose wording is absent here is left exactly as it was: a missing field, a bad
+#: pattern, an unknown key, a wrong type and a bare list where a row belongs all still classify
+#: as `invalid_schema`.
+_OBLIGATION_SHAPE_REPAIRS = {
+    "scalar quantitative obligation needs value only": ("quantitative", _quantitative_shape_repair),
+    "range quantitative obligation needs ordered minimum and maximum": (
+        "quantitative",
+        _quantitative_shape_repair,
+    ),
+    "fabrication obligation unit needs a minimum": ("fabrication", _fabrication_shape_repair),
+}
+
+
+def _obligation_shape_refusal(exc: Exception, payload: dict) -> StageSchemaError | None:
+    """Turn the obligation contract's refusal of a draft's design data into a repair request.
+
+    Same defect class as `_ownership_refusal`: the draft is schema-shaped, but a row states design
+    data its `kind` cannot carry, and the pydantic ``ValidationError`` would reach the driver as
+    ``invalid_schema`` -- unusable provider output -- answered with a generic re-emit instead of
+    the restatement only the writer can make. Measured live on the held-out brief
+    `stm32-four-adc-usb`: the model stated the brief's four I2C addresses (0x48, 0x49, 0x4A, 0x4B)
+    as a `quantitative` row with no numeric value, and all three trials of every campaign died at
+    stage 1 with "1 validation error for IntentStageResponse\nobligations.13.quantitative\nValue
+    error, scalar quantitative obligation needs value only". An address set is not a scalar
+    measurement, so the row is refused -- repairably, and with the four addresses in the evidence
+    so the correction the driver asks for cannot drop them. A refusal that names no such row is
+    returned as ``None`` and stays a schema error.
+    """
+    from pydantic import ValidationError
+
+    if not isinstance(exc, ValidationError):
+        return None
+    findings: list[tuple[str, dict, str]] = []
+    for error in exc.errors():
+        # A `model_validator` failure is reported as "Value error, <raised message>", so the
+        # published wording is matched inside the reported one (the `_ownership_refusal` shape).
+        message = str(error.get("msg") or "")
+        matched = next(
+            (
+                (kind, repair)
+                for wording, (kind, repair) in _OBLIGATION_SHAPE_REPAIRS.items()
+                if wording in message
+            ),
+            None,
+        )
+        if matched is None:
+            continue
+        kind, repair = matched
+        loc = error.get("loc") or ()
+        row = _obligation_row_at(payload, loc)
+        if not isinstance(row, dict) or str(row.get("kind") or "") != kind:
+            continue
+        findings.append((".".join(str(part) for part in loc), row, repair(row)))
+    if not findings:
+        return None
+    return StageSchemaError(
+        "an obligation row states design data its kind cannot carry",
+        diagnostic={
+            "code": "invalid_obligation_shape",
+            "severity": "repair_required",
+            "message": " ".join(repair for _, _, repair in findings),
+            "evidence": [
+                f"{path}: {json.dumps(row, separators=(',', ':'), sort_keys=True)}"
+                for path, row, _repair in findings
+            ],
+        },
+    )
+
+
 def validate_obligation_retention(stage: str, payload: dict, prompt_state: dict) -> None:
     """Reject a candidate whose ownership of the committed obligations cannot be honored.
 
@@ -1649,6 +1793,9 @@ def _normalize_stage_response(
     except StageSchemaError:
         raise
     except (TypeError, ValueError) as exc:
+        refusal = _obligation_shape_refusal(exc, payload)
+        if refusal is not None:
+            raise refusal from exc
         diagnostic = getattr(exc, "diagnostic", None)
         raise StageSchemaError(
             _schema_error_detail(exc),
