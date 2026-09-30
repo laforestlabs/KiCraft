@@ -3922,6 +3922,21 @@ def test_ads1115_address_strap_is_selectable_per_instance():
     assert adc_address_net("scl") == {"SCL"}
 
 
+def test_ads1115_record_and_recipe_agree_on_the_address_straps():
+    """§9.43 counts the reviewed record's straps; the recipe must not offer more.
+
+    A recipe strap outside the record's list would let a fifth converter commit
+    while the capacity gate computed against the reviewed four.
+    """
+    from kicraft.design.part_identity import reviewed_part
+
+    record = reviewed_part("ADS1115IDGSR")
+    definition = get_recipe("ads1115-i2c-adc@1")
+    assert tuple(sorted(record.support_network["address_strap"]["straps"])) == tuple(
+        sorted(definition.allowed_parameters["address_strap"])
+    )
+
+
 def test_hub75_recipe_exposes_named_channels_including_oe_and_d():
     """The HUB75 interface must declare its real signals.
 

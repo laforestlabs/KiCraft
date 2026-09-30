@@ -1511,6 +1511,29 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
             "sda": "9",
             "scl": "10",
         },
+        support_network={
+            # The ADDR pin straps the converter to one of four I2C addresses
+            # (0x48–0x4B): pulled to GND, VDD, SDA or SCL. Two converters on one
+            # bus that share a strap answer at the same address, and the family
+            # has no fifth strap, so one bus reaches at most four of them. That
+            # is the datasheet's address table and the manifest's own
+            # "I2C addr set by ADDR strap (0x48-0x4B)" note.
+            "address_strap": {
+                "pin": "ADDR",
+                "straps": ("gnd", "vdd", "sda", "scl"),
+            },
+            # AIN0..AIN3 are the single-ended inputs. The PGA chooses a
+            # full-scale conversion range; it does not extend or protect the
+            # pin, whose absolute maximum is GND-0.3 V .. VDD+0.3 V against the
+            # device's own supply (datasheet absolute maximum ratings).
+            "analog_input": {
+                "pins": ("AIN0", "AIN1", "AIN2", "AIN3"),
+                "reference_pin": "VDD",
+                "ground_pin": "GND",
+                "above_reference_margin_v": 0.3,
+                "below_ground_margin_v": 0.3,
+            },
+        },
     ),
     ReviewedPart(
         identity="drv8833pwpr",

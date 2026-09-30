@@ -118,7 +118,9 @@ from .synthesis.validation import (
     check_spec_named_mpn_substitutions,
     check_two_terminal_self_short,
     check_typed_led_current_paths,
+    check_reviewed_analog_input_ranges,
     check_reviewed_device_support_networks,
+    check_reviewed_i2c_address_assignments,
     check_reviewed_input_operating_ranges,
     check_reviewed_power_transfer,
     check_typed_passive_crossover_values,
@@ -1414,6 +1416,8 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             checks.extend(
                 [
                     check_reviewed_input_operating_ranges(state.architecture, state.bom),
+                    check_reviewed_analog_input_ranges(state.architecture, state.bom),
+                    check_reviewed_i2c_address_assignments(state.architecture, state.bom),
                     check_reviewed_power_transfer(state.architecture, state.bom),
                     check_typed_passive_crossover_values(state.architecture, state.bom),
                     check_reviewed_constant_current_led_feedback(state.architecture, state.bom),

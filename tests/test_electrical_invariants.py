@@ -1,6 +1,8 @@
 """Focused regressions for GAP1 device, transfer, and typed-value invariants."""
 from __future__ import annotations
 
+import copy
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1256,3 +1258,246 @@ def test_usb_powered_buck_enable_bias_does_not_rely_on_typical_pullup_current(
     assert validation.check_reviewed_input_operating_ranges(
         SimpleNamespace(rail_voltages={"VIN": 5.0, "GND": 0.0}), bom,
     ).ok is accepted
+
+
+# ---------- preregistered negative boundaries: I2C addresses, analog inputs ----------
+#
+# The held-out briefs are multi-ADS1115 boards, so the daq-8ch reference is the
+# positive control for these gates: it must keep constructing and passing, and
+# each mutated copy below must be refused with the diagnostic that names the
+# address/input defect rather than a generic failure.
+
+def _compose_daq8ch(mutate=None):
+    """Construct the daq-8ch reference exactly as the architecture commit probe does."""
+    from kicraft.design import models
+    from kicraft.eval.design_acceptance import load_reference_rows
+    from kicraft.server.stage_contracts import _normalize_stage_response
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    row = next(
+        row for _name, row in load_reference_rows()
+        if (row.get("acceptance") or {}).get("slug") == "daq-8ch"
+    )
+    compiler_input = copy.deepcopy(row["compiler_input"])
+    if mutate is not None:
+        mutate(compiler_input)
+    prompt_state = {
+        "intent": compiler_input.get("intent") or {},
+        "functional_spec": compiler_input.get("functional_spec") or {},
+    }
+    architecture = _normalize_stage_response(
+        "architecture", compiler_input["architecture"], prompt_state,
+    )
+    if isinstance(architecture, tuple):
+        architecture = architecture[0]
+    built = probe_architecture_construction({**prompt_state, "architecture": architecture})
+    assert built is not None
+    return models.Architecture.model_validate(architecture), models.BOM.model_validate(built)
+
+
+def test_multi_adc_reference_still_composes_and_passes_both_new_gates():
+    architecture, bom = _compose_daq8ch()
+    gates = {
+        check.name: check for check in validation.check_composed_wiring(architecture, bom)
+    }
+    assert [name for name, check in gates.items() if not check.ok] == []
+    assert gates["9.43 reviewed I2C address assignments"].ok
+    assert gates["9.44 reviewed analog input ranges"].ok
+
+
+def _duplicate_second_address_strap(compiler_input):
+    """Strap both ADS1115 converters to GND, so both answer at 0x48."""
+    for requirement in compiler_input["architecture"]["requirements"]:
+        if requirement["id"] == "ads1115b":
+            requirement["parameters"]["address_strap"] = "gnd"
+            requirement["parameters"]["i2c_address"] = "0x48"
+
+
+def _append_converters(straps):
+    """Append one ADS1115 requirement per (suffix, address_strap, i2c_address)."""
+    def mutate(compiler_input):
+        requirements = compiler_input["architecture"]["requirements"]
+        template = next(row for row in requirements if row["id"] == "ads1115a")
+        for suffix, strap, address in straps:
+            extra = copy.deepcopy(template)
+            extra["id"] = f"ads1115{suffix}"
+            extra["parameters"]["address_strap"] = strap
+            extra["parameters"]["i2c_address"] = address
+            requirements.append(extra)
+    return mutate
+
+
+_append_three_more_converters = _append_converters(
+    [(suffix, "gnd", "0x48") for suffix in ("c", "d", "e")]
+)
+
+
+def _type_analog_input_voltage(volts):
+    """Type one voltage on the converter's first single-ended input."""
+    def mutate(compiler_input):
+        compiler_input["architecture"]["rail_voltages"]["AI1"] = volts
+    return mutate
+
+
+_type_five_volts_on_the_first_analog_input = _type_analog_input_voltage(5.0)
+
+
+def test_repeated_address_strap_on_one_bus_is_a_named_collision():
+    architecture, bom = _compose_daq8ch(_duplicate_second_address_strap)
+    result = validation.check_reviewed_i2c_address_assignments(architecture, bom)
+    assert not result.ok
+    assert any(
+        offender.startswith("E_I2C_ADDRESS_COLLISION I2C_SDA: U1, U2 strap ADDR to 'GND'")
+        and "declared 0x48" in offender
+        and "reviewed 'ads1115idgsr'" in offender
+        for offender in result.offenders
+    )
+
+
+def test_more_devices_than_address_straps_on_one_bus_is_named_capacity():
+    architecture, bom = _compose_daq8ch(_append_three_more_converters)
+    assert len([part for part in bom.parts if part.mpn == "ADS1115IDGSR"]) == 5
+    result = validation.check_reviewed_i2c_address_assignments(architecture, bom)
+    assert not result.ok
+    assert any(
+        offender.startswith(
+            "E_I2C_ADDRESS_CAPACITY I2C_SDA: 5 reviewed 'ads1115idgsr' device(s) (U1, U2, U3, U4, U5)"
+        )
+        and "only 4 distinct address strap(s)" in offender
+        for offender in result.offenders
+    )
+
+
+def test_direct_five_volt_input_on_a_three_volt_adc_is_a_named_overvoltage():
+    architecture, bom = _compose_daq8ch(_type_five_volts_on_the_first_analog_input)
+    result = validation.check_reviewed_analog_input_ranges(architecture, bom)
+    assert not result.ok
+    assert any(
+        offender.startswith("E_ANALOG_INPUT_RANGE U1.4: AIN0 is wired to 'AI1', typed 5V")
+        and "supply '+3V3' is 3.3V" in offender
+        and "absolute maximum is 3.6V" in offender
+        for offender in result.offenders
+    )
+
+
+@pytest.mark.parametrize(("input_volts", "accepted"), [(3.3, True), (3.6, True), (3.7, False)])
+def test_analog_input_limit_is_the_device_supply_plus_its_reviewed_margin(input_volts, accepted):
+    """VDD+0.3 V is the rated absolute maximum: at it the design is kept, above it refused."""
+    architecture, bom = _compose_daq8ch(_type_analog_input_voltage(input_volts))
+    assert validation.check_reviewed_analog_input_ranges(architecture, bom).ok is accepted
+
+
+def test_four_converters_with_four_distinct_straps_are_not_refused():
+    """The capacity gate counts straps, not devices: four straps address four converters."""
+    architecture, bom = _compose_daq8ch(_append_converters(
+        [("c", "sda", "0x4a"), ("d", "scl", "0x4b")],
+    ))
+    assert len([part for part in bom.parts if part.mpn == "ADS1115IDGSR"]) == 4
+    assert validation.check_reviewed_i2c_address_assignments(architecture, bom).ok
+
+
+@pytest.mark.parametrize(("mutate", "gate", "code"), [
+    (_duplicate_second_address_strap, "9.43", "E_I2C_ADDRESS_COLLISION"),
+    (_append_three_more_converters, "9.43", "E_I2C_ADDRESS_CAPACITY"),
+    (_type_five_volts_on_the_first_analog_input, "9.44", "E_ANALOG_INPUT_RANGE"),
+])
+def test_architecture_commit_probe_refuses_each_mutated_payload(mutate, gate, code):
+    """The commit probe reaches the gate and attributes it to the owning requirement."""
+    from kicraft.design import models
+    from kicraft.eval.design_acceptance import load_reference_rows
+    from kicraft.server.stage_contracts import (
+        StageSchemaError,
+        _normalize_stage_response,
+        _validate_constructed_architecture,
+    )
+
+    row = next(
+        row for _name, row in load_reference_rows()
+        if (row.get("acceptance") or {}).get("slug") == "daq-8ch"
+    )
+    compiler_input = copy.deepcopy(row["compiler_input"])
+    mutate(compiler_input)
+    prompt_state = {
+        "intent": compiler_input.get("intent") or {},
+        "functional_spec": compiler_input.get("functional_spec") or {},
+    }
+    architecture = _normalize_stage_response(
+        "architecture", compiler_input["architecture"], prompt_state,
+    )
+    if isinstance(architecture, tuple):
+        architecture = architecture[0]
+    committed = models.Architecture.model_validate(architecture).model_dump(exclude_none=True)
+
+    with pytest.raises(StageSchemaError) as raised:
+        _validate_constructed_architecture(
+            copy.deepcopy(committed),
+            {**prompt_state, "architecture": copy.deepcopy(committed)},
+            project_root=str(Path(__file__).resolve().parents[1]),
+        )
+    diagnostic = raised.value.diagnostic or {}
+    assert diagnostic.get("code") == "constructed_circuit_invalid"
+    findings = {finding["gate_codes"][0]: finding for finding in diagnostic["findings"]}
+    assert gate in findings
+    assert any(code in evidence for evidence in findings[gate]["evidence"])
+    assert findings[gate]["candidate_requirement_ids"][gate]
+
+
+def test_addressable_device_without_reviewed_address_data_is_named_not_refused(monkeypatch):
+    """A record that declares no strap contract must not refuse, but must not be silent either."""
+    monkeypatch.setattr(validation, "_reviewed_fact_for_part", lambda _part: {
+        "mpn": "TCA9555PWR",
+        "identity": "tca9555pwr",
+        "physical_features": ["io-expander", "i2c-gpio-expander"],
+        "port_pins": {"sda": "23", "scl": "22"},
+    })
+    monkeypatch.setattr(
+        validation,
+        "_pin_info_by_ref",
+        lambda _bom: (
+            {
+                "U7": {
+                    "23": {"name": "SDA", "type": "bidirectional"},
+                    "22": {"name": "SCL", "type": "input"},
+                }
+            },
+            {},
+        ),
+    )
+    bom = _bom([_part("U7", "TCA9555PWR", mpn="TCA9555PWR")], {
+        "I2C_SDA": [("U7", "23")],
+        "I2C_SCL": [("U7", "22")],
+    })
+    result = validation.check_reviewed_i2c_address_assignments(
+        SimpleNamespace(requirements=[]), bom,
+    )
+    assert result.ok
+    assert "E_I2C_ADDRESS_UNREVIEWED U7" in result.message
+
+
+def test_analog_input_device_without_reviewed_range_data_is_named_not_refused(monkeypatch):
+    """An ADC record with no input-range contract is named, never refused on absent data."""
+    monkeypatch.setattr(validation, "_reviewed_fact_for_part", lambda _part: {
+        "mpn": "MCP3208",
+        "identity": "mcp3208",
+        "physical_features": ["adc"],
+        "port_pins": {"vdd": "16", "ground": "15", "ain0": "1"},
+    })
+    monkeypatch.setattr(
+        validation,
+        "_pin_info_by_ref",
+        lambda _bom: (
+            {
+                "U8": {
+                    "1": {"name": "CH0", "type": "input"},
+                    "16": {"name": "VDD", "type": "power_in"},
+                }
+            },
+            {},
+        ),
+    )
+    bom = _bom([_part("U8", "MCP3208", mpn="MCP3208")], {"CH0": [("U8", "1")]})
+    result = validation.check_reviewed_analog_input_ranges(
+        SimpleNamespace(rail_voltages={"CH0": 5.0}), bom,
+    )
+    assert result.ok
+    assert "E_ANALOG_INPUT_RANGE U8" in result.message

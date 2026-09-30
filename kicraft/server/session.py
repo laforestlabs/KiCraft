@@ -986,6 +986,12 @@ _BUILD_OWNER_BY_GATE = {
     "9.22": "architecture",
     "9.24": "architecture",
     "9.42": "architecture",
+    # §9.43/§9.44 both read a datum the architecture stage declares: the address
+    # strap a requirement demands for its converter, and the voltage a typed
+    # rail puts on an analog input. The owning repair is that assignment, not
+    # the reviewed part that honestly reports its limit.
+    "9.43": "architecture",
+    "9.44": "architecture",
     "9.37": "compiler",
     "9.38": "compiler",
     "9.39": "compiler",

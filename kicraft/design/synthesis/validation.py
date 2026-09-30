@@ -2591,6 +2591,261 @@ def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
     )
 
 
+# Reviewed feature vocabulary that marks an addressable I2C *peripheral*. The
+# bus master's own I2C pins and a connector's `i2c-connector` feature carry no
+# device address, so only these records take part in an address assignment.
+_I2C_ADDRESSABLE_FEATURES = frozenset({
+    "i2c-adc",
+    "i2c-sensor",
+    "i2c-gpio-expander",
+    "i2c-pwm-driver",
+    "i2c-oled-display",
+})
+
+# Reviewed feature vocabulary that marks a device with directly wired analog
+# inputs, whose pin limits the reviewed record must publish for §9.44.
+_ANALOG_INPUT_FEATURES = frozenset({"adc"})
+
+
+def _requirement_parameters_by_ref(architecture, bom) -> dict[str, dict]:
+    """The architecture requirement parameters that own each BOM reference.
+
+    A device's declared address lives on the requirement that demands it (the
+    recipe instance names that requirement), never on the part row, so the
+    address assignment is read back from the architecture the design committed.
+    """
+    by_id = {
+        requirement.id: requirement
+        for requirement in (getattr(architecture, "requirements", None) or ())
+    }
+    owners: dict[str, set[str]] = defaultdict(set)
+    for ownership in getattr(bom, "recipe_ownership", None) or ():
+        for ref in ownership.refs:
+            owners[ref].update(ownership.requirement_ids)
+    for part in bom.parts:
+        for requirement_id in (
+            getattr(part, "recipe_instance", None),
+            getattr(part, "lowering_requirement_id", None),
+        ):
+            if requirement_id:
+                owners[part.ref].add(requirement_id)
+    resolved: dict[str, dict] = {}
+    for ref, requirement_ids in owners.items():
+        parameters: dict = {}
+        for requirement_id in sorted(requirement_ids):
+            requirement = by_id.get(requirement_id)
+            if requirement is None:
+                continue
+            parameters.update(getattr(requirement, "parameters", None) or {})
+        resolved[ref] = parameters
+    return resolved
+
+
+def check_reviewed_i2c_address_assignments(architecture, bom) -> CheckResult:
+    """§9.43 — one reviewed address per I2C device on a shared bus.
+
+    An addressable peripheral answers at one address per strap its reviewed
+    record supports, so two of them that share a bus and strap the same net
+    cannot both be reached, and one bus can never carry more of a family than
+    the record has straps. Both are read from the composed nets and the
+    reviewed record; a device name or net name is never evidence.
+
+    A device whose record declares no address-strap contract is not judged (the
+    check must not refuse on data it does not have), but an addressable I2C
+    device in that state is named in the message as an unproven address rather
+    than silently skipped.
+    """
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    parameters_by_ref = _requirement_parameters_by_ref(architecture, bom)
+    buses: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    gaps: list[str] = []
+    for part in bom.parts:
+        fact = _reviewed_fact_for_part(part)
+        if fact is None:
+            continue
+        wired = nets.get(part.ref) or {}
+        sda = _pin_number_named(info, part.ref, _fact_pin_name(fact, "sda") or "SDA")
+        scl = _pin_number_named(info, part.ref, _fact_pin_name(fact, "scl") or "SCL")
+        sda_net = wired.get(sda) if sda else None
+        scl_net = wired.get(scl) if scl else None
+        if sda_net is None or scl_net is None:
+            continue  # not wired to a bus: no address to collide with
+        contract = (fact.get("support_network") or {}).get("address_strap")
+        if not isinstance(contract, dict):
+            if set(fact.get("physical_features") or ()) & _I2C_ADDRESSABLE_FEATURES:
+                gaps.append(
+                    f"E_I2C_ADDRESS_UNREVIEWED {part.ref}: reviewed "
+                    f"{_reviewed_name(fact)!r} is an addressable I2C device but its record "
+                    "declares no address-strap contract"
+                )
+            continue
+        straps = tuple(str(value) for value in (contract.get("straps") or ()))
+        if not straps:
+            gaps.append(
+                f"E_I2C_ADDRESS_UNREVIEWED {part.ref}: reviewed {_reviewed_name(fact)!r} "
+                "declares an address strap pin but no supported strap list"
+            )
+        pin = _pin_number_named(info, part.ref, str(contract.get("pin") or "").upper())
+        declared = parameters_by_ref.get(part.ref) or {}
+        buses[(sda_net, scl_net)].append({
+            "ref": part.ref,
+            "identity": str(
+                fact.get("identity") or fact.get("family") or fact.get("mpn") or part.ref
+            ),
+            "strap_net": wired.get(pin) if pin else None,
+            "straps": straps,
+            "address": declared.get("i2c_address"),
+        })
+    bad: list[str] = []
+    for (sda_net, _scl_net), devices in sorted(buses.items()):
+        by_identity: dict[str, list[dict]] = defaultdict(list)
+        for device in devices:
+            by_identity[device["identity"]].append(device)
+        for identity, group in sorted(by_identity.items()):
+            straps = sorted({strap for device in group for strap in device["straps"]})
+            if straps and len(group) > len(straps):
+                names = ", ".join(sorted(str(device["ref"]) for device in group))
+                bad.append(
+                    f"E_I2C_ADDRESS_CAPACITY {sda_net}: {len(group)} reviewed {identity!r} "
+                    f"device(s) ({names}) share the bus, but the record supports only "
+                    f"{len(straps)} distinct address strap(s) ({', '.join(straps)}), so at "
+                    "least two must answer at the same address"
+                )
+            reached: dict[str, list[str]] = defaultdict(list)
+            for device in group:
+                if device["strap_net"] is None:
+                    bad.append(
+                        f"E_I2C_ADDRESS_UNPROVEN {device['ref']}: reviewed {identity!r} "
+                        "declares an address strap pin, but it carries no composed net, so "
+                        "its address is unproven"
+                    )
+                    continue
+                reached[str(device["strap_net"])].append(str(device["ref"]))
+            for strap_net, refs in sorted(reached.items()):
+                if len(refs) < 2:
+                    continue
+                declared_addresses = sorted({
+                    str(device["address"])
+                    for device in group
+                    if str(device["strap_net"]) == strap_net and device["address"] is not None
+                })
+                where = f" (declared {', '.join(declared_addresses)})" if declared_addresses else ""
+                bad.append(
+                    f"E_I2C_ADDRESS_COLLISION {sda_net}: {', '.join(sorted(refs))} strap "
+                    f"ADDR to {strap_net!r}{where}; reviewed {identity!r} answers at one "
+                    "address per strap, so they cannot be reached independently"
+                )
+    message = (
+        "every addressable I2C device on a shared bus has a distinct reviewed address"
+        if not bad
+        else f"{len(bad)} I2C address assignment defect(s)"
+    )
+    if gaps:
+        message = f"{message}; {len(gaps)} device(s) without reviewed address data: " + "; ".join(gaps)
+    return CheckResult("9.43 reviewed I2C address assignments", not bad, message, bad)
+
+
+# A datasheet limit is compared against a typed rail: an input exactly at the
+# absolute maximum is at the limit, not above it, so binary float arithmetic
+# (3.3 + 0.3 == 3.5999999999999996) must not turn "at the rating" into a refusal.
+_LIMIT_COMPARISON_TOLERANCE_V = 1e-6
+
+
+def check_reviewed_analog_input_ranges(architecture, bom) -> CheckResult:
+    """§9.44 — a direct analog input may not exceed the device's own supply.
+
+    An ADC's PGA chooses a full-scale conversion range; it neither extends nor
+    protects the pin. The reviewed record carries the input absolute-maximum
+    margin against the device's own reference supply (and its return), so a
+    typed rail above ``VDD + margin`` on an analog input is a contradiction no
+    downstream choice can resolve.
+
+    A device whose record declares no input-range contract is not judged, but an
+    analog-input device in that state is named in the message rather than
+    silently skipped.
+    """
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    bad: list[str] = []
+    gaps: list[str] = []
+    for part in bom.parts:
+        fact = _reviewed_fact_for_part(part)
+        if fact is None:
+            continue
+        contract = (fact.get("support_network") or {}).get("analog_input")
+        if not isinstance(contract, dict):
+            if set(fact.get("physical_features") or ()) & _ANALOG_INPUT_FEATURES:
+                gaps.append(
+                    f"E_ANALOG_INPUT_RANGE {part.ref}: reviewed {_reviewed_name(fact)!r} has "
+                    "direct analog inputs but its record declares no input-range contract"
+                )
+            continue
+        pin_names = tuple(str(name) for name in (contract.get("pins") or ()))
+        if not pin_names:
+            continue
+        wired = nets.get(part.ref) or {}
+
+        def _wired_voltage(pin_key: str) -> tuple[str | None, float | None]:
+            number = _pin_number_named(info, part.ref, str(contract.get(pin_key) or "").upper())
+            net = wired.get(number) if number else None
+            if net is None:
+                return None, None
+            return net, _fact_number(architecture.rail_voltages, net)
+
+        reference_net, reference_voltage = _wired_voltage("reference_pin")
+        ground_net, ground_voltage = _wired_voltage("ground_pin")
+        above = _fact_number(contract, "above_reference_margin_v")
+        below = _fact_number(contract, "below_ground_margin_v")
+        unproven = False
+        for pin_name in pin_names:
+            number = _pin_number_named(info, part.ref, pin_name.upper())
+            if number is None:
+                gaps.append(
+                    f"E_ANALOG_INPUT_RANGE {part.ref}: reviewed {_reviewed_name(fact)!r} names "
+                    f"input {pin_name} but the loaded symbol exposes no such pin"
+                )
+                continue
+            net = wired.get(number)
+            if net is None:
+                continue
+            voltage = _fact_number(architecture.rail_voltages, net)
+            if voltage is None:
+                continue  # an untyped analog signal is unknown, never guessed
+            if reference_voltage is None or above is None or ground_voltage is None or below is None:
+                unproven = True
+                continue
+            if voltage > reference_voltage + above + _LIMIT_COMPARISON_TOLERANCE_V:
+                bad.append(
+                    f"E_ANALOG_INPUT_RANGE {part.ref}.{number}: {pin_name} is wired to {net!r}, "
+                    f"typed {voltage:g}V, on reviewed {_reviewed_name(fact)!r} whose supply "
+                    f"{reference_net!r} is {reference_voltage:g}V; the input absolute maximum is "
+                    f"{reference_voltage + above:g}V and the PGA full-scale setting is not input "
+                    "protection"
+                )
+            elif voltage < ground_voltage - below - _LIMIT_COMPARISON_TOLERANCE_V:
+                bad.append(
+                    f"E_ANALOG_INPUT_RANGE {part.ref}.{number}: {pin_name} is wired to {net!r}, "
+                    f"typed {voltage:g}V, below the {ground_net!r} return of reviewed "
+                    f"{_reviewed_name(fact)!r} ({ground_voltage:g}V); the input absolute minimum "
+                    f"is {ground_voltage - below:g}V"
+                )
+        if unproven:
+            gaps.append(
+                f"E_ANALOG_INPUT_RANGE {part.ref}: reviewed {_reviewed_name(fact)!r} has a typed "
+                "analog input, but its supply/reference rail is not typed, so its input range is "
+                "unproven"
+            )
+    message = (
+        "every typed analog input is within the reviewed device input limits"
+        if not bad
+        else f"{len(bad)} analog input(s) outside the reviewed device input limits"
+    )
+    if gaps:
+        message = f"{message}; {len(gaps)} device(s) with unproven input data: " + "; ".join(gaps)
+    return CheckResult("9.44 reviewed analog input ranges", not bad, message, bad)
+
+
 # The reference domain belongs to the port that *is* the return: a supply port
 # already carries its rail, and the derivation refuses two nets on one port
 # (`conflicting_port_binding`), so a rail-bound port can never also declare its
@@ -5527,6 +5782,8 @@ def check_composed_wiring(
             check_inter_sheet_nets_realized(architecture, bom),
             check_typed_led_current_paths(architecture, bom),
             check_reviewed_input_operating_ranges(architecture, bom),
+            check_reviewed_analog_input_ranges(architecture, bom),
+            check_reviewed_i2c_address_assignments(architecture, bom),
             check_reviewed_power_transfer(architecture, bom),
             check_typed_passive_crossover_values(architecture, bom),
             check_reviewed_constant_current_led_feedback(architecture, bom),
