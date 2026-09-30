@@ -830,33 +830,28 @@ class StageSchemaError(ValueError):
         super().__init__(message)
 
 
-def _normalize_board_outline_obligation_rows(rows) -> list:
-    """Retype only semantically proven board-outline pseudo-parts as fabrication facts."""
-    from kicraft.design.part_identity import board_outline_fabrication_feature
+def _normalize_non_part_obligation_rows(rows) -> list:
+    """Retype only semantically proven non-part demands into the kind they really state.
+
+    A demanded class that states a board fact -- an outline or shape, a mechanical hole, the
+    board's own copper, its edge plating -- becomes a `fabrication` row, and a class that states
+    the absence of a class becomes a `negative` row. Every genuine part class is passed through
+    untouched.
+    """
+    from kicraft.design.part_identity import non_part_obligation_row
 
     normalized = []
     for row in rows or []:
-        if not isinstance(row, dict) or row.get("kind") != "physical":
-            normalized.append(row)
-            continue
-        feature = board_outline_fabrication_feature(str(row.get("component_class") or ""))
-        normalized.append(
-            {
-                "kind": "fabrication",
-                "original_obligation_id": row.get("original_obligation_id"),
-                "feature": feature,
-            }
-            if feature is not None
-            else row
-        )
+        retyped = non_part_obligation_row(row)
+        normalized.append(retyped if retyped is not None else row)
     return normalized
 
 
-def normalize_board_outline_obligations(payload: dict) -> dict:
-    """Normalize board-outline facts in source and requirement rows before ownership checks."""
+def normalize_non_part_obligations(payload: dict) -> dict:
+    """Normalize non-part demands in source and requirement rows before ownership checks."""
     normalized = dict(payload)
     if "obligations" in normalized:
-        normalized["obligations"] = _normalize_board_outline_obligation_rows(
+        normalized["obligations"] = _normalize_non_part_obligation_rows(
             normalized["obligations"]
         )
     requirements = normalized.get("requirements")
@@ -864,7 +859,7 @@ def normalize_board_outline_obligations(payload: dict) -> dict:
         normalized["requirements"] = [
             {
                 **requirement,
-                "obligations": _normalize_board_outline_obligation_rows(
+                "obligations": _normalize_non_part_obligation_rows(
                     requirement.get("obligations")
                 ),
             }
@@ -882,7 +877,7 @@ def _canonical_obligations(rows) -> list[dict]:
     adapter = TypeAdapter(list[models.RequirementObligation])
     return [
         row.model_dump(mode="json", exclude_none=True)
-        for row in adapter.validate_python(_normalize_board_outline_obligation_rows(rows))
+        for row in adapter.validate_python(_normalize_non_part_obligation_rows(rows))
     ]
 
 
@@ -1492,7 +1487,7 @@ def _normalize_stage_response(
             # The strict provider envelope requires the key on every answer, so a
             # slot response carries `questions: []`. It is not part of the slot.
             payload = {key: value for key, value in payload.items() if key != "questions"}
-        payload = normalize_board_outline_obligations(payload)
+        payload = normalize_non_part_obligations(payload)
         intent_shaped = False
         if stage == "architecture":
             payload = _apply_authoritative_standard_form_factor(payload, prompt_state)

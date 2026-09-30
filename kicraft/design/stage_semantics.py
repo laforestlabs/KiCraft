@@ -120,7 +120,7 @@ def _committed_topology_text(candidate: dict) -> str:
 
 def complete_intent_classification(brief: str, candidate: dict) -> dict:
     """Fill omitted intent classifications from exact user text, without invention."""
-    from kicraft.design.part_identity import board_outline_fabrication_feature
+    from kicraft.design.part_identity import non_part_obligation_row
 
     completed = dict(candidate)
     expected = named_part_tokens([brief])
@@ -156,19 +156,12 @@ def complete_intent_classification(brief: str, candidate: dict) -> dict:
 
     normalized_obligations = []
     for obligation in completed.get("obligations") or []:
-        if not isinstance(obligation, dict) or obligation.get("kind") != "physical":
-            normalized_obligations.append(obligation)
-            continue
-        feature = board_outline_fabrication_feature(str(obligation.get("component_class") or ""))
-        normalized_obligations.append(
-            {
-                "kind": "fabrication",
-                "original_obligation_id": obligation.get("original_obligation_id"),
-                "feature": feature,
-            }
-            if feature is not None
-            else obligation
-        )
+        # A demanded class that states a board fact (an outline or shape, a mechanical hole, the
+        # board's own copper, its edge plating) or the ABSENCE of a class is not a part demand:
+        # `non_part_obligation_row` retypes it to the row the typed vocabulary has for it, so no
+        # later gate asks for a BOM line no part can ever be.
+        retyped = non_part_obligation_row(obligation)
+        normalized_obligations.append(retyped if retyped is not None else obligation)
     if normalized_obligations != completed.get("obligations"):
         completed["obligations"] = normalized_obligations
     return completed
@@ -201,6 +194,7 @@ def complete_class_spellings(candidate: dict) -> dict:
     from kicraft.design.part_identity import (
         class_is_not_a_part,
         off_board_source_class,
+        package_descriptor_class,
         realizable_physical_features,
         reviewed_class_variants,
     )
@@ -215,7 +209,11 @@ def complete_class_spellings(candidate: dict) -> dict:
             continue
         if _CLASS_NEGATION_RE.search(demanded.replace("-", " ").replace("_", " ")):
             continue
-        if class_is_not_a_part(demanded) or off_board_source_class(demanded):
+        if (
+            class_is_not_a_part(demanded)
+            or off_board_source_class(demanded)
+            or package_descriptor_class(demanded)
+        ):
             continue
         target = next(
             (
@@ -367,14 +365,87 @@ def _omitted_board_features(brief: str, candidate: dict) -> list[StageDiagnostic
     ]
 
 
+#: The reading a package or footprint descriptor gets, whether it carries the noun
+#: ("qfn-56-package") or is nothing but the package itself ("lqfp-48", which the package pattern
+#: in `part_identity.package_descriptor_class` proves).
+_PACKAGE_DESCRIPTOR_READING = (
+    "a package or footprint descriptor, which is an attribute of a part",
+    "name the package on the part that carries it (or keep it in constraints); a package "
+    "descriptor is never a class",
+)
+
+#: What a not-a-part token proves about a demanded class, and the repair it implies, as
+#: ``(tokens, reading, repair)``. The first group whose tokens the class carries names the
+#: reading, so a package descriptor is never reported as printed copper and a region label is
+#: never reported as an interface. The repair is the concrete move the writer must make, because
+#: a refusal the writer cannot act on only spends a repair round.
+_NOT_A_PART_READINGS: tuple[tuple[frozenset[str], str, str], ...] = (
+    (frozenset({"package", "footprint"}), *_PACKAGE_DESCRIPTOR_READING),
+    (
+        frozenset({"section", "region"}),
+        "a region or section label, which says where parts go",
+        "keep the label in constraints or the goal and demand the parts it names",
+    ),
+    (
+        frozenset({"connection"}),
+        "a net-level connection, which the wiring owns",
+        "keep it in constraints: the wiring stage draws it and no BOM line implements it",
+    ),
+    (
+        frozenset({"isolation", "barrier"}),
+        "a dielectric or clearance property of the build",
+        "record it as a constraint on the build, not as a part",
+    ),
+    (
+        frozenset({"switchable"}),
+        "a network named by its function rather than by the parts that build it",
+        "demand the parts that build it (its resistor and its switch), or keep the function in "
+        "constraints",
+    ),
+    (
+        frozenset({"outline", "shape", "layout"}),
+        "the board outline or layout",
+        "record it as a `fabrication` row, or keep it in constraints",
+    ),
+    (
+        frozenset({"interface", "bus", "protocol", "format"}),
+        "an interface, bus or board format",
+        "record it as a constraint",
+    ),
+    (
+        frozenset({"pour", "plane", "via", "vias"}),
+        "printed copper the board itself carries",
+        "record it as a `fabrication` row",
+    ),
+    (
+        frozenset({"net", "netlist"}),
+        "a net or netlist fact",
+        "keep it in constraints: the wiring stage owns it",
+    ),
+)
+
+
+def _not_a_part_reading(not_a_part: tuple[str, ...]) -> tuple[str, str]:
+    """The reading and repair a not-a-part token match proves."""
+    matched = set(not_a_part)
+    for tokens, reading, repair in _NOT_A_PART_READINGS:
+        if matched & tokens:
+            return reading, repair
+    return "a board or wiring fact", "move the fact out of `obligations` into constraints"
+
+
 def _unrealizable_obligation_classes(obligations) -> list[StageDiagnostic]:
     """Physical obligations whose class is a not-a-part fact or a puzzled variant name.
 
-    Three cases, each safe to reject at the stage that writes them:
+    Four cases, each safe to reject at the stage that writes them:
 
     * the class carries a token no physical class can have (an interface, bus, board
-      format, package style, or printed-board feature), so it belongs in `constraints`,
-      a `fabrication` row, or a `negative` row;
+      format, package style, region label, net-level connection, dielectric property,
+      printed-board feature, or a switchable network named by its function), so it
+      belongs in `constraints`, a `fabrication` row, or a `negative` row. The evidence
+      names WHICH reading it is and the concrete repair;
+    * the class states the absence of a class (`no-microcontroller`), which no BOM line
+      implements: the repair is a `negative` row with that `absent_class`;
     * the class names the power source itself (a battery, a cell, a pack), which no placed
       part can implement: the board carries the mate, so the demand has no satisfying group
       however many times the unit is re-driven;
@@ -388,11 +459,22 @@ def _unrealizable_obligation_classes(obligations) -> list[StageDiagnostic]:
     the novel designs the pipeline exists to build.
 
     ``coin-cell-holder`` and ``battery-connector`` are the mate classes and stay unflagged
-    for the same reason: they name something the board does place.
+    for the same reason: they name something the board does place. `mounting-hole` and
+    `thermal-pad` stay unflagged because a reviewed record carries each of them.
+
+    A class this module's completion already retypes (a board outline, a mechanical hole,
+    printed copper, castellations, or a leading negation — see
+    :func:`kicraft.design.part_identity.non_part_obligation_row`) is not reported here when
+    it carries no not-a-part token: the compiler has already read it, so asking the writer to
+    restate it would buy a repair round for nothing. The pipeline diagnoses the completed
+    candidate, so those rows are typed before this check ever sees them.
     """
     from kicraft.design.part_identity import (
+        absent_class_of_negation,
         class_is_not_a_part,
+        negation_names_a_reviewed_class,
         off_board_source_class,
+        package_descriptor_class,
         realizable_physical_features,
         reviewed_class_variants,
     )
@@ -410,17 +492,58 @@ def _unrealizable_obligation_classes(obligations) -> list[StageDiagnostic]:
         seen.add(component_class)
         not_a_part = class_is_not_a_part(component_class)
         variants = reviewed_class_variants(component_class)
-        if not_a_part:
+        if not_a_part or package_descriptor_class(component_class):
+            reading, repair = (
+                _not_a_part_reading(not_a_part)
+                if not_a_part
+                else _PACKAGE_DESCRIPTOR_READING
+            )
+            marker = ", ".join(not_a_part) if not_a_part else "package"
             diagnostics.append(
                 _diag(
                     "intent_obligation_class_unrealizable",
                     "repair_required",
-                    "A physical obligation names an interface, board format or board "
-                    "fabrication feature rather than a part class.",
-                    [f"{component_class} -> not a part class ({', '.join(not_a_part)})"],
+                    f"A physical obligation names {reading} rather than a part class.",
+                    [f"{component_class} -> not a part class ({marker}): {repair}"],
                 )
             )
-        elif off_board_source_class(component_class):
+            continue
+        absent = absent_class_of_negation(component_class)
+        if absent is not None:
+            repair = f"record it as kind `negative` with absent_class {absent}"
+            if not negation_names_a_reviewed_class(absent):
+                # The pipeline leaves this wording to the writer, because the negated rest is no
+                # class it reads: a "not gate" is a part. Both repairs must travel.
+                repair += (
+                    ", or restate the class plainly if the negation word is part of its own "
+                    f"name (the pipeline read {absent!r} as the class being denied)"
+                )
+            diagnostics.append(
+                _diag(
+                    "intent_obligation_class_unrealizable",
+                    "repair_required",
+                    "A physical obligation states the absence of a class; no BOM line implements "
+                    "an absence.",
+                    [f"{component_class} -> {repair}"],
+                )
+            )
+            continue
+        if _CLASS_NEGATION_RE.search(component_class.replace("-", " ").replace("_", " ")):
+            diagnostics.append(
+                _diag(
+                    "intent_obligation_class_unrealizable",
+                    "repair_required",
+                    "A physical obligation states the absence of a class inside a larger demand; "
+                    "no BOM line implements an absence.",
+                    [
+                        f"{component_class} -> split the row: record the absence as kind "
+                        "`negative` with its `absent_class`, and keep the part or function it "
+                        "also names as its own demand"
+                    ],
+                )
+            )
+            continue
+        if off_board_source_class(component_class):
             diagnostics.append(
                 _diag(
                     "intent_obligation_class_unrealizable",

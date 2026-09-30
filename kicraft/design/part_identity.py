@@ -4031,9 +4031,18 @@ def _class_tokens(value: str) -> set[str]:
 
 
 # Tokens that name a fact about the board or its wiring rather than a physical class: a bus
-# ("i2c-interface"), a board format ("arduino-uno-format-board"), a package style, or a
-# printed-copper feature ("thermal-via-copper-pour"). A demand carrying one belongs in
-# constraints, a `fabrication` row, or a `negative` row instead.
+# ("i2c-interface"), a board format ("arduino-uno-format-board"), a package style, a
+# printed-copper feature ("thermal-via-copper-pour"), a region/section label
+# ("base-led-section"), a net-level connection ("vbus-connection"), a dielectric property
+# ("isolation-barrier"), or a switchable network named by its function
+# ("switchable-can-termination"). A demand carrying one belongs in constraints, a
+# `fabrication` row, or a `negative` row instead.
+#
+# Every token below is safe only because the caller first proves the class is unrealizable:
+# `class_is_not_a_part` is consulted AFTER `realizable_physical_features`, so a reviewed part
+# that legitimately carries one of these words stays a part class (`thermal-pad` is the
+# AONR21357's own land; `mounting-hole` is a reviewed mechanical part). The list is a
+# vocabulary of readings, never a filter on its own.
 _NOT_A_PART_CLASS_TOKENS = frozenset(
     {
         "interface",
@@ -4051,6 +4060,22 @@ _NOT_A_PART_CLASS_TOKENS = frozenset(
         "vias",
         "net",
         "netlist",
+        # A region or section of the board, said as a label ("base-led-section",
+        # "analog-region"): the place the parts go, never a part.
+        "section",
+        "region",
+        # A net-level wiring fact ("vbus-connection", "cc-signal-connection"): the wiring stage
+        # draws it, and no BOM line implements it. `connector` is deliberately absent.
+        "connection",
+        # A dielectric/clearance property of the build ("isolation-barrier",
+        # "galvanic-isolation"). `isolated` is deliberately absent: an isolated converter and a
+        # digital isolator are real parts.
+        "isolation",
+        "barrier",
+        # A network named by what it does rather than by the parts that build it
+        # ("switchable-can-termination", "switchable-termination-network"). `termination` alone
+        # is deliberately absent: a termination resistor and a termination switch are parts.
+        "switchable",
     }
 )
 
@@ -4107,20 +4132,264 @@ def off_board_source_class(component_class: str) -> tuple[str, ...]:
     return tuple(sorted(tokens & _OFF_BOARD_SOURCE_TOKENS))
 
 
-def board_outline_fabrication_feature(component_class: str) -> str | None:
-    """Return a physical row's board-outline feature only when that reading is proven.
+# Board words that say WHERE the demanded thing is, not what it is.
+_BOARD_NOUN_TOKENS = frozenset({"board", "pcb"})
 
-    `shape` alone is not enough: a part can have a shape. The class must explicitly name the
-    board/PCB and an outline or shaped-board relation, and no reviewed class or reviewed spelling
-    may realize it. This keeps `mounting-hole` and every realizable component demand physical.
+# The bare board-outline noun. It states the outline on its own ("arduino-uno-shield-outline"):
+# on a PCB brief an outline is the board's, and the reviewed-spelling guard below still keeps a
+# realizable class that happens to carry the word. A shape word states the outline only when it
+# sits ON the board noun ("round-pcb", "snowman-shaped-board"), because a part can have a shape
+# and a class can merely contain the word ("heart-rate-sensor-pcb", "gear-motor-board").
+_BOARD_OUTLINE_TOKENS = frozenset({"outline"})
+_BOARD_SHAPE_WORDS = frozenset(
+    {
+        "shaped",
+        "shape",
+        "circular",
+        "circle",
+        "round",
+        "oval",
+        "ellipse",
+        "elliptical",
+        "hexagon",
+        "hexagonal",
+        "octagon",
+        "octagonal",
+        "pentagon",
+        "pentagonal",
+        "triangle",
+        "triangular",
+        "square",
+        "rectangular",
+        "rectangle",
+        "rounded",
+        "chamfered",
+        "beveled",
+        "bevelled",
+        "star",
+        "heart",
+        "snowman",
+        "gear",
+        "cog",
+        "disc",
+        "disk",
+        "coaster",
+        "puck",
+        "diamond",
+    }
+)
+
+# A hole the BOARD carries ("hang-hole"): the class names the hole noun plus a board, hanging or
+# fixing context. `mounting-hole` matches here too and is kept physical by the reviewed-carrier
+# guard below, because a reviewed mechanical part implements it; `through-hole-relay` does not
+# match at all (no context word), and is a reviewed part besides.
+_BOARD_HOLE_TOKENS = frozenset({"hole", "holes"})
+_BOARD_HOLE_CONTEXT_TOKENS = frozenset(
+    {
+        "hang",
+        "hanging",
+        "mount",
+        "mounting",
+        "screw",
+        "drill",
+        "mechanical",
+        "fixing",
+        "board",
+        "pcb",
+    }
+)
+
+# Plating the board's own edge ("castellated-gpio", "castellated-gpio-pads"). The castellation is
+# the edge treatment the PCB side owns -- `models.FabricationObligation` names `castellated-edge`
+# among its canonical features -- so it is never a BOM line. `castellated-pin-header` carries the
+# same word and is excluded by the reviewed-spelling guard below: it IS a longer spelling of the
+# reviewed `pin-header`, so it keeps its rename.
+_CASTELLATED_TOKENS = frozenset({"castellated", "castellation", "castellations"})
+
+# Copper the board itself carries: a pour, a plane, a thermal-via field ("thermal-via",
+# "thermal-via-copper-pour"), or an area named as a heatsink ("copper-heatsink-area",
+# "heatsink-copper-area", "pcb-copper-heatsink-area"). `thermal-pad` is deliberately not matched
+# by the copper rule -- and is a reviewed feature of the AONR21357 either way.
+_BOARD_COPPER_TOKENS = frozenset({"pour", "plane", "heatsink", "via", "vias"})
+_BOARD_COPPER_AREA_TOKENS = frozenset({"area", "field", "zone", "region", "pad", "plane", "pour"})
+
+# The words that make a demanded class an ABSENCE of a class ("no-microcontroller"). `non` is
+# here because "non-isolated-dc-dc-converter" states exactly the negated build.
+_CLASS_NEGATION_TOKENS = frozenset({"no", "not", "without", "non", "none"})
+
+
+def board_fabrication_feature(component_class: str) -> str | None:
+    """Return a physical row's board fabrication feature only when that reading is proven.
+
+    Four wordings name something the BOARD carries rather than a part the design places: its
+    outline or shape ("snowman-shaped-board", "round-pcb", "arduino-uno-shield-outline"), a
+    mechanical hole ("hang-hole"), its own edge plating ("castellated-gpio"), and its own copper
+    ("copper-heatsink-area", "thermal-via-copper-pour"). None of them can be satisfied by a BOM
+    line, and every later gate treats them as unsatisfiable part demands, so the intent retypes
+    them to `fabrication` (see :func:`kicraft.design.stage_semantics.complete_intent_classification`
+    and `normalize_non_part_obligations`) instead of asking the writer to repair a wording the
+    compiler can read.
+
+    The reading must be PROVEN: the class names one of the board facts above, and no reviewed
+    record and no reviewed spelling may realize it. That guard is what keeps `mounting-hole` (a
+    reviewed mechanical part) and `castellated-pin-header` (a longer spelling of the reviewed
+    `pin-header`) physical. `shape` alone is never enough -- a part can have a shape.
+
+    The feature is the class's own canonical spelling: it is the board's, so no part classifier
+    will read it again, and keeping the writer's wording preserves what the brief asked for.
     """
     canonical = str(component_class or "").strip().casefold().replace("_", "-")
-    tokens = _class_tokens(canonical)
-    if not ({"board", "pcb"} & tokens) or not ({"outline", "shaped"} & tokens):
+    ordered = re.findall(r"[a-z0-9]+", canonical)
+    tokens = set(ordered)
+    if not tokens:
+        return None
+    # A shape word says the outline only when it SITS ON the board noun ("round-pcb",
+    # "snowman-shaped-board") -- otherwise "heart-rate-sensor-pcb" and "gear-motor-board" would
+    # read as outlines, and both name hardware. `outline` states it on its own.
+    board_positions = [index for index, token in enumerate(ordered) if token in _BOARD_NOUN_TOKENS]
+    shape_positions = [index for index, token in enumerate(ordered) if token in _BOARD_SHAPE_WORDS]
+    is_board_shape = bool(tokens & _BOARD_OUTLINE_TOKENS) or any(
+        abs(board - shape) == 1 for board in board_positions for shape in shape_positions
+    )
+    is_board_fact = (
+        is_board_shape
+        or (bool(tokens & _BOARD_HOLE_TOKENS) and bool(tokens & _BOARD_HOLE_CONTEXT_TOKENS))
+        or bool(tokens & _CASTELLATED_TOKENS)
+        or bool(tokens & _BOARD_COPPER_TOKENS)
+        or ("copper" in tokens and bool(tokens & _BOARD_COPPER_AREA_TOKENS))
+    )
+    if not is_board_fact:
         return None
     if realizable_physical_features(canonical) or reviewed_class_variants(canonical):
         return None
     return canonical
+
+
+def absent_class_of_negation(component_class: str) -> str | None:
+    """The class a demanded class's leading negation forbids, or None when it is not one.
+
+    "no microcontroller" is the absence of a class, and the typed vocabulary states that as a
+    `negative` row with its `absent_class`, never as a `physical` demand: no BOM line implements
+    an absence, so the demand can never be satisfied. Only a LEADING negation reads this way --
+    "no-microcontroller" is entirely the absence, while "passive-rc-filter-no-microcontroller"
+    is a function that also states an absence, and the writer has to split that row.
+
+    The rest of the class is returned in the reviewed class spelling (`class_key` folds a plural
+    to its singular), so `no-edge-connectors` forbids `edge-connector`. Nothing is invented: the
+    forbidden class is the writer's own wording minus the negation.
+    """
+    canonical = str(component_class or "").strip().casefold().replace("_", "-")
+    tokens = re.findall(r"[a-z0-9]+", canonical)
+    if len(tokens) < 2 or tokens[0] not in _CLASS_NEGATION_TOKENS:
+        return None
+    rest = tokens[1:]
+    if set(rest) & _CLASS_NEGATION_TOKENS:
+        return None
+    return class_key("-".join(rest))
+
+
+# The IC package families a designer names to state the LAND PATTERN rather than a device. A
+# class built from one of these plus only its pin count or a size is a package descriptor
+# ("lqfp-48" is the same row as "lqfp-48-package" with the noun dropped, and the noun-carrying
+# spelling already reads as a package through the `package` token). The set is matched only when
+# it accounts for EVERY word of the class, so a class that names a device beside its package
+# ("soic-8-op-amp", "dip-switch") is never read this way.
+_PACKAGE_FAMILY_TOKENS = frozenset(
+    {
+        "bga",
+        "csp",
+        "dfn",
+        "dip",
+        "hsop",
+        "lga",
+        "lqfp",
+        "mlf",
+        "msop",
+        "pdip",
+        "plcc",
+        "pqfn",
+        "qfn",
+        "qfp",
+        "so",
+        "soic",
+        "sop",
+        "sot",
+        "sot23",
+        "sot89",
+        "sot223",
+        "ssop",
+        "to",
+        "tqfp",
+        "tssop",
+        "ufqfp",
+        "uqfn",
+        "vqfn",
+        "wlcsp",
+    }
+)
+
+
+def package_descriptor_class(component_class: str) -> bool:
+    """Whether a demanded class is nothing but a package descriptor, never a part class.
+
+    A package is an attribute of the part that carries it, so a demand for the package alone is
+    unsatisfiable: nothing in the BOM is "an LQFP-48". Only a class built ENTIRELY from a package
+    family word plus its pin count or size reads this way; a device named beside the package does
+    not.
+    """
+    tokens = re.findall(r"[a-z0-9]+", str(component_class or "").strip().casefold())
+    # A pin count ("48") or a size ("0.5mm", "5x5") is not a word of the class.
+    words = {
+        token
+        for token in tokens
+        if not re.fullmatch(r"\d+(?:\.\d+)?(?:x\d+(?:\.\d+)?)?(?:mm)?", token)
+    }
+    return bool(words) and words <= _PACKAGE_FAMILY_TOKENS
+
+
+def negation_names_a_reviewed_class(absent: str) -> bool:
+    """Whether the class a leading negation names is one the pipeline reads as a class at all.
+
+    "no-microcontroller" forbids a class the reviewed library carries, and "no-edge-connector"
+    forbids one it can spell (`connector`). "not-gate-ic" reads as a leading negation too, but
+    "gate-ic" is no class this pipeline knows, so the row is left to the writer's own refusal
+    instead of being silently converted: a NOT gate is a part, and an absence of an unknown class
+    is the writer's to state.
+    """
+    return bool(realizable_physical_features(absent) or reviewed_class_variants(absent))
+
+
+def non_part_obligation_row(obligation) -> dict | None:
+    """The typed row a demanded `physical` class really states, or None when it is a part class.
+
+    One decision, shared by the intent completion
+    (:func:`kicraft.design.stage_semantics.complete_intent_classification`) and by the commit-time
+    normalizer (`kicraft.server.stage_contracts.normalize_non_part_obligations`), so the candidate
+    the writer is diagnosed against and the row that is committed can never disagree.
+
+    Returns the `negative` row an absence states, then the `fabrication` row a board fact states.
+    Every genuine part class -- a reviewed one, a longer spelling of one, or a category the
+    library has never covered -- returns None and is left exactly as written.
+    """
+    if not isinstance(obligation, Mapping) or str(obligation.get("kind") or "") != "physical":
+        return None
+    source_id = obligation.get("original_obligation_id")
+    component_class = str(obligation.get("component_class") or "")
+    absent = absent_class_of_negation(component_class)
+    if absent is not None and negation_names_a_reviewed_class(absent):
+        return {
+            "kind": "negative",
+            "original_obligation_id": source_id,
+            "absent_class": absent,
+        }
+    feature = board_fabrication_feature(component_class)
+    if feature is not None:
+        return {
+            "kind": "fabrication",
+            "original_obligation_id": source_id,
+            "feature": feature,
+        }
+    return None
 
 
 def reviewed_class_variants(component_class: str) -> tuple[str, ...]:

@@ -2244,7 +2244,7 @@ def test_board_outline_measurement_may_stand_alone_but_electrical_limit_may_not(
 def test_board_outline_is_normalized_from_semantic_evidence_not_shape_word():
     """A board outline becomes fabrication; a realizable mounting hole remains physical."""
     from kicraft.design.stage_semantics import complete_intent_classification
-    from kicraft.server.stage_contracts import normalize_board_outline_obligations
+    from kicraft.server.stage_contracts import normalize_non_part_obligations
 
     outline = {
         "kind": "physical",
@@ -2269,7 +2269,7 @@ def test_board_outline_is_normalized_from_semantic_evidence_not_shape_word():
     ]
     # The compiler also repairs legacy source rows before source comparison.
     assert (
-        normalize_board_outline_obligations({"obligations": [outline, mounting_hole]})[
+        normalize_non_part_obligations({"obligations": [outline, mounting_hole]})[
             "obligations"
         ]
         == normalized["obligations"]

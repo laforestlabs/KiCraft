@@ -46,9 +46,15 @@ board or its wiring. Write the class, not the user's phrase or a qualifier: the 
 vocabulary spells the Arduino shield interface `stacking-header` (not
 `stacking-through-hole-header`) and a 3.3 V regulator `voltage-regulator` (not
 `smt-voltage-regulator`). An interface or bus (`i2c-interface`), a board format
-(`arduino-uno-format-board`) and a printed-copper feature (`thermal-via-copper-pour`) are
-not part classes: a board format goes in `constraints`, a printed-board feature uses
-`kind: "fabrication"`, and an absent class uses `kind: "negative"`.
+(`arduino-uno-format-board`), a printed-copper feature (`thermal-via-copper-pour`), a board
+outline or shape (`snowman-shaped-board`), a mechanical hole (`hang-hole`), the board's edge
+plating (`castellated-gpio`), a package descriptor (`qfn-56-package`, `lqfp-48`), a region or
+section label (`base-led-section`), a net-level connection (`vbus-connection`), a build
+property (`isolation-barrier`) and a network named by its function
+(`switchable-can-termination`) are not part classes: a board format, region label, connection
+or build property goes in `constraints`, a printed-board feature (copper, vias, outline,
+hole, edge plating) uses `kind: "fabrication"`, and an absent class uses `kind: "negative"`.
+A part class that merely NAMES its package (`soic-8-op-amp`) is still a part class.
 
 A part class the reviewed library does not cover yet is legitimate — name it plainly
 (`gps-module`, `air-quality-sensor`) and never substitute an unrelated reviewed class just
