@@ -2069,6 +2069,10 @@ def test_a_board_stackup_row_is_board_level_and_an_outline_row_still_is():
     # "board maximum dimension" in mm, and this predicate refused it as an ownerless part limit.
     assert is_board_level_quantitative_obligation(quantitative("board maximum dimension", "mm"))
     assert is_board_level_quantitative_obligation(quantitative("board size", "mm"))
+    # Live cohort 2026-09-30: the same brief reached the intent as the plural "board dimensions"
+    # in mm and was refused; the board/PCB subject guard keeps the plural safe to admit.
+    assert is_board_level_quantitative_obligation(quantitative("board dimensions", "mm"))
+    assert is_board_level_quantitative_obligation(quantitative("board outline", "mm"))
     # The board/PCB subject guard still holds: a part's own dimension is not board-level.
     assert not is_board_level_quantitative_obligation(quantitative("component dimension", "mm"))
 
