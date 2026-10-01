@@ -447,6 +447,23 @@ def test_one_amp_led_feedback_refuses_unknown_reviewed_topology(reviewed, monkey
         ("ESP32-C3-MINI-1-N4", "esp32-c3-module", True),
         ("ESP32-C3-MINI-1-N4", "wireless-module", True),
         ("ESP32-S3-WROOM-1-N8R8", "esp32-c3-module", False),
+        # Live cohort 2026-09-30: 11 designs demanded `esp32-s3-module` and every one of them
+        # failed 9.42 with "requires 1 real 'esp32-s3-module' physical part(s), found 0" while the
+        # construction held the correct S3 module -- the C3 record carries its own class feature
+        # (`esp32-c3-module`) and the S3 records carried none. The cross-family cases below are the
+        # guard: an S3 module is not a C3 module and a plain ESP32 is not an S3.
+        ("ESP32-S3-WROOM-1-N8R8", "esp32-s3-module", True),
+        ("ESP32-S3-WROOM-1-N16R8", "esp32-s3-module", True),
+        ("ESP32-S3-MINI-1-N8", "esp32-s3-module", True),
+        ("ESP32-S3-MINI-1-N8", "esp32-c3-module", False),
+        ("ESP32-C3-MINI-1-N4", "esp32-s3-module", False),
+        ("ESP32-WROOM-32E-N4", "esp32-s3-module", False),
+        # A brief that says only "an ESP32 module" names the family; any reviewed ESP32 satisfies
+        # it and a reviewed wifi SoC that is not an ESP32 does not (4 designs demanded it, all 4
+        # failed).
+        ("ESP32-S3-MINI-1-N8", "esp32-module", True),
+        ("ESP32-C3-MINI-1-N4", "esp32-module", True),
+        ("NRF52840-QIAA-R", "esp32-module", False),
         ("NRF52840-QIAA-R", "wireless-module", False),
         ("AP63203WU-7", "wireless-module", False),
     ],

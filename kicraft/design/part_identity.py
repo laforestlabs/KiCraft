@@ -1334,7 +1334,9 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="esp32-s3-wroom-1",
         symbol="esp32-s3-wroom-1:ESP32-S3-WROOM-1",
         footprint="esp32-s3-wroom-1:WIRELM-SMD_ESP32-S3-WROOM-1",
-        physical_features=frozenset({"microcontroller", "wifi-module", "bluetooth-le-soc"}),
+        physical_features=frozenset(
+            {"microcontroller", "wifi-module", "bluetooth-le-soc", "esp32-s3-module"}
+        ),
         contacts=tuple(str(number) for number in range(1, 42)),
         manufacturer_sources=(
             "https://www.lcsc.com/datasheet/C2913201.pdf",
@@ -1365,7 +1367,9 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="esp32-s3-wroom-1-n16r8",
         symbol="esp32-s3-wroom-1-n16r8:ESP32-S3-WROOM-1",
         footprint="esp32-s3-wroom-1-n16r8:WIRELM-SMD_ESP32-S3-WROOM-1",
-        physical_features=frozenset({"microcontroller", "wifi-module", "bluetooth-le-soc"}),
+        physical_features=frozenset(
+            {"microcontroller", "wifi-module", "bluetooth-le-soc", "esp32-s3-module"}
+        ),
         contacts=tuple(str(number) for number in range(1, 42)),
         manufacturer_sources=(
             "https://www.lcsc.com/datasheet/C2913202.pdf",
@@ -2208,7 +2212,9 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         bundle="esp32-s3-mini-1",
         symbol="esp32-s3-mini-1:ESP32-S3-MINI-1-N8",
         footprint="esp32-s3-mini-1:BULETM-SMD_ESP32-S3-MINI-1-N8",
-        physical_features=frozenset({"microcontroller", "wifi-module", "bluetooth-le-soc"}),
+        physical_features=frozenset(
+            {"microcontroller", "wifi-module", "bluetooth-le-soc", "esp32-s3-module"}
+        ),
         contacts=tuple(str(number) for number in range(1, 61)) + ("GND",),
         manufacturer_sources=("https://www.lcsc.com/datasheet/C2913206.pdf",),
         lcsc="C2913206",
@@ -3676,6 +3682,10 @@ _DEMANDED_CLASS_ALIASES: dict[str, frozenset[str]] = {
     "microcontroller-module": frozenset(
         {"esp32-c3-module", "wifi-module", "bluetooth-le-soc"}
     ),
+    # A brief that says only "an ESP32 module" names the family, not which SoC: any reviewed ESP32
+    # module realizes it, and a reviewed wifi SoC that is not an ESP32 never does. Measured over the
+    # live store: 4 designs demanded `esp32-module` and all 4 failed, because no record carried it.
+    "esp32-module": frozenset({"esp32-c3-module", "esp32-s3-module"}),
     "isolated-power-supply": frozenset({"isolated-dc-dc-converter"}),
     "switching-regulator-ic": frozenset({"buck-regulator", "voltage-regulator"}),
     "buck-regulator-ic": frozenset({"buck-regulator"}),
