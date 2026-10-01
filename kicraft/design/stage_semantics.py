@@ -14,6 +14,7 @@ from kicraft.design.models import (
     StageDiagnostic,
     board_copper_layers,
     is_power_or_ground_name,
+    obligation_requires_requirement_owner,
 )
 from kicraft.design.synthesis.board_features import (
     PROTOTYPING_AREA_FEATURE,
@@ -340,6 +341,29 @@ def normalize_project_stem(value: str) -> str:
 def _names_board_field(name: object) -> bool:
     """Whether a block name names the prototyping pad field, whatever separators it uses."""
     return prototyping_area_requested(str(name or "").replace("_", " ")) is not None
+
+
+def _block_is_board_realized(block: dict, intent: dict) -> bool:
+    """Whether every obligation a block names is a board-wide fact the printed board realizes.
+
+    Mirrors the architecture-side exemption in ``validation._functional_block_sheets``: a block
+    whose only rows are ``quantity``/``fabrication``/``negative`` facts, or a ``quantitative`` row
+    that measures the board outline or its stack-up, is realized by the board itself and needs no
+    implementing sheet. A block naming no obligation, or any obligation the committed intent does
+    not carry, is not evidence of that exemption.
+    """
+    ids = [str(identifier) for identifier in block.get("obligation_ids") or []]
+    if not ids:
+        return False
+    rows = {
+        str(row.get("original_obligation_id")): row
+        for row in intent.get("obligations") or []
+        if isinstance(row, dict)
+    }
+    return all(
+        identifier in rows and not obligation_requires_requirement_owner(rows[identifier])
+        for identifier in ids
+    )
 
 
 def _omitted_board_features(brief: str, candidate: dict) -> list[StageDiagnostic]:
@@ -1182,6 +1206,38 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
                 "A functional connection starts and ends at the same block, so it states no "
                 "flow between blocks; name the block the signal actually moves to.",
                 self_loops,
+            )
+        )
+    # A block whose every committed obligation is a board-wide fact is realized by the printed
+    # board itself, so no architecture sheet can ever implement it -- the architecture's own
+    # block/sheet mapping gate exempts such a block from needing a requirement. A *connection*
+    # naming it is therefore unmappable for good, and the spec is frozen by the time the
+    # architecture gate sees it. Live cohort 2026-09-30, brief 3: the functional spec committed a
+    # PCB_STACKUP block (obligation `pcb-copper-layers`, a board-wide stack-up measurement) plus a
+    # PCB_STACKUP -> POWER_INPUT connection, and every architecture draft was refused with
+    # "connection 'PCB_STACKUP'->'POWER_INPUT' ... has an unknown or unmapped block endpoint"
+    # until the stage exhausted its attempts. Refuse it here, where a redraft can drop the
+    # connection and leave the board-wide row board-wide.
+    board_realized = {
+        name
+        for name, block in blocks_by_name.items()
+        if _block_is_board_realized(block, intent)
+    }
+    unmappable_connections = sorted(
+        f"{connection.get('from_block')!r} -> {connection.get('to_block')!r}"
+        for connection in connections
+        if connection.get("from_block") in board_realized
+        or connection.get("to_block") in board_realized
+    )
+    if unmappable_connections:
+        diagnostics.append(
+            _diag(
+                "functional_spec_board_realized_block_connected",
+                "repair_required",
+                "A block realized by the printed board itself (its only obligations are board-wide "
+                "facts) has no sheet, so a connection naming it can never be mapped to one; remove "
+                "the connection and leave the board-wide fact at the board level.",
+                unmappable_connections,
             )
         )
     incoming_power = {

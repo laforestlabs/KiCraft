@@ -2794,6 +2794,83 @@ def test_a_crystal_block_is_functional_while_a_bare_net_block_is_not():
     assert "functional_spec_nonfunctional_block" in _codes("functional_spec", bare_net)
 
 
+def test_a_connection_to_a_board_realized_block_is_refused_before_the_spec_is_frozen():
+    """A block the board itself realizes has no sheet, so a connection naming it never maps.
+
+    Live cohort 2026-09-30, brief 3: the committed functional spec carried a PCB_STACKUP block
+    (obligation `pcb-copper-layers`, a board-wide stack-up measurement) and a connection
+    PCB_STACKUP -> POWER_INPUT. No architecture sheet can implement a board-wide block, so every
+    architecture draft was refused with an unmapped block endpoint while the frozen spec kept the
+    connection. The refusal belongs to the stage that authored it.
+    """
+    candidate = {
+        "blocks": [
+            {
+                "name": "POWER_INPUT",
+                "category": "power",
+                "purpose": "Accept the 18 V DC input.",
+                "obligation_ids": ["input-voltage"],
+            },
+            {
+                "name": "PCB_STACKUP",
+                "category": "interface",
+                "purpose": "Implement the specified two-layer PCB copper stack-up.",
+                "obligation_ids": ["pcb-copper-layers"],
+            },
+        ],
+        "connections": [
+            {
+                "from_block": "PCB_STACKUP",
+                "to_block": "POWER_INPUT",
+                "signal_type": "other",
+                "description": "Two-layer copper stack-up.",
+            }
+        ],
+        "assumptions": [],
+    }
+    upstream = {
+        "intent": {
+            "obligations": [
+                {
+                    "kind": "quantitative",
+                    "original_obligation_id": "input-voltage",
+                    "quantity": "DC input voltage",
+                    "relation": "equal",
+                    "value": 18.0,
+                    "unit": "V",
+                },
+                {
+                    "kind": "quantitative",
+                    "original_obligation_id": "pcb-copper-layers",
+                    "quantity": "PCB copper layers",
+                    "relation": "equal",
+                    "value": 2.0,
+                    "unit": "layers",
+                },
+            ]
+        }
+    }
+    diagnostics = diagnose_stage(
+        "functional_spec",
+        brief="An 18 V DC input to a two-layer board.",
+        upstream_state=upstream,
+        candidate=candidate,
+    )
+    by_code = {item.code: item for item in diagnostics}
+    assert by_code["functional_spec_board_realized_block_connected"].evidence == [
+        "'pcb_stackup' -> 'power_input'"
+    ]
+
+    # Dropping the connection leaves the board-wide block alone: the block itself is legal, and the
+    # check stays silent, while a block carrying an obligation that needs a requirement owner is
+    # never treated as board-realized.
+    candidate["connections"] = []
+    candidate["blocks"][1]["obligation_ids"] = ["input-voltage"]
+    assert "functional_spec_board_realized_block_connected" not in _codes(
+        "functional_spec", candidate, upstream
+    )
+
+
 def test_ground_flow_does_not_demand_a_return_from_a_mechanical_block():
     """A mounting-features block draws no current and owns no return.
 
