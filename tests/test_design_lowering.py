@@ -1811,6 +1811,54 @@ def test_a_reviewed_led_identity_is_built_not_refused():
     }
 
 
+def test_a_reviewed_indicator_led_family_is_realized_by_the_led_build():
+    """A draft that names the LED by its reviewed part class stays in compiler ownership.
+
+    Live cohort 2026-09-30, brief 2: the architecture committed `power_led` with family
+    `warm-white-led` -- the spelling the reviewed record `e6c0805wway1uda(1.1t m)` itself carries --
+    and that reviewed exact part. No registered lowerer claimed the family, so the BOM planning put
+    the requirement in a model-owned unit (`planned_resolution_source="llm", lowerer_ids=[]`) and the
+    draft failed the ownership gate identically in two passes
+    ("missing-requirement-implementation=['power_led']; declared-interface-unrealized=['power_led:
+    declared interface needs one identified hardware owner']") until the stage ran out of attempts.
+    The class spellings now route to this build, which places the reviewed part the draft named plus
+    the series resistor its own rail and current parameters compute.
+    """
+    requirement = _requirement(
+        "warm-white-led",
+        parameters={
+            "rail_voltage": 5.0,
+            "led_vf": 2.0,
+            "target_current_ma": 2.0,
+            "color": "warm-white",
+        },
+        ports={"drive": "VBUS", "gnd": "GND"},
+    ).model_copy(update={"exact_part": "e6c0805wway1uda(1.1t m)"})
+
+    assert lowerer_contract_diagnostic(requirement) is None
+    artifact = lower_requirement(requirement)
+    assert artifact.lowerer_id == "led-current-resistor@1"
+    by_role = {group.role: group for group in artifact.groups}
+    # The reviewed record is the hardware, not a generic 0603 outline.
+    assert by_role["led"].symbol == "e6c0805wway1uda-1-1t-m:E6C0805WWAY1UDA"
+    assert by_role["led"].mpn == "E6C0805WWAY1UDA(1.1T M)"
+    assert by_role["led"].reference_prefix == "D"
+    # R = (5.0 - 2.0) / 2 mA = 1500 ohm, at or above the ideal on the E24 grid.
+    assert by_role["resistor"].value == "1.5k"
+
+    # The partial port set the live draft committed is refused with the missing contact named, so
+    # the refusal is repairable at the stage that owns the requirement.
+    diagnostic = lowerer_contract_diagnostic(requirement.model_copy(update={"ports": {"drive": "VBUS"}}))
+    assert diagnostic is not None
+    assert "'gnd'" in diagnostic.message and "unbound" in diagnostic.message
+
+    # The other spelling the reviewed indicator records carry resolves the same way.
+    assert (
+        lower_requirement(requirement.model_copy(update={"family": "led-0603"})).lowerer_id
+        == "led-current-resistor@1"
+    )
+
+
 def test_a_reviewed_dc_jack_is_built_on_its_own_symbol_and_footprint():
     """The reviewed DC inlet is placeable, so a `barrel-jack` requirement is not a dead end.
 

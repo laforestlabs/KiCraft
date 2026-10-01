@@ -1681,6 +1681,22 @@ def _r2r(requirement: CircuitRequirement) -> LoweringArtifact | None:
 
 _LED_PARAMETER_KEYS = ("rail_voltage", "led_vf", "target_current_ma")
 
+#: The family spellings the reviewed indicator-LED records themselves carry.
+#:
+#: A draft names the LED by its reviewed part class instead of by the topology ("warm-white-led",
+#: "led-0603" -- read from `kicraft/parts_library/e6c0805wway1uda-1-1t-m`), and a family key with no
+#: registered lowerer silently drops the requirement out of compiler-owned realization: the BOM
+#: unit is then handed to the model, which must re-emit a reviewed identity it cannot see.
+#: Live cohort 2026-09-30, brief 2: the architecture committed `power_led` with family
+#: `warm-white-led` and the reviewed exact part, the BOM unit `bom-s002` came back model-owned
+#: (`planned_resolution_source="llm", lowerer_ids=[]`), and the draft failed the ownership gate
+#: identically in two passes ("missing-requirement-implementation=['power_led'];
+#: declared-interface-unrealized=['power_led: declared interface needs one identified hardware
+#: owner']") until the stage exhausted its repair attempts. Registering the class spellings routes
+#: the requirement to this build, which places the reviewed part the draft named plus the series
+#: resistor its own rail/current parameters compute.
+_REVIEWED_INDICATOR_LED_FAMILIES = ("warm-white-led", "led-0603")
+
 
 def _led_resistor_parameters(requirement: CircuitRequirement) -> tuple[float, float, float]:
     values = []
@@ -2432,7 +2448,7 @@ for _lowerer in (
     ),
     RegisteredLowerer(
         "led-current-resistor@1",
-        frozenset({"led-current-resistor", "status-led"}),
+        frozenset({"led-current-resistor", "status-led", *_REVIEWED_INDICATOR_LED_FAMILIES}),
         _led_resistor,
         ("rail_voltage", "led_vf", "target_current_ma", "color"),
         ("drive", "gnd"),
