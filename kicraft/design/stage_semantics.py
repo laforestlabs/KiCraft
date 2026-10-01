@@ -3353,11 +3353,26 @@ def _bom(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
         requirements = requirements_by_sheet.get(sheet_name, [])
         connector_owned = _is_connector_owned(requirements, sheet_parts)
         own_terms = _own_terms(sheet_name, requirements, connector_owned)
+        # A sheet that carries a non-connector requirement has stated what it implements, and that
+        # statement is enforced by the obligation and declared-interface gates on its own. Prose is
+        # then only an *effect* it names, never a role it promises: live run KC-WWYS3W (project 1109,
+        # brief 2) was refused at BOM because the POWER INDICATOR sheet's function reads "a visible
+        # low-current indication that 5 V controller power is present" -- "controller" is the MCU's
+        # word on another sheet -- while the sheet's own requirement (the reviewed LED build) was
+        # realized. The title path is untouched, so a sheet *named* for an IC role with nothing on
+        # it is still refused.
+        realized_here = any(
+            isinstance(requirement, dict) and requirement.get("role") != "connector"
+            for requirement in requirements
+        )
         # Prose only counts for a role the design implements nowhere: then the sheet promises
         # an active part nothing builds ("Connector and on-board amplifier" with no U anywhere).
-        prose_terms = {
-            match.lower() for match in ic_role.findall(str(sheet.get("function") or ""))
-        } - own_terms
+        prose_terms = (
+            set()
+            if realized_here
+            else {match.lower() for match in ic_role.findall(str(sheet.get("function") or ""))}
+            - own_terms
+        )
         if not own_terms and not (prose_terms - implemented_terms):
             continue
         if not any(str(part.get("ref") or "").startswith("U") for part in sheet_parts):

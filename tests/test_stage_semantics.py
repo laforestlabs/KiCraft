@@ -1177,6 +1177,70 @@ def test_bom_requires_architecture_ic_roles_on_their_declared_sheets():
     assert "bom_architecture_role_unsupported" not in {item.code for item in clean}
 
 
+def test_bom_prose_cannot_refuse_a_sheet_that_states_what_it_implements():
+    """A sheet carrying a realized requirement is not refused for a word in its function prose.
+
+    Live run 1109 (brief 2, 2026-09-30): the POWER INDICATOR sheet's function reads "a visible
+    low-current indication that 5 V controller power is present" -- "controller" names the MCU's work
+    on another sheet -- and the sheet's own requirement (the reviewed LED build) was realized, yet the
+    BOM stage refused the run with `bom_architecture_role_unsupported`. Prose is an effect a sheet
+    names, never a role it promises once the sheet has stated a non-connector requirement of its own;
+    the title path and the requirement-less prose path both still refuse.
+    """
+    architecture = {
+        "sheets": [
+            {"name": "ESP32 S3", "function": "Run controller logic and drive the LED matrix."},
+            {
+                "name": "POWER INDICATOR",
+                "function": (
+                    "Provide a visible low-current indication that 5 V controller power is present."
+                ),
+            },
+        ],
+        "requirements": [
+            {
+                "id": "mcu",
+                "sheet": "ESP32 S3",
+                "role": "mcu_core",
+                "family": "esp32-s3-module",
+                "ports": {"vdd": "+3V3", "gnd": "GND"},
+            },
+            {
+                "id": "power_led",
+                "sheet": "POWER INDICATOR",
+                "role": "user_io",
+                "family": "led-current-resistor",
+                "ports": {"drive": "VBUS", "gnd": "GND"},
+            },
+        ],
+    }
+    parts = [
+        {"ref": "U1", "sheet": "ESP32 S3"},
+        {"ref": "D1", "sheet": "POWER INDICATOR"},
+        {"ref": "R1", "sheet": "POWER INDICATOR"},
+    ]
+    assert "bom_architecture_role_unsupported" not in _codes(
+        "bom", {"parts": parts}, {"architecture": architecture}
+    )
+
+    # The sheet's own *title* still promises its role: a sheet named for an IC role with nothing
+    # built on it is refused, and so is prose when the sheet states no requirement at all.
+    titled = {
+        "sheets": [{"name": "MOTOR DRIVER", "function": "Drive one motor."}],
+        "requirements": [],
+    }
+    assert _codes("bom", {"parts": []}, {"architecture": titled}) == {
+        "bom_architecture_role_unsupported"
+    }
+    prose_only = {
+        "sheets": [{"name": "LED DRIVE", "function": "Provide a controller for the matrix."}],
+        "requirements": [],
+    }
+    assert _codes("bom", {"parts": []}, {"architecture": prose_only}) == {
+        "bom_architecture_role_unsupported"
+    }
+
+
 def test_bom_does_not_infer_amplifier_ic_from_typed_input_connector_title():
     architecture = {
         "sheets": [
