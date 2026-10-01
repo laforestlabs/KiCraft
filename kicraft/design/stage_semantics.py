@@ -2756,12 +2756,91 @@ def _architecture_drive_on_logic_rail(
     return diagnostics
 
 
+def _requirements_with_curated_ownership() -> frozenset[str]:
+    """The family spellings a curated recipe or registered lowerer owns."""
+    families: set[str] = set()
+    try:
+        from kicraft.design.lowering import registered_lowerers
+
+        for lowerer in registered_lowerers():
+            families.update(str(name).casefold() for name in lowerer.families)
+    except Exception:  # noqa: BLE001 - a diagnostic never fails the stage
+        pass
+    try:
+        from kicraft.design.recipes.registry import registered_recipes
+
+        for recipe in registered_recipes():
+            family = getattr(recipe.definition, "family", None)
+            if family:
+                families.add(str(family).casefold())
+            families.update(
+                str(alias).casefold()
+                for alias in getattr(recipe.definition, "identity_aliases", ()) or ()
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return frozenset(families)
+
+
+def _architecture_declared_contact_unnamed(candidate: dict) -> list[StageDiagnostic]:
+    """A declared interface whose ports name no contact can never be verified.
+
+    A declared interface is a claim about a real part, and the only thing that makes it
+    checkable is the contact each port names. The BOM stage refuses an unnamed contact
+    ("claim states no pin number; name the actual contact of <symbol>"), but the claim is
+    committed with this stage and no BOM draft can change it, so the run can only exhaust its
+    repair rounds. Measured over every committed architecture in the live store on 2026-09-30:
+    seven carried an unnamed declared contact and all seven died at BOM with
+    `unit_repair_exhausted` (projects 866, 971, 1019, 1034, 1057, 1074, 1105); no board that
+    shipped has one. Naming the contact here costs one redraft instead of the whole run.
+    """
+    offenders: list[str] = []
+    owned = _requirements_with_curated_ownership()
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        # Only a requirement no curated recipe or lowerer owns reaches BOM as a declared
+        # interface; for any other the draft's declared ports are replaced by the owner's own
+        # published contract, so refusing them here would refuse a design that commits fine.
+        if str(requirement.get("family") or "").strip().casefold() in owned:
+            continue
+        ports = requirement.get("declared_ports")
+        if not isinstance(ports, list) or not ports:
+            claim = requirement.get("declared_interface")
+            ports = claim.get("ports") if isinstance(claim, dict) else None
+        if not isinstance(ports, list) or not ports:
+            continue
+        unnamed = sorted(
+            str(port.get("key") or port.get("function") or "?")
+            for port in ports
+            if isinstance(port, dict) and not str(port.get("pin") or "").strip()
+        )
+        if unnamed:
+            offenders.append(f"{requirement.get('id')}: {', '.join(unnamed)}")
+    if not offenders:
+        return []
+    return [
+        _diag(
+            "architecture_declared_contact_unnamed",
+            "repair_required",
+            "A declared interface must name the real contact behind each of its ports: name the "
+            "reviewed part as `exact_part` and give every port that part's own contact number. "
+            "When the ports belong to more than one physical part (a fuse in series with its "
+            "output terminal, a shared ground return), split them into one requirement per part. "
+            "An unnamed contact cannot be checked, and this claim is frozen once the stage "
+            "commits.",
+            sorted(offenders),
+        )
+    ]
+
+
 def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     diagnostics = architecture_power_requirement_diagnostics(upstream, candidate)
     diagnostics.extend(_architecture_supply_over_rating(candidate))
     diagnostics.extend(_architecture_drive_on_logic_rail(upstream, candidate))
     diagnostics.extend(_architecture_obligation_family_mismatch(candidate))
     diagnostics.extend(_architecture_derivation_diagnostics(upstream, candidate))
+    diagnostics.extend(_architecture_declared_contact_unnamed(candidate))
     sheets = candidate.get("sheets") or []
     for sheet in sheets:
         if not isinstance(sheet, dict):

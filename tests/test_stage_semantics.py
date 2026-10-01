@@ -3072,3 +3072,72 @@ def test_a_class_spelling_is_never_renamed_when_it_would_invert_or_distort():
         "pin-header",
         "pin-header",
     ]
+
+
+def test_a_declared_interface_that_names_no_contact_is_refused_at_architecture():
+    """An unnamed declared contact is unverifiable, and committing it dooms the run.
+
+    Seven architectures in the live store carried an unnamed declared contact and every one died at
+    BOM with `unit_repair_exhausted` (projects 866, 971, 1019, 1034, 1057, 1074, 1105); no board
+    that shipped has one. The BOM gate can name the condition ("claim states no pin number; name the
+    actual contact of <symbol>") but cannot be acted on there -- the claim is frozen with the
+    architecture -- so the refusal belongs to the stage that authored it.
+    """
+    unnamed = {
+        "sheets": [{"name": "OUTPUT 1", "stem": "OUTPUT_1", "function": "Fused 5 V output"}],
+        "requirements": [
+            {
+                "id": "fuse1",
+                "sheet": "OUTPUT 1",
+                "role": "connector",
+                "family": "fused-output",
+                "declared_ports": [
+                    {"key": "input", "pin": None, "direction": "input", "function": "5 V feed"},
+                    {"key": "output", "pin": None, "direction": "output", "function": "fused out"},
+                ],
+            }
+        ],
+    }
+    diagnostics = diagnose_stage(
+        "architecture", brief="A fused 5 V distribution board.", upstream_state={}, candidate=unnamed
+    )
+    row = next(d for d in diagnostics if d.code == "architecture_declared_contact_unnamed")
+    assert row.evidence == ["fuse1: input, output"]
+
+    # The canonical shape is read too, so a committed claim is caught as well as a draft.
+    canonical = {
+        "sheets": unnamed["sheets"],
+        "requirements": [
+            {
+                "id": "mcu",
+                "sheet": "OUTPUT 1",
+                "role": "mcu_core",
+                "family": "stm32g0",
+                "declared_interface": {
+                    "ports": [
+                        {"key": "vdd", "pin": None, "direction": "power_in", "function": "3V3"},
+                        {"key": "gnd", "pin": "2", "direction": "power_in", "function": "return"},
+                    ]
+                },
+            }
+        ],
+    }
+    assert "architecture_declared_contact_unnamed" in _codes("architecture", canonical)
+
+    # A claim that names a contact for every port is untouched.
+    named = {
+        "sheets": unnamed["sheets"],
+        "requirements": [
+            {
+                "id": "fuse1",
+                "sheet": "OUTPUT 1",
+                "role": "connector",
+                "family": "fused-output",
+                "declared_ports": [
+                    {"key": "input", "pin": "1", "direction": "passive", "function": "5 V feed"},
+                    {"key": "output", "pin": "2", "direction": "passive", "function": "fused out"},
+                ],
+            }
+        ],
+    }
+    assert "architecture_declared_contact_unnamed" not in _codes("architecture", named)
