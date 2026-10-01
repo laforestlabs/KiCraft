@@ -2406,14 +2406,26 @@ def check_reviewed_device_support_networks(bom) -> CheckResult:
     )
 
 
-def _catalog_capacitor_voltage_defects(architecture, bom, nets) -> list[str]:
-    """Check selected capacitors across two typed DC rails, not guessed signal peaks."""
+def under_rated_capacitors(architecture, bom, nets=None) -> list[tuple[object, str, float, float | None]]:
+    """`(part, lcsc, stress, rating)` for every selected capacitor under-rated for its DC rails.
+
+    One reading, two callers. §9.38 refuses on it; the wiring commit repairs it deterministically
+    first, because the part it names is a recipe-owned passive: its pins are locked and the wiring
+    response contract is pins-only, so the stage that sees the refusal cannot change the part. The
+    live cohort of 2026-09-30 hit exactly that four times ("E_CAPACITOR_VOLTAGE C1: selected
+    C19702 is rated 10V but spans 18V across 'VIN18'/'GND'"): the draft re-emitted an identical
+    candidate and the identical-rejection guard ended the stage.
+
+    ``rating`` is ``None`` when the catalog carries no verified voltage rating for the selection.
+    """
     from kicraft.design.part_research import catalog_ratings
     from kicraft.design.synthesis.fab_export import extract_lcsc_pin
     from kicraft.parts_library import jlcparts
 
+    if nets is None:
+        nets = _nets_by_ref(bom)
     ratings: dict[str, float | None] = {}
-    bad: list[str] = []
+    under: list[tuple[object, str, float, float | None]] = []
     for part in bom.parts:
         if _ref_prefix(part.ref) != "C":
             continue
@@ -2434,12 +2446,22 @@ def _catalog_capacitor_voltage_defects(architecture, bom, nets) -> list[str]:
             attributes = (jlcparts.parameters(cid) or {}).get("attributes")
             ratings[cid] = catalog_ratings(attributes)[0].get("voltage_v")
         rating = ratings[cid]
+        if rating is None or rating <= 0 or not stress <= rating:
+            under.append((part, cid, stress, rating))
+    return under
+
+
+def _catalog_capacitor_voltage_defects(architecture, bom, nets) -> list[str]:
+    """Check selected capacitors across two typed DC rails, not guessed signal peaks."""
+    bad: list[str] = []
+    for part, cid, stress, rating in under_rated_capacitors(architecture, bom, nets):
+        pair = _two_terminal_part_nets(part, nets)
         if rating is None or rating <= 0:
             bad.append(
                 f"E_CAPACITOR_VOLTAGE {part.ref}: selected {cid} has no verified voltage "
                 f"rating for {stress:g}V across {pair[0]!r}/{pair[1]!r}"
             )
-        elif not stress <= rating:
+        else:
             bad.append(
                 f"E_CAPACITOR_VOLTAGE {part.ref}: selected {cid} is rated {rating:g}V "
                 f"but spans {stress:g}V across {pair[0]!r}/{pair[1]!r}; select a "

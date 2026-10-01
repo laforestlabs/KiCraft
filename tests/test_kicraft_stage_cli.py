@@ -635,7 +635,7 @@ def test_stage_commit_attaches_questions(tmp_path, capsys):
     assert written["open_questions"][0]["stage"] == "intent"
 
 
-def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys):
+def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys, monkeypatch):
     state_path = tmp_path / "state.json"
 
     # Walk up through intent / functional_spec / architecture / bom
@@ -733,6 +733,50 @@ def test_stage_commit_wiring_preserves_bom_other_fields(tmp_path, capsys):
     # ...and the rest of the BOM is intact
     assert len(written["bom"]["parts"]) == 5
     assert {p["ref"] for p in written["bom"]["parts"]} == {"U1", "C1", "J3", "U2", "U3"}
+
+    # A commit that finds an under-rated capacitor re-pins it and reports the swap, instead of
+    # dying on its own bookkeeping. Loop 3 shipped `bom_normalizations.extend(repinned)` above the
+    # list's binding, so the wiring commit returned invalid process output the moment a repair was
+    # actually found -- live cohort 2026-09-30, project 1113: "UnboundLocalError: cannot access
+    # local variable 'bom_normalizations'". Brief 1 passed the same loop because its re-pin found
+    # nothing and never reached the line, which is exactly why the empty case cannot be the test.
+    import kicraft.design.cli_app as cli_app
+    from kicraft.parts_library import jlcparts
+
+    for part in written["bom"]["parts"]:
+        if part["ref"] == "C1":
+            part["sourcing_note"] = "LCSC C19702"  # spans +3V3, rated far below it
+    # The stress is only provable across two typed rails; the fixture architecture declares +3V3
+    # and VBUS but no return, so C1's terminal pair would be skipped as "not proved by a DC rail".
+    written["architecture"]["rail_voltages"]["GND"] = 0.0
+    state_path.write_text(json.dumps(written))
+    monkeypatch.setattr(
+        jlcparts, "parameters",
+        lambda cid: {"attributes": {"Voltage Rating": {"C19702": "1V", "C96446": "50V"}.get(cid, "")}},
+    )
+    monkeypatch.setattr(
+        jlcparts, "search",
+        lambda term, limit=10: [
+            {
+                "lcsc": "C96446", "model": "CL05A105KA5NQNC", "package": "0402",
+                "description": "1uF ±10% 50V X5R 0402", "stock": 400000, "type": "Basic",
+                "brand": "Samsung", "price": 0.01, "joints": 2,
+            },
+        ],
+    )
+    monkeypatch.setattr(cli_app.lcsc_retail, "enabled", lambda: False)
+
+    rc, payload = _run(
+        capsys,
+        "stage-commit",
+        "wiring",
+        "--slot-file",
+        str(wiring_slot),
+        "--no-archive",
+        str(state_path),
+    )
+    assert rc == 0, payload
+    assert any("re-pinned C19702 -> C96446" in note for note in payload["bom_normalizations"])
 
 
 def test_stage_commit_bom_rejects_per_sheet_overflow(tmp_path, capsys, monkeypatch):

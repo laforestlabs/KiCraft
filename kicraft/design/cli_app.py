@@ -683,6 +683,98 @@ def _lcsc_identity_conflict(part, hit: dict) -> str | None:
     return None
 
 
+def _repin_under_rated_capacitors(architecture, bom) -> list[str]:
+    """Re-select a catalog capacitor that is rated for the rail it actually spans.
+
+    §9.38 refuses an under-rated selected capacitor, but the parts it names are recipe-owned
+    passives: their pins are locked as ``excluded_pins`` and the wiring response contract is
+    pins-only, so the stage that reads the refusal has no field to change and re-emits an
+    identical candidate. The live cohort of 2026-09-30 ended brief 3 that way four times
+    ("E_CAPACITOR_VOLTAGE C1: selected C19702 is rated 10V but spans 18V across 'VIN18'/'GND'").
+    The selection is the defect and it was made by this module's own tier-4 keyword pin, so the
+    repair is made here, before the gate: search the same offline catalog, keep the same value and
+    package, and take a candidate whose catalog voltage rating covers the stress. Nothing is
+    invented -- a part with no verified rating is never preferred, and when no rated candidate
+    exists the selection is left alone and the gate still refuses it.
+
+    Every repair is recorded on the part (``sourcing_note``), in the BOM's substitution ledger, and
+    in the returned notes, which the caller surfaces as ``bom_normalizations``.
+    """
+    from kicraft.design.models import Substitution
+    from kicraft.design.part_research import catalog_ratings
+    from kicraft.design.synthesis.validation import under_rated_capacitors
+
+    notes: list[str] = []
+    floor = _bom_stock_floor()
+    for part, old_cid, stress, rating in under_rated_capacitors(architecture, bom):
+        keyword = jlcparts.bom_keyword(part.value or "", part.footprint or "")
+        if not keyword:
+            notes.append(
+                f"{part.ref}: spans {stress:g}V with {old_cid} "
+                f"(rated {f'{rating:g}V' if rating else 'unrated'}) and carries no searchable "
+                "value/package keyword; left as selected"
+            )
+            continue
+        single = _is_single_passive_footprint(part.footprint or "")
+        picked: tuple[str, float] | None = None
+        for candidate in jlcparts.search(keyword, limit=20):
+            cid = str(candidate.get("lcsc") or "")
+            if not cid or (candidate.get("stock") or 0) < floor:
+                continue
+            if single:
+                if is_multi_element_array(candidate) or not chip_value_matches(
+                    keyword.split()[0], candidate
+                ):
+                    continue
+            attributes = (jlcparts.parameters(cid) or {}).get("attributes")
+            candidate_rating = catalog_ratings(attributes)[0].get("voltage_v")
+            if candidate_rating is None or candidate_rating < stress:
+                continue
+            # The same rule the BOM pin follows: never select a part that is dry at retail. The
+            # pin's own helper is local to `_resolve_bom_mpn_sourcing`, so the reading is taken
+            # here from the same storefront client and floor.
+            if lcsc_retail.enabled():
+                try:
+                    info = lcsc_retail.stock(cid)
+                except lcsc_retail.RetailUnavailable:
+                    info = None
+                if info is not None and info["stock"] < max(
+                    info["min_buy"], lcsc_retail.retail_floor()
+                ):
+                    continue
+            picked = (cid, candidate_rating)
+            break
+        if picked is None:
+            notes.append(
+                f"{part.ref}: no in-stock catalog part matching {keyword!r} carries a verified "
+                f"rating for {stress:g}V (selected {old_cid} is "
+                f"{f'rated {rating:g}V' if rating else 'unrated'}); left as selected"
+            )
+            continue
+        cid, candidate_rating = picked
+        previous_note = str(part.sourcing_note or "")
+        part.sourcing_note = f"LCSC {cid}"
+        bom.substitutions.append(
+            Substitution(
+                wanted=f"{part.ref} {old_cid}"
+                + (f" rated {rating:g}V" if rating else " with no verified rating"),
+                got=f"{cid} rated {candidate_rating:g}V",
+                reason=(
+                    f"the selected part spans {stress:g}V across its own two terminals; §9.38 "
+                    "requires a capacitor rated for the actual voltage"
+                ),
+            )
+        )
+        notes.append(
+            f"{part.ref}: re-pinned {old_cid} -> {cid} "
+            f"({f'rated {rating:g}V' if rating else 'unrated'} -> rated {candidate_rating:g}V) for "
+            f"{stress:g}V across its terminals"
+            + (f"; was {previous_note!r}" if previous_note else "")
+            + " (derived)"
+        )
+    return notes
+
+
 def _resolve_bom_mpn_sourcing(
     bom, project_root: Path, receipt: list[dict] | None = None, *,
     named_parts: Iterable[str] = (), brief: str = "",
@@ -4187,8 +4279,18 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             )
             return 3
 
+    bom_normalizations: list[str] = []
     if stage == "wiring" and state.bom is not None and state.bom.connections:
         from .synthesis.validation import check_composed_wiring
+
+        # §9.38's own repair, before the gate that raises it: the under-rated capacitor is a
+        # recipe-owned passive the wiring stage cannot re-select, so refusing it there is
+        # unrepairable. Re-pin it from the same catalog the BOM pin used and record the swap.
+        if state.architecture is not None:
+            repinned = _repin_under_rated_capacitors(state.architecture, state.bom)
+            if repinned:
+                bom_normalizations.extend(repinned)
+                state.bom.assumptions.extend(repinned)
 
         checks = check_composed_wiring(
             state.architecture, state.bom, declared_interface_scope="model_owned",
@@ -4231,7 +4333,6 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
     #   numbered footprint passes ERC yet leaves every pad netless
     #   (KC-V8YWN8 / KC-B8NQEE).
     # - manifest LCSC: a fabricated C# in a bundle manifest can never be priced.
-    bom_normalizations: list[str] = []
     if stage == "bom" and state.bom is not None:
         project_root = state_path.resolve().parent.parent
         size_check = check_bom_size(state.bom)

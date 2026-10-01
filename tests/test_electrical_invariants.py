@@ -1641,3 +1641,95 @@ def test_analog_input_device_without_reviewed_range_data_is_named_not_refused(mo
     )
     assert result.ok
     assert "E_ANALOG_INPUT_RANGE U8" in result.message
+
+
+def test_an_under_rated_selected_capacitor_is_repinned_before_the_gate(monkeypatch):
+    """The capacitor §9.38 refuses is a recipe-owned passive, so the pin is repaired, not the model.
+
+    Live cohort 2026-09-30: brief 3's wiring stage refused the same 10 V part on its 18 V rail four
+    times ("E_CAPACITOR_VOLTAGE C1: selected C19702 is rated 10V but spans 18V across 'VIN18'/'GND'"),
+    because the recipe's input capacitor has no voltage class, the tier-4 keyword pin chose the 10 V
+    catalog row, and a recipe passive's pins are locked while the wiring response contract is
+    pins-only -- so the refusal was unrepairable where it was raised. The selection is re-made here
+    from the same offline catalog, keeping the value and package.
+    """
+    from kicraft.design import cli_app
+    from kicraft.design.cli_app import _repin_under_rated_capacitors
+    from kicraft.parts_library import jlcparts
+
+    monkeypatch.setattr(
+        jlcparts, "parameters",
+        lambda cid: {"attributes": {"Voltage Rating": {"C19702": "10V", "C96446": "25V"}.get(cid, "")}},
+    )
+    monkeypatch.setattr(
+        jlcparts, "search",
+        lambda term, limit=10: [
+            {
+                "lcsc": "C19702", "model": "CL10A106KP8NNNC", "package": "0603",
+                "description": "10uF ±10% 10V X5R 0603", "stock": 900000, "type": "Basic",
+                "brand": "Samsung", "price": 0.01, "joints": 2,
+            },
+            {
+                "lcsc": "C96446", "model": "CL10A106MA8NRNC", "package": "0603",
+                "description": "10uF ±20% 25V X5R 0603", "stock": 400000, "type": "Basic",
+                "brand": "Samsung", "price": 0.01, "joints": 2,
+            },
+        ],
+    )
+    monkeypatch.setattr(cli_app.lcsc_retail, "enabled", lambda: False)
+    cap = SimpleNamespace(
+        ref="C1", value="10uF", mpn=None, symbol="Test:Part", sheet="POWER",
+        footprint="Capacitor_SMD:C_0603_1608Metric", sourcing_note="LCSC C19702",
+    )
+    bom = _bom([cap], {"VIN18": [("C1", "1")], "GND": [("C1", "2")]})
+    bom.substitutions = []
+    architecture = SimpleNamespace(rail_voltages={"VIN18": 18.0, "GND": 0.0})
+
+    # The gate sees the under-rated selection first.
+    assert not validation.check_reviewed_input_operating_ranges(architecture, bom).ok
+
+    notes = _repin_under_rated_capacitors(architecture, bom)
+
+    assert cap.sourcing_note == "LCSC C96446"
+    assert any("re-pinned C19702 -> C96446" in note for note in notes)
+    assert [(row.wanted, row.got) for row in bom.substitutions] == [
+        ("C1 C19702 rated 10V", "C96446 rated 25V")
+    ]
+    # The repaired selection clears the gate that refused it.
+    assert validation.check_reviewed_input_operating_ranges(architecture, bom).ok
+
+
+def test_an_under_rated_capacitor_is_left_alone_when_no_rated_candidate_exists(monkeypatch):
+    """Never invent a part: no rated catalog row means the gate still refuses, and says why."""
+    from kicraft.design import cli_app
+    from kicraft.design.cli_app import _repin_under_rated_capacitors
+    from kicraft.parts_library import jlcparts
+
+    monkeypatch.setattr(
+        jlcparts, "parameters", lambda cid: {"attributes": {"Voltage Rating": "10V"}},
+    )
+    monkeypatch.setattr(
+        jlcparts, "search",
+        lambda term, limit=10: [
+            {
+                "lcsc": "C19702", "model": "CL10A106KP8NNNC", "package": "0603",
+                "description": "10uF ±10% 10V X5R 0603", "stock": 900000, "type": "Basic",
+                "brand": "Samsung", "price": 0.01, "joints": 2,
+            },
+        ],
+    )
+    monkeypatch.setattr(cli_app.lcsc_retail, "enabled", lambda: False)
+    cap = SimpleNamespace(
+        ref="C1", value="10uF", mpn=None, symbol="Test:Part", sheet="POWER",
+        footprint="Capacitor_SMD:C_0603_1608Metric", sourcing_note="LCSC C19702",
+    )
+    bom = _bom([cap], {"VIN18": [("C1", "1")], "GND": [("C1", "2")]})
+    bom.substitutions = []
+    architecture = SimpleNamespace(rail_voltages={"VIN18": 18.0, "GND": 0.0})
+
+    notes = _repin_under_rated_capacitors(architecture, bom)
+
+    assert cap.sourcing_note == "LCSC C19702"
+    assert not bom.substitutions
+    assert any("no in-stock catalog part matching" in note for note in notes)
+    assert not validation.check_reviewed_input_operating_ranges(architecture, bom).ok
