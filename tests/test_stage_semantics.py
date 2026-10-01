@@ -3141,3 +3141,68 @@ def test_a_declared_interface_that_names_no_contact_is_refused_at_architecture()
         ],
     }
     assert "architecture_declared_contact_unnamed" not in _codes("architecture", named)
+
+
+def test_a_class_the_brief_brands_with_a_participle_must_be_recorded():
+    """`fused outputs` demands a fuse; nothing downstream can place one the intent never records.
+
+    Live cohort 2026-09-30, project 1108: this exact brief committed an intent with no fuse
+    obligation, the board built and exported a fab package carrying no fuse at all, and it would
+    have counted as a successful run. Only the participle form is read: the bare and plural forms
+    fire on 30 boards in the live store that are correct as built.
+    """
+    brief = (
+        "A 5 V header from the host board power distribution board with two fused outputs on screw "
+        "terminals and an RGB status LED. Keep it under 100 x 100 mm."
+    )
+    recorded_without_fuse = {
+        "obligations": [
+            {"kind": "physical", "component_class": "pin-header"},
+            {"kind": "physical", "component_class": "screw-terminal"},
+            {"kind": "quantity", "subject": "screw-terminal", "minimum": 2},
+            {"kind": "physical", "component_class": "led"},
+        ],
+        "named_parts": [],
+        "constraints": [],
+        "assumptions": [],
+        "goal": "Distribute 5 V from a host board through two fused outputs.",
+    }
+    diagnostics = diagnose_stage(
+        "intent", brief=brief, upstream_state={}, candidate=recorded_without_fuse
+    )
+    row = next(d for d in diagnostics if d.code == "intent_demanded_class_omitted")
+    assert row.evidence == ["'fused' -> fuse"]
+
+    # Recording the class silences it.
+    recorded_with_fuse = {
+        **recorded_without_fuse,
+        "obligations": [
+            *recorded_without_fuse["obligations"],
+            {"kind": "physical", "component_class": "fuse"},
+        ],
+    }
+    assert "intent_demanded_class_omitted" not in {
+        d.code
+        for d in diagnose_stage(
+            "intent", brief=brief, upstream_state={}, candidate=recorded_with_fuse
+        )
+    }
+
+    # The bare and plural forms are compounds and counts, not a second class: a brief that says
+    # "screw terminals" or "servo headers" and records them under another spelling stays silent.
+    plain = {
+        "obligations": [{"kind": "physical", "component_class": "pin-header"}],
+        "named_parts": [],
+        "constraints": [],
+        "assumptions": [],
+        "goal": "Break out host power.",
+    }
+    assert "intent_demanded_class_omitted" not in {
+        d.code
+        for d in diagnose_stage(
+            "intent",
+            brief="A power breakout with screw terminals and two servo headers.",
+            upstream_state={},
+            candidate=plain,
+        )
+    }

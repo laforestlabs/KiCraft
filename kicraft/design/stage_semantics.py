@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import re
 from collections.abc import Iterable
+from functools import lru_cache
 
 from kicraft.design.models import (
     Architecture,
@@ -649,8 +650,75 @@ def _quantity_subject_unbound(candidate: dict) -> list[StageDiagnostic]:
     return diagnostics
 
 
+@lru_cache(maxsize=1)
+def _reviewed_class_heads() -> tuple[tuple[str, str], ...]:
+    """`(head word, class name)` for every reviewed class a brief may demand by name.
+
+    Deterministic by construction: the exact class name wins over a compound that happens to end in
+    the same word ("fuse" over "input-fuse"), and the rest are read in sorted order, so the
+    diagnostic's evidence never depends on set iteration order.
+    """
+    from kicraft.design.part_identity import reviewed_feature_vocabulary
+
+    best: dict[str, str] = {}
+    for name in sorted(reviewed_feature_vocabulary()):
+        words = re.split(r"[-_ ]+", str(name).casefold())
+        if not 0 < len(words) <= 3:
+            continue
+        head = words[-1]
+        current = best.get(head)
+        if current is None or (len(words) == 1 and len(re.split(r"[-_ ]+", current)) > 1):
+            best[head] = str(name)
+    return tuple(sorted(best.items()))
+
+
+def _omitted_demanded_classes(brief: str, candidate: dict) -> list[StageDiagnostic]:
+    """A class the brief brands onto the design that no obligation records.
+
+    Live cohort 2026-09-30, project 1108: the brief asked for "two fused outputs" and the committed
+    intent recorded no fuse at all -- only a count of screw terminals -- so nothing downstream could
+    place one. That board built, exported a fab package, and would have counted as a success while
+    carrying no fuse. No later obligation gate can see it, because the whole chain starts here.
+
+    Read only from the *participle* form (`fuse` -> "fused"), never the bare noun or the plural.
+    Measured over every board in the live store that shipped: the bare and plural forms fire on 30
+    designs that are correct as built ("screw terminals", "film capacitors", "servo headers" -- each
+    already recorded under another class spelling), while the participle form fires on exactly one,
+    and that one is the non-compliant board above. The refusal is repairable: record the class the
+    brief names, or say in assumptions why the design does not carry it.
+    """
+    recorded = " ".join(
+        str(row.get("component_class") or row.get("subject") or "")
+        for row in candidate.get("obligations") or []
+        if isinstance(row, dict)
+    ).casefold()
+    recorded_words = {word for word in re.split(r"[\s\-_]+", recorded) if word}
+    text = str(brief or "").casefold()
+    offenders = [
+        f"{form!r} -> {class_name}"
+        for head, class_name in _reviewed_class_heads()
+        if head not in recorded_words
+        for form in (head + "ed", head + "d")
+        if re.search(rf"\b{re.escape(form)}\b", text)
+    ]
+    if not offenders:
+        return []
+    return [
+        _diag(
+            "intent_demanded_class_omitted",
+            "repair_required",
+            "The brief brands a part class onto the design (a participle such as 'fused') and no "
+            "obligation records that class, so no later stage can place it. Record the physical "
+            "obligation for the class it names, or state in assumptions why the design does not "
+            "carry it.",
+            sorted(set(offenders)),
+        )
+    ]
+
+
 def _intent(brief: str, candidate: dict) -> list[StageDiagnostic]:
     diagnostics: list[StageDiagnostic] = []
+    diagnostics.extend(_omitted_demanded_classes(brief, candidate))
     expected = named_part_tokens([brief])
     supplied = {_norm_token(part) for part in candidate.get("named_parts") or []}
     omitted = [token for token in expected.values() if _norm_token(token) not in supplied]
