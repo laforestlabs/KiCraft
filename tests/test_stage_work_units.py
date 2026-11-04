@@ -4278,6 +4278,42 @@ def test_probe_architecture_construction_composes_recipe_and_lowerer_without_mut
     assert all(connected[pin] == net for pin, net in lowerer_pins.items() if net is not None)
 
 
+@pytest.mark.parametrize("contacts", [2, 6])
+def test_validated_header_retains_canonical_pin_graph_through_bom_aggregation(contacts):
+    from kicraft.design.models import Architecture, BOM
+    from kicraft.design.synthesis.validation import _invalid_lowerer_ownership
+
+    state = _state()
+    state["architecture"]["sheets"] = [
+        {"name": "A", "stem": "A", "function": "Expose the declared connector contacts"}]
+    state["architecture"]["requirements"] = [{
+        "id": "header", "sheet": "A", "role": "connector", "family": "pin-header",
+        "parameters": {"rows": 1, "gender": "male"},
+        "ports": {f"pin{i}": f"SIGNAL_{i}" for i in range(1, contacts + 1)},
+    }]
+    units = plan_stage_work_units("bom", state, {})
+    candidates = {
+        unit.unit_id: validate_unit_candidate(
+            unit, deterministic_bom_candidate(unit, state), state, {})
+        for unit in units
+    }
+    payload, *_ = aggregate_stage_work_units(
+        "bom", units, candidates, state,
+        unit_sources={unit.unit_id: "lowerer" for unit in units})
+    bom = BOM.model_validate(payload)
+    architecture = Architecture.model_validate(state["architecture"])
+    assert _invalid_lowerer_ownership(architecture, bom) == []
+    actual = {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in bom.connections for endpoint in connection.endpoints
+    }
+    assert actual == {
+        (bom.parts[0].ref, str(i)): f"SIGNAL_{i}" for i in range(1, contacts + 1)}
+    bom.connections[0].net_name = "WRONG_NET"
+    assert _invalid_lowerer_ownership(architecture, bom) == [
+        f"{bom.parts[0].ref}.{i}" for i in range(1, contacts + 1)]
+
+
 def test_lowerer_bom_ownership_drives_wiring_normalization_and_locks():
     from kicraft.design.models import BOM
     from kicraft.server.stage_contracts import _normalize_stage_response

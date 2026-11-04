@@ -3076,8 +3076,9 @@ def _project_assurance(*, status: str, derived: dict, signals: dict) -> dict:
         limit(f"Electrical review recorded {len(blockers)} blocker(s) the pipeline did not clear; "
               "each needs a human review before fabrication", blocking=True)
 
-    # Durable stage findings: a stage that committed with a blocking finding, or
-    # a stage that terminally failed on one (the recorded capability limitation).
+    # Durable findings remain blockers. Only explicit library/resource
+    # diagnostics establish a capability limit; compiler/input/procurement
+    # failures do not prove that the user's requirement is unsupported.
     capability: list[str] = []
     for stage in (*DESIGN_STAGES, "electrical_review"):
         entry = ss.get(stage)
@@ -3097,8 +3098,15 @@ def _project_assurance(*, status: str, derived: dict, signals: dict) -> dict:
             scope = (f" (requirement {diagnostic['requirement_id']})"
                      if diagnostic.get("requirement_id") else "")
             if entry.get("ok") is False:
-                # Terminal: the pipeline stopped on this requirement.
-                capability.append(f"{label}: {detail}{scope}")
+                finding_codes = {
+                    str(diagnostic.get("code") or ""),
+                    *(str(finding.get("code") or "")
+                      for finding in diagnostic.get("findings") or []
+                      if isinstance(finding, dict)),
+                }
+                if any(code == "unknown_part_refused" or code.startswith("unavailable_recipe_")
+                       for code in finding_codes):
+                    capability.append(f"{label}: {detail}{scope}")
                 limit(f"{label} stopped on: {detail}{scope}", blocking=True)
             else:
                 limit(f"{label}: {detail}{scope}", blocking=True)

@@ -173,9 +173,26 @@ def test_recorded_unrealizable_requirement_is_a_capability_limitation():
                    gate={}, synth={}, artifacts=False)
     assert a["level"] == "limited"
     assert a["capability"] and "cp2102n_bridge" in a["capability"][0]
-    # The wording must not claim physical impossibility.
-    assert "could not realize" in a["summary"]
-    assert "may resolve it" in a["summary"]
+
+
+@pytest.mark.parametrize("code", [
+    "commit_gate_rejected", "multiple_intent_contracts", "source_obligation_not_retained",
+])
+def test_terminal_contract_failure_is_not_a_library_capability_limit(code):
+    state = _clean_state()
+    state["stage_status"] = {
+        "intent": {"ok": True},
+        "bom": {"ok": False, "diagnostics": [{
+            "code": code, "severity": "fab_gate",
+            "message": "Compiler contract rejected this candidate",
+        }]},
+    }
+    assurance = _assurance(
+        state, status="failed", derived=_derived(bom="failed"),
+        gate={}, synth={}, artifacts=False)
+    assert assurance["level"] == "partial"
+    assert assurance["capability"] == []
+    assert assurance["verified_export"] is False
 
 
 # ---- 4. clarification -------------------------------------------------------

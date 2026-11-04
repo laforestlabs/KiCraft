@@ -145,6 +145,21 @@ def test_chip_value_matches_requires_clean_numeric_boundaries():
     assert jlcparts.chip_value_matches("", {"description": "whatever"})
 
 
+@pytest.mark.parametrize("wanted,description,expected", [
+    ("22R", "100mW 22Ω 75V ±1% 0603 Chip Resistor", True),
+    ("22R", "100mW 222Ω 75V ±1% 0603 Chip Resistor", False),
+    ("22R", "100mW 2.2Ω 75V ±1% 0603 Chip Resistor", False),
+    ("22R", "100mW 22kΩ 75V ±1% 0603 Chip Resistor", False),
+    ("10k", "100mW 10kΩ 75V ±1% 0603 Chip Resistor", True),
+    ("10k", "100mW 510kΩ 75V ±1% 0603 Chip Resistor", False),
+    ("1M", "1MΩ 0603 Chip Resistor", True),
+    ("1m", "1MΩ 0603 Chip Resistor", False),
+])
+def test_resistance_uses_physical_value_not_incidental_order_code(wanted, description, expected):
+    assert jlcparts.chip_value_matches(
+        wanted, {"model": "RC0603FR-0722RL", "description": description}) is expected
+
+
 def test_zero_ohm_requires_semantic_value_not_mpn_substrings():
     for description in ("0Ω 0603 Chip Resistor", "0 ohm", "0.0Ω"):
         assert jlcparts.chip_value_matches(

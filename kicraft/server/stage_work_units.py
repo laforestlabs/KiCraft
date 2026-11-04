@@ -1466,7 +1466,10 @@ def _normalize_curated_group_identities(
         update = {
             "symbol": f"{manifest.name}:{manifest.symbol_name}",
             "footprint": f"{manifest.name}:{manifest.footprint_name}",
-            "mpn": manifest.mpn,
+            # Preserve an already selected exact order-code spelling: lowerer
+            # provenance is reconstructed from that same reviewed identity.
+            "mpn": (group.mpn if group.mpn and _identity_token(group.mpn)
+                    == _identity_token(manifest.mpn or "") else manifest.mpn),
         }
         lcsc = (manifest.sourcing or {}).get("lcsc")
         if lcsc:

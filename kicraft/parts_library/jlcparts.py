@@ -175,6 +175,20 @@ def chip_value_matches(value_token: str, cand: dict) -> bool:
             r"(?<![\d.])0(?:\.0+)?\s*(?:Ω|ohms?\b|R(?![a-z\d]))",
             desc, re.IGNORECASE,
         ))
+    # A manufacturer's ordering code is not the physical resistance. For
+    # example, 22R occurs inside RC0603FR-0722RL but its description correctly
+    # says 22Ω. Prefer an explicit unit-bearing catalog value over that substring.
+    requested = re.fullmatch(r"(\d+(?:\.\d+)?)([rRkKmM]?)(?:Ω|ohms?)?", tok)
+    if requested:
+        scale = {"": 1.0, "r": 1.0, "R": 1.0, "k": 1e3, "K": 1e3,
+                 "m": 1e-3, "M": 1e6}
+        wanted = float(requested[1]) * scale[requested[2]]
+        values = re.findall(
+            r"(?<![\w.])(\d+(?:\.\d+)?)([kKmM]?)\s*(?:Ω|ohms?\b|R\b)",
+            str(cand.get("description") or ""), re.IGNORECASE,
+        )
+        if values:
+            return any(float(value) * scale[prefix] == wanted for value, prefix in values)
     hay = " ".join(str(cand.get(k) or "")
                    for k in ("model", "brand", "description", "package"))
     if tok.lower() not in hay.lower():

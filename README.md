@@ -56,10 +56,11 @@ the same answer.
   recorded limitations (compiler advisories, model-declared pin claims for
   unreviewed parts, unresolved requirements, review blockers, fabrication
   cautions, unapproved changes to a required part).
-- **Recorded capability limitation** — a design stage stopped on a requirement
-  KiCraft could not realize with the reviewed library. The wording is the
-  recorded finding, and it names a part, range or choice that may resolve it —
-  a failed search is not proof the circuit is impossible.
+- **Recorded capability limitation** — an explicit reviewed-library or recipe
+  resource diagnostic stopped a requirement. A compiler contract, malformed
+  candidate or procurement rejection alone is an **Incomplete or failed preview**,
+  not evidence that the user's requirement is unsupported. A failed search is
+  not proof the circuit is impossible.
 - **Incomplete or failed preview** / **Stale preview** — the build failed or
   exhausted its recovery, or the board on disk belongs to an earlier accepted
   design (an upstream edit invalidated it). The artifacts stay viewable as
@@ -721,6 +722,9 @@ Recognized assembled chip-passive requests must resolve to an exact compatible
 catalog package with verified sourcing, or report an actionable failure.
 Zero-ohm values include `0Ω`, not numeric substrings in unrelated MPNs; an
 unreachable or disabled retail check is unverified, not a successful selection.
+An explicit catalog resistance (`22Ω`, for example) takes precedence over an
+incidental `22R` substring in a manufacturer's order code; unequal physical
+values remain incompatible regardless of the MPN text.
 Header lowering owns generic SPI/I2C carriers. A misleading analog-header family
 is normalized only for a committed generic-header physical class with an explicit
 identity contact map; true analog-output classes keep their existing part-stage
@@ -731,6 +735,9 @@ six-contact Amphenol C178289 carrier retain their exact declared pin maps.
 Explicit gender, rows and contact counts are not silently changed, and a longer
 strip is not a qualified cut-down substitute. Land-pattern qualification is
 nominal dimensional evidence, not production-lot or fab-tolerance metrology.
+Curated BOM normalization preserves an already selected equivalent order-code
+spelling, so its reconstructed lowerer provenance and actual pin graph agree.
+Sourcing annotations do not authorize changing the compiler-owned construction.
 Native footprint readers scope their owning KiCad plugin and detach one native
 copy before releasing its library cache. KiCad regenerates root and descendant
 UUIDs; board insertion transfers ownership. Malformed files are rejected through
