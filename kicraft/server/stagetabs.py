@@ -336,6 +336,7 @@ class StagePanel:
         self._draft_dirty = False
         self._committed = False
         self._draft_structured = False
+        self._draft_header = None
         self._saw_reasoning = False
         # Activity diagnostic line (model / elapsed / chars / tool calls).
         self._live = None
@@ -546,6 +547,9 @@ class StagePanel:
         settle the line the FIRST outcome wrote -- otherwise a stale "✗ failed"
         stays on screen behind a successful result."""
         self._live_done = True
+        if self._draft_buf and not self._committed and self._draft_header is not None:
+            self._draft_header.set_text(
+                f"Uncommitted {self.key} draft  ·  {len(self._draft_buf):,} chars")
         if self._live is not None:
             self._live.set_text(text)
             self._live.style(f"color:{color}")
@@ -1073,7 +1077,9 @@ class StagePanel:
             return
         self._insp.clear()
         with self._insp:
-            ui.label(f"● writing {self.key} slot…  ·  {len(self._draft_buf):,} chars").classes(
+            head = f"Uncommitted {self.key} draft" if self._live_done else (
+                f"● writing {self.key} slot…")
+            self._draft_header = ui.label(f"{head}  ·  {len(self._draft_buf):,} chars").classes(
                 "text-xs font-semibold"
             ).style(f"color:{self.accent}")
             if secs:

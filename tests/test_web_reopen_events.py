@@ -9,6 +9,7 @@ provider.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -239,6 +240,41 @@ def test_newer_attempt_does_not_inherit_the_older_failure(root):
     assert activity.reduce_activity(None, current["events"][0])["phase_status"] == "running"
     act = web._reduce_attempt_activity(current["events"])
     assert act["phase_status"] == "complete" and act["failure"] is None
+
+
+@pytest.mark.parametrize("status", ["ok", "failed", "interrupted", "awaiting_input"])
+def test_saved_attempt_duration_stops_and_new_attempt_restarts(status):
+    act = activity.reduce_activity(None, {
+        "kind": "run_started", "ts": "2026-01-01T00:00:00+00:00",
+    })
+    activity.reduce_activity(act, {
+        "kind": "run_finished", "status": status,
+        "ts": "2026-01-01T00:02:00+00:00",
+    })
+    activity.reduce_activity(act, {
+        "kind": "metadata", "ts": "2026-02-01T00:00:00+00:00",
+    })
+    reopened = dt.datetime(2026, 3, 1, tzinfo=dt.timezone.utc)
+    assert web._attempt_elapsed_s(act, now=reopened) == 120
+
+    activity.reduce_activity(act, {
+        "kind": "run_started", "ts": reopened.isoformat(),
+    })
+    assert web._attempt_elapsed_s(
+        act, now=reopened + dt.timedelta(seconds=5),
+    ) == 5
+
+
+@pytest.mark.parametrize("phase", ["complete", "failed", "interrupted", "awaiting_input"])
+def test_legacy_stopped_attempt_uses_last_observed_event_not_reopen_time(phase):
+    legacy = {
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "last_event_at": "2026-01-01T00:02:00+00:00",
+        "phase_status": phase,
+    }
+    assert web._attempt_elapsed_s(
+        legacy, now=dt.datetime(2026, 3, 1, tzinfo=dt.timezone.utc),
+    ) == 120
 
 
 def _start_attempt_for_test(state: dict) -> dict:

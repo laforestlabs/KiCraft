@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:6981ce1a8a96dc335a22df5bb2209b4aad230220f7a2fad569de5839a1a66588",
+  "content_hash": "sha256:29c30e184de962f2ac722444ae27c6f1cefc2f39fd5d8c5d350d57eed0f2181e",
   "datasheet_url": "https://lcsc.com/product-detail/Terminal-Blocks_WJ126V-5-0-3P_C8401.html",
   "description": "WJ126V-5.0-3P",
   "footprint_name": "CONN-TH_3P-P5.00_WJ126V-5.0-3P",
@@ -10,7 +10,7 @@
   "provenance": {
     "added_at": "2026-07-03T23:19:21Z",
     "kicad_version": "9.0.0",
-    "source": "easyeda2kicad",
+    "source": "easyeda2kicad import from LCSC C8401; STEP representation origin normalized from (4.99, 0, 0) mm to zero to match the imported WRL; BREP geometry unchanged.",
     "source_project_stem": null
   },
   "schema_version": "1",

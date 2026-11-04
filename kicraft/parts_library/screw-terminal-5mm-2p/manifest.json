@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:4bc0d57fc383c5cd9ef66a9db32df3beeb1ea0dac6b578abec074c6879368c46",
+  "content_hash": "sha256:4f559246d0d194ef75e0ac390bbf116c6582f791eba01ccd7f47c872891d354a",
   "datasheet_url": "https://lcsc.com/product-detail/Terminal-Blocks_WJ126V-5-0-2P_C8404.html",
   "description": "KANGNEX WJ126V-5.0-02P-14-00A — 2-position, 5.00 mm-pitch through-hole screw terminal block. LCSC C8404 rates it 250 V, 18 A, −40 to +105 °C.",
   "footprint_name": "CONN-TH_WJ126V-5.0-2P",
@@ -10,7 +10,7 @@
   "provenance": {
     "added_at": "2026-06-14T23:24:30Z",
     "kicad_version": "9.0.0",
-    "source": "EasyEDA import from LCSC C8404; canonical manufacturer MPN, two contacts, 5.00 mm pitch, and 250 V/18 A ratings reviewed against the product page and attached datasheet.",
+    "source": "EasyEDA import from LCSC C8404; canonical manufacturer MPN, two contacts, 5.00 mm pitch, and 250 V/18 A ratings reviewed against the product page and attached datasheet. STEP representation origin normalized from (2.39, 0.35, 0) mm to zero to match the imported WRL; BREP geometry unchanged.",
     "source_project_stem": null
   },
   "schema_version": "1",

@@ -224,6 +224,23 @@ def _iso_age_s(iso: str) -> float:
         return 0.0
 
 
+def _attempt_elapsed_s(activity: dict, *, now: dt.datetime | None = None) -> float:
+    """A stopped attempt's duration must not grow while its saved page is open."""
+    try:
+        started = dt.datetime.fromisoformat(activity["started_at"])
+        ended = activity.get("finished_at")
+        if not ended and activity.get("phase_status") in (
+            "complete", "failed", "interrupted", "awaiting_input",
+        ):
+            ended = activity.get("last_event_at")
+        stop = dt.datetime.fromisoformat(ended) if ended else (
+            now if now is not None else dt.datetime.now(dt.timezone.utc)
+        )
+        return max(0.0, (stop - started).total_seconds())
+    except (KeyError, ValueError, TypeError):
+        return 0.0
+
+
 def _finalize_orphan(job) -> None:
     with _ATTEMPT_LOCK:
         _finalize_orphan_locked(job)
@@ -8163,7 +8180,7 @@ def index(prompt: str = "", project: str = ""):
             # event -- never an inferred failure for a quiet period.
             elapsed = ""
             if act.get("started_at"):
-                elapsed = f"elapsed {_fmt_duration(_iso_age_s(act['started_at']))}"
+                elapsed = f"elapsed {_fmt_duration(_attempt_elapsed_s(act))}"
             age = _relative_age(pres["last_event_at"])
             summary_age.text = "  ·  ".join(
                 part for part in (elapsed, f"updated {age}" if age else "") if part)

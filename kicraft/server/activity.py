@@ -314,6 +314,7 @@ def blank_activity() -> dict:
         "stage": None,
         "phase_status": "starting",
         "started_at": None,
+        "finished_at": None,
         "last_event_at": None,
         "last_activity": None,
         "failure": None,
@@ -358,6 +359,7 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
             stage=None,
             phase_status="running",
             started_at=event.get("ts") or now_iso(),
+            finished_at=None,
             failure=None,
             last_activity="Starting the design run",
         )
@@ -370,6 +372,8 @@ def reduce_activity(previous: dict | None, event: dict) -> dict:
 
     if kind == "run_finished":
         status = str(event.get("status") or "")
+        if status in ("ok", "failed", "awaiting_input", "interrupted"):
+            act["finished_at"] = ts or now_iso()
         act["phase_status"] = {
             "ok": "complete",
             "failed": "failed",

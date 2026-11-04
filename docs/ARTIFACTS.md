@@ -120,6 +120,12 @@ or assembled mechanical clearance. Missing bodies are shown in the GUI and CLI;
 they are not silently replaced by generic shapes. Bundled model attribution
 is staged alongside the model and retained in downloaded KiCad projects.
 
+Paired WRL and STEP assets must use the same footprint-local coordinate frame.
+Audit actual exported terminal registration and body seating against native
+footprint transforms; matching reference counts cannot detect a shifted, floating
+or PCB-penetrating body. Correct source model frames, preserve the failed package,
+and publish a fresh byte-bound export rather than patching the delivered STEP.
+
 ## Invariants (do not break)
 
 - **Provenance lives only in JSON sidecars — never inside a `.kicad_pcb`.**

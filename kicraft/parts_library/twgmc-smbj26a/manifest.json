@@ -1,5 +1,5 @@
 {
-  "content_hash": "sha256:121b1d5a85c2ee8623946d2b5266d081bf1476aa738e90ac65c5d59cd39cd038",
+  "content_hash": "sha256:c8e98c97839915a38d4f4c61a5c55cd96caa13bc49992c8ccf0a8c56b0bef123",
   "datasheet_url": "https://lcsc.com/product-detail/TVS_TWGMC-SMBJ26A_C726831.html",
   "description": "TWGMC(\u8fea\u5609) SMBJ26A",
   "footprint_name": "SMB_L4.4-W3.6-LS5.3-RD",
@@ -21,5 +21,5 @@
   "tags": [],
   "three_d_model": null,
   "version": "0.1.0",
-  "watch_out_for": null
+  "watch_out_for": "Supplier EasyEDA-imported STEP representation origin shifted +1.225 mm Z to match the unchanged WRL seating plane; original geometry retained."
 }

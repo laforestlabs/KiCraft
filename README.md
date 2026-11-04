@@ -717,6 +717,10 @@ Intentionally generic, null-MPN chip parts retain only the finite reviewed
 standard-case exception, with an exact catalog package match; an explicit
 unknown MPN cannot use that exception. Missing proof stays unverified.
 This does not replace the independent audit of actual pad geometry and exports.
+The exact Samsung CL10A105KA8NNNC / C5673 record covers its nominal 1 µF,
+25 V X5R 0603 pair; those ratings do not guarantee effective capacitance under bias.
+Reopened run durations stop at the attempt's terminal timestamp, and a retained
+uncommitted stage draft is not presented as an active writer after it stops.
 
 ## Saved recipe and spend safety
 
