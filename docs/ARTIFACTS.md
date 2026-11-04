@@ -125,6 +125,10 @@ Audit actual exported terminal registration and body seating against native
 footprint transforms; matching reference counts cannot detect a shifted, floating
 or PCB-penetrating body. Correct source model frames, preserve the failed package,
 and publish a fresh byte-bound export rather than patching the delivered STEP.
+Standalone candidate inspection reports are not necessarily reports of the
+final promoted layout. Bind any final raw-DRC claim to the delivered PCB hash;
+a selected-category fabrication gate does not establish zero warnings.
+
 
 Hand-fitted non-PCB items, such as a removable enable shunt, are typed
 accessories of their owning BOM part. Their exact order codes, quantities and
@@ -133,6 +137,13 @@ digest. The fabrication ZIP includes a separate `accessories.csv` procurement
 list with unique accessory IDs and owner references. These items do not become
 fake PCB footprints, netlist components, placement rows or PCB assembly-BOM rows.
 Missing or changed accessory procurement evidence invalidates its product proof.
+
+An assembled chip passive without a selected compatible catalog package is not
+a complete procurement row. Missing candidates, insufficient stock and
+unverified retail availability must not silently leave an assembled part out
+of the sourcing receipt. Generic header geometry likewise does not qualify a
+purchased ordering identity: the exact header, pitch, contact map and nominal
+manufacturer land pattern must agree.
 
 ## Invariants (do not break)
 

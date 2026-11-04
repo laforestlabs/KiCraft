@@ -203,7 +203,7 @@ class _Run:
 
     __slots__ = ("exp", "label", "buf", "head", "mode")
 
-    def __init__(self, exp, label, head="Thinking", mode="chars"):
+    def __init__(self, exp, label, head="Model text", mode="chars"):
         self.exp = exp
         self.label = label
         self.buf = ""
@@ -317,7 +317,7 @@ class StagePanel:
                         .props('dense header-class="text-xs text-grey-5"'):
                     with ui.column().classes("w-full gap-2 p-1"):
                         _activity()
-                        with ui.expansion("Model reasoning", icon="psychology") \
+                        with ui.expansion("Model transcript", icon="psychology") \
                                 .classes("w-full") \
                                 .props('dense header-class="text-xs text-grey-5"'):
                             _thinking()
@@ -381,6 +381,8 @@ class StagePanel:
         if k == "reasoning_delta":
             # The model's reasoning channel -> the (collapsed) reasoning pane.
             self._on_reasoning(e.get("text", ""))
+        elif k == "answer_start":
+            self._on_answer_start()
         elif k == "answer_delta":
             # The model's content draft = the slot JSON it is writing -> a live
             # preview in Project state (and the reasoning pane too for
@@ -596,6 +598,12 @@ class StagePanel:
         self._saw_reasoning = True
         self._append_thinking(text)
 
+    def _on_answer_start(self) -> None:
+        """A new candidate owns the draft; the transcript retains prior responses."""
+        self._draft_buf = ""
+        self._draft_structured = False
+        self._draft_dirty = True
+
     def _on_answer(self, text: str) -> None:
         """The model's content draft is the slot JSON being written. Feed it to the
         live Project-state preview; mirror it into Thinking only when the model
@@ -620,7 +628,7 @@ class StagePanel:
             self._fold_open()
             with self._think:
                 exp = (
-                    ui.expansion("Thinking", icon="psychology", value=True)
+                    ui.expansion("Model text", icon="psychology", value=True)
                     .classes("w-full")
                     .props('dense expand-separator header-class="text-xs text-grey-5"')
                 )

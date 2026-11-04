@@ -224,7 +224,7 @@ MAX3485_RS485_NODE = _recipe(
 )
 
 DRV8833_DUAL_MOTOR = _recipe(
-    recipe="drv8833-dual-motor@3",
+    recipe="drv8833-dual-motor@4",
     family="dual-dc-motor-driver",
     exact="DRV8833PWPR",
     safety=True,
@@ -233,13 +233,13 @@ DRV8833_DUAL_MOTOR = _recipe(
         Port(name="logic_vdd", direction="power"),
         Port(name="gnd", direction="power"),
         *(
-            Port(name=name, direction="input")
+            Port(name=name, direction="input", reset_control="external_low")
             for name in ("ain1", "ain2", "bin1", "bin2", "sleep_n")
         ),
         Port(name="fault_n", direction="output"),
         *(Port(name=name, direction="output") for name in ("aout1", "aout2", "bout1", "bout2")),
     ),
-    internal=("vcp", "vint", "aisense", "bisense"),
+    internal=("vcp", "vint"),
     parts=(
         _part(
             "driver",
@@ -253,7 +253,6 @@ DRV8833_DUAL_MOTOR = _recipe(
         _passive("vm_decoupling", "C", "100nF"),
         _passive("vcp_cap", "C", "10nF"),
         _passive("vint_cap", "C", "2.2uF"),
-        _passive("sense", "R", "0R", 2),
         _passive("control_pulldown", "R", "100k", 5),
         _passive("fault_pullup", "R", "10k"),
         _part(
@@ -267,10 +266,10 @@ DRV8833_DUAL_MOTOR = _recipe(
     pins=(
         Pin(role="driver", pin="1", net="sleep_n"),
         Pin(role="driver", pin="2", net="aout1"),
-        Pin(role="driver", pin="3", net="aisense"),
+        Pin(role="driver", pin="3", net="gnd"),
         Pin(role="driver", pin="4", net="aout2"),
         Pin(role="driver", pin="5", net="bout2"),
-        Pin(role="driver", pin="6", net="bisense"),
+        Pin(role="driver", pin="6", net="gnd"),
         Pin(role="driver", pin="7", net="bout1"),
         Pin(role="driver", pin="8", net="fault_n"),
         Pin(role="fault_pullup", pin="1", net="fault_n"),
@@ -298,10 +297,6 @@ DRV8833_DUAL_MOTOR = _recipe(
             for role in ("vm_bulk", "vm_decoupling", "vint_cap")
         ),
         Pin(role="vcp_cap", pin="2", net="vm"),
-        Pin(role="sense", index=0, pin="1", net="aisense"),
-        Pin(role="sense", index=0, pin="2", net="gnd"),
-        Pin(role="sense", index=1, pin="1", net="bisense"),
-        Pin(role="sense", index=1, pin="2", net="gnd"),
         Pin(role="control_pulldown", index=0, pin="1", net="ain1"),
         Pin(role="control_pulldown", index=1, pin="1", net="ain2"),
         Pin(role="control_pulldown", index=2, pin="1", net="bin1"),
@@ -319,7 +314,7 @@ DRV8833_DUAL_MOTOR = _recipe(
     assertions=(
         Assertion(
             code="motor_current_thermal_bound",
-            message="The exposed pad requires grounded thermal copper; this ordinary-fab footprint has no in-pad vias. Motor stall current, sense configuration, copper area, dissipation, and bulk capacitance require independent review; the package current rating is not a board current guarantee",
+            message="AISEN and BISEN are grounded directly, so winding current regulation is not provided. The exposed pad requires grounded thermal copper; this ordinary-fab footprint has no in-pad vias. Motor stall current, copper area, dissipation, and bulk capacitance require independent review; the package current rating is not a board current guarantee",
         ),
     ),
 )

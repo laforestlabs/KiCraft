@@ -166,6 +166,15 @@ def chip_value_matches(value_token: str, cand: dict) -> bool:
     tok = (value_token or "").strip()
     if not tok:
         return True
+    if tok.casefold() in ("0r", "0", "0ohm", "0ω"):
+        # MPNs embed "0R" in both jumper and nonzero resistance codes.
+        # Only a standalone zero with an explicit ohm unit in the catalog
+        # description establishes the value; stock is not a current rating.
+        desc = str(cand.get("description") or "")
+        return bool(re.search(
+            r"(?<![\d.])0(?:\.0+)?\s*(?:Ω|ohms?\b|R(?![a-z\d]))",
+            desc, re.IGNORECASE,
+        ))
     hay = " ".join(str(cand.get(k) or "")
                    for k in ("model", "brand", "description", "package"))
     if tok.lower() not in hay.lower():

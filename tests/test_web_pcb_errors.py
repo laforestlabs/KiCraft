@@ -279,6 +279,16 @@ def test_legacy_failed_project_gets_location_unavailable_card():
     assert section["title"] == "PCB place/route failed"
     assert "No precise PCB location" in section["explanation"]
 
+@pytest.mark.parametrize("artifacts", [{}, {"status": "ok"}])
+def test_retained_retry_errors_do_not_mark_current_board_failed(artifacts):
+    section = _pcb_error_section(
+        {"artifacts": artifacts},
+        None,
+        ["error: first candidate rejected", "[round 2] parent routing resumed"],
+    )
+    assert section is None
+
+
 # The UI simulation is intentionally small: it verifies the persisted state is
 # enough to repaint the reopened card, without starting KiCad or a worker.
 user_simulation = pytest.importorskip("nicegui.testing.user_simulation").user_simulation

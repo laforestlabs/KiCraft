@@ -145,6 +145,16 @@ def test_chip_value_matches_requires_clean_numeric_boundaries():
     assert jlcparts.chip_value_matches("", {"description": "whatever"})
 
 
+def test_zero_ohm_requires_semantic_value_not_mpn_substrings():
+    for description in ("0Ω 0603 Chip Resistor", "0 ohm", "0.0Ω"):
+        assert jlcparts.chip_value_matches(
+            "0R", {"model": "RC0603JR-070RL", "description": description})
+    for description in ("30Ω", "10Ω", "100Ω", "0.1Ω"):
+        assert not jlcparts.chip_value_matches(
+            "0R", {"model": "RC0603JR-070RL", "description": description})
+    assert not jlcparts.chip_value_matches("0R", {"model": "RC0603JR-070RL"})
+
+
 def test_parse_ladder_and_price_at():
     ladder = jlcparts.parse_ladder("1-9:4.817,10-29:4.27,garbage,1000-:3.16")
     assert ladder == [{"qty_from": 1, "qty_to": 9, "price": 4.817},

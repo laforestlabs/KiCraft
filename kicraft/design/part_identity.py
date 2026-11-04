@@ -476,6 +476,99 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         )
         for count, lcsc in ((2, "C541849"), (4, "C541851"), (8, "C46595973"))
     ),
+    # The offline catalog retains the Chinese "pin" suffix in this exact order
+    # name. C49257 links the 1xN manufacturer drawing; N=3 is the purchased part,
+    # not a cut-down longer strip. Its recommended nominal finished hole is 1 mm.
+    ReviewedPart(
+        identity="2.54-1*3p针",
+        family="pin-header",
+        package="BOOMELE 1x3 male through-hole header, 2.54 mm pitch, 0.64 mm square posts",
+        bundle="kicad-standard",
+        symbol="Connector_Generic:Conn_01x03",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+        physical_features=frozenset(
+            {"connector", "header", "pin-header", "male", "single-row", "through-hole"}
+        ),
+        contacts=("1", "2", "3"),
+        manufacturer_sources=(
+            "https://datasheet.lcsc.com/datasheet/pdf/d52c83a07830c4e9e9a614accc55f5cd.pdf?productCode=C49257",
+            "https://www.lcsc.com/product-detail/C49257.html",
+        ),
+        lcsc="C49257",
+        operating_limits={
+            "pitch_mm": 2.54,
+            "positions": 3,
+            "post_width_mm": 0.64,
+            "pcb_hole_diameter_mm": 1.0,
+            "mating_length_mm": 5.7,
+            "pcb_tail_length_mm": 3.0,
+            "current_a": 3,
+            "contact_resistance_max_ohm": 0.020,
+            "temperature_min_c": -40,
+            "temperature_max_c": 105,
+        },
+    ),
+    ReviewedPart(
+        identity="b-2100s04p-a110",
+        family="pin-header",
+        package="Ckmtw B-2100S04P-A110 1x4 vertical male through-hole header, 2.54 mm pitch",
+        bundle="kicad-standard",
+        symbol="Connector_Generic:Conn_01x04",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+        physical_features=frozenset(
+            {"connector", "header", "pin-header", "male", "single-row", "through-hole"}
+        ),
+        contacts=("1", "2", "3", "4"),
+        manufacturer_sources=(
+            "https://datasheet.lcsc.com/datasheet/pdf/219f7e7eb5f34457895b2c164313179f.pdf?productCode=C124378",
+            "https://www.lcsc.com/product-detail/C124378.html",
+        ),
+        lcsc="C124378",
+        operating_limits={
+            "pitch_mm": 2.54,
+            "positions": 4,
+            "post_width_mm": 0.64,
+            "post_width_tolerance_mm": 0.02,
+            "reviewed_nominal_pcb_hole_mm": 1.0,
+            "mating_length_mm": 6.0,
+            "pcb_tail_length_mm": 3.0,
+            "current_a": 3,
+            "contact_resistance_max_ohm": 0.020,
+            "temperature_min_c": -40,
+            "temperature_max_c": 105,
+        },
+    ),
+    # Exact catalog spelling includes "straight pin". Its own product-code
+    # drawing specifies the 1xN land pattern; N=6 is the order, not a cut strip.
+    ReviewedPart(
+        identity="2.54-1x6p直针",
+        family="pin-header",
+        package="BOOMELE 1x6 vertical male through-hole header, 2.54 mm pitch",
+        bundle="kicad-standard",
+        symbol="Connector_Generic:Conn_01x06",
+        footprint="Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+        physical_features=frozenset(
+            {"connector", "header", "pin-header", "male", "single-row", "through-hole"}
+        ),
+        contacts=("1", "2", "3", "4", "5", "6"),
+        manufacturer_sources=(
+            "https://datasheet.lcsc.com/datasheet/pdf/cb0770a379b121177c8c7d26dfb00406.pdf?productCode=C37208",
+            "https://www.lcsc.com/product-detail/C37208.html",
+        ),
+        lcsc="C37208",
+        operating_limits={
+            "pitch_mm": 2.54,
+            "positions": 6,
+            "post_width_mm": 0.64,
+            "pcb_hole_diameter_mm": 1.0,
+            "mating_length_mm": 5.7,
+            "pcb_tail_length_mm": 3.0,
+            "current_a": 3,
+            "contact_resistance_max_ohm": 0.020,
+            "temperature_min_c": -40,
+            "temperature_max_c": 105,
+        },
+    ),
     # Samtec's SNT shunt drawing specifies TSW mating, 0.64 mm square posts,
     # and 4.32 mm minimum insertion; TSW -07 supplies a 5.84 mm mating post.
     ReviewedPart(
@@ -4030,6 +4123,36 @@ def _researched_parts() -> tuple[ReviewedPart, ...]:
     return _RESEARCHED_CACHE[1]
 
 
+def reviewed_header_geometry(record: ReviewedPart) -> tuple[int, str] | None:
+    """Proven 2.54 mm passive-header rows/gender, independent of default choices."""
+    count = len(record.contacts)
+    if (
+        not count or not record.bundle or not record.symbol or not record.footprint
+        or "pin-header" not in record.physical_features
+        or set(record.contacts) != {str(pin) for pin in range(1, count + 1)}
+    ):
+        return None
+    standard = re.search(
+        r"(PinHeader|PinSocket)_(\d+)x(\d+)_P(\d+(?:\.\d+)?)mm", record.footprint
+    )
+    if standard:
+        rows = int(standard.group(2))
+        gender = "female" if standard.group(1) == "PinSocket" else "male"
+        pitch = float(standard.group(4))
+        if rows * int(standard.group(3)) != count:
+            return None
+    elif "single-row" in record.physical_features:
+        rows = 1
+        gender = (
+            "female" if "female" in record.physical_features
+            else "male" if "male" in record.physical_features else None
+        )
+        pitch = record.operating_limits.get("pitch_mm")
+    else:
+        return None
+    return (rows, gender) if rows in (1, 2) and pitch == 2.54 and gender else None
+
+
 # Equivalent spellings, unlike demand alternatives such as header/socket or
 # wireless/Wi-Fi. Only equivalences may add facts to a researched part record.
 _PHYSICAL_FEATURE_SYNONYMS = {
@@ -5071,10 +5194,11 @@ _STANDARD_LIBRARY_PARTS: tuple[ReviewedPart, ...] = (
         bundle="amphenol-68000-406hlf",
         symbol="Connector_Generic:Conn_01x06",
         footprint="amphenol-68000-406hlf:HDR-TH_6P-P2.54-V-M-1",
-        physical_features=frozenset({"connector", "header", "pin-header", "single-row", "through-hole"}),
+        physical_features=frozenset({"connector", "header", "pin-header", "male", "single-row", "through-hole"}),
         contacts=("1", "2", "3", "4", "5", "6"),
         manufacturer_sources=("https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588895884876242944",),
         lcsc="C178289",
+        operating_limits={"pitch_mm": 2.54, "positions": 6},
     ),
     ReviewedPart(
         identity="grm31cr71h475ka12l",

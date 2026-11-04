@@ -455,9 +455,9 @@ class ArchitectureIntent(BaseModel):
                 "owner-requiring obligation in the implementing requirement's `obligation_ids`. "
                 f"listed_at_top_level_only={unowned}"
             )
-        # Distinct sheets already demand distinct physical instances. When those
-        # instances prove a shared board-wide count, do not charge that count again
-        # in each BOM unit; optional replication hints are not quantity evidence.
+        # Distinct physical requirements demand distinct instances, even on one
+        # sheet. If that lower bound proves a board-wide count, do not charge
+        # the count again in every local BOM unit.
         from kicraft.design.part_identity import quantity_subject_binds
 
         owned_rows = {
@@ -477,8 +477,8 @@ class ArchitectureIntent(BaseModel):
                     for row in owned_rows[requirement.id]
                 )
             ]
-            sheet_count = len({requirement.sheet for requirement in owners})
-            if sheet_count < quantity.minimum:
+            instance_count = len(owners)
+            if instance_count < quantity.minimum:
                 continue
             for requirement in owners:
                 requirement.obligation_ids = [
@@ -487,8 +487,8 @@ class ArchitectureIntent(BaseModel):
                     if identifier != quantity.original_obligation_id
                 ]
             self.assumptions.append(
-                f"{quantity.original_obligation_id}: its owners already require a physical "
-                f"instance on {sheet_count} distinct sheets; "
+                f"{quantity.original_obligation_id}: its owners already require "
+                f"{instance_count} distinct physical instances; "
                 "the shared count is retained once at board level (derived)"
             )
         return self
@@ -763,7 +763,7 @@ def _lowerer_realizes_exact_part(family: str, identity: str) -> bool:
     and consolidation_r15: the rewrite dropped `usb-c-breakout@1`, and the parts stage was left
     asking the model for a receptacle identity only the compiler can state).
     """
-    from kicraft.design.part_identity import reviewed_part
+    from kicraft.design.part_identity import reviewed_part, reviewed_header_geometry
     from kicraft.design.lowering import registered_lowerers
 
     wanted = str(identity or "").strip()
@@ -785,6 +785,11 @@ def _lowerer_realizes_exact_part(family: str, identity: str) -> bool:
     record = reviewed_part(wanted)
     if record is None:
         return False
+    if any(
+        family in lowerer.families and "pin-header" in lowerer.families
+        for lowerer in registered_lowerers()
+    ):
+        return reviewed_header_geometry(record) is not None
     # One physical device is one reviewed class on one reviewed symbol/footprint pair; a record
     # that differs in either is a different part and never this lowerer's.
     return any(
@@ -1092,6 +1097,45 @@ def _adopt_carrier_families(payload: dict) -> dict:
     generic_connector_classes = {"pin-header", "screw-terminal", "jst-connector", "jst-xh-connector", "jst-ph"}
     for requirement in requirements:
         family = str(requirement.get("family") or "")
+        physical = [
+            row for row in _physical_obligations(requirement)
+            if row.get("kind") == "physical"
+        ]
+        declared = requirement.get("declared_ports") or []
+        ports = requirement.get("ports") or {}
+        identity_contacts = bool(declared) and all(
+            isinstance(port, dict)
+            and re.fullmatch(r"pin[1-9][0-9]*", str(port.get("key") or ""))
+            and str(port.get("pin")) == str(port["key"])[3:]
+            for port in declared
+        )
+        if not declared and isinstance(ports, dict) and ports:
+            identity_contacts = all(re.fullmatch(r"pin[1-9][0-9]*", str(key)) for key in ports)
+        if (
+            family.casefold() in {
+                "pin-header", "pin_header", "generic-header", "header",
+                "analog-output-header", "analog_output_header",
+                "spi-header", "spi_header", "i2c-header", "i2c_header",
+            }
+            and str(requirement.get("role") or "").casefold() == "connector"
+            and physical
+            and all(
+                (features := canonical_physical_features(str(row.get("component_class") or "")))
+                and features
+                <= {"pin-header", "pin-socket"}
+                for row in physical
+            )
+            and identity_contacts
+            and (
+                not requirement.get("exact_part")
+                or _lowerer_realizes_exact_part("pin-header", str(requirement["exact_part"]))
+            )
+        ):
+            # The committed physical class and explicit identity contact map own this
+            # carrier. Do not relabel a generic header as an analog-output assembly,
+            # erase rows/gender, or reinterpret a logical key as a different pad.
+            requirement["family"] = "pin-header"
+            continue
         if family.casefold() not in lowerers:
             # A requirement that names a reviewed part *class* instead of the lowerer family that
             # builds it gets the family that owns the class's support parts -- the part is the

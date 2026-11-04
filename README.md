@@ -717,6 +717,24 @@ Intentionally generic, null-MPN chip parts retain only the finite reviewed
 standard-case exception, with an exact catalog package match; an explicit
 unknown MPN cannot use that exception. Missing proof stays unverified.
 This does not replace the independent audit of actual pad geometry and exports.
+Recognized assembled chip-passive requests must resolve to an exact compatible
+catalog package with verified sourcing, or report an actionable failure.
+Zero-ohm values include `0Ω`, not numeric substrings in unrelated MPNs; an
+unreachable or disabled retail check is unverified, not a successful selection.
+Header lowering owns generic SPI/I2C carriers. A misleading analog-header family
+is normalized only for a committed generic-header physical class with an explicit
+identity contact map; true analog-output classes keep their existing part-stage
+owner. Exact carriers transfer only when their geometry is proven independently
+of the unspecified-default list.
+Reviewed three-, four- and six-contact BOOMELE/Ckmtw stock-pattern carriers and the
+six-contact Amphenol C178289 carrier retain their exact declared pin maps.
+Explicit gender, rows and contact counts are not silently changed, and a longer
+strip is not a qualified cut-down substitute. Land-pattern qualification is
+nominal dimensional evidence, not production-lot or fab-tolerance metrology.
+Native footprint readers scope their owning KiCad plugin and detach one native
+copy before releasing its library cache. KiCad regenerates root and descendant
+UUIDs; board insertion transfers ownership. Malformed files are rejected through
+the native loader, not the unsafe direct-import error boundary.
 The exact Samsung CL10A105KA8NNNC / C5673 record covers its nominal 1 µF,
 25 V X5R 0603 pair; those ratings do not guarantee effective capacitance under bias.
 Reopened run durations stop at the attempt's terminal timestamp, and a retained
@@ -725,6 +743,12 @@ Live elapsed time and last-event age refresh even when no new execution event
 arrives; a quiet period never changes a run's status. Concept diagrams retain
 their deterministic coordinates on finite hidden axes, avoiding singular graph
 view transforms during tab transitions without stretching component symbols.
+Each provider response attempt owns its own uncommitted draft, including transport
+retries, successive tool-loop completions, and mixed reasoning/content deltas.
+Earlier response history remains available in Technical details → Model transcript,
+not mislabeled as reasoning-only text. Retained failed-candidate log lines do not
+turn an active
+automatic recovery or a successfully exported board into a current failure.
 
 An `external_interface` obligation describes the board-side connection to a
 named external protocol/load, not an onboard copy of that load. It requires a
@@ -738,16 +762,29 @@ Exact linear-regulator dissipation limits reject clearly excessive calculated
 loss. Passing that absolute-limit check is not board thermal qualification.
 The DRV8833 land no longer contains unspecified in-pad plated thermal holes;
 ordinary-process assembly does not imply a guaranteed motor stall/current rating.
+DRV8833 `@4` grounds AISEN/BISEN directly when current regulation is not requested;
+it does not claim winding-current regulation or infer a winding limit from the
+shared supply rating. Its externally low-biased control ports require MCU
+reset-pull compatibility. Documented C3 pin facts qualify automatic allocations;
+incompatible explicit GPIO choices and unknown required reset facts are refused.
+Only explicitly MCU-bound control nets acquire those constraints; sheet
+membership never invents a physical MCU connection. Unregistered MCU cores
+cannot bypass a bound reset-control obligation through model-owned fallback.
+This is a DC reset-bias contract, not a power-ramp or firmware guarantee.
+Board-wide counts already witnessed by distinct physical requirement owners
+remain at board scope even when those owners share a sheet; they are not
+multiplied into every local connector bank.
 
 ## Saved recipe and spend safety
 
 Saved selections migrate explicitly to the current recipe contract:
-`rp2040-minimal@1/@2` → `@3`, DRV8833 `@1/@2` → `@3`, TPS54331 `@1` → `@2`,
-and the changed C3 native-USB minimal recipes `@1` → `@2`. The already-qualified
-H4X UART recipe remains `@1`. DRV8833's fault pull-up uses an explicit MCU logic
-supply, never the motor rail; a legacy selection without the required bindings
-must regenerate architecture. Migration preserves known programming, GPIO and
-net-binding intent; ambiguous legacy parameters are refused rather than guessed.
+`rp2040-minimal@1/@2` → `@3`, TPS54331 `@1` → `@2`, and the changed C3
+native-USB minimal recipes `@1` → `@2`. The already-qualified H4X UART recipe
+remains `@1`. DRV8833 `@1/@2/@3` instead require architecture regeneration
+and MCU reset requalification even when all port bindings are present:
+BOM-only relabeling cannot preserve a previously unsafe GPIO allocation.
+DRV8833's fault pull-up uses an explicit MCU logic supply, never the motor rail.
+Ambiguous legacy parameters are refused rather than guessed.
 Derived BOMs carrying obsolete ownership must be regenerated upstream.
 Changing their recipe labels is not a migration of the electrical graph.
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import pcbnew
 
@@ -24,6 +25,7 @@ from kicraft.autoplacer.hardware.silk_geometry import (
     find_shift_into_poly,
 )
 from kicraft.autoplacer.hardware.silk_refdes import legalize_refdes
+from kicraft.design.synthesis.footprint_library import load_footprint_file
 
 
 def _outline_poly_mm(outline: dict | None) -> list[tuple[float, float]]:
@@ -144,13 +146,9 @@ def main(argv: list[str]) -> int:
                     f"synthesized mounting-hole ref {_sf['ref']!r} already "
                     f"exists on the source board; refusing to overwrite"
                 )
-            _new_fp = pcbnew.FootprintLoad(_sf["lib_dir"], _sf["fp_name"])
-            if _new_fp is None:
-                raise RuntimeError(
-                    f"FootprintLoad({_sf['lib_dir']!r}, {_sf['fp_name']!r}) "
-                    f"returned None; stock MountingHole library missing or "
-                    f"footprint renamed"
-                )
+            _new_fp = load_footprint_file(
+                pcbnew, Path(_sf["lib_dir"]) / f'{_sf["fp_name"]}.kicad_mod'
+            )
             _new_fp.SetReference(_sf["ref"])
             _new_fp.SetPosition(
                 pcbnew.VECTOR2I(pcbnew.FromMM(_sf["x"]), pcbnew.FromMM(_sf["y"]))

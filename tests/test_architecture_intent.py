@@ -2099,9 +2099,9 @@ def test_distributed_physical_instances_prove_only_their_shared_count(
                 for name in requirement.obligation_ids
             ],
         }
-        if instances == 4 and subject == "relay" and not same_sheet:
-            # Distinct sheets already demand distinct instances, so the shared count is retained
-            # once at board level and no requirement charges it again.
+        if instances == 4 and subject == "relay":
+            # Distinct owners demand distinct instances even on one sheet; the
+            # original count remains at board level, never multiplied locally.
             assert "count" not in requirement.obligation_ids
             assert not _requirement_obligation_defects(
                 [resolved], [group]

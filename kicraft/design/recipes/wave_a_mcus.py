@@ -76,6 +76,8 @@ def _module_recipe(
     no_connect_pins: tuple[str, ...] = (),
     input_only_gpios: frozenset[int] = frozenset(),
     boot_high_gpios: frozenset[int] = frozenset(),
+    reset_no_pull_up_gpios: frozenset[int] = frozenset(),
+    reset_pull_up_gpios: frozenset[int] = frozenset(),
     family_aliases: tuple[str, ...] = (),
  ) -> RecipeDefinition:
     fixed = {boot_gpio}
@@ -259,6 +261,11 @@ def _module_recipe(
                 strapping=gpio in strapping,
                 reserved=gpio in fixed,
                 input_only=gpio in input_only_gpios,
+                reset_bias=(
+                    "no_pull_up" if gpio in reset_no_pull_up_gpios
+                    else "pull_up" if gpio in reset_pull_up_gpios
+                    else "unknown"
+                ),
             )
             for gpio, pin in sorted(gpio_to_pin.items())
             if gpio not in fixed
@@ -304,6 +311,18 @@ def _module_recipe(
                 revision="current",
                 reviewed_date=_REVIEW_DATE,
                 sections=("ADC Calibration Results: ATTEN3 effective measurement range",),
+            ),
+            *(
+                (
+                    SourceDocument(
+                        url="https://documentation.espressif.com/esp32-c3_datasheet_en.pdf",
+                        title="ESP32-C3 chip datasheet",
+                        revision="current",
+                        reviewed_date="2026-11-04",
+                        sections=("Table 2-1 and note 6", "Table 2-4"),
+                    ),
+                )
+                if reset_no_pull_up_gpios or reset_pull_up_gpios else ()
             ),
             SourceDocument(
                 url=guideline,
@@ -550,6 +569,10 @@ ESP32_C3_MINI_1_MINIMAL = _module_recipe(
     adc_input_max_v=2.5,
     adc_datasheet="https://documentation.espressif.com/esp32-c3_datasheet_en.pdf",
     strapping=frozenset({2, 8, 9}),
+    # ESP32-C3 chip datasheet Tables 2-1 and 2-4, including note 6.
+    # GPIO6/MTCK has a reset pull-up with the default JTAG efuse setting.
+    reset_no_pull_up_gpios=frozenset({0, 1, 3, 4, 5}),
+    reset_pull_up_gpios=frozenset({6}),
     boot_high_gpios=frozenset({8}),
     no_connect_pins=(
         "4",

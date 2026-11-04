@@ -21,6 +21,7 @@ class PinAllocationRequest(BaseModel):
     group: str | None = None
     contiguous: bool = False
     allow_strapping: bool = False
+    reset_control: str | None = None
 
 
 class PinAllocationError(ValueError):
@@ -89,6 +90,8 @@ def _supports(pin: RecipeAllocatablePin, request: PinAllocationRequest) -> bool:
     wanted = _capability(request.capability)
     available = {_capability(value) for value in pin.capabilities}
     if pin.reserved or (pin.strapping and not request.allow_strapping):
+        return False
+    if request.reset_control == "external_low" and pin.reset_bias != "no_pull_up":
         return False
     if pin.input_only and wanted in {
         "gpio",
@@ -419,6 +422,7 @@ def allocate_requirement_pins(
     *,
     existing: list[RecipePinAllocation] | None = None,
     required_capabilities: dict[str, str] | None = None,
+    required_reset_controls: dict[str, str] | None = None,
 ) -> list[RecipePinAllocation]:
     fixed_port_pins = definition.fixed_port_pins
     fixed_ports = (
@@ -582,12 +586,56 @@ def allocate_requirement_pins(
             if fixed:
                 explicit.append(RecipePinAllocation(net=net, pin=fixed[0], capability=capability))
         requests = [requests_by_net[request.net] for request in requests]
-    allocations = allocate_pins(
-        available_pins,
-        requests,
-        existing=[*(existing or []), *explicit],
-        requirement_id=requirement.id,
-    )
+    if required_reset_controls:
+        requests_by_net = {request.net: request for request in requests}
+        explicit_by_net = {allocation.net: allocation.pin for allocation in explicit}
+        for net, control in required_reset_controls.items():
+            request = requests_by_net.get(net)
+            if control != "external_low" or request is None or request.capability not in {
+                "gpio", "output", "pwm",
+            }:
+                raise PinAllocationError(
+                    "unsupported_reset_control",
+                    f"net {net!r} requires a documented reset-low-compatible MCU output; "
+                    "bind it to an allocatable output and provide a qualified reset-bias contract",
+                    requirement_id=requirement.id,
+                )
+            constrained = request.model_copy(update={"reset_control": control})
+            explicit_pin = explicit_by_net.get(net)
+            if explicit_pin is not None and not _supports(pin_by_number[explicit_pin], constrained):
+                raise PinAllocationError(
+                    "conflicting_reset_control",
+                    f"net {net!r} explicitly selects pin {explicit_pin!r}, whose reset bias "
+                    "does not establish compatibility with the external low bias; choose a "
+                    "documented non-pull-up GPIO or a separately qualified circuit",
+                    requirement_id=requirement.id,
+                )
+            if not any(_supports(pin, constrained) for pin in available_pins):
+                raise PinAllocationError(
+                    "unsupported_reset_control",
+                    f"net {net!r} needs an externally low-biased output, but this MCU "
+                    "has no available GPIO with documented reset pull-up absence; select "
+                    "a qualified MCU or provide a separately qualified control circuit",
+                    requirement_id=requirement.id,
+                )
+            requests_by_net[net] = constrained
+        requests = [requests_by_net[request.net] for request in requests]
+    try:
+        allocations = allocate_pins(
+            available_pins,
+            requests,
+            existing=[*(existing or []), *explicit],
+            requirement_id=requirement.id,
+        )
+    except PinAllocationError as exc:
+        if not required_reset_controls or exc.code != "unsatisfied_pin_capability":
+            raise
+        # A newly introduced peer constraint may need a previously allocated
+        # unconstrained signal's pad. Reallocate automatic assignments together;
+        # explicit GPIO and fixed typed functions remain pinned.
+        allocations = allocate_pins(
+            available_pins, requests, existing=explicit, requirement_id=requirement.id,
+        )
     explicit_by_net = {allocation.net: allocation.pin for allocation in explicit}
     for allocation in allocations:
         expected = explicit_by_net.get(allocation.net)

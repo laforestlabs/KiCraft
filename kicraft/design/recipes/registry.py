@@ -98,6 +98,20 @@ def recipe_summaries(
                     if pin.gpio is not None and not pin.reserved
                 }
             ),
+            "allocatable_pins": [
+                pin.model_dump() for pin in definition.allocatable_pins if not pin.reserved
+            ],
+            "application_port_patterns": (
+                {"output_<id>": "output", "input_<id>": "input"}
+                if definition.allocatable_pins else {}
+            ),
+            "application_port_binding": (
+                "For generated/default signals use output_<id> or input_<id> with neutral "
+                "net names; the allocator selects physical pads using typed peer constraints. "
+                "Use gpioN only for an explicitly requested physical GPIO, which cannot be "
+                "silently reassigned."
+                if definition.allocatable_pins else None
+            ),
             "allocatable_capabilities": (
                 capabilities := allocatable_capability_counts(definition.allocatable_pins)
             ),
@@ -152,6 +166,11 @@ def migrate_recipe_selection(value: object) -> RecipeSelection:
     """
     selection = RecipeSelection.model_validate(value)
     replacement = legacy_recipe_replacement(selection.recipe)
+    if replacement is not None and selection.recipe.startswith("drv8833-dual-motor@"):
+        raise ValueError(
+            f"saved {selection.recipe} requires architecture regeneration: its MCU control "
+            "allocations must be requalified for reset bias before using the replacement recipe"
+        )
     if replacement is not None and not selection.recipe.startswith("rp2040-minimal@"):
         definition = get_recipe(replacement)
         unknown = selection.parameters.keys() - definition.parameter_defaults.keys()
@@ -160,16 +179,6 @@ def migrate_recipe_selection(value: object) -> RecipeSelection:
         for name, choices in definition.allowed_parameters.items():
             if name in selection.parameters and selection.parameters[name] not in choices:
                 raise ValueError(f"saved {selection.recipe} has unsupported {name!r}")
-        if selection.recipe.startswith("drv8833-dual-motor@"):
-            missing = [
-                port.name for port in definition.ports
-                if port.required and not selection.port_bindings.get(port.name)
-            ]
-            if missing:
-                raise ValueError(
-                    f"saved {selection.recipe} lacks required replacement ports {missing}; "
-                    "regenerate architecture rather than inventing their rails"
-                )
         return selection.model_copy(update={"recipe": replacement})
     if selection.recipe not in {"rp2040-minimal@1", "rp2040-minimal@2"}:
         return selection

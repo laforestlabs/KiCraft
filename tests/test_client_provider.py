@@ -945,12 +945,31 @@ def test_stream_retries_mid_stream_disconnect(monkeypatch):
         return _FakeResp(good_chunks)
 
     monkeypatch.setattr(c, "_open_stream", _fake_open)
-    msg, cost = c._stream({"messages": [{"role": "user", "content": "x"}]})
+    draft = ""
+
+    def progress(event):
+        nonlocal draft
+        if event["kind"] == "answer_start":
+            draft = ""
+        elif event["kind"] == "answer_delta":
+            draft += event["text"]
+
+    on_delta = c._delta_progress(progress)
+    msg, cost = c._stream(
+        {"messages": [{"role": "user", "content": "x"}]}, on_delta=on_delta
+    )
     assert len(attempts) == 2
     # The partial "par" from the aborted attempt was discarded, not prepended.
     assert msg["content"] == "hello"
     assert msg["finish_reason"] == "stop"
     assert cost > 0.0
+    assert draft == msg["content"]
+    # Tool rounds reuse the same callback. A subsequent completion replaces the
+    # prior response just as a transport retry replaces its discarded prefix.
+    final, _ = c._stream(
+        {"messages": [{"role": "user", "content": "final"}]}, on_delta=on_delta
+    )
+    assert draft == final["content"]
 
 
 def test_stream_gives_up_after_max_retries(monkeypatch):

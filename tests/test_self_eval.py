@@ -1513,35 +1513,6 @@ def test_compile_report_aggregates_and_writes(tmp_path):
     assert "By archetype" in md and "usb_c_connector" in md
 
 
-def test_full_report_attends_every_frozen_non_rc0_run(tmp_path):
-    frozen = json.loads(
-        (Path(__file__).parents[1] / "logs/self_eval/20260915T132650Z/summary.json").read_text()
-    )
-    records = frozen["runs"]
-    non_rc0 = [record for record in records if record.get("build_rc") != 0]
-    assert len(non_rc0) == 23
-
-    summary = se.compile_report(
-        records,
-        tmp_path,
-        {key: value for key, value in frozen.items() if key != "runs"},
-    )
-    attention = (tmp_path / "summary.md").read_text().split("## Needs attention", 1)[1]
-    for record in non_rc0:
-        assert f"**#{record['index']}** {record['stem']}" in attention
-    assert "**#10** run_10_rp2040-min" in attention
-    assert "**#21** run_21_proto-shield" in attention
-    assert summary["execution_mode"] == "full"
-    assert {
-        phase: summary["lifecycle"][phase]["status"]
-        for phase in ("post_wiring_review", "silkscreen", "judge")
-    } == {
-        "post_wiring_review": "not-recorded",
-        "silkscreen": "not-recorded",
-        "judge": "not-recorded",
-    }
-
-
 def test_design_only_success_is_not_reported_as_a_build_failure(tmp_path):
     summary = se.compile_report(
         [

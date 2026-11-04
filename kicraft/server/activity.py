@@ -82,6 +82,7 @@ IMPLICIT_STAGE_KINDS = frozenset(
         "retry",
         "stage_diagnostic",
         "reasoning_delta",
+        "answer_start",
         "answer_delta",
         "serialization_recovery",
         "provider_fallback",

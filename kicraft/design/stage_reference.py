@@ -84,6 +84,12 @@ def reviewed_option_detail(part, ratings: list[str]) -> list[str]:
     if part.contacts:
         count = len(part.contacts)
         detail.append(f"{count} contact" + ("" if count == 1 else "s"))
+    features = part.physical_features
+    if "pin-header" in features:
+        detail.extend(gender for gender in ("male", "female") if gender in features)
+        pitch = (part.operating_limits or {}).get("pitch_mm")
+        if pitch is not None:
+            detail.append(f"{pitch:g} mm pitch")
     detail.extend(ratings)
     return detail
 
@@ -105,9 +111,11 @@ def reviewed_class_options_block(intent: dict) -> str | None:
     from kicraft.design.part_identity import (
         canonical_physical_features,
         reviewed_parts_for_feature,
+        quantity_subject_binds,
     )
     from kicraft.parts_library import jlcparts
     from kicraft.design.recipes.registry import registered_recipes
+    from kicraft.design.cli_app import _bom_stock_floor
 
     demanded = sorted(
         {
@@ -117,27 +125,53 @@ def reviewed_class_options_block(intent: dict) -> str | None:
         }
         - {""}
     )
+    # Conversion facts already require this hardware; a second physical-part
+    # obligation is not necessary to expose its qualified constructors.
+    if any(
+        isinstance(row, dict) and row.get("kind") == "conversion"
+        and all(re.search(r"\d+(?:\.\d+)?\s*m?V\b", str(row.get(key) or ""), re.I)
+                for key in ("input_kind", "output_kind"))
+        for row in intent.get("obligations") or []
+    ):
+        demanded = sorted({*demanded, "voltage-regulator"})
     lines: list[str] = []
     terminal_demanded = False
     for component_class in demanded:
         options: dict[str, str] = {}
+        wanted_widths = {
+            row.get("minimum") for row in intent.get("obligations") or []
+            if isinstance(row, dict) and row.get("kind") == "quantity"
+            and "pin-header" in canonical_physical_features(component_class)
+            and quantity_subject_binds(str(row.get("subject") or ""), component_class)
+        }
+        if "pin-header" in canonical_physical_features(component_class):
+            wanted_widths.update(
+                row.get("value") for row in intent.get("obligations") or []
+                if isinstance(row, dict) and row.get("kind") == "quantitative"
+                and row.get("relation") == "equal"
+                and str(row.get("unit") or "").casefold() in {"pins", "contacts", "positions"}
+                and "header" in str(row.get("quantity") or "").casefold()
+            )
+        width_matches: set[str] = set()
         terminal_demanded |= "screw-terminal" in canonical_physical_features(component_class)
         for feature in sorted(canonical_physical_features(component_class)):
             for part in reviewed_parts_for_feature(feature):
                 if part.identity.startswith("kicad-"):
                     continue  # Reserved library-pattern namespace, not manufacturer MPNs.
-                if part.family == "screw-terminal":
-                    # A reviewed land pattern is not evidence that its ordering
-                    # code exists in this installation's offline catalog.
+                if (part.family.endswith("header") or part.family == "screw-terminal"
+                        or "voltage-regulator" in part.physical_features):
+                    # Choices must clear the same assembly-stock policy as the
+                    # sourcing gate, not merely exist with one unit available.
                     row = jlcparts.lookup(part.lcsc) if part.lcsc else None
                     if (not row or (row.get("model") or "").casefold() != part.identity.casefold()
-                            or (row.get("stock") or 0) <= 0):
+                            or (row.get("stock") or 0) < max(1, _bom_stock_floor())):
                         continue
                 limits = dict(part.operating_limits or {})
                 ratings = [
                     f"{key.removesuffix('_v').removesuffix('_a').replace('_', ' ')}="
                     f"{limits[key]}"
-                    for key in ("output_voltage_v", "output_current_a", "input_voltage_max_v")
+                    for key in ("output_voltage_v", "output_current_a", "input_voltage_min_v",
+                                "input_voltage_max_v", "dissipated_power_limit_w")
                     if limits.get(key) is not None
                 ]
                 options.setdefault(
@@ -149,9 +183,12 @@ def reviewed_class_options_block(intent: dict) -> str | None:
                         else f" ({part.family})"
                     ),
                 )
+                if len(part.contacts) in wanted_widths:
+                    width_matches.add(part.identity)
         if options:
+            choices = sorted(options, key=lambda identity: (identity not in width_matches, identity))
             lines.append(
-                f"  {component_class}: " + "; ".join(sorted(options.values())[:6])
+                f"  {component_class}: " + "; ".join(options[identity] for identity in choices[:6])
             )
     external = [
         row for row in intent.get("obligations") or []
@@ -172,6 +209,20 @@ def reviewed_class_options_block(intent: dict) -> str | None:
                 "physical component; satisfy any separate onboard physical obligation only "
                 "with a construction that actually emits that component."
             )
+    if any(
+        isinstance(row, dict) and row.get("kind") == "adjustability"
+        and str(row.get("parameter") or "").casefold() == "enable"
+        and str(row.get("mechanism") or "").casefold() == "jumper"
+        for row in intent.get("obligations") or []
+    ):
+        lines.append(
+            "  enable-jumper construction: use the published switch-input circuit, "
+            "pull_policy=external, active_level=high; its signal controls exactly one "
+            "recipe-published enable port, and its supply must be a sourced rail within "
+            "that recipe's reviewed EN limit. A bare pin-header does not supply this "
+            "bias/control contract. Preserve the physical jumper and adjustability IDs; "
+            "the typed construction includes the separately procured removable shunt."
+        )
     if terminal_demanded:
         lines.append(
             "  screw-terminal construction: leave exact_part null unless the brief requires "
@@ -186,8 +237,9 @@ def reviewed_class_options_block(intent: dict) -> str | None:
     return "\n".join(
         [
             "REVIEWED MANUFACTURER PARTS FOR THE DEMANDED CLASSES: these identities "
-            "have reviewed symbol/footprint pairs; listed screw terminals also have an "
-            "exact matching, in-stock offline catalog row. Leave exact_part null for "
+            "have reviewed symbol/footprint pairs; listed headers, terminals and regulators "
+            "also have an exact matching offline catalog row above the sourcing stock floor. "
+            "Leave exact_part null for "
             "an unspecified generic component; retain any exact part required by the brief.",
             *lines,
         ]

@@ -1289,6 +1289,42 @@ def _complete_typed_mcu_interfaces(
     ), required_capabilities
 
 
+def _complete_reset_control_peers(
+    requirement: CircuitRequirement,
+    architecture: Architecture,
+    recipes: tuple[RegisteredRecipe, ...],
+) -> tuple[CircuitRequirement, dict[str, str]]:
+    """Find typed control requirements only on MCU-bound conductors."""
+    if requirement.role != "mcu_core":
+        return requirement, {}
+    controls: dict[str, str] = {}
+    for peer in architecture.requirements:
+        if peer.id == requirement.id:
+            continue
+        exact = _recipe_for_exact(peer.exact_part or peer.family, recipes)
+        matches = [exact] if exact is not None else _family_recipes(peer.family, recipes)
+        if len(matches) != 1:
+            continue
+        definition = matches[0].definition
+        if not any(port.reset_control is not None for port in definition.ports):
+            continue
+        bindings, _ = _port_bindings(definition, peer, architecture)
+        for port in definition.ports:
+            if port.reset_control is None:
+                continue
+            net = bindings.get(port.name)
+            if not net or net not in requirement.ports.values():
+                continue
+            if peer.sheet != requirement.sheet and not any(
+                row.name == net
+                and {peer.sheet, requirement.sheet} <= {endpoint.sheet for endpoint in row.endpoints}
+                for row in architecture.inter_sheet_nets
+            ):
+                continue
+            controls[net] = port.reset_control
+    return requirement, controls
+
+
 def _unowned_endpoint_diagnostics(
     definition: RecipeDefinition,
     requirement: CircuitRequirement,
@@ -1668,6 +1704,25 @@ def resolve_architecture_recipes(
     output_nets: dict[str, list[str]] = defaultdict(list)
 
     for requirement in sorted(requirements, key=lambda item: item.id):
+        requirement, required_reset_controls = _complete_reset_control_peers(
+            requirement, architecture_model, recipes
+        )
+        conflicting_mcus = [
+            (net, peer.id)
+            for net in required_reset_controls
+            for peer in requirements
+            if peer.id != requirement.id and peer.role == "mcu_core" and net in peer.ports.values()
+        ]
+        if conflicting_mcus:
+            result.blocking.append(
+                ResolutionDiagnostic(
+                    code="conflicting_reset_control_owner",
+                    requirement_id=requirement.id,
+                    message="Reset-biased control nets must have exactly one MCU owner.",
+                    evidence=[f"{net}: {peer}" for net, peer in conflicting_mcus],
+                )
+            )
+            continue
         family_matches = _family_recipes(requirement.family, recipes)
         sheet = next(
             (row for row in architecture_model.sheets if row.name == requirement.sheet),
@@ -1825,6 +1880,20 @@ def resolve_architecture_recipes(
                 assumption_rows.append(
                     f"{requirement.id}: selected the only registered exact family variant"
                 )
+        if selected is None and required_reset_controls:
+            result.blocking.append(
+                ResolutionDiagnostic(
+                    code="unsupported_reset_control",
+                    requirement_id=requirement.id,
+                    message=(
+                        "The MCU has no reviewed reset-bias profile for its externally "
+                        "low-biased control outputs; select a qualified MCU or a separately "
+                        "qualified control circuit."
+                    ),
+                    evidence=sorted(required_reset_controls),
+                )
+            )
+            continue
         if selected is None:
             result.unresolved_requirements.append(requirement.id)
             continue
@@ -2114,6 +2183,11 @@ def resolve_architecture_recipes(
                 if (
                     match is not None
                     and int(match.group(1)) in available_gpios
+                    and sum(
+                        peer.role == "mcu_core"
+                        and any(endpoint.sheet == peer.sheet for endpoint in net.endpoints)
+                        for peer in requirements
+                    ) == 1
                     and any(endpoint.sheet == requirement.sheet for endpoint in net.endpoints)
                 ):
                     inferred_ports.setdefault(f"gpio{match.group(1)}", net.name)
@@ -2121,6 +2195,25 @@ def resolve_architecture_recipes(
         requirement, required_capabilities = _complete_typed_mcu_interfaces(
             requirement, architecture_model, recipes
         )
+        requirement, required_reset_controls = _complete_reset_control_peers(
+            requirement, architecture_model, recipes
+        )
+        conflicting_mcus = [
+            (net, peer.id)
+            for net in required_reset_controls
+            for peer in requirements
+            if peer.id != requirement.id and peer.role == "mcu_core" and net in peer.ports.values()
+        ]
+        if conflicting_mcus:
+            result.blocking.append(
+                ResolutionDiagnostic(
+                    code="conflicting_reset_control_owner",
+                    requirement_id=requirement.id,
+                    message="Reset-biased control nets must have exactly one MCU owner.",
+                    evidence=[f"{net}: {peer}" for net, peer in conflicting_mcus],
+                )
+            )
+            continue
         if "can_controller" in requirement.interfaces and parameters.get("can_remap"):
             assumption_rows.append(
                 f"{requirement.id}: firmware must enable CAN remap {parameters['can_remap']}"
@@ -2220,6 +2313,7 @@ def resolve_architecture_recipes(
                     for net, capability in required_capabilities.items()
                     if capability == "touch"
                 },
+                required_reset_controls=required_reset_controls,
             )
         except PinAllocationError as exc:
             result.blocking.append(

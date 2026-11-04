@@ -1306,12 +1306,9 @@ def _pcb_error_section(
     arts = sj.get("artifacts") or {}
     raw_errors = arts.get("pcb_errors") or []
     errors = [item for item in raw_errors if isinstance(item, dict)]
-    legacy_failed = (
-        not errors
-        and (arts.get("status") == "failed" or any(
-            "error:" in str(line).lower() for line in (build_lines or [])
-        ))
-    )
+    # Build logs retain failed candidates during automatic recovery. They are
+    # evidence, not the current attempt's terminal status.
+    legacy_failed = not errors and arts.get("status") == "failed"
     if legacy_failed:
         # Legacy projects predate pcb_errors. Preserve useful bounded evidence
         # without pretending that a location exists.

@@ -1375,28 +1375,35 @@ def _connector(
         if gender not in ("male", "female"):
             return None
         selected_header = None
+        male_parts = {
+            2: "tsw-102-07-g-s",
+            3: "2.54-1*3p针",
+            4: "b-2100s04p-a110",
+            6: "68000-406hlf",
+        }
         female_parts = {
             2: "pm254v-11-02-h85",
             4: "pm254v-11-04-h85",
             8: "pm254v-11-08-h85",
         }
+        header_parts = male_parts if gender == "male" else female_parts
         if requirement.exact_part is not None:
             selected_header = reviewed_part(str(requirement.exact_part))
-            allowed = (
-                {"tsw-102-07-g-s"} if gender == "male"
-                else set(female_parts.values())
-            )
+            from kicraft.design.part_identity import reviewed_header_geometry
+
+            geometry = reviewed_header_geometry(selected_header) if selected_header else None
+            if geometry is None or len(selected_header.contacts) != count:
+                return None
+            record_rows, record_gender = geometry
             if (
-                rows != 1
-                or selected_header is None
-                or selected_header.identity.casefold() not in allowed
-                or len(selected_header.contacts) != count
-                or not selected_header.symbol
-                or not selected_header.footprint
+                ("rows" in requirement.parameters and rows != record_rows)
+                or ("gender" in requirement.parameters and gender != record_gender)
             ):
                 return None
-        elif gender == "female" and rows == 1 and count in female_parts:
-            selected_header = reviewed_part(female_parts[count])
+            rows, gender = record_rows, record_gender
+            per_row = count // rows
+        elif rows == 1 and count in header_parts:
+            selected_header = reviewed_part(header_parts[count])
         if selected_header is not None:
             mpn = selected_header.identity
             symbol = selected_header.symbol
@@ -4175,6 +4182,8 @@ for _lowerer in (
                 "header",
                 "spi-header",
                 "spi_header",
+                "i2c-header",
+                "i2c_header",
             }
         ),
         _pin_header,

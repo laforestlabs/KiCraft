@@ -11,8 +11,8 @@ If ``bom.connections`` is empty (Stage A pre-wiring callers, or tests),
 the function falls back to writing an empty board (the prior behavior).
 This keeps existing callers working unchanged.
 
-Uses ``pcbnew.NewBoard()`` + ``pcbnew.FootprintLoad()`` — both stable
-across the KiCad 6 → 9 transitions in scope for this project.
+Uses the shared scoped native loader, with owned footprints and fresh
+item UUIDs transferred to the destination board.
 """
 
 from __future__ import annotations

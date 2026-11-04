@@ -30,6 +30,25 @@ class FootprintNotFoundError(LookupError):
     """Raised when a footprint cannot be loaded from the resolver chain."""
 
 
+def load_footprint_file(pcbnew_mod, path: Path):
+    """Load an owned footprint with fresh UUIDs from a scoped native library.
+
+    pcbnew.FootprintLoad leaves its unowned plugin/cache alive. The concrete
+    owned plugin safely rejects malformed files and refreshes item UUIDs. A
+    direct native copy owns the geometry after that scoped cache is released.
+    """
+    path = Path(path)
+    try:
+        parser = pcbnew_mod.PCB_IO_KICAD_SEXPR()
+        cached = parser.FootprintLoad(str(path.parent), path.stem, False)
+        if cached is None:
+            raise ValueError("native loader returned no footprint")
+        footprint = pcbnew_mod.FOOTPRINT(cached)
+        return footprint
+    except Exception as exc:
+        raise FootprintNotFoundError(f"could not import footprint {path}: {exc}") from exc
+
+
 # Query terms that describe the *kind* of thing being searched, not the part, and so
 # never appear in a footprint id. The model habitually appends "footprint" to queries
 # (e.g. "pinheader 2x08 footprint"); since matching ANDs every term, that one token
@@ -54,15 +73,11 @@ def load_footprint(
     except LibraryNotFoundError as exc:
         raise FootprintNotFoundError(str(exc)) from exc
     try:
-        fp = pcbnew_mod.FootprintLoad(str(lib_dir), name)
+        fp = load_footprint_file(pcbnew_mod, lib_dir / f"{name}.kicad_mod")
     except Exception as exc:  # noqa: BLE001
         raise FootprintNotFoundError(
             f"could not load {library}:{name} from {lib_dir}: {exc}"
         ) from exc
-    if fp is None:
-        raise FootprintNotFoundError(
-            f"FootprintLoad returned None for {library}:{name} from {lib_dir}"
-        )
 
     from kicraft.parts_library.footprint_courtyard import (
         normalize_pth_pads_for_fab,
@@ -144,8 +159,8 @@ def lookup_footprint(
 ) -> dict:
     """Load a ``Library:Name`` footprint and report its actual pad count.
 
-    Uses the same resolver and ``pcbnew.FootprintLoad`` seam as synthesis, so a
-    file that exists but KiCad cannot load is rejected before board generation.
+    Uses the same scoped native loader as synthesis, so a file that exists but
+    KiCad cannot parse is rejected and no whole-library cache remains retained.
     """
     library, _, name = (footprint or "").partition(":")
     if not library or not name:
@@ -169,6 +184,7 @@ def lookup_footprint(
 __all__ = [
     "FootprintNotFoundError",
     "load_footprint",
+    "load_footprint_file",
     "lookup_footprint",
     "search_footprints",
 ]

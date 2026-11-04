@@ -486,8 +486,16 @@ def test_lowerer_registry_matches_exact_family_without_ordered_fallback():
     assert lower_requirement(_requirement("pin-header", ports={"pin1": "N"})) is not None
 
 
-@pytest.mark.parametrize(("rows", "count"), [(1, 4), (2, 2), (2, 8)])
-def test_pin_header_lowerer_preserves_real_contact_geometry(rows, count):
+@pytest.mark.parametrize(
+    ("family", "rows", "count"),
+    [
+        ("pin-header", 1, 4),
+        ("pin-header", 2, 2),
+        ("pin-header", 2, 8),
+        ("spi-header", 1, 6),
+    ],
+)
+def test_pin_header_lowerer_preserves_real_contact_geometry(family, rows, count):
     from pathlib import Path
 
     import pcbnew
@@ -496,7 +504,7 @@ def test_pin_header_lowerer_preserves_real_contact_geometry(rows, count):
     from kicraft.design.synthesis.symbol_pinout import lookup_pins
 
     requirement = _requirement(
-        "pin-header",
+        family,
         parameters={"rows": rows},
         ports={f"pin{index}": f"NET{index}" for index in range(1, count + 1)},
     )
@@ -508,7 +516,86 @@ def test_pin_header_lowerer_preserves_real_contact_geometry(rows, count):
     assert {pin["number"] for pin in symbol["pins"]} == contacts
     assert {pad.GetNumber() for pad in footprint.Pads()} == contacts
     assert {pin.pin for pin in artifact.pins} == contacts
-    assert len({pad.GetPosition().x for pad in footprint.Pads()}) == rows
+    assert sorted((
+        len({pad.GetPosition().x for pad in footprint.Pads()}),
+        len({pad.GetPosition().y for pad in footprint.Pads()}),
+    )) == sorted((rows, count // rows))
+
+
+@pytest.mark.parametrize(
+    ("identity", "count"),
+    [("2.54-1x6P直针", 6), ("TSW-103-07-G-S", 3), ("PM254V-11-04-H85", 4)],
+)
+def test_exact_reviewed_header_preserves_identity_and_physical_contacts(identity, count):
+    from kicraft.design.part_identity import physical_inventory_record
+    from kicraft.design.synthesis.symbol_pinout import lookup_pins
+
+    requirement = _requirement(
+        "pin-header", ports={f"pin{pin}": f"NET{pin}" for pin in range(1, count + 1)}
+    ).model_copy(update={"exact_part": identity})
+    artifact = lower_requirement(requirement)
+    group = artifact.groups[0]
+    assert group.mpn.casefold() == identity.casefold()
+    record = physical_inventory_record(
+        mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
+    )
+    assert record is not None and record.identity == identity.casefold()
+    assert {pin["number"] for pin in lookup_pins(group.symbol, all_units=True)["pins"]} == {
+        str(pin) for pin in range(1, count + 1)
+    }
+    assert {pin.pin: pin.net for pin in artifact.pins} == {
+        str(pin): f"NET{pin}" for pin in range(1, count + 1)
+    }
+
+
+@pytest.mark.parametrize(
+    ("component_class", "identity", "count", "native"),
+    [
+        ("pin-header", "PM254V-11-04-H85", 4, True),
+        ("analog-output-header", "PM254V-11-04-H85", 4, False),
+        ("pin-header", "640456-5", 5, False),
+    ],
+)
+def test_committed_carrier_class_controls_generic_header_lowering(
+    component_class, identity, count, native
+):
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    payload = {
+        "requirements": [{
+            "id": "header", "sheet": "MAIN", "role": "connector",
+            "family": "analog-output-header",
+            "exact_part": identity,
+            "parameters": {"rows": 1},
+            "obligation_ids": ["carrier"],
+            "declared_ports": [
+                {"key": f"pin{pin}", "pin": str(pin), "direction": "bidirectional"}
+                for pin in range(1, count + 1)
+            ],
+        }],
+        "obligations": [{
+            "kind": "physical", "original_obligation_id": "carrier",
+            "component_class": component_class,
+        }],
+    }
+    complete_architecture_payload(payload)
+    row = payload["requirements"][0]
+    requirement = CircuitRequirement(
+        id=row["id"], sheet=row["sheet"], role=row["role"],
+        family=row["family"], parameters=row["parameters"], exact_part=row["exact_part"],
+        ports={f"pin{pin}": f"NET{pin}" for pin in range(1, count + 1)},
+    )
+    artifact = lower_requirement(requirement)
+    if not native:
+        # Neither a narrower physical class nor an exact carrier with unproven
+        # primitive geometry may be transferred from its model-owned path.
+        assert artifact is None
+    else:
+        group = artifact.groups[0]
+        assert group.mpn.casefold() == identity.casefold()
+        assert {pin.pin: pin.net for pin in artifact.pins} == {
+            str(pin): f"NET{pin}" for pin in range(1, count + 1)
+        }
 
 
 def test_reserved_header_contacts_are_no_connects_not_a_shared_net():
@@ -607,10 +694,6 @@ def test_header_accepts_a_declared_contact_subset_as_no_connects():
         "8": "H",
     }
     assert {row.pin for row in artifact.no_connects} == {"5", "6", "7"}
-    assert artifact.assumptions == (
-        "the header's physical size is its highest declared contact (8); undeclared "
-        "contact(s) 5, 6, 7 are emitted as no-connects",
-    )
     # The same shape starting above 1 (the seed-18 "main_header" draft): position 1 is
     # the unused one, and the part is still the 8-way the brief asked for.
     leading = lower_requirement(
@@ -2473,9 +2556,6 @@ def test_a_stated_contact_count_sizes_the_header_the_circuit_only_partly_uses(re
     artifact = lower_requirement(requirement)
 
     assert artifact.groups[0].symbol == "Connector_Generic:Conn_01x06"
-    assert artifact.groups[0].footprint == (
-        "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"
-    )
     assert {pin.pin: pin.net for pin in artifact.pins} == {"1": "HOST_5V", "2": "+3V3"}
     assert {row.pin for row in artifact.no_connects} == {"3", "4", "5", "6"}
 

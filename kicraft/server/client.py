@@ -906,7 +906,8 @@ class CappedOpenRouterClient:
         """One capped streaming completion (SSE).
 
         Calls on_delta({"reasoning"|"content": <partial text>}) as tokens arrive,
-        accumulates content / reasoning / tool_calls from the deltas, and records
+        marking the first accepted content delta of each response attempt with
+        answer_start=True. Accumulates content / reasoning / tool_calls and records
         the real cost from the final usage chunk. Returns (assembled_message,
         cost). preflight() runs before any spend, so the caps still apply.
         """
@@ -966,6 +967,7 @@ class CappedOpenRouterClient:
         stream_backoff = float(getattr(self.s, "llm_retry_backoff_s", 1.0))
         for stream_attempt in range(max_stream_retries + 1):
             content, reasoning = [], []
+            answer_started = False
             tool_calls: dict = {}
             finish = None
             provider = None
@@ -1046,7 +1048,11 @@ class CappedOpenRouterClient:
                                     content.append(accepted)
                                     content_chars += len(accepted)
                                     if on_delta:
-                                        on_delta({"content": accepted})
+                                        event = {"content": accepted}
+                                        if not answer_started:
+                                            event["answer_start"] = True
+                                            answer_started = True
+                                        on_delta(event)
                                 if overflow is not None:
                                     collection_limit = {
                                         **overflow,
@@ -1219,13 +1225,14 @@ class CappedOpenRouterClient:
     @staticmethod
     def _delta_progress(progress):
         """Wrap a progress callback to forward streaming token deltas."""
-
         def on_delta(d):
             if not progress:
                 return
             if d.get("reasoning"):
                 progress({"kind": "reasoning_delta", "text": d["reasoning"]})
-            elif d.get("content"):
+            if d.get("content"):
+                if d.get("answer_start"):
+                    progress({"kind": "answer_start"})
                 progress({"kind": "answer_delta", "text": d["content"]})
 
         return on_delta

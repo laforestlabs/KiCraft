@@ -4343,7 +4343,7 @@
               {
                 "kind": "artifact",
                 "source_url": "kicraft/design/recipes/wave_c_interfaces.py",
-                "section": "drv8833-dual-motor@3 (family dual-dc-motor-driver, exact DRV8833PWPR) is the reviewed recipe for both motor-driver requirements drv1 and drv2",
+                "section": "drv8833-dual-motor@4 (family dual-dc-motor-driver, exact DRV8833PWPR) is the reviewed recipe for both motor-driver requirements drv1 and drv2",
                 "path": "kicraft/design/recipes/wave_c_interfaces.py"
               },
               {
@@ -4817,7 +4817,7 @@
               "role": "driver",
               "family": "dual-dc-motor-driver",
               "parameters": {
-                "expected_recipe": "drv8833-dual-motor@3"
+                "expected_recipe": "drv8833-dual-motor@4"
               },
               "ports": {
                 "vm": "VBAT",
@@ -4846,7 +4846,7 @@
               "role": "driver",
               "family": "dual-dc-motor-driver",
               "parameters": {
-                "expected_recipe": "drv8833-dual-motor@3"
+                "expected_recipe": "drv8833-dual-motor@4"
               },
               "ports": {
                 "vm": "VBAT",

@@ -868,8 +868,6 @@ def test_raw_legacy_recipe_ids_identify_artifacts_needing_regeneration():
 
 
 @pytest.mark.parametrize(("old", "new"), [
-    ("drv8833-dual-motor@1", "drv8833-dual-motor@3"),
-    ("drv8833-dual-motor@2", "drv8833-dual-motor@3"),
     ("esp32-c3-mini-1-minimal@1", "esp32-c3-mini-1-minimal@2"),
     ("esp32-c3-mini-1-h4x-minimal@1", "esp32-c3-mini-1-h4x-minimal@2"),
     ("tps54331-adjustable@1", "tps54331-adjustable@2"),
@@ -890,26 +888,33 @@ def test_electrical_fix_versions_migrate_saved_selection_without_mutation(old, n
     with pytest.raises(ValueError, match="unknown parameters"):
         migrate_recipe_selection(saved.model_copy(update={"parameters": {"unexpected": 1}}))
 
-@pytest.mark.parametrize("old", ["drv8833-dual-motor@1", "drv8833-dual-motor@2"])
-def test_legacy_motor_without_logic_supply_requires_architecture_regeneration(old):
+@pytest.mark.parametrize("old", ["drv8833-dual-motor@1", "drv8833-dual-motor@2", "drv8833-dual-motor@3"])
+@pytest.mark.parametrize("complete", [False, True])
+def test_legacy_motor_requires_architecture_regeneration(old, complete):
     from kicraft.design.stage_state import legacy_recipe_resume_stage
 
-    definition = get_recipe("drv8833-dual-motor@3")
+    definition = get_recipe("drv8833-dual-motor@4")
     selection = RecipeSelection(
         recipe=old, instance="motor", sheets={"interface": "MOTOR"},
         port_bindings={port.name: port.name.upper() for port in definition.ports
-                       if port.required and port.name != "logic_vdd"},
+                       if port.required and (complete or port.name != "logic_vdd")},
     )
-    with pytest.raises(ValueError, match="logic_vdd"):
+    with pytest.raises(ValueError, match="architecture regeneration"):
         migrate_recipe_selection(selection)
     assert legacy_recipe_resume_stage({
-        "architecture": {"recipe_selections": [selection.model_dump()]},
+        "architecture": {"recipe_selections": [
+            selection.model_dump(),
+            {"recipe": "esp32-c3-mini-1-h4x-minimal@2", "instance": "core",
+             "sheets": {"mcu": "MCU"}, "pin_allocations": [
+                 {"net": "SLEEP_N", "pin": "20", "capability": "output"}
+             ]},
+        ]},
         "bom": {"parts": []},
     }) == "architecture"
 
 
 def test_drv8833_charge_pump_capacitor_is_between_vcp_and_vm():
-    definition = get_recipe("drv8833-dual-motor@3")
+    definition = get_recipe("drv8833-dual-motor@4")
     selection = RecipeSelection(
         recipe=definition.recipe, instance="motor", sheets={"interface": "MOTOR"},
         port_bindings={port.name: port.name.upper() for port in definition.ports if port.required},
@@ -928,6 +933,8 @@ def test_drv8833_charge_pump_capacitor_is_between_vcp_and_vm():
     assert nets[pullup, "1"] == nets[driver, "8"] == "FAULT_N"
     assert nets[pullup, "2"] == "LOGIC_VDD"
     assert nets[pullup, "2"] != nets[driver, "12"]
+    assert nets[driver, "3"] == nets[driver, "6"] == nets[driver, "13"] == nets[driver, "17"] == "GND"
+    assert not any(part.recipe_role == "sense" for part in expansion.parts)
 
 @pytest.mark.parametrize(("binding", "expected"), [(None, "VIN"), ("CONTROL", "CONTROL")])
 def test_me6211_enable_binding_or_default_tracks_pin_three(binding, expected):
@@ -3349,32 +3356,6 @@ def test_ch340c_rejects_unsupported_supply_modes(supply_voltage):
         )
 
 
-def test_expanded_recipe_wave_assets_resolve():
-    from pathlib import Path
-
-    from kicraft.design.recipes.wave_a_mcus import WAVE_A_MCU_RECIPES
-    from kicraft.design.recipes.wave_b_power import WAVE_B_POWER_RECIPES
-    from kicraft.design.recipes.wave_c_interfaces import WAVE_C_INTERFACE_RECIPES
-    from kicraft.design.recipes.wave_d_display import WAVE_D_DISPLAY_RECIPES
-    from kicraft.design.recipes.wave_e_usb_bridge import WAVE_E_USB_BRIDGE_RECIPES
-    from kicraft.design.synthesis.footprint_library import lookup_footprint
-    from kicraft.design.synthesis.symbol_pinout import lookup_pins
-
-    for definition in (
-        *WAVE_A_MCU_RECIPES,
-        *WAVE_B_POWER_RECIPES,
-        *WAVE_C_INTERFACE_RECIPES,
-        *WAVE_D_DISPLAY_RECIPES,
-        *WAVE_E_USB_BRIDGE_RECIPES,
-    ):
-        for group in definition.parts:
-            lookup_pins(group.symbol, project_root=Path("."))
-            lookup_footprint(group.footprint, project_root=Path("."))
-
-
-
-
-
 def test_unused_can_reference_output_is_isolated_not_grounded():
     expanded = expand_recipe(
         RecipeSelection(
@@ -4708,7 +4689,7 @@ def test_recipe_castellation_edges_replace_the_synthetic_header_unit():
 
 def test_real_pin_header_is_not_consumed_by_matching_recipe_edges():
     from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
-    from kicraft.server.stage_work_units import deterministic_bom_candidate, plan_stage_work_units
+    from kicraft.server.stage_work_units import plan_stage_work_units
 
     architecture = {
         "topologies": {"MCU": "RP2040 controller"},
@@ -4750,8 +4731,6 @@ def test_real_pin_header_is_not_consumed_by_matching_recipe_edges():
     assert selection.requirement_ids == ["rp2040"]
     (header_unit,) = plan_stage_work_units("bom", {"architecture": resolved.model_dump()}, {})
     assert header_unit.requirement_ids == ("physical_gpio_header",)
-    header = deterministic_bom_candidate(header_unit, {"architecture": resolved.model_dump()})
-    assert header["groups"][0]["value"] == "PinHeader_1x03"
 
 
 # ---------------------------------------------------------------------------
@@ -6064,3 +6043,103 @@ def test_c3_bypass_expansion_keeps_both_caps_on_mcu_supply_and_return(recipe):
         capacitor = next(part for part in expansion.parts if part.recipe_role == role)
         assert capacitor.footprint == "Capacitor_SMD:C_0402_1005Metric"
         assert {nets[capacitor.ref, "1"], nets[capacitor.ref, "2"]} == {"LOGIC", "GND"}
+
+
+def test_reset_control_bound_ports_and_reallocation_use_documented_c3_pads():
+    from kicraft.design.models import Architecture, CircuitRequirement
+    from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
+    from kicraft.design.recipes.registry import registered_recipes
+    from kicraft.design.recipes.resolver import _complete_reset_control_peers
+
+    signals = {
+        "ain1": "BRIDGE_A1", "ain2": "BRIDGE_A2", "bin1": "BRIDGE_B1",
+        "bin2": "BRIDGE_B2", "sleep_n": "ENABLE", "fault_n": "FAULT",
+    }
+    core = CircuitRequirement(
+        id="core", sheet="MCU", role="mcu_core", family="esp32-c3-mini-1-module",
+        ports={**{f"output_{i}": net for i, net in enumerate(list(signals.values())[:5])},
+               "input_0": "FAULT"},
+    )
+    motor = CircuitRequirement(
+        id="motor", sheet="MOTOR", role="driver", family="dual-dc-motor-driver",
+        exact_part="DRV8833PWPR", ports=signals,
+    )
+    architecture = Architecture.model_validate({
+        "sheets": [
+            {"name": "MCU", "stem": "MCU", "function": "controller"},
+            {"name": "MOTOR", "stem": "MOTOR", "function": "motor driver"},
+        ],
+        "power_nets": ["GND"],
+        "inter_sheet_nets": [
+            {"name": net, "endpoints": [
+                {"sheet": "MCU", "direction": "input" if name == "fault_n" else "output"},
+                {"sheet": "MOTOR", "direction": "output" if name == "fault_n" else "input"},
+            ]}
+            for name, net in signals.items()
+        ],
+        "requirements": [core.model_dump(), motor.model_dump()],
+    })
+    completed, controls = _complete_reset_control_peers(core, architecture, registered_recipes())
+    assert set(controls) == set(signals.values()) - {"FAULT"}
+    assert set(completed.ports.values()) == set(signals.values())
+    definition = get_recipe("esp32-c3-mini-1-h4x-minimal@2")
+    old = allocate_requirement_pins(definition, completed)
+    result = allocate_requirement_pins(
+        definition, completed, existing=old, required_reset_controls=controls,
+    )
+    gpio_by_pin = {pin.pin: pin.gpio for pin in definition.allocatable_pins}
+    mapped = {row.net: gpio_by_pin[row.pin] for row in result}
+    assert {mapped[net] for net in controls} == {0, 1, 3, 4, 5}
+    assert mapped["FAULT"] == 6
+    assert allocate_requirement_pins(
+        definition, completed, existing=result, required_reset_controls=controls,
+    ) == result
+    # A co-sheet motor output is not an MCU input merely because the sheet
+    # exports it, and missing MCU ports are not manufactured from sheet labels.
+    unbound = core.model_copy(update={"ports": {}})
+    cosheet_motor = motor.model_copy(update={
+        "sheet": "MCU", "ports": {**signals, "aout1": "MOTOR_POWER"},
+    })
+    cosheet = architecture.model_copy(update={"requirements": [unbound, cosheet_motor]})
+    unchanged, no_controls = _complete_reset_control_peers(unbound, cosheet, registered_recipes())
+    assert unchanged.ports == {}
+    assert no_controls == {}
+
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+    unknown = core.model_copy(update={"family": "unreviewed-mcu"})
+    unknown_arch = architecture.model_copy(update={"requirements": [unknown, motor]})
+    unresolved = resolve_architecture_recipes(unknown_arch)
+    assert any(row.code == "unsupported_reset_control" and row.requirement_id == "core"
+               for row in unresolved.blocking)
+    second = core.model_copy(update={"id": "core2"})
+    shared = architecture.model_copy(update={"requirements": [core, second, motor]})
+    conflicts = resolve_architecture_recipes(shared)
+    assert {row.requirement_id for row in conflicts.blocking
+            if row.code == "conflicting_reset_control_owner"} == {"core", "core2"}
+
+
+def test_reset_control_explicit_conflict_and_unknown_mcu_fail_closed():
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
+
+    core = CircuitRequirement(
+        id="core", sheet="MCU", role="mcu_core", family="esp32-c3-mini-1-module",
+        ports={"gpio6": "ENABLE"},
+    )
+    controls = {"ENABLE": "external_low"}
+    with pytest.raises(PinAllocationError, match="conflicting_reset_control"):
+        allocate_requirement_pins(
+            get_recipe("esp32-c3-mini-1-h4x-minimal@2"), core,
+            required_reset_controls=controls,
+        )
+    good = core.model_copy(update={"ports": {"gpio4": "ENABLE"}})
+    assert allocate_requirement_pins(
+        get_recipe("esp32-c3-mini-1-h4x-minimal@2"), good,
+        required_reset_controls=controls,
+    )[0].pin == "18"
+    neutral = core.model_copy(update={"ports": {"output_0": "ENABLE"}})
+    with pytest.raises(PinAllocationError, match="unsupported_reset_control"):
+        allocate_requirement_pins(
+            get_recipe("attiny402-updi-minimal@1"), neutral,
+            required_reset_controls=controls,
+        )

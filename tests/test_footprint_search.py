@@ -82,21 +82,65 @@ def test_lookup_missing_footprint_raises():
         lookup_footprint("Connector_BarrelJack:BarrelJack_2.1mm_P5.5mm")
 
 
-def test_lookup_rejects_existing_file_that_kicad_cannot_load(
-    tmp_path, monkeypatch
-) -> None:
+def test_lookup_rejects_existing_file_that_kicad_cannot_parse(tmp_path, monkeypatch):
     pretty = tmp_path / "Broken.pretty"
     pretty.mkdir()
-    (pretty / "Present.kicad_mod").write_text("(footprint \"Present\")")
+    (pretty / "Present.kicad_mod").write_text('(footprint "Present" (pad')
     monkeypatch.setattr(
-        footprint_library,
-        "resolve_footprint_library_path",
-        lambda *args, **kwargs: pretty,
+        footprint_library, "resolve_footprint_library_path", lambda *a, **kw: pretty
     )
-    monkeypatch.setattr(pcbnew, "FootprintLoad", lambda *args: None)
-
-    with pytest.raises(
-        FootprintNotFoundError,
-        match="FootprintLoad returned None.*Broken:Present",
-    ):
+    with pytest.raises(FootprintNotFoundError):
         lookup_footprint("Broken:Present", project_root=tmp_path)
+
+
+def test_native_import_preserves_geometry_and_regenerates_all_item_identities(tmp_path):
+    import gc
+
+    path = tmp_path / "Part.kicad_mod"
+    path.write_text('''(footprint "ImportedName"
+      (version 20240108) (generator pcbnew) (layer "F.Cu")
+      (uuid "11111111-1111-4111-8111-111111111111")
+      (fp_line (start 0 0) (end 2 0)
+        (stroke (width 0.1) (type default)) (layer "F.SilkS")
+        (uuid "33333333-3333-4333-8333-333333333333"))
+      (pad "1" smd rect (at 0 0) (size 1 1)
+        (layers "F.Cu" "F.Paste" "F.Mask")
+        (uuid "22222222-2222-4222-8222-222222222222"))
+    )''')
+    first = footprint_library.load_footprint_file(pcbnew, path)
+    gc.collect()
+    second = footprint_library.load_footprint_file(pcbnew, path)
+
+    def identities(footprint):
+        return {
+            item.m_Uuid.AsString()
+            for item in [footprint, *footprint.Pads(), *footprint.GraphicalItems()]
+        }
+
+    assert identities(first).isdisjoint(identities(second))
+    assert "11111111-1111-4111-8111-111111111111" not in identities(first)
+    assert "22222222-2222-4222-8222-222222222222" not in identities(first)
+    assert "33333333-3333-4333-8333-333333333333" not in identities(first)
+    board = pcbnew.BOARD()
+    first.SetReference("J1")
+    second.SetReference("J2")
+    second.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(5), 0))
+    board.Add(first)
+    board.Add(second)
+    del first, second
+    gc.collect()
+    output = tmp_path / "owned.kicad_pcb"
+    pcbnew.SaveBoard(str(output), board)
+    restored = pcbnew.LoadBoard(str(output))
+    geometry = {}
+    for footprint in restored.GetFootprints():
+        pad = next(iter(footprint.Pads()))
+        geometry[footprint.GetReference()] = (
+            pad.GetNumber(), pad.GetPosition().x, pad.GetPosition().y,
+            pad.GetSize().x, pad.GetSize().y,
+        )
+    mm = pcbnew.FromMM(1)
+    assert geometry == {
+        "J1": ("1", 0, 0, mm, mm),
+        "J2": ("1", 5 * mm, 0, mm, mm),
+    }

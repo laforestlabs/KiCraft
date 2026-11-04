@@ -179,18 +179,14 @@ def test_fabricated_sourcing_note_lcsc_is_an_offender(tmp_path, monkeypatch):
     assert len(bad) == 1 and "C99999999" in bad[0]
 
 
-def test_mpnless_passive_with_no_match_stays_unpinned_not_blocked(
-    tmp_path, monkeypatch
-):
-    # Tier 4 (KC-V8YWN8): a generic with a keyword but no catalog match must
-    # NOT bounce the model (the search misses legitimate parts); it stays
-    # visibly unpriced instead.
+def test_mpnless_passive_with_no_match_is_an_offender(tmp_path, monkeypatch):
     _install(monkeypatch, _FakeCatalog())
     p = _part(ref="C1", mpn=None, symbol="Device:C",
               footprint="Capacitor_SMD:C_0603_1608Metric")
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
-    assert p.sourcing_note is None
-
+    receipt = []
+    bad, _ = _resolve_bom_mpn_sourcing(_bom(p), tmp_path, receipt)
+    assert len(bad) == 1 and "C1" in bad[0] and "cannot procure" in bad[0]
+    assert p.sourcing_note is None and receipt == []
 
 # ------------------------------------------------- tier 4: keyword sourcing
 
@@ -202,7 +198,7 @@ def _kw_catalog(term, rows):
 def test_mpnless_passive_is_keyword_pinned(tmp_path, monkeypatch):
     _install(monkeypatch, _kw_catalog("100nF 0603", [
         {"lcsc": "C1590", "model": "CL10B104KB8NNNC", "stock": 5_000_000,
-         "type": "Basic"}]))
+         "package": "0603", "type": "Basic"}]))
     p = _part(ref="C1", mpn=None, symbol="Device:C",
               footprint="Capacitor_SMD:C_0603_1608Metric")
     p.value = "100nF"
@@ -212,9 +208,9 @@ def test_mpnless_passive_is_keyword_pinned(tmp_path, monkeypatch):
 
 def test_keyword_pick_prefers_basic_over_stocked_extended(tmp_path, monkeypatch):
     _install(monkeypatch, _kw_catalog("1k 0603", [
-        {"lcsc": "CEXT", "model": "CHURN", "stock": 2_000_000, "type": "Extended"},
+        {"lcsc": "CEXT", "model": "CHURN", "stock": 2_000_000, "package": "0603", "type": "Extended"},
         {"lcsc": "CBAS", "model": "0603WAF1001T5E", "stock": 900_000,
-         "type": "Basic"}]))
+         "package": "0603", "type": "Basic"}]))
     p = _part(ref="R2", mpn=None, symbol="Device:R",
               footprint="Resistor_SMD:R_0603_1608Metric")
     p.value = "1k"
@@ -226,7 +222,7 @@ def test_keyword_qualifiers_relax_on_miss(tmp_path, monkeypatch):
     # "0.1uF 25V X7R 0603" matches nothing; the relaxed "0.1uF 0603" must hit.
     _install(monkeypatch, _kw_catalog("0.1uF 0603", [
         {"lcsc": "C14663", "model": "CC0603KRX7R8BB104", "stock": 3_000_000,
-         "type": "Basic"}]))
+         "description": "0.1uF 50V X7R", "package": "0603", "type": "Basic"}]))
     p = _part(ref="C2", mpn=None, symbol="Device:C",
               footprint="Capacitor_SMD:C_0603_1608Metric")
     p.value = "0.1uF 25V X7R"
@@ -270,10 +266,8 @@ def test_bare_board_exemption_is_footprint_exact_not_family_based():
 
     A real component drawn onto a bare-board library footprint is NOT exempt:
     the exemption must not degrade into a family/prefix match, or an unknown
-    controller could ride a reviewed electrode footprint past sourcing. Whether
-    an unfindable generic is an offender is decided by the documented tier-4
-    policy (nothing searchable -> offender; no catalog match -> stay
-    unpinned), so this asserts the exemption boundary itself.
+    controller could ride a reviewed electrode footprint past sourcing. This
+    asserts the exemption boundary itself.
     """
     assert jlcparts.is_unsourceable_hardware("capacitive-touch-pad:TouchPad_12mm_Front_NoUnderlay")
     assert jlcparts.is_unsourceable_hardware("TestPoint:TestPoint_Pad_D1.5mm")
@@ -563,9 +557,9 @@ def test_kw_walk_picks_next_candidate_when_basic_is_retail_dry(tmp_path, monkeyp
     _install(monkeypatch,
              _kw_catalog("1k 0603", [
                  {"lcsc": "CEXT", "model": "CHURN", "stock": 2_000_000,
-                  "type": "Extended"},
+                  "package": "0603", "type": "Extended"},
                  {"lcsc": "CBAS", "model": "0603WAF1001T5E", "stock": 900_000,
-                  "type": "Basic"}]),
+                  "package": "0603", "type": "Basic"}]),
              _FakeRetail(by_lcsc={"CBAS": {"stock": 0, "min_buy": 100}}))
     p = _part(ref="R2", mpn=None, symbol="Device:R",
               footprint="Resistor_SMD:R_0603_1608Metric")
@@ -574,33 +568,32 @@ def test_kw_walk_picks_next_candidate_when_basic_is_retail_dry(tmp_path, monkeyp
     assert p.sourcing_note == "LCSC CEXT"  # Basic preferred but dry → next
 
 
-def test_kw_walk_exhausted_stays_unpinned_with_warning_not_offender(
-        tmp_path, monkeypatch):
+def test_kw_walk_exhausted_is_offender_not_blank(tmp_path, monkeypatch):
     retail = _FakeRetail(default_stock=0)  # everything dry at retail
     _install(monkeypatch,
              _kw_catalog("1k 0603", [
                  {"lcsc": "CBAS", "model": "0603WAF1001T5E", "stock": 900_000,
-                  "type": "Basic"}]),
+                  "package": "0603", "type": "Basic"}]),
              retail)
     p = _part(ref="R2", mpn=None, symbol="Device:R",
               footprint="Resistor_SMD:R_0603_1608Metric")
     p.value = "1k"
     bad, warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
-    assert bad == []
-    assert len(warns) == 1 and "R2" in warns[0] and "retail" in warns[0]
+    assert len(bad) == 1 and "R2" in bad[0] and "retail-dry" in bad[0]
+    assert warns == []
     assert p.sourcing_note is None
 
 
 def test_kw_walk_respects_the_live_check_cap(tmp_path, monkeypatch):
     rows = [{"lcsc": f"C{i}", "model": f"R{i}", "stock": 1_000_000,
-             "type": "Extended"} for i in range(10)]
+             "package": "0603", "type": "Extended"} for i in range(10)]
     retail = _FakeRetail(default_stock=0)  # all dry → full walk
     _install(monkeypatch, _kw_catalog("1k 0603", rows), retail)
     p = _part(ref="R2", mpn=None, symbol="Device:R",
               footprint="Resistor_SMD:R_0603_1608Metric")
     p.value = "1k"
     bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
-    assert bad == [] and p.sourcing_note is None
+    assert len(bad) == 1 and p.sourcing_note is None
     assert len(retail.calls) == cli_app._RETAIL_WALK_CAP_KW
 
 
@@ -716,16 +709,75 @@ def test_kw_walk_pins_a_true_single_never_the_array_or_a_wrong_value(
     assert _check_passive_array_mismatch(_bom(p), tmp_path) == []
 
 
-def test_kw_walk_all_matches_ineligible_stays_unpinned_not_bounced(
-        tmp_path, monkeypatch):
-    # Only an array and a wrong-value row match: nothing is pinnable, and
-    # nothing bounces to the model — the part stays visibly unpriced.
+def test_kw_walk_all_matches_ineligible_is_offender(tmp_path, monkeypatch):
+    # An array and a wrong-value row cannot satisfy an assembled resistor.
     _install(monkeypatch, _FakeCatalog(
         by_mpn={"10K 0603": [_KW_10K_0603[3], _KW_10K_0603[4]]}))
     p = _generic_10k()
     bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
-    assert bad == []
+    assert len(bad) == 1 and "R1" in bad[0]
     assert p.sourcing_note is None
+
+
+def test_zero_ohm_selection_requires_single_exact_package_and_receipt(tmp_path, monkeypatch):
+    rows = [
+        _kw_row("C10", "RC0603FR-0710RL", "Basic", 5000, "10Ω 0603 Chip Resistor"),
+        _kw_row("C11", "ARRAY0R", "Basic", 5000, "0Ω array", joints=8, package="0603x4"),
+        _kw_row("C12", "OTHER0R", "Basic", 5000, "0Ω", package="0805"),
+        _kw_row("C13", "LOW0R", "Basic", 1, "0Ω"),
+        _kw_row("C95177", "RC0603JR-070RL", "Extended", 5000, "0Ω 0603 Chip Resistor"),
+    ]
+    retail = _FakeRetail()
+    _install(monkeypatch, _kw_catalog("0R 0603", rows), retail)
+    p = _generic_10k()
+    p.value = "0R"
+    receipt = []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path, receipt) == ([], [])
+    assert p.sourcing_note == "LCSC C95177"
+    assert retail.calls == ["C95177"]
+    assert len(receipt) == 1
+    assert receipt[0]["ref"] == "R1" and receipt[0]["exact_lcsc"] == "C95177"
+    assert receipt[0]["catalog_mpn"] == "RC0603JR-070RL"
+
+
+def test_relaxed_search_does_not_waive_voltage_or_dielectric(tmp_path, monkeypatch):
+    rows = [
+        _kw_row("C1", "LOW", "Basic", 5000, "0.1uF 10V X7R"),
+        _kw_row("C2", "WRONG", "Basic", 5000, "0.1uF 50V Y5V"),
+        _kw_row("C3", "GOOD", "Extended", 5000, "0.1uF 50V X7R"),
+    ]
+    _install(monkeypatch, _kw_catalog("0.1uF 0603", rows))
+    p = _part(ref="C1", mpn=None, symbol="Device:C",
+              footprint="Capacitor_SMD:C_0603_1608Metric")
+    p.value = "0.1uF 25V X7R"
+    receipt = []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path, receipt) == ([], [])
+    assert p.sourcing_note == "LCSC C3" and receipt[0]["exact_lcsc"] == "C3"
+
+
+def test_nonassembled_chip_passive_is_not_procured(tmp_path, monkeypatch):
+    _install(monkeypatch, _FakeCatalog())
+    p = _generic_10k()
+    p.assembly = False
+    receipt = []
+    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path, receipt) == ([], [])
+    assert p.sourcing_note is None
+    assert receipt == [{"ref": "R1", "verdict": "excluded_not_assembled"}]
+
+
+def test_assembled_chip_requires_catalog_and_retail_evidence(tmp_path, monkeypatch):
+    p = _generic_10k()
+    _install(monkeypatch, _FakeCatalog(up=False))
+    bad, _ = _resolve_bom_mpn_sourcing(_bom(p), tmp_path, [])
+    assert len(bad) == 1 and "catalog unavailable" in bad[0]
+
+    row = _kw_row("C25804", "0603WAF1002T5E", "Basic", 5000, "10kΩ 0603")
+    _install(monkeypatch, _kw_catalog("10k 0603", [row]), _FakeRetail(on=False))
+    receipt = []
+    bad, _ = _resolve_bom_mpn_sourcing(_bom(p), tmp_path, receipt)
+    assert len(bad) == 1 and "retail orderability" in bad[0]
+    assert receipt[0]["exact_lcsc"] == "C25804"
+    assert receipt[0]["verdict"] == "unverified"
 
 
 def test_kw_walk_array_footprint_may_pin_an_array_part(tmp_path, monkeypatch):

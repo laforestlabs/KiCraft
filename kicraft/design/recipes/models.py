@@ -72,6 +72,9 @@ class RecipePort(BaseModel):
     #: sits on the input rail (always-on), an inverting input on the output (unity-gain
     #: follower). Names another port of the same recipe; the derived binding comes from here.
     default_tie: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*$")
+    # An externally biased control input requires an MCU pad without a reset
+    # pull-up. This is a DC compatibility requirement, not a ramp guarantee.
+    reset_control: Literal["external_low"] | None = None
 
 
 class RecipeAllocatablePin(BaseModel):
@@ -85,6 +88,8 @@ class RecipeAllocatablePin(BaseModel):
     strapping: bool = False
     reserved: bool = False
     input_only: bool = False
+    # Pin-specific reset documentation; unknown is deliberately not a proof.
+    reset_bias: Literal["unknown", "no_pull_up", "pull_up"] = "unknown"
 
 
 class RecipeSourceDocument(BaseModel):

@@ -78,6 +78,7 @@ from .synthesis.fab_export import extract_lcsc_pin
 from .synthesis.symbol_library import search_symbols
 from .synthesis.footprint_library import (
     FootprintNotFoundError,
+    load_footprint_file,
     lookup_footprint,
     search_footprints,
 )
@@ -546,6 +547,37 @@ def _is_single_passive_footprint(fp: str) -> bool:
         return False
     return not re.search(r"array|network|x\d", leaf, re.IGNORECASE)
 
+def _assembled_chip_rc(part) -> bool:
+    fp = part.footprint or ""
+    return (getattr(part, "assembly", True)
+            and fp.split(":", 1)[0] in ("Resistor_SMD", "Capacitor_SMD")
+            and _is_single_passive_footprint(fp))
+
+
+def _generic_chip_compatible(part, candidate: dict) -> bool:
+    """Require the catalog package and any explicit value qualifiers."""
+    leaf = (part.footprint or "").split(":", 1)[-1]
+    size = re.search(r"_(\d{3,4})(?:_|$)", leaf)
+    if not size or str(candidate.get("package") or "").strip() != size.group(1):
+        return False
+    description = str(candidate.get("description") or "")
+    for token in (part.value or "").split()[1:]:
+        voltage = re.fullmatch(r"(\d+(?:\.\d+)?)V", token, re.IGNORECASE)
+        if voltage:
+            ratings = re.findall(r"(?<![\d.])(\d+(?:\.\d+)?)\s*V\b", description,
+                                 re.IGNORECASE)
+            if not ratings or max(map(float, ratings)) < float(voltage.group(1)):
+                return False
+        elif re.fullmatch(r"X[57]R|C0G|NP0|Y5V", token, re.IGNORECASE):
+            if not re.search(r"(?<![A-Za-z0-9])" + re.escape(token)
+                             + r"(?![A-Za-z0-9])", description, re.IGNORECASE):
+                return False
+        elif re.fullmatch(r"±?\d+(?:\.\d+)?%", token):
+            tolerances = re.findall(r"±\s*(\d+(?:\.\d+)?)\s*%", description)
+            if not tolerances or min(map(float, tolerances)) > float(token.lstrip("±")[:-1]):
+                return False
+    return True
+
 
 def _resolve_part_lcsc(part, manifest_by_name: dict) -> str | None:
     """The C# a BOM part resolves to: an explicit pin in ``sourcing_note``
@@ -883,28 +915,21 @@ def _resolve_bom_mpn_sourcing(
         substring matches ("10k" inside "510kΩ") are ineligible in BOTH
         walks — auto-pinning an array §9.28 then rejects was the KC-8XZS9Q
         unwinnable-retry deadlock.
-        Only a part with NOTHING searchable (no value, no package) is an
-        offender; a keyword whose matches are all retail-dry (or that finds
-        none) stays unpinned and visibly unpriced rather than bouncing the
-        model (generics have dozens of equivalents; the search also misses
-        legitimate specialty parts). Test points / mounting holes / net ties
-        are bare copper, not orderable parts, and are skipped.
+        An assembled single chip resistor or capacitor with no suitable
+        candidate is an offender, not a silently blank assembly BOM row.
+        Other generic parts retain the existing unpriced-on-miss policy.
+        Bare-board features and non-assembled parts are not procured.
 
-    Retail checks fail OPEN ("can't verify — don't block"): an unreachable
-    storefront never bounces the model, it downgrades to a warning. A
-    deliberately chosen part (explicit pin, bundle) that is out of stock follows
-    the owner's rule above rather than being vetoed: kept, or swapped for an
-    in-stock same-package carrier, and always recorded. Walk-time candidates
-    (the two auto-pinning tiers) still *prefer* parts that clear the retail floor
-    (KICRAFT_BOM_RETAIL_STOCK_FLOOR), because there the gate is choosing and can
-    simply choose one that is buyable.
+    Retail checks for non-chip parts retain their fail-open policy. Assembled
+    chip resistors and capacitors require an orderable selection or a failure.
 
-    Returns ``(offenders, warnings)`` (offenders empty = everything is real, or
-    the catalog is unavailable). Only mutations are appending ``LCSC <C#>`` pins
-    and the recorded keep-or-swap outcome.
+    Returns ``(offenders, warnings)``. An unavailable catalog prevents
+    verification of assembled chip resistors and capacitors.
     """
     if not jlcparts.available():
-        return [], []  # can't verify — don't block
+        return ([f"{p.ref}: offline catalog unavailable; cannot select or verify "
+                 "the assembled chip passive" for p in bom.parts or []
+                 if _assembled_chip_rc(p)], [])
     floor = _bom_stock_floor()
     warnings: list[str] = []
     age = jlcparts.dump_age_days()
@@ -1087,14 +1112,21 @@ def _resolve_bom_mpn_sourcing(
             )
         bom.assumptions.append(decision.reason)
         warnings.append(f"{part.ref} ({label}): {decision.reason}")
+        if _assembled_chip_rc(part):
+            bad.append(f"{part.ref}: assembled chip passive {cid} is not orderable: "
+                       f"{shortfall}; select an in-stock replacement")
 
     best_by_mpn: dict[
-        tuple[str, bool, str, str], tuple[dict | None, list[str], bool]
+        tuple[str, bool, str, str, str], tuple[dict | None, list[str], bool]
     ] = {}
     best_by_kw: dict[
         tuple[str, bool, str, str], tuple[dict | None, bool, bool]
     ] = {}
     for part in bom.parts or []:
+        if not getattr(part, "assembly", True):
+            if receipt is not None:
+                receipt.append({"ref": part.ref, "verdict": "excluded_not_assembled"})
+            continue
         mpn = (part.mpn or "").strip()
         note = part.sourcing_note or ""
         # A reviewed bare-board feature (a capacitive electrode, test point,
@@ -1134,6 +1166,13 @@ def _resolve_bom_mpn_sourcing(
             conflict = None
             if hit is not None and not fp_is_bundle:
                 conflict = _lcsc_identity_conflict(part, hit)
+                value_token = jlcparts.bom_keyword(part.value or "", part.footprint or "")
+                if _assembled_chip_rc(part) and (
+                    is_multi_element_array(hit)
+                    or not _generic_chip_compatible(part, hit)
+                    or (value_token and not chip_value_matches(value_token.split()[0], hit))
+                ):
+                    conflict = "the catalog value, package or specified ratings do not match the chip footprint"
             if hit is None:
                 bad.append(
                     f"{part.ref} ({label}): sourcing_note claims LCSC "
@@ -1161,7 +1200,7 @@ def _resolve_bom_mpn_sourcing(
                     ),
                 )
             else:
-                verdict, info = _retail_verdict(cid, picky=False)
+                verdict, info = _retail_verdict(cid, picky=_assembled_chip_rc(part))
                 if verdict == "dry":
                     _out_of_stock(
                         part,
@@ -1172,9 +1211,12 @@ def _resolve_bom_mpn_sourcing(
                             f"({info['stock']} available, min buy {info['min_buy']})"
                         ),
                     )
-                elif verdict == "unverified":
-                    unverified.append(f"{part.ref} ({cid})")
-                elif verdict == "ok":
+                else:
+                    if verdict == "unverified":
+                        unverified.append(f"{part.ref} ({cid})")
+                    if _assembled_chip_rc(part) and verdict != "ok":
+                        bad.append(f"{part.ref}: retail orderability for {cid} is {verdict}; "
+                                   "verify retail stock before committing")
                     _receipt(part, cid, hit, verdict, info, False)
             continue
         lib = _lib_prefix(part.symbol) or _lib_prefix(part.footprint or "")
@@ -1184,7 +1226,9 @@ def _resolve_bom_mpn_sourcing(
             # stock (both inventories) is gated here.
             cid = str((man.sourcing or {}).get("lcsc")).strip().upper()
             hit = jlcparts.lookup(cid)
-            if hit is not None and (hit.get("stock") or 0) < floor:
+            if hit is None and _assembled_chip_rc(part):
+                bad.append(f"{part.ref}: bundle LCSC {cid} is absent from the offline catalog")
+            elif hit is not None and (hit.get("stock") or 0) < floor:
                 _out_of_stock(
                     part,
                     label=lib,
@@ -1195,7 +1239,7 @@ def _resolve_bom_mpn_sourcing(
                     ),
                 )
             else:
-                verdict, info = _retail_verdict(cid, picky=False)
+                verdict, info = _retail_verdict(cid, picky=_assembled_chip_rc(part))
                 if verdict == "dry":
                     _out_of_stock(
                         part,
@@ -1206,9 +1250,12 @@ def _resolve_bom_mpn_sourcing(
                             f"({info['stock']} available, min buy {info['min_buy']})"
                         ),
                     )
-                elif verdict == "unverified":
-                    unverified.append(f"{part.ref} ({cid})")
-                elif verdict == "ok":
+                else:
+                    if verdict == "unverified":
+                        unverified.append(f"{part.ref} ({cid})")
+                    if _assembled_chip_rc(part) and verdict != "ok":
+                        bad.append(f"{part.ref}: retail orderability for {cid} is {verdict}; "
+                                   "verify retail stock before committing")
                     part.sourcing_note = (f"{note} " if note else "") + f"LCSC {cid}"
                     _receipt(part, cid, hit, verdict, info, False)
             continue
@@ -1247,6 +1294,8 @@ def _resolve_bom_mpn_sourcing(
                             for c in stocked
                             if not is_multi_element_array(c) and chip_value_matches(vtok, c)
                         ]
+                    if _assembled_chip_rc(part):
+                        stocked = [c for c in stocked if _generic_chip_compatible(part, c)]
                     # Prefer JLC Basic (the stable no-setup-fee tier;
                     # Extended long-tail rows churn out within weeks).
                     return [c for c in stocked if c.get("type") == "Basic"] + [
@@ -1280,22 +1329,25 @@ def _resolve_bom_mpn_sourcing(
                 _receipt(part, str(best["lcsc"]), best, verdict, info, True)
                 if unv:
                     unverified.append(f"{part.ref} ({best['lcsc']})")
+                if _assembled_chip_rc(part) and verdict != "ok":
+                    bad.append(f"{part.ref}: retail orderability for {best['lcsc']} is {verdict}; "
+                               "verify retail stock before committing")
+            elif _assembled_chip_rc(part):
+                reason = ("all eligible candidates are retail-dry" if had_cands else
+                          "no catalog candidate meets value, package, rating and stock requirements")
+                bad.append(
+                    f"{part.ref}: cannot procure assembled chip passive '{kw}': {reason}; "
+                    "use lookup_lcsc_id to select an in-stock compatible part and provide its LCSC"
+                )
             elif had_cands:
-                # Every catalog match is dry at retail: stay unpinned (never
-                # select an OOS part) but don't bounce — see below.
                 warnings.append(
                     f"{part.ref}: every catalog match for '{kw}' is out of "
-                    f"stock at the lcsc.com retail storefront; left "
-                    f"unpinned/unpriced"
+                    f"stock at the lcsc.com retail storefront; left unpinned/unpriced"
                 )
-            # A generic with a keyword but no orderable catalog match is NOT
-            # blocked: the search misses legitimate parts (specialty jacks,
-            # exotic values) and bouncing those to the model just
-            # whack-a-moles. It stays visibly unpriced in the BOM/cost UI.
             continue
         single = _is_single_passive_footprint(part.footprint or "")
         mkey = mpn.upper()
-        key = (mkey, single, part.symbol, part.footprint)
+        key = (mkey, single, part.symbol, part.footprint, part.value or "")
         if key not in best_by_mpn:
             matches: list[dict] = []
             tried: list[str] = []
@@ -1320,6 +1372,14 @@ def _resolve_bom_mpn_sourcing(
                             f"multi-element array — unusable on a single "
                             f"2-pad footprint"
                         )
+                        continue
+                    value_token = jlcparts.bom_keyword(part.value or "", part.footprint or "")
+                    if _assembled_chip_rc(part) and (
+                        not _generic_chip_compatible(part, cand)
+                        or (value_token and not chip_value_matches(value_token.split()[0], cand))
+                    ):
+                        tried.append(f"{cand.get('model')} ({cand['lcsc']}) has an "
+                                     "incompatible value, package or specified rating")
                         continue
                     matches.append(cand)
             eligible: list[dict] = []
@@ -1373,6 +1433,9 @@ def _resolve_bom_mpn_sourcing(
             _receipt(part, str(best["lcsc"]), best, verdict, info, True)
             if unv:
                 unverified.append(f"{part.ref} ({best['lcsc']})")
+            if _assembled_chip_rc(part) and verdict != "ok":
+                bad.append(f"{part.ref}: retail orderability for {best['lcsc']} is {verdict}; "
+                           "verify retail stock before committing")
     if unverified:
         warnings.append(
             "retail stock unverified (lcsc.com unreachable at commit) for: "
@@ -2522,9 +2585,7 @@ def _ensure_vendored_courtyard_clearance(
     except ImportError:
         return
     try:
-        fp = pcbnew.FootprintLoad(str(pretty_dir), footprint_name)
-        if fp is None:
-            return
+        fp = load_footprint_file(pcbnew, pretty_dir / f"{footprint_name}.kicad_mod")
         repaired = repair_malformed_courtyard(fp)
         grew = ensure_courtyard_clears_pads(fp, min_clearance_mm=min_clearance_mm)
         pth_changes = normalize_pth_pads_for_fab(fp)
@@ -2715,10 +2776,12 @@ def _warn_undetectable_mouth(part_dir: Path, libname: str, footprint_name: str) 
     except ImportError:
         return
     try:
-        loaded = pcbnew.FootprintLoad(str(part_dir / f"{libname}.pretty"), footprint_name)
+        loaded = load_footprint_file(
+            pcbnew, part_dir / f"{libname}.pretty" / f"{footprint_name}.kicad_mod"
+        )
     except Exception:  # noqa: BLE001 -- a lint must never fail the fetch
         return
-    if loaded is None or not _mouth_undetectable(loaded, pcbnew):
+    if not _mouth_undetectable(loaded, pcbnew):
         return
     print(
         f"WARNING {libname}: deep-bodied holed footprint '{footprint_name}' "
@@ -3320,8 +3383,14 @@ def _cmd_validate_part(args: argparse.Namespace) -> int:
     except ImportError:
         _pcbnew = None
     if _pcbnew is not None:
-        loaded_fp = _pcbnew.FootprintLoad(str(fp.parent), manifest.footprint_name)
-        bad_layers = malformed_courtyard_layers(loaded_fp) if loaded_fp else []
+        try:
+            loaded_fp = load_footprint_file(
+                _pcbnew, fp.parent / f"{manifest.footprint_name}.kicad_mod"
+            )
+        except FootprintNotFoundError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        bad_layers = malformed_courtyard_layers(loaded_fp)
         if bad_layers:
             names = ", ".join(_pcbnew.BOARD.GetStandardLayerName(layer) for layer in bad_layers)
             print(
