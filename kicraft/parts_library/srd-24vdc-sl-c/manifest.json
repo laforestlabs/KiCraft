@@ -1,0 +1,22 @@
+{
+  "content_hash": "sha256:fbfcf766210c6969f0dfd8f6123cbabbe1061706c074d74d47f9fb044a531143",
+  "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/9ddfe54b7529126320ff1ddcabf6bab7.pdf?productCode=C15840",
+  "description": "Songle SRD-24VDC-SL-C 24 V SPDT relay, 0.36 W coil",
+  "footprint_name": "RELAY-TH_SRD-XXVDC-XL-C",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "SRD-24VDC-SL-C",
+  "name": "srd-24vdc-sl-c",
+  "provenance": {
+    "added_at": "2026-11-03T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "Songle datasheet and LCSC C15840 EasyEDA symbol and footprint",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {"lcsc": "C15840"},
+  "symbol_name": "SRD-24VDC-SL-C",
+  "tags": ["portable"],
+  "version": "1.0.0",
+  "watch_out_for": "Supplier CAD-derived; verify physical fit, contact load and clearances for the application."
+}

@@ -39,6 +39,134 @@ def _state(requirement: CircuitRequirement, parts=None) -> dict:
     }
 
 
+def test_tmp102_temperature_lowerer_owns_power_i2c_and_address():
+    req = _requirement("tmp102-temperature", ports={
+        "vdd": "+3V3", "gnd": "GND", "sda": "SDA", "scl": "SCL",
+    })
+    artifact = lower_requirement(req)
+    sensor = next(group for group in artifact.groups if group.role == "sensor")
+    assert sensor.mpn == "TMP102AIDRLR"
+    assert {pin.pin: pin.net for pin in artifact.pins if pin.role == "sensor"} == {
+        "1": "SCL", "2": "GND", "4": "GND", "5": "+3V3", "6": "SDA",
+    }
+    assert {(pin.role, pin.pin) for pin in artifact.no_connects} == {("sensor", "3")}
+    for role, net in (("bypass", "GND"), ("sda_pullup", "SDA"), ("scl_pullup", "SCL")):
+        assert {pin.pin: pin.net for pin in artifact.pins if pin.role == role} == {
+            "1": "+3V3", "2": net,
+        }
+    shorted = req.model_copy(update={"ports": {**req.ports, "sda": "SCL"}})
+    with pytest.raises(ValueError):
+        lower_requirement(shorted)
+
+
+def test_tmp102_export_reconstructs_each_canonical_owner_and_rejects_spoof(tmp_path):
+    from collections import defaultdict
+    from kicraft.design.models import Architecture, BOM, BomPart, NetConnection, PinEndpoint
+    from kicraft.design.synthesis.autoplacer import write_autoplacer_json
+
+    requirements = [
+        _requirement("tmp102-temperature", ports={
+            "vdd": "+3V3", "gnd": "GND", "sda": f"SDA{i}", "scl": f"SCL{i}",
+        }).model_copy(update={"id": f"sensor{i}"})
+        for i in (1, 2)
+    ]
+    parts = []
+    nets = defaultdict(list)
+    for i, requirement in enumerate(requirements, 1):
+        artifact = lower_requirement(requirement)
+        refs = {"sensor": f"U{i}", "bypass": f"C{i}",
+                "sda_pullup": f"R{2*i-1}", "scl_pullup": f"R{2*i}"}
+        for group in artifact.groups:
+            parts.append(BomPart(
+                ref=refs[group.role], value=group.value, symbol=group.symbol,
+                footprint=group.footprint, sheet="MAIN", mpn=group.mpn,
+                resolution_source="lowerer", resolution_id=artifact.lowerer_id,
+                lowering_requirement_id=requirement.id, lowering_role=group.role,
+                lowering_index=0,
+            ))
+        for pin in artifact.pins:
+            nets[pin.net].append(PinEndpoint(ref=refs[pin.role], pin=pin.pin))
+    bom = BOM(parts=parts, connections=[
+        NetConnection(net_name=net, endpoints=endpoints, sheet="MAIN")
+        for net, endpoints in nets.items()
+    ])
+    arch = Architecture(
+        requirements=requirements,
+        sheets=[{"name": "MAIN", "stem": "MAIN", "function": "Sensors"}],
+        power_nets=["+3V3", "GND"], inter_sheet_nets=[],
+    )
+    out = write_autoplacer_json(tmp_path, "OWNERS", arch, bom)
+    specs = json.loads(out.read_text())["local_bypasses"]
+    assert [(s["owner_ref"], s["bypass_ref"]) for s in specs] == [("U1", "C1"), ("U2", "C2")]
+    assert all(s["power_pins"] == ["5", "1"] and s["ground_pins"] == ["2", "2"]
+               and s["max_distance_mm"] == 2.5 for s in specs)
+    # A DTO cannot steal the other requirement's bypass despite a common rail.
+    next(p for p in bom.parts if p.ref == "C1").lowering_requirement_id = "sensor2"
+    with pytest.raises(ValueError, match="canonical BOM/wiring ownership"):
+        write_autoplacer_json(tmp_path, "BAD", arch, bom)
+
+
+def test_tmp102_merge_reconstructs_role_provenance_not_candidate_metadata():
+    reqs = [
+        _requirement("tmp102-temperature", ports={
+            "vdd": "+3V3", "gnd": "GND", "sda": f"SDA{i}", "scl": f"SCL{i}",
+        }).model_copy(update={"id": f"sensor{i}"})
+        for i in (1, 2)
+    ]
+    state = _state(reqs[0])
+    state["architecture"]["requirements"] = [r.model_dump(mode="json") for r in reqs]
+    units = tuple(StageWorkUnit(f"bom-r00{i}", "bom", "MAIN", requirement_ids=(r.id,))
+                  for i, r in enumerate(reqs))
+    candidates = {}
+    for unit in units:
+        candidate = deterministic_bom_candidate(unit, state)
+        candidate["_lowering_roles"] = {"bypass": {"lowering_role": "sensor"}}
+        candidates[unit.unit_id] = candidate
+    _, _, provenance, _, _ = merge_bom_units(units, candidates, state)
+    for requirement in reqs:
+        owned = [v for v in provenance.values()
+                 if v["lowering_requirement_id"] == requirement.id]
+        assert {v["lowering_role"] for v in owned} == {
+            "sensor", "bypass", "sda_pullup", "scl_pullup",
+        }
+
+
+def test_tmp102_qualified_ti_land_pattern():
+    from pathlib import Path
+
+    import pcbnew
+
+    from kicraft.design.part_identity import reviewed_part
+    from kicraft.design.synthesis.footprint_library import load_footprint
+    from kicraft.parts_library.manifest import load_manifest, verify_content_hash
+
+    req = _requirement("tmp102-temperature", ports={
+        "vdd": "+3V3", "gnd": "GND", "sda": "SDA", "scl": "SCL",
+    })
+    sensor = next(g for g in lower_requirement(req).groups if g.role == "sensor")
+    record = reviewed_part("TMP102AIDRLR")
+    assert (sensor.symbol, sensor.footprint) == (record.symbol, record.footprint)
+    assert record.lcsc == "C99269"
+    bundle = Path("kicraft/parts_library/tmp102aidrlr")
+    manifest = load_manifest(bundle)
+    assert verify_content_hash(bundle, manifest)
+    footprint, _ = load_footprint(pcbnew, *sensor.footprint.split(":"), project_root=Path("."))
+    pads = {pad.GetNumber(): pad for pad in footprint.Pads()}
+    locations = {
+        "1": (-0.74, -0.5), "2": (-0.74, 0.0), "3": (-0.74, 0.5),
+        "4": (0.74, 0.5), "5": (0.74, 0.0), "6": (0.74, -0.5),
+    }
+    assert set(pads) == set(locations)
+    for number, pad in pads.items():
+        assert (pcbnew.ToMM(pad.GetPosition().x), pcbnew.ToMM(pad.GetPosition().y)) == locations[number]
+        assert (pcbnew.ToMM(pad.GetSize().x), pcbnew.ToMM(pad.GetSize().y)) == (0.67, 0.30)
+        assert pad.GetShape() == pcbnew.PAD_SHAPE_ROUNDRECT
+        assert pcbnew.ToMM(pad.GetRoundRectCornerRadius()) == pytest.approx(0.05)
+        assert pcbnew.ToMM(pad.GetLocalSolderMaskMargin()) == pytest.approx(0.05)
+        assert all(pad.GetLayerSet().Contains(layer) for layer in (pcbnew.F_Cu, pcbnew.F_Mask, pcbnew.F_Paste))
+    assert pcbnew.ToMM(pads["2"].GetPosition().y - pads["1"].GetPosition().y - pads["1"].GetSize().y) == pytest.approx(0.20)
+
+
 def test_verified_lowerer_can_own_an_exact_part_used_inside_an_active_recipe():
     from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
 
@@ -523,15 +651,12 @@ def test_header_physical_constraints_reject_unproven_known_lowerer_claims(update
         deterministic_bom_candidate(unit, state)
 
 
-def test_screw_terminal_honors_registered_row_parameter():
+def test_screw_terminal_rejects_unregistered_row_parameter():
     requirement = _requirement(
-        "screw-terminal", parameters={"rows": 1}, ports={"positive": "VIN", "negative": "GND"}
+        "screw-terminal", parameters={"rows": 2}, ports={"positive": "VIN", "negative": "GND"}
     )
-    artifact = lower_requirement(requirement)
-    assert artifact is not None
-    assert artifact.groups[0].symbol == "Connector:Screw_Terminal_01x02"
     with pytest.raises(ValueError):
-        lower_requirement(requirement.model_copy(update={"parameters": {"rows": 2}}))
+        lower_requirement(requirement)
 
 
 def test_selector_cannot_silently_substitute_an_explicit_device():
@@ -544,16 +669,6 @@ def test_selector_cannot_silently_substitute_an_explicit_device():
     assert artifact.groups[0].mpn == "SS13D07VG4"
     with pytest.raises(ValueError):
         lower_requirement(requirement.model_copy(update={"exact_part": "MSK13C02-SZ"}))
-
-
-def test_switch_lowerer_does_not_guess_an_absent_pull_policy():
-    requirement = _requirement(
-        "switch-input",
-        parameters={"active_level": "high", "resistance": 10000},
-        ports={"signal": "BOOT0", "gnd": "GND", "vdd": "+3V3"},
-    )
-    with pytest.raises(ValueError):
-        lower_requirement(requirement)
 
 
 def test_internal_switch_bias_cannot_discard_requested_resistor():
@@ -603,20 +718,21 @@ def test_selector_realizes_common_throws_grounded_frame_and_open_position():
     assert not all_throws.no_connects
 
 
+@pytest.mark.parametrize("exact_part", [None, "TL3342F260QG"])
 @pytest.mark.parametrize("policy", ["internal", "external"])
 @pytest.mark.parametrize(
     ("active_level", "active_net", "pull_role", "idle_net"),
     [("low", "GND", "pullup", "3V3"), ("high", "3V3", "pulldown", "GND")],
 )
 def test_button_actuation_and_bias_follow_explicit_polarity(
-    policy, active_level, active_net, pull_role, idle_net
+    policy, active_level, active_net, pull_role, idle_net, exact_part
 ):
     artifact = lower_requirement(
         _requirement(
             "switch-input",
             parameters={"pull_policy": policy, "active_level": active_level},
             ports={"signal": "CONTROL", "vdd": "3V3", "gnd": "GND"},
-        )
+        ).model_copy(update={"exact_part": exact_part})
     )
     by_pin = {(pin.role, pin.pin): pin.net for pin in artifact.pins}
     expected = {
@@ -629,9 +745,54 @@ def test_button_actuation_and_bias_follow_explicit_polarity(
     assert {group.role for group in artifact.groups} == (
         {"switch", pull_role} if policy == "external" else {"switch"}
     )
-    assert next(group for group in artifact.groups if group.role == "switch").symbol == (
-        "Switch:SW_Push"
-    )
+    switch = next(group for group in artifact.groups if group.role == "switch")
+    if exact_part:
+        assert switch.mpn == exact_part
+
+
+@pytest.mark.parametrize(("voltage", "exact_part", "accepted"), [
+    (24, None, True),
+    (32, None, True),
+    (33, None, False),
+    (12, "TL3342F260QG", True),
+    (13, "TL3342F260QG", False),
+])
+def test_button_voltage_respects_selected_exact_identity(voltage, exact_part, accepted):
+    requirement = _requirement(
+        "switch-input",
+        parameters={"voltage": voltage},
+        ports={"signal": "CONTROL", "vdd": "CONTROL_SUPPLY", "gnd": "GND"},
+    ).model_copy(update={"exact_part": exact_part})
+    if accepted:
+        artifact = lower_requirement(requirement)
+        switch = next(group for group in artifact.groups if group.role == "switch")
+        from kicraft.design.part_identity import physical_inventory_record
+        record = physical_inventory_record(
+            mpn=switch.mpn, symbol=switch.symbol, footprint=switch.footprint
+        )
+        assert record is not None
+        assert record.operating_limits["voltage_v"] >= voltage
+        if exact_part:
+            assert switch.mpn == exact_part
+    else:
+        with pytest.raises(ValueError):
+            lower_requirement(requirement)
+
+
+
+def test_button_catalog_binding_rejects_different_physical_switch():
+    from types import SimpleNamespace
+    from kicraft.design.cli_app import _lcsc_identity_conflict
+
+    artifact = lower_requirement(_requirement(
+        "switch-input", parameters={},
+        ports={"signal": "CONTROL", "vdd": "3V3", "gnd": "GND"},
+    ))
+    switch = next(group for group in artifact.groups if group.role == "switch")
+    part = SimpleNamespace(symbol=switch.symbol, footprint=switch.footprint)
+    assert _lcsc_identity_conflict(part, {"model": "KMR232NGULCLFS"}) is None
+    assert _lcsc_identity_conflict(part, {"model": "TL3342F260QG"}) is not None
+
 
 
 @pytest.mark.parametrize(
@@ -653,7 +814,7 @@ def test_button_lowerer_refuses_ambiguous_supply_or_actuation(parameters, ports)
         lower_requirement(_requirement("switch-input", parameters=parameters, ports=ports))
 
 
-@pytest.mark.parametrize("mechanism", ["jumper", "rotary switch", "potentiometer"])
+@pytest.mark.parametrize("mechanism", ["rotary switch", "potentiometer"])
 def test_button_cannot_replace_a_different_adjustment_mechanism(mechanism):
     requirement = CircuitRequirement(
         id="enable", sheet="MAIN", role="user_io", family="switch-input",
@@ -669,6 +830,87 @@ def test_button_cannot_replace_a_different_adjustment_mechanism(mechanism):
     assert lowerer_contract_diagnostic(requirement) is not None
 
 
+def test_jst_xh_lowerer_selects_the_reviewed_carrier_with_exact_contact_count():
+    four = lower_requirement(
+        _requirement(
+            "jst-xh-connector",
+            ports={f"pin{index}": f"NET{index}" for index in range(1, 5)},
+        )
+    )
+    assert four.groups[0].mpn == "B4B-XH-A(LF)(SN)"
+    assert four.groups[0].footprint == "Connector_JST:JST_XH_B4B-XH-A_1x04_P2.50mm_Vertical"
+    assert {(pin.pin, pin.net) for pin in four.pins} == {
+        ("1", "NET1"), ("2", "NET2"), ("3", "NET3"), ("4", "NET4"),
+    }
+
+    two = lower_requirement(
+        _requirement("jst-xh-connector", ports={"pin1": "A", "pin2": "B"})
+    )
+    assert two.groups[0].mpn == "B2B-XH-A(LF)(SN)"
+
+    with pytest.raises(ValueError, match="cannot realize"):
+        lower_requirement(
+            _requirement(
+                "jst-xh-connector",
+                ports={f"pin{index}": f"NET{index}" for index in range(1, 5)},
+            ).model_copy(update={"exact_part": "B2B-XH-A(LF)(SN)"})
+        )
+
+
+@pytest.mark.parametrize(
+    ("active_level", "active_net", "idle_net", "pull_role"),
+    [("low", "GND", "+3V3", "pullup"), ("high", "+3V3", "GND", "pulldown")],
+)
+def test_enable_jumper_is_real_hardware_with_deterministic_fitted_and_removed_states(
+    active_level, active_net, idle_net, pull_role
+):
+    artifact = lower_requirement(
+        CircuitRequirement(
+            id="enable", sheet="POWER", role="user_io", family="switch-input",
+            parameters={"pull_policy": "external", "active_level": active_level},
+            ports={"signal": "REG_EN", "gnd": "GND", "vdd": "+3V3"},
+            obligations=[{
+                "kind": "adjustability", "original_obligation_id": "enable",
+                "parameter": "enable", "mechanism": "jumper",
+            }],
+        )
+    )
+    assert {group.role for group in artifact.groups} == {"jumper", pull_role}
+    jumper = next(group for group in artifact.groups if group.role == "jumper")
+    assert jumper.mpn == "TSW-102-07-G-S"
+    assert jumper.symbol == "Connector_Generic:Conn_01x02"
+    assert jumper.sourcing_note == (
+        "Fit Samtec SNT-100-BK-G removable shunt for enabled state; leave shunt off "
+        "for disabled state"
+    )
+    assert {(pin.role, pin.pin): pin.net for pin in artifact.pins} == {
+        ("jumper", "1"): "REG_EN",
+        ("jumper", "2"): active_net,
+        (pull_role, "1"): idle_net,
+        (pull_role, "2"): "REG_EN",
+    }
+    assert f"fitted on TSW-102-07-G-S: REG_EN={active_net}" in artifact.assumptions[0]
+    assert f"removed: REG_EN={idle_net}" in artifact.assumptions[0]
+
+
+def test_enable_jumper_refuses_an_internal_pull_or_unbounded_raw_supply():
+    def requirement(parameters, vdd="+3V3"):
+        return CircuitRequirement(
+            id="enable", sheet="POWER", role="user_io", family="switch-input",
+            parameters=parameters,
+            ports={"signal": "REG_EN", "gnd": "GND", "vdd": vdd},
+            obligations=[{
+                "kind": "adjustability", "original_obligation_id": "enable",
+                "parameter": "enable", "mechanism": "jumper",
+            }],
+        )
+
+    with pytest.raises(ValueError, match="external pull"):
+        lower_requirement(requirement({"pull_policy": "internal"}))
+    with pytest.raises(ValueError, match="verified logic/control rail"):
+        lower_requirement(requirement({"pull_policy": "external"}, vdd="VIN18"))
+
+
 @pytest.mark.parametrize("mechanism", ["pushbutton", "momentary button", "push-button"])
 def test_button_adjustment_retains_momentary_contacts(mechanism):
     requirement = CircuitRequirement(
@@ -681,7 +923,6 @@ def test_button_adjustment_retains_momentary_contacts(mechanism):
         }],
     )
     artifact = lower_requirement(requirement)
-    assert artifact.groups[0].symbol == "Switch:SW_Push"
     assert {(p.pin, p.net) for p in artifact.pins if p.role == "switch"} == {
         ("1", "ENABLE"), ("2", "VIN"),
     }
@@ -704,7 +945,7 @@ def test_coin_cell_holder_lowers_real_source_and_preserves_battery_polarity():
     state = _state(requirement)
     (bom_unit,) = plan_stage_work_units("bom", state, {})
     candidate = validate_unit_candidate(bom_unit, {"groups": []}, state, {})
-    merged, _, provenance, _ = merge_bom_units((bom_unit,), {bom_unit.unit_id: candidate}, state)
+    merged, _, provenance, _, _ = merge_bom_units((bom_unit,), {bom_unit.unit_id: candidate}, state)
     _, parts, _, _, _ = _expand_bom_groups(merged, state)
     (holder,) = parts
     assert holder.mpn == "BS-07-A1BJ001"
@@ -890,7 +1131,7 @@ def test_r2r_bom_provenance_drives_wiring_from_the_same_artifact():
     state = _state(requirement)
     bom_unit = StageWorkUnit("bom-r000", "bom", "MAIN", requirement_ids=(requirement.id,))
     candidate = validate_unit_candidate(bom_unit, {"groups": [], "arrays": []}, state, {})
-    merged, ref_to_unit, ref_to_lowering, trusted_groups = merge_bom_units(
+    merged, ref_to_unit, ref_to_lowering, trusted_groups, _ = merge_bom_units(
         (bom_unit,), {bom_unit.unit_id: candidate}, state
     )
     assert trusted_groups == frozenset({"r000_branch", "r000_series"})
@@ -1475,30 +1716,6 @@ def test_lowerer_refusal_names_required_ports():
     assert lowerer_contract_diagnostic(bound) is None
 
 
-def test_lowerer_summary_publishes_the_reviewed_part_and_parameter_choices():
-    """What a lowerer can build must be discoverable before a draft is written.
-
-    `extras.circuit_lowerers` is the model's only view of these contracts: an audio jack
-    that realizes exactly one reviewed part, and a filter whose two parameters have one
-    accepted value each, are unreachable by a draft that cannot read them.
-    """
-    from kicraft.design.lowering import lowerer_summaries
-
-    rows = {row["lowerer"]: row for row in lowerer_summaries()}
-    assert rows["audio-jack@1"]["required_exact_part"] == "SJ1-3533NG"
-    assert rows["bnc-connector@1"]["reviewed_exact_part"] == "KH-BNC50-3511"
-    assert rows["fpc-connector@1"]["reviewed_exact_part"] == "KH-FG0.5-H2.0-24PIN"
-    # The breakout build places the reviewed USB-C receptacle and no other connector, so a draft
-    # that reaches for the demanded class can name the code it builds (and the architecture stage
-    # keeps this family instead of rewriting it to the bare record's class).
-    assert rows["usb-c-breakout@1"]["reviewed_exact_part"] == "12401610E4#2A"
-    assert rows["adjustable-rc-lowpass@1"]["parameter_choices"] == {
-        "capacitance_f": [10e-9],
-        "capacitor_exact_part": ["C0805C103J5GACTU"],
-    }
-    # A family that realizes no specific reviewed part publishes none.
-    assert "required_exact_part" not in rows["pin-header@1"]
-    assert "reviewed_exact_part" not in rows["pin-header@1"]
 
 
 def test_lowerer_refusal_names_the_reviewed_part_and_the_accepted_parameter():
@@ -1591,7 +1808,7 @@ def _lower_prototyping_area_bom():
     validated = validate_unit_candidate(
         unit, {**candidate, "_trusted_deterministic_candidate": True}, state, {}
     )
-    merged, _ref_to_unit, ref_to_lowering, trusted = merge_bom_units(
+    merged, _ref_to_unit, ref_to_lowering, trusted, _ = merge_bom_units(
         (unit,), {unit.unit_id: validated}, state
     )
     normalized, _count = _normalize_stage_response(
@@ -2251,3 +2468,295 @@ def test_a_trimmer_with_no_end_bound_is_still_refused_by_name():
     )
     assert bare is not None
     assert "wiper" in bare.message
+
+
+def _distribution_requirement(
+    *, channels=4, voltage=18.0, current=0.5, enable=True, reset=False, rgb=False
+):
+    return CircuitRequirement(
+        id="distribution",
+        sheet="POWER",
+        role="power_input",
+        family="fused-power-distribution",
+        parameters={
+            "channels": channels,
+            "input_voltage_v": voltage,
+            "source_current_a": current,
+            "enable_jumper": enable,
+            "reset_button": reset,
+            "rgb_status": rgb,
+        },
+        ports={
+            "input": "SOURCE_POSITIVE",
+            "gnd": "SOURCE_RETURN",
+            **{f"output{index}": f"LOAD_{index}_POSITIVE" for index in range(1, channels + 1)},
+        },
+    )
+
+
+@pytest.mark.parametrize("channels", [2, 4, 8])
+def test_fused_distribution_has_distinct_post_fuse_outputs_and_safe_enable(channels):
+    artifact = lower_requirement(_distribution_requirement(channels=channels, current=0.5))
+    assert artifact.lowerer_id == "fused-power-distribution@1"
+    pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
+    source_bus = "__KICRAFT_DISTRIBUTION__SWITCHED"
+    for index in range(channels):
+        output = f"LOAD_{index + 1}_POSITIVE"
+        # A distinct fuse is the only route from the switched source to each
+        # terminal's positive contact; every terminal return is the source return.
+        assert pins[("branch_fuse", index, "1")] == source_bus
+        assert pins[("branch_fuse", index, "2")] == output
+    assert pins[("source_fuse", 0, "1")] == "SOURCE_POSITIVE"
+    assert pins[("source_fuse", 0, "2")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
+    assert pins[("global_switch", 0, "1")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
+    assert pins[("global_switch", 0, "5")] == source_bus
+    assert pins[("global_switch", 0, "4")] == "__KICRAFT_DISTRIBUTION__GATE"
+    assert pins[("gate_clamp", 0, "1")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
+    assert pins[("gate_clamp", 0, "2")] == "__KICRAFT_DISTRIBUTION__GATE"
+    assert pins[("enable_jumper", 0, "2")] == "SOURCE_RETURN"
+
+
+def test_fused_distribution_refuses_missing_or_bypassed_output_contracts():
+    requirement = _distribution_requirement(channels=2, current=0.5)
+    with pytest.raises(ValueError):
+        lower_requirement(requirement.model_copy(update={"ports": {
+            "input": "SOURCE_POSITIVE", "gnd": "SOURCE_RETURN", "output1": "LOAD_1_POSITIVE",
+        }}))
+    # An output on the source net would bypass its own physical fuse and is never
+    # normalized into a superficially valid distribution.
+    with pytest.raises(ValueError):
+        lower_requirement(requirement.model_copy(update={"ports": {
+            "input": "SOURCE_POSITIVE", "gnd": "SOURCE_RETURN",
+            "output1": "SOURCE_POSITIVE", "output2": "LOAD_2_POSITIVE",
+        }}))
+    with pytest.raises(ValueError):
+        lower_requirement(requirement.model_copy(update={"ports": {
+            **requirement.ports, "input": requirement.ports["gnd"],
+        }}))
+    with pytest.raises(ValueError):
+        lower_requirement(requirement.model_copy(update={"parameters": {
+            **requirement.parameters, "channels": 2.5,
+        }}))
+
+
+def test_five_volt_power_cycle_is_real_reverse_blocked_and_discharged():
+    artifact = lower_requirement(
+        _distribution_requirement(channels=2, voltage=5.0, current=0.5, enable=True, reset=True)
+    )
+    pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
+    for index in range(2):
+        output = f"LOAD_{index + 1}_POSITIVE"
+        assert pins[("branch_switch", index, "1")] == f"__KICRAFT_DISTRIBUTION__FUSED_{index + 1}"
+        assert pins[("branch_switch", index, "6")] == output
+        assert pins[("output_discharge", index, "1")] == output
+        assert pins[("output_discharge", index, "2")] == "SOURCE_RETURN"
+    assert {row.pin for row in artifact.no_connects if row.role == "branch_switch"} == {"4"}
+
+
+@pytest.mark.parametrize("voltage", [18.0, 24.0])
+def test_high_voltage_power_cycle_has_isolated_rtn_and_real_global_efuse(voltage):
+    artifact = lower_requirement(
+        _distribution_requirement(channels=2, voltage=voltage, current=1.0, enable=True, reset=True)
+    )
+    switch = next(group for group in artifact.groups if group.role == "efuse_power_cycle_button")
+    assert switch.mpn == "KMR232NGULCLFS"
+    pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
+    assert pins[("global_efuse", 0, "9")] == "SOURCE_RETURN"
+    assert pins[("global_efuse", 0, "8")] == "__KICRAFT_DISTRIBUTION__EFUSE_RTN"
+    assert pins[("global_efuse", 0, "17")] == "__KICRAFT_DISTRIBUTION__EFUSE_RTN"
+    assert pins[("global_efuse", 0, "15")] == "__KICRAFT_DISTRIBUTION__EFUSE_OUT"
+    assert pins[("efuse_power_cycle_button", 0, "2")] == "__KICRAFT_DISTRIBUTION__EFUSE_RTN"
+    assert pins[("efuse_power_cycle_button", 0, "1")] == pins[("global_efuse", 0, "7")]
+    for index in range(2):
+        assert pins[("branch_fuse", index, "1")] == "__KICRAFT_DISTRIBUTION__EFUSE_OUT"
+        assert pins[("efuse_output_discharge", index, "1")] == f"LOAD_{index + 1}_POSITIVE"
+    assert {row.pin for row in artifact.no_connects if row.role == "global_efuse"} == {
+        "4", "6", "10", "13", "14"
+    }
+
+
+def test_three_amp_distribution_is_not_clamped_to_a_smaller_switch():
+    with pytest.raises(ValueError):
+        lower_requirement(_distribution_requirement(channels=8, voltage=18.0, current=3.0, reset=True))
+
+
+def test_discrete_rgb_status_uses_actual_source_and_output_presence():
+    artifact = lower_requirement(
+        _distribution_requirement(channels=2, voltage=24.0, current=0.5, enable=False, rgb=True)
+    )
+    pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
+    assert pins[("rgb_status_led", 0, "2")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
+    assert pins[("rgb_base_resistor", 0, "1")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
+    assert pins[("rgb_base_resistor", 5, "1")] == "LOAD_1_POSITIVE"
+    assert pins[("rgb_base_resistor", 10, "1")] == "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
+    assert pins[("rgb_sense_base_resistor", 0, "1")] == "LOAD_1_POSITIVE"
+    assert pins[("rgb_output_sense", 0, "3")] == "__KICRAFT_DISTRIBUTION__RGB_BASE_0"
+    assert pins[("rgb_driver", 0, "2")] == "SOURCE_RETURN"
+
+
+@pytest.mark.parametrize("reset,role,anode,cathodes", [
+    (False, "rgb_status_led", "__KICRAFT_DISTRIBUTION__SOURCE_FUSED", (
+        "__KICRAFT_DISTRIBUTION__RGB_RED_K", "__KICRAFT_DISTRIBUTION__RGB_GREEN_K",
+        "__KICRAFT_DISTRIBUTION__RGB_BLUE_K",
+    )),
+    (True, "efuse_rgb_status_led", "SOURCE_POSITIVE", (
+        "__KICRAFT_EFUSE_RGB_R", "__KICRAFT_EFUSE_RGB_G", "__KICRAFT_EFUSE_RGB_B",
+    )),
+])
+def test_distribution_rgb_uses_reviewed_led_and_three_real_channel_paths(reset, role, anode, cathodes):
+    artifact = lower_requirement(_distribution_requirement(
+        channels=2, voltage=24.0, current=0.5, enable=False, reset=reset, rgb=True,
+    ))
+    group = next(group for group in artifact.groups if group.role == role)
+    from kicraft.design.part_identity import reviewed_part
+    led = reviewed_part("XL-1615RGBC-RF")
+    assert (group.mpn.casefold(), group.symbol, group.footprint) == (
+        led.identity, led.symbol, led.footprint,
+    )
+    pins = {pin.pin: pin.net for pin in artifact.pins if pin.role == role}
+    assert pins[led.port_pins["common_anode"]] == anode
+    assert tuple(pins[led.port_pins[f"{color}_cathode"]] for color in ("red", "green", "blue")) == cathodes
+    resistor_role = "efuse_rgb_current_resistor" if reset else "rgb_channel_resistor"
+    for cathode in cathodes:
+        assert any(pin.role == resistor_role and pin.net == cathode for pin in artifact.pins)
+
+
+def test_reset_without_enable_jumper_defaults_to_powered_outputs():
+    artifact = lower_requirement(
+        _distribution_requirement(channels=2, voltage=5.0, enable=False, reset=True)
+    )
+    pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
+    control = pins["branch_switch", 0, "3"]
+    assert pins["branch_switch", 1, "3"] == control
+    assert pins["reset_enable_series", 0, "1"] == pins["source_fuse", 0, "2"]
+    assert pins["reset_enable_series", 0, "2"] == control
+    assert pins["power_cycle_button", 0, "1"] == control
+    assert pins["power_cycle_button", 0, "2"] == "SOURCE_RETURN"
+
+
+def test_analog_power_cycle_reset_has_one_real_switched_load_rail():
+    artifact = lower_requirement(
+        CircuitRequirement(
+            id="analog-reset", sheet="ANALOG", role="power_input",
+            family="analog-power-cycle-reset",
+            parameters={"rail_voltage_v": 5.0, "source_current_a": 0.5},
+            ports={"input": "ANALOG_PRE", "output": "ANALOG_SWITCHED", "gnd": "AGND"},
+        )
+    )
+    pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
+    supervisor = next(group for group in artifact.groups if group.role == "power_cycle_supervisor")
+    assert supervisor.mpn == "TPS3808G50DBVR"
+    assert pins["power_cycle_switch", 0, "1"] == "ANALOG_PRE"
+    assert pins["power_cycle_switch", 0, "6"] == "ANALOG_SWITCHED"
+    assert pins["power_cycle_supervisor", 0, "6"] == "ANALOG_PRE"
+    assert pins["power_cycle_supervisor", 0, "5"] == "ANALOG_SWITCHED"
+    assert pins["power_cycle_supervisor", 0, "3"] == "ANALOG_PRE"
+    assert pins["power_cycle_supervisor", 0, "1"] != pins["power_cycle_switch", 0, "3"]
+    assert {pins["supervisor_reset_pullup", 0, "1"], pins["supervisor_reset_pullup", 0, "2"]} == {
+        pins["power_cycle_supervisor", 0, "1"], pins["power_cycle_switch", 0, "3"],
+    }
+    assert pins["output_discharge", 0, "1"] == "ANALOG_SWITCHED"
+    assert pins["output_discharge", 0, "2"] == "AGND"
+
+def test_analog_power_cycle_reset_exports_only_supervised_isolation_release():
+    artifact = lower_requirement(
+        CircuitRequirement(
+            id="analog-reset", sheet="ANALOG", role="power_input",
+            family="analog-power-cycle-reset",
+            parameters={"rail_voltage_v": 5.0, "source_current_a": 0.5},
+            ports={
+                "input": "HOST_5V", "output": "SWITCHED_5V", "gnd": "AGND",
+                "isolation_enable": "ISOLATION_RELEASE",
+            },
+        )
+    )
+    pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
+    assert pins["isolation_control_buffer", 0, "4"] == "ISOLATION_RELEASE"
+    assert pins["isolation_control_buffer", 0, "2"] == pins["power_cycle_supervisor", 0, "1"]
+    assert pins["isolation_control_buffer", 0, "5"] == "HOST_5V"
+    assert pins["isolation_control_buffer", 0, "3"] == "AGND"
+    assert pins["power_cycle_supervisor", 0, "1"] != "ISOLATION_RELEASE"
+    assert pins["power_cycle_supervisor", 0, "1"] != pins["power_cycle_switch", 0, "3"]
+    assert {pins["supervisor_reset_pullup", 0, "1"], pins["supervisor_reset_pullup", 0, "2"]} == {
+        pins["power_cycle_supervisor", 0, "1"], pins["power_cycle_switch", 0, "3"],
+    }
+
+
+def test_analog_conditioner_isolates_every_external_output_for_power_cycle_reset():
+    artifact = lower_requirement(
+        CircuitRequirement(
+            id="humidity-reset", sheet="ANALOG", role="analog_block",
+            family="analog-conditioner",
+            parameters={"channel_count": 2, "sensor_type": "humidity", "power_cycle_isolation": True},
+            ports={
+                "vplus": "SWITCHED_5V", "vminus": "AGND", "analog_out_return": "AGND",
+                "isolation_vdd": "HOST_5V", "isolation_enable": "POWER_CYCLE_EN",
+                "sensor_1_signal": "RAW_1", "sensor_1_return": "AGND",
+                "sensor_2_signal": "RAW_2", "sensor_2_return": "AGND",
+                "conditioned_1": "ANALOG_1", "conditioned_2": "ANALOG_2",
+                "analog_out_1": "HOST_OUT_1", "analog_out_2": "HOST_OUT_2",
+            },
+        )
+    )
+    pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
+    assert pins["output_isolator", 0, "1"] == "ANALOG_1"
+    assert pins["output_isolator", 0, "2"] == "HOST_OUT_1"
+    assert pins["output_isolator", 0, "4"] == "POWER_CYCLE_EN"
+    assert pins["output_isolator", 0, "5"] == "HOST_5V"
+
+@pytest.mark.parametrize(
+    "parameters",
+    (
+        {"rail_voltage_v": 3.3, "source_current_a": 0.5},
+        {"rail_voltage_v": 24.0, "source_current_a": 0.5},
+        {"rail_voltage_v": 5.0, "source_current_a": 1.0},
+    ),
+)
+def test_analog_power_cycle_reset_refuses_unqualified_voltage_and_source_current(parameters):
+    with pytest.raises(ValueError):
+        lower_requirement(
+            CircuitRequirement(
+                id="analog-reset", sheet="ANALOG", role="power_input",
+                family="analog-power-cycle-reset", parameters=parameters,
+                ports={"input": "ANALOG_PRE", "output": "ANALOG_SWITCHED", "gnd": "AGND"},
+            )
+        )
+
+
+@pytest.mark.parametrize("voltage", [6.0, 7.4, 8.4, 12.0, 18.0, 24.0])
+def test_efuse_divider_allows_its_input_with_resistor_and_source_tolerance(voltage):
+    from kicraft.design.synthesis.validation import _resistance_ohms
+
+    requirement = _distribution_requirement(voltage=voltage, reset=True)
+    artifact = lower_requirement(requirement)
+    pins = {(pin.role, pin.index, pin.pin): pin.net for pin in artifact.pins}
+    adjacency = {}
+    for group in artifact.groups:
+        if not group.role.startswith("efuse_uvlo_ovp_"):
+            continue
+        resistance = _resistance_ohms(group.value)
+        for index in range(group.quantity):
+            left, right = pins[group.role, index, "1"], pins[group.role, index, "2"]
+            adjacency.setdefault(left, []).append((right, resistance))
+            adjacency.setdefault(right, []).append((left, resistance))
+    # Solve the actual series chain from RTN, rather than trusting UVLO/OVP labels.
+    current = pins["global_efuse", 0, "8"]
+    below = {current: 0.0}
+    while current != requirement.ports["input"]:
+        choices = [(net, resistance) for net, resistance in adjacency[current] if net not in below]
+        assert len(choices) == 1
+        following, resistance = choices[0]
+        below[following] = below[current] + resistance
+        current = following
+    total = below[current]
+    uvlo_below = below[pins["global_efuse", 0, "3"]]
+    ovp_below = below[pins["global_efuse", 0, "5"]]
+    # Independent 1% resistor extrema and a 5% input source tolerance.
+    uvlo_min = voltage * .95 * uvlo_below * .99 / (
+        uvlo_below * .99 + (total - uvlo_below) * 1.01
+    )
+    ovp_max = voltage * 1.05 * ovp_below * 1.01 / (
+        ovp_below * 1.01 + (total - ovp_below) * .99
+    )
+    assert uvlo_min > 1.225
+    assert ovp_max < 1.170

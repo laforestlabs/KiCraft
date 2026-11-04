@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:002cc2e9a7c3031ea7a50b41d024ce4323fdf3aa898536d4ffd339ba1e03336b",
+  "datasheet_url": "https://www.ti.com/lit/ds/symlink/tps2660.pdf",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TPS26600PWPR",
+  "footprint_name": "HTSSOP-16_L5.0-W4.4-P0.65-LS6.4-BL-EP3.3",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "TPS26600PWPR",
+  "name": "tps26600",
+  "provenance": {
+    "added_at": "2026-10-11T03:09:48Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C544399"
+  },
+  "symbol_name": "TPS26600PWPR",
+  "tags": [
+    "power",
+    "current-limiter"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "TI SLVSDG2G PWP0016A review: OUT is pins 15 and 16; NC is 4 and 13; PowerPAD is 17. RTN 8 and PowerPAD 17 MUST remain separate from system GND 9. Corrected imported undersized PowerPAD to 5.0 x 3.4 mm copper with 3.3 mm square mask/paste opening, nine 0.30 mm thermal drills and rear mask tenting. Paste example assumes 0.125 mm stencil. Generic imported 3D body does not define PowerPAD geometry. Not assembled-hardware validation."
+}

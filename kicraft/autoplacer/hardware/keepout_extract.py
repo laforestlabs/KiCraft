@@ -93,14 +93,17 @@ def _direction_and_anchor(
     secondary = min(ax, ay)
     if dominant < min_offset_mm or dominant < secondary * dominance_ratio:
         return None
+    # Pin the body-facing support line, not the far end of the antenna.
+    # The full antenna polygon then projects outward from the substrate edge;
+    # using the outward-most line instead buries the entire antenna inboard.
     if ax > ay:
         direction = "right" if dx > 0 else "left"
-        anchor = max(point.x for point in polygon) if dx > 0 else min(point.x for point in polygon)
+        anchor = min(point.x for point in polygon) if dx > 0 else max(point.x for point in polygon)
         support = [point for point in polygon if abs(point.x - anchor) <= 1e-6]
         midpoint = Point(anchor, sum(point.y for point in support) / len(support))
     else:
         direction = "bottom" if dy > 0 else "top"
-        anchor = max(point.y for point in polygon) if dy > 0 else min(point.y for point in polygon)
+        anchor = min(point.y for point in polygon) if dy > 0 else max(point.y for point in polygon)
         support = [point for point in polygon if abs(point.y - anchor) <= 1e-6]
         midpoint = Point(sum(point.x for point in support) / len(support), anchor)
     return direction, anchor, midpoint

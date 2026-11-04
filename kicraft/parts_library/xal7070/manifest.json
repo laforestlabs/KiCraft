@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:9402608bebc6b590adae34397c910f531aead028da9d9f1bab3f5bce141824d7",
+  "datasheet_url": "https://www.coilcraft.com/getmedia/1ba55433-bcc8-4838-9b21-382f497e12e0/xal7070.pdf",
+  "description": "Coilcraft XAL7070-472MEC shielded power inductor",
+  "footprint_name": "XAL7070-472MEC",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "XAL7070-472MEC",
+  "name": "xal7070",
+  "provenance": {
+    "added_at": "2026-10-11T04:26:59Z",
+    "kicad_version": "9.0.0",
+    "source": "manual",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C3911513"
+  },
+  "symbol_name": "XAL7070-472MEC",
+  "tags": [
+    "inductor",
+    "power",
+    "buck-boost",
+    "high-current"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Footprint pads reproduce Coilcraft Document 856-1 recommended land pattern: two 1.92 x 6.50 mm pads on 4.82 mm centers (6.74 mm outside span and 2.90 mm inner gap). Courtyard covers the 7.2 ±0.5 x 7.5 ±0.5 mm maximum body plus 0.25 mm clearance. No manufacturer 3D model is vendored. The 15.2 A saturation current is typical and the 13.6 A Irms figure is specified for a 40 C rise, not an application guarantee."
+}

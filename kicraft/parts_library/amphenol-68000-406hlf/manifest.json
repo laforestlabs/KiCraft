@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:fbe49677dc3ee5f35ffb65843ff47fbe5a5b013ad89806c462d045500c120891",
+  "datasheet_url": "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588895884876242944",
+  "description": "Amphenol 68000-406HLF",
+  "footprint_name": "HDR-TH_6P-P2.54-V-M-1",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "68000-406HLF",
+  "name": "amphenol-68000-406hlf",
+  "provenance": {
+    "added_at": "2026-11-03T20:04:11Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C178289"
+  },
+  "symbol_name": "68000-406HLF",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Supplier CAD imported from C178289; six drilled holes set to manufacturer nominal 1.02 mm (drawing 68000 sheet 1); nominal pad diameter 1.8 mm, annular ring 0.39 mm. Original importer bundle preserved in session evidence."
+}

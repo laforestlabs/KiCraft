@@ -87,6 +87,21 @@ class LoweringCalculation(BaseModel):
     tolerance: str
 
 
+class LoweringLocalBypass(BaseModel):
+    """Owned bypass pad pairs whose PCB distances are mandatory, in millimetres."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner_role: str
+    owner_index: int = Field(default=0, ge=0)
+    bypass_role: str
+    bypass_index: int = Field(default=0, ge=0)
+    power_pins: tuple[str, str]
+    ground_pins: tuple[str, str]
+    max_distance_mm: float = Field(gt=0)
+
+
+
 class LoweringArtifact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -97,6 +112,7 @@ class LoweringArtifact(BaseModel):
     no_connects: tuple[LoweringNoConnect, ...] = ()
     assumptions: tuple[str, ...] = ()
     calculations: tuple[LoweringCalculation, ...] = ()
+    local_bypasses: tuple[LoweringLocalBypass, ...] = ()
     # Compiler-proven semantic identities, never copied from requirement labels.
     named_part_identities: tuple[str, ...] = ()
 
@@ -179,6 +195,15 @@ class RegisteredLowerer:
     # The reviewed ordering code a build realizes *when one is stated*; the family still accepts a
     # requirement with no `exact_part`. Published so a draft names a part the lowerer can build.
     reviewed_exact_part: str | None = None
+    # The reviewed ordering codes a composition can realize when its own finite
+    # implementation supports more than one carrier. This is the same exact_part
+    # contract as `reviewed_exact_part`, not a generic part-family substitution.
+    reviewed_exact_parts: tuple[str, ...] = ()
+    # Cross-parameter limits that individual choice lists cannot express.
+    parameter_constraints: tuple[str, ...] = ()
+    # Compiler-owned circuit nodes: valid in a completed lowering requirement,
+    # but not contacts a draft may wire or discover as public architecture ports.
+    derived_port_patterns: tuple[tuple[str, str], ...] = ()
 
 
 _REGISTRY: dict[str, RegisteredLowerer] = {}
@@ -262,6 +287,11 @@ def lowerer_summaries() -> list[dict]:
                 else {}
             ),
             **(
+                {"parameter_constraints": list(lowerer.parameter_constraints)}
+                if lowerer.parameter_constraints
+                else {}
+            ),
+            **(
                 {"required_parameter_keys": list(lowerer.required_parameter_keys)}
                 if lowerer.required_parameter_keys
                 else {}
@@ -290,13 +320,20 @@ def lowerer_summaries() -> list[dict]:
                 if lowerer.reviewed_exact_part
                 else {}
             ),
+            **(
+                {"reviewed_exact_parts": list(lowerer.reviewed_exact_parts)}
+                if lowerer.reviewed_exact_parts
+                else {}
+            ),
         }
         for lowerer in registered_lowerers()
     ]
 
 
-def lowerer_port_direction(lowerer: RegisteredLowerer, name: str) -> str | None:
-    """Return a published lowerer port direction; never infer one from its name."""
+def lowerer_port_direction(
+    lowerer: RegisteredLowerer, name: str, *, include_derived: bool = False
+) -> str | None:
+    """Return a registered direction; compiler-owned nodes are opt-in."""
 
     name = name.lower()
     directions = {key.lower(): direction for key, direction in lowerer.port_directions}
@@ -311,6 +348,10 @@ def lowerer_port_direction(lowerer: RegisteredLowerer, name: str) -> str | None:
     for pattern, direction in lowerer.port_patterns:
         if re.fullmatch(pattern, name):
             return direction
+    if include_derived:
+        for pattern, direction in lowerer.derived_port_patterns:
+            if re.fullmatch(pattern, name):
+                return direction
     return None
 
 def lowerer_parameter_diagnostics(
@@ -383,7 +424,8 @@ def lowerer_contract_diagnostic(
         return None
     lowerer = _REGISTRY[lowerer_id]
     unknown_ports = sorted(
-        name for name in requirement.ports if lowerer_port_direction(lowerer, name) is None
+        name for name in requirement.ports
+        if lowerer_port_direction(lowerer, name, include_derived=True) is None
     )
     parameter_diagnostics = lowerer_parameter_diagnostics(requirement)
     failure = None
@@ -415,6 +457,8 @@ def lowerer_contract_diagnostic(
         evidence.append("required_exact_part=" + lowerer.required_exact_part)
     if lowerer.reviewed_exact_part:
         evidence.append("reviewed_exact_part=" + lowerer.reviewed_exact_part)
+    if lowerer.reviewed_exact_parts:
+        evidence.append("reviewed_exact_parts=" + ",".join(lowerer.reviewed_exact_parts))
     if failure:
         evidence.append(failure)
     # A published contact is bound when the draft spells it any way its own build accepts: the
@@ -517,6 +561,17 @@ def lowerer_contract_diagnostic(
             f"{lowerer.reviewed_exact_part!r}, not {requirement.exact_part!r}; state that ordering "
             "code or omit exact_part"
         )
+    elif (
+        lowerer.reviewed_exact_parts
+        and requirement.exact_part
+        and requirement.exact_part.casefold()
+        not in {part.casefold() for part in lowerer.reviewed_exact_parts}
+    ):
+        message = (
+            f"known lowerer {lowerer_id} realizes one of the reviewed parts "
+            f"{list(lowerer.reviewed_exact_parts)!r}, not {requirement.exact_part!r}; state one "
+            "of those ordering codes or omit exact_part"
+        )
     else:
         message = (
             f"known lowerer {lowerer_id} cannot realize this port/parameter combination"
@@ -560,7 +615,10 @@ def lower_requirement(requirement: CircuitRequirement | dict) -> LoweringArtifac
     if artifact is None:
         raise ValueError(
             f"requirement {requirement.id}: known lowerer {lowerer_id} cannot realize "
-            "this identity/port/parameter combination; model-owned fallback is not permitted"
+            "this identity/port/parameter combination; model-owned fallback is not permitted. "
+            f"Received exact_part={requirement.exact_part!r}, ports={requirement.ports}, "
+            f"parameters={requirement.parameters}. "
+            + " ".join(lowerer.parameter_constraints)
         )
     if artifact is not None and requirement.exact_part:
         # Only a physically identified group can prove an exact-part request.
@@ -586,6 +644,7 @@ def _artifact(
     no_connects: tuple[LoweringNoConnect, ...] = (),
     assumptions: tuple[str, ...] = (),
     calculations: tuple[LoweringCalculation, ...] = (),
+    local_bypasses: tuple[LoweringLocalBypass, ...] = (),
     named_part_identities: tuple[str, ...] = (),
 ) -> LoweringArtifact:
     roles = {group.role: group.quantity for group in groups}
@@ -599,6 +658,14 @@ def _artifact(
         if key in seen:
             raise ValueError(f"{lowerer_id}: duplicate pin ownership {key}")
         seen.add(key)
+    for locality in local_bypasses:
+        for owner_pin, bypass_pin in (locality.power_pins, locality.ground_pins):
+            owner = next((p for p in pins if (p.role, p.index, p.pin) ==
+                          (locality.owner_role, locality.owner_index, owner_pin)), None)
+            bypass = next((p for p in pins if (p.role, p.index, p.pin) ==
+                           (locality.bypass_role, locality.bypass_index, bypass_pin)), None)
+            if owner is None or bypass is None or owner.net != bypass.net:
+                raise ValueError(f"{lowerer_id}: invalid local bypass pin ownership")
     return LoweringArtifact(
         lowerer_id=lowerer_id,
         requirement_id=requirement.id,
@@ -607,6 +674,7 @@ def _artifact(
         no_connects=no_connects,
         assumptions=assumptions,
         calculations=calculations,
+        local_bypasses=local_bypasses,
         named_part_identities=named_part_identities,
     )
 
@@ -619,6 +687,139 @@ def _require_ports(
     if any(not requirement.ports[name] for name in names):
         return None
     return requirement.ports
+
+def _dual_source_battery_power(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """Lower the bounded host-5-V/single-cell-Li-ion supply without source tying."""
+    from kicraft.design.recipes.dual_source_battery_power import (
+        DUAL_SOURCE_BATTERY_POWER,
+    )
+
+    required_ports = ("host_input", "battery_input", "output", "gnd")
+    ports = _require_ports(requirement, required_ports)
+    expected = DUAL_SOURCE_BATTERY_POWER.parameter_defaults
+    if (
+        ports is None
+        or set(requirement.parameters) != set(expected)
+        or (
+            requirement.exact_part is not None
+            and requirement.exact_part.casefold() != "tps2113apwr"
+        )
+    ):
+        return None
+    if len(set(ports.values())) != len(ports):
+        return None
+
+    include_host_connector = bool(requirement.parameters["include_host_connector"])
+    prefix = f"__KICRAFT_DUAL_SOURCE_{requirement.id.upper()}__"
+    net_map = {
+        **ports,
+        **{
+            net: f"{prefix}{net.upper()}"
+            for net in DUAL_SOURCE_BATTERY_POWER.internal_nets
+        },
+    }
+    groups = tuple(
+        LoweringGroup.model_validate(group.model_dump(exclude={"sheet_role"}))
+        for group in DUAL_SOURCE_BATTERY_POWER.parts
+        if include_host_connector or group.role != "host_connector"
+    )
+    pins = tuple(
+        LoweringPin(
+            role=pin.role,
+            index=pin.index,
+            pin=pin.pin,
+            net=net_map[pin.net],
+        )
+        for pin in DUAL_SOURCE_BATTERY_POWER.pins
+        if include_host_connector or pin.role != "host_connector"
+    )
+    no_connects = tuple(
+        LoweringNoConnect(
+            role=pin.role,
+            index=pin.index,
+            pin=pin.pin,
+            reason=(
+                "Unconnected connector mounting pad"
+                if pin.role == "battery_connector"
+                else "TPS61088 manufacturer-designated no-connect pin"
+            ),
+        )
+        for pin in DUAL_SOURCE_BATTERY_POWER.no_connects
+    )
+    return _artifact(
+        "dual-source-battery-power@1",
+        requirement,
+        groups,
+        pins,
+        no_connects=no_connects,
+        assumptions=(
+            "Unspecified battery chemistry defaults to one external protected single-cell "
+            "Li-ion pack, 3.0 V to 4.2 V. No charger is included.",
+            "Host 5 V is a separate physical interface constrained to 4.75 V to 5.25 V; "
+            "it is not a surrogate battery source.",
+            "The 400 Ohm TPS2113A ILIM resistor has a datasheet-characterized 0.95 A "
+            "minimum current limit. The 0.50 A load contract is below that bound; host-path "
+            "output remains at least 4.675 V using the 150 mOhm 125 C maximum switch resistance.",
+        ),
+        calculations=(
+            LoweringCalculation(
+                output="battery_path_output_range",
+                equation=(
+                    "VOUT = VREF * (1 + RTOP / RBOTTOM), then VLOAD = VOUT - "
+                    "0.50 A * 0.150 ohm"
+                ),
+                inputs={
+                    "vref_min_v": 1.186, "vref_max_v": 1.222,
+                    "top_resistance_ohm_nominal": 178000.0,
+                    "bottom_resistance_ohm_nominal": 56000.0,
+                    "resistor_tolerance_fraction": 0.01,
+                    "load_current_a": 0.5, "mux_rds_on_max_ohm": 0.150,
+                },
+                chosen_value="4.806 V minimum, 5.188 V maximum",
+                tolerance="TPS61088 VREF min/max and 1% feedback-divider worst case; TPS2113A 125 C maximum RDS(on)",
+            ),
+            LoweringCalculation(
+                output="boost_compensation_equations",
+                equation=(
+                    "R5 = 2*pi*VOUT*RSENSE*fC*COUT / ((1-D)*VREF*GEA); "
+                    "C5 = RO*COUT/(2*R5); C8 = RESR*COUT/R5"
+                ),
+                inputs={
+                    "vout_v": 5.0, "duty_cycle": 0.4, "load_resistance_ohm": 10.0,
+                    "switching_frequency_hz": 600000.0, "selected_crossover_hz": 20000.0,
+                    "inductance_h": 2.2e-6, "rhpz_hz": 260435.0,
+                    "rhpz_crossover_limit_hz": 52087.0,
+                    "sense_resistance_ohm": 0.08, "vref_v_typ": 1.204,
+                    "error_amplifier_gm_a_per_v_typ": 190e-6,
+                    "design_output_capacitance_uf": 192.0,
+                    "initial_output_capacitance_min_uf": 240.0,
+                    "maximum_output_esr_ohm": 0.011667,
+                },
+                chosen_value="R5 69.8 kohm, C5 15 nF C0G, C8 33 pF C0G",
+                tolerance="TPS61088 equations 18--20; GEA is datasheet typical, so delivered-graph evidence proves the authored network but cannot prove dynamic phase/gain margin without electrical characterization.",
+            ),
+            LoweringCalculation(
+                output="mux_current_limit_minimum",
+                equation="TPS2113A datasheet current-limit characterization at RILIM = 400 ohm",
+                inputs={"rilim_ohm": 400.0, "load_current_a": 0.5},
+                chosen_value="0.95 A minimum",
+                tolerance="The 0.50 A load contract is below the documented minimum; 1.25 A is only the nominal adjustment value, not a guaranteed capability.",
+            ),
+            LoweringCalculation(
+                output="host_path_minimum",
+                equation="4.75 V - 0.50 A * 0.150 ohm",
+                inputs={"host_min_v": 4.75, "load_current_a": 0.5, "mux_rds_on_max_ohm": 0.150},
+                chosen_value="4.675 V",
+                tolerance="TPS2113A 125 C maximum RDS(on) from datasheet",
+            ),
+        ),
+        named_part_identities=(
+            "tps2113apwr",
+            "tps61088rhlr",
+            "s2b-ph-sm4-tb(lf)(sn)",
+            "tsw-102-07-g-s",
+        ),
+    )
 
 
 _E24 = (
@@ -1144,25 +1345,67 @@ def _connector(
             _, mpn, symbol, footprint = selected
             value = mpn
         else:
-            symbol = f"Connector:Screw_Terminal_01x{count:02d}"
-            footprint = (
-                f"TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-{count}_1x{count:02d}"
-                "_P5.00mm_Horizontal"
+            # Generic terminals use reviewed, orderable blocks, never an
+            # unbound stock land pattern as if it were a supplier identity.
+            default_identity = (
+                "WJ126V-5.0-02P-14-00A" if count % 2 == 0
+                else "WJ126V-5.0-03P-14-00A" if count % 3 == 0
+                else None
             )
-            value = f"ScrewTerminal_1x{count:02d}"
+            selected = _reviewed_terminal_part(default_identity) if default_identity else None
+            if selected is not None:
+                block_contacts, mpn, symbol, footprint = selected
+                blocks = count // block_contacts
+                value = mpn
+            else:
+                symbol = f"Connector:Screw_Terminal_01x{count:02d}"
+                footprint = (
+                    f"TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-{count}_1x{count:02d}"
+                    "_P5.00mm_Horizontal"
+                )
+                value = f"ScrewTerminal_1x{count:02d}"
     else:
         gender = str(requirement.parameters.get("gender", "male")).lower()
         if gender not in ("male", "female"):
             return None
-        symbol = f"Connector_Generic:Conn_{rows:02d}x{per_row:02d}"
-        if rows == 2 and per_row > 1:
-            symbol += "_Odd_Even"
-        if gender == "female":
-            footprint = f"Connector_PinSocket_2.54mm:PinSocket_{rows}x{per_row:02d}_P2.54mm_Vertical"
-            value = f"PinSocket_{rows}x{per_row:02d}"
+        selected_header = None
+        female_parts = {
+            2: "pm254v-11-02-h85",
+            4: "pm254v-11-04-h85",
+            8: "pm254v-11-08-h85",
+        }
+        if requirement.exact_part is not None:
+            selected_header = reviewed_part(str(requirement.exact_part))
+            allowed = (
+                {"tsw-102-07-g-s"} if gender == "male"
+                else set(female_parts.values())
+            )
+            if (
+                rows != 1
+                or selected_header is None
+                or selected_header.identity.casefold() not in allowed
+                or len(selected_header.contacts) != count
+                or not selected_header.symbol
+                or not selected_header.footprint
+            ):
+                return None
+        elif gender == "female" and rows == 1 and count in female_parts:
+            selected_header = reviewed_part(female_parts[count])
+        if selected_header is not None:
+            mpn = selected_header.identity
+            symbol = selected_header.symbol
+            footprint = selected_header.footprint
+            value = selected_header.identity
         else:
-            footprint = f"Connector_PinHeader_2.54mm:PinHeader_{rows}x{per_row:02d}_P2.54mm_Vertical"
-            value = f"PinHeader_{rows}x{per_row:02d}"
+            symbol = f"Connector_Generic:Conn_{rows:02d}x{per_row:02d}"
+            if rows == 2 and per_row > 1:
+                symbol += "_Odd_Even"
+            if gender == "female":
+                footprint = f"Connector_PinSocket_2.54mm:PinSocket_{rows}x{per_row:02d}_P2.54mm_Vertical"
+                value = f"PinSocket_{rows}x{per_row:02d}"
+            else:
+                footprint = f"Connector_PinHeader_2.54mm:PinHeader_{rows}x{per_row:02d}_P2.54mm_Vertical"
+                value = f"PinHeader_{rows}x{per_row:02d}"
         lowerer_id = "pin-header@1"
     group = LoweringGroup(
         role="connector",
@@ -1203,6 +1446,72 @@ def _connector(
         )
     return _artifact(
         lowerer_id, requirement, (group,), pins, no_connects=no_connects, assumptions=assumptions
+    )
+
+def _reviewed_jst_xh_connector(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """Lower one reviewed JST XH carrier whose contact count exactly matches its interface."""
+    nets = _contact_nets(requirement.ports, prefixes=("pin",))
+    if nets is None:
+        return None
+    from kicraft.design.part_identity import reviewed_parts_for_feature
+
+    exact = str(requirement.exact_part or "").strip()
+    if exact:
+        record = reviewed_part(exact)
+        candidates = (record,) if record is not None else ()
+    else:
+        candidates = reviewed_parts_for_feature("jst-xh-connector")
+    matches = [
+        record
+        for record in candidates
+        if record is not None
+        and record.family == "jst-xh-connector"
+        and len(record.contacts) == len(nets)
+        and record.symbol
+        and record.footprint
+    ]
+    if len(matches) != 1:
+        return None
+    (record,) = matches
+    group = LoweringGroup(
+        role="connector",
+        reference_prefix="J",
+        value=record.identity.upper(),
+        symbol=record.symbol,
+        footprint=record.footprint,
+        mpn=record.identity.upper(),
+    )
+    return _artifact(
+        "reviewed-jst-xh-connector@1",
+        requirement,
+        (group,),
+        tuple(
+            LoweringPin(role="connector", pin=contact, net=net)
+            for contact, net in zip(record.contacts, nets, strict=True)
+        ),
+    )
+
+
+def _qwiic_connector(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """Publish the reviewed four-contact I2C pinout, never ordinal GPIO pins."""
+    record = reviewed_part(requirement.exact_part or "SM04B-SRSS-TB(LF)(SN)")
+    if record is None or record.family != "qwiic-i2c-connector":
+        return None
+    ports = _require_ports(requirement, ("ground", "vcc", "sda", "scl"))
+    if ports is None or set(requirement.ports) != set(record.port_pins):
+        return None
+    if len(set(ports.values())) != 4:
+        raise ValueError("Qwiic supply, return, SDA and SCL must use four distinct nets")
+    group = LoweringGroup(
+        role="connector", reference_prefix="J", value=record.identity.upper(),
+        symbol=record.symbol, footprint=record.footprint, mpn=record.identity.upper(),
+    )
+    return _artifact(
+        "qwiic-i2c-connector@1", requirement, (group,),
+        tuple(
+            LoweringPin(role="connector", pin=pin, net=ports[key])
+            for key, pin in record.port_pins.items()
+        ),
     )
 
 
@@ -1961,33 +2270,121 @@ def _pullup(requirement: CircuitRequirement) -> LoweringArtifact | None:
 def _switch_input(requirement: CircuitRequirement) -> LoweringArtifact | None:
     from kicraft.design.part_identity import canonical_physical_features, class_key
 
-    for obligation in requirement.obligations:
-        if obligation.kind == "adjustability" and "momentary-button" not in (
-            canonical_physical_features(class_key(obligation.mechanism))
-        ):
-            raise ValueError(
-                f"switch-input@1 implements a momentary pushbutton, not the requested "
-                f"adjustment mechanism {obligation.mechanism!r}; retain that mechanism "
-                "and select hardware that actually implements it"
-            )
+    mechanisms = {
+        feature
+        for obligation in requirement.obligations
+        if obligation.kind == "adjustability"
+        for feature in canonical_physical_features(class_key(obligation.mechanism))
+    }
+    unsupported = mechanisms - {"momentary-button", "jumper"}
+    if unsupported or {"momentary-button", "jumper"} <= mechanisms:
+        mechanism = sorted(unsupported or mechanisms)
+        raise ValueError(
+            "switch-input@1 cannot combine a momentary pushbutton with "
+            f"adjustment mechanism(s) {mechanism!r}; retain the requested mechanism and select "
+            "hardware that actually implements it"
+        )
     ports = _require_ports(requirement, ("signal", "gnd", "vdd"))
-    policy = str(requirement.parameters.get("pull_policy", ""))
+    policy = str(requirement.parameters.get("pull_policy", "external"))
     active_level = str(requirement.parameters.get("active_level", "low"))
     if (
         ports is None
         or len(set(ports.values())) != 3
         or any(not net.strip() for net in ports.values())
-        or (policy == "internal" and "resistance" in requirement.parameters)
-        or requirement.exact_part
+        or active_level not in {"low", "high"}
     ):
         return None
+    if "jumper" in mechanisms:
+        if policy != "external":
+            raise ValueError(
+                "a removable enable jumper requires an external pull so its removed state is "
+                "deterministic"
+            )
+        raw_supply = re.sub(r"[^A-Z0-9]", "", ports["vdd"].upper())
+        if (
+            raw_supply in {"VIN", "VBAT", "RAW"}
+            or re.fullmatch(r"(?:VIN|VBAT|RAW)(?:1[89]|2[0-9]|[3-9][0-9])V?", raw_supply)
+            or re.fullmatch(r"(?:1[89]|2[0-9]|[3-9][0-9])V", raw_supply)
+        ):
+            raise ValueError(
+                "a removable enable jumper must use a verified logic/control rail, not an "
+                f"unbounded raw supply ({ports['vdd']!r})"
+            )
+        identity = "TSW-102-07-G-S"
+        if requirement.exact_part and requirement.exact_part.casefold() != identity.casefold():
+            return None
+        record = reviewed_part(identity)
+        if record is None or not record.symbol or not record.footprint:
+            return None
+        active_net = ports["gnd" if active_level == "low" else "vdd"]
+        idle_net = ports["vdd" if active_level == "low" else "gnd"]
+        pull_role = "pullup" if active_level == "low" else "pulldown"
+        jumper = LoweringGroup(
+            role="jumper",
+            reference_prefix="J",
+            value=identity,
+            symbol=record.symbol,
+            footprint=record.footprint,
+            mpn=identity,
+            sourcing_note=(
+                "Fit Samtec SNT-100-BK-G removable shunt for enabled state; leave shunt off "
+                "for disabled state"
+            ),
+        )
+        pull = _passive(pull_role, "R", str(requirement.parameters.get("resistance", "10k")))
+        return _artifact(
+            "switch-input@1",
+            requirement,
+            (jumper, pull),
+            (
+                LoweringPin(role="jumper", pin="1", net=ports["signal"]),
+                LoweringPin(role="jumper", pin="2", net=active_net),
+                LoweringPin(role=pull_role, pin="1", net=idle_net),
+                LoweringPin(role=pull_role, pin="2", net=ports["signal"]),
+            ),
+            assumptions=(
+                f"SNT-100-BK-G fitted on {identity}: {ports['signal']}={active_net}; removed: "
+                f"{ports['signal']}={idle_net} through the {pull.value} {pull_role}",
+            ),
+        )
+    if policy == "internal" and "resistance" in requirement.parameters:
+        return None
+    if requirement.exact_part:
+        record = reviewed_part(requirement.exact_part)
+        if (
+            record is None
+            or "momentary-button" not in record.physical_features
+            or set(record.contacts) != {"1", "2"}
+        ):
+            return None
+    else:
+        record = reviewed_part("KMR232NGULCLFS")
+    if record is None:
+        return None
+    # Contact ratings constrain declared voltage, not a voltage guessed from a net label.
+    voltage = requirement.parameters.get("voltage")
+    if voltage is not None:
+        try:
+            voltage = float(voltage)
+        except (TypeError, ValueError):
+            return None
+        limit = record.operating_limits.get("voltage_v")
+        if limit is None or not 0 < voltage <= limit:
+            return None
+    switch = _reviewed_group_for_identity(
+        "switch", "SW", requirement, expected_port_pins={}
+    )
+    if requirement.exact_part and switch is None:
+        return None
     groups = [
-        LoweringGroup(
+        switch or LoweringGroup(
             role="switch",
             reference_prefix="SW",
             value="BUTTON",
-            symbol="Switch:SW_Push",
-            footprint="Button_Switch_SMD:SW_SPST_TL3342",
+            symbol="kmr232ngulclfs:KMR232NGULCLFS",
+            footprint="kmr232ngulclfs:KMR232NGULCLFS",
+            mpn="KMR232NGULCLFS",
+            datasheet="https://datasheet.lcsc.com/datasheet/pdf/b5da7fd4e81211d634f1332fb1486a1f.pdf",
         )
     ]
     pins = [
@@ -2266,7 +2663,1425 @@ def _decoupling(requirement: CircuitRequirement) -> LoweringArtifact | None:
     return _artifact("explicit-decoupling@1", requirement, (group,), pins)
 
 
+def _analog_power_cycle_reset(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """Power-cycle one regulated analog rail with supervised external isolation."""
+    if requirement.exact_part is not None or set(requirement.parameters) != {
+        "rail_voltage_v", "source_current_a"
+    }:
+        return None
+    try:
+        rail_voltage = float(requirement.parameters["rail_voltage_v"])
+        source_current = float(requirement.parameters["source_current_a"])
+    except (TypeError, ValueError):
+        return None
+    if rail_voltage != 5.0 or source_current != 0.5:
+        return None
+    required_ports = {"input", "output", "gnd"}
+    if not required_ports <= set(requirement.ports) or set(requirement.ports) - (
+        required_ports | {"isolation_enable"}
+    ):
+        return None
+    ports = {key: str(value) for key, value in requirement.ports.items()}
+    if (
+        any(not ports[key].strip() for key in required_ports)
+        or len({ports[key] for key in required_ports}) != 3
+        or (
+            "isolation_enable" in ports
+            and ports["isolation_enable"] in {ports["input"], ports["output"], ports["gnd"]}
+        )
+    ):
+        return None
+    source = ports["input"]
+    enable = "__KICRAFT_ANALOG_POWER_CYCLE__ENABLE"
+    supervisor_reset = "__KICRAFT_ANALOG_POWER_CYCLE__SUPERVISOR_RESET"
+    isolation_enable = ports.get(
+        "isolation_enable", "__KICRAFT_ANALOG_POWER_CYCLE__ISOLATION_ENABLE"
+    )
+    supervisor = "TPS3808G50DBVR"
+    supervisor_threshold = 4.65
+    supervisor_accuracy = 0.02
+    groups = (
+        LoweringGroup(
+            role="power_cycle_switch", reference_prefix="U", value="TPS22948DCKR",
+            symbol="tps22948dckr:TPS22948DCKR",
+            footprint="tps22948dckr:SC-70-6_L2.0-W1.3-P0.65-LS2.1-BR",
+            mpn="TPS22948DCKR", datasheet="https://www.ti.com/lit/ds/symlink/tps22948.pdf",
+        ),
+        LoweringGroup(
+            role="power_cycle_supervisor", reference_prefix="U", value=supervisor,
+            symbol="Power_Supervisor:TPS3808DBV",
+            footprint="Package_TO_SOT_SMD:SOT-23-6", mpn=supervisor,
+            datasheet="https://www.ti.com/lit/ds/symlink/tps3808.pdf",
+        ),
+        LoweringGroup(
+            role="isolation_control_buffer", reference_prefix="U", value="SN74LVC1G17DBVR",
+            symbol="74xGxx:74LVC1G17", footprint="Package_TO_SOT_SMD:SOT-23-5",
+            mpn="SN74LVC1G17DBVR", datasheet="https://www.ti.com/lit/ds/symlink/sn74lvc1g17.pdf",
+        ),
+        LoweringGroup(
+            role="isolation_control_decoupling", reference_prefix="C", value="100nF",
+            symbol="Device:C", footprint="Capacitor_SMD:C_0603_1608Metric",
+            mpn="GRM188R71C104KA01D",
+        ),
+        LoweringGroup(
+            role="power_cycle_button", reference_prefix="SW", value="POWER CYCLE",
+            symbol="kmr232ngulclfs:KMR232NGULCLFS", footprint="kmr232ngulclfs:KMR232NGULCLFS",
+            mpn="KMR232NGULCLFS",
+            datasheet="https://datasheet.lcsc.com/datasheet/pdf/b5da7fd4e81211d634f1332fb1486a1f.pdf",
+        ),
+        LoweringGroup(
+            role="reset_enable_series", reference_prefix="R", value="5.9k",
+            symbol="Device:R", footprint="Resistor_SMD:R_0603_1608Metric", mpn="FRC0603F5901TS",
+        ),
+        LoweringGroup(
+            role="reset_enable_pulldown", reference_prefix="R", value="60k",
+            symbol="Device:R", footprint="Resistor_SMD:R_0603_1608Metric",
+        ),
+        LoweringGroup(
+            role="supervisor_reset_pullup", reference_prefix="R", value="100k",
+            symbol="Device:R", footprint="Resistor_SMD:R_0603_1608Metric",
+        ),
+        LoweringGroup(
+            role="switch_input_decoupling", reference_prefix="C", value="1uF",
+            symbol="Device:C", footprint="Capacitor_SMD:C_0603_1608Metric",
+        ),
+        LoweringGroup(
+            role="switch_output_decoupling", reference_prefix="C", value="18nF",
+            symbol="Device:C", footprint="Capacitor_SMD:C_0603_1608Metric",
+        ),
+        LoweringGroup(
+            role="supervisor_decoupling", reference_prefix="C", value="100nF",
+            symbol="Device:C", footprint="Capacitor_SMD:C_0603_1608Metric",
+            mpn="GRM188R71C104KA01D",
+        ),
+        LoweringGroup(
+            role="output_discharge", reference_prefix="R", value="1k",
+            symbol="Device:R", footprint="Resistor_SMD:R_0603_1608Metric", mpn="AC0603FR-071KL",
+        ),
+    )
+    pins = (
+        LoweringPin(role="power_cycle_switch", pin="1", net=source),
+        LoweringPin(role="power_cycle_switch", pin="2", net=ports["gnd"]),
+        LoweringPin(role="power_cycle_switch", pin="3", net=enable),
+        LoweringPin(role="power_cycle_switch", pin="6", net=ports["output"]),
+        LoweringPin(role="power_cycle_supervisor", pin="1", net=supervisor_reset),
+        LoweringPin(role="power_cycle_supervisor", pin="2", net=ports["gnd"]),
+        LoweringPin(role="power_cycle_supervisor", pin="3", net=source),
+        LoweringPin(role="power_cycle_supervisor", pin="5", net=ports["output"]),
+        LoweringPin(role="power_cycle_supervisor", pin="6", net=source),
+        LoweringPin(role="isolation_control_buffer", pin="2", net=supervisor_reset),
+        LoweringPin(role="isolation_control_buffer", pin="3", net=ports["gnd"]),
+        LoweringPin(role="isolation_control_buffer", pin="4", net=isolation_enable),
+        LoweringPin(role="isolation_control_buffer", pin="5", net=source),
+        LoweringPin(role="isolation_control_decoupling", pin="1", net=source),
+        LoweringPin(role="isolation_control_decoupling", pin="2", net=ports["gnd"]),
+        LoweringPin(role="reset_enable_series", pin="1", net=source),
+        LoweringPin(role="reset_enable_series", pin="2", net=enable),
+        LoweringPin(role="reset_enable_pulldown", pin="1", net=enable),
+        LoweringPin(role="reset_enable_pulldown", pin="2", net=ports["gnd"]),
+        LoweringPin(role="supervisor_reset_pullup", pin="1", net=supervisor_reset),
+        LoweringPin(role="supervisor_reset_pullup", pin="2", net=enable),
+        LoweringPin(role="power_cycle_button", pin="1", net=enable),
+        LoweringPin(role="power_cycle_button", pin="2", net=ports["gnd"]),
+        LoweringPin(role="switch_input_decoupling", pin="1", net=source),
+        LoweringPin(role="switch_input_decoupling", pin="2", net=ports["gnd"]),
+        LoweringPin(role="switch_output_decoupling", pin="1", net=ports["output"]),
+        LoweringPin(role="switch_output_decoupling", pin="2", net=ports["gnd"]),
+        LoweringPin(role="supervisor_decoupling", pin="1", net=source),
+        LoweringPin(role="supervisor_decoupling", pin="2", net=ports["gnd"]),
+        LoweringPin(role="output_discharge", pin="1", net=ports["output"]),
+        LoweringPin(role="output_discharge", pin="2", net=ports["gnd"]),
+    )
+    return _artifact(
+        "analog-power-cycle-reset@1", requirement, groups, pins,
+        no_connects=(
+            LoweringNoConnect(
+                role="power_cycle_switch", pin="4",
+                reason="TPS22948 NC is deliberately left floating.",
+            ),
+            LoweringNoConnect(
+                role="power_cycle_switch", pin="5",
+                reason="TPS22948 FLT is unused; power-cycle recovery is controlled by the supervisor.",
+            ),
+            LoweringNoConnect(
+                role="power_cycle_supervisor", pin="4",
+                reason="TPS3808 CT is deliberately open for its documented 20 ms nominal reset delay.",
+            ),
+            LoweringNoConnect(
+                role="isolation_control_buffer", pin="1",
+                reason="SN74LVC1G17 NC has no internal connection.",
+            ),
+        ),
+        assumptions=(
+            f"TPS22948 operates only from the already-regulated {rail_voltage:g} V input rail; "
+            "a 24 V source must be converted before this circuit.",
+            f"{supervisor} is independently powered from the unswitched input; its SENSE "
+            "pin monitors the switched analog rail. Its open-drain RESET feeds an unswitched "
+            "SN74LVC1G17 Schmitt buffer, which drives isolation_enable low until the rail "
+            "exceeds the reviewed threshold and CT-open delay. The buffer regenerates the "
+            "slow 100 kOhm pull-up edge instead of driving the SN74LVC1G66 controls directly. "
+            "MR is held high from the unswitched source. RESET behavior is guaranteed only "
+            "after its 1.7 V minimum VDD is reached; below that startup region isolation is not "
+            "advertised as safe or functional.",
+            "Released EN is set by 5.9 kOhm to source and 60 kOhm to return; pressing the "
+            "momentary button grounds EN and opens the TPS22948. Its guaranteed continuous "
+            "rating is 130 mA; the integrated current-limit range is 130--350 mA. "
+            "The connected analog loads and discharge resistor are limited to <=100 mA.",
+            "The switched-domain capacitance limit is 1 uF. A 1 kOhm 1% bleed bounds "
+            "sixteen SN74LVC1G66 off leaks, TPS22948 forward-off input current with OUT "
+            "grounded, and TPS3808 SENSE/RESET leakage to <=23.23 mV, below 1% of "
+            "the supported 5 V rail. Unknown external drives or loads remain unverified "
+            "unless every such path is isolated by a reviewed switch controlled by isolation_enable.",
+        ),
+        calculations=(
+            LoweringCalculation(
+                output="power_cycle_discharge_to_1_percent",
+                equation="t=Rmax*Cmax*ln((Vrail-Ileak*Rmax)/(0.01*Vrail-Ileak*Rmax)) after the power switch and signal isolators are off",
+                inputs={"rail_voltage_v": rail_voltage, "bleed_resistance_ohm_max": 1_010, "off_leakage_a_max": 23e-6, "total_switched_capacitance_uf_max": 1},
+                chosen_value="<=0.006s after power and signal isolation",
+                tolerance="This bounds passive discharge after isolation, not control propagation. TPS22948 SLVSEZ7A gives typical, not maximum, switching delay; no guaranteed total button-to-discharge time is claimed. Capacitance is an integration limit.",
+            ),
+            LoweringCalculation(
+                output="isolation_release_threshold",
+                equation="TPS3808 fixed SENSE threshold with the selected threshold variant",
+                inputs={"sense_threshold_v": supervisor_threshold, "threshold_accuracy_fraction": supervisor_accuracy, "hysteresis_fraction_max": 0.025},
+                chosen_value=f"{supervisor_threshold:g} V nominal",
+                tolerance=f"-40..125 C threshold accuracy +/-{supervisor_accuracy * 100:g}%; fixed hysteresis 1% typical, 2.5% maximum.",
+            ),
+            LoweringCalculation(
+                output="isolation_reconnect_delay",
+                equation="TPS3808 CT-open reset delay after SENSE rises above the reviewed threshold",
+                inputs={"ct_open_delay_min_ms": 12, "ct_open_delay_typ_ms": 20, "ct_open_delay_max_ms": 28},
+                chosen_value="20 ms typical; 12--28 ms bounded",
+                tolerance="TPS3808 SBVS050N; RESET remains asserted before and during this interval.",
+            ),
+            LoweringCalculation(
+                output="off_state_leakage_voltage",
+                equation="1.01k*(16*1uA + 5uA TPS22948 + 1.7uA SENSE + 0.3uA RESET)",
+                inputs={"bleed_resistance_ohm_max": 1_010, "isolator_count_max": 16, "isolator_off_leakage_ua_max": 1, "switch_forward_off_current_ua_max": 5, "supervisor_sense_leakage_ua_max": 1.7, "supervisor_reset_leakage_ua_max": 0.3},
+                chosen_value="23.23 mV maximum",
+                tolerance="TPS22948 off-current bound is specified at VIN=5 V; no bound is claimed at other supply voltages. External leakage is not bounded by this circuit.",
+            ),
+        ),
+        named_part_identities=("TPS22948DCKR", supervisor, "SN74LVC1G17DBVR"),
+    )
+
+def _common_anode_rgb_indicator(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """Build one 5-V common-anode RGB indicator with three 3.3-V GPIO controls.
+
+    The common anode uses 5 V, while each cathode is sunk by a discrete NPN
+    whose base is resistor-driven from a 3.3-V GPIO. A base-emitter pull-down
+    makes the power-up/reset state off.
+    """
+    ports = _require_ports(requirement, ("vdd_5v", "gnd", "red", "green", "blue"))
+    if (
+        ports is None
+        or set(requirement.parameters) != {"target_current_ma"}
+        or requirement.parameters["target_current_ma"] != 2.0
+        or (requirement.exact_part or "xl-1615rgbc-rf").casefold()
+        not in {"aptf1616lseezgkqbkc", "xl-1615rgbc-rf"}
+        or len(set(ports.values())) != len(ports)
+    ):
+        return None
+    led = reviewed_part(requirement.exact_part or "XL-1615RGBC-RF")
+    assert led is not None
+    mpn = "APTF1616LSEEZGKQBKC" if led.identity == "aptf1616lseezgkqbkc" else "XL-1615RGBC-RF"
+
+
+    groups = (
+        LoweringGroup(
+            role="rgb_led",
+            reference_prefix="D",
+            value=mpn,
+            symbol=led.symbol,
+            footprint=led.footprint,
+            mpn=mpn,
+            datasheet=led.manufacturer_sources[0],
+        ),
+        LoweringGroup(
+            role="red_current_resistor",
+            reference_prefix="R",
+            value="1.5k 1%",
+            symbol="Device:R",
+            footprint="Resistor_SMD:R_0603_1608Metric",
+        ),
+        LoweringGroup(
+            role="green_blue_current_resistor",
+            reference_prefix="R",
+            quantity=2,
+            value="820R 1%",
+            symbol="Device:R",
+            footprint="Resistor_SMD:R_0603_1608Metric",
+        ),
+        LoweringGroup(
+            role="channel_driver",
+            reference_prefix="Q",
+            quantity=3,
+            value="MMBT3904",
+            symbol="Transistor_BJT:MMBT3904",
+            footprint="Package_TO_SOT_SMD:SOT-23",
+            mpn="MMBT3904",
+            datasheet="https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8586176249693941760",
+        ),
+        LoweringGroup(
+            role="base_resistor",
+            reference_prefix="R",
+            quantity=3,
+            value="4.7k 1%",
+            symbol="Device:R",
+            footprint="Resistor_SMD:R_0603_1608Metric",
+        ),
+        LoweringGroup(
+            role="base_pulldown",
+            reference_prefix="R",
+            quantity=3,
+            value="100k 1%",
+            symbol="Device:R",
+            footprint="Resistor_SMD:R_0603_1608Metric",
+        ),
+    )
+    cathodes = ("__KICRAFT_RGB_INDICATOR_RED_K", "__KICRAFT_RGB_INDICATOR_GREEN_K",
+                "__KICRAFT_RGB_INDICATOR_BLUE_K")
+    collectors = tuple(f"__KICRAFT_RGB_INDICATOR_COLLECTOR_{color}" for color in range(3))
+    bases = tuple(f"__KICRAFT_RGB_INDICATOR_BASE_{color}" for color in range(3))
+    controls = (ports["red"], ports["green"], ports["blue"])
+    pins: list[LoweringPin] = [
+        LoweringPin(role="rgb_led", pin=led.port_pins["common_anode"], net=ports["vdd_5v"]),
+        *(LoweringPin(role="rgb_led", pin=led.port_pins[f"{color}_cathode"], net=cathodes[index])
+          for index, color in enumerate(("red", "green", "blue"))),
+    ]
+    for index, (cathode, collector, base, control) in enumerate(
+        zip(cathodes, collectors, bases, controls, strict=True)
+    ):
+        resistor_role = "red_current_resistor" if index == 0 else "green_blue_current_resistor"
+        resistor_index = 0 if index == 0 else index - 1
+        pins.extend(
+            (
+                LoweringPin(role=resistor_role, index=resistor_index, pin="1", net=cathode),
+                LoweringPin(role=resistor_role, index=resistor_index, pin="2", net=collector),
+                LoweringPin(role="channel_driver", index=index, pin="1", net=base),
+                LoweringPin(role="channel_driver", index=index, pin="2", net=ports["gnd"]),
+                LoweringPin(role="channel_driver", index=index, pin="3", net=collector),
+                LoweringPin(role="base_resistor", index=index, pin="1", net=control),
+                LoweringPin(role="base_resistor", index=index, pin="2", net=base),
+                LoweringPin(role="base_pulldown", index=index, pin="1", net=base),
+                LoweringPin(role="base_pulldown", index=index, pin="2", net=ports["gnd"]),
+            )
+        )
+    return _artifact(
+        "common-anode-rgb-indicator@2",
+        requirement,
+        groups,
+        tuple(pins),
+        assumptions=(
+            f"{mpn} is a four-contact common-anode RGB LED: "
+            "the 5 V common anode is not connected to any MCU GPIO.",
+            "The 1.5 kOhm red and 820 Ohm green/blue resistors limit individual "
+            "channels; each channel's 4.7 kOhm base resistor limits its own GPIO load.",
+            "Light output at the actual operating current is unmeasured; "
+            "the LED's forward-voltage and luminous-intensity specifications are not a 2 mA guarantee.",
+            "A qualified MCU output must use its manufacturer-documented 3.3 V loaded-output "
+            "condition and source-current rating for that base load. Such rows are per GPIO; "
+            "this circuit makes no simultaneous-pin or aggregate GPIO-current claim.",
+            "Each 100 kOhm base-emitter pull-down holds its NPN off while GPIOs are reset or "
+            "unpowered. GPIO-output configuration remains a firmware responsibility.",
+        ),
+        calculations=(
+            LoweringCalculation(
+                output="channel_current_upper_bound",
+                equation="I <= 5.25 V / (820 Ohm * 0.99)",
+                inputs={"supply_voltage_v_max": 5.25, "resistance_ohm_min": 811.8},
+                chosen_value="6.47 mA per channel maximum",
+                tolerance="Conservative zero LED and transistor voltage drop; 1% resistor, 5% supply. No brightness claim.",
+            ),
+        ),
+        named_part_identities=(led.identity, "mmbt3904"),
+    )
+
+
+_DISTRIBUTION_OUTPUT_RE = re.compile(r"output([1-8])$")
+
+
+def _fused_power_distribution(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """Build a source-owned, separately fused low-to-mid-voltage distribution block.
+
+    Each typed output port is the branch after its own fuse. The architecture
+    owns board-edge connector selection and maps each requested positive/return
+    contact onto these ports. The optional removable jumper actuates a high-side
+    PMOS; it never exposes a raw supply on an unprotected logic/GPIO control,
+    and its fitted and removed states are visible in the generated netlist.
+    """
+    allowed = {
+        "channels",
+        "input_voltage_v",
+        "source_current_a",
+        "enable_jumper",
+        "reset_button",
+        "rgb_status",
+    }
+    if set(requirement.parameters) - allowed or requirement.exact_part is not None:
+        return None
+    try:
+        channels = requirement.parameters["channels"]
+        input_voltage = float(requirement.parameters["input_voltage_v"])
+        source_current = float(requirement.parameters["source_current_a"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    enable_jumper = requirement.parameters.get("enable_jumper", False)
+    reset_button = requirement.parameters.get("reset_button", False)
+    rgb_status = requirement.parameters.get("rgb_status", False)
+    if (
+        type(enable_jumper) is not bool
+        or type(reset_button) is not bool
+        or type(rgb_status) is not bool
+        or type(channels) is not int
+        or channels not in {2, 4, 8}
+        or input_voltage not in {5.0, 6.0, 7.4, 8.4, 12.0, 18.0, 24.0}
+        or source_current not in {0.5, 1.0, 2.0}
+    ):
+        return None
+    required_ports = {"input", "gnd"} | {f"output{index}" for index in range(1, channels + 1)}
+    indexed_outputs = {
+        int(match.group(1)): net
+        for key, net in requirement.ports.items()
+        if (match := _DISTRIBUTION_OUTPUT_RE.fullmatch(key))
+    }
+    if (
+        set(requirement.ports) != required_ports
+        or set(indexed_outputs) != set(range(1, channels + 1))
+        or any(not str(net).strip() for net in requirement.ports.values())
+        or len(set(indexed_outputs.values())) != channels
+        or requirement.ports["input"] == requirement.ports["gnd"]
+        or requirement.ports["gnd"] in set(indexed_outputs.values())
+        or requirement.ports["input"] in set(indexed_outputs.values())
+    ):
+        return None
+    high_voltage_reset = reset_button and input_voltage != 5.0
+    if (
+        (not high_voltage_reset and source_current != 0.5)
+        or (high_voltage_reset and source_current not in {0.5, 1.0, 2.0})
+        or (high_voltage_reset and source_current > channels * 0.5)
+    ):
+        # The 5 V path has only PTC branch protection. Its source budget stays
+        # at the conservative 0.5 A default. Higher-current high-voltage
+        # distributions use the TPS26600 eFuse below; 3 A remains unsupported
+        # instead of being silently clamped to that part's 2.23 A maximum.
+        return None
+    # Each branch has a 0.5 A-hold, 30 V PTC for fault protection. A PTC hold
+    # value is not a precision current limit or a continuous-load guarantee.
+    # The 30 V rating, unlike the earlier proposed 16 V part, remains valid at
+    # the 24 V input maximum.
+    branch_hold_current = 0.5
+    fuse = LoweringGroup(
+        role="branch_fuse",
+        reference_prefix="F",
+        quantity=channels,
+        value="MF-MSMF050/30X-2",
+        symbol="mf-msmf050-30x-2:Polyfuse_1812",
+        footprint="mf-msmf050-30x-2:MF-MSMF-1812",
+        mpn="MF-MSMF050/30X-2",
+        datasheet="https://www.bourns.com/docs/product-datasheets/mf-msmf.pdf",
+        sourcing_note=(
+            "Bourns MF-MSMF050/30X-2 resettable fuse: 0.5 A hold, 30 V maximum; "
+            "one is fitted in every delivered branch."
+        ),
+    )
+    source_fuse = LoweringGroup(
+        role="source_fuse",
+        reference_prefix="F",
+        value="MF-MSMF075/33X-2",
+        symbol="mf-msmf075-33x-2:Polyfuse_1812",
+        footprint="mf-msmf075-33x-2:MF-MSMF-1812",
+        mpn="MF-MSMF075/33X-2",
+        datasheet="https://www.bourns.com/docs/product-datasheets/mf-msmf.pdf",
+        sourcing_note=(
+            "Bourns MF-MSMF075/33X-2 resettable input fuse: 0.75 A hold, 33 V "
+            "maximum; it limits faults on the 0.5 A non-eFuse source path."
+        ),
+    )
+
+    resistor_count = max(2, math.ceil((input_voltage - 2.0) / 2.0))
+    groups: list[LoweringGroup] = [
+        *(() if high_voltage_reset else (source_fuse,)),
+        fuse,
+        LoweringGroup(
+            role="indicator_resistor",
+            reference_prefix="R",
+            quantity=resistor_count,
+            value="1k",
+            symbol="Device:R",
+            footprint="Resistor_SMD:R_0603_1608Metric",
+            mpn="AC0603FR-071KL",
+            datasheet="https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8754852008425861120",
+        ),
+        LoweringGroup(
+            role="indicator_led",
+            reference_prefix="D",
+            value="LTST-C190KGKT",
+            symbol="Device:LED",
+            footprint="LED_SMD:LED_0603_1608Metric",
+            mpn="LTST-C190KGKT",
+            datasheet="https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588884651616583680",
+        ),
+    ]
+    source_bus = (
+        "__KICRAFT_DISTRIBUTION__EFUSE_OUT"
+        if high_voltage_reset
+        else "__KICRAFT_DISTRIBUTION__SOURCE_FUSED"
+    )
+    protected_source_bus = source_bus
+    pins: list[LoweringPin] = []
+    if not high_voltage_reset:
+        pins.extend(
+            (
+                LoweringPin(role="source_fuse", pin="1", net=requirement.ports["input"]),
+                LoweringPin(role="source_fuse", pin="2", net=source_bus),
+            )
+        )
+    no_connects: list[LoweringNoConnect] = []
+    assumptions = [
+        (
+            f"Each branch uses a {branch_hold_current:g} A-hold PTC at 23 °C, "
+            "with a 1 A trip rating and temperature derating; this is not a precision current limit. "
+            f"The {source_current:g} A source budget is aggregate, not a per-branch guarantee."
+        ),
+        (
+            "Each output port is the unique post-fuse branch rail. Connector "
+            "ownership remains with the architecture’s explicitly requested I/O."
+        ),
+    ]
+    if reset_button and not high_voltage_reset:
+        groups.extend(
+            (
+                *((LoweringGroup(
+                    role="reset_enable_jumper",
+                    reference_prefix="J",
+                    value="TSW-102-07-G-S",
+                    symbol="Connector_Generic:Conn_01x02",
+                    footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+                    mpn="TSW-102-07-G-S",
+                    sourcing_note="Fit SNT-100-BK-G to enable all output switches; remove to turn all outputs off.",
+                ),) if enable_jumper else ()),
+                LoweringGroup(
+                    role="reset_enable_series", reference_prefix="R", value="5.9k",
+                    symbol="Device:R", footprint="Resistor_SMD:R_0603_1608Metric", mpn="0603WAF5901T5E",
+                ),
+                LoweringGroup(
+                    role="reset_enable_pulldown", reference_prefix="R", quantity=6, value="10k",
+                    symbol="Device:R", footprint="Resistor_SMD:R_0603_1608Metric", mpn="0603WAF1002T5E",
+                ),
+                LoweringGroup(
+                    role="power_cycle_button", reference_prefix="SW", value="POWER CYCLE",
+                    symbol="kmr232ngulclfs:KMR232NGULCLFS", footprint="kmr232ngulclfs:KMR232NGULCLFS",
+                    mpn="KMR232NGULCLFS",
+                ),
+                LoweringGroup(
+                    role="branch_switch", reference_prefix="U", quantity=channels, value="TPS2553DBVR",
+                    symbol="tps2553dbvr:TPS2553DBVR", footprint="tps2553dbvr:SOT-23-6_DBV",
+                    mpn="TPS2553DBVR", datasheet="https://www.ti.com/lit/ds/symlink/tps2553.pdf",
+                ),
+                LoweringGroup(
+                    role="switch_ilim_top", reference_prefix="R", quantity=channels, value="10k",
+                    symbol="Device:R", footprint="Resistor_SMD:R_0603_1608Metric", mpn="0603WAF1002T5E",
+                ),
+                LoweringGroup(
+                    role="switch_ilim_bottom", reference_prefix="R", quantity=channels, value="5.9k",
+                    symbol="Device:R", footprint="Resistor_SMD:R_0603_1608Metric", mpn="0603WAF5901T5E",
+                ),
+                LoweringGroup(
+                    role="switch_input_decoupling", reference_prefix="C", quantity=channels, value="100nF",
+                    symbol="Device:C", footprint="Capacitor_SMD:C_0603_1608Metric", mpn="GRM188R71C104KA01D",
+                ),
+                LoweringGroup(
+                    role="output_discharge", reference_prefix="R", quantity=channels, value="10k",
+                    symbol="Device:R", footprint="Resistor_SMD:R_0603_1608Metric", mpn="0603WAF1002T5E",
+                ),
+            )
+        )
+        pins.extend(
+            (
+                *((
+                    LoweringPin(role="reset_enable_jumper", pin="1", net=protected_source_bus),
+                    LoweringPin(role="reset_enable_jumper", pin="2", net="__KICRAFT_DISTRIBUTION__ENABLE_FEED"),
+                ) if enable_jumper else ()),
+                LoweringPin(
+                    role="reset_enable_series", pin="1",
+                    net="__KICRAFT_DISTRIBUTION__ENABLE_FEED" if enable_jumper else protected_source_bus,
+                ),
+                LoweringPin(role="reset_enable_series", pin="2", net="__KICRAFT_DISTRIBUTION__ENABLE"),
+                LoweringPin(role="power_cycle_button", pin="1", net="__KICRAFT_DISTRIBUTION__ENABLE"),
+                LoweringPin(role="power_cycle_button", pin="2", net=requirement.ports["gnd"]),
+            )
+        )
+        for index in range(6):
+            pins.extend(
+                (
+                    LoweringPin(
+                        role="reset_enable_pulldown", index=index, pin="1",
+                        net="__KICRAFT_DISTRIBUTION__ENABLE" if index == 0 else f"__KICRAFT_DISTRIBUTION__RESET_PULL_{index}",
+                    ),
+                    LoweringPin(
+                        role="reset_enable_pulldown", index=index, pin="2",
+                        net=requirement.ports["gnd"] if index == 5 else f"__KICRAFT_DISTRIBUTION__RESET_PULL_{index + 1}",
+                    ),
+                )
+            )
+        assumptions.append(
+            "The enabled state drives TPS2553 EN≈4.55 V through 5.9 kOhm against "
+            "the 60 kOhm pulldown. Pressing the button, or removing the optional enable "
+            "shunt when present, drives EN low. Each TPS2553 is limited by a 15.9 kOhm "
+            "ILIM network to about 1.4 A and provides reverse-current blocking; each output "
+            "has a 10 kOhm discharge path."
+        )
+    if high_voltage_reset:
+        # TPS26600's back-to-back FETs are the sole global switching element.
+        # GND is the source/load return; RTN remains an isolated control return,
+        # including the PowerPAD, dividers and reset button, per TI SLVSDG2G
+        # sections 9.3.5.5 and 10.4.  Tying those returns together would defeat
+        # reverse-polarity protection.
+        divider = {
+            6.0: (6, 0, 10.0),
+            7.4: (8, 0, 10.0),
+            8.4: (8, 0, 10.0),
+            12.0: (11, 0, 5.9),
+            18.0: (17, 0, 5.9),
+            24.0: (23, 1, 5.9),
+        }[input_voltage]
+        top_10k_count, top_5k9_count, divider_mid_kohm = divider
+        # Bounds use 1% resistor extrema and TI's specified rising thresholds:
+        # UVLO 1.175--1.225 V, OVP 1.170--1.225 V.
+        divider_bounds = {
+            6.0: (4.630, 4.974, 9.175, 9.998),
+            7.4: (5.782, 6.224, 11.468, 12.497),
+            8.4: (5.782, 6.224, 11.468, 12.497),
+            12.0: (9.143, 9.871, 14.439, 15.734),
+            18.0: (13.489, 14.587, 21.320, 23.233),
+            24.0: (18.263, 19.767, 28.877, 31.469),
+        }[input_voltage]
+        ilim = {
+            0.5: ("22.6k", "RS-03K2262FT"),
+            1.0: ("11.3k", "0603WAF1132T5E"),
+            2.0: ("5.36k", "0603WAF5361T5E"),
+        }[source_current]
+        groups.extend(
+            (
+                LoweringGroup(
+                    role="global_efuse",
+                    reference_prefix="U",
+                    value="TPS26600PWPR",
+                    symbol="tps26600:TPS26600PWPR",
+                    footprint="tps26600:HTSSOP-16_L5.0-W4.4-P0.65-LS6.4-BL-EP3.3",
+                    mpn="TPS26600PWPR",
+                    datasheet="https://www.ti.com/lit/ds/symlink/tps2660.pdf",
+                ),
+                LoweringGroup(
+                    role="efuse_input_ceramic",
+                    reference_prefix="C",
+                    value="100nF 100V X7R",
+                    symbol="Device:C",
+                    footprint="Capacitor_SMD:C_0603_1608Metric",
+                    mpn="GRM188R72A104KA35D",
+                ),
+                LoweringGroup(
+                    role="efuse_output_ceramic",
+                    reference_prefix="C",
+                    value="1uF 50V X7R",
+                    symbol="Device:C",
+                    footprint="Capacitor_SMD:C_0603_1608Metric",
+                    mpn="CL10B105KB8NQNC",
+                ),
+                LoweringGroup(
+                    role="efuse_ilim",
+                    reference_prefix="R",
+                    value=f"{ilim[0]} 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn=ilim[1],
+                ),
+                LoweringGroup(
+                    role="efuse_dvdt",
+                    reference_prefix="C",
+                    value="1.5nF 50V C0G",
+                    symbol="Device:C",
+                    footprint="Capacitor_SMD:C_0603_1608Metric",
+                    mpn="GRM1885C1H152JA01D",
+                ),
+                LoweringGroup(
+                    role="efuse_uvlo_ovp_top_10k",
+                    reference_prefix="R",
+                    quantity=top_10k_count,
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="0603WAF1002T5E",
+                ),
+                *(
+                    (
+                        LoweringGroup(
+                            role="efuse_uvlo_ovp_top_5k9",
+                            reference_prefix="R",
+                            value="5.9k 1%",
+                            symbol="Device:R",
+                            footprint="Resistor_SMD:R_0603_1608Metric",
+                            mpn="0603WAF5901T5E",
+                        ),
+                    )
+                    if top_5k9_count
+                    else ()
+                ),
+                LoweringGroup(
+                    role="efuse_uvlo_ovp_mid",
+                    reference_prefix="R",
+                    value=f"{divider_mid_kohm:g}k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn=(
+                        "0603WAF1002T5E"
+                        if divider_mid_kohm == 10.0
+                        else "0603WAF5901T5E"
+                    ),
+                ),
+                LoweringGroup(
+                    role="efuse_uvlo_ovp_bottom",
+                    reference_prefix="R",
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="0603WAF1002T5E",
+                ),
+                LoweringGroup(
+                    role="efuse_power_cycle_button",
+                    reference_prefix="SW",
+                    value="POWER CYCLE",
+                    symbol="kmr232ngulclfs:KMR232NGULCLFS",
+                    footprint="kmr232ngulclfs:KMR232NGULCLFS",
+                    mpn="KMR232NGULCLFS",
+                ),
+                *(
+                    (
+                        LoweringGroup(
+                            role="efuse_disable_jumper",
+                            reference_prefix="J",
+                            value="EFUSE_DISABLE",
+                            symbol="Connector_Generic:Conn_01x02",
+                            footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+                            mpn="TSW-102-07-G-S",
+                            sourcing_note=(
+                                "Fit the shunt to pull SHDN to RTN and turn all delivered "
+                                "rails off; remove it for the TPS26600 internal-pullup on state."
+                            ),
+                        ),
+                    )
+                    if enable_jumper
+                    else ()
+                ),
+                LoweringGroup(
+                    role="efuse_output_discharge",
+                    reference_prefix="R",
+                    quantity=channels,
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="0603WAF1002T5E",
+                ),
+                LoweringGroup(
+                    role="efuse_bus_discharge",
+                    reference_prefix="R",
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="0603WAF1002T5E",
+                ),
+            )
+        )
+        control_rtn = "__KICRAFT_DISTRIBUTION__EFUSE_RTN"
+        top_end = (
+            "__KICRAFT_DISTRIBUTION__EFUSE_TOP_10K"
+            if top_5k9_count
+            else "__KICRAFT_DISTRIBUTION__EFUSE_UVLO"
+        )
+        for index in range(top_10k_count):
+            pins.extend(
+                (
+                    LoweringPin(
+                        role="efuse_uvlo_ovp_top_10k",
+                        index=index,
+                        pin="1",
+                        net=(
+                            requirement.ports["input"]
+                            if index == 0
+                            else f"__KICRAFT_DISTRIBUTION__EFUSE_TOP_{index}"
+                        ),
+                    ),
+                    LoweringPin(
+                        role="efuse_uvlo_ovp_top_10k",
+                        index=index,
+                        pin="2",
+                        net=(
+                            top_end
+                            if index == top_10k_count - 1
+                            else f"__KICRAFT_DISTRIBUTION__EFUSE_TOP_{index + 1}"
+                        ),
+                    ),
+                )
+            )
+        if top_5k9_count:
+            pins.extend(
+                (
+                    LoweringPin(
+                        role="efuse_uvlo_ovp_top_5k9",
+                        pin="1",
+                        net=top_end,
+                    ),
+                    LoweringPin(
+                        role="efuse_uvlo_ovp_top_5k9",
+                        pin="2",
+                        net="__KICRAFT_DISTRIBUTION__EFUSE_UVLO",
+                    ),
+                )
+            )
+        pins.extend(
+            (
+                *(LoweringPin(role="global_efuse", pin=pin, net=requirement.ports["input"])
+                  for pin in ("1", "2")),
+                LoweringPin(role="global_efuse", pin="3", net="__KICRAFT_DISTRIBUTION__EFUSE_UVLO"),
+                LoweringPin(role="global_efuse", pin="5", net="__KICRAFT_DISTRIBUTION__EFUSE_OVP"),
+                LoweringPin(role="global_efuse", pin="7", net="__KICRAFT_DISTRIBUTION__EFUSE_SHDN"),
+                LoweringPin(role="global_efuse", pin="8", net=control_rtn),
+                LoweringPin(role="global_efuse", pin="9", net=requirement.ports["gnd"]),
+                LoweringPin(role="global_efuse", pin="11", net="__KICRAFT_DISTRIBUTION__EFUSE_ILIM"),
+                LoweringPin(role="global_efuse", pin="12", net="__KICRAFT_DISTRIBUTION__EFUSE_DVDT"),
+                *(LoweringPin(role="global_efuse", pin=pin, net=source_bus) for pin in ("15", "16")),
+                LoweringPin(role="global_efuse", pin="17", net=control_rtn),
+                LoweringPin(role="efuse_input_ceramic", pin="1", net=requirement.ports["input"]),
+                LoweringPin(role="efuse_input_ceramic", pin="2", net=requirement.ports["gnd"]),
+                LoweringPin(role="efuse_output_ceramic", pin="1", net=source_bus),
+                LoweringPin(role="efuse_output_ceramic", pin="2", net=requirement.ports["gnd"]),
+                LoweringPin(role="efuse_bus_discharge", pin="1", net=source_bus),
+                LoweringPin(role="efuse_bus_discharge", pin="2", net=requirement.ports["gnd"]),
+                LoweringPin(role="efuse_ilim", pin="1", net="__KICRAFT_DISTRIBUTION__EFUSE_ILIM"),
+                LoweringPin(role="efuse_ilim", pin="2", net=control_rtn),
+                LoweringPin(role="efuse_dvdt", pin="1", net="__KICRAFT_DISTRIBUTION__EFUSE_DVDT"),
+                LoweringPin(role="efuse_dvdt", pin="2", net=control_rtn),
+                LoweringPin(role="efuse_uvlo_ovp_mid", pin="1", net="__KICRAFT_DISTRIBUTION__EFUSE_UVLO"),
+                LoweringPin(role="efuse_uvlo_ovp_mid", pin="2", net="__KICRAFT_DISTRIBUTION__EFUSE_OVP"),
+                LoweringPin(role="efuse_uvlo_ovp_bottom", pin="1", net="__KICRAFT_DISTRIBUTION__EFUSE_OVP"),
+                LoweringPin(role="efuse_uvlo_ovp_bottom", pin="2", net=control_rtn),
+                LoweringPin(role="efuse_power_cycle_button", pin="1", net="__KICRAFT_DISTRIBUTION__EFUSE_SHDN"),
+                LoweringPin(role="efuse_power_cycle_button", pin="2", net=control_rtn),
+            )
+        )
+        if enable_jumper:
+            pins.extend(
+                (
+                    LoweringPin(
+                        role="efuse_disable_jumper",
+                        pin="1",
+                        net="__KICRAFT_DISTRIBUTION__EFUSE_SHDN",
+                    ),
+                    LoweringPin(role="efuse_disable_jumper", pin="2", net=control_rtn),
+                )
+            )
+        for index in range(channels):
+            pins.extend(
+                (
+                    LoweringPin(
+                        role="efuse_output_discharge",
+                        index=index,
+                        pin="1",
+                        net=indexed_outputs[index + 1],
+                    ),
+                    LoweringPin(
+                        role="efuse_output_discharge",
+                        index=index,
+                        pin="2",
+                        net=requirement.ports["gnd"],
+                    ),
+                )
+            )
+        no_connects.extend(
+            (
+                LoweringNoConnect(role="global_efuse", pin="4", reason="TPS26600 PWP pin 4 is NC"),
+                LoweringNoConnect(role="global_efuse", pin="6", reason="MODE is intentionally open for TPS26600 circuit-breaker auto-retry"),
+                LoweringNoConnect(role="global_efuse", pin="10", reason="IMON is unused on a standalone distribution"),
+                LoweringNoConnect(role="global_efuse", pin="13", reason="TPS26600 PWP pin 13 is NC"),
+                *(
+                    ()
+                    if rgb_status
+                    else (LoweringNoConnect(
+                        role="global_efuse",
+                        pin="14",
+                        reason="FLT has no external monitor when RGB status is absent",
+                    ),)
+                ),
+            )
+        )
+        nominal_current_limit = {
+            0.5: 12.0 / 22.6,
+            1.0: 12.0 / 11.3,
+            2.0: 2.23,
+        }[source_current]
+        assumptions.append(
+            f"TPS26600 PWPR has an isolated RTN control return and a {ilim[0]} ILIM "
+            f"resistor (nominal {nominal_current_limit:.3g} A; this is fault limiting, "
+            f"not a continuous-load rating). The 1%-resistor/TI-threshold bounds are "
+            f"UVLO {divider_bounds[0]:.3f}--{divider_bounds[1]:.3f} V and OVP "
+            f"{divider_bounds[2]:.3f}--{divider_bounds[3]:.3f} V. Its 1.5 nF dVdT "
+            "capacitor produces about 272 us nominal ramp; 1 uF COUT therefore contributes "
+            "about 88 mA inrush at 24 V. Each delivered output is post-eFuse/post-PTC and "
+            "has a 10 kOhm 0.1 W discharge path (24 V: 57.6 mW, tau about 10 ms per 1 uF)."
+        )
+        assumptions.append(
+            "The reset button spans TPS26600 SHDN and isolated RTN, not the raw input: "
+            "TI specifies SHDN output 2--3.4 V at 0.1 uA and a -10 uA minimum leakage "
+            "entry at 0.4 V, not a guaranteed 10 uA contact current. KMR232NGULCLFS "
+            "ULC is specified at 1 uA/1.8 V; contact-life qualification below that "
+            "test current remains unverified."
+        )
+    if high_voltage_reset and rgb_status:
+        # FLT is a 0--60 V active-low open drain (TI SLVSDG2G table 7.5);
+        # the red LED is current-limited directly to it. This does not join
+        # external system GND to the isolated RTN control return.
+        rgb_led = reviewed_part("XL-1615RGBC-RF")
+        assert rgb_led is not None
+        rgb_series = max(1, math.ceil(input_voltage / 20.0))
+        rgb_base_series = max(1, math.ceil((input_voltage - 0.7) / 5.0))
+        groups.extend(
+            (
+                LoweringGroup(
+                    role="efuse_rgb_status_led",
+                    reference_prefix="D",
+                    value="XL-1615RGBC-RF",
+                    symbol=rgb_led.symbol,
+                    footprint=rgb_led.footprint,
+                    mpn="XL-1615RGBC-RF",
+                    datasheet=rgb_led.manufacturer_sources[0],
+                ),
+                LoweringGroup(
+                    role="efuse_rgb_current_resistor",
+                    reference_prefix="R",
+                    quantity=3 * rgb_series,
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="0603WAF1002T5E",
+                ),
+                LoweringGroup(
+                    role="efuse_rgb_driver",
+                    reference_prefix="Q",
+                    quantity=2,
+                    value="MMBT3904",
+                    symbol="Transistor_BJT:MMBT3904",
+                    footprint="Package_TO_SOT_SMD:SOT-23",
+                    mpn="MMBT3904",
+                ),
+                LoweringGroup(
+                    role="efuse_rgb_base_resistor",
+                    reference_prefix="R",
+                    quantity=2 * rgb_base_series,
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="0603WAF1002T5E",
+                ),
+                LoweringGroup(
+                    role="efuse_rgb_base_pulldown",
+                    reference_prefix="R",
+                    quantity=2,
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="0603WAF1002T5E",
+                ),
+            )
+        )
+        rgb_cathodes = ("__KICRAFT_EFUSE_RGB_R", "__KICRAFT_EFUSE_RGB_G", "__KICRAFT_EFUSE_RGB_B")
+        for color, endpoint in enumerate(("__KICRAFT_EFUSE_FLT", "__KICRAFT_EFUSE_RGB_Q0", "__KICRAFT_EFUSE_RGB_Q1")):
+            for index in range(rgb_series):
+                group_index = color * rgb_series + index
+                pins.extend((
+                    LoweringPin(role="efuse_rgb_current_resistor", index=group_index, pin="1", net=rgb_cathodes[color] if index == 0 else f"__KICRAFT_EFUSE_RGB_LED_{color}_{index}"),
+                    LoweringPin(role="efuse_rgb_current_resistor", index=group_index, pin="2", net=endpoint if index == rgb_series - 1 else f"__KICRAFT_EFUSE_RGB_LED_{color}_{index + 1}"),
+                ))
+        for driver, drive_net in enumerate((indexed_outputs[1], requirement.ports["input"])):
+            base = f"__KICRAFT_EFUSE_RGB_B{driver}"
+            for index in range(rgb_base_series):
+                group_index = driver * rgb_base_series + index
+                pins.extend((
+                    LoweringPin(role="efuse_rgb_base_resistor", index=group_index, pin="1", net=drive_net if index == 0 else f"__KICRAFT_EFUSE_RGB_BASE_{driver}_{index}"),
+                    LoweringPin(role="efuse_rgb_base_resistor", index=group_index, pin="2", net=base if index == rgb_base_series - 1 else f"__KICRAFT_EFUSE_RGB_BASE_{driver}_{index + 1}"),
+                ))
+            pins.extend((
+                LoweringPin(role="efuse_rgb_driver", index=driver, pin="1", net=base),
+                LoweringPin(role="efuse_rgb_driver", index=driver, pin="2", net=requirement.ports["gnd"]),
+                LoweringPin(role="efuse_rgb_driver", index=driver, pin="3", net=f"__KICRAFT_EFUSE_RGB_Q{driver}"),
+                LoweringPin(role="efuse_rgb_base_pulldown", index=driver, pin="1", net=base),
+                LoweringPin(role="efuse_rgb_base_pulldown", index=driver, pin="2", net=requirement.ports["gnd"]),
+            ))
+        pins.extend((
+            LoweringPin(role="global_efuse", pin="14", net="__KICRAFT_EFUSE_FLT"),
+            LoweringPin(role="efuse_rgb_status_led", pin=rgb_led.port_pins["common_anode"], net=requirement.ports["input"]),
+            *(LoweringPin(role="efuse_rgb_status_led", pin=rgb_led.port_pins[f"{color}_cathode"], net=rgb_cathodes[index])
+              for index, color in enumerate(("red", "green", "blue"))),
+        ))
+        assumptions.append(
+            f"eFuse RGB channels use {rgb_series}x10 kOhm current resistors; at "
+            f"{input_voltage:g} V their zero-drop 1%-resistor current bound is "
+            f"{input_voltage / (rgb_series * 9900):.3g} A. The red channel is sunk by FLT; "
+            "green and blue use separate low-side drivers. Light output at the actual current "
+            "is unmeasured; XINGLIGHT optical and forward-voltage specifications are at 20 mA."
+        )
+    if enable_jumper and not reset_button:
+        source_bus = "__KICRAFT_DISTRIBUTION__SWITCHED"
+        groups.extend(
+            (
+                LoweringGroup(
+                    role="global_switch",
+                    reference_prefix="Q",
+                    value="AONR21357",
+                    symbol="aonr21357:AONR21357",
+                    footprint="aonr21357:DFN-8_L3.0-W3.0-P0.65-BL",
+                    mpn="AONR21357",
+                    datasheet="https://www.lcsc.com/datasheet/C431196.pdf",
+                ),
+                LoweringGroup(
+                    role="gate_pullup",
+                    reference_prefix="R",
+                    quantity=6,
+                    value="10k",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="FRC0603F1002TS",
+                    datasheet="https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8763490791224557568",
+                ),
+                LoweringGroup(
+                    role="gate_drive",
+                    reference_prefix="R",
+                    value="5.9k",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="FRC0603F5901TS",
+                    datasheet="https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8763495553592778752",
+                ),
+                LoweringGroup(
+                    role="gate_clamp",
+                    reference_prefix="D",
+                    value="BZT52C10",
+                    symbol="Device:D_Zener",
+                    footprint="Diode_SMD:D_SOD-123",
+                    mpn="BZT52C10",
+                    datasheet="https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8756679576573890560",
+                ),
+                LoweringGroup(
+                    role="enable_jumper",
+                    reference_prefix="J",
+                    value="TSW-102-07-G-S",
+                    symbol="Connector_Generic:Conn_01x02",
+                    footprint="Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+                    mpn="TSW-102-07-G-S",
+                    sourcing_note=(
+                        "Fit Samtec SNT-100-BK-G shunt for enabled output; remove for "
+                        "the deterministic PMOS-off state."
+                    ),
+                ),
+            )
+        )
+        pins.extend(
+            [
+                *(LoweringPin(role="global_switch", pin=pin, net=protected_source_bus)
+                  for pin in ("1", "2", "3")),
+                *(LoweringPin(role="global_switch", pin=pin, net=source_bus)
+                  for pin in ("5", "6", "7", "8", "9")),
+                LoweringPin(role="global_switch", pin="4", net="__KICRAFT_DISTRIBUTION__GATE"),
+                LoweringPin(role="gate_clamp", pin="1", net=protected_source_bus),
+                LoweringPin(role="gate_clamp", pin="2", net="__KICRAFT_DISTRIBUTION__GATE"),
+                LoweringPin(role="gate_drive", pin="1", net="__KICRAFT_DISTRIBUTION__GATE"),
+                LoweringPin(role="gate_drive", pin="2", net="__KICRAFT_DISTRIBUTION__ENABLE"),
+                LoweringPin(role="enable_jumper", pin="1", net="__KICRAFT_DISTRIBUTION__ENABLE"),
+                LoweringPin(role="enable_jumper", pin="2", net=requirement.ports["gnd"]),
+            ]
+        )
+        for index in range(6):
+            pins.extend(
+                (
+                    LoweringPin(
+                        role="gate_pullup",
+                        index=index,
+                        pin="1",
+                        net=(
+                            protected_source_bus
+                            if index == 0
+                            else f"__KICRAFT_DISTRIBUTION__PULLUP_{index}"
+                        ),
+                    ),
+                    LoweringPin(
+                        role="gate_pullup",
+                        index=index,
+                        pin="2",
+                        net=(
+                            "__KICRAFT_DISTRIBUTION__GATE"
+                            if index == 5
+                            else f"__KICRAFT_DISTRIBUTION__PULLUP_{index + 1}"
+                        ),
+                    ),
+                )
+            )
+        assumptions.append(
+            "Enable jumper fitted: gate is pulled low through 5.9 kOhm and the PMOS delivers "
+            "power; removed: six series 10 kOhm pull-up resistors hold gate at source and the "
+            "output is off. At 5 V they set VGS≈-4.55 V; at 24 V BZT52C10 clamps |VGS| near "
+            "10 V, with about 2.4 mA gate-drive current (about 24 mW in the clamp and 33 mW in "
+            "the 5.9 kOhm resistor), all below reviewed ratings."
+        )
+    if rgb_status and not high_voltage_reset:
+        # These are discrete status channels, not an addressable LED pretending
+        # to be useful without a controller. Blue proves protected input power,
+        # green is sampled after the first branch PTC, and a separate output
+        # sense inverter lights red only when that output is absent. The PMOS
+        # gate is never loaded by status circuitry.
+        rgb_led = reviewed_part("XL-1615RGBC-RF")
+        assert rgb_led is not None
+        rgb_current_series = max(1, math.ceil(input_voltage / 20.0))
+        rgb_base_series = max(1, math.ceil((input_voltage - 0.7) / 5.0))
+        groups.extend(
+            (
+                LoweringGroup(
+                    role="rgb_status_led",
+                    reference_prefix="D",
+                    value="XL-1615RGBC-RF",
+                    symbol=rgb_led.symbol,
+                    footprint=rgb_led.footprint,
+                    mpn="XL-1615RGBC-RF",
+                    datasheet=rgb_led.manufacturer_sources[0],
+                ),
+                LoweringGroup(
+                    role="rgb_channel_resistor",
+                    reference_prefix="R",
+                    quantity=3 * rgb_current_series,
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="FRC0603F1002TS",
+                ),
+                LoweringGroup(
+                    role="rgb_driver",
+                    reference_prefix="Q",
+                    quantity=3,
+                    value="MMBT3904",
+                    symbol="Transistor_BJT:MMBT3904",
+                    footprint="Package_TO_SOT_SMD:SOT-23",
+                    mpn="MMBT3904",
+                ),
+                LoweringGroup(
+                    role="rgb_base_resistor",
+                    reference_prefix="R",
+                    quantity=3 * rgb_base_series,
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="FRC0603F1002TS",
+                ),
+                LoweringGroup(
+                    role="rgb_base_pulldown",
+                    reference_prefix="R",
+                    quantity=3,
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="FRC0603F1002TS",
+                ),
+                LoweringGroup(
+                    role="rgb_output_sense",
+                    reference_prefix="Q",
+                    value="MMBT3904",
+                    symbol="Transistor_BJT:MMBT3904",
+                    footprint="Package_TO_SOT_SMD:SOT-23",
+                    mpn="MMBT3904",
+                ),
+                LoweringGroup(
+                    role="rgb_sense_base_resistor",
+                    reference_prefix="R",
+                    quantity=rgb_base_series,
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="FRC0603F1002TS",
+                ),
+                LoweringGroup(
+                    role="rgb_sense_base_pulldown",
+                    reference_prefix="R",
+                    value="10k 1%",
+                    symbol="Device:R",
+                    footprint="Resistor_SMD:R_0603_1608Metric",
+                    mpn="FRC0603F1002TS",
+                ),
+            )
+        )
+        rgb_cathodes = ("__KICRAFT_DISTRIBUTION__RGB_RED_K", "__KICRAFT_DISTRIBUTION__RGB_GREEN_K", "__KICRAFT_DISTRIBUTION__RGB_BLUE_K")
+        rgb_sources = (
+            protected_source_bus,
+            indexed_outputs[1],
+            protected_source_bus,
+        )
+        for channel, (cathode, drive_source) in enumerate(zip(rgb_cathodes, rgb_sources, strict=True)):
+            collector = f"__KICRAFT_DISTRIBUTION__RGB_COLLECTOR_{channel}"
+            base = f"__KICRAFT_DISTRIBUTION__RGB_BASE_{channel}"
+            for resistor_index in range(rgb_current_series):
+                group_index = channel * rgb_current_series + resistor_index
+                pins.extend(
+                    (
+                        LoweringPin(
+                            role="rgb_channel_resistor",
+                            index=group_index,
+                            pin="1",
+                            net=(
+                                cathode
+                                if resistor_index == 0
+                                else f"__KICRAFT_DISTRIBUTION__RGB_LED_{channel}_{resistor_index}"
+                            ),
+                        ),
+                        LoweringPin(
+                            role="rgb_channel_resistor",
+                            index=group_index,
+                            pin="2",
+                            net=(
+                                collector
+                                if resistor_index == rgb_current_series - 1
+                                else f"__KICRAFT_DISTRIBUTION__RGB_LED_{channel}_{resistor_index + 1}"
+                            ),
+                        ),
+                    )
+                )
+            for resistor_index in range(rgb_base_series):
+                group_index = channel * rgb_base_series + resistor_index
+                pins.extend(
+                    (
+                        LoweringPin(
+                            role="rgb_base_resistor",
+                            index=group_index,
+                            pin="1",
+                            net=(
+                                drive_source
+                                if resistor_index == 0
+                                else f"__KICRAFT_DISTRIBUTION__RGB_BASE_R_{channel}_{resistor_index}"
+                            ),
+                        ),
+                        LoweringPin(
+                            role="rgb_base_resistor",
+                            index=group_index,
+                            pin="2",
+                            net=(
+                                base
+                                if resistor_index == rgb_base_series - 1
+                                else f"__KICRAFT_DISTRIBUTION__RGB_BASE_R_{channel}_{resistor_index + 1}"
+                            ),
+                        ),
+                    )
+                )
+            pins.extend(
+                (
+                    LoweringPin(role="rgb_driver", index=channel, pin="1", net=base),
+                    LoweringPin(role="rgb_driver", index=channel, pin="2", net=requirement.ports["gnd"]),
+                    LoweringPin(role="rgb_driver", index=channel, pin="3", net=collector),
+                    LoweringPin(role="rgb_base_pulldown", index=channel, pin="1", net=base),
+                    LoweringPin(role="rgb_base_pulldown", index=channel, pin="2", net=requirement.ports["gnd"]),
+                )
+            )
+        sense_base = "__KICRAFT_DISTRIBUTION__RGB_SENSE_BASE"
+        red_base = "__KICRAFT_DISTRIBUTION__RGB_BASE_0"
+        for resistor_index in range(rgb_base_series):
+            pins.extend(
+                (
+                    LoweringPin(
+                        role="rgb_sense_base_resistor",
+                        index=resistor_index,
+                        pin="1",
+                        net=(
+                            indexed_outputs[1]
+                            if resistor_index == 0
+                            else f"__KICRAFT_DISTRIBUTION__RGB_SENSE_R_{resistor_index}"
+                        ),
+                    ),
+                    LoweringPin(
+                        role="rgb_sense_base_resistor",
+                        index=resistor_index,
+                        pin="2",
+                        net=(
+                            sense_base
+                            if resistor_index == rgb_base_series - 1
+                            else f"__KICRAFT_DISTRIBUTION__RGB_SENSE_R_{resistor_index + 1}"
+                        ),
+                    ),
+                )
+            )
+        pins.extend(
+            (
+                LoweringPin(role="rgb_output_sense", pin="1", net=sense_base),
+                LoweringPin(role="rgb_output_sense", pin="2", net=requirement.ports["gnd"]),
+                LoweringPin(role="rgb_output_sense", pin="3", net=red_base),
+                LoweringPin(role="rgb_sense_base_pulldown", pin="1", net=sense_base),
+                LoweringPin(role="rgb_sense_base_pulldown", pin="2", net=requirement.ports["gnd"]),
+            )
+        )
+        pins.extend(
+            (
+                LoweringPin(role="rgb_status_led", pin=rgb_led.port_pins["common_anode"], net=protected_source_bus),
+                *(LoweringPin(role="rgb_status_led", pin=rgb_led.port_pins[f"{color}_cathode"], net=rgb_cathodes[index])
+                  for index, color in enumerate(("red", "green", "blue"))),
+            )
+        )
+        assumptions.append(
+            f"Discrete RGB status: blue is protected-input present, green is post-PTC output1 "
+            f"present, and red is output1-absent through a separate MMBT3904 inverter. "
+            f"{rgb_current_series}x10 kOhm per LED channel bounds current at 24 V to "
+            f"{24.0 / (rgb_current_series * 9900):.3g} A with zero LED and switch drop; "
+            f"{rgb_base_series}x10 kOhm base chains limit sensing and driver base current. "
+            "Light output at the actual current is unmeasured.",
+        )
+    for index in range(channels):
+        output = indexed_outputs[index + 1]
+        if reset_button and not high_voltage_reset:
+            fused = f"__KICRAFT_DISTRIBUTION__FUSED_{index + 1}"
+            ilim_mid = f"__KICRAFT_DISTRIBUTION__ILIM_{index + 1}"
+            pins.extend(
+                (
+                    LoweringPin(role="branch_fuse", index=index, pin="1", net=protected_source_bus),
+                    LoweringPin(role="branch_fuse", index=index, pin="2", net=fused),
+                    LoweringPin(role="branch_switch", index=index, pin="1", net=fused),
+                    LoweringPin(role="branch_switch", index=index, pin="2", net=requirement.ports["gnd"]),
+                    LoweringPin(role="branch_switch", index=index, pin="3", net="__KICRAFT_DISTRIBUTION__ENABLE"),
+                    LoweringPin(role="branch_switch", index=index, pin="5", net=ilim_mid),
+                    LoweringPin(role="branch_switch", index=index, pin="6", net=output),
+                    LoweringPin(role="switch_ilim_top", index=index, pin="1", net=ilim_mid),
+                    LoweringPin(role="switch_ilim_top", index=index, pin="2", net=f"{ilim_mid}_R"),
+                    LoweringPin(role="switch_ilim_bottom", index=index, pin="1", net=f"{ilim_mid}_R"),
+                    LoweringPin(role="switch_ilim_bottom", index=index, pin="2", net=requirement.ports["gnd"]),
+                    LoweringPin(role="switch_input_decoupling", index=index, pin="1", net=fused),
+                    LoweringPin(role="switch_input_decoupling", index=index, pin="2", net=requirement.ports["gnd"]),
+                    LoweringPin(role="output_discharge", index=index, pin="1", net=output),
+                    LoweringPin(role="output_discharge", index=index, pin="2", net=requirement.ports["gnd"]),
+                )
+            )
+            no_connects.append(
+                LoweringNoConnect(
+                    role="branch_switch", index=index, pin="4",
+                    reason="TPS2553 FAULT is intentionally unused on this standalone power-cycle board",
+                )
+            )
+        else:
+            pins.extend(
+                (
+                    LoweringPin(role="branch_fuse", index=index, pin="1", net=source_bus),
+                    LoweringPin(role="branch_fuse", index=index, pin="2", net=output),
+                )
+            )
+    for index in range(resistor_count):
+        pins.extend(
+            (
+                LoweringPin(
+                    role="indicator_resistor",
+                    index=index,
+                    pin="1",
+                    net=source_bus if index == 0 else f"__KICRAFT_DISTRIBUTION__LED_R_{index}",
+                ),
+                LoweringPin(
+                    role="indicator_resistor",
+                    index=index,
+                    pin="2",
+                    net=(
+                        "__KICRAFT_DISTRIBUTION__LED_A"
+                        if index == resistor_count - 1
+                        else f"__KICRAFT_DISTRIBUTION__LED_R_{index + 1}"
+                    ),
+                ),
+            )
+        )
+    pins.extend(
+        (
+            LoweringPin(role="indicator_led", pin="2", net="__KICRAFT_DISTRIBUTION__LED_A"),
+            LoweringPin(role="indicator_led", pin="1", net=requirement.ports["gnd"]),
+        )
+    )
+    return _artifact(
+        "fused-power-distribution@1",
+        requirement,
+        tuple(groups),
+        tuple(pins),
+        no_connects=tuple(no_connects),
+        assumptions=tuple(assumptions),
+        calculations=(
+            LoweringCalculation(
+                output="power_indicator_current",
+                equation="I=(Vin-Vf)/(N*1k)",
+                inputs={
+                    "input_voltage_v": input_voltage,
+                    "led_forward_voltage_v": 2.0,
+                    "series_resistors": resistor_count,
+                },
+                chosen_value=f"{(input_voltage - 2.0) / (resistor_count * 1_000):.3g}A",
+                tolerance="LTST-C190KGKT nominal 2 V forward voltage; E24-equivalent 1 kOhm series chain",
+            ),
+        ),
+    )
+def _tmp102_temperature(requirement: CircuitRequirement) -> LoweringArtifact | None:
+    """TMP102AIDRLR with ADD0 grounded, bypass and independent I2C pullups."""
+    ports = requirement.ports
+    if (requirement.exact_part and requirement.exact_part.casefold() != "tmp102aidrlr") or (
+        set(ports) != {"vdd", "gnd", "sda", "scl"}
+    ):
+        return None
+    if any(not value or value == "NC" for value in ports.values()) or len(set(ports.values())) != 4:
+        return None
+    groups = (
+        LoweringGroup(role="sensor", reference_prefix="U", value="TMP102AIDRLR",
+                      symbol="Sensor_Temperature:TMP102xxDRL", footprint="tmp102aidrlr:TI_DRL0006A_TMP102",
+                      mpn="TMP102AIDRLR", datasheet="https://www.ti.com/lit/ds/symlink/tmp102.pdf",
+                      sourcing_note="LCSC C99269"),
+        _passive("bypass", "C", "100nF"),
+        _passive("sda_pullup", "R", "4.7k"),
+        _passive("scl_pullup", "R", "4.7k"),
+    )
+    pins = (
+        LoweringPin(role="sensor", pin="1", net=ports["scl"]),
+        LoweringPin(role="sensor", pin="2", net=ports["gnd"]),
+        LoweringPin(role="sensor", pin="4", net=ports["gnd"]),
+        LoweringPin(role="sensor", pin="5", net=ports["vdd"]),
+        LoweringPin(role="sensor", pin="6", net=ports["sda"]),
+        LoweringPin(role="bypass", pin="1", net=ports["vdd"]),
+        LoweringPin(role="bypass", pin="2", net=ports["gnd"]),
+        LoweringPin(role="sda_pullup", pin="1", net=ports["vdd"]),
+        LoweringPin(role="sda_pullup", pin="2", net=ports["sda"]),
+        LoweringPin(role="scl_pullup", pin="1", net=ports["vdd"]),
+        LoweringPin(role="scl_pullup", pin="2", net=ports["scl"]),
+    )
+    return _artifact(
+        "tmp102-i2c-temperature@1", requirement, groups, pins,
+        no_connects=(LoweringNoConnect(role="sensor", pin="3", reason="ALERT unused"),),
+        local_bypasses=(LoweringLocalBypass(
+            owner_role="sensor", bypass_role="bypass",
+            power_pins=("5", "1"), ground_pins=("2", "2"), max_distance_mm=2.5,
+        ),),
+        assumptions=("ADD0 grounded selects I2C address 0x48; supply 1.4 to 3.6 V. "
+                     "Verify bus capacitance and pull-up rise time for the actual layout.",
+                     "TI TMP102 SBOS397I sections 4 and 7.2."),
+    )
+
+
+
+from kicraft.design import actuator_circuits as _actuator_circuits  # noqa: F401
+from kicraft.design import analog_conditioner as _analog_conditioner  # noqa: F401
+
+
 for _lowerer in (
+    RegisteredLowerer(
+        "tmp102-i2c-temperature@1",
+        frozenset({"tmp102-temperature", "temperature-sensor", "i2c-temperature-sensor"}),
+        _tmp102_temperature,
+        (),
+        ("vdd", "gnd", "sda", "scl"),
+        required_port_keys=("vdd", "gnd", "sda", "scl"),
+        reviewed_exact_part="TMP102AIDRLR",
+    ),
     RegisteredLowerer(
         "usb-c-breakout@1",
         frozenset({"usb-c-breakout"}),
@@ -2352,6 +4167,28 @@ for _lowerer in (
         ),
         parameter_choices=(("rows", (1, 2)), ("gender", ("male", "female"))),
         port_patterns=((r"pin[1-9][0-9]*", "bidirectional"),),
+    ),
+    RegisteredLowerer(
+        "reviewed-jst-xh-connector@1",
+        frozenset({"jst-connector", "jst-xh-connector"}),
+        _reviewed_jst_xh_connector,
+        (),
+        ("<pin1..pinN: every real JST XH contact, with a reviewed exact-width carrier>",),
+        port_patterns=((r"pin[1-9][0-9]*", "bidirectional"),),
+    ),
+    RegisteredLowerer(
+        "qwiic-i2c-connector@1",
+        frozenset({"qwiic-i2c-connector", "qwiic-receptacle", "qwiic-header"}),
+        _qwiic_connector,
+        (),
+        ("ground", "vcc", "sda", "scl"),
+        required_port_keys=("ground", "vcc", "sda", "scl"),
+        reference_port_keys=("ground",),
+        port_directions=(
+            ("ground", "bidirectional"), ("vcc", "input"),
+            ("sda", "bidirectional"), ("scl", "input"),
+        ),
+        reviewed_exact_part="SM04B-SRSS-TB(LF)(SN)",
     ),
     RegisteredLowerer(
         "reviewed-connector@1",
@@ -2447,6 +4284,29 @@ for _lowerer in (
         port_patterns=((r"bit(?:[0-9]|[12][0-9]|3[0-2])", "input"),),
     ),
     RegisteredLowerer(
+        "common-anode-rgb-indicator@2",
+        frozenset({"rgb-led", "rgb-status-indicator", "common-anode-rgb-indicator"}),
+        _common_anode_rgb_indicator,
+        ("target_current_ma",),
+        ("vdd_5v", "gnd", "red", "green", "blue"),
+        required_port_keys=("vdd_5v", "gnd", "red", "green", "blue"),
+        required_parameter_keys=("target_current_ma",),
+        parameter_choices=(("target_current_ma", (2.0,)),),
+        reviewed_exact_parts=("XL-1615RGBC-RF", "APTF1616LSEEZGKQBKC"),
+        parameter_constraints=(
+            "This circuit uses a 5 V common anode and separate 3.3 V MCU GPIO controls "
+            "for red, green and blue. Bind all five public ports; do not connect the common "
+            "anode to 3.3 V or to an MCU GPIO.",
+            "The supported nominal design target is 2.0 mA per channel; actual current and "
+            "light output are not guaranteed. Each channel has its own low-side MMBT3904, "
+            "series resistor and base-emitter pull-down; no external MOSFET drive is assumed.",
+        ),
+        port_directions=(
+            ("vdd_5v", "input"), ("gnd", "bidirectional"),
+            ("red", "input"), ("green", "input"), ("blue", "input"),
+        ),
+    ),
+    RegisteredLowerer(
         "led-current-resistor@1",
         frozenset({"led-current-resistor", "status-led", *_REVIEWED_INDICATOR_LED_FAMILIES}),
         _led_resistor,
@@ -2505,14 +4365,19 @@ for _lowerer in (
         "switch-input@1",
         frozenset({"switch-input"}),
         _switch_input,
-        ("pull_policy", "resistance", "active_level"),
+        ("pull_policy", "resistance", "active_level", "voltage"),
         ("signal", "gnd", "vdd"),
         required_port_keys=("signal", "gnd", "vdd"),
+        port_directions=(("signal", "bidirectional"),),
         parameter_choices=(
             ("pull_policy", ("internal", "external")),
             ("active_level", ("low", "high")),
         ),
-        required_parameter_keys=("pull_policy",),
+        reviewed_exact_parts=("KMR232NGULCLFS", "TL3342F260QG"),
+        parameter_constraints=(
+            "An unspecified pull policy uses an external pull resistor; explicit internal bias remains internal.",
+            "When known, voltage is the switch supply in volts and must not exceed the selected contact rating.",
+        ),
     ),
     RegisteredLowerer(
         "voltage-selector-switch@1",
@@ -2554,6 +4419,128 @@ for _lowerer in (
         frozenset({_PROTOTYPING_AREA_FAMILY}),
         _prototyping_area,
         ("rows", "cols", "pitch_mm"),
+    ),
+    RegisteredLowerer(
+        "analog-power-cycle-reset@1",
+        frozenset({"analog-power-cycle-reset", "analog_power_cycle_reset"}),
+        _analog_power_cycle_reset,
+        ("rail_voltage_v", "source_current_a"),
+        ("input", "output", "gnd", "isolation_enable"),
+        required_port_keys=("input", "output", "gnd"),
+        required_parameter_keys=("rail_voltage_v", "source_current_a"),
+        parameter_choices=(("rail_voltage_v", (5.0,)), ("source_current_a", (0.5,))),
+        parameter_constraints=(
+            "Input is an already-regulated 5 V rail, output is the sole switched "
+            "analog-load rail, and gnd is the common return. Never connect TPS22948 input to "
+            "24 V; lower the source first.",
+            "The connected analog load must not exceed 95 mA and total output-to-return "
+            "capacitance must not exceed 1 uF. The 1 kOhm bleed consumes the remaining 5 mA "
+            "of the 100 mA switched-load budget. If `isolation_enable` is published, it is "
+            "the TPS3808 RESET output: it remains low while the output is below the selected "
+            "threshold and for the documented 12--28 ms CT-open delay after recovery.",
+        ),
+        port_directions=(("input", "input"), ("output", "output"), ("gnd", "bidirectional"), ("isolation_enable", "output")),
+    ),
+    RegisteredLowerer(
+        "fused-power-distribution@1",
+        frozenset(
+            {
+                "fused-power-distribution",
+                "fused_power_distribution",
+                "power-distribution",
+                "power_distribution",
+            }
+        ),
+        _fused_power_distribution,
+        (
+            "channels",
+            "input_voltage_v",
+            "source_current_a",
+            "enable_jumper",
+            "reset_button",
+            "rgb_status",
+        ),
+        (
+            "input; gnd; output1..outputN (N is channels, each output is post-fuse)",
+        ),
+        required_port_keys=("input", "gnd"),
+        required_parameter_keys=("channels", "input_voltage_v", "source_current_a"),
+        parameter_choices=(
+            ("channels", (2, 4, 8)),
+            ("input_voltage_v", (5.0, 6.0, 7.4, 8.4, 12.0, 18.0, 24.0)),
+            ("source_current_a", (0.5, 1.0, 2.0)),
+            ("enable_jumper", (False, True)),
+            ("reset_button", (False, True)),
+            ("rgb_status", (False, True)),
+        ),
+        parameter_constraints=(
+            "source_current_a must be 0.5 A unless reset_button=true and input_voltage_v>5. "
+            "That high-voltage reset configuration also supports 1 or 2 A, but no more than "
+            "channels*0.5 A. These are supported circuit limits, not permission to reduce "
+            "an explicit current requirement.",
+            "Bind exactly input, gnd and output1 through outputN; N=channels. "
+            "All output nets must be distinct from each other, input and gnd. "
+            "The enable jumper and reset button are owned controls, not additional public ports.",
+            "This circuit owns the fuses, power indicator and enabled optional controls, "
+            "but does not build output connectors. Preserve the requested connector types "
+            "and quantities in separate requirements. For two-contact screw-terminal outputs, "
+            "use one screw-terminal requirement per output: positive=outputN net, negative=gnd. "
+            "Do not number contacts across separate connectors or omit their return contacts.",
+        ),
+        port_directions=(("input", "input"), ("gnd", "bidirectional")),
+        port_patterns=((r"output[1-8]", "output"),),
+    ),
+    RegisteredLowerer(
+        "dual-source-battery-power@1",
+        frozenset({"dual-source-battery-power"}),
+        _dual_source_battery_power,
+        (
+            "host_voltage_v",
+            "host_voltage_min_v",
+            "host_voltage_max_v",
+            "battery_chemistry",
+            "battery_voltage_min_v",
+            "battery_voltage_max_v",
+            "load_current_a",
+            "include_host_connector",
+        ),
+        ("host_input", "battery_input", "output", "gnd"),
+        required_port_keys=("host_input", "battery_input", "output", "gnd"),
+        required_parameter_keys=(
+            "host_voltage_v",
+            "host_voltage_min_v",
+            "host_voltage_max_v",
+            "battery_chemistry",
+            "battery_voltage_min_v",
+            "battery_voltage_max_v",
+            "load_current_a",
+            "include_host_connector",
+        ),
+        parameter_choices=(
+            ("host_voltage_v", (5.0,)),
+            ("host_voltage_min_v", (4.75,)),
+            ("host_voltage_max_v", (5.25,)),
+            ("battery_chemistry", ("single-cell-liion",)),
+            ("battery_voltage_min_v", (3.0,)),
+            ("battery_voltage_max_v", (4.2,)),
+            ("load_current_a", (0.5,)),
+            ("include_host_connector", (True, False)),
+        ),
+        reviewed_exact_part="TPS2113APWR",
+        parameter_constraints=(
+            "This is a bounded 0.5 A load supply only: physical host and battery "
+            "connectors must bind separately to host_input and battery_input. Never join "
+            "those nets outside the TPS2113A.",
+            "The host source contract is 5.00 V nominal, 4.75 V to 5.25 V. The "
+            "external battery contract is a 3.0 V to 4.2 V single-cell Li-ion source; "
+            "this circuit does not charge it.",
+        ),
+        port_directions=(
+            ("host_input", "input"),
+            ("battery_input", "input"),
+            ("output", "output"),
+            ("gnd", "bidirectional"),
+        ),
     ),
     RegisteredLowerer(
         "explicit-decoupling@1",

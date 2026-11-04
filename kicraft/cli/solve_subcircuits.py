@@ -620,6 +620,10 @@ def _solve_one_round(
             solver._restore_pinned_positions(solved_components)
         solver._clamp_companions_inboard_of_connectors(solved_components, companion_clear)
 
+    # Post-solve legalization and connector repair can move a bypass again.
+    # Re-establish the mandatory owned pair before scoring and stamping.
+    solver._place_local_bypasses(solved_components)
+
     placement_score_start = time.monotonic()
     placement = _score_local_components(local_state, solved_components, cfg)
     round_timing["placement_scoring_s"] = round(
@@ -954,6 +958,7 @@ def _solve_leaf_subcircuit(
                     cfg, extraction.local_state.components
                 ),
                 component_zones=cfg.get("component_zones") or {},
+                edge_interfaces=cfg.get("edge_interfaces") or [],
             )
             set_extraction_canvas(
                 extraction,
@@ -1147,7 +1152,7 @@ def _solve_leaf_subcircuit(
             round_index = base_offset + len(round_results)
             seed = rng.randint(0, 2**31 - 1)
             round_cfg = dict(local_cfg)
-            if route and not fast_smoke_mode:
+            if (route or cfg.get("placement_route_variants", False)) and not fast_smoke_mode:
                 if local_round_index % 3 == 1:
                     round_cfg["randomize_group_layout"] = True
                     round_cfg["orderedness"] = max(
@@ -1813,9 +1818,32 @@ def _persist_solution(
                     f"score={getattr(round_result, 'score', 0.0):.3f}",
                 ],
             )
-            layout_artifact["validation"] = dict(
-                round_result.routing.get("validation", {})
-            )
+            # A pin may later promote this non-winning board.  Persist the
+            # same per-round gate verdict beside the exact board/layout
+            # snapshot so diagnostic consumers never have to borrow a later
+            # invocation's canonical acceptance record.
+            round_validation = dict(round_result.routing.get("validation", {}))
+            round_acceptance = round_result.routing.get("_round_acceptance")
+            if (
+                isinstance(round_acceptance, dict)
+                and isinstance(round_acceptance.get("accepted"), bool)
+            ):
+                round_validation["leaf_acceptance_result"] = copy.deepcopy(
+                    round_acceptance
+                )
+                round_validation["accepted"] = round_acceptance["accepted"]
+            else:
+                # A snapshot without its contemporaneous gate verdict is not
+                # eligible to claim acceptance when manually pinned.
+                round_validation["leaf_acceptance_result"] = {
+                    "accepted": False,
+                    "rejection_reasons": ["round_acceptance_unavailable"],
+                    "gate_results": {},
+                    "drc_summary": {},
+                    "notes": ["round acceptance record unavailable"],
+                }
+                round_validation["accepted"] = False
+            layout_artifact["validation"] = round_validation
             (artifact_dir / f"{round_prefix}_solved_layout.json").write_text(
                 json.dumps(layout_artifact, indent=2, sort_keys=True, default=str),
                 encoding="utf-8",
@@ -1949,6 +1977,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Run the autorouter after placement to route internal leaf nets",
     )
     parser.add_argument(
+        "--placement-route-variants",
+        action="store_true",
+        help="Use routed-search placement round variants without enabling routing",
+    )
+    parser.add_argument(
         "--workers",
         type=int,
         default=0,
@@ -2026,6 +2059,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = _load_config(args.config, project_dir=top_schematic.parent)
         cfg["pcb_path"] = str(pcb_path)
+        if args.placement_route_variants:
+            cfg["placement_route_variants"] = True
         if args.fast_smoke:
             cfg["subcircuit_fast_smoke_mode"] = True
             cfg["subcircuit_render_pre_route_board_views"] = False

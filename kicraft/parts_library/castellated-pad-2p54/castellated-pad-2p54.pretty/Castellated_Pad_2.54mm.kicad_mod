@@ -8,6 +8,7 @@
   (fp_rect (start -1.27 -1.27) (end 1.27 1.27)
     (stroke (width 0.15) (type default)) (fill none) (layer "F.Fab"))
   (pad "1" thru_hole oval (at 0 0) (size 2.2 1.8) (drill 1.0)
+    (property pad_prop_castellated)
     (layers "*.Cu" "*.Mask") (remove_unused_layers no))
   (model "${KIPRJMOD}/3dmodels/castellated-pad-2p54/castellated-pad-2p54.wrl"
     (offset (xyz 0 0 0))

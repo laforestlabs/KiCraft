@@ -33,7 +33,24 @@ def _route_parent_board(
     from kicraft.autoplacer.kicad_routing_tools import KicadRoutingToolsTimeoutError
 
     routed_pcb = stamped_pcb.parent / "parent_routed.kicad_pcb"
+    # The parent route is a single KRT invocation over the whole composed net
+    # set, and its in-run recovery ladder (rip -> #103 reconciliation) does not
+    # fit the 120 s leaf cap -- see kicad_routing_tools_parent_timeout_s. The
+    # parent key is authoritative for this route; kicad_routing_tools_timeout_s
+    # remains the LEAF/local-subcircuit cap.
     route_cfg = {**cfg, "pcb_path": str(stamped_pcb)}
+    _parent_timeout = cfg.get(
+        "kicad_routing_tools_parent_timeout_s",
+        cfg.get("kicad_routing_tools_timeout_s"),
+    )
+    if _parent_timeout is not None:
+        route_cfg["kicad_routing_tools_timeout_s"] = int(_parent_timeout)
+    # The leaf grid knob is a leaf-escape fix; the parent's grid is its own
+    # decision (see kicad_routing_tools_parent_grid_step_mm). Without this the
+    # parent would inherit a leaf-tuned 0.05 grid and time out on a large board.
+    route_cfg["kicad_routing_tools_grid_step_mm"] = cfg.get(
+        "kicad_routing_tools_parent_grid_step_mm"
+    )
     try:
         routing_stats = route_with_kicad_routing_tools(
             str(stamped_pcb), str(routed_pcb), route_cfg

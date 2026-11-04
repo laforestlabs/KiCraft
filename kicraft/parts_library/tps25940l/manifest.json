@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:9453c62449b0914d6bd6292ca7923d4ac4d5fe419b613029c4de505d73f1cc70",
+  "datasheet_url": "https://www.ti.com/lit/ds/symlink/tps25940.pdf",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TPS25940LRVCR",
+  "footprint_name": "WQFN-20_L4.0-W3.0-P0.50-BL-EP",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "TPS25940LRVCR",
+  "name": "tps25940l",
+  "provenance": {
+    "added_at": "2026-10-11T03:06:22Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2867756"
+  },
+  "symbol_name": "TPS25940LRVCR",
+  "tags": [
+    "power",
+    "current-limiter"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Pinout and RVC0020A lands reviewed against TI SLVSCF3A. Pin 4 is the ERC output driver; internally common OUT pins 5-8 are passive and must all be connected. Ground exposed pad 21 has six 0.30 mm thermal drills with rear mask tenting; two paste windows follow TI's 81% coverage example. Wider imported perimeter lands retain lead coverage. Verify assembly stencil and thermal copper for the complete circuit; not assembled-hardware validation."
+}

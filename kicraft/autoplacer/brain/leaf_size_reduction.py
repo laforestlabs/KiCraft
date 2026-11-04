@@ -3,13 +3,20 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 from typing import Any
+from kicraft.autoplacer.brain.edge_datum import (
+    edge_datum_outline_floors,
+    edge_datum_requirements,
+)
 
 from kicraft.autoplacer.brain.leaf_geometry import (
     build_reduced_leaf_extraction,
     leaf_size_reduction_candidates,
     tight_leaf_geometry_bounds,
 )
-from kicraft.autoplacer.brain.leaf_routing import route_local_subcircuit
+from kicraft.autoplacer.brain.leaf_routing import (
+    _place_fabricated_edge_interfaces,
+    route_local_subcircuit,
+)
 from kicraft.autoplacer.brain.placement_solver import PlacementSolver
 from kicraft.autoplacer.brain.subcircuit_extractor import ExtractedSubcircuitBoard
 from kicraft.autoplacer.brain.types import Point, SolveRoundResult
@@ -349,13 +356,37 @@ def attempt_leaf_size_reduction(
         float(cfg.get("leaf_size_reduction_margin_mm", 0.5)),
     )
 
+    edge_requirements = edge_datum_requirements(
+        best_round.components,
+        cfg,
+        edge_margin_mm=float(cfg.get("edge_margin_mm", 2.0)),
+    )
+    edge_refs = edge_requirements["refs"]
+    content_bounds = tight_leaf_geometry_bounds(
+        extraction,
+        best_round.components,
+        best_round.routing,
+        exclude_component_refs=edge_refs,
+        include_routing=not bool(edge_requirements["groups"]),
+        fallback_to_outline=not bool(edge_requirements["groups"]),
+    )
     geometry_bounds = tight_leaf_geometry_bounds(
         extraction,
         best_round.components,
         best_round.routing,
+        exclude_component_refs=edge_refs,
+        include_routing=not bool(edge_requirements["groups"]),
+        fallback_to_outline=not bool(edge_requirements["groups"]),
     )
     min_width = max(1.0, geometry_bounds["width_mm"] + 2.0 * outline_margin)
     min_height = max(1.0, geometry_bounds["height_mm"] + 2.0 * outline_margin)
+    if edge_requirements["groups"]:
+        min_width, min_height = edge_datum_outline_floors(
+            edge_requirements,
+            content_width_mm=geometry_bounds["width_mm"],
+            content_height_mm=geometry_bounds["height_mm"],
+            content_margin_mm=outline_margin,
+        )
 
     summary: dict[str, Any] = {
         "attempted": True,
@@ -381,6 +412,7 @@ def attempt_leaf_size_reduction(
         "tight_geometry_bounds": geometry_bounds,
         "outline_margin_mm": outline_margin,
         "pad_inset_margin_mm": pad_inset_margin,
+        "edge_datum_requirements": copy.deepcopy(edge_requirements["groups"]),
         "attempts": [],
         "outline_reduction_mm": {
             "width_mm": 0.0,
@@ -450,6 +482,19 @@ def attempt_leaf_size_reduction(
             min_width,
             min_height,
         )
+        if edge_requirements["groups"]:
+            fit_width = round(min_width, 4)
+            fit_height = round(min_height, 4)
+            if fit_width < current_width or fit_height < current_height:
+                candidates.insert(
+                    0,
+                    {
+                        "axis": "edge_datum_fit",
+                        "step_mm": max(current_width - fit_width, current_height - fit_height),
+                        "width_mm": fit_width,
+                        "height_mm": fit_height,
+                    },
+                )
         if not candidates:
             break
 
@@ -471,15 +516,32 @@ def attempt_leaf_size_reduction(
                 Point(0.0, 0.0),
                 Point(candidate_width, candidate_height),
             )
+            rebase_edge_content = (
+                candidate["axis"] == "edge_datum_fit" and bool(edge_requirements["groups"])
+            )
             candidate_extraction = build_reduced_leaf_extraction(
                 current_extraction,
                 current_round.components,
                 current_round.routing,
                 candidate_outline,
+                rebase_content_bounds=content_bounds if rebase_edge_content else None,
+                rebase_content_origin=(
+                    Point(
+                        outline_margin + edge_requirements["depths_mm"]["left"],
+                        outline_margin + edge_requirements["depths_mm"]["top"],
+                    )
+                    if rebase_edge_content
+                    else None
+                ),
             )
             candidate_cfg = local_solver_config(cfg, candidate_extraction)
             candidate_cfg["board_width_mm"] = candidate_width
             candidate_cfg["board_height_mm"] = candidate_height
+            if edge_requirements["groups"]:
+                _place_fabricated_edge_interfaces(
+                    candidate_extraction.local_state,
+                    candidate_cfg,
+                )
 
             legality_solver = PlacementSolver(
                 candidate_extraction.local_state, candidate_cfg, seed=0
@@ -503,6 +565,12 @@ def attempt_leaf_size_reduction(
                 "legality": copy.deepcopy(legality),
                 "accepted": False,
             }
+            actual_width = candidate_extraction.local_state.board_width
+            actual_height = candidate_extraction.local_state.board_height
+            if actual_width > candidate_width + 1e-6 or actual_height > candidate_height + 1e-6:
+                attempt_record["rejection_reason"] = "edge_datum_outline_floor_failed"
+                summary["attempts"].append(attempt_record)
+                continue
 
             if legality.get("pad_outside_count", 0) or legality.get("overlap_count", 0):
                 attempt_record["rejection_reason"] = "placement_legality_failed"
@@ -532,8 +600,10 @@ def attempt_leaf_size_reduction(
             # "reroute_validation_failed"), which is why outlines never
             # actually shrunk on disk -- only small deltas were ever
             # accepted, via the reuse path that doesn't rewrite the PCB.
-            can_reuse = not should_reroute and current_round.routing.get("validation", {}).get(
-                "accepted", False
+            can_reuse = (
+                not edge_requirements["groups"]
+                and not should_reroute
+                and current_round.routing.get("validation", {}).get("accepted", False)
             )
             preserved_boards: dict[str, bytes] = {}
             if can_reuse:

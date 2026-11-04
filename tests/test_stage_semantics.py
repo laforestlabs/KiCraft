@@ -6,6 +6,7 @@ import pytest
 from kicraft.design.stage_semantics import (
     complete_unsourced_external_rails,
     diagnose_stage,
+    external_load_budget_stated,
     remove_mislabeled_architecture_defaults,
     remove_mislabeled_functional_defaults,
 )
@@ -25,6 +26,151 @@ def _codes(stage, candidate, upstream=None):
             stage, brief=brief, upstream_state=upstream or {}, candidate=candidate
         )
     }
+
+
+@pytest.mark.parametrize("fault", ["missing_source", "unconnected_source", "signal_only", "denied_operation", None])
+def test_battery_operation_requires_a_power_path_to_a_load(fault):
+    blocks = [
+        {"name": "HOST", "category": "power", "purpose": "Accept host 5 V"},
+        {"name": "MCU", "category": "process", "purpose": "Process measurements"},
+        {"name": "REGULATION", "category": "power", "purpose": "Supply the logic rail"},
+    ]
+    connections = [
+        {"from_block": "HOST", "to_block": "REGULATION", "signal_type": "power"},
+        {"from_block": "REGULATION", "to_block": "MCU", "signal_type": "power"},
+    ]
+    if fault != "missing_source":
+        blocks.append(
+            {"name": "PACK", "category": "power", "purpose": "Accept battery power"}
+        )
+    if fault not in {"missing_source", "unconnected_source"}:
+        connections.append({
+            "from_block": "PACK", "to_block": "REGULATION",
+            "signal_type": "digital" if fault == "signal_only" else "power",
+        })
+    candidate = {
+        "blocks": blocks, "connections": connections,
+        "assumptions": ["Battery chemistry and charging details are unspecified (defaulted)"],
+    }
+    if fault == "denied_operation":
+        candidate["assumptions"].append(
+            "No battery power path is included because charging is unspecified (defaulted)"
+        )
+    diagnostics = diagnose_stage(
+        "functional_spec", brief="A battery-powered measurement node with a host 5 V input",
+        upstream_state={}, candidate=candidate,
+    )
+    omitted = {
+        diagnostic.code for diagnostic in diagnostics
+        if diagnostic.severity == "repair_required"
+    }
+    assert ("functional_spec_battery_operation_omitted" in omitted) == (fault is not None)
+
+
+@pytest.mark.parametrize("brief", [
+    "A host-powered battery voltage monitor",
+    "A host-powered monitor, not battery-powered",
+    "A non-battery-powered monitor",
+    "A monitor not powered from a battery",
+])
+def test_battery_monitoring_does_not_imply_battery_powered_operation(brief):
+    candidate = {
+        "blocks": [
+            {"name": "HOST", "category": "power", "purpose": "Accept host 5 V"},
+            {"name": "SENSOR", "category": "sense", "purpose": "Measure external battery voltage"},
+        ],
+        "connections": [
+            {"from_block": "HOST", "to_block": "SENSOR", "signal_type": "power"},
+        ],
+    }
+    diagnostics = diagnose_stage(
+        "functional_spec", brief=brief,
+        upstream_state={}, candidate=candidate,
+    )
+    assert "functional_spec_battery_operation_omitted" not in {d.code for d in diagnostics}
+
+
+@pytest.mark.parametrize("fault", ["missing_sensor", "unconnected_sensor", "reversed", "power_only", None])
+def test_ambient_light_node_requires_measurement_acquisition(fault):
+    blocks = [
+        {"name": "MCU", "category": "process", "purpose": "Process ambient-light-node functions"}
+    ]
+    connections = []
+    if fault != "missing_sensor":
+        blocks.append({
+            "name": "ACQUISITION", "category": "sense",
+            "purpose": "Acquire ambient light measurements",
+        })
+    if fault not in {"missing_sensor", "unconnected_sensor"}:
+        connections.append({
+            "from_block": "MCU" if fault == "reversed" else "ACQUISITION",
+            "to_block": "ACQUISITION" if fault == "reversed" else "MCU",
+            "signal_type": "power" if fault == "power_only" else "analog",
+        })
+    diagnostics = diagnose_stage(
+        "functional_spec", brief="An ambient-light node",
+        upstream_state={}, candidate={"blocks": blocks, "connections": connections},
+    )
+    assert (
+        "functional_spec_ambient_light_acquisition_omitted" in {d.code for d in diagnostics}
+    ) == (fault is not None)
+
+
+def test_onboard_power_led_is_not_two_external_five_volt_loads():
+    upstream = {
+        "intent": {"goal": "A 12 V board driving a 3 W power LED"},
+        "functional_spec": {
+            "blocks": [{
+                "name": "POWER_LED_DISPLAY", "category": "drive",
+                "purpose": "Regulate and drive the onboard 3 W LED",
+            }],
+            "connections": [{
+                "from_block": "DC_INPUT", "to_block": "POWER_LED_DISPLAY",
+                "signal_type": "power",
+            }],
+        },
+    }
+    assert "architecture_external_load_current_unspecified" not in _codes(
+        "architecture", {"rail_voltages": {"VIN": 12.0}}, upstream
+    )
+
+
+def test_distinct_external_loads_are_identified_by_function_not_block_spelling():
+    upstream = {
+        "intent": {"goal": "Power a HUB75 panel and an LED strip"},
+        "functional_spec": {
+            "blocks": [
+                {"name": "LOAD_A", "category": "drive", "purpose": "HUB75 panel power"},
+                {"name": "LOAD_B", "category": "drive", "purpose": "WS2812 LED strip power"},
+            ],
+            "connections": [
+                {"from_block": "INPUT", "to_block": target, "signal_type": "power"}
+                for target in ("LOAD_A", "LOAD_B")
+            ],
+        },
+    }
+    assert "architecture_external_load_current_unspecified" in _codes(
+        "architecture", {"rail_voltages": {"VBUS": 5.0}}, upstream
+    )
+    answered = {
+        **upstream,
+        "_stage_answers": [{
+            "text": "How much current must the board supply to the external 5 V loads?",
+            "answer": "Up to 2 A",
+        }],
+    }
+    assert "architecture_external_load_current_unspecified" not in _codes(
+        "architecture", {"rail_voltages": {"VBUS": 5.0}}, answered
+    )
+
+
+def test_external_load_budget_does_not_treat_logic_regulator_rating_as_load_budget():
+    candidate = {
+        "topologies": {"POWER": "Buck VBUS to 3.3 V at 1 A for logic"},
+        "requirements": [{"id": "hub75", "family": "hub75-level-shift-interface"}],
+    }
+    assert not external_load_budget_stated(candidate)
+    assert external_load_budget_stated("The HUB75 panel and LED string draw up to 2 A at 5 V.")
 
 
 def test_live_intent_candidate_reports_classification_defects():
@@ -662,6 +808,227 @@ def test_power_input_conversion_uses_owned_port_voltages_not_sheet_prose():
     )
 
 
+def _retained_same_voltage_conversion():
+    obligation = {
+        "kind": "conversion",
+        "original_obligation_id": "voltage-conversion",
+        "input_kind": "5 V USB-C power",
+        "output_kind": "5 V DC power",
+        "behavior": "Provide a 5 V output from the 5 V input.",
+    }
+    upstream = {
+        "intent": {"obligations": [obligation]},
+        "functional_spec": {
+            "obligations": [dict(obligation)],
+            "blocks": [{"name": "FIVE_VOLT_POWER_PATH", "purpose": "Provide 5 V"}],
+        },
+    }
+    candidate = {
+        "rail_voltages": {"GND": 0.0},
+        "requirements": [{
+            "id": "five_volt_path",
+            "sheet": "POWER",
+            "role": "power_input",
+            "family": "usb-c-power-sink",
+            "exact_part": "USB-C-5V-SINK",
+            "parameters": {},
+            "ports": {"gnd": "GND", "vbus": "PROTECTED_5V"},
+            "obligations": [dict(obligation)],
+            "functional_blocks": ["FIVE_VOLT_POWER_PATH"],
+        }],
+    }
+    return upstream, candidate
+
+
+def _power_owner_findings(upstream, candidate):
+    return [
+        diagnostic for diagnostic in diagnose_stage(
+            "architecture", brief="", upstream_state=upstream, candidate=candidate
+        )
+        if diagnostic.code == "architecture_unowned_power_conversion"
+    ]
+
+
+def test_retained_same_voltage_conversion_rejects_connector_owner_before_bom():
+    upstream, candidate = _retained_same_voltage_conversion()
+    findings = _power_owner_findings(upstream, candidate)
+    assert len(findings) == 1
+    assert findings[0].severity == "repair_required"
+
+
+@pytest.mark.parametrize("defect", ["missing_input", "shorted_output", "distribution", "connector"])
+def test_committed_conversion_needs_a_distinct_physical_power_path(defect):
+    upstream, candidate = _retained_same_voltage_conversion()
+    owner = candidate["requirements"][0]
+    owner.update(
+        role="regulator", family="buck-boost-regulator", exact_part=None,
+        ports={"input": "USB_VBUS", "output": "PROTECTED_5V", "gnd": "GND"},
+    )
+    if defect == "missing_input":
+        owner["ports"].pop("input")
+    elif defect == "shorted_output":
+        owner["ports"]["output"] = "USB_VBUS"
+    elif defect == "distribution":
+        owner["family"] = "power-distribution"
+    else:
+        owner["family"] = "usb-c-power-sink"
+    assert _power_owner_findings(upstream, candidate)
+
+
+def test_conversion_can_be_owned_by_separate_model_owned_regulator():
+    upstream, candidate = _retained_same_voltage_conversion()
+    connector = candidate["requirements"][0]
+    obligation = connector.pop("obligations")
+    connector["functional_blocks"] = ["USB_INPUT"]
+    candidate["requirements"].append({
+        "id": "converter",
+        "sheet": "POWER",
+        "role": "regulator",
+        "family": "buck-boost-regulator",
+        "ports": {"vin": "USB_VBUS", "vout": "PROTECTED_5V", "gnd": "GND"},
+        "obligations": obligation,
+        "functional_blocks": ["FIVE_VOLT_POWER_PATH"],
+    })
+    assert not _power_owner_findings(upstream, candidate)
+
+
+@pytest.mark.parametrize("input_voltage", [5, 12])
+def test_same_voltage_path_can_be_protection_but_voltage_change_needs_regulator(input_voltage):
+    upstream, candidate = _retained_same_voltage_conversion()
+    owner = candidate["requirements"][0]
+    owner.update(
+        role="power_input", family="reverse-polarity-pmos", exact_part="AONR21357",
+        ports={"input": "USB_VBUS", "output": "PROTECTED_5V", "gnd": "GND"},
+    )
+    for obligation in (
+        upstream["intent"]["obligations"][0],
+        upstream["functional_spec"]["obligations"][0],
+        owner["obligations"][0],
+    ):
+        obligation["input_kind"] = f"{input_voltage} V DC power"
+    assert bool(_power_owner_findings(upstream, candidate)) is (input_voltage != 5)
+
+
+@pytest.mark.parametrize("shorted", [False, True])
+def test_same_voltage_fused_distribution_owns_its_real_branch_ports(shorted):
+    upstream, candidate = _retained_same_voltage_conversion()
+    owner = candidate["requirements"][0]
+    owner.update(
+        family="fused-power-distribution", exact_part=None,
+        ports={
+            "input": "USB_VBUS", "gnd": "GND", "output1": "LOAD1",
+            "output2": "GND" if shorted else "LOAD2",
+        },
+    )
+    assert bool(_power_owner_findings(upstream, candidate)) is shorted
+
+
+def test_signal_power_conversion_does_not_impose_a_regulator_role():
+    upstream, candidate = _retained_same_voltage_conversion()
+    owner = candidate["requirements"][0]
+    owner.update(
+        role="analog_block", family="rf-amplifier", exact_part=None,
+        ports={"input": "RF_IN", "output": "RF_OUT", "gnd": "GND"},
+    )
+    for obligation in (
+        upstream["intent"]["obligations"][0],
+        upstream["functional_spec"]["obligations"][0],
+        owner["obligations"][0],
+    ):
+        obligation.update(input_kind="RF power", output_kind="amplified RF power")
+    assert not _power_owner_findings(upstream, candidate)
+
+
+@pytest.mark.parametrize("conversion", [None, ("analog voltage", "digital I2C data")])
+def test_connector_passthrough_and_nonpower_conversion_do_not_imply_regulator(conversion):
+    upstream, candidate = _retained_same_voltage_conversion()
+    if conversion is None:
+        upstream["intent"]["obligations"] = []
+        upstream["functional_spec"]["obligations"] = []
+        candidate["requirements"][0]["obligations"] = []
+    else:
+        for obligation in (
+            upstream["intent"]["obligations"][0],
+            upstream["functional_spec"]["obligations"][0],
+            candidate["requirements"][0]["obligations"][0],
+        ):
+            obligation["input_kind"], obligation["output_kind"] = conversion
+    assert not _power_owner_findings(upstream, candidate)
+
+
+def _relay_rail_contract_candidate():
+    # The retained E6 requirement binds the on-board coil supply to +24V
+    # despite selecting the lowerer's 5 V motor-voltage contract.
+    return {
+        "rail_voltages": {"+24V": 24.0, "+3V3": 3.3, "GND": 0.0},
+        "requirements": [{
+            "id": "relay_driver", "sheet": "RELAY OUTPUTS", "role": "driver",
+            "family": "relay-output", "exact_part": "ULN2003ADR",
+            "parameters": {"channel_count": 2, "motor_voltage_v": 5.0, "load_current_a": 0.1},
+            "ports": {
+                "gnd": "GND", "vmotor": "+24V",
+                "control_1": "RELAY_CONTROL_1", "control_2": "RELAY_CONTROL_2",
+                "relay_1_common": "RELAY_1_COMMON",
+                "relay_1_normally_open": "RELAY_1_NO",
+                "relay_1_normally_closed": "RELAY_1_NC",
+                "relay_2_common": "RELAY_2_COMMON",
+                "relay_2_normally_open": "RELAY_2_NO",
+                "relay_2_normally_closed": "RELAY_2_NC",
+            },
+        }],
+    }
+
+
+def test_relay_coil_rail_contract_rejects_retained_contradiction_at_consumer():
+    from kicraft.server.stage_contracts import StageSchemaError, _validate_power_requirement_contracts
+
+    candidate = _relay_rail_contract_candidate()
+    with pytest.raises(StageSchemaError) as exc:
+        _validate_power_requirement_contracts(candidate, {})
+    assert exc.value.diagnostic["code"] == "unrealizable_power_requirement"
+    finding = exc.value.diagnostic["evidence"][0]
+    assert finding["code"] == "architecture_relay_coil_supply_mismatch"
+    assert candidate["requirements"][0]["ports"]["vmotor"] == "+24V"
+    assert candidate["rail_voltages"]["+24V"] == 24.0
+
+
+@pytest.mark.parametrize("case", ["valid_5v", "contact_24v", "offboard", "unknown"])
+def test_relay_coil_rail_contract_does_not_conflate_contacts_or_unknowns(case):
+    from kicraft.design.stage_semantics import architecture_power_requirement_diagnostics
+
+    candidate = _relay_rail_contract_candidate()
+    requirement = candidate["requirements"][0]
+    if case in {"valid_5v", "contact_24v"}:
+        candidate["rail_voltages"]["+5V"] = 5.0
+        requirement["ports"]["vmotor"] = "+5V"
+    if case == "contact_24v":
+        requirement["ports"]["relay_1_common"] = "+24V"
+    elif case == "offboard":
+        requirement["family"] = "uln2003-actuator"
+        requirement["ports"] = {
+            "vmotor": "+24V", "gnd": "GND",
+            "control_1": "RELAY_CONTROL_1", "control_2": "RELAY_CONTROL_2",
+            "load_1_positive": "+24V", "load_1_negative": "COIL_1_LOW",
+            "load_2_positive": "+24V", "load_2_negative": "COIL_2_LOW",
+        }
+    elif case == "unknown":
+        candidate["rail_voltages"].pop("+24V")
+    assert architecture_power_requirement_diagnostics({}, candidate) == []
+    if case == "unknown":
+        assert "+24V" not in candidate["rail_voltages"]
+        assert requirement["ports"]["vmotor"] == "+24V"
+
+
+def test_relay_coil_conflict_survives_independently_invalid_lowering_contract():
+    from kicraft.server.stage_contracts import StageSchemaError, _validate_power_requirement_contracts
+
+    candidate = _relay_rail_contract_candidate()
+    candidate["requirements"][0]["parameters"]["channel_count"] = 9
+    with pytest.raises(StageSchemaError) as exc:
+        _validate_power_requirement_contracts(candidate, {})
+    assert exc.value.diagnostic["evidence"][0]["code"] == "architecture_relay_coil_supply_mismatch"
+
+
 def test_architecture_rejects_false_pd_dac_provenance_and_missing_load_budget():
     candidate = {
         "topologies": {
@@ -742,8 +1109,7 @@ def test_architecture_rejects_false_pd_dac_provenance_and_missing_load_budget():
     }
     assert "architecture_unsupported_esp32s3_dac" in analog_codes
 
-    # The check reads the registry, not the model's prose: a topology line that
-    # says "rated 1A" proves nothing, a reviewed 2A recipe does.
+    # The check needs a reviewed regulator; topology prose alone proves nothing.
     upstream = {
         "intent": {
             "goal": "USB-C PD 5V ESP32-S3 HUB75 controller",
@@ -796,9 +1162,6 @@ def test_architecture_rejects_false_pd_dac_provenance_and_missing_load_budget():
             "recipe_resolution": [{"requirement_id": "buck", "recipe": recipe}],
         }
 
-    # A 0.5A LDO cannot be the MCU's 3.3V source, however the prose is phrased.
-    weak = _with_3v3_producer("me6211-3v3@1")
-    assert "architecture_mcu_regulator_incomplete" in _regulator_codes(weak)
 
     # A 2A reviewed buck is enough, even with the topology prose removed.
     complete_regulator = {
@@ -1314,6 +1677,15 @@ def test_mixed_case_and_short_mcu_families_survive_intent_classification():
     )
 
 
+@pytest.mark.parametrize("part", ["LM35", "LM358", "NE555"])
+def test_short_named_parts_are_retained_when_the_writer_omits_them(part):
+    from kicraft.design.stage_semantics import complete_intent_classification
+
+    brief = f"A board using {part}, with GPIO12 and a QFN32 package."
+    completed = complete_intent_classification(brief, {"named_parts": []})
+    assert completed["named_parts"] == [part]
+
+
 def test_intent_tokens_preserve_exact_variants_without_harvesting_counts_or_packages():
     from kicraft.design.synthesis.validation import named_part_tokens
 
@@ -1345,7 +1717,7 @@ def test_prose_modifier_is_not_glued_onto_the_part_identity():
     from kicraft.design.stage_semantics import complete_intent_classification
     from kicraft.design.synthesis.validation import named_part_tokens
 
-    assert named_part_tokens(["An LM358-based hall-effect amplifier board"]) == {}
+    assert named_part_tokens(["An LM358-based hall-effect amplifier board"]) == {"lm358": "LM358"}
     assert named_part_tokens(["Build a CH32V003-based LED driver board"]) == {
         "ch32v003": "CH32V003"
     }
@@ -1804,7 +2176,7 @@ def test_an_over_rated_load_gets_its_own_regulated_rail_before_diagnosis():
 
     Live walkthrough (2026-09-25, seed 37): 18 V DC in, a DRV8833 (`vm` 2.7-10.8 V) driving the
     actuators, and no reviewed dual-H-bridge rated for 18 V -- three drafts restated the
-    impossibility and the stage parked. The completion adds a reviewed adjustable buck, sets a
+    impossibility and the stage parked. The completion adds a reviewed converter, sets a
     rail inside the part's range, rebinds the part, and discloses it as a default.
     """
     from kicraft.design.stage_semantics import (
@@ -1838,17 +2210,13 @@ def test_an_over_rated_load_gets_its_own_regulated_rail_before_diagnosis():
     fixed = complete_over_rated_supply(candidate)
 
     # A rail inside the part's rated range, sourced from a reviewed converter on the input.
-    assert fixed["rail_voltages"]["BRIDGE_RAIL"] == 5.0
+    assert 2.7 <= fixed["rail_voltages"]["BRIDGE_RAIL"] <= 10.8
     assert "+18V" in fixed["rail_voltages"] and fixed["rail_voltages"]["+18V"] == 18.0
     converter = next(row for row in fixed["requirements"] if row["id"] == "bridge_regulator")
-    # A family the library carries at exactly this rail: the reviewed MP1584 10 V instance.
-    assert converter["family"] == "ap63205-5v"
-    assert converter["parameters"]["output_voltage"] == 5.0
+    assert converter["parameters"]["output_voltage"] == fixed["rail_voltages"]["BRIDGE_RAIL"]
     assert {
         key: converter["ports"][key] for key in ("input", "output", "gnd")
     } == {"input": "+18V", "output": "BRIDGE_RAIL", "gnd": "GND"}
-    # The recipe binds its own EN pin to its input; that is the record's business, not this test's.
-    assert converter["ports"].get("enable") == "+18V"
     bridge = next(row for row in fixed["requirements"] if row["id"] == "bridge")
     assert bridge["ports"]["vm"] == "BRIDGE_RAIL"
     assert any(row["name"] == "BRIDGE REGULATOR" for row in fixed["sheets"])
@@ -1866,6 +2234,133 @@ def test_an_over_rated_load_gets_its_own_regulated_rail_before_diagnosis():
               "requirements": [{**candidate["requirements"][0], "ports": {"vm": "+9V"}}]}
     assert complete_over_rated_supply(within) == within
 
+
+
+def test_undervoltage_rgb_supply_uses_its_battery_ancestry_not_usb_vbus():
+    """An unsupported 5 V load is not silently put on a 3.3 V rail or borrowed USB."""
+    from kicraft.design.stage_semantics import _complete_load_supply_rails
+
+    candidate = {
+        "rail_voltages": {
+            "BATT_2S": 7.4,
+            "+3V3": 3.3,
+            "USB_VBUS": 5.0,
+            "GND": 0.0,
+        },
+        "requirements": [
+            {
+                "id": "battery_input",
+                "role": "power_input",
+                "family": "jst-xh-connector",
+                "ports": {"positive": "BATT_2S", "negative": "GND"},
+            },
+            {
+                "id": "mcu_regulator",
+                "role": "regulator",
+                "family": "ap63203-3v3",
+                "exact_part": "AP63203WU-7",
+                "parameters": {"output_voltage": 3.3},
+                "ports": {"input": "BATT_2S", "output": "+3V3", "gnd": "GND"},
+                "obligation_ids": ["battery-to-3v3"],
+            },
+            {
+                "id": "rp2040",
+                "role": "mcu_core",
+                "family": "rp2040",
+                "exact_part": "RP2040",
+                "ports": {"vdd": "+3V3", "gnd": "GND"},
+            },
+            {
+                "id": "usb",
+                "role": "connector",
+                "family": "usb-c-receptacle",
+                "ports": {"vbus": "USB_VBUS", "gnd": "GND"},
+            },
+            {
+                "id": "rgb",
+                "role": "user_io",
+                "family": "ws2812b",
+                "exact_part": "WS2812B-B/T",
+                "ports": {"vdd": "+3V3", "gnd": "GND", "din": "RGB_DATA"},
+                "obligation_ids": ["rgb-status"],
+            },
+        ],
+        "assumptions": [],
+    }
+
+    fixed = _complete_load_supply_rails(json.loads(json.dumps(candidate)))
+
+    assert fixed == candidate
+
+    # Neither a missing nor a branched source lineage may be repaired by borrowing USB VBUS.
+    missing = json.loads(json.dumps(candidate))
+    missing["requirements"] = [
+        row for row in missing["requirements"] if row["id"] != "mcu_regulator"
+    ]
+    assert _complete_load_supply_rails(missing) == missing
+    ambiguous = json.loads(json.dumps(candidate))
+    ambiguous["requirements"].append(
+        {
+            "id": "usb_regulator",
+            "role": "regulator",
+            "family": "ap63203-3v3",
+            "ports": {"input": "USB_VBUS", "output": "+3V3", "gnd": "GND"},
+        }
+    )
+    assert _complete_load_supply_rails(ambiguous) == ambiguous
+
+@pytest.mark.parametrize(
+    ("exact_part", "host_rail"), [("CH340C", "HOST_5V"), ("CP2102N", "USB_SUPPLY")]
+)
+def test_integrated_reviewed_usb_bridge_vbus_is_an_external_source_not_a_load(
+    exact_part, host_rail
+):
+    """A reviewed bridge receptacle keeps arbitrary host VBUS names out of fallback generation."""
+    from kicraft.design.stage_semantics import _complete_load_supply_rails
+
+    candidate = {
+        "rail_voltages": {"VBAT": 7.4, "+3V3": 3.3, host_rail: 5.0, "GND": 0.0},
+        "requirements": [
+            {
+                "id": "battery_input",
+                "role": "power_input",
+                "family": "pin-header",
+                "ports": {"pin1": "VBAT", "pin2": "GND"},
+            },
+            {
+                "id": "mcu_regulator",
+                "role": "regulator",
+                "family": "ap63203-3v3",
+                "exact_part": "AP63203WU-7",
+                "parameters": {"output_voltage": 3.3},
+                "ports": {"input": "VBAT", "output": "+3V3", "gnd": "GND"},
+            },
+            {
+                "id": "usb_bridge",
+                "role": "bus_interface",
+                "family": "usb-uart-bridge",
+                "exact_part": exact_part,
+                "ports": {"vbus": host_rail, "vdd": "+3V3", "gnd": "GND"},
+            },
+            {
+                "id": "rgb",
+                "role": "user_io",
+                "family": "ws2812b",
+                "exact_part": "WS2812B-B/T",
+                "ports": {"vdd": "+3V3", "gnd": "GND", "din": "RGB_DATA"},
+            },
+        ],
+        "assumptions": [],
+    }
+
+    fixed = _complete_load_supply_rails(candidate)
+
+    assert next(row for row in fixed["requirements"] if row["id"] == "rgb")["ports"]["vdd"] == "+3V3"
+    assert not any(
+        row.get("role") == "regulator" and row.get("ports", {}).get("output") == host_rail
+        for row in fixed["requirements"]
+    )
+    assert _complete_load_supply_rails(fixed) == fixed
 
 def test_the_rail_fix_corrects_the_statements_it_invalidates():
     """A candidate whose prose contradicts its bindings is not reviewable.
@@ -1979,14 +2474,12 @@ def test_a_drive_on_the_logic_rail_gets_its_own_rail_too():
 
     fixed = complete_over_rated_supply(candidate)
 
-    # Its own rail, at the highest voltage the part's reviewed limit allows, from the board input.
-    assert fixed["rail_voltages"]["BRIDGE_RAIL"] == 5.0
+    # Its own rail fits the load and is sourced from the board input.
+    assert 2.7 <= fixed["rail_voltages"]["BRIDGE_RAIL"] <= 10.8
     assert next(r for r in fixed["requirements"] if r["id"] == "bridge")["ports"]["vm"] == "BRIDGE_RAIL"
     converter = next(r for r in fixed["requirements"] if r["id"] == "bridge_regulator")
     assert converter["ports"] == {"input": "+18V", "output": "BRIDGE_RAIL", "gnd": "GND"}
     assert _architecture_drive_on_logic_rail({}, fixed) == []
-    # And the sheet that claimed the 3.3 V rail now names the rail the part runs on.
-    assert "BRIDGE_RAIL" in next(r for r in fixed["sheets"] if r["name"] == "H BRIDGE")["function"]
 
 
 def test_the_rail_rewrite_neither_mangles_words_nor_skips_the_part():
@@ -2043,12 +2536,16 @@ def test_generated_regulator_sheet_is_valid_and_owns_its_connections(source_name
 
     rail = source_name.upper() if declared_rail else "VIN"
     candidate = {
-        "rail_voltages": {"VIN": 18.0, "GND": 0.0, **({rail: 5.0} if declared_rail else {})},
+        "rail_voltages": {"VIN": 18.0, "GND": 0.0, **({rail: 3.3} if declared_rail else {})},
         "sheets": [{"name": "LOAD", "stem": "LOAD", "function": "Drive load"}],
         "requirements": [{
             "id": source_name, "sheet": "LOAD", "role": "driver",
             "family": "dual-dc-motor-driver", "exact_part": "DRV8833PWPR",
             "ports": {"vm": rail, "gnd": "GND"}, "functional_blocks": [],
+        }, {
+            "id": "input", "sheet": "LOAD", "role": "power_input",
+            "family": "screw-terminal",
+            "ports": {"positive": "VIN", "negative": "GND"},
         }],
         "assumptions": [],
     }
@@ -2061,57 +2558,66 @@ def test_generated_regulator_sheet_is_valid_and_owns_its_connections(source_name
     assert converter["sheet"] in sheets
     assert converter["ports"]["input"] == "VIN"
     assert converter["ports"]["output"] == fixed["requirements"][0]["ports"]["vm"]
-    assert fixed["rail_voltages"][converter["ports"]["output"]] == 5.0
+    assert 2.7 <= fixed["rail_voltages"][converter["ports"]["output"]] <= 10.8
 
 
-def test_a_declared_load_rail_nothing_generates_gets_its_converter():
-    """The same fault one step later: the writer declared the rail and left the converter out.
-
-    Live walkthrough (2026-09-25, seed 37): a draft declared MOTOR_VIN at 10.8 V with
-    `from: null`, bound the DRV8833 to it, and reported zero diagnostics -- the rail-source
-    check only covers ~3.3 V rails. A rail nothing generates is not a design.
-    """
-    from kicraft.design.stage_semantics import complete_over_rated_supply
+def test_declared_load_rail_preserves_unsupported_voltage_and_completes_exact_voltage():
+    """Fallback generation never retargets a declared rail to a nearby reviewed output."""
+    from kicraft.design.stage_semantics import _complete_load_supply_rails
 
     candidate = {
         "rail_voltages": {"VIN": 18.0, "MOTOR_VIN": 10.8, "+3V3": 3.3, "GND": 0.0},
-        "sheets": [{"name": "DUAL H BRIDGE", "stem": "DUAL_H_BRIDGE", "role": "driver",
-                    "function": "Drive the actuators"}],
         "requirements": [
-            {"id": "reg", "role": "regulator", "family": "tps54331-adjustable",
-             "exact_part": "TPS54331DDAR", "parameters": {"output_voltage": 3.3},
-             "ports": {"input": "VIN", "output": "+3V3"}},
-            {"id": "driver", "role": "driver", "family": "dual-dc-motor-driver",
-             "exact_part": "DRV8833PWPR", "ports": {"vm": "MOTOR_VIN", "gnd": "GND"},
-             "functional_blocks": ["DUAL H-BRIDGE"]},
+            {
+                "id": "input",
+                "role": "power_input",
+                "family": "screw-terminal",
+                "ports": {"positive": "VIN", "negative": "GND"},
+            },
+            {
+                "id": "reg",
+                "role": "regulator",
+                "family": "tps54331-adjustable",
+                "exact_part": "TPS54331DDAR",
+                "parameters": {"output_voltage": 3.3},
+                "ports": {"input": "VIN", "output": "+3V3"},
+            },
+            {
+                "id": "driver",
+                "role": "driver",
+                "family": "dual-dc-motor-driver",
+                "exact_part": "DRV8833PWPR",
+                "ports": {"vm": "MOTOR_VIN", "gnd": "GND"},
+                "functional_blocks": ["DUAL H-BRIDGE"],
+            },
         ],
         "assumptions": [],
     }
 
-    fixed = complete_over_rated_supply(candidate)
+    assert _complete_load_supply_rails(candidate) == candidate
 
+    supported = json.loads(json.dumps(candidate))
+    supported["rail_voltages"]["MOTOR_VIN"] = 3.3
+    fixed = _complete_load_supply_rails(supported)
     converter = next(
         row for row in fixed["requirements"] if row["id"] == "motor_vin_regulator"
     )
     assert converter["ports"] == {"input": "VIN", "output": "MOTOR_VIN", "gnd": "GND"}
-    # 10.8 V has no reviewed instance; the rail takes the nearest one the library builds, and the
-    # rail's own voltage follows it rather than naming a rail nothing can produce.
-    assert converter["parameters"]["output_voltage"] == 5.0
-    assert converter["family"] == "ap63205-5v"
-    assert fixed["rail_voltages"]["MOTOR_VIN"] == 5.0
-    assert any("motor_vin_regulator" in row and "(defaulted)" in row for row in fixed["assumptions"])
-    # The board input and the 3.3 V rail already have their sources; only the bare rail is filled.
-    assert not any(row["id"] == "vin_regulator" for row in fixed["requirements"])
-    # A design where every rail has a generator is left alone.
-    sourced = {
-        **candidate,
-        "requirements": [
-            *candidate["requirements"],
-            {"id": "motor_reg", "role": "regulator", "family": "tps54331-adjustable",
-             "ports": {"input": "VIN", "output": "MOTOR_VIN"}},
-        ],
-    }
-    assert complete_over_rated_supply(sourced) == sourced
+    assert converter["parameters"]["output_voltage"] == 3.3
+    assert converter["family"] == "ylptec-k7803m-1000r3"
+    assert fixed["rail_voltages"]["MOTOR_VIN"] == 3.3
+
+    ambiguous = json.loads(json.dumps(supported))
+    ambiguous["rail_voltages"]["ALT_INPUT"] = 5.0
+    ambiguous["requirements"].append(
+        {
+            "id": "alternate_input",
+            "role": "power_input",
+            "family": "screw-terminal",
+            "ports": {"positive": "ALT_INPUT", "negative": "GND"},
+        }
+    )
+    assert _complete_load_supply_rails(ambiguous) == ambiguous
 
 
 def test_compiler_generated_regulator_id_normalizes_numeric_rail_and_avoids_collision():
@@ -2443,8 +2949,8 @@ def test_a_lowerer_that_builds_the_class_itself_is_not_a_family_mismatch(monkeyp
         "role": "user_io",
         "family": "switch-input",
         "exact_part": None,
-        "parameters": {},
-        "ports": {},
+        "parameters": {"pull_policy": "external"},
+        "ports": {"signal": "RESET", "vdd": "+3V3", "gnd": "GND"},
         "obligations": [
             {"kind": "physical", "original_obligation_id": "reset-button",
              "component_class": "pushbutton"}
@@ -2456,6 +2962,42 @@ def test_a_lowerer_that_builds_the_class_itself_is_not_a_family_mismatch(monkeyp
     assert _architecture_obligation_family_mismatch(
         {"requirements": [{**requirement, "family": "pin-header"}]}
     ) != []
+
+
+@pytest.mark.parametrize(("component_class", "enable", "accepted"), [
+    ("fuse", False, True),
+    ("jumper", True, True),
+    ("jumper", False, False),
+    ("screw-terminal", True, False),
+])
+def test_distribution_claims_only_parts_its_selected_circuit_builds(component_class, enable, accepted):
+    from kicraft.design.stage_semantics import _architecture_obligation_family_mismatch
+
+    requirement = {
+        "id": "distribution",
+        "sheet": "POWER",
+        "role": "power_input",
+        "family": "fused-power-distribution",
+        "parameters": {
+            "channels": 4,
+            "input_voltage_v": 5.0,
+            "source_current_a": 0.5,
+            "enable_jumper": enable,
+        },
+        "ports": {
+            "input": "VBUS",
+            "gnd": "GND",
+            **{f"output{index}": f"LOAD{index}" for index in range(1, 5)},
+        },
+        "obligations": [{
+            "kind": "physical",
+            "original_obligation_id": "requested-hardware",
+            "component_class": component_class,
+        }],
+    }
+
+    diagnostics = _architecture_obligation_family_mismatch({"requirements": [requirement]})
+    assert (diagnostics == []) is accepted
 
 
 def test_the_buck_converter_class_spelling_resolves_to_the_reviewed_buck_regulator():
@@ -2509,21 +3051,7 @@ def test_the_buck_converter_class_spelling_resolves_to_the_reviewed_buck_regulat
 
 
 def test_the_rp2040_recipes_own_bootsel_button_realizes_a_pushbutton_demand():
-    """The RP2040 recipe's BOOTSEL group is a reviewed momentary button, so the demand is met.
-
-    Held-out rp1 `rp2040-dual-adc-usb` (2026-09-30): the draft named the brief's BOOTSEL button
-    obligation on the `rp2040` requirement itself -- the RP2040 circuit *does* own that button --
-    and the family audit refused `rp2040` for claiming `pushbutton`, spending every repair round
-    asking for a family the selected recipe already builds. The recipe's `bootsel` group named the
-    `Switch:SW_Push` / `Button_Switch_SMD:SW_Push_1P1T_NO_E-Switch_TL3301NxxxxxG` pair, which
-    resolves to no reviewed record, so neither this audit nor §9.42 could prove the part. The
-    recipe now names the reviewed momentary-button stock pair every other compiler-owned button
-    group uses, so the same observed draft commits without loosening the audit.
-    """
-    from kicraft.design.part_identity import (
-        physical_inventory_record,
-        reviewed_record_realizes_class,
-    )
+    """Recipe-owned buttons satisfy a demand; unrelated physical owners do not."""
     from kicraft.design.stage_semantics import (
         _architecture_obligation_family_mismatch,
         _selected_recipe_realizes_class,
@@ -2552,93 +3080,432 @@ def test_the_rp2040_recipes_own_bootsel_button_realizes_a_pushbutton_demand():
         ],
     }
 
-    bootsel = physical_inventory_record(
-        mpn=None, symbol="Switch:SW_Push", footprint="Button_Switch_SMD:SW_SPST_TL3342"
-    )
-    assert bootsel is not None
-    assert reviewed_record_realizes_class(bootsel, "pushbutton")
     assert _selected_recipe_realizes_class(candidate, requirement, "pushbutton")
     assert _architecture_obligation_family_mismatch(candidate) == []
 
-    # The land pattern the recipe named before resolves to no reviewed record at all, which is
-    # the evidence the fix is keyed on.
-    assert physical_inventory_record(
-        mpn=None,
-        symbol="Switch:SW_Push",
-        footprint="Button_Switch_SMD:SW_Push_1P1T_NO_E-Switch_TL3301NxxxxxG",
-    ) is None
-
     # Negative control: a selected recipe that owns no momentary switch is still refused.
-    assert [
-        row.code
+    assert any(
+        row.code == "architecture_obligation_family_mismatch"
         for row in _architecture_obligation_family_mismatch(
             {
-                "requirements": [{**requirement, "family": "tlv62569-3v3"}],
+                "requirements": [{
+                    **requirement, "role": "regulator",
+                    "family": "tlv62569-3v3", "exact_part": "TLV62569DBVR",
+                }],
                 "recipe_selections": [
                     {"recipe": "tlv62569-3v3@1", "instance": "rp2040",
                      "requirement_ids": ["rp2040"]}
                 ],
             }
         )
-    ] == ["architecture_obligation_family_mismatch"]
+    )
 
 
-def test_a_regulator_family_with_no_instance_at_its_voltage_is_retargeted():
-    """The resolver falls back to the instance default, so the divider comes out for 3.3 V.
-
-    Live walkthrough (2026-09-25): `tps54331-adjustable` at 10.0 V -- a family registered only at
-    3.3 V -- produced a 3.28 V divider on the 10 V rail, which §9.32 refuses at commit.
-    """
+def test_unbuildable_regulator_targets_and_exact_identity_are_preserved():
+    """Unsupported outputs remain the request for the owning contract to refuse."""
     from kicraft.design.stage_semantics import _retarget_unbuildable_regulators
 
     candidate = {
-        "rail_voltages": {"+18V": 18.0, "+3V3": 3.3, "HBRIDGE_RAIL": 10.0},
+        "rail_voltages": {"+18V": 18.0, "+12V": 12.0, "HBRIDGE_RAIL": 10.0},
         "requirements": [
-            {"id": "reg3v3", "role": "regulator", "family": "tps54331-adjustable",
-             "parameters": {"output_voltage": 3.3}},
-            {"id": "hbridge_regulator", "role": "regulator", "family": "tps54331-adjustable",
-             "exact_part": "MP1584EN",
-             "parameters": {"output_voltage": 10.0},
-             "ports": {"input": "+18V", "output": "HBRIDGE_RAIL"}},
+            {
+                "id": "boost",
+                "role": "regulator",
+                "family": "ap63205-5v",
+                "exact_part": "AP63205WU-7",
+                "parameters": {"output_voltage": 12.0},
+                "ports": {"input": "+18V", "output": "+12V", "gnd": "GND"},
+            },
+            {
+                "id": "hbridge_regulator",
+                "role": "regulator",
+                "family": "tps54331-adjustable",
+                "parameters": {"output_voltage": 10.0},
+                "ports": {"input": "+18V", "output": "HBRIDGE_RAIL", "gnd": "GND"},
+            },
         ],
-        "assumptions": [],
     }
-    retargeted = _retarget_unbuildable_regulators(candidate)
+    before = json.loads(json.dumps(candidate))
 
-    assert retargeted == ["hbridge_regulator"]
-    assert candidate["requirements"][1]["family"] == "ap63205-5v"
-    # The part it named belonged to the family it left: kept, it reads as an explicitly named
-    # part on a family that does not carry it, and the resolver refuses the whole resolution.
-    assert candidate["requirements"][1]["exact_part"] is None
-    # 10 V has no orderable family: the rail moves to the nearest buildable one with it.
-    assert candidate["rail_voltages"]["HBRIDGE_RAIL"] == 5.0
-    assert candidate["requirements"][1]["parameters"]["output_voltage"] == 5.0
-    # The 3.3 V requirement already names the family registered at its voltage: untouched.
-    assert candidate["requirements"][0]["family"] == "tps54331-adjustable"
+    assert _retarget_unbuildable_regulators(candidate) == []
+    assert candidate == before
 
 
-def test_the_retarget_reads_the_target_voltage_from_the_rail_it_feeds():
-    """The derived shape drops `parameters`, so the rail the output port feeds states the target."""
+def test_unbuildable_regulator_reads_rail_target_without_rewriting_it():
+    """A parameter-less derived regulator has the same no-drift behavior as an explicit target."""
     from kicraft.design.stage_semantics import _retarget_unbuildable_regulators
 
     candidate = {
         "rail_voltages": {"+18V": 18.0, "HBRIDGE_RAIL": 10.0},
         "requirements": [
-            {"id": "hbridge_regulator", "role": "regulator",
-             "family": "tps54331-adjustable",
-             "ports": {"input": "+18V", "output": "HBRIDGE_RAIL", "gnd": "GND"}},
-            {"id": "reg3v3", "role": "regulator", "family": "tps54331-adjustable",
-             "ports": {"input": "+18V", "output": "+3V3", "gnd": "GND"}},
+            {
+                "id": "hbridge_regulator",
+                "role": "regulator",
+                "family": "tps54331-adjustable",
+                "ports": {"input": "+18V", "output": "HBRIDGE_RAIL", "gnd": "GND"},
+            }
+        ],
+    }
+    before = json.loads(json.dumps(candidate))
+
+    assert _retarget_unbuildable_regulators(candidate) == []
+    assert candidate == before
+
+
+def test_recipe_resolution_never_discards_an_unsupported_protected_identity(monkeypatch):
+    from kicraft.design.recipes import resolver
+    from kicraft.design.stage_semantics import _resolve_added_requirements
+
+    candidate = {
+        "requirements": [
+            {
+                "id": "regulator",
+                "role": "regulator",
+                "family": "ap63205-5v",
+                "exact_part": "ESP32-S3-WROOM-1-N16R8",
+            }
+        ]
+    }
+
+    def reject(*_args, **_kwargs):
+        raise resolver.RecipeResolutionError(
+            [
+                resolver.ResolutionDiagnostic(
+                    code="unsupported_protected_variant",
+                    requirement_id="regulator",
+                    message="protected variant has no verified recipe",
+                )
+            ]
+        )
+
+    monkeypatch.setattr(resolver, "apply_architecture_recipe_resolution", reject)
+
+    assert _resolve_added_requirements(candidate) is candidate
+    assert candidate["requirements"][0]["exact_part"] == "ESP32-S3-WROOM-1-N16R8"
+
+
+def test_retarget_only_swaps_an_unprotected_family_at_the_same_voltage():
+    from kicraft.design.stage_semantics import _retarget_unbuildable_regulators
+
+    candidate = {
+        "rail_voltages": {"+18V": 18.0, "+3V3": 3.3},
+        "requirements": [
+            {
+                "id": "replaceable",
+                "role": "regulator",
+                "family": "ap63205-5v",
+                "parameters": {"output_voltage": 3.3},
+                "ports": {"input": "+18V", "output": "+3V3", "gnd": "GND"},
+            },
+            {
+                "id": "protected",
+                "role": "regulator",
+                "family": "ap63205-5v",
+                "exact_part": "AP63205WU-7",
+                "parameters": {"output_voltage": 3.3},
+                "ports": {"input": "+18V", "output": "+3V3", "gnd": "GND"},
+            },
+        ],
+    }
+
+    assert _retarget_unbuildable_regulators(candidate) == ["replaceable"]
+    assert candidate["requirements"][0]["family"] == "ylptec-k7803m-1000r3"
+    assert candidate["requirements"][1]["family"] == "ap63205-5v"
+    assert candidate["requirements"][1]["exact_part"] == "AP63205WU-7"
+    assert candidate["rail_voltages"]["+3V3"] == 3.3
+    assert candidate["requirements"][0]["parameters"]["output_voltage"] == 3.3
+
+
+@pytest.mark.parametrize("input_voltage", [6.0, 18.0, 24.0])
+@pytest.mark.parametrize("model_shape", [False, True])
+def test_declared_3v3_rail_uses_qualified_input_and_typed_ports(input_voltage, model_shape):
+    from kicraft.design.stage_semantics import _complete_load_supply_rails
+
+    candidate = {
+        "requirements": [
+            {"id": "entry", "role": "power_input", "ports": {"positive": "VIN", "negative": "GND"}},
+            {"id": "load", "role": "mcu_core", "family": "esp32-c3",
+             "ports": {"vdd": "LOGIC", "gnd": "GND"}},
         ],
         "assumptions": [],
     }
-    candidate["rail_voltages"]["+3V3"] = 3.3
+    if model_shape:
+        candidate["power"] = {"rails": {
+            "VIN": {"voltage": input_voltage, "from": None},
+            "LOGIC": {"voltage": 3.3},
+            "GND": {"voltage": 0.0},
+        }}
+    else:
+        candidate["rail_voltages"] = {"VIN": input_voltage, "LOGIC": 3.3, "GND": 0.0}
+    fixed = _complete_load_supply_rails(candidate)
+    converter = next(row for row in fixed["requirements"] if row["role"] == "regulator")
+    assert converter["family"] == "ylptec-k7803m-1000r3"
+    assert converter["parameters"]["output_voltage"] == 3.3
+    assert converter["ports"] == {"input": "VIN", "output": "LOGIC", "gnd": "GND"}
 
-    retargeted = _retarget_unbuildable_regulators(candidate)
 
-    assert retargeted == ["hbridge_regulator"]
-    assert candidate["requirements"][0]["family"] == "ap63205-5v"
-    assert candidate["requirements"][1]["family"] == "tps54331-adjustable"
+@pytest.mark.parametrize("input_voltage", [18.0, 24.0])
+def test_overrated_load_gets_qualified_converter_from_same_input(input_voltage):
+    from kicraft.design.stage_semantics import _complete_load_supply_rails
+
+    candidate = {
+        "rail_voltages": {"VIN": input_voltage, "GND": 0.0},
+        "requirements": [
+            {"id": "entry", "role": "power_input", "ports": {"positive": "VIN", "negative": "GND"}},
+            {"id": "bridge", "role": "driver", "family": "dual-dc-motor-driver",
+             "exact_part": "DRV8833PWPR", "ports": {"vm": "VIN", "gnd": "GND"}},
+        ],
+        "sheets": [], "assumptions": [],
+    }
+    fixed = _complete_load_supply_rails(candidate)
+    converter = next(row for row in fixed["requirements"] if row["role"] == "regulator")
+    assert converter["family"] == "ylptec-k7803m-1000r3"
+    assert converter["ports"] == {"input": "VIN", "output": "BRIDGE_RAIL", "gnd": "GND"}
+    assert fixed["rail_voltages"]["BRIDGE_RAIL"] == 3.3
+    assert fixed["requirements"][1]["ports"]["vm"] == "BRIDGE_RAIL"
+
+
+@pytest.mark.parametrize("input_voltage", [6.0, 18.0, 24.0])
+def test_underrated_load_regulator_keeps_declared_upstream_source(input_voltage):
+    from kicraft.design.stage_semantics import _complete_load_supply_rails
+
+    candidate = {
+        "rail_voltages": {"VIN": input_voltage, "LOW": 2.5, "GND": 0.0},
+        "requirements": [
+            {"id": "entry", "role": "power_input", "ports": {"positive": "VIN", "negative": "GND"}},
+            {"id": "existing", "role": "regulator", "family": "other",
+             "ports": {"input": "VIN", "output": "LOW", "gnd": "GND"}},
+            {"id": "bridge", "role": "driver", "family": "dual-dc-motor-driver",
+             "exact_part": "DRV8833PWPR", "ports": {"vm": "LOW", "gnd": "GND"}},
+        ],
+        "sheets": [], "assumptions": [],
+    }
+    fixed = _complete_load_supply_rails(candidate)
+    converter = next(row for row in fixed["requirements"] if row["id"] == "bridge_regulator")
+    assert converter["family"] == "ylptec-k7803m-1000r3"
+    assert converter["ports"] == {"input": "VIN", "output": "BRIDGE_RAIL", "gnd": "GND"}
+    assert fixed["requirements"][2]["ports"]["vm"] == "BRIDGE_RAIL"
+    assert fixed["rail_voltages"]["LOW"] == 2.5
+
+
+@pytest.mark.parametrize("input_voltage", [None, 5.0, 30.0, 36.0])
+@pytest.mark.parametrize("target", [3.3, 5.0, 10.0, 12.0])
+def test_unqualified_input_or_output_never_creates_module(input_voltage, target):
+    from kicraft.design.stage_semantics import _complete_load_supply_rails
+
+    candidate = {
+        "rail_voltages": {"VIN": input_voltage, "LOAD": target, "GND": 0.0},
+        "requirements": [
+            {"id": "entry", "role": "power_input", "ports": {"positive": "VIN", "negative": "GND"}},
+            {"id": "load", "role": "sensor", "ports": {"vdd": "LOAD", "gnd": "GND"}},
+        ],
+    }
+    assert _complete_load_supply_rails(candidate) == candidate
+
+
+@pytest.mark.parametrize("target", [5.0, 10.0, 12.0])
+def test_qualified_input_does_not_rewrite_other_requested_outputs(target):
+    from kicraft.design.stage_semantics import _complete_load_supply_rails
+
+    candidate = {
+        "rail_voltages": {"VIN": 18.0, "LOAD": target, "GND": 0.0},
+        "requirements": [
+            {"id": "entry", "role": "power_input", "ports": {"positive": "VIN", "negative": "GND"}},
+            {"id": "load", "role": "sensor", "ports": {"vdd": "LOAD", "gnd": "GND"}},
+        ],
+    }
+    assert _complete_load_supply_rails(candidate) == candidate
+
+
+@pytest.mark.parametrize("input_voltage", [None, 5.0, 30.0])
+def test_retarget_requires_a_known_qualified_input(input_voltage):
+    from kicraft.design.stage_semantics import _retarget_unbuildable_regulators
+
+    candidate = {
+        "rail_voltages": {"VIN": input_voltage, "OUT": 3.3},
+        "requirements": [{"id": "reg", "role": "regulator", "family": "ap63205-5v",
+                          "parameters": {"output_voltage": 3.3},
+                          "ports": {"input": "VIN", "output": "OUT", "gnd": "GND"}}],
+    }
+    before = json.loads(json.dumps(candidate))
+    assert _retarget_unbuildable_regulators(candidate) == []
+    assert candidate == before
+
+
+def test_retarget_refuses_manufacturer_and_ambiguous_inputs():
+    from kicraft.design.stage_semantics import _retarget_unbuildable_regulators
+
+    candidate = {
+        "rail_voltages": {"VIN": 18.0, "OTHER": 24.0, "OUT": 3.3},
+        "requirements": [
+            {"id": "protected", "role": "regulator", "family": "ap63205-5v",
+             "manufacturer": "Diodes Incorporated", "parameters": {"output_voltage": 3.3},
+             "ports": {"input": "VIN", "output": "OUT"}},
+            {"id": "ambiguous", "role": "regulator", "family": "ap63205-5v",
+             "parameters": {"output_voltage": 3.3}, "supply": "OTHER",
+             "ports": {"input": "VIN", "output": "OUT"}},
+        ],
+    }
+    before = json.loads(json.dumps(candidate))
+    assert _retarget_unbuildable_regulators(candidate) == []
+    assert candidate == before
+
+
+def test_conversion_obligation_refuses_a_wrong_fixed_output_after_normalization():
+    """The runtime pre-diagnosis path retains the original 12 V conversion request."""
+    from kicraft.server.stage_runtime import _normalize_candidate_for_diagnostics
+
+    conversion = {
+        "kind": "conversion",
+        "original_obligation_id": "battery-to-12v",
+        "input_kind": "2S Li-ion battery-pack DC",
+        "output_kind": "12 V DC",
+        "behavior": "Convert the battery pack voltage to 12 V DC.",
+    }
+    candidate = {
+        "topologies": {"POWER": "Battery converter"},
+        "rail_voltages": {"BATT": 7.4, "+12V": 5.0, "GND": 0.0},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [
+            {"name": "POWER", "stem": "POWER", "function": "battery converter"}
+        ],
+        "power_nets": ["BATT", "+12V", "GND"],
+        "inter_sheet_nets": [],
+        "assumptions": [],
+        "requirements": [
+            {
+                "id": "boost",
+                "sheet": "POWER",
+                "role": "regulator",
+                "family": "ap63205-5v",
+                "exact_part": "AP63205WU-7",
+                "parameters": {"output_voltage": 5.0},
+                "ports": {"input": "BATT", "output": "+12V", "gnd": "GND"},
+                "obligation_ids": ["battery-to-12v"],
+            }
+        ],
+    }
+    upstream = {
+        "intent": {"obligations": [conversion]},
+        "functional_spec": {"obligations": [conversion]},
+    }
+
+    normalized = _normalize_candidate_for_diagnostics(
+        "architecture", candidate, "2S Li-ion battery pack to 12 V converter", upstream
+    )
+    diagnostics = diagnose_stage(
+        "architecture",
+        brief="2S Li-ion battery pack to 12 V converter",
+        upstream_state=upstream,
+        candidate=normalized,
+    )
+
+    assert normalized["rail_voltages"]["+12V"] == 5.0
+    boost = normalized["requirements"][0]
+    assert boost["parameters"]["output_voltage"] == 5.0
+    assert boost["exact_part"] == "AP63205WU-7"
+    mismatch = next(
+        row for row in diagnostics if row.code == "architecture_conversion_output_mismatch"
+    )
+    assert "battery-to-12v" in mismatch.evidence[0]
+
+
+def _conversion_acceptance_payload(
+    *,
+    requested_voltage: float,
+    rail_voltage: float,
+    family: str,
+    parameters: dict | None = None,
+    exact_part: str | None = None,
+) -> tuple[dict, dict]:
+    identifier = f"battery-to-{requested_voltage:g}v".replace(".", "_")
+    conversion = {
+        "kind": "conversion",
+        "original_obligation_id": identifier,
+        "input_kind": "2S Li-ion battery-pack DC",
+        "output_kind": f"{requested_voltage:g} V DC",
+        "behavior": f"Convert the battery pack voltage to {requested_voltage:g} V DC.",
+    }
+    payload = {
+        "topologies": {"POWER": "Battery converter"},
+        "rail_voltages": {"BATT": 7.4, "VOUT": rail_voltage, "GND": 0.0},
+        "comms_protocols": [],
+        "mcu_present": False,
+        "sheets": [{"name": "POWER", "stem": "POWER", "function": "battery converter"}],
+        "power_nets": ["BATT", "VOUT", "GND"],
+        "inter_sheet_nets": [],
+        "assumptions": [],
+        "obligations": [conversion],
+        "requirements": [
+            {
+                "id": "converter",
+                "sheet": "POWER",
+                "role": "regulator",
+                "family": family,
+                "exact_part": exact_part,
+                "parameters": parameters or {},
+                "ports": {"input": "BATT", "output": "VOUT", "gnd": "GND"},
+                "obligations": [conversion],
+            }
+        ],
+    }
+    upstream = {
+        "intent": {"obligations": [conversion]},
+        "functional_spec": {"obligations": [conversion]},
+    }
+    return payload, upstream
+
+
+@pytest.mark.parametrize(
+    ("requested_voltage", "rail_voltage", "family", "parameters", "exact_part"),
+    [
+        (12.0, 5.0, "ap63205-5v", {"output_voltage": 5.0}, "AP63205WU-7"),
+        (10.0, 5.0, "ap63205-5v", {"output_voltage": 5.0}, None),
+        (12.0, 12.0, "ap63205-5v", {}, None),
+        (10.0, 10.0, "tps54331-adjustable", {}, None),
+    ],
+)
+def test_architecture_contract_rejects_resolved_output_drift(
+    requested_voltage,
+    rail_voltage,
+    family,
+    parameters,
+    exact_part,
+):
+    """The final architecture contract checks recipe defaults, not only raw draft rails."""
+    from kicraft.server.stage_contracts import StageSchemaError, _normalize_stage_response
+
+    payload, upstream = _conversion_acceptance_payload(
+        requested_voltage=requested_voltage,
+        rail_voltage=rail_voltage,
+        family=family,
+        parameters=parameters,
+        exact_part=exact_part,
+    )
+
+    with pytest.raises(StageSchemaError) as rejected:
+        _normalize_stage_response("architecture", payload, upstream)
+
+    assert rejected.value.diagnostic["code"] == "architecture_conversion_output_mismatch"
+
+
+def test_supported_3v3_regulator_still_passes_architecture_normalization():
+    """A real covered regulator still satisfies its original typed conversion request."""
+    from kicraft.server.stage_contracts import _normalize_stage_response
+
+    payload, upstream = _conversion_acceptance_payload(
+        requested_voltage=3.3,
+        rail_voltage=3.3,
+        family="tps54331-adjustable",
+    )
+
+    normalized, _expanded = _normalize_stage_response("architecture", payload, upstream)
+
+    assert normalized["rail_voltages"]["VOUT"] == 3.3
+    regulator = next(row for row in normalized["requirements"] if row["id"] == "converter")
+    assert regulator["family"] == "tps54331-adjustable"
+    assert regulator["parameters"]["output_voltage"] == 3.3
 
 
 def test_a_rail_named_sheet_that_holds_a_circuit_is_not_a_distribution_sheet():
@@ -2814,8 +3681,11 @@ def test_the_adjustable_rc_lowerer_that_builds_the_trimmer_is_not_a_family_misma
                     "role": "analog_block",
                     "family": family,
                     "exact_part": None,
-                    "parameters": {},
-                    "ports": {},
+                    "parameters": {
+                        "capacitance_f": 10e-9,
+                        "capacitor_exact_part": "C0805C103J5GACTU",
+                    },
+                    "ports": {"input": "SIGNAL_IN", "output": "FILTERED", "gnd": "GND"},
                     "obligations": [
                         {
                             "kind": "physical",

@@ -2,18 +2,19 @@
 
 The composer is artifact-driven -- it reads each leaf's metadata.json,
 solved_layout.json, and leaf_routed.kicad_pcb from disk and treats them as
-rigid modules. Pinning is just "copy the round_NNNN_* snapshots over the
-canonical names so the composer picks them up." The pins.json manifest is
-the source of truth; ensure_applied() reconciles the on-disk state with it
+rigid modules. Pinning copies the round_NNNN_* snapshots over canonical names;
+the accompanying debug.json retains all search history but its canonical
+diagnostic fields are reconciled to that same snapshot. The pins.json manifest
+is the source of truth; ensure_applied() reconciles the on-disk state with it
 and is safe to call repeatedly.
 
-This module assumes step (2) of the snapshot work: round_NNNN_metadata.json
-and round_NNNN_solved_layout.json exist alongside round_NNNN_leaf_*.kicad_pcb
-in each leaf artifact dir.
+Each pinnable round provides round_NNNN_metadata.json and
+round_NNNN_solved_layout.json beside round_NNNN_leaf_*.kicad_pcb.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 from datetime import datetime, timezone
@@ -152,6 +153,144 @@ def _round_all_snapshot_files(
     return out
 
 
+def _load_json_object(path: Path) -> dict[str, Any] | None:
+    """Load a JSON object, returning ``None`` for missing/corrupt records."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _pinned_round_record(
+    debug_payload: dict[str, Any], snapshot_id: str | int
+) -> dict[str, Any] | None:
+    """Return the historical all-round record for a numeric solver round."""
+    if not isinstance(snapshot_id, int):
+        return None
+    extra = debug_payload.get("extra")
+    if not isinstance(extra, dict):
+        return None
+    all_rounds = extra.get("all_rounds")
+    if not isinstance(all_rounds, list):
+        return None
+    for record in all_rounds:
+        if isinstance(record, dict) and record.get("round_index") == snapshot_id:
+            return record
+    return None
+
+
+def _unavailable_acceptance(snapshot_id: str | int) -> dict[str, Any]:
+    """A conservative verdict for pre-custody or incomplete snapshots."""
+    return {
+        "accepted": False,
+        "rejection_reasons": ["pinned_round_acceptance_unavailable"],
+        "gate_results": {},
+        "drc_summary": {},
+        "notes": [
+            f"round {snapshot_id!r} is pinned, but its acceptance record is unavailable"
+        ],
+    }
+
+
+def pinned_debug_payload(
+    leaf_dir: Path, snapshot_id: str | int, debug_payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Return diagnostics for the exact snapshot selected by a pin.
+
+    ``all_rounds`` remains historical search evidence.  Canonical diagnostic
+    fields are rebuilt from the selected round's solved-layout snapshot and
+    its recorded gate verdict instead of retaining a later solve invocation's
+    winner.  Older snapshots without either a persisted gate verdict or their
+    matching historical round record fail closed.
+    """
+    payload = copy.deepcopy(debug_payload)
+    extra = payload.get("extra")
+    if not isinstance(extra, dict):
+        extra = {}
+        payload["extra"] = extra
+
+    token = _normalize_snapshot_id(snapshot_id)
+    snapshot_complete = bool(_round_snapshot_files(leaf_dir, snapshot_id))
+    layout = _load_json_object(leaf_dir / f"round_{token}_solved_layout.json")
+    snapshot_validation = (
+        layout.get("validation") if isinstance(layout, dict) else None
+    )
+    if not isinstance(snapshot_validation, dict):
+        snapshot_validation = {}
+    else:
+        snapshot_validation = copy.deepcopy(snapshot_validation)
+
+    round_record = _pinned_round_record(debug_payload, snapshot_id)
+    routing = (
+        round_record.get("routing")
+        if isinstance(round_record, dict)
+        and isinstance(round_record.get("routing"), dict)
+        else {}
+    )
+    persisted_acceptance = snapshot_validation.get("leaf_acceptance_result")
+    if not isinstance(persisted_acceptance, dict):
+        persisted_acceptance = routing.get("_round_acceptance")
+    if not (
+        isinstance(persisted_acceptance, dict)
+        and isinstance(persisted_acceptance.get("accepted"), bool)
+        and snapshot_complete
+        and snapshot_validation
+    ):
+        persisted_acceptance = _unavailable_acceptance(snapshot_id)
+    else:
+        persisted_acceptance = copy.deepcopy(persisted_acceptance)
+
+    # The validation DRC evidence comes from the selected snapshot, while its
+    # gate verdict is the contemporaneous per-round result.  Do not reuse a
+    # later invocation's canonical validation or invent a pass for old files.
+    canonical_validation = snapshot_validation
+    canonical_validation["leaf_acceptance_result"] = copy.deepcopy(
+        persisted_acceptance
+    )
+    canonical_validation["accepted"] = bool(persisted_acceptance["accepted"])
+
+    if isinstance(round_record, dict):
+        extra["best_round"] = copy.deepcopy(round_record)
+    else:
+        # The pin manifest still establishes the selected artifact even when
+        # old debug history has been pruned.  It does not establish a verdict.
+        extra["best_round"] = {"round_index": snapshot_id}
+    extra["best_round_routing"] = {
+        key: copy.deepcopy(value)
+        for key, value in routing.items()
+        if not key.startswith("_")
+    }
+    components = layout.get("components") if isinstance(layout, dict) else None
+    extra["solved_placement_summary"] = {
+        "component_count": len(components) if isinstance(components, dict) else 0,
+        "components": copy.deepcopy(components)
+        if isinstance(components, dict)
+        else {},
+    }
+    extra["leaf_acceptance"] = canonical_validation
+    extra["leaf_acceptance_structured"] = copy.deepcopy(persisted_acceptance)
+    extra["round_acceptance"] = copy.deepcopy(persisted_acceptance)
+    extra["leaf_render_diagnostics"] = copy.deepcopy(
+        routing.get("render_diagnostics", {})
+    )
+    return payload
+
+
+def _reconcile_pinned_debug(leaf_dir: Path, snapshot_id: str | int) -> None:
+    """Atomically make debug's canonical fields describe a pinned snapshot."""
+    debug_path = leaf_dir / "debug.json"
+    payload = _load_json_object(debug_path)
+    if payload is None:
+        return
+    reconciled = pinned_debug_payload(leaf_dir, snapshot_id, payload)
+    tmp_path = debug_path.with_suffix(debug_path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(reconciled, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    tmp_path.replace(debug_path)
+
+
 def list_available_rounds(experiments_dir: Path, leaf_key: str) -> list[int]:
     """Return sorted round numbers that have a complete snapshot for this leaf.
 
@@ -285,6 +424,8 @@ def pin_leaf(
         else:
             shutil.copy(src, dst)
     _invalidate_leaf_canvas_cache(leaf_dir)
+    _reconcile_pinned_debug(leaf_dir, snapshot_id)
+
 
     manifest = read_pins(experiments_dir)
     # Preserve the on-the-wire type: ints stay ints (back-compat with
@@ -440,12 +581,13 @@ def ensure_applied(experiments_dir: Path) -> dict[str, str]:
                 break
         if all_current:
             statuses[leaf_key] = "already-current"
-            continue
-        for src, dst in all_files.items():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(src, dst)
-        _invalidate_leaf_canvas_cache(leaf_dir)
-        statuses[leaf_key] = "applied"
+        else:
+            for src, dst in all_files.items():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(src, dst)
+            _invalidate_leaf_canvas_cache(leaf_dir)
+            statuses[leaf_key] = "applied"
+        _reconcile_pinned_debug(leaf_dir, snapshot_id)
     return statuses
 
 

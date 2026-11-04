@@ -1,0 +1,18 @@
+{
+  "content_hash": "sha256:a2283b0d17dc5c7175ce2a7898cdad72934ccd51f427acab77e2bffa65ecd1fb",
+  "datasheet_url": "https://www.bourns.com/docs/product-datasheets/SRP1770TA.pdf",
+  "description": "Bourns SRP1770TA-101M 100uH shielded power inductor",
+  "footprint_name": "SRP1770TA-101M",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "SRP1770TA-101M",
+  "name": "srp1770ta-101m",
+  "provenance": {"added_at": "2026-10-11T05:00:00Z", "kicad_version": "9.0.0", "source": "manual", "source_project_stem": null},
+  "schema_version": "1",
+  "sourcing": {"lcsc": "C2045587", "digikey": "5429635"},
+  "symbol_name": "SRP1770TA-101M",
+  "tags": ["inductor", "power", "boost"],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Manufacturer recommended layout is two 3.15 x 12.50 mm pads on 15.35 mm centers (18.50 mm outer span, 12.20 mm inner gap). The 5.3A Irms rating is a 40°C rise figure; 6.5A and 12A are 20% and 30% inductance-drop currents respectively."
+}

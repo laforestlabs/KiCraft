@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from kicraft.design.synthesis import validation
+from kicraft.design.models import CircuitRequirement
 
 
 def _part(ref: str, value: str, *, mpn: str | None = None, sheet: str = "POWER"):
@@ -24,6 +25,46 @@ def _bom(parts, nets):
             )
             for net, endpoints in nets.items()
         ],
+    )
+
+def _physical_requirement(
+    identifier: str,
+    *,
+    sheet: str,
+    family: str,
+    component_class: str,
+    role: str = "user_io",
+    exact_part: str | None = None,
+    minimum: int | None = None,
+    subject: str | None = None,
+    physical_obligation_id: str | None = None,
+    quantity_obligation_id: str | None = None,
+) -> CircuitRequirement:
+    obligations = [
+        {
+            "kind": "physical",
+            "original_obligation_id": physical_obligation_id or f"{identifier}-physical",
+            "component_class": component_class,
+        }
+    ]
+    if minimum is not None:
+        obligations.append(
+            {
+                "kind": "quantity",
+                "original_obligation_id": quantity_obligation_id or f"{identifier}-quantity",
+                "subject": subject or component_class,
+                "minimum": minimum,
+            }
+        )
+    return CircuitRequirement.model_validate(
+        {
+            "id": identifier,
+            "sheet": sheet,
+            "role": role,
+            "family": family,
+            "exact_part": exact_part,
+            "obligations": obligations,
+        }
     )
 
 
@@ -160,6 +201,11 @@ def test_tps54331_bootstrap_requires_direct_100nf_between_boot_and_ph(reviewed):
     )
     assert validation.check_reviewed_device_support_networks(bom).ok
 
+    bom.parts[1].value = "0.0000001 F"
+    assert validation.check_reviewed_device_support_networks(bom).ok
+    bom.parts[1].value = "0.0000001"
+    assert not validation.check_reviewed_device_support_networks(bom).ok
+
     bom.parts[1].value = "10nF"
     result = validation.check_reviewed_device_support_networks(bom)
     assert not result.ok
@@ -173,6 +219,83 @@ def test_tps5430_rejects_typed_five_volt_input(reviewed):
     assert not result.ok
     assert "E_INPUT_OPERATING_RANGE" in result.offenders[0]
     assert "5.5–36V" in result.offenders[0]
+
+
+@pytest.mark.parametrize(("identity", "voltage", "accepted"), [
+    ("MF-MSMF050/30X-2", 5.0, True),
+    ("MF-MSMF050/30X-2", 36.0, False),
+    ("MF-MSMF075/33X-2", 24.0, True),
+    ("MF-MSMF075/33X-2", 36.0, False),
+])
+def test_reviewed_ptc_input_voltage_uses_its_real_contact(identity, voltage, accepted):
+    from kicraft.design.part_identity import reviewed_part
+
+    record = reviewed_part(identity)
+    fuse = _part("F1", identity, mpn=identity)
+    fuse.symbol = record.symbol
+    bom = _bom([fuse], {"SOURCE": [("F1", "1")], "PROTECTED": [("F1", "2")]})
+    result = validation.check_reviewed_input_operating_ranges(
+        SimpleNamespace(rail_voltages={"SOURCE": voltage}), bom,
+    )
+
+    assert result.ok is accepted
+
+
+def _fused_pass_through_bom(bridge="AONR21357"):
+    from kicraft.design.part_identity import reviewed_part
+
+    source = _part("F1", "MF-MSMF075/33X-2", mpn="MF-MSMF075/33X-2")
+    branch = _part("F2", "MF-MSMF050/30X-2", mpn="MF-MSMF050/30X-2")
+    source.symbol = reviewed_part(source.mpn).symbol
+    branch.symbol = reviewed_part(branch.mpn).symbol
+    if bridge == "resistor":
+        link = _part("R1", "10k")
+        link.symbol = "Device:R"
+        input_pins, output_pins = ("1",), ("2",)
+    else:
+        link = _part("Q1" if bridge == "AONR21357" else "U1", bridge, mpn=bridge)
+        link.symbol = reviewed_part(bridge).symbol
+        input_pins, output_pins = (
+            (("1", "2", "3"), ("5", "6", "7", "8", "9"))
+            if bridge == "AONR21357" else (("2", "3"), ("8",))
+        )
+    return _bom([source, link, branch], {
+        "SOURCE": [("F1", "1")],
+        "PRIVATE_FUSED": [("F1", "2"), *((link.ref, pin) for pin in input_pins)],
+        "PRIVATE_SWITCHED": [*((link.ref, pin) for pin in output_pins), ("F2", "1")],
+        "LOAD": [("F2", "2")],
+    })
+
+
+@pytest.mark.parametrize(("voltage", "accepted"), [(5.0, True), (31.0, False)])
+def test_private_fused_rails_inherit_only_reviewed_pass_through_voltage(voltage, accepted):
+    architecture = SimpleNamespace(rail_voltages={"SOURCE": voltage})
+    result = validation.check_reviewed_input_operating_ranges(architecture, _fused_pass_through_bom())
+
+    assert result.ok is accepted
+    assert architecture.rail_voltages == {"SOURCE": voltage}
+    if not accepted:
+        assert any("F2.1" in row and "outside reviewed" in row for row in result.offenders)
+
+
+@pytest.mark.parametrize("bridge", ["resistor", "TPS54331DDAR"])
+def test_resistors_and_converter_switches_do_not_invent_private_dc_rails(bridge):
+    result = validation.check_reviewed_input_operating_ranges(
+        SimpleNamespace(rail_voltages={"SOURCE": 5.0}), _fused_pass_through_bom(bridge),
+    )
+
+    assert not result.ok
+    assert any("F2.1" in row and "no typed" in row for row in result.offenders)
+
+
+def test_conflicting_declared_rails_across_pass_through_switch_are_refused():
+    result = validation.check_reviewed_input_operating_ranges(
+        SimpleNamespace(rail_voltages={"SOURCE": 5.0, "LOAD": 3.3}),
+        _fused_pass_through_bom(),
+    )
+
+    assert not result.ok
+    assert any("E_PASS_THROUGH_RAIL_CONFLICT" in row for row in result.offenders)
 
 
 def _conversion_requirement(*, output="VOUT", output_domain="GND"):
@@ -476,10 +599,12 @@ def test_module_class_requires_the_reviewed_module_not_an_unrelated_ic(identity,
         ref="U1", sheet="MCU", value=record.identity, mpn=record.identity,
         symbol=record.symbol, footprint=record.footprint,
     )
-    requirement = SimpleNamespace(
-        id="mcu", sheet="MCU", exact_part=None, family=component_class,
-        declared_interface=None,
-        obligations=[SimpleNamespace(kind="physical", component_class=component_class)],
+    requirement = _physical_requirement(
+        "mcu",
+        sheet="MCU",
+        family=component_class,
+        component_class=component_class,
+        role="mcu_core",
     )
     result = validation.check_requirement_physical_realization(
         SimpleNamespace(requirements=[requirement]), _bom([part], {})
@@ -497,16 +622,13 @@ def test_physical_quantity_requires_exact_reviewed_identity_evidence(monkeypatch
     )
     monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda _part: record)
     monkeypatch.setattr(validation, "_pin_info_by_ref", lambda _bom: ({}, {}))
-    requirement = SimpleNamespace(
-        id="bnc",
+    requirement = _physical_requirement(
+        "bnc",
         sheet="IO",
-        exact_part=None,
         family="bnc-connector",
-        declared_interface=None,
-        obligations=[
-            SimpleNamespace(kind="physical", component_class="bnc-connector"),
-            SimpleNamespace(kind="quantity", subject="bnc-connector", minimum=2),
-        ],
+        component_class="bnc-connector",
+        role="connector",
+        minimum=2,
     )
     architecture = SimpleNamespace(requirements=[requirement])
     bom = _bom([_part("J1", "BNC", sheet="IO"), _part("J2", "BNC", sheet="IO")], {})
@@ -535,15 +657,11 @@ def test_a_class_with_no_reviewed_carrier_is_not_realized_by_a_reviewed_part_of_
     stepper = _part("U1", "A4988SETTR-T", mpn="A4988SETTR-T")
     stepper.symbol = "a4988:A4988SETTR-T"
     stepper.footprint = "a4988:WQFN-28_L5.0-W5.0-P0.50-BL-EP3.2"
-    requirement = SimpleNamespace(
-        id="motor_a",
+    requirement = _physical_requirement(
+        "motor_a",
         sheet="POWER",
-        exact_part=None,
         family="solder-jumper",
-        declared_interface=None,
-        obligations=[
-            SimpleNamespace(kind="physical", component_class="solder-jumper"),
-        ],
+        component_class="solder-jumper",
     )
     result = validation.check_requirement_physical_realization(
         SimpleNamespace(requirements=[requirement]), _bom([stepper], {})
@@ -732,13 +850,12 @@ def test_new_part_category_is_realized_by_a_resolved_part(monkeypatch):
     """
     monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda _part: None)
     monkeypatch.setattr(validation, "_pin_info_by_ref", lambda _bom: ({}, {}))
-    requirement = SimpleNamespace(
-        id="gnss",
+    requirement = _physical_requirement(
+        "gnss",
         sheet="IO",
-        exact_part=None,
         family="gnss-receiver",
-        declared_interface=None,
-        obligations=[SimpleNamespace(kind="physical", component_class="gps-module")],
+        component_class="gps-module",
+        role="sensor",
     )
     architecture = SimpleNamespace(requirements=[requirement])
     resolved = SimpleNamespace(
@@ -803,20 +920,17 @@ def test_a_count_two_requirements_share_is_one_demand_on_the_sheet(monkeypatch):
     monkeypatch.setattr(validation, "_pin_info_by_ref", lambda _bom: ({}, {}))
 
     def requirement(ident: str):
-        return SimpleNamespace(
-            id=ident,
+        return _physical_requirement(
+            ident,
             sheet="XH",
-            exact_part=None,
             family="jst-xh-connector",
-            declared_interface=None,
-            obligations=[
-                SimpleNamespace(kind="physical", original_obligation_id="xh",
-                                component_class="jst-xh-connector"),
-                SimpleNamespace(kind="quantity", original_obligation_id="two_xh",
-                                subject="jst-xh connectors", minimum=2),
-            ],
+            component_class="jst-xh-connector",
+            role="connector",
+            minimum=2,
+            subject="jst-xh connectors",
+            physical_obligation_id="xh",
+            quantity_obligation_id="two_xh",
         )
-
     architecture = SimpleNamespace(requirements=[requirement("jst1"), requirement("jst2")])
     two = _bom([_part("J1", "XH", sheet="XH"), _part("J2", "XH", sheet="XH")], {})
     assert validation.check_requirement_physical_realization(architecture, two).ok
@@ -829,18 +943,15 @@ def test_a_count_two_requirements_share_is_one_demand_on_the_sheet(monkeypatch):
 
 def _terminal_requirement(ident: str, *, minimum: int, exact_part: str | None = None):
     """One screw-terminal requirement carrying the brief's shared terminal-count row."""
-    return SimpleNamespace(
-        id=ident,
+    return _physical_requirement(
+        ident,
         sheet="ANALOG INPUTS",
-        exact_part=exact_part,
         family="screw-terminal",
-        declared_interface=None,
-        obligations=[
-            SimpleNamespace(kind="physical", original_obligation_id="screw-terminals",
-                            component_class="screw-terminal"),
-            SimpleNamespace(kind="quantity", original_obligation_id="eight-input-terminals",
-                            subject="screw-terminal", minimum=minimum),
-        ],
+        component_class="screw-terminal",
+        role="connector",
+        minimum=minimum,
+        physical_obligation_id="screw-terminals",
+        quantity_obligation_id="eight-input-terminals",
     )
 
 
@@ -975,13 +1086,12 @@ def test_distinct_requirement_owners_cannot_share_one_reviewed_connector(monkeyp
     )
     monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda _part: record)
     monkeypatch.setattr(validation, "_pin_info_by_ref", lambda _bom: ({}, {}))
-    requirement = lambda ident: SimpleNamespace(
-        id=ident,
+    requirement = lambda ident: _physical_requirement(
+        ident,
         sheet="IO",
-        exact_part=None,
         family="bnc-connector",
-        declared_interface=None,
-        obligations=[SimpleNamespace(kind="physical", component_class="bnc-connector")],
+        component_class="bnc-connector",
+        role="connector",
     )
     architecture = SimpleNamespace(requirements=[requirement("input"), requirement("output")])
     bom = _bom([_part("J1", "BNC", sheet="IO")], {})
@@ -1183,15 +1293,11 @@ def test_demanded_class_aliases_apply_in_the_realization_gate_too(monkeypatch):
     )
     monkeypatch.setattr(validation, "_reviewed_identity_for_bom_part", lambda _part: record)
     monkeypatch.setattr(validation, "_pin_info_by_ref", lambda _bom: ({}, {}))
-    requirement = SimpleNamespace(
-        id="dc_output",
+    requirement = _physical_requirement(
+        "dc_output",
         sheet="OUTPUT",
-        exact_part=None,
         family="voltage-selector-switch",
-        declared_interface=None,
-        obligations=[
-            SimpleNamespace(kind="physical", component_class="three-position-selector-switch")
-        ],
+        component_class="three-position-selector-switch",
     )
     architecture = SimpleNamespace(requirements=[requirement])
     bom = _bom([_part("SW1", "SS13D07VG4", sheet="OUTPUT")], {})
@@ -1750,3 +1856,298 @@ def test_an_under_rated_capacitor_is_left_alone_when_no_rated_candidate_exists(m
     assert not bom.substitutions
     assert any("no in-stock catalog part matching" in note for note in notes)
     assert not validation.check_reviewed_input_operating_ranges(architecture, bom).ok
+
+
+def test_reverse_polarity_recipe_witness_requires_complete_provenanced_graph():
+    """A recipe tag or PMOS alone cannot waive the composite protection circuit."""
+    from kicraft.design.models import RecipeSelection
+    from kicraft.design.recipes.registry import expand_recipe
+
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe="reverse-polarity-pmos@1",
+            instance="protection",
+            sheets={"power": "POWER"},
+            port_bindings={"input": "VIN", "output": "VPROTECTED", "gnd": "GND"},
+            requirement_ids=["protection"],
+        )
+    )
+    requirement = _physical_requirement(
+        "protection",
+        sheet="POWER",
+        family="reverse-polarity-pmos",
+        component_class="reverse-polarity-protection",
+        role="power_input",
+    )
+
+    def candidate(parts, connections):
+        return SimpleNamespace(
+            parts=parts,
+            connections=connections,
+            recipe_ownership=[expansion.ownership],
+        )
+
+    architecture = SimpleNamespace(requirements=[requirement])
+    assert validation.check_requirement_physical_realization(
+        architecture, candidate(expansion.parts, expansion.connections)
+    ).ok
+
+    # The PMOS remains, but deleting its gate-bias resistor invalidates the
+    # recipe-owned topology and a transistor by itself is not protection.
+    no_bias = candidate(
+        [part for part in expansion.parts if part.recipe_role != "gate_resistor"],
+        expansion.connections,
+    )
+    assert not validation.check_requirement_physical_realization(architecture, no_bias).ok
+
+    # All parts remain, but a source/drain polarity tamper is equally invalid:
+    # the witness checks actual BOM connection nets, not manifest prose.
+    wrong_orientation = [
+        SimpleNamespace(
+            sheet=connection.sheet,
+            net_name=(
+                "VIN_TAMPERED"
+                if connection.net_name == "VIN"
+                else connection.net_name
+            ),
+            endpoints=[
+                SimpleNamespace(ref=endpoint.ref, pin=endpoint.pin)
+                for endpoint in connection.endpoints
+            ],
+        )
+        for connection in expansion.connections
+    ]
+    assert not validation.check_requirement_physical_realization(
+        architecture, candidate(expansion.parts, wrong_orientation)
+    ).ok
+
+def test_shared_push_button_count_allocates_one_part_per_owner_and_keeps_total():
+    """Three replicated owners each realize one button; the immutable total is three."""
+    from kicraft.design.part_identity import reviewed_part
+
+    button = reviewed_part("TL3342F260QG")
+    assert button is not None
+    requirements = [
+        _physical_requirement(
+            f"button{index}",
+            sheet="USER BUTTONS",
+            family="momentary-button",
+            exact_part="TL3342F260QG",
+            component_class="push-button",
+            minimum=3,
+            subject="push-button",
+            quantity_obligation_id="push-button-count",
+        )
+        for index in range(1, 4)
+    ]
+
+    def candidate(quantity):
+        return SimpleNamespace(
+            parts=[
+                SimpleNamespace(
+                    ref=f"SW{index}",
+                    value="TL3342F260QG",
+                    mpn="TL3342F260QG",
+                    symbol=button.symbol,
+                    footprint=button.footprint,
+                    sheet="USER BUTTONS",
+                )
+                for index in range(1, quantity + 1)
+            ],
+            connections=[],
+            recipe_ownership=[],
+        )
+
+    architecture = SimpleNamespace(requirements=requirements)
+    assert validation.check_requirement_physical_realization(
+        architecture, candidate(3)
+    ).ok
+
+    result = validation.check_requirement_physical_realization(architecture, candidate(1))
+    assert not result.ok
+    assert any(
+        "'USER BUTTONS'/'push-button'" in offender
+        and "demand 3 distinct part(s), but only 1" in offender
+        for offender in result.offenders
+    )
+    assert not any("'button" in offender for offender in result.offenders)
+
+
+def _three_lowered_switches():
+    """Use the production compiler to own and wire three independent inputs."""
+    from kicraft.design.models import Architecture, BOM
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    requirements = [
+        _physical_requirement(
+            f"button{index}", sheet="USER BUTTONS", family="switch-input",
+            exact_part="TL3342F260QG", component_class="push-button",
+            minimum=3, subject="push-button",
+            quantity_obligation_id="push-button-count",
+        ).model_copy(update={
+            "ports": {"signal": f"BUTTON_{index}", "gnd": "GND", "vdd": "+3V3"},
+            "parameters": {
+                "pull_policy": "external", "resistance": "10k", "active_level": "low",
+            },
+        })
+        for index in range(1, 4)
+    ]
+    architecture = Architecture.model_validate({
+        "mcu_present": False,
+        "sheets": [{
+            "name": "USER BUTTONS", "stem": "BUTTONS", "role": "interface",
+            "function": "Three independent active-low inputs",
+        }],
+        "power_nets": ["+3V3", "GND"],
+        "inter_sheet_nets": [],
+        "requirements": [requirement.model_dump(mode="json") for requirement in requirements],
+    })
+    constructed = probe_architecture_construction({
+        "architecture": architecture.model_dump(mode="json"), "bom": {"parts": []},
+    })
+    assert constructed is not None
+    return architecture, BOM.model_validate(constructed)
+
+
+def test_shared_switch_inputs_require_complete_owned_topology():
+    architecture, bom = _three_lowered_switches()
+    check = validation.check_requirement_physical_realization
+    assert check(architecture, bom).ok
+
+    # Break one actual pull-up endpoint while retaining every physical part.
+    pullup = next(part for part in bom.parts if part.ref.startswith("R"))
+    broken = bom.model_copy(deep=True)
+    for connection in broken.connections:
+        connection.endpoints = [
+            endpoint for endpoint in connection.endpoints
+            if not (endpoint.ref == pullup.ref and str(endpoint.pin) == "1")
+        ]
+    assert not check(architecture, broken).ok
+
+    wrong_identity = bom.model_copy(deep=True)
+    button = next(part for part in wrong_identity.parts if part.ref.startswith("SW"))
+    button.mpn = button.value = "WRONG-EXACT-BUTTON"
+    assert not check(architecture, wrong_identity).ok
+
+    missing_owner = bom.model_copy(deep=True)
+    owner_refs = {
+        part.ref for part in bom.parts if part.lowering_requirement_id == "button1"
+    }
+    assert owner_refs
+    missing_owner.parts = [part for part in missing_owner.parts if part.ref not in owner_refs]
+    for connection in missing_owner.connections:
+        connection.endpoints = [
+            endpoint for endpoint in connection.endpoints if endpoint.ref not in owner_refs
+        ]
+    assert not check(architecture, missing_owner).ok
+
+    bare = bom.model_copy(deep=True)
+    bare.parts = [part for part in bare.parts if part.ref.startswith("SW")]
+    bare.connections = []
+    assert not check(architecture, bare).ok
+
+
+@pytest.mark.parametrize(
+    ("requested", "mpn"),
+    [
+        ("MCP6002", "MCP6002-I/SN"),
+        ("MCP6002", "MCP6002T-I/SN"),
+        ("MCP6002T-I/SN", "MCP6002T-I/SN"),
+        ("TLV9062", "TLV9062IDR"),
+        ("LM358", "LM358DR"),
+    ],
+)
+def test_reviewed_device_interface_uses_the_same_identity_at_bom_and_wiring(
+    requested, mpn
+):
+    from kicraft.design.models import BOM
+    from kicraft.design.part_identity import physical_inventory_record, reviewed_identity_for_order_code, reviewed_part
+
+    record = reviewed_part(reviewed_identity_for_order_code(mpn))
+    requirement = _physical_requirement(
+        "amp", sheet="ANALOG", family="operational-amplifier",
+        component_class="op-amp", role="analog_block", exact_part=requested,
+    ).model_copy(update={
+        "ports": {"vdd": "+5V", "gnd": "GND", "input": "AIN", "output": "AOUT"},
+    })
+    requirement = CircuitRequirement.model_validate({
+        **requirement.model_dump(),
+        "declared_interface": {
+            "ports": [
+                {"key": key, "pin": pin, "direction": direction, "function": key}
+                for key, pin, direction in [
+                    ("vdd", "8", "power"), ("gnd", "4", "power"),
+                    ("input", "3", "input"), ("output", "1", "output"),
+                ]
+            ]
+        },
+    })
+    bom = BOM.model_validate({
+        "parts": [{
+            "ref": "U1", "sheet": "ANALOG", "value": requested, "mpn": mpn,
+            "symbol": record.symbol, "footprint": record.footprint,
+        }],
+        "connections": [
+            {"sheet": "ANALOG", "net_name": net,
+             "endpoints": [{"ref": "U1", "pin": pin}]}
+            for pin, net in [("8", "+5V"), ("4", "GND"), ("3", "AIN"), ("1", "AOUT")]
+        ],
+    })
+    architecture = SimpleNamespace(requirements=[requirement])
+    assert validation.check_requirement_physical_realization(architecture, bom).ok
+
+    # Recognizing the device never supplies a missing electrical path.
+    broken = bom.model_copy(deep=True)
+    broken.connections = [
+        connection for connection in broken.connections if connection.net_name != "AOUT"
+    ]
+    assert not validation.check_requirement_physical_realization(architecture, broken).ok
+
+    # A correct display label/MPN cannot prove an unreviewed physical package.
+    wrong_package = bom.model_copy(deep=True)
+    wrong_package.parts[0].footprint = "Package_SO:MSOP-8_3x3mm_P0.65mm"
+    assert physical_inventory_record(
+        mpn=mpn, symbol=record.symbol, footprint=wrong_package.parts[0].footprint,
+    ) is None
+    assert not validation.check_requirement_physical_realization(architecture, wrong_package).ok
+
+
+@pytest.mark.parametrize(
+    ("requested", "accepted"),
+    [
+        ("ESP32-S3", True),
+        ("ESP32-S3-WROOM-1-N16R8", True),
+        ("ESP32-S3-WROOM-1-N8R8", False),
+    ],
+)
+def test_declared_interface_keeps_exact_flash_variant_not_a_deviation(requested, accepted):
+    from kicraft.design.models import BOM
+    from kicraft.design.part_identity import reviewed_part
+
+    record = reviewed_part("esp32-s3-wroom-1-n16r8")
+    requirement = CircuitRequirement.model_validate({
+        "id": "core", "sheet": "MCU", "role": "mcu_core",
+        "family": "esp32-s3", "exact_part": requested,
+        "ports": {"vdd": "+3V3"},
+        "declared_interface": {
+            "ports": [{"key": "vdd", "pin": "2", "direction": "power", "function": "supply"}]
+        },
+        "obligations": [{
+            "kind": "physical", "original_obligation_id": "core",
+            "component_class": "microcontroller",
+        }],
+    })
+    bom = BOM.model_validate({
+        "parts": [{
+            "ref": "U1", "sheet": "MCU", "value": requested,
+            "mpn": "ESP32-S3-WROOM-1-N16R8",
+            "symbol": record.symbol, "footprint": record.footprint,
+        }],
+        "connections": [{
+            "sheet": "MCU", "net_name": "+3V3", "endpoints": [{"ref": "U1", "pin": "2"}],
+        }],
+    })
+    result = validation.check_requirement_physical_realization(
+        SimpleNamespace(requirements=[requirement]), bom,
+    )
+    assert result.ok is accepted

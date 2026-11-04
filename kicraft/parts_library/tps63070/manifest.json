@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:03ce49c0dd1d08868162eaa2234ef117248d487ee635e80cc948cac888e365eb",
+  "datasheet_url": "https://www.ti.com/lit/ds/symlink/tps63070.pdf",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TPS63070RNMR",
+  "footprint_name": "VQFN-15_L3.0-W2.5-P0.50-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "TPS63070RNMR",
+  "name": "tps63070",
+  "provenance": {
+    "added_at": "2026-11-03T03:16:26Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C109322"
+  },
+  "symbol_name": "TPS63070RNMR",
+  "tags": [
+    "power",
+    "buck-boost"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "TI SLVSC58B exact pins1..15. Supplier labels7/8 and12/13 unmerged to manufacturer numbering; same-net overlapping auxiliary land rectangles7/12 retained. Original supplier bytes preserved. Grounds4/10 common; VAUX3 needs100nF and no external load. L1=11/L2=9, output7/8, input12/13. No 3D, assembled, energized or thermal qualification asserted."
+}

@@ -12,6 +12,22 @@ import os
 from pathlib import Path
 from typing import Any
 
+
+def _optional_env_float(name: str, default: float | None = None) -> float | None:
+    """Read an optional float from the environment, else *default*.
+
+    A set-but-unparseable value raises: silently ignoring a typo'd knob is the
+    "fallbacks fail loudly" violation this repo bans.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+
+
 DEFAULT_CONFIG = {
     # The fab the pipeline actually targets (JLCPCB 2-layer 1oz) and its
     # published minimum feature sizes. Single source of truth -- see
@@ -229,7 +245,14 @@ DEFAULT_CONFIG = {
             "x_max": 12.0,
             "y_max": -9.0,
         },
-        "*ESP32-S3-MINI-1*": {
+        "*ESP32-S3-MINI-1": {
+            "x_min": -10.0,
+            "y_min": -20.0,
+            "x_max": 10.0,
+            "y_max": -6.0,
+        },
+        # Delimited MINI-1 variants have a PCB antenna; MINI-1U does not.
+        "*ESP32-S3-MINI-1[-_]*": {
             "x_min": -10.0,
             "y_min": -20.0,
             "x_max": 10.0,
@@ -325,12 +348,59 @@ DEFAULT_CONFIG = {
     "kicad_routing_tools_python": os.environ.get(
         "KICRAFT_KICAD_ROUTING_TOOLS_PYTHON", sys.executable
     ),
-    "kicad_routing_tools_timeout_s": 120,
+    # Per-invocation KRT wall clock for a LEAF / local subcircuit route.
+    # 120 s was below what a dense leaf needs: rebuilding project 1125's copy
+    # (44/9102) SIGTERMed the RP2040 CONTROL leaf in every round and every canvas
+    # attempt ("router deadline ... timed out after 120s", 3-4 rounds x 2-3
+    # canvases), so the leaf persisted NO artifact at all, the parent compose
+    # aborted with "child subcircuit(s) produced no solved artifact", and the
+    # build ended rc 6 with no board. The same leaf input runs to completion in
+    # ~200 s at the same nominal geometry (measured, 600 s cap). The production
+    # build wall gives the leaf phase 0.65 x 1620 s across 2 workers, so a leaf
+    # slice is ~350 s; 300 s stays under it while leaving headroom to finalize.
+    "kicad_routing_tools_timeout_s": _optional_env_float(
+        "KICRAFT_KICAD_ROUTING_TOOLS_TIMEOUT_S", 300
+    ),
+    # The PARENT route gets a longer wall-clock slice than a leaf. A composed
+    # parent is one net set that must be routed in a single KRT invocation, and
+    # its own recovery ladder (frontier analysis -> rip ladder -> #103
+    # reconciliation over hinted blockers) runs inside that invocation. The
+    # 2026-10-01 production runs show the parent using ~63 s for main+rescue and
+    # then being SIGTERMed at the 120 s leaf cap halfway through its
+    # reconciliation, leaving a half-written board (project 1125,
+    # subcircuit__8a5edab282: stdout ends at "Building base obstacle map..."
+    # during "Final reconciliation", 02:28:08 -> 02:30:08 = 120 s). The leaf cap
+    # is a good bound for a ~40-net leaf; the parent phase is allotted 65/30 of
+    # the build wall budget, so its routing cap must not be the leaf's.
+    "kicad_routing_tools_parent_timeout_s": _optional_env_float(
+        "KICRAFT_KICAD_ROUTING_TOOLS_PARENT_TIMEOUT_S", 420
+    ),
     "kicad_routing_tools_max_iterations": 200000,
     "kicad_routing_tools_max_ripup": 3,
     "kicad_routing_tools_ordering": "mps",
+    # Routing grid. ``None`` keeps the router's own default (0.1 mm). A finer
+    # grid is the escape fix our 0.1 mm default cannot make: measured on the
+    # RP2040 CONTROL leaf of project 1125 (43 single-ended nets, board clearance
+    # 0.153 mm, track 0.2 mm), the nominal grid left **20** nets unrouted with
+    # the router's own diagnosis "the start/target pads are boxed in by static
+    # obstacles (neighboring pads + clearance)", while a full re-run at
+    # ``--grid-step 0.05`` left 4 (main pass 7.2 s), and 0.05 with a necked
+    # 0.15 mm track left 2. Not a default: a finer grid is ~4x the cells, so it
+    # is paid only where an operator/next session has measured that the coarse
+    # grid is the binding constraint -- and it must be paired with a matching
+    # kicad_routing_tools_timeout_s (through the bridge, 0.05 took 365 s on that
+    # leaf, so the 120 s leaf default would SIGTERM it mid-recovery).
+    "kicad_routing_tools_grid_step_mm": _optional_env_float(
+        "KICRAFT_KICAD_ROUTING_TOOLS_GRID_STEP_MM"
+    ),
     "kicad_routing_tools_clearance_mm": None,
     "kicad_routing_tools_layers": None,
+    # The parent route's grid. Deliberately SEPARATE from the leaf key above:
+    # a finer grid is a leaf-escape fix (fine-pitch pads), while the parent
+    # routes a much larger board where 4x the cells is a different trade (the
+    # 2026-10-02 experiment drove 0.05 globally and the parent route then
+    # exceeded a 600 s cap, truncating mid-route). None = the router default.
+    "kicad_routing_tools_parent_grid_step_mm": None,
     # Leaf nesting (shaped compose): a leaf whose occupied copper leaves a
     # large interior hole (an LED-ring annulus) may host a smaller leaf fully
     # INSIDE that hole -- see docs/plans/shaped-compose-leaf-nesting.md. The
@@ -370,9 +440,9 @@ DEFAULT_CONFIG = {
     "gnd_plane_pad_connection": "full",
     # Full bottom-layer GND plane (default on): after routing, pour a B.Cu GND
     # zone over the whole board (the ZONE_FILLER keeps it clear of rule-area
-    # keepouts like the WROOM antenna) and stitch large GND/thermal pads into it
-    # with a dense thermal-via array, so the plane connects and boxed-in center
-    # pads (e.g. the WROOM exposed pad) escape to ground.
+    # keepouts like the WROOM antenna). Ordinary SMD grounds use off-pad
+    # dogbones; in-pad thermal vias require an explicitly reviewed land pattern
+    # (currently ESP32-S3-MINI-1U and ESP32-C3-MINI-1 exposed lands).
     "gnd_plane_enabled": True,
     # Power-plane pour (default on): after routing, pour the primary power rail
     # (auto-detected as the power net with the most pads, e.g. VBUS on a USB

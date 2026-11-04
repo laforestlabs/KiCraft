@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:82deb7a9a25d3f54165529651e114503aefba584aa50dea6620aa25798cb5cef",
+  "datasheet_url": "https://lcsc.com/product-detail/DC-DC-Converters_TI_TPS61175PWPR_TPS61175PWPR_C43276.html",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TPS61175PWPR",
+  "footprint_name": "HTSSOP-14_L5.0-W4.4-P0.65-LS6.4-BL-EP",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "TPS61175PWPR",
+  "name": "tps61175",
+  "provenance": {
+    "added_at": "2026-11-03T04:48:36Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C43276"
+  },
+  "symbol_name": "TPS61175PWPR",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": null
+}

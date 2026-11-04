@@ -276,6 +276,68 @@ def _load_json(path: Path) -> dict[str, Any]:
         return json.load(f)
 
 
+def _leaf_acceptance_config_for(solved_layout: dict[str, Any]):
+    """The leaf's own acceptance thresholds, recovered from its artifact.
+
+    ``solved_layout.json`` embeds the solve config as JSON in ``config_hash``
+    (the same recovery ``_auto_pin_best_leaves`` uses), so the gate can be
+    re-evaluated with exactly the thresholds the solve ran under. With no
+    recoverable config the project defaults apply -- which keep the strict
+    ``leaf_acceptance_max_unconnected = 0``; the dataclass bare default is
+    ``None`` (gate skipped), and a missing artifact field must not silently
+    disable the gate.
+    """
+    from kicraft.autoplacer.brain.leaf_acceptance import acceptance_config_from_dict
+
+    raw = solved_layout.get("config_hash")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            cfg = json.loads(raw)
+        except ValueError:
+            cfg = None
+        if isinstance(cfg, dict):
+            return acceptance_config_from_dict(cfg)
+    from kicraft.autoplacer.config import DEFAULT_CONFIG
+
+    return acceptance_config_from_dict(DEFAULT_CONFIG)
+
+
+def _leaf_gate_accepted(
+    validation: dict[str, Any], solved_layout: dict[str, Any] | None = None
+) -> bool:
+    """The leaf acceptance gate's verdict for a persisted validation block.
+
+    ``solved_layout.json``'s ``validation.accepted`` was historically only
+    ``validate_routed_board``'s geometry verdict, which deliberately does not
+    judge unconnected nets. ``solve_subcircuits._persist_solution`` now stores
+    the contemporaneous per-round gate verdict in every pinnable layout
+    snapshot; ``pins.pin_leaf`` carries it into canonical diagnostics.
+
+    Re-deriving remains a fail-safe for retained snapshots created before that
+    custody record existed. It is correct for freshly persisted leaves and
+    avoids treating raw routing validation as a fabrication gate pass.
+    """
+    persisted = validation.get("leaf_acceptance_result")
+    if isinstance(persisted, dict) and "accepted" in persisted:
+        return bool(persisted.get("accepted"))
+    try:
+        from kicraft.autoplacer.brain.leaf_acceptance import (
+            evaluate_leaf_acceptance,
+        )
+
+        anchor = validation.get("anchor_summary")
+        config = _leaf_acceptance_config_for(solved_layout or {})
+        return bool(
+            evaluate_leaf_acceptance(
+                validation, anchor if isinstance(anchor, dict) else {}, config
+            ).accepted
+        )
+    except Exception:
+        # A malformed block must not crash the search; fall back to the
+        # persisted verdict (the pre-existing behaviour).
+        return validation.get("accepted") is True
+
+
 def _accepted_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
     accepted: list[dict[str, Any]] = []
     for artifact_dir in _discover_artifact_dirs(project_dir):
@@ -288,7 +350,7 @@ def _accepted_leaf_artifacts(project_dir: Path) -> list[dict[str, Any]]:
             continue
 
         validation = solved_layout.get("validation", {})
-        if validation.get("accepted") is True:
+        if _leaf_gate_accepted(validation, solved_layout):
             accepted.append(
                 {
                     "artifact_dir": str(artifact_dir),
@@ -366,14 +428,14 @@ def _board_only_leaf_dirs(project_dir: Path) -> list[Path]:
 def _auto_pin_best_leaves(project_dir: Path) -> None:
     """Pin each leaf to its best ACCEPTANCE-PASSING round of THIS run.
 
-    Run after ``--leaves-only`` completes. The run-start purge wipes
-    each leaf's ``round_NNNN_*`` snapshot files and ``debug.json``,
-    which leaves stale pin entries pointing at round numbers that no
-    longer exist on disk. The GUI's pin-status check then incorrectly
-    reports leaves as "pinned" when their snapshots are gone, and
-    parent-only fails to load the pinned state. Replacing the pin
-    with the best round of the just-finished leaves-only run gives
-    the user an immediately usable parent-only invocation.
+    Called after ``--leaves-only`` and before each parent compose in a full
+    hierarchical run. The run-start purge wipes each leaf's
+    ``round_NNNN_*`` snapshot files and ``debug.json``, which leaves stale pin
+    entries pointing at round numbers that no longer exist on disk. The GUI's
+    pin-status check then incorrectly reports leaves as "pinned" when their
+    snapshots are gone, and parent-only fails to load the pinned state.
+    Replacing the pin with the best round of the just-finished leaf work gives
+    the user an immediately usable parent compose.
 
     Selection applies the SAME leaf-acceptance gates the solver used to
     choose its winner. A bare ``(routed, score)`` key used to pin
@@ -680,6 +742,44 @@ def _read_stamp_drc(parent_output_json: Path) -> tuple[int, int]:
         return (int(sd.get("shorts", 0) or 0), int(sd.get("clearance", 0) or 0))
     except (TypeError, ValueError):
         return (0, 0)
+
+
+def _parent_snapshot_composition(parent_output_json: Path) -> dict[str, Any]:
+    """The composer's composition block, or {} when it never composed.
+
+    ``parent_composed`` must answer "did the leaves compose into a parent
+    board", which is a different question from "did the parent route". The
+    compose subprocess writes the snapshot only after composing, and its
+    ``state.entry_count`` is the number of child leaves it packed; the
+    composition summary is populated at the same time. A killed or rejected
+    compose leaves both empty. Reading them (rather than aliasing
+    ``parent_routed``, which a route failure sets False even though the parent
+    board exists on disk) is what keeps the round record honest.
+    """
+    try:
+        payload = _load_json(parent_output_json)
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    state = payload.get("state")
+    composition = payload.get("composition")
+    entry_count = 0
+    if isinstance(state, dict):
+        try:
+            entry_count = int(state.get("entry_count", 0) or 0)
+        except (TypeError, ValueError):
+            entry_count = 0
+    summary = ""
+    if isinstance(composition, dict):
+        summary = str(composition.get("summary") or "")
+    if entry_count <= 0 and not summary:
+        return {}
+    return {"entry_count": entry_count, "summary": summary}
+
+
+def _parent_was_composed(parent_output_json: Path) -> bool:
+    return bool(_parent_snapshot_composition(parent_output_json))
 
 
 def _routed_dirty_score(
@@ -2435,6 +2535,11 @@ def main(argv: list[str] | None = None) -> int:
 
     start_ts = time.monotonic()
     best_round: HierarchyRound | None = None
+    # The final status must not collapse to 0/0 just because no round was ever
+    # KEPT (a kept round requires a routed parent, so a routing wall zeroes the
+    # reported leaf counts). Keep the last round's record as the fallback so the
+    # completion status still reports the leaves that were accepted.
+    last_round: HierarchyRound | None = None
     resolved_config_path = args.config
     if not resolved_config_path:
         discovered_config_path = discover_project_config(project_dir)
@@ -2865,6 +2970,17 @@ def main(argv: list[str] | None = None) -> int:
                     return solve_verdict.rc_hint
                 break
 
+        # A full hierarchical run composes immediately after each leaf solve.
+        # Pin before that compose so it cannot consume the last invocation's
+        # canonical bytes when an earlier round is the selected leaf. The
+        # explicit --leaves-only/--parents-only workflow already establishes
+        # this boundary; parents-only must retain its existing pins unchanged.
+        if not args.leaves_only and not args.parents_only:
+            _auto_pin_best_leaves(project_dir)
+            from kicraft.cli._leaf_replication import finalize_leaf_replication
+
+            finalize_leaf_replication(project_dir)
+
         solve_payload = _extract_solve_json_payload(solve_stdout)
         leaf_timing_summary = _extract_leaf_timing_summary(solve_payload)
 
@@ -2917,6 +3033,7 @@ def main(argv: list[str] | None = None) -> int:
         parent_route_stderr = ""
         parent_route_elapsed_s = 0.0
         parent_routed = False
+        parent_composed = False
         parent_copper_accounting: dict[str, int] = {}
         # Initialize the validation dict here so the --leaves-only branch
         # (which never enters the parent compose block) doesn't trigger an
@@ -3042,6 +3159,9 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 pass
             parent_routed = parent_route_rc == 0
+            # Composed ≠ routed: the snapshot proves the leaves packed into a
+            # parent board even when the route (and therefore rc) failed.
+            parent_composed = _parent_was_composed(parent_output_json)
             parent_copper_accounting = _extract_parent_copper_accounting(project_dir)
             parent_board_metrics = _extract_parent_board_metrics(parent_output_json)
             parent_routed_validation = _extract_parent_routed_validation(
@@ -3230,7 +3350,7 @@ def main(argv: list[str] | None = None) -> int:
             duration_s=duration_s,
             leaf_total=len(all_leafs),
             leaf_accepted=len(accepted_leafs),
-            parent_composed=parent_routed,
+            parent_composed=parent_composed,
             parent_routed=parent_routed,
             accepted_trace_count=sum(
                 item.get("trace_count", 0) for item in accepted_leafs
@@ -3240,6 +3360,7 @@ def main(argv: list[str] | None = None) -> int:
             details=(
                 f"tier={tier}; "
                 f"leafs {len(accepted_leafs)}/{len(all_leafs)} accepted; "
+                f"parent_composed={'yes' if parent_composed else 'no'}; "
                 f"parent_route={'ok' if parent_routed else 'fail'}; "
                 f"score={score:.2f}; "
                 f"improvement_vs_best={improvement_vs_best:+.2f}; "
@@ -3268,6 +3389,7 @@ def main(argv: list[str] | None = None) -> int:
             leaf_timing_summary=leaf_timing_summary,
             leaf_score_summary=_extract_leaf_score_summary(solve_payload),
         )
+        last_round = round_result
 
         if round_result.kept:
             # (scheduler already folded score into best_score/kept_count)
@@ -3413,34 +3535,42 @@ def main(argv: list[str] | None = None) -> int:
 
     final_parent_copper_accounting = _extract_parent_copper_accounting(project_dir)
 
+    # Report the kept round when there is one, else the last round actually run:
+    # a routing wall leaves kept_count at 0, and reporting 0/0 there hides the
+    # accepted leaves and the composed parent (the 2026-10-01 handoff's error).
+    _reported = best_round or last_round
     _write_live_status(
         status_json_path,
         status_txt_path,
         phase=phase,
         rounds_total=args.rounds,
-        round_num=best_round.round_num if best_round else 0,
+        round_num=_reported.round_num if _reported else 0,
         best_score=max(scheduler.best_score, 0.0),
         kept_count=scheduler.kept_count,
         latest_score=max(scheduler.best_score, 0.0) if best_round else None,
         latest_marker="run complete",
         start_ts=start_ts,
         current_stage="complete",
-        leaf_total=best_round.leaf_total if best_round else 0,
-        leaf_accepted=best_round.leaf_accepted if best_round else 0,
-        parent_routed=best_round.parent_routed if best_round else False,
+        leaf_total=_reported.leaf_total if _reported else 0,
+        leaf_accepted=_reported.leaf_accepted if _reported else 0,
+        parent_routed=_reported.parent_routed if _reported else False,
         leaf_worker_count=effective_workers,
         leaf_workers_active=0,
         leaf_workers_queued=0,
-        leaf_workers_completed=best_round.leaf_accepted if best_round else 0,
+        leaf_workers_completed=_reported.leaf_accepted if _reported else 0,
         current_node=args.parent,
         current_parent=args.parent,
-        current_leaf=", ".join(best_round.accepted_leaf_names[:3])
-        if best_round
+        current_leaf=", ".join(_reported.accepted_leaf_names[:3])
+        if _reported
         else None,
         top_level_status=(
-            "ready" if best_round and best_round.parent_routed else "not_ready"
+            "ready" if _reported and _reported.parent_routed else "not_ready"
         ),
-        composition_status="complete",
+        composition_status=(
+            "complete"
+            if _reported and _reported.parent_composed
+            else ("parent_failed" if _reported else "complete")
+        ),
         copper_accounting=final_parent_copper_accounting,
         current_action="run complete",
         preview_paths=_discover_live_preview_paths(project_dir),

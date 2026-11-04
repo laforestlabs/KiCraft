@@ -10,10 +10,8 @@ from functools import lru_cache
 from kicraft.design.models import (
     Architecture,
     BOM,
-    MAX_BOARD_COPPER_LAYERS,
-    MIN_BOARD_COPPER_LAYERS,
     StageDiagnostic,
-    board_copper_layers,
+    is_board_stackup_obligation,
     is_power_or_ground_name,
     obligation_requires_requirement_owner,
 )
@@ -52,24 +50,62 @@ _NONFUNCTIONAL_RE = re.compile(
 _POWER_RE = re.compile(r"\b(power|vbus|vcc|vdd|3v3|5v|1v1|ldo|regulat)\b", re.I)
 # The one code that asks for a fact only the user has (next-steps plan §4 B2).
 EXTERNAL_LOAD_CURRENT_CODE = "architecture_external_load_current_unspecified"
+_EXTERNAL_LOAD_PATTERN = re.compile(
+    r"\b(?:hub\s*75|(?:addressable\s+)?led\s+(?:strip|string)|"
+    r"ws2812(?:[-\w]*)?|external\s+(?:5\s*v\s+)?(?:loads?|panel|display))\b",
+    re.I,
+)
+_CURRENT_PATTERN = re.compile(r"\b\d+(?:\.\d+)?\s*(?:a|ma)\b", re.I)
+
+
+def _text_fragments(value) -> list[str]:
+    """Keep authored fields separate when looking for a load-current statement."""
+    if isinstance(value, dict):
+        return [
+            fragment
+            for item in value.values()
+            for fragment in _text_fragments(item)
+        ]
+    if isinstance(value, list):
+        return [fragment for item in value for fragment in _text_fragments(item)]
+    return [str(value or "")]
 
 
 def external_load_budget_stated(text) -> bool:
-    """Does this text state how much current the external 5 V loads draw?
+    """Does one authored statement give an external display or LED load current?
 
-    One definition, read twice: the semantic check fires when the *slot* does not
-    state it, and the driver asks the user only when the brief does not state it
-    either. Asking for a number the user already gave would be a question nobody
-    can answer better.
+    A regulator's own ``VBUS to 3.3 V at 1 A`` rating is not a budget for a
+    HUB75 panel or LED string.  Do not flatten independently authored fields:
+    doing so makes the converter rating appear to qualify a later load name.
     """
-    return bool(
-        re.search(
-            r"(?:5v|vbus|hub75|led string|external load)[^.;]{0,80}"
-            r"\d+(?:\.\d+)?\s*(?:a|ma)\b",
-            _text(text),
-            re.I,
-        )
-    )
+    for fragment in _text_fragments(text):
+        for clause in re.split(r"[.;\n]+", fragment):
+            load_spans = [match.span() for match in _EXTERNAL_LOAD_PATTERN.finditer(clause)]
+            current_spans = [match.span() for match in _CURRENT_PATTERN.finditer(clause)]
+            if any(
+                abs(current_start - load_end) <= 80
+                or abs(load_start - current_end) <= 80
+                for load_start, load_end in load_spans
+                for current_start, current_end in current_spans
+            ):
+                return True
+    return False
+
+
+def _external_load_budget_answered(answers) -> bool:
+    """Accept a current only when it answers the external-load current question."""
+    for answer in answers or []:
+        if not isinstance(answer, dict):
+            continue
+        question = str(answer.get("text") or "")
+        if not (
+            "current" in question.casefold()
+            and re.search(r"\b(?:external|load|display|led|hub75)\b", question, re.I)
+        ):
+            continue
+        if _CURRENT_PATTERN.search(str(answer.get("answer") or "")):
+            return True
+    return False
 
 
 def _diag(code: str, severity: str, message: str, evidence: Iterable[str] = (), *, attempt=None):
@@ -148,13 +184,24 @@ def complete_intent_classification(brief: str, candidate: dict) -> dict:
     # A stated stack-up is a machine-readable board fact the builder reads to set the copper
     # layer count; prose in `constraints` reaches no gate. The brief's own words are the
     # evidence, so no default is recorded -- unlike the power-entry fallback, nothing is
-    # invented here. A row the writer already wrote is left alone.
+    # invented here. An existing row retains its ID, but cannot contradict the original brief.
     layers = requested_board_copper_layers(brief)
-    if layers is not None and board_copper_layers(completed.get("obligations")) is None:
-        completed["obligations"] = [
-            *(completed.get("obligations") or []),
-            _board_stackup_obligation(layers),
+    if layers is not None:
+        obligations = list(completed.get("obligations") or [])
+        stackup_rows = [
+            index for index, row in enumerate(obligations) if is_board_stackup_obligation(row)
         ]
+        if stackup_rows:
+            for index in stackup_rows:
+                row = obligations[index]
+                if row.get("value") != layers or row.get("relation") != "equal":
+                    obligations[index] = {
+                        **row, "relation": "equal", "value": float(layers),
+                        "minimum": None, "maximum": None,
+                    }
+        else:
+            obligations.append(_board_stackup_obligation(layers))
+        completed["obligations"] = obligations
 
     normalized_obligations = []
     for obligation in completed.get("obligations") or []:
@@ -272,6 +319,8 @@ def complete_class_spellings(candidate: dict) -> dict:
 #: The brief's spelled-out layer counts. "four-layer stack-up" and "4 layers" both read here;
 #: the generator's own trailing sentences use the first spelling.
 _STACKUP_COUNT_WORDS = {
+    "zero": 0,
+    "one": 1,
     "two": 2,
     "three": 3,
     "four": 4,
@@ -287,34 +336,30 @@ _STACKUP_COUNT_WORDS = {
     "fourteen": 14,
     "fifteen": 15,
     "sixteen": 16,
+    "hundred": 100,
 }
 
 #: A count bound to the layer noun, so an unrelated number ("under 100 x 100 mm") never reads
 #: as a stack-up. `two-layer`, `4 layer`, `four copper layers` all match.
 _STACKUP_COUNT_RE = re.compile(
-    r"\b(?P<count>\d{1,2}|"
+    r"\b(?P<count>\d+(?:\.\d+)?|"
     + "|".join(_STACKUP_COUNT_WORDS)
     + r")[\s-]+(?:copper[\s-]+)?layers?\b",
     re.IGNORECASE,
 )
 
 
-def requested_board_copper_layers(text: str) -> int | None:
-    """The copper-layer count the brief states, or ``None`` when it states none.
-
-    Only a count a printed stack-up can carry is returned, so a nonsensical request ("a
-    hundred-layer board") stays unrecorded rather than failing the build with a number the
-    writer never meant as a stack-up.
-    """
+def requested_board_copper_layers(text: str) -> int | float | None:
+    """Read the stated count, retaining unsupported counts for an honest refusal."""
     for match in _STACKUP_COUNT_RE.finditer(text or ""):
         raw = match.group("count").casefold()
-        count = int(raw) if raw.isdigit() else _STACKUP_COUNT_WORDS.get(raw)
-        if count is not None and MIN_BOARD_COPPER_LAYERS <= count <= MAX_BOARD_COPPER_LAYERS:
-            return count
+        if raw in _STACKUP_COUNT_WORDS:
+            return _STACKUP_COUNT_WORDS[raw]
+        return float(raw)
     return None
 
 
-def _board_stackup_obligation(layers: int) -> dict:
+def _board_stackup_obligation(layers: int | float) -> dict:
     return {
         "kind": "quantitative",
         "original_obligation_id": "board-copper-layers",
@@ -1254,6 +1299,89 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
         for connection in candidate.get("connections") or []
         if isinstance(connection, dict)
     ]
+    requested_functions = _text(
+        [brief, intent.get("goal"), intent.get("constraints")]
+    ).lower()
+    if re.search(
+        r"(?<!not )(?<!non-)\bbattery[- ]powered\b|"
+        r"(?<!not )\bpowered\s+(?:from|by)\s+(?:an?\s+)?batter(?:y|ies)\b",
+        requested_functions,
+    ):
+        battery_sources = {
+            name
+            for name, block in blocks_by_name.items()
+            if block.get("category") == "power"
+            and re.search(
+                r"\bbatter(?:y|ies)\b|\bli[- ]?ion\b|\blipo\b",
+                _text([name.replace("_", " "), block.get("purpose")]),
+                re.I,
+            )
+        }
+        reachable = set(battery_sources)
+        pending = list(battery_sources)
+        power_edges: dict[str, list[str]] = {}
+        for connection in connections:
+            if connection.get("signal_type") == "power":
+                power_edges.setdefault(str(connection.get("from_block")), []).append(
+                    str(connection.get("to_block"))
+                )
+        while pending:
+            for target in power_edges.get(pending.pop(), []):
+                if target in blocks_by_name and target not in reachable:
+                    reachable.add(target)
+                    pending.append(target)
+        denied_battery_operation = [
+            row for row in assumption_rows
+            if re.search(
+                r"\bno\s+battery\s+power\s+path\b|"
+                r"\bbattery\s+(?:operation|power(?:\s+path)?)\s+"
+                r"(?:is\s+)?(?:omitted|excluded|not\s+included)\b",
+                row, re.I,
+            )
+        ]
+        if not any(
+            blocks_by_name[name].get("category") in {"sense", "process", "drive", "interface"}
+            for name in reachable - battery_sources
+        ) or denied_battery_operation:
+            diagnostics.append(
+                _diag(
+                    "functional_spec_battery_operation_omitted",
+                    "repair_required",
+                    "Requested battery operation needs a battery power-source function and "
+                    "a power flow to the functions it supplies. Unspecified chemistry or "
+                    "charging does not justify omitting battery operation. Assumptions must "
+                    "not contradict that required power path.",
+                    [*sorted(battery_sources), *denied_battery_operation],
+                )
+            )
+    if re.search(r"\bambient[- ]light[- ]+(?:node|sensor|channels?)\b", requested_functions):
+        light_sources = {
+            name
+            for name, block in blocks_by_name.items()
+            if block.get("category") == "sense"
+            and re.search(
+                r"\blight\b|\bphoto(?:transistor|diode)\b|\blux\b",
+                _text([name.replace("_", " "), block.get("purpose")]),
+                re.I,
+            )
+        }
+        if not any(
+            connection.get("from_block") in light_sources
+            and connection.get("signal_type") in {"analog", "digital", "other"}
+            and blocks_by_name.get(str(connection.get("to_block")), {}).get("category")
+            in {"process", "interface", "drive"}
+            for connection in connections
+        ):
+            diagnostics.append(
+                _diag(
+                    "functional_spec_ambient_light_acquisition_omitted",
+                    "repair_required",
+                    "An ambient-light node, sensor or channel requires a light-acquisition "
+                    "function with a measurement flow to processing or an output interface; "
+                    "a processor described as an ambient-light node does not acquire light.",
+                    sorted(light_sources),
+                )
+            )
     # A connection that starts and ends at the same block states no flow between blocks.
     # Live run 6 (KC-KAHKR7, seed 23) died on one and the only feedback the model got was the
     # commit gate's bare `self-loop connection: 'DISPLAY_DRIVE' → 'DISPLAY_DRIVE'`, which
@@ -1415,6 +1543,71 @@ def _functional_spec(brief: str, upstream: dict, candidate: dict) -> list[StageD
     return diagnostics
 
 
+@lru_cache(maxsize=2)
+def _onboard_relay_coil_rating(voltage: float) -> tuple[str, float] | None:
+    """Read the selected canonical construction's reviewed nominal coil rating."""
+    from kicraft.design.actuator_circuits import RELAY_OUTPUT_LOWERER
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.part_identity import physical_inventory_record
+
+    # Select the actual lowerer's supply variant; the contact rails are not
+    # substitutes for its coil supply. Unsupported parameters are rejected by
+    # the construction validator, not assigned an invented relay rating here.
+    ports = {"vmotor": "SUPPLY", "gnd": "GND"}
+    for index in (1, 2):
+        ports[f"control_{index}"] = f"CONTROL_{index}"
+        for contact in ("common", "normally_open", "normally_closed"):
+            ports[f"relay_{index}_{contact}"] = f"CONTACT_{index}_{contact}"
+    artifact = RELAY_OUTPUT_LOWERER.build(CircuitRequirement(
+        id="relay_rating_witness", sheet="RELAY", role="driver",
+        family="relay-output", parameters={"channel_count": 2, "motor_voltage_v": voltage}, ports=ports,
+    ))
+    if artifact is None:
+        return None
+    group = next(group for group in artifact.groups if group.role == "relay")
+    record = physical_inventory_record(
+        mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
+    )
+    if record is None or not isinstance(record.operating_limits.get("coil_voltage_v"), (int, float)):
+        raise RuntimeError("Canonical on-board relay has no reviewed coil voltage")
+    return record.identity, float(record.operating_limits["coil_voltage_v"])
+
+
+def _onboard_relay_supply_diagnostics(requirement: dict, rails: dict) -> list[StageDiagnostic]:
+    from kicraft.design.actuator_circuits import RELAY_OUTPUT_LOWERER
+
+    if requirement.get("family") not in RELAY_OUTPUT_LOWERER.families:
+        return []
+    net = (requirement.get("ports") or {}).get("vmotor")
+    voltage = rails.get(net)
+    if type(voltage) not in (int, float):
+        return []
+    try:
+        selected_voltage = float((requirement.get("parameters") or {}).get("motor_voltage_v", 5.0))
+    except (TypeError, ValueError):
+        return []
+    selected = _onboard_relay_coil_rating(selected_voltage)
+    if selected is None:
+        return []
+    identity, rating = selected
+    if abs(voltage - rating) <= 0.05:
+        return []
+    evidence = [
+        f"requirement {requirement.get('id')!r} on sheet {requirement.get('sheet')!r}",
+        f"ports.vmotor={net!r}; declared rail voltage={voltage!r} V",
+        f"canonical on-board relay {identity!r} nominal coil voltage={rating:g} V",
+    ]
+    return [_diag(
+        "architecture_relay_coil_supply_mismatch",
+        "repair_required",
+        "The declared relay coil supply conflicts with the canonical on-board relay rating. "
+        "Repair the actual supply binding and its physical source while preserving the declared "
+        "requirements and voltages; isolated contact nets are separate from the coil supply. "
+        + "; ".join(evidence),
+        evidence,
+    )]
+
+
 def architecture_power_requirement_diagnostics(
     upstream: dict, candidate: dict
 ) -> list[StageDiagnostic]:
@@ -1426,8 +1619,11 @@ def architecture_power_requirement_diagnostics(
         if isinstance(block, dict)
     }
     rails = candidate.get("rail_voltages") or {}
+    declared_rails = _architecture_rail_voltages(candidate)
+    conversions = _conversion_source_obligations(upstream)
     diagnostics = []
     for requirement in requirements:
+        diagnostics.extend(_onboard_relay_supply_diagnostics(requirement, declared_rails))
         family = _norm_token(requirement.get("family") or "")
         generic_power = family in {
             "powerinput",
@@ -1436,12 +1632,21 @@ def architecture_power_requirement_diagnostics(
             "directbatteryrail",
         }
         distribution = family in {"powerdistribution", "directbatteryrail"}
+        power_conversions = [
+            identifier
+            for identifier in sorted(_requirement_obligation_ids(requirement) & conversions.keys())
+            if _is_power_conversion(conversions[identifier])
+        ]
         if not generic_power and requirement.get("role") not in {"power_input", "regulator"}:
             continue
         ports = requirement.get("ports") or {}
         port_aliases = {_norm_token(key): net for key, net in ports.items()}
         input_net = port_aliases.get("input") or port_aliases.get("vin")
         output_net = port_aliases.get("output") or port_aliases.get("vout")
+        output_nets = [output_net] if output_net else [
+            net for key, net in port_aliases.items()
+            if re.fullmatch(r"(?:output|vout)[1-9][0-9]*", key)
+        ]
         ground_net = port_aliases.get("gnd") or port_aliases.get("ground")
         parameters = requirement.get("parameters") or {}
         input_voltage = parameters.get("input_voltage", rails.get(input_net))
@@ -1451,12 +1656,43 @@ def architecture_power_requirement_diagnostics(
             and type(output_voltage) in (int, float)
             and abs(input_voltage - output_voltage) > 0.05
         )
-        incomplete_conversion = voltage_change and (
-            generic_power
-            or not input_net
-            or not output_net
-            or not ground_net
-            or len({input_net, output_net, ground_net}) != 3
+        # This checks declared ownership, not hardware capability. A same-voltage
+        # path may be protection or a fused distribution, not an invented
+        # regulator. Different voltages still need a physical regulator.
+        non_converter_family = bool(re.search(
+            r"(?:connector|socket|terminal|protection|distribution|batteryrail|"
+            r"powersink|powerinput|fuse)",
+            family,
+        ))
+        physical_converter = (
+            requirement.get("role") == "regulator"
+            and bool(family or requirement.get("exact_part"))
+            and not generic_power
+            and not non_converter_family
+        )
+        physical_path = (
+            bool(family or requirement.get("exact_part"))
+            and not generic_power
+            and not re.search(
+                r"(?:connector|socket|terminal|batteryrail|powersink|powerinput)",
+                family,
+            )
+        )
+        typed_voltage_change = any(
+            len(inputs := _TYPED_VOLTAGE_RE.findall(str(conversions[identifier].get("input_kind") or ""))) == 1
+            and (output := _typed_output_voltage(conversions[identifier])) is not None
+            and abs(float(inputs[0]) - output) > 0.05
+            for identifier in power_conversions
+        )
+        owns_path = physical_converter if voltage_change or typed_voltage_change else physical_path
+        distinct_ports = (
+            input_net and ground_net and output_nets
+            and len({input_net, ground_net, *output_nets}) == len(output_nets) + 2
+        )
+        incomplete_conversion = (
+            bool(power_conversions) and (not owns_path or not distinct_ports)
+        ) or (
+            voltage_change and (generic_power or not distinct_ports)
         )
         if not distribution and not incomplete_conversion:
             continue
@@ -1472,6 +1708,13 @@ def architecture_power_requirement_diagnostics(
                 for name in requirement.get("functional_blocks") or []
             ),
         ]
+        if power_conversions:
+            evidence.extend(
+                f"committed power conversion {identifier!r}: "
+                f"input_kind={conversions[identifier].get('input_kind')!r}; "
+                f"output_kind={conversions[identifier].get('output_kind')!r}"
+                for identifier in power_conversions
+            )
         if voltage_change:
             evidence.extend(
                 [
@@ -1482,11 +1725,12 @@ def architecture_power_requirement_diagnostics(
             )
         if incomplete_conversion:
             repair = (
-                "Voltage conversion must have a typed regulator requirement with a physical "
-                "converter family (and exact part where known), distinct input/output/GND ports "
-                "before BOM. Keep the declared voltages and all functional ownership; split "
-                "the external connector from its converter if they are separate hardware. "
-                "A generic power-input requirement does not own a registered regulator."
+                "A committed power path needs a typed physical owner with distinct "
+                "input/output/GND ports before BOM. Different voltages require a regulator; "
+                "an unchanged-voltage path may belong to the actual protection or fused "
+                "distribution circuit. A source connector alone does not implement that path. "
+                "Preserve declared voltages, exact identities and functional ownership; "
+                "reuse the existing physical owner when it implements the full function."
             )
             code = "architecture_unowned_power_conversion"
         else:
@@ -1590,7 +1834,8 @@ def _requirement_supply_rails(requirement: dict) -> list[str]:
     from kicraft.design.architecture_intent import _supply_port_name
 
     for port, net in (requirement.get("ports") or {}).items():
-        if _supply_port_name(str(port).casefold()) and str(net) not in rails:
+        if (str(port).casefold() in {"input", "input_positive"} or
+                _supply_port_name(str(port).casefold())) and str(net) not in rails:
             rails.append(str(net))
     return rails
 
@@ -2024,45 +2269,35 @@ def _corrected_load_supply_rows(
     return out
 
 
-#: Reviewed converter families by the rail each one produces, for a load that needs a rail of its
-#: own. Every entry is a recipe the library carries with the divider its own data specifies, so the
-#: pipeline picks a rail it can actually build and never invents a voltage: the highest one that
-#: fits inside the part's rated range (a DRV8833's 2.7-10.8 V vm picks 10.0 V, the MP1584 instance).
-_REVIEWED_RAIL_FAMILIES: tuple[tuple[str, float], ...] = (
-    # Highest first: the selection takes the first entry that fits inside the part's rated range.
-    # Only families whose part the offline catalog stocks at both JLCPCB assembly and the lcsc.com
-    # retail storefront belong here -- a rail that cannot be ordered is not a rail (the 10 V
-    # MP1584EN looked ideal until §9.26 reported 0 retail stock and the BOM could not commit).
-    ("ap63205-5v", 5.0),
-    ("tps54331-adjustable", 3.3),
+# Component-stage qualification: fixed output and half-open input envelope.
+_REVIEWED_RAIL_FAMILIES: tuple[tuple[str, float, float, float], ...] = (
+    ("ylptec-k7803m-1000r3", 3.3, 6.0, 30.0),
 )
 
-#: The reviewed adjustable buck the pipeline uses when a load needs its own regulated rail
-#: (3.5-28 V input, adjustable output). Named here, not chosen per design: it is the library's
-#: general-purpose converter family, and the assumption records the choice.
-_OVER_RATED_REGULATOR_FAMILY = "tps54331-adjustable"
 
+def _selected_lowerer_realizes_class(requirement: dict, component_class: str) -> bool:
+    """Prove the class from this exact construction, including optional support parts."""
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.part_identity import (
+        lowerer_witnesses_physical_class,
+        physical_inventory_record,
+        reviewed_record_realizes_class,
+    )
 
-def _lowerer_family_witnesses_class(family: str, component_class: str) -> bool:
-    """Whether a registered lowerer of this family builds the demanded class itself.
-
-    A family that constructs the class out of its own reviewed parts is a realization, not a
-    substitute: `switch-input` emits the SW_Push symbol on the tactile-button footprint for a
-    reset button. The witness table is the reviewed list of those relations
-    (``kicraft.design.part_identity.lowerer_witnesses_physical_class``), so a family that merely
-    looks switch-like -- a generic `pin-header` standing in for a demanded JST-XH connector --
-    stays refused.
-    """
-    from kicraft.design.lowering import registered_lowerers
-    from kicraft.design.part_identity import lowerer_witnesses_physical_class
-
-    key = str(family or "").strip().casefold()
-    if not key:
+    try:
+        artifact = lower_requirement(requirement)
+    except ValueError:
         return False
+    if artifact is None:
+        return False
+    if lowerer_witnesses_physical_class(artifact.lowerer_id, component_class):
+        return True
     return any(
-        lowerer_witnesses_physical_class(registered.lowerer_id, component_class)
-        for registered in registered_lowerers()
-        if key in {name.casefold() for name in registered.families}
+        reviewed_record_realizes_class(
+            physical_inventory_record(mpn=group.mpn, symbol=group.symbol, footprint=group.footprint),
+            component_class,
+        )
+        for group in artifact.groups
     )
 
 
@@ -2070,7 +2305,7 @@ def _selected_recipe_realizes_class(candidate: dict, requirement: dict, componen
     """Whether the recipe selected for this requirement emits a reviewed part of the class.
 
     A recipe family that constructs the class out of its own reviewed parts is a realization, not
-    a substitute -- the same standard :func:`_lowerer_family_witnesses_class` applies to a
+    a substitute -- the same standard :func:`_selected_lowerer_realizes_class` applies to a
     lowerer. Live walkthrough (usb-pd-trigger, 2026-09-29): the ``pd_trigger`` requirement
     claimed a ``switch`` and the selected ``ch224k-pd-selectable@1`` emits the reviewed
     SS13D07VG4 selector, but the audit knew only the raw carrier list and refused the writer's
@@ -2155,7 +2390,7 @@ def _architecture_obligation_family_mismatch(candidate: dict) -> list[StageDiagn
                 part.identity for part in carriers
             }:
                 continue
-            if _lowerer_family_witnesses_class(family, component_class):
+            if _selected_lowerer_realizes_class(requirement, component_class):
                 continue
             diagnostics.append(
                 _diag(
@@ -2208,15 +2443,16 @@ def _family_output_voltages() -> dict[str, set[float]]:
 
 
 def _retarget_unbuildable_regulators(candidate: dict) -> list[str]:
-    """Point a regulator whose family has no instance at its output voltage at the reviewed one.
+    """Select a reviewed family at the already-requested voltage when identity is not fixed.
 
-    A requirement can name an adjustable family and a voltage that family is not registered for
-    (live walkthrough 2026-09-25: `tps54331-adjustable` at 10.0 V, whose only instance is 3.3 V).
-    The resolver then falls back to the instance's default, so the rail's feedback divider comes
-    out sized for the wrong voltage and §9.32 refuses the commit. The reviewed family at that
-    voltage is the same design intent, built from parts whose own data sizes it correctly.
+    A family can have no reviewed recipe instance at the voltage the requirement already
+    specifies.  A different family may be used only when it has an instance at that same
+    voltage and the requirement did not name an exact part.  An unavailable requested voltage,
+    or a protected exact identity, is a contract refusal rather than permission to rewrite the
+    requested rail or output parameter.
     """
     retargeted: list[str] = []
+    rails = _architecture_rail_voltages(candidate)
     for requirement in candidate.get("requirements") or []:
         if not isinstance(requirement, dict) or str(requirement.get("role") or "") != "regulator":
             continue
@@ -2226,13 +2462,13 @@ def _retarget_unbuildable_regulators(candidate: dict) -> list[str]:
             # The derived shape states the same fact as the rail this part's output port feeds.
             for port, net in (requirement.get("ports") or {}).items():
                 port_key = str(port).casefold()
-                if port_key.startswith(("output", "vout", "sw")) or port_key == "out":
-                    target = (candidate.get("rail_voltages") or {}).get(str(net))
+                if port_key.startswith(("output", "vout")) or port_key == "out":
+                    target = rails.get(str(net))
                     break
         if not isinstance(target, (int, float)):
             continue
         family = str(requirement.get("family") or "")
-        if (family, float(target)) in _REVIEWED_RAIL_FAMILIES:
+        if any(family == row[0] and float(target) == row[1] for row in _REVIEWED_RAIL_FAMILIES):
             continue
         family_key = family.strip().casefold()
         carried = _family_output_voltages().get(family_key)
@@ -2243,71 +2479,35 @@ def _retarget_unbuildable_regulators(candidate: dict) -> list[str]:
             continue
         if any(abs(voltage - float(target)) <= 0.05 for voltage in carried):
             continue
+        inputs = _requirement_supply_rails(requirement)
+        if len(inputs) != 1 or inputs[0] not in rails:
+            continue
+        input_voltage = rails[inputs[0]]
         reviewed = next(
-            (row for row in _REVIEWED_RAIL_FAMILIES if abs(row[1] - float(target)) <= 0.05),
+            (row for row in _REVIEWED_RAIL_FAMILIES
+             if row[1] == float(target) and row[2] <= input_voltage < row[3]),
             None,
         )
-        clamped = reviewed is None
-        if reviewed is None:
-            # No orderable converter produces this voltage: the rail moves to the nearest one the
-            # library can build, and its consumers keep working (a motor driver's range usually
-            # spans it), rather than the design naming a rail nothing can supply.
-            reviewed = min(
-                _REVIEWED_RAIL_FAMILIES, key=lambda row: abs(row[1] - float(target))
-            )
+        if reviewed is None or any(
+            str(requirement.get(key) or "").strip()
+            for key in ("exact_part", "manufacturer", "exact_manufacturer")
+        ):
+            continue
         requirement["family"] = reviewed[0]
-        # The exact part the requirement named belonged to the family it was on. Left in place it
-        # reads as an explicitly named part on a family that does not carry it, and the resolver
-        # refuses exactly that ("protected variant 'MP1584EN' has no verified recipe", live
-        # walkthrough 2026-09-25) -- which blocks the whole resolution, not just this requirement.
-        if str(requirement.get("exact_part") or "").strip():
-            requirement["exact_part"] = None
-        if clamped:
-            requirement["parameters"] = {**parameters, "output_voltage": reviewed[1]}
-            for port, net in (requirement.get("ports") or {}).items():
-                port_key = str(port).casefold()
-                if port_key.startswith(("output", "vout", "sw")) or port_key == "out":
-                    rail_voltages = dict(candidate.get("rail_voltages") or {})
-                    rail_voltages[str(net)] = reviewed[1]
-                    candidate["rail_voltages"] = rail_voltages
         retargeted.append(str(requirement.get("id") or ""))
     return retargeted
 
 
 def complete_over_rated_supply(candidate: dict) -> dict:
-    """Give a load part the rail it can actually run on, then resolve what the pass wrote.
-
-    The resolver pass runs on every candidate, not only on the ones this pass edited: a
-    requirement can inherit a part its family no longer carries (live walkthrough, 2026-09-25:
-    `exact_part: MP1584EN` beside `family: ap63205-5v`), which the resolver refuses as a
-    protected variant with no recipe and which blocks the whole resolution.
-    """
+    """Give an out-of-range load its own rail, then resolve the added converter."""
     return _resolve_added_requirements(_complete_load_supply_rails(candidate))
 
 
 def _resolve_added_requirements(completed: dict) -> dict:
-    """Run the recipe resolver, clearing a part the resolver says its family cannot carry."""
+    """Run the recipe resolver without weakening a protected exact identity."""
     try:
-        from kicraft.design import models as _models
-        from kicraft.design.recipes import resolve_architecture_recipes
         from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
 
-        blocking = resolve_architecture_recipes(
-            _models.Architecture.model_validate(completed), None
-        ).blocking
-        blocked_ids = {
-            str(row.requirement_id)
-            for row in blocking
-            if getattr(row, "code", "") == "unsupported_protected_variant"
-        }
-        if blocked_ids:
-            for row in completed.get("requirements") or []:
-                if (
-                    isinstance(row, dict)
-                    and str(row.get("id") or "") in blocked_ids
-                    and str(row.get("exact_part") or "").strip()
-                ):
-                    row["exact_part"] = None
         return apply_architecture_recipe_resolution(completed).model_dump(exclude_none=True)
     except Exception:  # a resolution problem is the stage's to report, not this pass's
         return completed
@@ -2337,21 +2537,188 @@ def _generated_regulator_requirement_id(source: object, requirements: list[objec
             return identifier
         index += 1
 
+def _reviewed_external_usb_vbus_rails(candidate: dict) -> set[str]:
+    """Return VBUS nets that reviewed USB interfaces receive from the host.
+
+    A USB receptacle's VBUS is a board entry, not a load merely because it has a
+    consumer-side port.  USB-UART recipes that integrate their own reviewed
+    receptacle have the same ownership.  The determination follows reviewed
+    interface identities and recipe contents, never a rail's spelling.
+    """
+    from kicraft.design.part_identity import (
+        physical_inventory_record,
+        reviewed_inventory,
+        reviewed_part,
+    )
+    from kicraft.design.recipes import registered_recipes
+
+    usb_receptacle_families = {
+        part.family
+        for part in reviewed_inventory()
+        if part.family.startswith("usb-") and part.family.endswith("-receptacle")
+    }
+    integrated_bridge_families: dict[str, set[str]] = {}
+    for registered in registered_recipes():
+        definition = getattr(registered, "definition", registered)
+        if not any(port.name == "vbus" for port in definition.ports):
+            continue
+        has_receptacle = any(
+            (record := physical_inventory_record(
+                mpn=part.mpn, symbol=part.symbol, footprint=part.footprint
+            )) is not None
+            and record.family in usb_receptacle_families
+            for part in definition.parts
+            if part.role == "connector"
+        )
+        family = str(definition.family or "").casefold()
+        if has_receptacle and family:
+            integrated_bridge_families.setdefault(family, set()).add(
+                str(definition.exact_part or "").casefold()
+            )
+
+    rails: set[str] = set()
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        ports = requirement.get("ports") or {}
+        vbus = ports.get("vbus")
+        if not isinstance(vbus, str) or not vbus:
+            continue
+        family = str(requirement.get("family") or "").casefold()
+        exact = str(requirement.get("exact_part") or "").casefold()
+        reviewed = reviewed_part(exact) if exact else None
+        direct_receptacle = (
+            str(requirement.get("role") or "").casefold() == "connector"
+            and (family in usb_receptacle_families or (
+                reviewed is not None and reviewed.family in usb_receptacle_families
+            ))
+        )
+        integrated_exact = integrated_bridge_families.get(family)
+        integrated_bridge = integrated_exact is not None and (
+            not exact or exact in integrated_exact
+        )
+        if direct_receptacle or integrated_bridge:
+            rails.add(vbus)
+    return rails
+
+
+def _declared_external_input_rails(candidate: dict) -> set[str]:
+    """Return explicitly owned board-entry rails, without inferring consumer ownership."""
+    entries = _reviewed_external_usb_vbus_rails(candidate)
+    for name, row in ((candidate.get("power") or {}).get("rails") or {}).items():
+        if isinstance(row, dict) and "from" in row and row.get("from") is None:
+            entries.add(str(name))
+    voltages = candidate.get("rail_voltages") or {}
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict) or str(requirement.get("role") or "") != "power_input":
+            continue
+        ports = requirement.get("ports") or {}
+        named_entries = {
+            str(net)
+            for port, net in ports.items()
+            if str(port).casefold() in {"positive", "input", "input_positive", "vin", "vbus"}
+        }
+        if named_entries:
+            entries.update(named_entries)
+            continue
+        # A reviewed generic input connector can expose numbered contacts rather
+        # than a semantic ``positive`` port. Its declared non-ground rail is
+        # still explicit provenance; arbitrary consumer ports are not.
+        for net in ports.values():
+            try:
+                if abs(float(voltages.get(str(net)))) > 0.05:
+                    entries.add(str(net))
+            except (TypeError, ValueError):
+                continue
+    return entries
+
+
+
+def _declared_upstream_supply_source(candidate: dict, rail: str) -> str | None:
+    """Return the one explicit board-entry source upstream of ``rail``.
+
+    A regulated load may only be moved to a new rail when its existing supply has a
+    concrete ancestry.  In particular, a USB VBUS rail elsewhere on the board is
+    not evidence that a battery-powered load may use VBUS.  ``None`` intentionally
+    covers a missing producer, a branch, and a cycle; those cases need an
+    architecture repair rather than an invented converter input.
+    """
+    upstream: dict[str, set[str]] = {}
+    for name, row in ((candidate.get("power") or {}).get("rails") or {}).items():
+        if isinstance(row, dict) and isinstance(row.get("from"), str) and row["from"]:
+            upstream.setdefault(str(name), set()).add(str(row["from"]))
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict) or str(requirement.get("role") or "") != "regulator":
+            continue
+        ports = requirement.get("ports") or {}
+        outputs = {
+            str(net)
+            for port, net in ports.items()
+            if str(port).casefold().startswith(("output", "vout")) or str(port).casefold() == "out"
+        }
+        inputs = {
+            str(net)
+            for port, net in ports.items()
+            if str(port).casefold() in {"input", "input_positive", "vin", "vin_positive"}
+        }
+        if len(outputs) != 1 or len(inputs) != 1:
+            continue
+        upstream.setdefault(next(iter(outputs)), set()).update(inputs)
+
+    board_entries = _declared_external_input_rails(candidate)
+
+    current = str(rail)
+    seen: set[str] = set()
+    while current not in seen:
+        seen.add(current)
+        sources = upstream.get(current)
+        if not sources:
+            return current if current in board_entries else None
+        if len(sources) != 1:
+            return None
+        current = next(iter(sources))
+    return None
+
+
+def _underpowered_supply_rails(candidate: dict, rails: dict[str, float]) -> set[str]:
+    """Return rails below a reviewed load's minimum supply voltage."""
+    from kicraft.design.part_identity import reviewed_part, reviewed_supply_voltage_limits
+
+    underpowered: set[str] = set()
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        exact = str(requirement.get("exact_part") or "").strip()
+        record = reviewed_part(exact) if exact else None
+        if record is None:
+            continue
+        minima = [
+            float(low)
+            for _label, low, _high in reviewed_supply_voltage_limits(record)
+            if low is not None
+        ]
+        if not minima:
+            continue
+        # Records can publish alternative operating modes (for example CH340's
+        # 3.3 V and 5 V modes). Below every minimum is unambiguously underpowered;
+        # below only one mode's minimum is not.
+        required = min(minima)
+        underpowered.update(
+            rail
+            for rail in _requirement_supply_rails(requirement)
+            if rails.get(rail) is not None and rails[rail] < required
+        )
+    return underpowered
+
 
 def _complete_load_supply_rails(candidate: dict) -> dict:
-    """Give an over-rated load part its own regulated rail, before it is diagnosed.
+    """Give a reviewed load outside its supply range its own regulated rail.
 
-    Live walkthrough (2026-09-25, seed 37): the brief states an 18 V DC input and a DRV8833
-    (``vm`` rated 2.7-10.8 V) driving the actuators. The reviewed library has no dual-H-bridge
-    rated for 18 V, so no part satisfies the stated input, and every correction round restated
-    the impossibility: three drafts, no candidate. Catching the fault is not enough -- the rail
-    the part can run on has to exist.
-
-    So the pipeline adds it: a reviewed adjustable buck on the offending rail, its output at a
-    voltage inside the part's rated range, the part's supply port rebound to that rail, and an
-    assumption ending "(defaulted)" that names the choice. The higher input voltage stays the
-    board input only. Nothing is invented about the *load*: its current and voltage stay as the
-    brief and the writer stated them.
+    The compiler may add a reviewed converter only when the existing load supply
+    has one declared upstream board-entry source.  That preserves a battery
+    load's power ancestry instead of silently moving it to an unrelated USB
+    rail.  Nothing is invented about the load: its current, voltage, exact part,
+    and original conversion obligations stay as the writer stated them.
     """
     from kicraft.design.part_identity import (
         reviewed_part,
@@ -2366,20 +2733,19 @@ def _complete_load_supply_rails(candidate: dict) -> dict:
             (
                 "regulator requirement(s) "
                 + ", ".join(sorted(retargeted))
-                + " moved to the reviewed converter family registered at that output voltage, "
-                "because the named family has no instance there (defaulted)"
+                + " moved to the reviewed converter family registered at the already-requested "
+                "output voltage, because the named family has no instance there (defaulted)"
             ),
         ]
     rails = _architecture_rail_voltages(candidate)
     if not rails:
         return candidate
+    underpowered_rails = _underpowered_supply_rails(candidate, rails)
     requirements = candidate.get("requirements") or []
     for index, requirement in enumerate(requirements):
         if not isinstance(requirement, dict):
             continue
         role = str(requirement.get("role") or "")
-        if role not in {"driver", "analog_block"}:
-            continue
         exact = str(requirement.get("exact_part") or "").strip()
         record = reviewed_part(exact) if exact else None
         if record is None:
@@ -2392,29 +2758,51 @@ def _complete_load_supply_rails(candidate: dict) -> dict:
         if not limits:
             continue
         allowed = max(high for _label, _low, high in limits)
+        minimum = min(
+            (float(low) for _label, low, _high in limits if low is not None),
+            default=None,
+        )
         logic_rails = _logic_rails(candidate)
-        supplied = [
-            rail for rail in _requirement_supply_rails(requirement) if rails.get(rail) is not None
-        ]
-        over = [rail for rail in supplied if rails[rail] > allowed]
-        # Riding the logic rail is the other half of the same fault: a load part on the rail that
-        # powers the MCU takes its current out of the logic budget, and that is what the writer
-        # reaches for once an over-rated rail is refused (seen live, 2026-09-25).
-        on_logic = [rail for rail in supplied if rail in logic_rails]
-        if not over and not on_logic:
+        supplied = _requirement_supply_rails(requirement)
+        if len(supplied) != 1 or supplied[0] not in rails:
             continue
-        if over:
-            source_rail = max(over, key=lambda rail: rails[rail])
+        over = [rail for rail in supplied if rails[rail] > allowed]
+        under = [
+            rail for rail in supplied if minimum is not None and rails[rail] < minimum
+        ]
+        # A drive or analog load riding the logic rail needs its own supply even when its
+        # voltage limit permits that rail; other roles are adapted only for an actual
+        # reviewed over/undervoltage violation.
+        on_logic = (
+            [rail for rail in supplied if rail in logic_rails]
+            if role in {"driver", "analog_block"}
+            else []
+        )
+        if not over and not under and not on_logic:
+            continue
+        if under:
+            upstream_sources = {
+                _declared_upstream_supply_source(candidate, rail) for rail in under
+            }
+            if len(upstream_sources) != 1 or None in upstream_sources:
+                continue
+            source_rail = next(iter(upstream_sources))
+        elif over:
+            if len(over) != 1:
+                continue
+            source_rail = over[0]
         else:
             sources = [
                 rail
                 for rail, volts in rails.items()
                 if rail not in logic_rails and rail not in on_logic and abs(float(volts)) > 0.0
             ]
-            if not sources:
+            if len(sources) != 1:
                 continue
-            source_rail = max(sources, key=lambda rail: rails[rail])
-        if any(
+            source_rail = sources[0]
+        if source_rail not in rails:
+            continue
+        if not under and any(
             any(
                 high is not None and high >= rails[source_rail]
                 for _label, _low, high in reviewed_supply_voltage_limits(alternative)
@@ -2422,13 +2810,17 @@ def _complete_load_supply_rails(candidate: dict) -> dict:
             for alternative in reviewed_parts_for_feature(str(requirement.get("family") or ""))
         ):
             continue
-        label, low, _high = min(limits, key=lambda row: row[2])
-        # A rail the library can build: the highest reviewed family that fits the part's range.
+        if under:
+            label, low, _high = max(limits, key=lambda row: float(row[1] or 0.0))
+        else:
+            label, low, _high = min(limits, key=lambda row: row[2])
+        # Select only a construction qualified for both input and load voltages.
         reviewed = next(
             (
                 (family, volts)
-                for family, volts in _REVIEWED_RAIL_FAMILIES
+                for family, volts, vin_min, vin_max in _REVIEWED_RAIL_FAMILIES
                 if float(low or 0.0) <= volts <= allowed
+                and vin_min <= rails[source_rail] < vin_max
             ),
             None,
         )
@@ -2442,11 +2834,13 @@ def _complete_load_supply_rails(candidate: dict) -> dict:
         sheet_name = re.sub(r"[^A-Z0-9]+", " ", str(requirement.get("id") or "load").upper()).strip() + " REGULATOR"
         completed = dict(candidate)
         completed["requirements"] = [dict(row) if isinstance(row, dict) else row for row in requirements]
-        offending = {*over, *on_logic}
+        offending = {*over, *under, *on_logic}
         completed["requirements"][index]["ports"] = {
             key: (new_rail if str(value) in offending else value)
             for key, value in (requirement.get("ports") or {}).items()
         }
+        if requirement.get("supply") in offending:
+            completed["requirements"][index]["supply"] = new_rail
         completed.setdefault("sheets", [])
         completed["sheets"] = [dict(row) for row in completed.get("sheets") or []]
         completed["sheets"].append(
@@ -2476,15 +2870,17 @@ def _complete_load_supply_rails(candidate: dict) -> dict:
         completed["rail_voltages"] = rail_voltages
         if isinstance(completed.get("power_nets"), list):
             completed["power_nets"] = [*completed["power_nets"], new_rail]
-        # The writer's own statements are now false: they say this part runs on the source
-        # rail, and (for the load) that the actuators are fed at the input voltage. A candidate
-        # whose prose contradicts its bindings is not reviewable, so the claims are corrected
-        # here before the disclosure below states the whole picture in one row.
+        # The writer's own statements are now false: they say this part runs on the
+        # under- or over-rated rail. A candidate whose prose contradicts its bindings is
+        # not reviewable, so the claims are corrected before the disclosure below states
+        # the whole picture in one row.
         tokens = _load_part_tokens(requirement, exact)
-        # The rail the part was wrongly on is the one its claims have to stop naming; for an
-        # over-rated part that is the source rail, for a part riding the logic rail it is that
-        # logic rail, and the converter's input is the source rail either way.
-        wrong_rail = source_rail if over else (on_logic[0] if on_logic else source_rail)
+        # The rail the part was wrongly on is the source rail for an over-rated part,
+        # the logic rail for a deliberately separated drive, and its existing rail for
+        # an under-rated part whose upstream source feeds the added converter.
+        wrong_rail = (
+            source_rail if over else (under[0] if under else (on_logic[0] if on_logic else source_rail))
+        )
         wrong_voltage = float(rails[wrong_rail])
         completed["assumptions"] = _corrected_load_supply_rows(
             completed.get("assumptions") or [],
@@ -2521,35 +2917,39 @@ def _complete_load_supply_rails(candidate: dict) -> dict:
             for row in completed.get("sheets") or []
         ]
         refresh_touched_rail_nets(completed, {wrong_rail, new_rail, source_rail})
-        completed["assumptions"] = [
-            *(completed.get("assumptions") or []),
-            (
+        if under:
+            disclosure = (
+                f"{exact} runs from a regulated {voltage:g} V rail ({new_rail}) because its "
+                f"reviewed {label} minimum is {minimum:g} V, while {wrong_rail} is "
+                f"{wrong_voltage:g} V; {converter_id} steps the declared upstream "
+                f"{source_rail} source down, and the existing {wrong_rail} rail remains "
+                "unchanged (defaulted)"
+            )
+        else:
+            disclosure = (
                 f"{exact} runs from a regulated {voltage:g} V rail ({new_rail}) because its "
                 f"reviewed {label} limit is {allowed:g} V and no reviewed part for "
                 f"{requirement.get('family')!r} is rated for {source_rail} "
                 f"({rails[source_rail]:g} V); {converter_id} steps {source_rail} down, and the "
                 f"{source_rail} input stays the board input only (defaulted)"
-            ),
+            )
+        completed["assumptions"] = [
+            *(completed.get("assumptions") or []),
+            disclosure,
         ]
-        # The added requirement is a recipe requirement like any other, and the recipe's owned
-        # parts -- an adjustable regulator's feedback divider, its compensation network -- exist
-        # only after the resolver's pass. Without it the parts unit drafts them from scratch,
-        # which is how the 10 V motor rail ended up carrying the 3.3 V divider and failing §9.32
-        # (live walkthrough, 2026-09-25). This is the same pass the slot already went through, so
-        # every existing requirement keeps its own resolution.
+        # Resolve the added requirement with the same recipe pass as the existing slot.
         return completed
-    # A declared load rail that nothing generates is the same fault one step later: the writer
-    # stated the voltage and bound the part, and left the converter out (live draft,
-    # 2026-09-25: MOTOR_VIN at 10.8 V, `from: null`, nothing producing it, zero diagnostics).
+    # A declared load rail without a generator may be completed only from the one
+    # explicit board-entry source.  Consumer rails never establish source ownership.
     generators = _rail_generators(candidate)
-    input_rail = _board_input_rail(rails)
-    for rail_name, voltage in (candidate.get("rail_voltages") or {}).items():
-        rail_name = str(rail_name)
-        try:
-            rail_voltage = float(voltage)
-        except (TypeError, ValueError):
-            continue
-        if rail_name in generators or _rail_needs_no_generator(rail_name, rail_voltage, rails):
+    external_input_rails = _declared_external_input_rails(candidate)
+    for rail_name, rail_voltage in rails.items():
+        if (
+            rail_name in underpowered_rails
+            or rail_name in generators
+            or rail_name in external_input_rails
+            or _rail_needs_no_generator(rail_name, rail_voltage)
+        ):
             continue
         consumers = [
             requirement
@@ -2557,20 +2957,28 @@ def _complete_load_supply_rails(candidate: dict) -> dict:
             if isinstance(requirement, dict)
             and rail_name in _requirement_supply_rails(requirement)
         ]
-        if not consumers or input_rail is None or input_rail == rail_name:
-            continue
-        # The rail is built by a family the library carries: the nearest reviewed output voltage,
-        # which is also the rail's voltage (a declared 10.8 V has no reviewed instance; 10.0 V
-        # does, and it is inside any part that accepts 10.8 V).
-        converter_family, rail_voltage = min(
-            _REVIEWED_RAIL_FAMILIES, key=lambda row: abs(row[1] - rail_voltage)
+        input_rails = sorted(
+            source
+            for source in external_input_rails
+            if source != rail_name
         )
+        if not consumers or len(input_rails) != 1 or input_rails[0] not in rails:
+            continue
+        input_rail = input_rails[0]
+        # A compiler-added regulator may implement the declared rail only at its
+        # exact reviewed voltage.  Nearest-voltage replacement would silently
+        # rewrite the author's electrical requirement.
+        reviewed = next(
+            (row for row in _REVIEWED_RAIL_FAMILIES
+             if row[1] == rail_voltage and row[2] <= rails[input_rail] < row[3]),
+            None,
+        )
+        if reviewed is None:
+            continue
+        converter_family = reviewed[0]
         converter_id = _generated_regulator_requirement_id(rail_name, requirements)
         sheet_name = re.sub(r"[^A-Z0-9]+", " ", rail_name.upper()).strip() + " REGULATOR"
         completed = dict(candidate)
-        rail_voltages = dict(completed.get("rail_voltages") or {})
-        rail_voltages[rail_name] = rail_voltage
-        completed["rail_voltages"] = rail_voltages
         completed["sheets"] = [dict(row) for row in completed.get("sheets") or []]
         completed["sheets"].append(
             {
@@ -2698,26 +3106,10 @@ def _rail_generators(candidate: dict) -> set[str]:
     return generators
 
 
-def _rail_needs_no_generator(name: str, voltage: float, rails: dict) -> bool:
-    """Ground, a host-supplied socket rail, or the board's own input rail."""
+def _rail_needs_no_generator(name: str, voltage: float) -> bool:
+    """Only ground is inherently source-free; inputs need explicit ownership."""
     key = str(name).strip().casefold()
-    if key in {"gnd", "ground", "0v"} or abs(float(voltage)) <= 0.05:
-        return True
-    if key in {"vbus", "+5v", "5v"} and abs(float(voltage) - 5.0) <= 0.5:
-        return True
-    others = [float(v) for rail, v in rails.items() if str(rail).strip().casefold() != key]
-    return bool(others) and float(voltage) >= max(others)
-
-
-def _board_input_rail(rails: dict) -> str | None:
-    candidates = [
-        (str(rail), float(volts))
-        for rail, volts in rails.items()
-        if abs(float(volts)) > 0.05
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda row: row[1])[0]
+    return key in {"gnd", "ground", "0v"} or abs(float(voltage)) <= 0.05
 
 
 def _load_current_disclosed_on(text: str, rail: str) -> bool:
@@ -2863,15 +3255,12 @@ def _architecture_declared_contact_unnamed(candidate: dict) -> list[StageDiagnos
     shipped has one. Naming the contact here costs one redraft instead of the whole run.
     """
     offenders: list[str] = []
-    owned = _requirements_with_curated_ownership()
     for requirement in candidate.get("requirements") or []:
         if not isinstance(requirement, dict):
             continue
-        # Only a requirement no curated recipe or lowerer owns reaches BOM as a declared
-        # interface; for any other the draft's declared ports are replaced by the owner's own
-        # published contract, so refusing them here would refuse a design that commits fine.
-        if str(requirement.get("family") or "").strip().casefold() in owned:
-            continue
+        # An explicit authored claim remains an auditable physical-contact
+        # assertion even when a curated recipe/lowerer owns support circuitry.
+        # Ownership cannot make a missing pin number observable.
         ports = requirement.get("declared_ports")
         if not isinstance(ports, list) or not ports:
             claim = requirement.get("declared_interface")
@@ -2902,8 +3291,116 @@ def _architecture_declared_contact_unnamed(candidate: dict) -> list[StageDiagnos
     ]
 
 
+_TYPED_VOLTAGE_RE = re.compile(
+    r"(?<![\w.])(\d+(?:\.\d+)?)\s*(?:v|volts?)(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _typed_output_voltage(obligation: dict) -> float | None:
+    """Return one explicit voltage from a typed conversion output, never a prose inference."""
+    matches = _TYPED_VOLTAGE_RE.findall(str(obligation.get("output_kind") or ""))
+    if len(matches) != 1:
+        return None
+    return float(matches[0])
+
+
+def _conversion_source_obligations(upstream: dict) -> dict[str, dict]:
+    """Read original conversion rows from committed upstream state by stable source id."""
+    conversions: dict[str, dict] = {}
+    for slot in ("intent", "functional_spec"):
+        for obligation in (upstream.get(slot) or {}).get("obligations") or []:
+            if not isinstance(obligation, dict) or obligation.get("kind") != "conversion":
+                continue
+            identifier = str(obligation.get("original_obligation_id") or "")
+            if identifier:
+                conversions.setdefault(identifier, obligation)
+    return conversions
+
+
+def _is_power_conversion(obligation: dict) -> bool:
+    """Recognize typed power-to-power conversion, not signal or data conversion."""
+    return all(
+        re.search(r"\b(?:power|supply|rail)\b", str(obligation.get(key) or ""), re.I)
+        for key in ("input_kind", "output_kind")
+    )
+
+
+def _requirement_obligation_ids(requirement: dict) -> set[str]:
+    """Read a draft's source-id ownership before or after canonical restoration."""
+    identifiers = {str(value) for value in requirement.get("obligation_ids") or []}
+    identifiers.update(
+        str(obligation.get("original_obligation_id"))
+        for obligation in requirement.get("obligations") or []
+        if isinstance(obligation, dict) and obligation.get("original_obligation_id")
+    )
+    return identifiers
+
+
+def _requirement_output_evidence(requirement: dict, candidate: dict) -> list[tuple[float, str]]:
+    """Pair numeric outputs with diagnostics; rail labels are never voltage evidence."""
+    evidence: list[tuple[float, str]] = []
+    parameters = requirement.get("parameters") or {}
+    voltage = parameters.get("output_voltage")
+    if isinstance(voltage, (int, float)) and not isinstance(voltage, bool):
+        evidence.append((float(voltage), f"parameters.output_voltage={float(voltage):g} V"))
+    rails = _architecture_rail_voltages(candidate)
+    for port, net in (requirement.get("ports") or {}).items():
+        key = str(port).casefold()
+        if not (key.startswith(("output", "vout")) or key == "out"):
+            continue
+        rail_voltage = rails.get(str(net))
+        if rail_voltage is not None:
+            evidence.append((rail_voltage, f"ports.{port}={net!r} at {rail_voltage:g} V"))
+    return evidence
+
+
+
+def architecture_conversion_output_diagnostics(
+    upstream: dict, candidate: dict
+) -> list[StageDiagnostic]:
+    """Reject a conversion whose owner's numeric output contradicts its original typed request."""
+    conversions = _conversion_source_obligations(upstream)
+    if not conversions:
+        return []
+    offenders: list[str] = []
+    for requirement in candidate.get("requirements") or []:
+        if not isinstance(requirement, dict):
+            continue
+        for identifier in sorted(_requirement_obligation_ids(requirement) & conversions.keys()):
+            obligation = conversions[identifier]
+            requested = _typed_output_voltage(obligation)
+            if requested is None:
+                continue
+            evidence = _requirement_output_evidence(requirement, candidate)
+            conflicting = [
+                description
+                for voltage, description in evidence
+                if abs(voltage - requested) > 0.05
+            ]
+            if conflicting:
+                offenders.append(
+                    f"requirement {requirement.get('id')!r} owns conversion {identifier!r}: "
+                    f"original output_kind={obligation.get('output_kind')!r} requests "
+                    f"{requested:g} V; " + "; ".join(conflicting)
+                )
+    if not offenders:
+        return []
+    return [
+        _diag(
+            "architecture_conversion_output_mismatch",
+            "repair_required",
+            "A typed conversion obligation's original requested output voltage conflicts with "
+            "the implementing requirement. Preserve the original output and select a converter "
+            "that implements it; do not relabel the rail or discard an exact identity.",
+            sorted(offenders),
+        )
+    ]
+
+
 def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
     diagnostics = architecture_power_requirement_diagnostics(upstream, candidate)
+    diagnostics.extend(architecture_conversion_output_diagnostics(upstream, candidate))
     diagnostics.extend(_architecture_supply_over_rating(candidate))
     diagnostics.extend(_architecture_drive_on_logic_rail(upstream, candidate))
     diagnostics.extend(_architecture_obligation_family_mismatch(candidate))
@@ -3008,9 +3505,27 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
         for connection in functional_connections
         if isinstance(connection, dict) and connection.get("signal_type") == "power"
     }
+    load_descriptions = {
+        str(block.get("name") or "").lower(): _text(
+            [block.get("name"), block.get("purpose")]
+        ).lower().replace("_", " ").replace("-", " ")
+        for block in (upstream.get("functional_spec") or {}).get("blocks") or []
+        if isinstance(block, dict)
+    }
+    hub75_targets = {
+        target for target in functional_power_targets
+        if "hub75" in load_descriptions.get(target, target)
+    }
+    led_strip_targets = {
+        target for target in functional_power_targets
+        if re.search(
+            r"\b(?:led|ws2812)\b.*\b(?:strip|string)\b",
+            load_descriptions.get(target, target.replace("_", " ").replace("-", " ")),
+        )
+    }
     functional_powers_external = any(
-        "hub75" in target or "display" in target for target in functional_power_targets
-    ) and any("led" in target for target in functional_power_targets)
+        panel != strip for panel in hub75_targets for strip in led_strip_targets
+    )
     board_powers_external = functional_powers_external or bool(
         re.search(
             r"board supplies power to both|power both from board",
@@ -3018,15 +3533,17 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
             re.I,
         )
     )
-    current_context = _text([candidate, upstream.get("_stage_answers", [])])
-    has_5v_load_budget = external_load_budget_stated(current_context)
+    stage_answers = upstream.get("_stage_answers", [])
+    has_5v_load_budget = external_load_budget_stated(candidate) or _external_load_budget_answered(
+        stage_answers
+    )
     if board_powers_external and not has_5v_load_budget:
         diagnostics.append(
             _diag(
                 EXTERNAL_LOAD_CURRENT_CODE,
                 "repair_required",
                 "Board-powered external loads have no maximum 5V current budget.",
-                ["hub75", "led string", "5v"],
+                sorted(hub75_targets | led_strip_targets) or [answer_text],
             )
         )
     external_load_currents = [
@@ -3212,7 +3729,7 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
             producer
             for producer in producers
             if producer["rated_output_current_a"] is not None
-            and producer["rated_output_current_a"] >= 1.0
+            and producer["rated_output_current_a"] >= 0.5
             and producer["sheet"] in declared_sheets
             and not re.search(r"\b(?:mcu|esp32)\b", producer["sheet"], re.I)
         ]
@@ -3221,7 +3738,7 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                 _diag(
                     "architecture_mcu_regulator_incomplete",
                     "repair_required",
-                    "ESP32-S3 needs its 3.3V rail generated by a regulator the recipe rates for >=1A "
+                    "ESP32-S3 needs its 3.3V rail generated by a regulator the recipe rates for >=0.5A "
                     "on a sheet of its own.",
                     [
                         "esp32-s3",
@@ -3231,7 +3748,7 @@ def _architecture(upstream: dict, candidate: dict) -> list[StageDiagnostic]:
                             f"{producer['rated_output_current_a']}"
                             for producer in producers
                         ),
-                        ">=1a",
+                        ">=0.5a",
                         "separate regulator sheet",
                     ],
                 )
@@ -3421,7 +3938,7 @@ def _shared_wiring_gate_diagnostics(
         ("wiring_gate_9_11", check_net_coverage(bom)),
         ("wiring_gate_9_14", check_inter_sheet_nets_realized(architecture, bom)),
         ("wiring_gate_9_15", check_no_dangling_signal_nets(architecture, bom)),
-        ("wiring_gate_9_29", check_mcu_programming_access(bom)),
+        ("wiring_gate_9_29", check_mcu_programming_access(bom, architecture=architecture)),
         # §9.42's model-owned half: only the wiring graph can prove a declared
         # interface whose implementing component came from the model's BOM
         # groups. Recipe/lowerer-owned declared interfaces are proven at BOM

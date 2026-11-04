@@ -96,9 +96,12 @@ _TRANSPORT_FAILURE_EXC = (
 )
 _PROVIDER_FAILURE_EXC = (requests.exceptions.HTTPError,)
 NONINTERACTIVE_DEFAULTS_INSTRUCTION = (
-    "This is a non-interactive evaluation. Apply sensible electrical defaults, "
-    "record each in assumptions ending '(defaulted)', and return a complete draft "
-    "without asking questions."
+    "This is a non-interactive evaluation. Apply sensible electrical defaults "
+    "only to details the brief leaves unspecified. Preserve every explicit "
+    "requirement, including requested voltages, features, quantities and named parts; "
+    "an automatic answer never authorizes weakening the brief. "
+    "Record each default in assumptions ending '(defaulted)', and return a complete "
+    "draft without asking questions."
 )
 
 
@@ -167,6 +170,8 @@ def _record_attempt_facts(
     fallback_reason: str | None = None,
     schema_error: str | None = None,
 ) -> None:
+    if call_mode == "native":
+        return
     usage = (facts.usage or {}) if facts is not None else {}
     errors = error_facts or {}
     _record_stage_attempt(
@@ -933,7 +938,7 @@ def _observe_attempt(
     aggregate_round: int | None = None,
 ) -> None:
     """Emit one sanitized, normalized attempt record to an opt-in observer."""
-    if observer is None:
+    if observer is None or call_mode == "native":
         return
     settings = getattr(client, "s", None)
     signature = rejection_signature
@@ -3835,6 +3840,7 @@ def drive_stage(
                 for p in full_bom.get("parts", [])
             ],
             "recipe_ownership": full_bom.get("recipe_ownership") or [],
+            "lowerer_ownership": full_bom.get("lowerer_ownership") or [],
         }
     if stage in {"bom", "wiring"}:
         try:
@@ -3946,6 +3952,36 @@ def drive_stage(
         tools=tools,
         executor=executor,
     )
+    native_candidate = None
+    # Native drafts enter the ordinary decoder, diagnostics, review and commit
+    # path. Do not replace a committed slot or ignore an explicit revision.
+    if (
+        stage in {"functional_spec", "architecture"}
+        and not prompt_state.get(stage)
+        and not answers
+        and instruction in (None, "", NONINTERACTIVE_DEFAULTS_INSTRUCTION)
+        and isinstance(prompt_state.get("intent"), dict)
+    ):
+        try:
+            from kicraft.design.supported_architecture import (
+                supported_architecture_intent,
+                supported_functional_spec,
+            )
+
+            if stage == "functional_spec":
+                native_candidate = supported_functional_spec(prompt_state["intent"])
+            elif isinstance(prompt_state.get("functional_spec"), dict):
+                native_candidate = supported_architecture_intent(
+                    prompt_state["intent"], prompt_state["functional_spec"]
+                )
+            if native_candidate is not None:
+                native_raw = json.dumps(native_candidate)
+        except Exception as exc:
+            return operational_failure(
+                "stage_contract_failed",
+                f"native {stage} construction failed: {exc}",
+            )
+
 
     def _debug_context(raw_response: str) -> dict:
         return {
@@ -4090,6 +4126,9 @@ def drive_stage(
     expanded_component_count = 0
     emitted_collection_count = 0
     provider_call_budget = max_retries + 1
+    if native_candidate is not None:
+        # A supported native draft gets one pass, not a hidden provider retry.
+        provider_call_budget = 0
     provider_ok = False
     schema_ok = False
     semantic_repair_attempted = False
@@ -4128,7 +4167,7 @@ def drive_stage(
         )
 
     for attempt in range(max_retries + 1 + _MAX_DESIGN_CONTRACT_REPAIR_ROUNDS):
-        if attempts >= provider_call_budget:
+        if attempts >= provider_call_budget and native_candidate is None:
             break
         if escalation_pending:
             profile_name = getattr(getattr(active_client, "s", None), "escalation_profile", "")
@@ -4172,7 +4211,26 @@ def drive_stage(
         call_messages = messages
         call_response_format = response_format
         transport_terminal = False
-        while True:
+        native_attempt = native_candidate is not None
+        if native_candidate is not None:
+            from .client import _StreamingCollectionGuard
+
+            guard = _StreamingCollectionGuard(policy.collection_bounds)
+            _, collection_limit = guard.consume(native_raw)
+            facts = ProviderFacts(
+                raw=native_raw, finish="collection_limit" if collection_limit else "stop",
+                rounds=None, tool_calls=None, cost_usd=0.0, had_content=True,
+                loop_detected=False, collection_limit=collection_limit,
+                loop_abort_reason=None, collection_counts=guard.counts(),
+            )
+            emitted_collection_count = max(facts.collection_counts.values(), default=0)
+            raw = native_raw
+            finish = facts.finish
+            had_content = True
+            current_facts = facts
+            current_call_mode = "native"
+            native_candidate = None
+        while not native_attempt:
             if attempts >= provider_call_budget:
                 transport_terminal = True
                 break
@@ -4378,6 +4436,16 @@ def drive_stage(
         schema_error = outcome.payload.get("failure_kind") in _SCHEMA_REJECTION_KINDS
         schema_error_detail = outcome.payload.get("schema_error")
         kind = outcome.payload.get("failure_kind")
+        if native_attempt and outcome.kind not in {"candidate", "questions"}:
+            last = {
+                "failure_kind": kind or "invalid_schema",
+                "error": _FAILURE_KIND_ERROR.get(kind, kind or "invalid_schema"),
+                "schema_error": schema_error_detail,
+                "diagnostic": outcome.payload.get("diagnostic"),
+                "audit_findings": outcome.payload.get("audit_findings") or [],
+                "collection_limit": collection_limit,
+            }
+            break
         if outcome.kind in {"candidate", "questions"}:
             obj = outcome.payload["candidate"]
             expanded_component_count = outcome.payload["expanded_component_count"]
@@ -5276,6 +5344,8 @@ def drive_stage(
             "repair_adopted": semantic_repair_adopted,
             "diagnostics": diagnostic_rows + _commit_rejection_diagnostics(out),
         }
+        if native_attempt:
+            break
         if progress:
             progress(
                 {

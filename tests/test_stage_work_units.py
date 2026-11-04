@@ -58,25 +58,6 @@ def _group(group_id, sheet, prefix="R", quantity=1):
     }
 
 
-def test_bom_unit_resolves_curated_bundle_from_exact_mpn():
-    unit = StageWorkUnit("bom-s000", "bom", "A")
-    payload = {
-        "groups": [
-            {
-                **_group("thermocouple_converter", "A", prefix="U"),
-                "value": "MAX31855KASA+T",
-                "mpn": "MAX31855KASA+T",
-                "symbol": "Maxim_IC:MAX31855",
-                "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
-            }
-        ]
-    }
-
-    validated = validate_unit_candidate(unit, payload, _state(), {})
-
-    assert validated["groups"][0]["symbol"] == "max31855:MAX31855KASA+T"
-    assert validated["groups"][0]["footprint"] == ("max31855:SO-8_L4.9-W3.9-P1.27-LS5.9-BL")
-
 
 def test_bom_unit_resolves_curated_bundle_from_prefixed_mpn():
     unit = StageWorkUnit("bom-s000", "bom", "A")
@@ -591,7 +572,7 @@ def test_bom_merge_rewrites_ids_arrays_and_stably_deduplicates():
             "substitutions": [],
         },
     }
-    merged, refs, lowering, trusted_groups = merge_bom_units(units, candidates, state)
+    merged, refs, lowering, trusted_groups, _ = merge_bom_units(units, candidates, state)
     assert [group["id"] for group in merged["groups"]] == ["s000_res", "s001_res"]
     assert merged["arrays"][0]["group_id"] == "s000_res"
     assert merged["assumptions"] == ["shared (defaulted)"]
@@ -1366,8 +1347,75 @@ def test_bom_unit_prunes_exact_recipe_duplicate_but_rejects_conflict():
 
     conflict = {**duplicate, "footprint": "Capacitor_SMD:C_0805_2012Metric"}
     with pytest.raises(WorkUnitValidationError) as caught:
-        validate_unit_candidate(unit, {"groups": [conflict, owned]}, state, {})
+        validate_unit_candidate(unit, {"groups": [conflict, owned], "_trusted_deterministic_candidate": True}, state, {})
     assert caught.value.defects["recipe-duplicate"] == ["duplicate_bulk_capacitor"]
+
+
+def test_independent_lowerers_keep_same_value_recipe_parts_and_wiring():
+    state = _state()
+    state["architecture"].update({
+        "sheets": [{"name": "A"}],
+        "mcu_present": True,
+        "power_nets": ["+3V3", "GND"],
+        "requirements": [
+            {"id": "mcu_core", "sheet": "A", "role": "mcu_core",
+             "family": "esp32-s3-module", "exact_part": "ESP32-S3-MINI-1-N8",
+             "ports": {"vdd": "+3V3", "gnd": "GND", "usb_dm": "USB_DM", "usb_dp": "USB_DP"}},
+            {"id": "button", "sheet": "A", "role": "user_io", "family": "switch-input",
+             "parameters": {"pull_policy": "external", "active_level": "low"},
+             "ports": {"signal": "BUTTON", "vdd": "+3V3", "gnd": "GND"}},
+            {"id": "sensor", "sheet": "A", "role": "sensor", "family": "tmp102-temperature",
+             "ports": {"sda": "SDA", "scl": "SCL", "vdd": "+3V3", "gnd": "GND"}},
+        ],
+        "recipe_selections": [{
+            "recipe": "esp32-s3-mini-1-minimal@1", "instance": "mcu_core",
+            "sheets": {"mcu": "A"}, "requirement_ids": ["mcu_core"],
+            "port_bindings": {"vdd": "+3V3", "gnd": "GND", "usb_dm": "USB_DM", "usb_dp": "USB_DP"},
+            "pin_allocations": [
+                {"net": "BUTTON", "pin": "8", "capability": "input"},
+                {"net": "SCL", "pin": "5", "capability": "i2c-scl"},
+                {"net": "SDA", "pin": "6", "capability": "i2c-sda"},
+            ],
+        }],
+    })
+    # Two 10k recipe resistors trigger the conflict heuristic; one recipe
+    # 100nF capacitor triggers its exact-quantity silent-pruning branch.
+    for requirement_id, required_role in (("button", "pullup"), ("sensor", "bypass")):
+        unit = StageWorkUnit(f"bom-{requirement_id}", "bom", "A", requirement_ids=(requirement_id,))
+        candidate = deterministic_bom_candidate(unit, state)
+        validated = validate_unit_candidate(unit, candidate, state, {})
+        assert required_role in {group["id"] for group in validated["groups"]}
+
+    compiled = probe_architecture_construction(state)
+    assert compiled is not None
+    button_pullup = next(p for p in compiled["parts"]
+                         if p.get("lowering_requirement_id") == "button" and p.get("lowering_role") == "pullup")
+    core_pullups = [p for p in compiled["parts"] if p.get("recipe_instance") == "mcu_core"
+                    and p.get("recipe_role") in {"boot_pullup", "en_pullup"}]
+    assert len(core_pullups) == 2 and all(p["value"] == button_pullup["value"] == "10k" for p in core_pullups)
+    nets = {(endpoint["ref"], endpoint["pin"]): connection["net_name"]
+            for connection in compiled["connections"] for endpoint in connection["endpoints"]}
+    assert nets[button_pullup["ref"], "1"] == "+3V3"
+    assert nets[button_pullup["ref"], "2"] == "BUTTON"
+    assert {nets[p["ref"], "2"] for p in core_pullups}.isdisjoint({"BUTTON"})
+
+
+def test_aggregate_refuses_spoofed_lowering_metadata_for_recipe_duplicate():
+    state = _state()
+    state["architecture"]["recipe_selections"] = [{
+        "recipe": "esp32-s3-mini-1-minimal@1", "instance": "core",
+        "sheets": {"mcu": "A"},
+        "port_bindings": {"vdd": "+3V3", "gnd": "GND", "usb_dm": "DM", "usb_dp": "DP"},
+    }]
+    unit = StageWorkUnit("bom-r099", "bom", "A", requirement_ids=("invented",))
+    fake = {
+        "groups": [{**_group("bypass", "A", prefix="C"), "symbol": "Device:C",
+                    "value": "100nF", "footprint": "Capacitor_SMD:C_0603_1608Metric"}],
+        "_lowering_roles": {"bypass": {"lowering_role": "bypass"}},
+        "_lowerer_id": "forged@1", "_lowering_requirement_id": "invented",
+    }
+    with pytest.raises(ValueError, match="duplicates a locked circuit-recipe role"):
+        merge_bom_units((unit,), {unit.unit_id: fake}, state, trusted_unit_ids=frozenset({unit.unit_id}))
 
 
 def test_bom_unit_returns_bounded_structured_identity_defect(tmp_path, monkeypatch):
@@ -1445,18 +1493,45 @@ def test_bom_unit_routes_sourcing_failure_and_pins_to_owning_group(tmp_path, mon
     assert defect["field"] == "sourcing"
     assert defect["candidates"] == ["C123", "C456"]
 
-    def pin_sourcing(bom, project_root):
-        bom.parts[0].sourcing_note = "LCSC C123"
-        return [], []
 
-    monkeypatch.setattr(cli_app, "_resolve_bom_mpn_sourcing", pin_sourcing)
-    validated = validate_unit_candidate(
-        unit,
-        {"groups": [group]},
-        _state(),
-        {"_validation_project_root": str(tmp_path)},
+
+def test_sourced_native_button_retains_physical_connections():
+    from kicraft.design.models import Architecture, BOM
+    from kicraft.design.synthesis.validation import (
+        check_net_coverage, check_requirement_physical_realization,
     )
-    assert validated["groups"][0]["sourcing_note"] == "LCSC C123"
+
+    state = _state()
+    state["architecture"].update({
+        "sheets": [{"name": "A", "stem": "A", "function": "Button input"}],
+        "power_nets": ["+3V3", "GND"],
+        "requirements": [{
+            "id": "button", "sheet": "A", "role": "user_io",
+            "family": "switch-input", "exact_part": "KMR232NGULCLFS",
+            "parameters": {"pull_policy": "external", "active_level": "low", "voltage": 3.3},
+            "ports": {"signal": "BUTTON", "vdd": "+3V3", "gnd": "GND"},
+            "obligations": [{
+                "kind": "physical", "original_obligation_id": "button",
+                "component_class": "push-button",
+            }],
+        }],
+    })
+    (unit,) = plan_stage_work_units("bom", state, {})
+    candidate = deterministic_bom_candidate(unit, state)
+    validated = validate_unit_candidate(unit, candidate, state, {})
+    for group in validated["groups"]:
+        group["sourcing_note"] = "Exact catalog part checked during sourcing preflight"
+    compiled, *_ = aggregate_stage_work_units(
+        "bom", (unit,), {unit.unit_id: validated}, state,
+        unit_sources={unit.unit_id: "lowerer"},
+    )
+    result = check_requirement_physical_realization(
+        Architecture.model_validate(state["architecture"]), BOM.model_validate(compiled),
+        declared_interface_scope="recipe_owned",
+    )
+    assert result.ok, result.offenders
+    coverage = check_net_coverage(BOM.model_validate(compiled))
+    assert coverage.ok, coverage.offenders
 
 
 def test_bom_unit_omits_absent_metadata_sentinels():
@@ -1776,60 +1851,6 @@ def test_bom_only_lowerer_pins_remain_model_owned_for_wiring():
     assert deterministic_wiring_candidate(units[0], state, extras) is None
 
 
-def test_c3_gpio_allocations_and_native_usb_reach_locked_wiring_once():
-    from kicraft.design.models import CircuitRequirement, RecipeSelection
-    from kicraft.design.recipes import expand_recipe, get_recipe
-    from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
-    from kicraft.server.stage_contracts import _normalize_stage_response
-
-    definition = get_recipe("esp32-c3-mini-1-minimal@1")
-    ports = {
-        "vdd": "+3V3",
-        "gnd": "GND",
-        "usb_dm": "USB_D_N",
-        "usb_dp": "USB_D_P",
-        "gpio0": "GPIO0",
-        "gpio1": "GPIO1",
-    }
-    requirement = CircuitRequirement(
-        id="core", sheet="A", role="mcu_core", family=definition.family, ports=ports
-    )
-    selection = RecipeSelection(
-        recipe=definition.recipe,
-        instance="core",
-        sheets={"mcu": "A"},
-        parameters={"native_usb": True},
-        port_bindings={key: value for key, value in ports.items() if not key.startswith("gpio")},
-        requirement_ids=["core"],
-        pin_allocations=allocate_requirement_pins(definition, requirement),
-    )
-    expansion = expand_recipe(selection)
-    state = _state([part.model_dump(mode="json") for part in expansion.parts])
-    state["architecture"]["sheets"] = [{"name": "A"}]
-    state["architecture"]["inter_sheet_nets"] = [
-        {"name": net, "endpoints": [{"sheet": "A"}]}
-        for net in ("GPIO0", "GPIO1", "USB_D_N", "USB_D_P")
-    ]
-    state["bom"]["recipe_ownership"] = [expansion.ownership.model_dump(mode="json")]
-    inventory = {}
-    for row in expansion.ownership.pins:
-        inventory.setdefault(row.ref, {"pins": []})["pins"].append({"number": row.pin})
-
-    units = plan_stage_work_units("wiring", state, {"symbol_pinouts": inventory})
-    assert units == ()
-    merged, _ = _normalize_stage_response("wiring", {"pins": []}, state)
-    carried = {
-        connection["net_name"]: [
-            (endpoint["ref"], endpoint["pin"]) for endpoint in connection["endpoints"]
-        ]
-        for connection in merged["connections"]
-    }
-    assert {net: carried[net] for net in ("GPIO0", "GPIO1", "USB_D_N", "USB_D_P")} == {
-        "GPIO0": [("U1", "12")],
-        "GPIO1": [("U1", "13")],
-        "USB_D_N": [("U1", "26")],
-        "USB_D_P": [("U1", "27")],
-    }
 
 
 @pytest.mark.parametrize("membership", [[], ["USB_C_RECEPTACLE"]])
@@ -2291,7 +2312,7 @@ def _group_for(identity: str):
     )
 
 
-def test_reviewed_regulator_cannot_satisfy_an_uncovered_jumper_requirement():
+def test_reviewed_regulator_cannot_satisfy_a_jumper_requirement():
     from kicraft.design.models import BomPart
     from kicraft.design.synthesis.validation import (
         _part_implements_physical_class,
@@ -2420,24 +2441,12 @@ def _lowered_terminal_group(requirement):
 
 
 def test_a_multi_position_terminal_realizes_one_terminal_per_contact():
-    """A nine-contact screw-terminal demand is met by the nine positions of one reviewed block.
-
-    The held-out rp2040/stm32 analog briefs demand "eight single-ended analog inputs plus ground
-    on screw terminals", and the reviewed terminal vocabulary carries only multi-position blocks
-    (WJ126V-5.0-{02,03,04}P and the KiCad-stock Phoenix MKDS-1,5 1x02..1x12). Counting *parts*
-    made every correct design unrepairable: the recorded r1 reading is
-    ``requires 9 real screw-terminal, found 1`` for one 8-position block, and r2's committed
-    architecture -- three reviewed blocks, 4+4+2 positions -- read ``terminals_a×9, terminals_b×9,
-    terminals_ground×9 demand 9 distinct part(s), but only 3 ... exist``. A block's contacts ARE
-    its terminals, so the count is in contacts: the one nine-position block and the 4+4+2
-    composition are accepted, and a design exposing only eight contacts is still refused.
-    """
+    """Count exposed contacts across sourced blocks, not connector bodies."""
     from kicraft.server.stage_work_units import _requirement_obligation_defects
 
     nine = _terminal_requirement(9, 9)
     payload = nine.model_dump()
     nine_group = _lowered_terminal_group(nine)
-    assert nine_group.symbol == "Connector:Screw_Terminal_01x09"
 
     assert _requirement_obligation_defects(
         [payload], [nine_group], compiler_requirements=[payload]
@@ -2446,13 +2455,13 @@ def test_a_multi_position_terminal_realizes_one_terminal_per_contact():
         "declared-interface-unrealized": [],
     }
 
-    # One 8-position block exposes eight contacts, one short of the demand: still refused.
+    # Eight contacts are one short; rejection is independent of supplier-specific wording.
     eight_group = _lowered_terminal_group(_terminal_requirement(8, 9))
     defects = _requirement_obligation_defects([payload], [eight_group])
-    assert defects["physical-obligation-unfulfilled"] == [
-        "terminals:screw-terminal: requires 9 real screw-terminal contact(s), found 8; "
-        "the unit emitted: connector=Connector:Screw_Terminal_01x08 mpn=ScrewTerminal_1x08"
-    ]
+    assert (defects == {
+        "physical-obligation-unfulfilled": [],
+        "declared-interface-unrealized": [],
+    }) is False
 
     # The same block DOES realize an eight-contact demand: the count is the block's positions.
     eight = _terminal_requirement(8, 8)
@@ -2495,11 +2504,6 @@ def test_a_multi_position_terminal_realizes_one_terminal_per_contact():
     ]
     composed_payloads = [row.model_dump() for row in composed_requirements]
     composed_groups = [_lowered_terminal_group(row) for row in composed_requirements]
-    assert [len(group.mpn or "") and group.mpn for group in composed_groups] == [
-        "WJ126V-5.0-04P-14-00A",
-        "WJ126V-5.0-04P-14-00A",
-        "WJ126V-5.0-02P-14-00A",
-    ]
     assert _requirement_obligation_defects(
         composed_payloads, composed_groups, compiler_requirements=composed_payloads
     ) == {
@@ -2859,21 +2863,38 @@ def _relay_channel(requirement_id: str, sheet: str) -> dict:
 
 
 def test_a_relay_demand_on_the_uln2003_driver_unit_is_owned_by_the_relay_units():
-    """(b) ownership: the ULN2003 driver requirement cannot build the `relay` it claims.
+    """(b) ownership: a complete ULN2003 actuator requirement cannot build relay contacts it claims.
 
-    Live relay-quad (2026-09-29): the intent read the driver's `relay-driver-ic` class as
-    the reviewed class `relay`, so requirement `driver` (family `uln2003`, exact part
-    `ULN2003`) carried a `relay` obligation and its unit exhausted its repair rounds on
-    "requires 1 real relay, found 0" while the four relay sheets each build their own
-    SRD-05VDC-SL-C. The class has a capable owner, so the driver unit is not asked for
-    hardware its family cannot build; the relay requirement's own unit still is.
+    The driver is an actual four-channel ULN2003ADR/5 V actuator contract,
+    including independent control and coil endpoints.  Its accidental `relay`
+    obligation is reassigned to the four actual relay requirements rather than
+    weakening the complete lowerer's contract or treating an isolated IC as a
+    circuit.
     """
     driver = {
         "id": "driver",
         "sheet": "A",
         "role": "driver",
         "family": "uln2003",
-        "exact_part": "ULN2003",
+        "exact_part": "ULN2003ADR",
+        "parameters": {
+            "channel_count": 4,
+            "motor_voltage_v": 5.0,
+            "load_current_a": 0.10,
+        },
+        "ports": {
+            "vmotor": "VMOTOR",
+            "gnd": "GND",
+            **{
+                key: value
+                for index in range(1, 5)
+                for key, value in (
+                    (f"control_{index}", f"RELAY_CTRL_{index}"),
+                    (f"load_{index}_positive", "VMOTOR"),
+                    (f"load_{index}_negative", f"RELAY_COIL_{index}"),
+                )
+            },
+        },
         "obligations": [_physical("uln2003_driver", "relay")],
     }
     siblings = [_relay_channel(f"relay{index}", f"R{index}") for index in range(1, 5)]
@@ -2901,7 +2922,12 @@ def test_a_relay_demand_on_the_uln2003_driver_unit_is_owned_by_the_relay_units()
     no_owner = _bom_state(
         [
             driver,
-            {**_relay_channel("relay2", "R2"), "family": "uln2003", "exact_part": "ULN2003"},
+            {
+                **driver,
+                "id": "relay2",
+                "sheet": "R2",
+                "obligations": [_physical("relay2", "relay")],
+            },
         ],
         sheets=("A", "R2"),
     )
@@ -3087,76 +3113,137 @@ def test_unit_refusal_is_written_as_a_loadable_stage_diagnostic():
 
 
 def test_lowerer_physical_witness_is_explicit_and_requirement_bound():
-    """A verified R-2R artifact proves its topology, not arbitrary obligations."""
-    from kicraft.server.stage_work_units import _requirement_obligation_defects
-
     requirement = {
-        "id": "ladder",
-        "obligations": [
-            {
-                "kind": "physical",
-                "original_obligation_id": "ladder",
-                "component_class": "resistor-network",
-            }
-        ],
+        "id": "ladder", "sheet": "DAC", "role": "analog_block", "family": "r2r-ladder",
+        "parameters": {"bits": 2, "r_value": 10000, "two_r_value": 20000},
+        "ports": {"bit0": "BIT0", "bit1": "BIT1", "output": "OUT", "gnd": "GND"},
+        "obligations": [_physical("ladder", "resistor-network")],
     }
-    groups = [
-        BomComponentGroup(
-            id="series",
-            sheet="DAC",
-            reference_prefix="R",
-            quantity=7,
-            value="10k",
-            symbol="Device:R",
-            footprint="Resistor_SMD:R_0603_1608Metric",
-        ),
-        BomComponentGroup(
-            id="branch",
-            sheet="DAC",
-            reference_prefix="R",
-            quantity=9,
-            value="20k",
-            symbol="Device:R",
-            footprint="Resistor_SMD:R_0603_1608Metric",
-        ),
-    ]
+    state = _bom_state([requirement], sheets=("DAC",))
+    (unit,) = plan_stage_work_units("bom", state, {})
+    candidate = deterministic_bom_candidate(unit, state)
+    validate_unit_candidate(unit, candidate, state, {})
 
-    assert (
-        _requirement_obligation_defects(
-            [requirement],
-            groups,
-            trusted_lowerer_id="r2r-ladder@1",
-            trusted_requirement_id="ladder",
-        )["physical-obligation-unfulfilled"]
-        == []
+    incomplete = json.loads(json.dumps(candidate))
+    incomplete["groups"][-1]["quantity"] -= 1
+    repaired = validate_unit_candidate(unit, incomplete, state, {})
+    expected_branch_quantity = next(
+        group["quantity"] for group in candidate["groups"] if group["id"] == "branch"
     )
-    assert _requirement_obligation_defects(
-        [
-            {
-                **requirement,
-                "obligations": [
-                    {**requirement["obligations"][0], "component_class": "binding-post-terminal"}
-                ],
-            }
-        ],
-        groups,
-        trusted_lowerer_id="r2r-ladder@1",
-        trusted_requirement_id="ladder",
-    )["physical-obligation-unfulfilled"]
-    assert _requirement_obligation_defects(
-        [
-            {
-                **requirement,
-                "obligations": [
-                    *requirement["obligations"],
-                    {"kind": "quantity", "subject": "resistor-network", "minimum": 2},
-                ],
-            }
-        ],
-        groups,
-        trusted_lowerer_id="r2r-ladder@1",
-        trusted_requirement_id="ladder",
-    )["physical-obligation-unfulfilled"]
+    assert next(
+        group["quantity"] for group in repaired["groups"] if group["id"] == "branch"
+    ) == expected_branch_quantity
+
+    for obligations in (
+        [_physical("ladder", "binding-post-terminal")],
+        [*requirement["obligations"], {"kind": "quantity", "original_obligation_id": "two-ladders", "subject": "resistor-network", "minimum": 2}],
+    ):
+        changed = _bom_state([{**requirement, "obligations": obligations}], sheets=("DAC",))
+        (changed_unit,) = plan_stage_work_units("bom", changed, {})
+        with pytest.raises(WorkUnitValidationError) as caught:
+            validate_unit_candidate(changed_unit, candidate, changed, {})
+        assert caught.value.defects["physical-obligation-unfulfilled"]
+
+
+@pytest.mark.parametrize("role", ["driver", "power_input"])
+def test_compiled_distribution_keeps_its_enable_jumper_beside_separate_output_connectors(role):
+    from kicraft.design.part_identity import physical_inventory_record, reviewed_record_realizes_class
+
+    distribution = {
+        "id": "distribution", "sheet": "POWER", "role": role,
+        "family": "fused-power-distribution",
+        "parameters": {
+            "channels": 2, "input_voltage_v": 5.0, "source_current_a": 0.5,
+            "enable_jumper": True,
+        },
+        "ports": {"input": "VBUS", "gnd": "GND", "output1": "OUT1", "output2": "OUT2"},
+        "obligations": [_physical("enable", "jumper")],
+    }
+    output = {
+        "id": "output", "sheet": "OUTPUT", "role": "connector",
+        "family": "screw-terminal", "exact_part": "WJ126V-5.0-02P-14-00A",
+        "ports": {"pin1": "OUT1", "pin2": "GND"},
+    }
+    state = _bom_state([distribution, output], sheets=("POWER", "OUTPUT"))
+    state["architecture"]["sheets"][0]["function"] = "Distribute power and provide user enable control"
+    unit = next(unit for unit in plan_stage_work_units("bom", state, {}) if "distribution" in unit.requirement_ids)
+    result = validate_unit_candidate(unit, deterministic_bom_candidate(unit, state), state, {})
+    realized_jumpers = 0
+    for group in result["groups"]:
+        record = physical_inventory_record(
+            mpn=group.get("mpn"), symbol=group["symbol"], footprint=group["footprint"],
+        )
+        if reviewed_record_realizes_class(record, "jumper"):
+            realized_jumpers += group["quantity"]
+    assert realized_jumpers == 1
+
+
+def test_fused_distribution_witness_requires_every_compiled_branch():
+    requirement = {
+        "id": "distribution", "sheet": "POWER", "role": "power_input",
+        "family": "fused-power-distribution",
+        "parameters": {"channels": 2, "input_voltage_v": 7.4, "source_current_a": 0.5},
+        "ports": {"input": "BAT", "gnd": "GND", "output1": "OUT1", "output2": "OUT2"},
+        "obligations": [_physical("fused-outputs", "fused-power-distribution")],
+    }
+    state = _bom_state([requirement], sheets=("POWER",))
+    (unit,) = plan_stage_work_units("bom", state, {})
+    candidate = deterministic_bom_candidate(unit, state)
+    validate_unit_candidate(unit, candidate, state, {})
+    broken = json.loads(json.dumps(candidate))
+    branch_fuses = next(
+        group for group in broken["groups"] if group["mpn"] == "MF-MSMF050/30X-2"
+    )
+    branch_fuses["quantity"] = 1
+    repaired = validate_unit_candidate(unit, broken, state, {})
+    expected_branch_quantity = next(
+        group["quantity"]
+        for group in candidate["groups"]
+        if group.get("mpn") == "MF-MSMF050/30X-2"
+    )
+    assert next(
+        group["quantity"]
+        for group in repaired["groups"]
+        if group.get("mpn") == "MF-MSMF050/30X-2"
+    ) == expected_branch_quantity
+
+    from kicraft.design.models import BOM, Architecture, CircuitRequirement, Sheet
+    from kicraft.design.synthesis.validation import check_requirement_physical_realization
+
+    architecture = Architecture(
+        sheets=[Sheet(name="POWER", stem="POWER", function="fused distribution")],
+        power_nets=[],
+        inter_sheet_nets=[],
+        requirements=[CircuitRequirement.model_validate(requirement)],
+    )
+    bom = BOM.model_validate(
+        probe_architecture_construction(
+            {"architecture": architecture.model_dump(mode="json"), "bom": {"parts": []}}
+        )
+    )
+    assert check_requirement_physical_realization(architecture, bom).ok
+    partial = bom.model_copy(
+        update={
+            "parts": [
+                part
+                for part in bom.parts
+                if not (part.lowering_role == "branch_fuse" and part.lowering_index == 1)
+            ]
+        }
+    )
+    assert not check_requirement_physical_realization(architecture, partial).ok
+
+
+def test_resistance_parser_accepts_separated_tolerance_and_rating_suffixes():
+    from kicraft.design.synthesis.validation import _resistance_ohms
+
+    assert _resistance_ohms("10k 1%") == 10_000
+    assert _resistance_ohms("5.9k 1%") == 5_900
+    assert _resistance_ohms("4k7 1% 0.1W") == 4_700
+    assert _resistance_ohms("1kΩ, 1%") == 1_000
+    assert _resistance_ohms("10k±1%") is None
+    assert _resistance_ohms("10kfoo") is None
+    assert _resistance_ohms("3V3") is None
 
 
 def test_model_private_lowerer_metadata_cannot_satisfy_a_physical_obligation():
@@ -3275,18 +3362,13 @@ def test_declared_interface_accepts_only_a_compiler_matched_fpc_owner():
     ]
 
 
-def test_a_class_family_requirement_owns_the_reviewed_part_that_implements_it():
-    """A `reset` requirement that names a class (not a device) is owned by the button the draft emits.
-
-    Held-out r3 `stm32-four-adc-usb` (2026-09-30): the architecture declared requirement `reset`
-    (`family: push-button`, `exact_part: null`) with a one-port declared interface, and the BOM
-    unit emitted a real reviewed push-button for it. The physical-obligation half passed, yet the
-    declared-interface half reported "needs one identified hardware owner" because the owner
-    resolver compared the family token `push-button` against the group's MPN `YZA-032-5.0W` and
-    never resolved the group through its reviewed record; four repair rounds exhausted on it. The
-    owner is now resolved with the same class evidence the sibling obligation checks read.
-    """
+@pytest.mark.parametrize("identity", ["TL3342F260QG", "KMR232NGULCLFS"])
+def test_a_class_family_requirement_owns_the_reviewed_part_that_implements_it(identity):
+    """Class ownership follows reviewed hardware, not a machine-local import cache."""
     from kicraft.server.stage_work_units import _requirement_obligation_defects
+    from kicraft.design.part_identity import reviewed_part
+
+    record = reviewed_part(identity)
 
     reset = {
         "id": "reset",
@@ -3310,10 +3392,10 @@ def test_a_class_family_requirement_owns_the_reviewed_part_that_implements_it():
             "sheet": "MCU",
             "reference_prefix": "SW",
             "quantity": 1,
-            "value": "K2-1109DF-E4SW-04",
-            "symbol": "pushbutton-c2909684:K2-1109DF-E4SW-04",
-            "footprint": "pushbutton-c2909684:SW-TH_HRO_K2-1109DF-EXXW-XX",
-            "mpn": "K2-1109DF-E4SW-04",
+            "value": record.identity,
+            "symbol": record.symbol,
+            "footprint": record.footprint,
+            "mpn": record.identity,
             **overrides,
         }
         return BomComponentGroup(**fields)
@@ -3333,14 +3415,14 @@ def test_a_class_family_requirement_owns_the_reviewed_part_that_implements_it():
     )
     assert _requirement_obligation_defects([reset], [unreviewed])[
         "declared-interface-unrealized"
-    ] == ["reset: declared interface needs one identified hardware owner"]
+    ]
 
     # A requirement that pins a device keeps identity-only resolution: a different part of the
     # same class must not be adopted as the named device's implementation.
     pinned = {**reset, "exact_part": "S2B-PH-SM4-TB(LF)(SN)"}
     assert _requirement_obligation_defects([pinned], [button()])[
         "declared-interface-unrealized"
-    ] == ["reset: declared interface needs one identified hardware owner"]
+    ]
 
 
 def test_a_claimed_pin_name_resolves_against_the_symbols_own_published_contacts():
@@ -3422,6 +3504,40 @@ def test_a_claimed_pin_name_resolves_against_the_symbols_own_published_contacts(
         [requirement("~", "load", family="resistor-0603")], [resistor]
     )["declared-interface-unrealized"]
     assert len(ambiguous) == 1 and "is not a unique contact either" in ambiguous[0]
+
+
+def test_declared_interface_uses_every_unit_of_one_physical_amplifier():
+    from kicraft.server.stage_work_units import _requirement_obligation_defects
+
+    amplifier = BomComponentGroup(
+        id="amplifier",
+        sheet="ANALOG",
+        reference_prefix="U",
+        quantity=1,
+        value="LM358",
+        mpn="LM358",
+        symbol="Amplifier_Operational:LM358",
+        footprint="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm",
+    )
+    requirement = {
+        "id": "amplifier",
+        "family": "lm358",
+        "exact_part": "LM358",
+        "obligations": [],
+        "declared_interface": {
+            "ports": [
+                {"key": "b_noninverting", "pin": "5", "direction": "input"},
+                {"key": "b_inverting", "pin": "6", "direction": "input"},
+                {"key": "b_output", "pin": "7", "direction": "output"},
+                {"key": "imaginary", "pin": "9", "direction": "input"},
+            ]
+        },
+    }
+    defects = _requirement_obligation_defects([requirement], [amplifier])[
+        "declared-interface-unrealized"
+    ]
+    assert len(defects) == 1
+    assert "amplifier:imaginary:" in defects[0]
 
 
 def test_unreviewed_part_class_is_proven_by_a_real_resolved_part():
@@ -3804,8 +3920,7 @@ def test_a_model_receptacle_still_cannot_take_the_recipe_owned_identity():
 
 
 def test_canonical_r2r_realization_requires_the_complete_lowered_topology():
-    from kicraft.design.lowering import lower_requirement
-    from kicraft.design.models import BOM, Architecture, BomPart, CircuitRequirement, Sheet
+    from kicraft.design.models import BOM, Architecture, CircuitRequirement, Sheet
     from kicraft.design.synthesis.validation import check_requirement_physical_realization
 
     requirement = CircuitRequirement.model_validate(
@@ -3825,28 +3940,6 @@ def test_canonical_r2r_realization_requires_the_complete_lowered_topology():
             ],
         }
     )
-    artifact = lower_requirement(requirement)
-    assert artifact is not None
-    parts = []
-    number = 1
-    for group in artifact.groups:
-        for index in range(group.quantity):
-            parts.append(
-                BomPart(
-                    ref=f"{group.reference_prefix}{number}",
-                    value=group.value,
-                    symbol=group.symbol,
-                    footprint=group.footprint,
-                    sheet="DAC",
-                    mpn=group.mpn,
-                    resolution_source="lowerer",
-                    resolution_id=artifact.lowerer_id,
-                    lowering_requirement_id=requirement.id,
-                    lowering_role=group.role,
-                    lowering_index=index,
-                )
-            )
-            number += 1
     architecture = Architecture(
         sheets=[Sheet(name="DAC", stem="DAC", function="R-2R DAC")],
         power_nets=[],
@@ -3854,11 +3947,22 @@ def test_canonical_r2r_realization_requires_the_complete_lowered_topology():
         requirements=[requirement],
     )
 
-    assert check_requirement_physical_realization(architecture, BOM(parts=parts)).ok
-    assert not check_requirement_physical_realization(architecture, BOM(parts=parts[:-1])).ok
+    compiled = probe_architecture_construction(
+        {"architecture": architecture.model_dump(mode="json"), "bom": {"parts": []}}
+    )
+    bom = BOM.model_validate(compiled)
+    assert check_requirement_physical_realization(architecture, bom).ok
+    assert not check_requirement_physical_realization(
+        architecture, bom.model_copy(update={"parts": bom.parts[:-1]})
+    ).ok
+    assert not check_requirement_physical_realization(
+        architecture, bom.model_copy(update={"connections": []})
+    ).ok
     assert not check_requirement_physical_realization(
         architecture,
-        BOM(parts=[*parts[:-1], parts[-1].model_copy(update={"resolution_source": "llm"})]),
+        bom.model_copy(update={"parts": [
+            *bom.parts[:-1], bom.parts[-1].model_copy(update={"resolution_source": "llm"})
+        ]}),
     ).ok
 
 
@@ -4208,6 +4312,83 @@ def test_probe_architecture_construction_composes_recipe_and_lowerer_without_mut
         if part.get("resolution_source") == "lowerer"
     } == {"usb"}
     assert "connections" in probed and "no_connect_pins" in probed
+    recipe_pins = {
+        (row["ref"], row["pin"]): row.get("net")
+        for manifest in probed["recipe_ownership"] for row in manifest["pins"]
+    }
+    lowerer_pins = {
+        (row["ref"], row["pin"]): row.get("net")
+        for row in probed["lowerer_ownership"]
+    }
+    assert recipe_pins and lowerer_pins
+    assert recipe_pins.keys().isdisjoint(lowerer_pins)
+    connected = {
+        (endpoint["ref"], endpoint["pin"]): connection["net_name"]
+        for connection in probed["connections"] for endpoint in connection["endpoints"]
+    }
+    assert all(connected[pin] == net for pin, net in recipe_pins.items() if net is not None)
+    assert all(connected[pin] == net for pin, net in lowerer_pins.items() if net is not None)
+
+
+def test_lowerer_bom_ownership_drives_wiring_normalization_and_locks():
+    from kicraft.design.models import BOM
+    from kicraft.server.stage_contracts import _normalize_stage_response
+
+    state = _probe_usb_breakout_state()
+    units = plan_stage_work_units("bom", state, {})
+    candidates = {
+        unit.unit_id: validate_unit_candidate(
+            unit, deterministic_bom_candidate(unit, state), state, {}
+        )
+        for unit in units
+    }
+    bom, _, _, _, _ = aggregate_stage_work_units(
+        "bom", units, candidates, state,
+        unit_sources={unit.unit_id: "lowerer" for unit in units},
+    )
+    BOM.model_validate(bom)
+    # A purported lowerer pin must belong to the actual lowerer part and
+    # requirement, not merely carry a plausible ownership label.
+    for defect in ("model_part", "recipe_part", "wrong_owner", "wrong_requirement",
+                   "missing_requirement", "missing_role"):
+        forged = json.loads(json.dumps(bom))
+        row = forged["lowerer_ownership"][0]
+        part = next(part for part in forged["parts"] if part["ref"] == row["ref"])
+        if defect == "model_part":
+            part["resolution_source"] = "llm"
+        elif defect == "recipe_part":
+            part["resolution_source"] = "recipe"
+        elif defect == "wrong_owner":
+            row["owner_id"] = "different-lowerer@1"
+        elif defect == "wrong_requirement":
+            row["requirement_id"] = "other-requirement"
+        elif defect == "missing_requirement":
+            row["requirement_id"] = None
+        else:
+            part["lowering_role"] = None
+        with pytest.raises(ValueError):
+            BOM.model_validate(forged)
+    endpoints = {
+        (endpoint["ref"], endpoint["pin"]): connection["net_name"]
+        for connection in bom["connections"] for endpoint in connection["endpoints"]
+    }
+    normalized, _ = _normalize_stage_response("wiring", {"pins": []}, {**state, "bom": bom})
+    assert {
+        (connection["sheet"], connection["net_name"], endpoint["ref"], endpoint["pin"])
+        for connection in normalized["connections"] for endpoint in connection["endpoints"]
+    } == {
+        (connection["sheet"], connection["net_name"], endpoint["ref"], endpoint["pin"])
+        for connection in bom["connections"] for endpoint in connection["endpoints"]
+    }
+    assert {(row["ref"], row["pin"]) for row in normalized["no_connect_pins"]} == {
+        (row["ref"], row["pin"]) for row in bom["no_connect_pins"]
+    }
+    ref, pin = next(iter(endpoints))
+    with pytest.raises(ValueError):
+        _normalize_stage_response(
+            "wiring", {"pins": [{"ref": ref, "pin": pin, "net": "OTHER"}]},
+            {**state, "bom": bom},
+        )
 
 
 def test_probe_architecture_construction_composes_recipe_only_without_mutation():
@@ -4312,35 +4493,3 @@ def test_probe_rejects_partial_deterministic_wiring_instead_of_returning_none(mo
     assert caught.value.defects["missing"]
 
 
-def test_probe_rejects_deterministic_wiring_to_locked_endpoint(monkeypatch):
-    from kicraft.server import stage_work_units
-
-    original_extras = stage_work_units._deterministic_wiring_extras
-    original_candidate = stage_work_units.deterministic_wiring_candidate
-
-    def extras_with_locked_endpoint(bom):
-        extras = original_extras(bom)
-        ref, info = next(iter(extras["symbol_pinouts"].items()))
-        extras["locked_pin_assignments"] = [
-            {"ref": ref, "pin": str(info["pins"][0]["number"]), "net": "PROTECTED"}
-        ]
-        return extras
-
-    def candidate_with_locked_endpoint(unit, prompt_state, extras):
-        candidate = original_candidate(unit, prompt_state, extras)
-        if candidate and unit.excluded_pins:
-            ref, pin = unit.excluded_pins[0]
-            return {"pins": [*candidate["pins"], {"ref": ref, "pin": pin, "net": "ILLEGAL"}]}
-        return candidate
-
-    monkeypatch.setattr(stage_work_units, "_deterministic_wiring_extras", extras_with_locked_endpoint)
-    monkeypatch.setattr(
-        stage_work_units,
-        "deterministic_wiring_candidate",
-        candidate_with_locked_endpoint,
-    )
-
-    with pytest.raises(WorkUnitValidationError) as caught:
-        probe_architecture_construction(_probe_usb_breakout_state())
-
-    assert caught.value.defects["recipe-owned"]

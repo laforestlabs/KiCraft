@@ -792,11 +792,11 @@ def _adopt_reviewed_library_pair(group: BomComponentGroup) -> BomComponentGroup:
     could only recommend the binding it was not allowed to make. The MPN is the design's own
     source of truth for the part, so the pair comes from that record.
     """
-    from kicraft.design.part_identity import reviewed_part
+    from kicraft.design.part_identity import reviewed_identity_for_order_code, reviewed_part
 
     if not group.mpn:
         return group
-    record = reviewed_part(str(group.mpn))
+    record = reviewed_part(reviewed_identity_for_order_code(str(group.mpn)))
     if record is None or not record.is_portable_candidate:
         return group
     if (group.symbol, group.footprint) == (record.symbol, record.footprint):
@@ -1369,7 +1369,7 @@ def _curated_part_indexes() -> tuple[dict[str, object], dict[str, object]]:
 def _normalize_curated_group_identities(
     groups: list[BomComponentGroup],
 ) -> list[BomComponentGroup]:
-    """Use curated bundles as authoritative, reusable component defaults."""
+    """Use reviewed physical pairs first, then curated defaults for other identities."""
     by_name, by_mpn = _curated_part_indexes()
     normalized: list[BomComponentGroup] = []
     for group in groups:
@@ -1469,7 +1469,11 @@ def _normalize_curated_group_identities(
         lcsc = (manifest.sourcing or {}).get("lcsc")
         if lcsc:
             update["sourcing_note"] = f"LCSC {lcsc}"
-        normalized.append(group.model_copy(update=_normalize_bom_optional_metadata(update)))
+        normalized.append(
+            _adopt_reviewed_library_pair(
+                group.model_copy(update=_normalize_bom_optional_metadata(update))
+            )
+        )
     return normalized
 
 
@@ -1735,16 +1739,20 @@ def _requirement_obligation_defects(
     *,
     trusted_lowerer_id: str | None = None,
     trusted_requirement_id: str | None = None,
+    trusted_topology_proven: bool = False,
     compiler_requirements=(),
     decider=None,
     reconciliation_confidence: float = 0.7,
 ) -> dict:
     """Check physical obligations and claimed pins against implementing hardware.
 
-    A lowerer witness applies only to the exact requirement it compiled and only
-    to a registered physical class.  Model payload provenance is never supplied
-    here: callers derive these arguments from an artifact-equal candidate.
+    A lowerer witness applies only to the exact requirement it compiled, a
+    registered physical class, and groups equal to the compiler's independently
+    regenerated artifact. Model payload provenance is never supplied here; a
+    lone transistor, a missing bias resistor, or a relabelled group cannot
+    borrow topology evidence.
     """
+    from kicraft.design.lowering import registered_lowerers
     from kicraft.design.synthesis.symbol_pinout import lookup_pins, normalize_pin_name
     from kicraft.design.part_identity import (
         class_counts_contacts,
@@ -1752,9 +1760,19 @@ def _requirement_obligation_defects(
         quantity_subject_binds,
     )
 
+    def lowerer_topology_required(requirement: dict, feature: str) -> bool:
+        """Whether a registered lowerer is the only proof for this physical class."""
+        family = str(requirement.get("family") or "")
+        return any(
+            family in lowerer.families
+            and lowerer_witnesses_physical_class(lowerer.lowerer_id, feature)
+            for lowerer in registered_lowerers()
+        )
+
     def lowerer_witnesses(requirement: dict, obligation: dict) -> bool:
         return (
-            trusted_lowerer_id is not None
+            trusted_topology_proven
+            and trusted_lowerer_id is not None
             and trusted_requirement_id == str(requirement.get("id"))
             and lowerer_witnesses_physical_class(
                 trusted_lowerer_id, str(obligation.get("component_class") or "")
@@ -1789,6 +1807,7 @@ def _requirement_obligation_defects(
                 ),
                 default=1,
             )
+            topology_required = lowerer_topology_required(requirement, feature)
             total = sum(_group_realization_units(group, feature) for group in groups)
             outstanding = max(total - consumed.get(feature, 0), 0)
             witnessed = lowerer_witnesses(requirement, obligation)
@@ -1817,15 +1836,23 @@ def _requirement_obligation_defects(
                 # shapes (two single connectors, one group of two).
                 counted.add(feature)
                 needed, available = minimum, total
-                # A lowerer witness proves the topology implements the class; it never proves
-                # the count the brief itself states.
-                witnessed = False
             else:
                 needed, available = 1, outstanding
-            if available < needed and not witnessed:
-                if _class_is_owned_by_a_capable_sibling(
-                    requirement, feature, compiler_requirements
-                ) and not _requirement_can_realize_class(requirement, feature):
+            if topology_required:
+                # A lowerer topology represents one physical implementation, never a bag of
+                # individually substitutable components. Its evidence is valid only for the
+                # complete independently regenerated artifact that this requirement owns.
+                available = int(witnessed)
+            elif witnessed:
+                available = max(available, 1)
+            if available < needed:
+                if (
+                    not topology_required
+                    and _class_is_owned_by_a_capable_sibling(
+                        requirement, feature, compiler_requirements
+                    )
+                    and not _requirement_can_realize_class(requirement, feature)
+                ):
                     # An ownership defect, not a parts defect: this requirement's own reviewed
                     # evidence cannot build the class, and another requirement both claims it
                     # and can. The capable requirement's own unit gate enforces the demand, so
@@ -1917,7 +1944,7 @@ def _requirement_obligation_defects(
             )
             continue
         try:
-            inventory = lookup_pins(owners[0].symbol)
+            inventory = lookup_pins(owners[0].symbol, all_units=True)
         except (OSError, ValueError, KeyError) as exc:
             defects["declared-interface-unrealized"].append(
                 f"{requirement['id']}:{owners[0].id}: pin inventory unavailable: {exc}"
@@ -2008,6 +2035,18 @@ def _requirement_obligation_defects(
     return defects
 
 
+def _same_bom_group_construction(
+    actual: list[BomComponentGroup], expected: list[BomComponentGroup],
+) -> bool:
+    # Sourcing preflight annotates the same physical construction. Its catalog
+    # memo is retained as evidence, but cannot invalidate regenerated ownership.
+    evidence_only = {"sourcing_note"}
+    return len(actual) == len(expected) and all(
+        left.model_dump(exclude=evidence_only) == right.model_dump(exclude=evidence_only)
+        for left, right in zip(actual, expected)
+    )
+
+
 def _validate_bom_unit(
     unit: StageWorkUnit,
     payload: dict,
@@ -2052,7 +2091,9 @@ def _validate_bom_unit(
     # Provenance is compiler-owned.  A model's private JSON keys cannot claim it;
     # at most an exact copy of the independently generated artifact earns the
     # artifact's evidence.
-    used_deterministic_candidate = deterministic is not None and groups == deterministic_groups
+    used_deterministic_candidate = (
+        deterministic is not None and _same_bom_group_construction(groups, deterministic_groups)
+    )
     deterministic_arrays: list[dict] = []
     lowering_metadata: dict[str, object] = {}
     if not groups and deterministic is not None:
@@ -2090,6 +2131,9 @@ def _validate_bom_unit(
     recipe_identities = {
         (part.sheet, part.symbol.lower(), part.value.lower()) for part in recipe_parts
     }
+    # Symbol/value equality does not imply shared ownership: a regenerated
+    # lowerer can require its own physically distinct passive on another net.
+    # Only model-authored surplus is eligible for recipe-duplicate pruning.
     exact_recipe_duplicates: set[str] = set()
     for group in groups:
         matching = [
@@ -2110,7 +2154,7 @@ def _validate_bom_unit(
             )
         ):
             exact_recipe_duplicates.add(group.id)
-    if exact_recipe_duplicates:
+    if exact_recipe_duplicates and not used_deterministic_candidate:
         groups = [group for group in groups if group.id not in exact_recipe_duplicates]
         arrays = [array for array in arrays if array.group_id not in exact_recipe_duplicates]
     from kicraft.design.recipes import protected_identity_matches
@@ -2140,9 +2184,9 @@ def _validate_bom_unit(
         else getattr(requirement, "role", None)
     )
     connector_prefixes = {"J", "P"}
-    # Ownership pruning only makes sense for a bounded single-requirement unit.
-    # A sheet-scoped unit legitimately owns a mix of connector and circuit
-    # roles, so pruning its J/P groups would silently drop owned connectors.
+    # An independently regenerated compiler circuit owns every group it emits.
+    # Prose about the sheet and unrelated connector requirements cannot remove
+    # its jumper, programming header, or load terminals. Prune authored surplus only.
     target_sheet = next(
         (
             sheet
@@ -2155,7 +2199,7 @@ def _validate_bom_unit(
     target_owns_connector = bool(
         re.search(r"\b(?:connector|receptacle|header|terminal|usb|bnc|fpc|ffc)\b", target_identity)
     )
-    if len(unit.requirement_ids) == 1:
+    if len(unit.requirement_ids) == 1 and not used_deterministic_candidate:
         if requirement_role == "connector":
             owned_group_ids = {
                 group.id for group in groups if group.reference_prefix in connector_prefixes
@@ -2202,7 +2246,8 @@ def _validate_bom_unit(
     recipe_duplicate_groups = [
         group.id
         for group in groups
-        if (group.sheet, group.symbol.lower(), group.value.lower()) in recipe_identities
+        if not used_deterministic_candidate
+        and (group.sheet, group.symbol.lower(), group.value.lower()) in recipe_identities
     ]
     # A requirement-scoped unit sometimes redundantly emits a protected sibling
     # (for example a USB receptacle beside its PD controller). Another planned
@@ -2306,6 +2351,9 @@ def _validate_bom_unit(
                 if used_deterministic_candidate
                 and lowering_metadata.get("_lowering_requirement_id")
                 else None
+            ),
+            trusted_topology_proven=(
+                used_deterministic_candidate and groups == deterministic_groups
             ),
             compiler_requirements=architecture_requirements,
         )
@@ -2654,7 +2702,7 @@ def merge_bom_units(
     prompt_state: dict,
     *,
     trusted_unit_ids: frozenset[str] = frozenset(),
-) -> tuple[dict, dict[str, str], dict[str, dict], frozenset[str]]:
+) -> tuple[dict, dict[str, str], dict[str, dict], frozenset[str], frozenset[str]]:
     """Merge sheet replacements and return unit/lowerer ref provenance."""
     groups: list[dict] = []
     arrays: list[dict] = []
@@ -2662,12 +2710,32 @@ def merge_bom_units(
     substitutions: list[dict] = []
     group_to_unit: dict[str, str] = {}
     lowering_by_group: dict[str, dict] = {}
+    independent_lowering_groups: set[str] = set()
+
+    def normalized_groups(rows):
+        return _normalize_curated_group_identities([
+            BomComponentGroup.model_validate(_normalize_bom_optional_metadata(row))
+            for row in rows
+        ])
+
     for unit in units:
         if unit.stage != "bom":
             raise ValueError(f"cannot merge {unit.stage!r} unit into BOM")
         candidate = candidates.get(unit.unit_id)
         if candidate is None:
             raise ValueError(f"missing validated candidate for {unit.unit_id}")
+        # Reconstruct the compiler artifact; never trust provenance carried in
+        # the DTO.  Only an exact, independently generated group list can
+        # coexist with same-valued recipe components.
+        regenerated = deterministic_bom_candidate(unit, prompt_state)
+        independently_lowered = (
+            regenerated is not None
+            and bool(regenerated.get("_lowerer_id"))
+            and _same_bom_group_construction(
+                normalized_groups(candidate.get("groups") or []),
+                normalized_groups(regenerated.get("groups") or []),
+            )
+        )
         prefix = f"{unit.unit_id.removeprefix('bom-')}_"
         local_to_global: dict[str, str] = {}
         for group in candidate.get("groups") or []:
@@ -2675,12 +2743,17 @@ def merge_bom_units(
             global_id = f"{prefix}{local_id}"
             local_to_global[local_id] = global_id
             group_to_unit[global_id] = unit.unit_id
+            if independently_lowered:
+                independent_lowering_groups.add(global_id)
             groups.append({**group, "id": global_id})
-            role_metadata = (candidate.get("_lowering_roles") or {}).get(local_id)
+            role_metadata = (
+                (regenerated.get("_lowering_roles") or {}).get(local_id)
+                if independently_lowered else None
+            )
             if role_metadata:
                 lowering_by_group[global_id] = {
-                    "resolution_id": str(candidate["_lowerer_id"]),
-                    "lowering_requirement_id": str(candidate["_lowering_requirement_id"]),
+                    "resolution_id": str(regenerated["_lowerer_id"]),
+                    "lowering_requirement_id": str(regenerated["_lowering_requirement_id"]),
                     **role_metadata,
                 }
         for array in candidate.get("arrays") or []:
@@ -2711,6 +2784,7 @@ def merge_bom_units(
     validation_state = {
         **prompt_state,
         "_trusted_lowering_group_ids": trusted_lowering_group_ids,
+        "_independent_lowering_group_ids": independent_lowering_groups,
     }
     _response, _parts, _arrays, refs_by_group, _expansions = _expand_bom_groups(
         merged, validation_state
@@ -2727,7 +2801,7 @@ def merge_bom_units(
         if group_id in lowering_by_group
         for index, ref in enumerate(refs)
     }
-    return merged, ref_to_unit, ref_to_lowering, trusted_lowering_group_ids
+    return merged, ref_to_unit, ref_to_lowering, trusted_lowering_group_ids, frozenset(independent_lowering_groups)
 
 
 def merge_wiring_units(
@@ -2793,6 +2867,7 @@ def aggregate_stage_work_units(
             ref_to_unit,
             ref_to_lowering,
             trusted_lowering_group_ids,
+            independent_lowering_group_ids,
         ) = merge_bom_units(
             units,
             candidates,
@@ -2807,6 +2882,7 @@ def aggregate_stage_work_units(
             {
                 **prompt_state,
                 "_trusted_lowering_group_ids": trusted_lowering_group_ids,
+                "_independent_lowering_group_ids": independent_lowering_group_ids,
             },
         )
         for part in normalized.get("parts") or []:
@@ -2819,6 +2895,49 @@ def aggregate_stage_work_units(
                 lowering = ref_to_lowering.get(str(part.get("ref")))
                 if lowering:
                     part.update(lowering)
+        if ref_to_lowering:
+            # Known factory topology is part of BOM realization, not a promise
+            # deferred until wiring. Leave model-owned pins for their own stage.
+            wiring_state = {**prompt_state, "bom": normalized}
+            extras = _deterministic_wiring_extras({
+                "parts": [
+                    part for part in normalized["parts"]
+                    if part.get("recipe_id")
+                    or (
+                        part.get("resolution_source") == "lowerer"
+                        and part.get("lowering_requirement_id")
+                    )
+                ]
+            })
+            assignments = []
+            for wiring_unit in plan_stage_work_units("wiring", wiring_state, extras):
+                if not wiring_unit.lowerer_ids:
+                    continue
+                candidate = deterministic_wiring_candidate(wiring_unit, wiring_state, extras)
+                if candidate is None:
+                    raise WorkUnitValidationError(
+                        wiring_unit.unit_id,
+                        {"deterministic-ownership": ["known lowerer wiring could not be rendered"]},
+                    )
+                assignments.extend(candidate["pins"])
+            wiring, _ = _normalize_stage_response(
+                "wiring", {"pins": assignments}, wiring_state
+            )
+            normalized.update(wiring)
+            parts_by_ref = {
+                str(part["ref"]): part for part in normalized["parts"]
+            }
+            normalized["lowerer_ownership"] = [
+                {
+                    "ref": row["ref"],
+                    "pin": row["pin"],
+                    "net": row.get("net"),
+                    "owner": "lowerer",
+                    "owner_id": parts_by_ref[row["ref"]]["resolution_id"],
+                    "requirement_id": parts_by_ref[row["ref"]]["lowering_requirement_id"],
+                }
+                for row in assignments
+            ]
         return normalized, ref_to_unit, {}, {}, expanded_component_count
 
     merged, pin_to_unit, ref_to_unit_ids = merge_wiring_units(units, candidates)

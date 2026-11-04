@@ -13,7 +13,9 @@ import pytest
 pcbnew = pytest.importorskip("pcbnew")
 
 from kicraft.autoplacer.brain.gnd_pour import (  # noqa: E402
+    _board_edge_geometry,
     _detect_power_nets,
+    _via_clears_board_edge,
     pour_power_planes,
 )
 
@@ -57,6 +59,40 @@ def _board(path, pad_nets):
         x += 3
     board.Save(path)
     return path
+
+
+def test_gnd_via_keeps_its_copper_clear_of_board_edges_and_cutouts(tmp_path):
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(path, {"1": "GND"})
+    board = pcbnew.LoadBoard(path)
+    # Opposite winding from the outer outline makes this an internal Edge.Cuts
+    # cutout. Its bounding box still contains the legal copper surrounding it.
+    cutout = [(8.0, 8.0), (8.0, 12.0), (12.0, 12.0), (12.0, 8.0), (8.0, 8.0)]
+    for (x1, y1), (x2, y2) in zip(cutout, cutout[1:]):
+        edge = pcbnew.PCB_SHAPE(board)
+        edge.SetShape(pcbnew.SHAPE_T_SEGMENT)
+        edge.SetStart(pcbnew.VECTOR2I(_mm(x1), _mm(y1)))
+        edge.SetEnd(pcbnew.VECTOR2I(_mm(x2), _mm(y2)))
+        edge.SetLayer(pcbnew.Edge_Cuts)
+        board.Add(edge)
+    board.Save(path)
+
+    edge_geometry = _board_edge_geometry(pcbnew.LoadBoard(path))
+    assert edge_geometry is not None
+    via_radius_iu = _mm(0.3)
+    assert not _via_clears_board_edge(
+        _mm(0.2), _mm(10.0), edge_geometry=edge_geometry, via_radius_iu=via_radius_iu
+    )
+    # (7.7, 10) is inside the outer bbox and board, but its via barrel reaches
+    # the internal cutout boundary.
+    assert not _via_clears_board_edge(
+        _mm(7.7), _mm(10.0), edge_geometry=edge_geometry, via_radius_iu=via_radius_iu
+    )
+    assert _via_clears_board_edge(
+        _mm(2.0), _mm(10.0), edge_geometry=edge_geometry, via_radius_iu=via_radius_iu
+    )
+
+
 
 
 def test_detect_power_nets_ranks_by_pad_count_and_excludes_gnd(tmp_path):
@@ -118,11 +154,8 @@ def test_pour_disabled_is_noop(tmp_path):
 from kicraft.autoplacer.brain.gnd_pour import add_gnd_pour_and_thermal_vias  # noqa: E402
 
 
-def _sot23_board(path, *, blocker_track=False):
-    """A 3-pad SOT-23-shaped U1 whose GND pad (0.5 mm -- too small for an
-    in-pad 0.6 mm via) sits at (10,10), plus a 1.3 mm via-fitting GND pad on a
-    6-pad U2 at (15,15). Optionally a foreign B.Cu track right under U2's pad
-    (the IP2368-bank shorts shape: a thermal via stamped blind through it)."""
+def _sot23_board(path, *, blocker_track=False, thermal=False):
+    """Small ordinary GND pad and a larger GND pad, optionally reviewed EP."""
     board = pcbnew.NewBoard(path)
     for name in ("GND", "VIN", "VOUT", "SIG"):
         board.Add(pcbnew.NETINFO_ITEM(board, name))
@@ -142,14 +175,19 @@ def _sot23_board(path, *, blocker_track=False):
     def add_fp(ref, pads):
         fp = pcbnew.FOOTPRINT(board)
         fp.SetReference(ref)
+        if ref == "U2" and thermal:
+            fp.SetValue("ESP32-S3-MINI-1U-N4R2")
+            fp.SetFPID(pcbnew.LIB_ID("reviewed", "BULETM-SMD_ESPRESSIF_ESP32-S3-MINI-1U-N8"))
         board.Add(fp)
         for num, (netname, x, y, w, h) in pads.items():
             pad = pcbnew.PAD(fp)
+            if ref == "U2" and thermal and num == "1":
+                w = h = 1.2
             pad.SetSize(pcbnew.VECTOR2I(_mm(w), _mm(h)))
             pad.SetPosition(pcbnew.VECTOR2I(_mm(x), _mm(y)))
             pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
             pad.SetLayerSet(pcbnew.PAD.SMDMask())
-            pad.SetNumber(num)
+            pad.SetNumber("61" if ref == "U2" and thermal and num == "1" else num)
             if netname:
                 pad.SetNet(net(netname))
             fp.Add(pad)
@@ -188,10 +226,9 @@ def test_small_ic_gnd_pad_is_escape_stitched(tmp_path):
     _sot23_board(path)
     res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
     assert res["escape_stitched"] >= 1, res
-    # U2's via-fitting GND pad still gets its in-pad via.
-    assert res["thermal_vias_added"] >= 1, res
+    assert res["thermal_vias_added"] == 0, res
     vias = _gnd_vias(path)
-    assert len(vias) >= 2
+    assert len(vias) >= 1
     # The escape via is OFF the small pad (10,10), not drilled through it.
     assert all(
         (pcbnew.ToMM(v.GetPosition().x), pcbnew.ToMM(v.GetPosition().y))
@@ -199,13 +236,80 @@ def test_small_ic_gnd_pad_is_escape_stitched(tmp_path):
         for v in vias
     )
 
+def test_reviewed_module_thermal_land_accepts_in_pad_via(tmp_path):
+    path = str(tmp_path / "thermal.kicad_pcb")
+    _sot23_board(path, thermal=True)
+    res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
+    assert res["thermal_vias_added"] == 1, res
+    board = pcbnew.LoadBoard(path)
+    fp = next(fp for fp in board.GetFootprints() if fp.GetReference() == "U2")
+    pad = next(p for p in fp.Pads() if p.GetNumber() == "61")
+    assert any(pad.HitTest(v.GetPosition()) for v in _gnd_vias(path))
+
+@pytest.mark.parametrize("value", ["ESP32-C3-MINI-1-H4X", "ESP32-C3-MINI-1-N4"])
+def test_reviewed_c3_exposed_land_accepts_in_pad_via(tmp_path, value):
+    path = str(tmp_path / "c3.kicad_pcb")
+    _sot23_board(path, thermal=True)
+    board = pcbnew.LoadBoard(path)
+    fp = next(fp for fp in board.GetFootprints() if fp.GetReference() == "U2")
+    fp.SetValue(value)
+    fp.SetFPID(pcbnew.LIB_ID("reviewed", "WIFIM-SMD_ESP32-C3-MINI-1"))
+    pad = next(p for p in fp.Pads() if p.GetNumber() == "61")
+    pad.SetNumber("49")
+    pad.SetSize(pcbnew.VECTOR2I(_mm(1.45), _mm(1.45)))
+    assert ("U2", "49") not in {(s.ref, s.pad) for s in gnd_escape_specs(board)}
+    board.Save(path)
+    res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
+    assert res["thermal_vias_added"] == 1, res
+    board = pcbnew.LoadBoard(path)
+    pad = next(p for fp in board.GetFootprints() if fp.GetReference() == "U2"
+               for p in fp.Pads() if p.GetNumber() == "49")
+    assert any(pad.HitTest(v.GetPosition()) for v in _gnd_vias(path))
+
+
+def test_c3_ordinary_land_is_not_authorized_by_size_and_name(tmp_path):
+    path = str(tmp_path / "c3-ordinary.kicad_pcb")
+    _sot23_board(path, thermal=True)
+    board = pcbnew.LoadBoard(path)
+    fp = next(fp for fp in board.GetFootprints() if fp.GetReference() == "U2")
+    fp.SetValue("ESP32-C3-MINI-1-H4X")
+    fp.SetFPID(pcbnew.LIB_ID("reviewed", "WIFIM-SMD_ESP32-C3-MINI-1"))
+    pad = next(p for p in fp.Pads() if p.GetNumber() == "61")
+    pad.SetNumber("48")
+    pad.SetSize(pcbnew.VECTOR2I(_mm(1.45), _mm(1.45)))
+    assert ("U2", "48") in {(s.ref, s.pad) for s in gnd_escape_specs(board)}
+    board.Save(path)
+    res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
+    assert res["thermal_vias_added"] == 0, res
+    board = pcbnew.LoadBoard(path)
+    pad = next(p for fp in board.GetFootprints() if fp.GetReference() == "U2"
+               for p in fp.Pads() if p.GetNumber() == "48")
+    assert all(not pad.HitTest(v.GetPosition()) for v in _gnd_vias(path))
+
+def test_thermal_permission_is_bound_to_reviewed_identity_and_land(tmp_path):
+    path = str(tmp_path / "identity.kicad_pcb")
+    _sot23_board(path, thermal=True)
+    board = pcbnew.LoadBoard(path)
+    fp = next(fp for fp in board.GetFootprints() if fp.GetReference() == "U2")
+    assert ("U2", "61") not in {(s.ref, s.pad) for s in gnd_escape_specs(board)}
+    fp.SetValue("unreviewed module")
+    assert ("U2", "61") in {(s.ref, s.pad) for s in gnd_escape_specs(board)}
+    board.Save(path)
+    res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
+    assert res["thermal_vias_added"] == 0, res
+    board = pcbnew.LoadBoard(path)
+    pad = next(p for fp in board.GetFootprints() if fp.GetReference() == "U2"
+               for p in fp.Pads() if p.GetNumber() == "61")
+    assert all(not pad.HitTest(v.GetPosition()) for v in _gnd_vias(path))
+
+
 
 def test_thermal_via_not_stamped_through_foreign_track(tmp_path):
     # Regression for the IP2368-bank incident: _add_via had no collision check
     # and stamped GND vias straight through routed B.Cu tracks (7 shorts). A
     # foreign B.Cu track under U2's GND pad must block that via.
     path = str(tmp_path / "b.kicad_pcb")
-    _sot23_board(path, blocker_track=True)
+    _sot23_board(path, blocker_track=True, thermal=True)
     res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
     assert res["thermal_vias_blocked"] >= 1, res
     blocked_at = (15.0, 15.0)  # U2 pad 1 centre, right on the SIG track
@@ -501,6 +605,7 @@ import json  # noqa: E402
 import shutil  # noqa: E402
 
 from kicraft.autoplacer.brain.gnd_pour import gnd_escape_specs  # noqa: E402
+from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs  # noqa: E402
 
 # Default(0.15) / Power(0.30) with GND assigned to Power -- the shape every
 # generated board ships in its sibling .kicad_pro.
@@ -545,7 +650,7 @@ def test_thermal_via_respects_netclass_pair_clearance(tmp_path):
     # the track -- a Power-netclass (0.30) DRC error, the KC-UXASHQ escape-via
     # signature. With pair clearance the margin is 0.675 mm -> blocked.
     build = str(tmp_path / "build.kicad_pcb")
-    _sot23_board(build)
+    _sot23_board(build, thermal=True)
     board = pcbnew.LoadBoard(build)
     t = pcbnew.PCB_TRACK(board)
     t.SetStart(pcbnew.VECTOR2I(_mm(12.0), _mm(15.6)))
@@ -582,7 +687,7 @@ def test_thermal_via_blocked_by_hole_to_hole(tmp_path):
     # guard allowed it) but its drilled hole is 0.4 mm from where the in-pad
     # via would drill -- inside hole-to-hole minimum. Must be blocked.
     path = str(tmp_path / "b.kicad_pcb")
-    _sot23_board(path)
+    _sot23_board(path, thermal=True)
     board = pcbnew.LoadBoard(path)
     via = pcbnew.PCB_VIA(board)
     via.SetPosition(pcbnew.VECTOR2I(_mm(15.4), _mm(15.0)))
@@ -605,9 +710,7 @@ def test_thermal_via_blocked_by_hole_to_hole(tmp_path):
 
 
 def test_two_pad_passive_via_fitting_gnd_pad_is_stitched(tmp_path):
-    # The KC-UXASHQ C2.2 strand: a decoupling cap's 1.0 mm GND pad could host
-    # an in-pad via with nothing blocking, but the old multipad>=3 gate
-    # skipped 2-pad passives entirely -> B.Cu-only pour never reached it.
+    # A two-pad capacitor needs an off-land dogbone, not a drilled solder land.
     path = str(tmp_path / "b.kicad_pcb")
     board = pcbnew.NewBoard(path)
     for name in ("GND", "+3V3"):
@@ -634,13 +737,85 @@ def test_two_pad_passive_via_fitting_gnd_pad_is_stitched(tmp_path):
         fp.Add(pad)
     board.Save(path)
 
-    res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
-    assert res["gnd_pads_stitched"] >= 1, res
-    assert any(
-        (pcbnew.ToMM(v.GetPosition().x), pcbnew.ToMM(v.GetPosition().y))
-        == (pytest.approx(6.0), pytest.approx(8.0))
-        for v in _gnd_vias(path)
+    res = add_gnd_pour_and_thermal_vias(
+        path, {"gnd_zone_net": "GND", "gnd_escape_length_mm": 1.5}
     )
+    assert res["escape_stitched"] == 1, res
+    board = pcbnew.LoadBoard(path)
+    pad = next(p for fp in board.GetFootprints() for p in fp.Pads() if p.GetNumber() == "2")
+    via = next(t for t in board.GetTracks() if isinstance(t, pcbnew.PCB_VIA))
+    assert not pad.HitTest(via.GetPosition(), _mm(0.4))
+    track = next(t for t in board.GetTracks() if t.GetClass() == "PCB_TRACK")
+    assert pad.HitTest(track.GetStart())
+    assert track.GetEnd() == via.GetPosition()
+    assert track.GetNetname() == via.GetNetname() == "GND"
+
+def _bottom_ground_pad_board(path):
+    _board(path, {"1": "GND"})
+    board = pcbnew.LoadBoard(path)
+    pad = next(p for fp in board.GetFootprints() for p in fp.Pads())
+    layers = pcbnew.LSET()
+    for layer in (pcbnew.B_Cu, pcbnew.B_Mask, pcbnew.B_Paste):
+        layers.AddLayer(layer)
+    pad.SetLayerSet(layers)
+    board.Save(path)
+
+
+def _assert_bottom_pad_connected_to_via(path):
+    board = pcbnew.LoadBoard(path)
+    pad = next(p for fp in board.GetFootprints() for p in fp.Pads())
+    assert pad.IsOnLayer(pcbnew.B_Cu) and not pad.IsOnLayer(pcbnew.F_Cu)
+    vias = [t for t in board.GetTracks()
+            if t.GetClass() == "PCB_VIA" and t.GetNetname() == "GND"]
+    tracks = [t for t in board.GetTracks()
+              if t.GetClass() == "PCB_TRACK" and t.GetLayer() == pcbnew.B_Cu
+              and t.GetNetname() == "GND"]
+    assert any(
+        pad.HitTest(track.GetStart())
+        and any(track.GetEnd() == via.GetPosition() and
+                not pad.HitTest(via.GetPosition(), _mm(0.4)) for via in vias)
+        for track in tracks
+    )
+
+
+@pytest.mark.parametrize("pre_route", [True, False])
+def test_bottom_smd_ground_gets_same_face_connected_dogbone(tmp_path, pre_route):
+    path = str(tmp_path / "bottom.kicad_pcb")
+    _bottom_ground_pad_board(path)
+    if pre_route:
+        board = pcbnew.LoadBoard(path)
+        specs = gnd_escape_specs(board)
+        del board
+        res = add_breakout_stubs(path, specs)
+        assert res["vias"] == 1, res
+    else:
+        res = add_gnd_pour_and_thermal_vias(path)
+        assert res["escape_stitched"] == 1, res
+    _assert_bottom_pad_connected_to_via(path)
+
+
+def test_wrong_face_track_does_not_count_as_bottom_pad_bond(tmp_path):
+    path = str(tmp_path / "wrong-face.kicad_pcb")
+    _bottom_ground_pad_board(path)
+    board = pcbnew.LoadBoard(path)
+    gnd = board.GetNetInfo().GetNetItem("GND")
+    via = pcbnew.PCB_VIA(board)
+    via.SetPosition(pcbnew.VECTOR2I(_mm(6), _mm(10)))
+    via.SetDrill(_mm(0.3))
+    via.SetWidth(_mm(0.6))
+    via.SetNet(gnd)
+    board.Add(via)
+    track = pcbnew.PCB_TRACK(board)
+    track.SetStart(pcbnew.VECTOR2I(_mm(5), _mm(10)))
+    track.SetEnd(via.GetPosition())
+    track.SetWidth(_mm(0.2))
+    track.SetLayer(pcbnew.F_Cu)
+    track.SetNet(gnd)
+    board.Add(track)
+    board.Save(path)
+    res = add_gnd_pour_and_thermal_vias(path)
+    assert res["escape_stitched"] == 1, res
+    _assert_bottom_pad_connected_to_via(path)
 
 
 def test_escape_skipped_when_pre_route_via_already_bonds(tmp_path):
@@ -659,21 +834,31 @@ def test_escape_skipped_when_pre_route_via_already_bonds(tmp_path):
         via.SetWidth(pcbnew.F_Cu, _mm(0.6))
     via.SetNet(board.GetNetInfo().GetNetItem("GND"))
     board.Add(via)
+    track = pcbnew.PCB_TRACK(board)
+    track.SetStart(pcbnew.VECTOR2I(_mm(10), _mm(10)))
+    track.SetEnd(via.GetPosition())
+    track.SetWidth(_mm(0.2))
+    track.SetLayer(pcbnew.F_Cu)
+    track.SetNet(board.GetNetInfo().GetNetItem("GND"))
+    board.Add(track)
     board.Save(path)
 
     res = add_gnd_pour_and_thermal_vias(path, {"gnd_zone_net": "GND"})
-    assert res["escape_stitched"] == 0, res
+    assert not any(
+        t.GetClass() == "PCB_TRACK" and t.GetStart() == pcbnew.VECTOR2I(_mm(10), _mm(10))
+        and t.GetEnd() != pcbnew.VECTOR2I(_mm(10.9), _mm(10))
+        for t in pcbnew.LoadBoard(path).GetTracks()
+    ), res
 
 
-def test_gnd_escape_specs_targets_only_small_gnd_pads(tmp_path):
-    # Pre-route spec gen: U1's 0.5 mm GND pad (no in-pad via possible) gets a
-    # via_at_end escape spec; U2's via-fitting 1.3 mm GND pad does not.
+def test_gnd_escape_specs_targets_ordinary_gnd_pads(tmp_path):
+    # Size alone does not authorize an in-pad via.
     path = str(tmp_path / "b.kicad_pcb")
     _sot23_board(path)
     board = pcbnew.LoadBoard(path)
     specs = gnd_escape_specs(board, {"gnd_zone_net": "GND"})
-    assert [(s.ref, s.pad) for s in specs] == [("U1", "2")]
-    assert all(s.via_at_end for s in specs)
+    assert {(s.ref, s.pad) for s in specs} == {("U1", "2"), ("U2", "1")}
+    assert all(s.via_at_end and s.via_outside_smd_pads for s in specs)
     assert gnd_escape_specs(board, {"gnd_zone_net": "GND",
                                     "gnd_pre_escape": False}) == []
 
@@ -742,12 +927,12 @@ def _module_keepout_board(path):
         outline.Append(_mm(px), _mm(py))
     u1.Add(ko)
 
-    # A large GND pad far from any keep-out: the finisher must still stitch it.
+    # An ordinary GND land far from the keepout still gets an off-pad escape.
     u2 = pcbnew.FOOTPRINT(board)
     u2.SetReference("U2")
     board.Add(u2)
     pad = pcbnew.PAD(u2)
-    pad.SetSize(pcbnew.VECTOR2I(_mm(2.5), _mm(2.5)))
+    pad.SetSize(pcbnew.VECTOR2I(_mm(1.2), _mm(1.2)))
     pad.SetPosition(pcbnew.VECTOR2I(_mm(25.0), _mm(25.0)))
     pad.SetAttribute(pcbnew.PAD_ATTRIB_SMD)
     pad.SetLayerSet(pcbnew.PAD.SMDMask())
@@ -779,8 +964,7 @@ def test_gnd_finisher_keeps_copper_out_of_footprint_keepout(tmp_path):
     gnd_in_keepout = [t for t in board.GetTracks()
                       if t.GetNetname() == "GND" and _inside(t)]
     assert gnd_in_keepout == [], gnd_in_keepout
-    # The far U2 pad is unaffected by the keep-out and still gets stitched
-    # (a large pad takes a via array, so just require a GND via in its area).
+    # The far U2 pad is unaffected by the keep-out and still gets a dogbone.
     assert any(
         isinstance(t, pcbnew.PCB_VIA) and t.GetNetname() == "GND"
         and abs(pcbnew.ToMM(t.GetPosition().x) - 25.0) <= 1.25

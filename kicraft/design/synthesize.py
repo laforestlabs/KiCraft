@@ -156,14 +156,12 @@ def _requested_copper_layers(state: ConversationState) -> int:
     Raises ``SynthesisInputError`` for a stated count no printed stack-up can carry: rounding
     it silently would ship a board the brief did not ask for.
     """
-    requested = board_copper_layers(state.intent.obligations if state.intent else None)
+    try:
+        requested = board_copper_layers(state.intent.obligations if state.intent else None)
+    except ValueError as exc:
+        raise SynthesisInputError(str(exc)) from exc
     if requested is None:
         return DEFAULT_COPPER_LAYERS
-    if requested % 2:
-        raise SynthesisInputError(
-            f"the design asks for {requested} copper layers; a printed stack-up carries an "
-            "even number, so the stack-up stated in the intent needs correcting"
-        )
     return requested
 
 
@@ -329,7 +327,9 @@ def run(
         ) from exc
     stage_3d_models(project_dir, state.bom)
 
-    results = collect_validations(project_dir, state.project_stem, bom=state.bom)
+    results = collect_validations(
+        project_dir, state.project_stem, bom=state.bom, architecture=state.architecture,
+    )
     results.append(check_typed_led_current_paths(state.architecture, state.bom))
     results.extend(
         [

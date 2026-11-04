@@ -1,0 +1,30 @@
+{
+  "content_hash": "sha256:61b022b07ba15a96e3ad0e08075e42d3a5883fe941067a659f89cbfa36b39771",
+  "datasheet_url": "https://www.ti.com/lit/ds/symlink/tps552892.pdf",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TPS552892RYQR",
+  "footprint_name": "VQFN-21_L5.0-W3.0-P0.50-TL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "TPS552892RYQR",
+  "name": "tps552892",
+  "provenance": {
+    "added_at": "2026-10-11T03:28:09Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C19272254"
+  },
+  "symbol_name": "TPS552892RYQR",
+  "tags": [
+    "regulator",
+    "buck-boost",
+    "autonomous",
+    "12v"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Reviewed against TI SLVSH28A: all 21 pins match Table 5-1; RYQ land pattern uses the 5 x 3 mm, 0.5 mm-pitch high-current VIN/SW1/PGND/SW2/VOUT bars. EN/UVLO is high-true; output current limiting requires Kelvin ISP/ISN sensing."
+}

@@ -133,6 +133,11 @@ class RecipeDefinition(BaseModel):
         default_factory=dict
     )
     ports: tuple[RecipePort, ...] = ()
+    # Optional MCU-only mapping for ports whose documented peripheral function
+    # is selected only when the architecture binds it.  The allocator reserves
+    # these pads only for bound ports, so a muxed ADC/GPIO function can remain
+    # legal when UART/SPI/I2C is absent.
+    fixed_port_pins: dict[str, str] | None = None
     internal_nets: tuple[str, ...] = ()
     parts: tuple[RecipeComponentGroup, ...]
     pins: tuple[RecipePinSpec, ...]
@@ -142,7 +147,6 @@ class RecipeDefinition(BaseModel):
     placement_constraints: tuple[RecipePlacementConstraint, ...] = ()
     electrical_assertions: tuple[RecipeElectricalAssertion, ...] = ()
     source_documents: tuple[RecipeSourceDocument, ...] = ()
-
     @model_validator(mode="after")
     def _default_ties_name_another_port(self):
         names = {port.name for port in self.ports}
@@ -153,6 +157,16 @@ class RecipeDefinition(BaseModel):
                 raise ValueError(
                     f"recipe {self.recipe} port {port.name!r} default_tie "
                     f"{port.default_tie!r} must name another port of the same recipe"
+                )
+        if self.fixed_port_pins is not None:
+            unknown_ports = set(self.fixed_port_pins) - names
+            allocatable = {pin.pin for pin in self.allocatable_pins}
+            unknown_pins = set(self.fixed_port_pins.values()) - allocatable
+            if unknown_ports or unknown_pins:
+                raise ValueError(
+                    f"recipe {self.recipe} fixed port mapping must name declared ports and "
+                    f"allocatable pins; unknown_ports={sorted(unknown_ports)}, "
+                    f"unknown_pins={sorted(unknown_pins)}"
                 )
         return self
 

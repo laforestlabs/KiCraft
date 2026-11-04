@@ -10,8 +10,10 @@ from kicraft.design.part_identity import physical_inventory_record
 from kicraft.design.synthesis.symbol_pinout import SymbolNotFoundError, lookup_pins
 from . import electrical_artifact_evidence
 from .geometry_artifact_evidence import extract_geometry_facts
+import hashlib
 import json
 from collections.abc import Mapping
+import re
 from collections import Counter
 from pathlib import Path
 import zipfile
@@ -179,6 +181,39 @@ def _bom_parts_digest(parts: list[dict[str, Any]]) -> str:
 
 
 
+def _ordered_package_is_qualified(
+    part: Mapping[str, Any], record: Any, receipt_row: Mapping[str, Any],
+) -> bool:
+    """Bind the selected order to a reviewed land pattern, not just pin numbers."""
+    if record is None:
+        return False
+    ordered_mpn = str(receipt_row.get("catalog_mpn") or "").strip()
+    if not ordered_mpn:
+        return False
+    selected = physical_inventory_record(
+        mpn=ordered_mpn, symbol=part.get("symbol"), footprint=part.get("footprint"),
+    )
+    # A printed MPN can name different manufacturers (for example USBLC6).
+    # A manufacturer-qualified record cannot borrow another supplier's order.
+    if selected is not None and selected.lcsc is not None:
+        if receipt_row.get("exact_lcsc") != selected.lcsc:
+            return False
+    if str(part.get("mpn") or "").strip():
+        return selected is not None and selected.identity == record.identity
+    if selected is not None:
+        return True
+    if record.bundle != "kicad-standard":
+        return False
+    # Only finite, reviewed IPC chip cases have this generic exception.
+    # Arbitrary inductors/connectors and explicit unknown MPNs never do.
+    case = re.match(r"^(\d{4}) \((\d{4}) metric\)", record.package, re.I)
+    if case is None:
+        return False
+    package = re.sub(r"\s+", "", str(receipt_row.get("package") or "")).casefold()
+    imperial, metric = case.groups()
+    return package in {imperial, f"{imperial}({metric}metric)"}
+
+
 def _reconcile_inventory(facts: dict[str, Any]) -> None:
     """Reconcile board pads with semantic records and stock-independent pin maps."""
     board_footprints = facts.get("board_footprints")
@@ -241,11 +276,14 @@ def _reconcile_inventory(facts: dict[str, Any]) -> None:
         if row is None:
             source_unverified.append(ref)
         elif row.get("verdict") == "pass":
-            inventory.append({
-                "ref": ref, "mpn": row.get("catalog_mpn"), "manufacturer": row.get("manufacturer"),
-                "source_url": f"https://www.lcsc.com/product-detail/{row.get('exact_lcsc')}",
-                "package": row.get("package"), "rated_limits": {"assembly_stock": row.get("assembly_stock"), "retail_stock": row.get("retail_stock")},
-            })
+            if _ordered_package_is_qualified(part, record, row):
+                inventory.append({
+                    "ref": ref, "mpn": row.get("catalog_mpn"), "manufacturer": row.get("manufacturer"),
+                    "source_url": f"https://www.lcsc.com/product-detail/{row.get('exact_lcsc')}",
+                    "package": row.get("package"), "rated_limits": {"assembly_stock": row.get("assembly_stock"), "retail_stock": row.get("retail_stock")},
+                })
+            else:
+                source_unverified.append(ref)
         elif row.get("verdict") != "excluded_not_orderable":
             source_unverified.append(ref)
     facts["part_classes"] = dict(classes)
@@ -284,6 +322,33 @@ def _verified_export_paths(rundir: Path, archives: list[Path]) -> list[str]:
     return verified
 
 
+def _verified_snapshot_board(rundir: Path, board: Path, declared: Path, state: Mapping[str, Any]) -> bool:
+    """Recognize an unchanged run copy without loading its external declared board."""
+    try:
+        relative = board.resolve().relative_to(rundir.resolve())
+        if len(relative.parts) != 3 or not declared.is_absolute():
+            return False
+        origin = declared.parents[2]
+        if (origin / relative).resolve() != declared.resolve():
+            return False
+        if _delivered_board_path(origin, state, origin / "generated") != declared:
+            return False
+        required = (Path(".kicraft/state.json"), relative)
+        optional = (relative.with_suffix(".kicad_pro"), relative.with_suffix(".kicad_dru"))
+        for path in (*required, *optional):
+            original, copied = origin / path, rundir / path
+            if path in optional and not original.exists() and not copied.exists():
+                continue
+            if not original.is_file() or not copied.is_file():
+                return False
+            with original.open("rb") as source, copied.open("rb") as snapshot:
+                if hashlib.file_digest(source, "sha256").digest() != hashlib.file_digest(snapshot, "sha256").digest():
+                    return False
+        return True
+    except (OSError, ValueError, IndexError):
+        return False
+
+
 def _delivered_board_path(rundir: Path, state: Mapping[str, Any], generated: Path) -> Path | None:
     """Select exactly one promoted ``generated/<stem>/<stem>.kicad_pcb`` board."""
     if not generated.is_dir():
@@ -305,7 +370,11 @@ def _delivered_board_path(rundir: Path, state: Mapping[str, Any], generated: Pat
     if not candidate.is_absolute():
         candidate = rundir / candidate
     try:
-        return canonical[0] if candidate.resolve() == canonical[0].resolve() else None
+        if candidate.resolve() == canonical[0].resolve():
+            return canonical[0]
+        if _verified_snapshot_board(rundir, canonical[0], candidate, state):
+            return canonical[0]
+        return None
     except OSError:
         return None
 

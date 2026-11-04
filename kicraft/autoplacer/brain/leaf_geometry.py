@@ -86,13 +86,22 @@ def tight_leaf_geometry_bounds(
     extraction: ExtractedSubcircuitBoard,
     solved_components: dict[str, Component],
     routing: dict[str, Any],
+    *,
+    exclude_component_refs: set[str] | None = None,
+    include_routing: bool = True,
+    fallback_to_outline: bool = True,
 ) -> dict[str, float]:
-    """Compute a tight axis-aligned bounding box around all leaf geometry.
+    """Compute a tight axis-aligned bounding box around leaf geometry.
 
-    Considers each component's full physical extent (courtyard ∪ pad
+    ``exclude_component_refs`` is for geometry whose location is derived from
+    the candidate outline (exact edge datums), not a waiver for its physical
+    extent.  Callers must reserve it separately.  ``include_routing`` is false
+    only when a candidate necessarily reroutes after moving such a datum.
+
+    Considers each remaining component's full physical extent (courtyard ∪ pad
     copper bboxes), trace segments (including half-widths), and vias
-    (including radii). Falls back to the extraction board outline when
-    there is no geometry at all.
+    (including radii). Falls back to the extraction board outline when there
+    is no geometry at all.
 
     The previous implementation expanded pad contributions by a configured
     ``connector_pad_margin_mm`` -- a band-aid for ``Pad`` carrying only the
@@ -105,34 +114,41 @@ def tight_leaf_geometry_bounds(
     min_y = float("inf")
     max_x = float("-inf")
     max_y = float("-inf")
+    excluded = exclude_component_refs or set()
 
-    for comp in solved_components.values():
+    for ref, comp in solved_components.items():
+        if ref in excluded:
+            continue
         tl, br = comp.physical_bbox()
         min_x = min(min_x, tl.x)
         min_y = min(min_y, tl.y)
         max_x = max(max_x, br.x)
         max_y = max(max_y, br.y)
 
-    for trace in routing.get("_trace_segments", []):
-        half_width = max(0.0, float(getattr(trace, "width_mm", 0.0)) / 2.0)
-        min_x = min(min_x, trace.start.x - half_width, trace.end.x - half_width)
-        min_y = min(min_y, trace.start.y - half_width, trace.end.y - half_width)
-        max_x = max(max_x, trace.start.x + half_width, trace.end.x + half_width)
-        max_y = max(max_y, trace.start.y + half_width, trace.end.y + half_width)
+    if include_routing:
+        for trace in routing.get("_trace_segments", []):
+            half_width = max(0.0, float(getattr(trace, "width_mm", 0.0)) / 2.0)
+            min_x = min(min_x, trace.start.x - half_width, trace.end.x - half_width)
+            min_y = min(min_y, trace.start.y - half_width, trace.end.y - half_width)
+            max_x = max(max_x, trace.start.x + half_width, trace.end.x + half_width)
+            max_y = max(max_y, trace.start.y + half_width, trace.end.y + half_width)
 
-    for via in routing.get("_via_objects", []):
-        radius = max(0.0, float(getattr(via, "size_mm", 0.0)) / 2.0)
-        min_x = min(min_x, via.pos.x - radius)
-        min_y = min(min_y, via.pos.y - radius)
-        max_x = max(max_x, via.pos.x + radius)
-        max_y = max(max_y, via.pos.y + radius)
+        for via in routing.get("_via_objects", []):
+            radius = max(0.0, float(getattr(via, "size_mm", 0.0)) / 2.0)
+            min_x = min(min_x, via.pos.x - radius)
+            min_y = min(min_y, via.pos.y - radius)
+            max_x = max(max_x, via.pos.x + radius)
+            max_y = max(max_y, via.pos.y + radius)
 
     if min_x == float("inf"):
-        tl, br = extraction.local_state.board_outline
-        min_x = tl.x
-        min_y = tl.y
-        max_x = br.x
-        max_y = br.y
+        if fallback_to_outline:
+            tl, br = extraction.local_state.board_outline
+            min_x = tl.x
+            min_y = tl.y
+            max_x = br.x
+            max_y = br.y
+        else:
+            min_x = min_y = max_x = max_y = 0.0
 
     return {
         "min_x": float(min_x),
@@ -212,14 +228,25 @@ def build_reduced_leaf_extraction(
     solved_components: dict[str, Component],
     routing: dict[str, Any],
     outline: tuple[Point, Point],
+    *,
+    rebase_content_bounds: dict[str, float] | None = None,
+    rebase_content_origin: Point | None = None,
 ) -> ExtractedSubcircuitBoard:
     """Build a new extraction whose outline is shrunk to *outline*.
 
-    All solved components and routing geometry are translated so that
-    the top-left corner of *outline* becomes the origin.
+    All solved components and routing geometry are translated so that the
+    top-left corner of *outline* becomes the origin.  An edge-datum fit may
+    instead rebase non-edge content to a reserved interior origin before
+    re-pinning the datum members against the new outline.
     """
     tl, br = outline
-    delta = Point(-tl.x, -tl.y)
+    if rebase_content_bounds is not None and rebase_content_origin is not None:
+        delta = Point(
+            rebase_content_origin.x - rebase_content_bounds["min_x"],
+            rebase_content_origin.y - rebase_content_bounds["min_y"],
+        )
+    else:
+        delta = Point(-tl.x, -tl.y)
     local_state = copy.deepcopy(extraction.local_state)
     local_state.components = copy_components_with_translation(solved_components, delta)
     local_state.traces = copy_traces_with_translation(
@@ -399,16 +426,22 @@ def repair_leaf_placement_legality(
     # Castellated pads deliberately straddle Edge.Cuts. They are fabrication
     # primitives with solver-owned pitch/datums, not ordinary components for the
     # generic out-of-board legalizer to scatter back inside the leaf.
-    for interface in cfg.get("edge_interfaces", []) or []:
-        for ref in interface.get("refs", []) or []:
-            comp = repaired.get(str(ref))
-            if comp is not None:
-                comp.array_member = True
-                comp.locked = True
+    from kicraft.autoplacer.brain.edge_datum import edge_datum_requirements
+
+    datum = edge_datum_requirements(
+        repaired, cfg, edge_margin_mm=float(cfg.get("edge_margin_mm", 2.0)),
+    )
+    for ref in datum["refs"]:
+        repaired[ref].locked = True
     local_state = copy.deepcopy(extraction.local_state)
     local_state.components = repaired
 
     legalizer = PlacementSolver(local_state, cfg, seed=0)
+    legalizer._fabricated_edge_refs = datum["refs"]
+    legalizer._pinned_targets = {
+        ref: Point(repaired[ref].pos.x, repaired[ref].pos.y) for ref in datum["refs"]
+    }
+    legalizer._pinned_rotations = {}
     legalization = legalizer.legalize_components(
         repaired,
         max_passes=int(cfg.get("leaf_legality_repair_passes", 12)),

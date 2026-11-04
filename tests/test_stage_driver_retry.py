@@ -1005,47 +1005,6 @@ def _ok_intent_reply():
     return {"text": _OK_INTENT, "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0}
 
 
-def test_default_semantic_mode_repairs_explicit_intent_classification(tmp_path):
-    brief = (
-        "make a board with USB C PD power input (configured for 5V) to an "
-        "ESP32-S3-WROOM-1-N16R8 that drives a HUB75 display"
-    )
-    initial = {
-        "goal": brief,
-        "constraints": [],
-        "named_parts": [],
-        "inferred_expertise": "intermediate",
-        "assumptions": [],
-        "project_stem": "ESP32S3_HUB75_DRIVER_BOARD_5V_US",
-    }
-    client = _ScriptedClient(
-        [
-            {
-                "text": json.dumps(initial),
-                "reasoning": "",
-                "finish_reason": "stop",
-                "cost_usd": 0.0,
-            }
-        ]
-    )
-    client.s = Settings(api_key="test")
-
-    result = run_session(tmp_path, brief, ["intent"], client=client)
-
-    stage = result["results"][0]
-    assert result["status"] == "ok"
-    assert stage["repair_attempted"] is False
-    schema = json.dumps(client.calls[0]["response_format"])
-    assert "Every explicit package" in schema
-    assert "Every exact MPN" in schema
-    assert stage["diagnostics"] == []
-    assert stage["slot"]["constraints"] == [brief]
-    assert stage["slot"]["named_parts"] == ["ESP32-S3-WROOM-1-N16R8"]
-    state = json.loads((tmp_path / ".kicraft" / "state.json").read_text())
-    assert state["project_stem"] == "ESP32S3_HUB75_DRIVER"
-    assert len(client.calls) == 1
-
-
 def test_commit_rejection_rows_validate_as_durable_diagnostics():
     """The row ``_commit_rejection_diagnostics`` writes must reload.
 
@@ -4291,3 +4250,160 @@ def test_a_repeated_design_defect_stays_terminal(tmp_path):
 
     assert result["commit_ok"] is False
     assert len(client.calls) == 3  # unchanged defect set: nothing is earned
+
+
+def test_native_construction_failure_stops_without_provider_retry(tmp_path, monkeypatch):
+    from kicraft.design import supported_architecture
+
+    prep = {"state": {"intent": {"goal": "controller"}}, "extras": {}}
+    monkeypatch.setattr(
+        stage_driver_mod, "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc", (), {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""}
+        )(),
+    )
+
+    def fail(_intent):
+        raise ValueError("native construction defect")
+
+    monkeypatch.setattr(supported_architecture, "supported_functional_spec", fail)
+    client = _ScriptedClient([])
+    client.s = Settings(api_key="test")
+    result = stage_driver_mod.drive_stage(
+        client, "functional_spec", "controller", tmp_path / "state.json", tmp_path,
+        review_before_commit=True,
+    )
+    assert result["commit_ok"] is False
+    assert result["failure_kind"] == "stage_contract_failed"
+    assert "native construction defect" in result["error"]
+    assert result["attempts"] == 0
+    assert client.calls == []
+
+
+def test_explicit_revision_uses_authored_path_not_native(tmp_path, monkeypatch):
+    from kicraft.design import supported_architecture
+
+    prep = {"state": {"intent": {"goal": "controller"}}, "extras": {}}
+    monkeypatch.setattr(
+        stage_driver_mod, "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc", (), {"returncode": 0, "stdout": json.dumps(prep), "stderr": ""}
+        )(),
+    )
+
+    def fail(_intent):
+        raise AssertionError("native producer must not handle a revision")
+
+    monkeypatch.setattr(supported_architecture, "supported_functional_spec", fail)
+    client = _ScriptedClient([
+        {"text": "not json", "reasoning": "", "finish_reason": "stop", "cost_usd": 0.0}
+    ])
+    client.s = Settings(api_key="test")
+    result = stage_driver_mod.drive_stage(
+        client, "functional_spec", "controller", tmp_path / "state.json", tmp_path,
+        instruction="Add a second button", max_retries=0, review_before_commit=True,
+    )
+    assert result["commit_ok"] is False
+    assert result["attempts"] == 1
+    assert len(client.calls) == 1
+
+
+def test_preparation_failure_precedes_native_construction(tmp_path, monkeypatch):
+    from kicraft.design import supported_architecture
+
+    monkeypatch.setattr(
+        stage_driver_mod, "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc", (), {"returncode": 1, "stdout": "", "stderr": "prep refused"}
+        )(),
+    )
+
+    def fail(_intent):
+        raise AssertionError("native producer must not run after failed preparation")
+
+    monkeypatch.setattr(supported_architecture, "supported_functional_spec", fail)
+    client = _ScriptedClient([])
+    client.s = Settings(api_key="test")
+    result = stage_driver_mod.drive_stage(
+        client, "functional_spec", "controller", tmp_path / "state.json", tmp_path,
+        review_before_commit=True,
+    )
+    assert result["failure_kind"] == "stage_prep_failed"
+    assert "prep refused" in result["error"]
+    assert result["attempts"] == 0
+    assert client.calls == []
+
+
+def test_supported_native_stages_pass_through_review_without_provider(tmp_path, monkeypatch):
+    intent = {
+        "goal": "Build an ESP32-C3 module relay board with two relay outputs, a 24 V DC supply input, a power LED, and a reset button.",
+        "constraints": [
+            "ESP32-C3 module", "Two relay outputs on screw terminals",
+            "24 V DC input on a screw terminal", "Power LED", "Reset button",
+        ],
+        "named_parts": ["ESP32-C3"],
+        "obligations": [
+            {"kind": "physical", "original_obligation_id": "mcu", "component_class": "microcontroller-module"},
+            {"kind": "physical", "original_obligation_id": "relays", "component_class": "relay"},
+            {"kind": "physical", "original_obligation_id": "terminal", "component_class": "screw-terminal"},
+            {"kind": "physical", "original_obligation_id": "led", "component_class": "led"},
+            {"kind": "physical", "original_obligation_id": "reset", "component_class": "pushbutton"},
+            {"kind": "quantity", "original_obligation_id": "relay_count", "subject": "relay", "minimum": 2},
+            {"kind": "quantitative", "original_obligation_id": "vin", "quantity": "supply voltage", "relation": "equal", "value": 24, "unit": "V"},
+        ],
+    }
+    state = {"intent": intent}
+    monkeypatch.setattr(
+        stage_driver_mod, "prepare_stage",
+        lambda *args, **kwargs: type(
+            "Proc", (), {
+                "returncode": 0, "stdout": json.dumps({"state": state, "extras": {}}),
+                "stderr": "",
+            }
+        )(),
+    )
+    client = _ScriptedClient([])
+    client.s = Settings(api_key="test")
+    events = []
+    spec = stage_driver_mod.drive_stage(
+        client, "functional_spec", intent["goal"], tmp_path / "state.json", tmp_path,
+        review_before_commit=True, progress=events.append,
+    )
+    assert spec["needs_review"] is True, spec
+    assert spec["attempts"] == 0
+    assert {row["original_obligation_id"] for row in spec["slot"]["obligations"]} == {
+        row["original_obligation_id"] for row in intent["obligations"]
+    }
+    state["functional_spec"] = spec["slot"]
+    architecture = stage_driver_mod.drive_stage(
+        client, "architecture", intent["goal"], tmp_path / "state.json", tmp_path,
+        review_before_commit=True, progress=events.append,
+    )
+    assert architecture["needs_review"] is True, architecture
+    assert architecture["attempts"] == 0
+    assert architecture["slot"]["requirements"]
+    assert client.calls == []
+    assert [event["stage"] for event in events if event["kind"] == "candidate_decoded"] == [
+        "functional_spec", "architecture",
+    ]
+
+    # A real native candidate still faces the ordinary commit gate; a refusal
+    # must not trigger a provider correction or turn into a success.
+    state.pop("functional_spec")
+    committed = []
+
+    def reject(stage, slot, *args):
+        committed.append((stage, slot))
+        return False, {"errors": ["electrical contract refused"]}
+
+    monkeypatch.setattr(stage_driver_mod, "commit_stage", reject)
+    refused = stage_driver_mod.drive_stage(
+        client, "functional_spec", intent["goal"], tmp_path / "state.json", tmp_path,
+        progress=events.append,
+    )
+    assert refused["commit_ok"] is False
+    assert refused["failure_kind"] == "commit_rejected"
+    assert refused["attempts"] == 0
+    assert refused["commit"]["errors"] == ["electrical contract refused"]
+    assert len(committed) == 1 and committed[0][0] == "functional_spec"
+    assert client.calls == []

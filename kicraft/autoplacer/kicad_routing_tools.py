@@ -4,11 +4,13 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import time
+import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,8 @@ _KRT_NPTH_TRACK_CLEARANCE_MM = 0.20
 _KICAD_DEFAULT_MIN_HOLE_CLEARANCE_MM = 0.25
 _NPTH_KEEPOUT_ZONE_NAME = "KiCraft NPTH hole clearance"
 _NPTH_KEEPOUT_POLYGON_SIDES = 32
+_PAD_VIA_KEEPOUT_ZONE_NAME = "KiCraft assembly pad via exclusion"
+
 
 
 
@@ -271,6 +275,11 @@ def _krt_command(
     clearance = config.get("kicad_routing_tools_clearance_mm")
     if clearance is not None:
         cmd.extend(["--clearance", str(clearance)])
+    grid_step = config.get("kicad_routing_tools_grid_step_mm")
+    if grid_step is not None:
+        # Escape fix for pads boxed in at the 0.1 mm default -- see the key's
+        # comment in config.py for the measured before/after.
+        cmd.extend(["--grid-step", str(grid_step)])
     layers = config.get("kicad_routing_tools_layers")
     if layers:
         cmd.extend(["--layers", *map(str, layers)])
@@ -326,6 +335,24 @@ def _krt_json_summaries(stdout: str, stderr: str) -> list[dict[str, Any]]:
                 summaries.append(summary)
     return summaries
 
+
+# ``output_writer`` prints this when it drops original-file segments that the
+# cleanup passes (dead-end sweep #84, orphan islands #217, dangle trim #347)
+# proved are not load-bearing: the segment reaches no pad of its net and no
+# continuation, so removing it cannot disconnect anything. It is emitted even
+# under ``--keep-input-copper`` (that flag protects input copper from *rip-up*,
+# not from this cleanup). Parsing the router's own accounting -- rather than
+# re-deriving dead ends from geometry, which the net-less trace fingerprint
+# cannot support -- lets the custody check distinguish "the router destroyed
+# functional input copper" from "the router swept declared unloaded stubs".
+_DECLARED_INPUT_SEGMENT_STRIP_RE = re.compile(
+    r"Removed (\d+) dead-end input segment\(s\) from the output"
+)
+
+
+def _declared_input_segment_removals(stdout: str) -> int:
+    """Original-file segments KRT's cleanup declared it stripped this run."""
+    return sum(int(match) for match in _DECLARED_INPUT_SEGMENT_STRIP_RE.findall(stdout))
 
 
 def _propagate_sibling_project_rules(src_pcb_path: str, dst_pcb_path: str) -> None:
@@ -558,6 +585,153 @@ def _stage_npth_keepouts(
     )
     return staged_board, summary
 
+def _stamp_pad_via_keepouts(board_path: Path, zone_name: str) -> dict[str, int]:
+    """Expose assembly mask openings to KRT as temporary via-only rule areas.
+
+    KRT inflates rule areas by its via copper radius plus routing clearance,
+    which is at least the drill radius. Thus a drill cannot intersect an
+    opening even when its centre lies outside the pad. Tracks remain allowed.
+    The reviewed manufacturer thermal lands are already handled by ground
+    finishing and are the only pads excluded from this ordinary-pad policy.
+    """
+    from kicraft.autoplacer.routing_board import run_pcbnew_script
+
+    summary_path = board_path.with_suffix(".pad-via-keepouts.json")
+    script = f"""
+import json
+import pcbnew
+import sys
+sys.path.insert(0, {str(Path(__file__).resolve().parents[2])!r})
+from kicraft.autoplacer.brain.gnd_pour import _authorized_thermal_pad
+
+board = pcbnew.LoadBoard({str(board_path)!r})
+name = {zone_name!r}
+for zone in list(board.Zones()):
+    if zone.GetIsRuleArea() and zone.GetZoneName() == name:
+        board.Delete(zone)
+
+pads = zones = authorized = 0
+for fp in board.Footprints():
+    for pad in fp.Pads():
+        if pad.GetAttribute() not in (
+            pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN, pcbnew.PAD_ATTRIB_PTH
+        ):
+            continue
+        if _authorized_thermal_pad(fp, pad):
+            authorized += 1
+            continue
+        openings = []
+        for copper, mask in ((pcbnew.F_Cu, pcbnew.F_Mask), (pcbnew.B_Cu, pcbnew.B_Mask)):
+            if not pad.IsOnLayer(mask):
+                continue
+            shape = pcbnew.SHAPE_POLY_SET()
+            # Transform the actual land shape, orientation, and offset. A
+            # negative mask expansion may shrink the opening; retaining the
+            # copper outline is conservative in that case.
+            expansion = max(0, pad.GetSolderMaskExpansion(mask))
+            pad.TransformShapeToPolygon(
+                shape, copper, expansion, pcbnew.FromMM(0.001), pcbnew.ERROR_OUTSIDE
+            )
+            if shape.OutlineCount() == 0:
+                raise RuntimeError(
+                    "Cannot construct mask opening for " + fp.GetReference() + "." + pad.GetNumber()
+                )
+            for index in range(shape.OutlineCount()):
+                contour = shape.Outline(index)
+                points = [contour.CPoint(i) for i in range(contour.PointCount())]
+                if len(points) >= 3:
+                    openings.append(points)
+        if openings:
+            pads += 1
+        for points in openings:
+            zone = pcbnew.ZONE(board)
+            # KRT's via obstacle map is global even for a single copper layer.
+            zone.SetLayer(pcbnew.F_Cu)
+            zone.SetIsRuleArea(True)
+            zone.SetDoNotAllowTracks(False)
+            zone.SetDoNotAllowVias(True)
+            zone.SetDoNotAllowPads(False)
+            zone.SetDoNotAllowCopperPour(False)
+            zone.SetZoneName(name)
+            outline = zone.Outline()
+            outline.NewOutline()
+            for point in points:
+                outline.Append(point.x, point.y)
+            board.Add(zone)
+            zones += 1
+board.BuildConnectivity()
+board.Save({str(board_path)!r})
+with open({str(summary_path)!r}, "w", encoding="utf-8") as out:
+    json.dump({{"pads": pads, "zones": zones, "authorized_thermal_pads": authorized}}, out)
+"""
+    run_pcbnew_script(script)
+    try:
+        return json.loads(summary_path.read_text(encoding="utf-8"))
+    finally:
+        summary_path.unlink(missing_ok=True)
+
+
+def _strip_pad_via_keepouts(board_path: Path, zone_name: str) -> None:
+    """Remove only our input-only areas, retaining authored rule areas."""
+    from kicraft.autoplacer.routing_board import run_pcbnew_script
+
+    script = f"""
+import pcbnew
+board = pcbnew.LoadBoard({str(board_path)!r})
+removed = 0
+for zone in list(board.Zones()):
+    if zone.GetIsRuleArea() and zone.GetZoneName() == {zone_name!r}:
+        board.Delete(zone)
+        removed += 1
+if removed:
+    board.BuildConnectivity()
+    board.Save({str(board_path)!r})
+"""
+    run_pcbnew_script(script)
+
+
+def _reject_vias_in_assembly_openings(board_path: Path) -> None:
+    """Guard against router passes that bypass staged via rule areas."""
+    from kicraft.autoplacer.routing_board import run_pcbnew_script
+
+    script = f"""
+import pcbnew
+import sys
+sys.path.insert(0, {str(Path(__file__).resolve().parents[2])!r})
+from kicraft.autoplacer.brain.gnd_pour import _authorized_thermal_pad
+board = pcbnew.LoadBoard({str(board_path)!r})
+violations = []
+for item in board.GetTracks():
+    if not isinstance(item, pcbnew.PCB_VIA):
+        continue
+    radius = (item.GetDrillValue() + 1) // 2
+    for fp in board.Footprints():
+        for pad in fp.Pads():
+            if pad.GetAttribute() not in (
+                pcbnew.PAD_ATTRIB_SMD, pcbnew.PAD_ATTRIB_CONN, pcbnew.PAD_ATTRIB_PTH
+            ):
+                continue
+            if pad.GetNetCode() == item.GetNetCode() and _authorized_thermal_pad(fp, pad):
+                continue
+            expansions = [
+                pad.GetSolderMaskExpansion(layer)
+                for layer in (pcbnew.F_Mask, pcbnew.B_Mask)
+                if pad.IsOnLayer(layer)
+            ]
+            if expansions and pad.HitTest(item.GetPosition(), radius + max(0, *expansions)):
+                violations.append(fp.GetReference() + "." + pad.GetNumber())
+if violations:
+    raise RuntimeError("Via drill intersects assembly mask opening(s): " + ", ".join(violations))
+"""
+    run_pcbnew_script(script)
+
+
+def _board_has_assembly_pads(board_path: Path) -> bool:
+    """Avoid a native staging pass for boards without assembly pads."""
+    text = board_path.read_text(encoding="utf-8", errors="replace")
+    return bool(re.search(r'\(pad\s+(?:"[^"]*"|[^\s()]+)\s+(?:smd|connect|thru_hole)\b', text))
+
+
 def route_with_kicad_routing_tools(
     kicad_pcb_path: str,
     output_path: str,
@@ -611,6 +785,14 @@ def route_with_kicad_routing_tools(
         hole_clearance_mm=_project_min_hole_clearance(source_project),
         router_clearance_mm=floors["clearance"],
     )
+    pad_via_keepouts = None
+    pad_via_zone_name = f"{_PAD_VIA_KEEPOUT_ZONE_NAME} {uuid.uuid4().hex}"
+    if _board_has_assembly_pads(router_input):
+        pad_via_keepouts = _stamp_pad_via_keepouts(router_input, pad_via_zone_name)
+        _propagate_sibling_project_rules(
+            str(source_project.with_suffix(".kicad_pcb")), str(router_input)
+        )
+
     fab_overrides = output_board.with_suffix(".fab-overrides.txt")
     fab_overrides.write_text(
         "".join(f"{key} = {value:.9g}\n" for key, value in floors.items()),
@@ -650,6 +832,9 @@ def route_with_kicad_routing_tools(
             # the project rule, so the shipped board keeps only authored geometry.
             _strip_npth_keepouts(output_board)
             _propagate_sibling_project_rules(str(router_input), str(output_board))
+        if pad_via_keepouts is not None:
+            _strip_pad_via_keepouts(output_board, pad_via_zone_name)
+            _propagate_sibling_project_rules(str(router_input), str(output_board))
     elapsed = time.monotonic() - started
     stdout_path = output_board.with_suffix(".router.stdout.log")
     stderr_path = output_board.with_suffix(".router.stderr.log")
@@ -668,6 +853,9 @@ def route_with_kicad_routing_tools(
             "KiCadRoutingTools requires a sibling .kicad_pro on its routed output; "
             f"could not propagate project rules to {output_board}"
         )
+
+    if pad_via_keepouts is not None:
+        _reject_vias_in_assembly_openings(output_board)
 
     output_copper = import_routed_copper(str(output_board))
     preservation = {
@@ -698,6 +886,7 @@ def route_with_kicad_routing_tools(
         "source_input_path": str(input_board),
         "router_input_path": str(router_input),
         "npth_hole_clearance_keepouts": npth_keepouts,
+        "assembly_pad_via_keepouts": pad_via_keepouts,
         "returncode": proc.returncode,
         "elapsed_s": round(elapsed, 3),
         "successful_nets": summary.get("successful"),
@@ -715,10 +904,40 @@ def route_with_kicad_routing_tools(
         "_raw_stderr": stderr,
     }
     if not preserved:
+        missing_traces = int(preservation["traces"]["missing_count"])
+        missing_vias = int(preservation["vias"]["missing_count"])
+        declared = _declared_input_segment_removals(stdout)
+        expected_traces = int(preservation["traces"]["expected_count"])
+        # Bound the tolerance: a cleanup that declared itself may still not gut
+        # the board. The observed live cases are 1/… and 20/1057 traces.
+        tolerance_cap = max(20, int(0.10 * expected_traces))
+        if (
+            declared > 0
+            and missing_vias == 0
+            and missing_traces == declared
+            and missing_traces <= tolerance_cap
+        ):
+            # The router removed exactly the original-file segments its own
+            # cleanup declared unloaded -- dead-end spurs / pad-less islands /
+            # antenna tails that reach no pad and no continuation. That is not
+            # copper loss: nothing became disconnected. Record it loudly and
+            # carry on; electrical completeness is still proven downstream by
+            # the routed-board validation and the promotion gate, which refuse a
+            # board with any open net.
+            stats["pruned_unloaded_input_traces"] = missing_traces
+            stats["copper_preservation_declared_prune"] = True
+            print(
+                "note: KiCadRoutingTools swept "
+                f"{declared} declared unloaded input segment(s) "
+                "(dead-end/island cleanup); custody check accepted them "
+                f"(vias preserved: {preservation['vias']['matched_count']}/"
+                f"{preservation['vias']['expected_count']})."
+            )
+            return stats
         raise RoutingCopperPreservationError(
             "KiCadRoutingTools failed to preserve input copper "
-            f"(missing traces={preservation['traces']['missing_count']}, "
-            f"vias={preservation['vias']['missing_count']}); "
+            f"(missing traces={missing_traces}, vias={missing_vias}; "
+            f"declared dead-end removals={declared}); "
             f"routed output retained at {output_board}",
             stats,
         )

@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:eb41dcb431110256711c65fdd1c9d328746e4bd4fb3620886fdda79e501fe73f",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C2977594.pdf",
+  "description": "ZHOURI(\u6d32\u65e5) DC3-2.54-16PAS",
+  "footprint_name": "IDC-TH_16P-P2.54_C3406",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "DC3-2.54-16PAS",
+  "name": "dc3-2p54-16pas",
+  "provenance": {
+    "added_at": "2026-10-11T23:17:13Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C2977594"
+  },
+  "symbol_name": "DC3-2.54-16PAS",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": null
+}

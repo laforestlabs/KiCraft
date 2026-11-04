@@ -73,6 +73,14 @@ class BreakoutSpec:
         matching pad nearest this board point (mm) is used. Without it the
         first match wins -- which for a strand repair tied the wrong, already-
         connected pad and silently left the stranded one (run_01/run_03).
+    strict_same_footprint:
+        Apply full pair-clearance to foreign pads on the source footprint when
+        stamping this spec. Required for perimeter power ties: their copper is
+        optional, so it must detour or be omitted rather than use the dense-row
+        escape exception.
+    via_outside_smd_pads:
+        Keep the entire tip via clear of all SMD solder lands, including
+        same-net lands. Used for ordinary ground-return dogbones.
     start_xy / net:
         Free-coordinate anchor (C1 v2 track-endpoint anchors): start the tie
         at this board point (mm) on ``net`` instead of at a pad -- the mode
@@ -95,6 +103,8 @@ class BreakoutSpec:
     net: str | None = None
     via_size_mm: float | None = None
     via_drill_mm: float | None = None
+    strict_same_footprint: bool = False
+    via_outside_smd_pads: bool = False
 
 
 def _find_pad(
@@ -568,16 +578,26 @@ def perimeter_tie_specs(
         # same net), tie directly. Shortest copper, and immune to the off-board
         # walk below. Both endpoints are placed pads, so the segment is always
         # on the board.
+        # Perimeter ties are optional copper, so they must use the full pair
+        # clearance even against sibling pads. Unlike a radial escape, there
+        # is a legal perimeter fallback; when that cannot fit, omit the tie.
         path_obs, _tip_obs = _foreign_pad_margins(
             board,
             pads[i],
             floor_mm=clearance_mm,
             half_width_mm=0.0765,
             layer_id=_LAYERS.get(layer, pcbnew.F_Cu),
+            strict_same_fp=True,
         )
         if _segment_clears_obstacles(path_obs, p1, p2):
             specs.append(
-                BreakoutSpec(ref=ref, pad=pads[i].GetNumber(), waypoints=[p2], layer=layer)
+                BreakoutSpec(
+                    ref=ref,
+                    pad=pads[i].GetNumber(),
+                    waypoints=[p2],
+                    layer=layer,
+                    strict_same_footprint=True,
+                )
             )
             continue
         # A pad field closer to the board edge than its margin puts part of the
@@ -607,7 +627,13 @@ def perimeter_tie_specs(
         corners = _rect_perimeter_path(b1, b2, wx1, wy1, wx2, wy2)
         waypoints = [b1, *corners, b2, p2]
         specs.append(
-            BreakoutSpec(ref=ref, pad=pads[i].GetNumber(), waypoints=waypoints, layer=layer)
+            BreakoutSpec(
+                ref=ref,
+                pad=pads[i].GetNumber(),
+                waypoints=waypoints,
+                layer=layer,
+                strict_same_footprint=True,
+            )
         )
     return specs
 
@@ -751,6 +777,12 @@ def add_breakout_stubs(
         return summary
 
     board = pcbnew.LoadBoard(pcb_path)
+    if any(spec.via_outside_smd_pads for spec in specs):
+        from kicraft.autoplacer.brain.gnd_pour import _board_edge_geometry
+
+        via_edge_geometry = _board_edge_geometry(board)
+    else:
+        via_edge_geometry = None
     rule_areas = collect_track_via_rule_areas(board)
     inner_box = _board_inner_box_mm(board)
     floor_mm = fab_floors(cfg)["clearance_mm"]
@@ -840,16 +872,16 @@ def add_breakout_stubs(
         half_width_mm = pcbnew.ToMM(width) / 2.0
         src_cl_mm = _own_clearance_mm(pad, layer, floor_mm)
         # A free-coordinate anchor does not start inside the stand-in pad's
-        # own row, so the same-footprint leniency is unjustified there: a
-        # USB_DN tie anchored at a track end grazed the stand-in footprint's
-        # USB_DP pad at 0.05 mm under the relaxed margins (run_10).
+        # own row, so the same-footprint leniency is unjustified there. Perimeter
+        # power ties likewise have a legal detour, rather than a reason to stamp
+        # within a sibling pad's pair-clearance keep-out.
         path_obs, tip_obs = _foreign_pad_margins(
             board,
             pad,
             floor_mm=floor_mm,
             half_width_mm=half_width_mm,
             layer_id=layer,
-            strict_same_fp=spec.start_xy is not None,
+            strict_same_fp=spec.strict_same_footprint or spec.start_xy is not None,
             hole_clearance_mm=hole_clearance_mm,
         )
 
@@ -903,6 +935,18 @@ def add_breakout_stubs(
             )
 
         def _via_fits(xy: tuple[float, float]) -> bool:
+            if spec.via_outside_smd_pads:
+                from kicraft.autoplacer.brain.gnd_pour import (
+                    _via_clears_board_edge,
+                    _via_hits_smd_pad,
+                )
+
+                point = _pt(xy)
+                radius = int(pcbnew.FromMM(via_r_mm))
+                if not _via_clears_board_edge(
+                    point.x, point.y, edge_geometry=via_edge_geometry, via_radius_iu=radius
+                ) or _via_hits_smd_pad(board, point, radius):
+                    return False
             if not _point_clears_obstacles(via_obs, xy[0], xy[1]):
                 return False
             for o_net, o_a, o_b, o_hw, o_cl, _o_layer in stamped:
@@ -942,7 +986,7 @@ def add_breakout_stubs(
             if spec.via_at_end and not _via_redundant(points[-1]) and _via_hits_keepout(points[-1]):
                 summary["skipped"].append(f"{spec.ref}.{spec.pad}:via_keepout")
                 continue
-            if spec.via_at_end and not _via_redundant(points[-1]) and not _via_fits(points[-1]):
+            if spec.via_at_end and (spec.via_outside_smd_pads or not _via_redundant(points[-1])) and not _via_fits(points[-1]):
                 summary["skipped"].append(f"{spec.ref}.{spec.pad}:via_blocked")
                 continue
         else:
@@ -1001,7 +1045,7 @@ def add_breakout_stubs(
                     if spec.via_at_end and not _via_redundant(end) and _via_hits_keepout(end):
                         via_keepout_seen = True
                         continue
-                    if spec.via_at_end and not _via_redundant(end) and not _via_fits(end):
+                    if spec.via_at_end and (spec.via_outside_smd_pads or not _via_redundant(end)) and not _via_fits(end):
                         continue
                     points = cand
                     break

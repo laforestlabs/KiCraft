@@ -384,6 +384,9 @@ def _expand_bom_groups(
 
     architecture = (prompt_state or {}).get("architecture") or {}
     trusted_lowering_groups = set((prompt_state or {}).get("_trusted_lowering_group_ids") or ())
+    independent_lowering_groups = set(
+        (prompt_state or {}).get("_independent_lowering_group_ids") or ()
+    )
     # A recipe publishes every pin its part has, including ports this design never
     # bound (an STM32's PA11/PA12 when no USB data is wanted). Those pins are
     # unused, not signals that connect to nothing: complete them as no-connects
@@ -416,7 +419,8 @@ def _expand_bom_groups(
                 "model_authored_protected_identity: "
                 f"BOM group {group.id!r} contains {list(protected)!r}"
             )
-        if (group.sheet, group.symbol.lower(), group.value.lower()) in recipe_identities:
+        if (group.id not in independent_lowering_groups
+                and (group.sheet, group.symbol.lower(), group.value.lower()) in recipe_identities):
             raise ValueError(f"BOM group {group.id!r} duplicates a locked circuit-recipe role")
 
     per_sheet: dict[str, int] = {}
@@ -945,9 +949,37 @@ def restore_source_obligations(
     return {**payload, "obligations": rows}
 
 
+def _lowerer_physical_presence(requirement: dict, component_class: str) -> bool | None:
+    """Proven presence/absence in a compiled circuit; unknown is never proven absence."""
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.part_identity import canonical_physical_features, physical_inventory_record
+
+    wanted = canonical_physical_features(component_class)
+    if not wanted:
+        return None
+    try:
+        canonical_fields = models.CircuitRequirement.model_fields
+        artifact = lower_requirement({
+            key: value for key, value in requirement.items() if key in canonical_fields
+        })
+    except (TypeError, ValueError):
+        return None
+    if artifact is None:
+        return None
+    unknown = False
+    for group in artifact.groups:
+        record = physical_inventory_record(
+            mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
+        )
+        if record is None:
+            unknown = True
+        elif wanted & record.physical_features:
+            return True
+    return None if unknown else False
+
+
 def _requirement_proves_physical_obligation(requirement: dict, component_class: str) -> bool:
     """Whether reviewed compiler evidence proves this requirement realizes one class."""
-    from kicraft.design.lowering import lower_requirement
     from kicraft.design.part_identity import (
         canonical_physical_features,
         physical_inventory_record,
@@ -992,20 +1024,7 @@ def _requirement_proves_physical_obligation(requirement: dict, component_class: 
         ):
             return True
 
-    try:
-        # The payload's requirement may carry provider-only intent fields (`obligation_ids`,
-        # `supply`, `ties`, ...) that `CircuitRequirement` forbids; the lowering probe reads the
-        # canonical fields only.
-        canonical_fields = models.CircuitRequirement.model_fields
-        artifact = lower_requirement({
-            key: value for key, value in requirement.items() if key in canonical_fields
-        })
-    except (TypeError, ValueError):
-        return False
-    return artifact is not None and any(
-        realizes(mpn=group.mpn, symbol=group.symbol, footprint=group.footprint)
-        for group in artifact.groups
-    )
+    return _lowerer_physical_presence(requirement, component_class) is True
 
 
 def physical_obligation_candidate_requirement_ids(payload: dict, row: dict) -> list[str]:
@@ -1028,6 +1047,9 @@ def attach_uniquely_provable_physical_obligations(
 
     The provider names owners by `obligation_ids`; a canonical payload already carries resolved
     `obligations` rows. Each shape is rewritten in its own vocabulary.
+    Multiple possible owners stay ambiguous unless the draft already names a proven owner.
+    In that case only claims disproven by a complete reviewed lowerer circuit are removed;
+    unknown/model-owned circuits and the original board-wide quantities are unchanged.
     """
     try:
         source_rows = source_obligation_rows(prompt_state, slots=("intent", "functional_spec"))
@@ -1041,14 +1063,36 @@ def attach_uniquely_provable_physical_obligations(
             continue
         identifier = str(row["original_obligation_id"])
         candidate_ids = physical_obligation_candidate_requirement_ids(normalized, row)
-        if len(candidate_ids) != 1:
+        if not candidate_ids:
             continue
-        requirement_id = candidate_ids[0]
+        unique_owner = len(candidate_ids) == 1
+        claimed_ids = {
+            requirement.get("id")
+            for requirement in requirements
+            if isinstance(requirement, dict)
+            and (
+                identifier in (requirement.get("obligation_ids") or [])
+                if intent_shaped
+                else any(
+                    isinstance(item, dict)
+                    and str(item.get("original_obligation_id")) == identifier
+                    for item in requirement.get("obligations") or []
+                )
+            )
+        }
+        if not unique_owner and not claimed_ids.intersection(candidate_ids):
+            continue
         changed = False
         for index, requirement in enumerate(requirements):
             if not isinstance(requirement, dict):
                 continue
-            owns = requirement.get("id") == requirement_id
+            requirement_id = requirement.get("id")
+            if not unique_owner:
+                if requirement_id not in claimed_ids or requirement_id in candidate_ids:
+                    continue
+                if _lowerer_physical_presence(requirement, row["component_class"]) is not False:
+                    continue
+            owns = unique_owner and requirement_id == candidate_ids[0]
             if intent_shaped:
                 prior = [str(name) for name in requirement.get("obligation_ids") or []]
                 retained = [name for name in prior if name != identifier]
@@ -1072,10 +1116,16 @@ def attach_uniquely_provable_physical_obligations(
                     requirements[index] = {**requirement, "obligations": retained}
                     changed = True
         if changed:
-            derived_notes.append(
-                f"{requirement_id}: physical obligation {identifier!r} "
-                "assigned to its unique reviewed physical owner (derived)"
-            )
+            if unique_owner:
+                derived_notes.append(
+                    f"{candidate_ids[0]}: physical obligation {identifier!r} "
+                    "assigned to its unique reviewed physical owner (derived)"
+                )
+            else:
+                derived_notes.append(
+                    f"Physical obligation {identifier!r}: removed compiler-proven non-owner "
+                    "claims; existing reviewed owners and board-wide quantities retained (derived)"
+                )
     if not derived_notes:
         return normalized
     normalized["requirements"] = requirements
@@ -1425,6 +1475,28 @@ def _validate_power_requirement_contracts(architecture: dict, prompt_state: dict
         )
 
 
+def _validate_conversion_output_contracts(architecture: dict, prompt_state: dict) -> None:
+    """Keep a recipe's resolved output from replacing a committed conversion target."""
+    from kicraft.design.stage_semantics import architecture_conversion_output_diagnostics
+
+    diagnostics = architecture_conversion_output_diagnostics(prompt_state, architecture)
+    if not diagnostics:
+        return
+    message = " ".join(diagnostic.message for diagnostic in diagnostics)
+    diagnostic = (
+        diagnostics[0].model_dump(exclude_none=True)
+        if len(diagnostics) == 1
+        else {
+            "code": "multiple_conversion_output_contracts",
+            "message": message,
+            "evidence": [
+                row.model_dump(exclude_none=True) for row in diagnostics
+            ],
+        }
+    )
+    raise StageSchemaError(message, diagnostic=diagnostic)
+
+
 def _validate_lowerer_parameter_contracts(architecture: models.Architecture) -> None:
     diagnostics = [
         diagnostic
@@ -1760,6 +1832,10 @@ def _normalize_stage_response(
                     if refusal is None:
                         raise
                     raise refusal from exc
+                # Bound lowerers can now prove which physical parts they do not emit.
+                payload = attach_uniquely_provable_physical_obligations(
+                    payload, prompt_state, intent_shaped=False
+                )
             try:
                 response = models.Architecture.model_validate(payload)
             except Exception as exc:
@@ -1793,6 +1869,7 @@ def _normalize_stage_response(
                 )
                 raise StageSchemaError(str(exc), diagnostic=diagnostic) from exc
             constructed_architecture = resolved.model_dump(exclude_none=True)
+            _validate_conversion_output_contracts(constructed_architecture, prompt_state)
             return constructed_architecture, 0
         if stage == "bom":
             return _normalize_bom_stage_response(payload, prompt_state)

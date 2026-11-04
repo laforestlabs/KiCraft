@@ -62,32 +62,22 @@
       "bundle": "tlv62569"
     },
     {
-      "function_key": "buck-3v3-2a",
-      "display_name": "Buck converter 3.3V (~2A)",
+      "function_key": "buck-3v3-wide-500ma",
+      "display_name": "Wide-input buck converter 3.3V (500mA)",
       "category": "power",
-      "qualifier": "2A fixed 3.3V, Vin 3.8-32V",
-      "package": "TSOT-23-6",
-      "selection_notes": "Fixed-output wide-Vin buck with minimal externals; the standard pick for 12V/24V inputs down to 3.3V.",
+      "qualifier": "3.3V, 500mA composition, 6V <= input < 30V",
+      "package": "SIP-3 through-hole module and 1206 ceramics",
+      "selection_notes": "YLPTEC K7803M-1000R3 C22749779 with CL31B106KBHNNNE C89632 10uF 50V X7R input and EMK316BB7226ML-T C385906 22uF 16V X7R output capacitors. Through-hole module requires manual or wave soldering, not reflow. This component-stage envelope does not establish board ampacity, hot-plug, reverse-polarity or surge protection, or measured thermal or transient margin. Keep input including transients below 30V. Source: https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8603362912006254592.",
       "sort_order": 70,
-      "bundle": "ap63203"
+      "bundle": "ylptec-k7803m-1000r3"
     },
     {
-      "function_key": "buck-5v-2a",
-      "display_name": "Buck converter 5V (~2A)",
+      "function_key": "buck-adjustable-tps54331",
+      "display_name": "Buck converter adjustable (TPS54331 IC)",
       "category": "power",
-      "qualifier": "2A fixed 5V, Vin 3.8-32V",
-      "package": "TSOT-23-6",
-      "selection_notes": "Same family as AP63203 (one footprint serves both rails).",
-      "sort_order": 80,
-      "bundle": "ap63205"
-    },
-    {
-      "function_key": "buck-adj-3a",
-      "display_name": "Buck converter adjustable (~3A)",
-      "category": "power",
-      "qualifier": "3A adjustable, Vin 3.5-28V",
+      "qualifier": "Fixed 3.3V, 500mA composition, normal input 7-28V",
       "package": "SOIC-8-EP",
-      "selection_notes": "Best price/stock 3A buck by a wide margin (152K stock). MP1584EN is $2.91 at LCSC despite its cheap-module reputation. XL4015E1 (C51661, $0.67) when 5A or a dirt-simple 180kHz design is acceptable.",
+      "selection_notes": "TPS54331DDAR C90761 is an adjustable IC, but tps54331-adjustable@1 is a fixed 3.3V, 500mA composition with two 47uF 25V X5R output capacitors and two 4.7uF 50V input capacitors. Its normal input envelope is 7-28V. Do not infer arbitrary outputs or the IC's 3A rating for this design. EN floats or is grounded, never tied to the input. Validate loop, thermal and transients on the finished board. https://www.ti.com/lit/ds/symlink/tps54331.pdf.",
       "sort_order": 90,
       "bundle": "tps54331"
     },
@@ -329,9 +319,19 @@
       "category": "sensors",
       "qualifier": "-55 to +125C, probe-able",
       "package": "TO-92",
-      "selection_notes": "The probe-able hobby classic (waterproof probe assemblies everywhere). UMW second source at half the genuine price (DS18B20+ C9753, $1.20). For on-board I2C temperature, TMP102 (C99269, $0.32) or the temp-humidity row.",
+      "selection_notes": "The probe-able 1-Wire option. For onboard I2C temperature, the tmp102-temperature lowerer uses TMP102AIDRLR C99269, 3.3V, SDA/SCL pull-ups and bypass capacitor; it does not measure humidity. TI: https://www.ti.com/lit/ds/symlink/tmp102.pdf. Confirm current retail and assembly stock for all selected parts.",
       "sort_order": 230,
       "bundle": "ds18b20"
+    },
+    {
+      "function_key": "tmp102-temperature",
+      "display_name": "Onboard I2C temperature sensor",
+      "category": "sensors",
+      "qualifier": "3.3V I2C temperature",
+      "package": "TI_DRL0006A SOT-563",
+      "selection_notes": "TMP102AIDRLR C99269 with a 100nF bypass and separate 4.7k SDA and SCL pull-ups; native TI_DRL0006A package. Temperature only, not humidity. The DS18B20 1-Wire option remains available for probes. https://www.ti.com/lit/ds/symlink/tmp102.pdf.",
+      "sort_order": 231,
+      "bundle": "tmp102aidrlr"
     },
     {
       "function_key": "cap-touch",

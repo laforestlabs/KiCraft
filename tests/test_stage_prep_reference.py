@@ -1,11 +1,4 @@
-"""The architecture checkpoint must show what the draft is actually offered.
-
-`kicraft stage-prep architecture` printed only the reusable-leaf list while the provider call
-received the curated circuit recipes, the generic building blocks and the reviewed carrying parts
-for each demanded class from the runtime. A reviewer judging the stage -- and an unattended run
-deciding whether to redraft -- read a checkpoint that under-reported the reference data the stage
-had. Both now read one builder, so this test pins the two together.
-"""
+"""Architecture checkpoint capabilities must construct the requested circuits."""
 from __future__ import annotations
 
 import io
@@ -17,7 +10,6 @@ import pytest
 
 from kicraft.design.cli_app import main
 from kicraft.design.models import ConversationState, IntentSlot
-from kicraft.design.stage_reference import architecture_reference_extras
 
 
 def _state(tmp_path, intent: IntentSlot) -> Path:
@@ -48,16 +40,53 @@ def _intent() -> IntentSlot:
     )
 
 
-def test_architecture_prep_carries_the_reference_blocks(tmp_path) -> None:
-    extras = _prep_extras(_state(tmp_path, _intent()))
+@pytest.mark.parametrize("exact_part", ["MCP6002-I/SN", "LM358DR", "TLV9062IDR"])
+def test_architecture_catalog_choices_construct_four_light_channels(tmp_path, exact_part):
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.architecture_intent import derive_architecture
 
-    assert extras["circuit_recipes"], "the curated recipes the stage chooses from"
-    assert extras["circuit_lowerers"], "the generic building blocks"
-    assert "led:" in extras["reviewed_class_options"], "the reviewed carrier for a demanded class"
-    # The builders are the runtime's own, so the checkpoint cannot drift from the draft.
-    assert extras["circuit_recipes"] == architecture_reference_extras(
-        _intent().model_dump()
-    )["circuit_recipes"]
+    extras = _prep_extras(_state(tmp_path, _intent()))
+    conditioner = next(
+        row for row in extras["circuit_lowerers"]
+        if "analog-conditioner" in row["families"]
+    )
+    selected = next(part for part in conditioner["reviewed_exact_parts"] if part == exact_part)
+    choices = conditioner["parameter_choices"]
+    channels = next(count for count in choices["channel_count"] if count == 4)
+    parameters = {
+        "amplifier_exact_part": next(part for part in choices["amplifier_exact_part"] if part == selected),
+        "sensor_type": next(kind for kind in choices["sensor_type"] if kind == "ambient-light"),
+        "channel_count": channels,
+        "analog_rail_v": next(voltage for voltage in choices["analog_rail_v"] if voltage == 5.0),
+        "consumer_input_max_v": 3.3,
+    }
+    architecture = derive_architecture({
+        "sheets": [{"name": "SENSORS", "stem": "SENSORS", "role": "analog", "function": "Acquisition"}],
+        "requirements": [
+            {"id": "source", "sheet": "SENSORS", "role": "power_input",
+             "family": "screw-terminal", "parameters": {"rows": 1}, "ties": {"pin2": "GND"}},
+            {"id": "acquisition", "sheet": "SENSORS", "role": "analog_block",
+             "family": "analog-conditioner", "exact_part": selected,
+             "parameters": parameters, "supply": "V5", "ties": {"vminus": "GND"}},
+            {"id": "output", "sheet": "SENSORS", "role": "connector",
+             "family": "pin-header", "parameters": {"rows": 1, "gender": "female"},
+             "ties": {"pin5": "GND", "pin6": "GND"}},
+        ],
+        "signals": [
+            {"name": f"OUT{channel}", "from": f"acquisition.analog_out_{channel}",
+             "to": f"output.pin{channel}"}
+            for channel in range(1, channels + 1)
+        ],
+        "power": {"rails": {"V5": {"voltage": 5.0, "from": "source.pin1"}}},
+        "mcu_present": False,
+    })
+    artifact = lower_requirement(next(row for row in architecture.requirements if row.id == "acquisition"))
+    amplifier = next(group for group in artifact.groups if group.role == "amplifier")
+    assert (amplifier.mpn, amplifier.quantity) == (exact_part, 2)
+    assert {
+        pin.net for pin in artifact.pins
+        if pin.role == "amplifier" and pin.pin in {"1", "7"}
+    } == {"OUT1", "OUT2", "OUT3", "OUT4"}
 
 
 def test_architecture_prep_still_reports_state_and_leaves(tmp_path) -> None:

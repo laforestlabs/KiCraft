@@ -16,15 +16,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import pytest
 
+from kicraft.autoplacer.brain import pins
 from kicraft.autoplacer.brain.leaf_size_reduction import (
     _preserve_round_boards,
     _restore_round_boards,
 )
 from kicraft.cli.autoexperiment import _auto_pin_best_leaves
+from kicraft.cli.triage import collect_leaves
 
 
-def _validation(courtyard: int) -> dict:
+def _validation(courtyard: int, unconnected: int = 0) -> dict:
     """A minimal validation dict that passes every default acceptance gate
     when clean; ``courtyard > 0`` with an unmeasurable board path makes the
     ``no_gross_courtyard_overlap`` gate fail conservatively."""
@@ -39,23 +42,40 @@ def _validation(courtyard: int) -> dict:
         "drc": {
             "ran": True,
             "shorts": 0,
-            "unconnected": 0,
+            "unconnected": unconnected,
             "clearance": 0,
             "courtyard": courtyard,
             "annular_width": 0,
             "padstack": 0,
             "copper_edge_clearance": 0,
-            "total": courtyard,
+            "total": courtyard + unconnected,
         },
     }
 
 
-def _round(idx: int, score: float, courtyard: int) -> dict:
+def _round(
+    idx: int, score: float, courtyard: int, unconnected: int = 0
+) -> dict:
+    accepted = courtyard == 0 and unconnected == 0
     return {
         "round_index": idx,
         "routed": True,
         "score": score,
-        "routing": {"validation": _validation(courtyard)},
+        "routing": {
+            "validation": _validation(courtyard, unconnected),
+            "_round_acceptance": {
+                "accepted": accepted,
+                "rejection_reasons": [] if accepted else ["leaf_gate_failed"],
+                "gate_results": {
+                    "no_unconnected": {
+                        "passed": unconnected == 0,
+                        "unconnected_total": unconnected,
+                    }
+                },
+                "drc_summary": {"unconnected": unconnected},
+                "notes": [],
+            },
+        },
     }
 
 
@@ -76,7 +96,13 @@ def _leaf_fixture(project_dir: Path, rounds: list[dict]) -> Path:
             f"(kicad_pcb round {token})"
         )
         (leaf / f"round_{token}_metadata.json").write_text("{}")
-        (leaf / f"round_{token}_solved_layout.json").write_text("{}")
+        # These emulate pre-custody snapshots: their raw DRC evidence is
+        # present, while the contemporaneous gate verdict remains in
+        # all_rounds. pinning must join those same-round records, not use a
+        # later canonical debug result.
+        (leaf / f"round_{token}_solved_layout.json").write_text(
+            json.dumps({"validation": r["routing"]["validation"], "components": {}})
+        )
     return leaf
 
 
@@ -111,6 +137,92 @@ def test_auto_pin_falls_back_loudly_when_no_round_accepted(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "NO round passed leaf acceptance" in out
     assert "UNACCEPTED" in out
+
+
+def test_pinned_debug_and_triage_follow_older_selected_round(tmp_path):
+    # 9102's witness shape: the later invocation leaves R5 in debug, but the
+    # all-round selector pins older R2 because its routed score is better.
+    rounds = [
+        _round(2, 12.43, courtyard=0, unconnected=6),
+        _round(5, 0.0, courtyard=0, unconnected=9),
+    ]
+    leaf = _leaf_fixture(tmp_path, rounds)
+
+    _auto_pin_best_leaves(tmp_path)
+    assert (leaf / "leaf_routed.kicad_pcb").read_text() == "(kicad_pcb round 0002)"
+    canonical_layout = json.loads((leaf / "solved_layout.json").read_text())
+    assert canonical_layout["validation"]["drc"]["unconnected"] == 6
+
+
+    debug = json.loads((leaf / "debug.json").read_text())
+    extra = debug["extra"]
+    assert extra["best_round"]["round_index"] == 2
+    assert extra["leaf_acceptance_structured"]["accepted"] is False
+    assert extra["leaf_acceptance"]["drc"]["unconnected"] == 6
+    # Pin reconciliation leaves the all-round search history intact.
+    assert [r["round_index"] for r in extra["all_rounds"]] == [2, 5]
+
+    # Retained artifacts from before diagnostic custody still have R5 in
+    # debug.json. Triage resolves their pins in memory rather than reporting
+    # that stale invocation.
+    (leaf / "debug.json").write_text(
+        json.dumps(
+            {
+                "extra": {
+                    "all_rounds": rounds,
+                    "best_round": rounds[1],
+                    "leaf_acceptance": rounds[1]["routing"]["validation"],
+                    "leaf_acceptance_structured": rounds[1]["routing"][
+                        "_round_acceptance"
+                    ],
+                }
+            }
+        )
+    )
+    leaves = collect_leaves(tmp_path / ".experiments")
+    assert len(leaves) == 1
+    assert leaves[0]["accepted"] is False
+    assert leaves[0]["unconnected"]["total"] == 6
+
+
+def test_pinned_debug_fails_closed_without_same_round_gate_record(tmp_path):
+    round_record = _round(2, 12.43, courtyard=0, unconnected=0)
+    del round_record["routing"]["_round_acceptance"]
+    leaf = _leaf_fixture(tmp_path, [round_record])
+
+    pins.pin_leaf(tmp_path / ".experiments", leaf.name, 2)
+
+    debug = json.loads((leaf / "debug.json").read_text())
+    acceptance = debug["extra"]["leaf_acceptance_structured"]
+    assert acceptance["accepted"] is False
+    assert acceptance["rejection_reasons"] == [
+        "pinned_round_acceptance_unavailable"
+    ]
+
+
+@pytest.mark.parametrize("raw_count", [6, 0, None])
+def test_selected_raw_drc_does_not_manufacture_acceptance(tmp_path, raw_count):
+    selected = _round(2, 12.43, courtyard=0, unconnected=6)
+    del selected["routing"]["_round_acceptance"]
+    if raw_count is None:
+        del selected["routing"]["validation"]["drc"]
+    else:
+        selected["routing"]["validation"]["drc"].update({
+            "unconnected": raw_count, "unconnected_nets": ["QSPI_CS", "QSPI_SD2", "gpio7"],
+        })
+    stale = _round(5, 0.0, courtyard=0, unconnected=9)
+    leaf = _leaf_fixture(tmp_path, [selected, stale])
+    pins.pin_leaf(tmp_path / ".experiments", leaf.name, 2)
+    report = collect_leaves(tmp_path / ".experiments")[0]
+    assert report["accepted"] is False
+    assert report["rejection_reasons"] == ["pinned_round_acceptance_unavailable"]
+    assert report["unconnected"] is None
+    if raw_count is None:
+        assert report["raw_drc"] is None
+    else:
+        assert report["raw_drc"] == {
+            "unconnected": raw_count, "unconnected_nets": ["QSPI_CS", "QSPI_SD2", "gpio7"],
+        }
 
 
 def test_squeeze_preserve_restore_round_trips(tmp_path):

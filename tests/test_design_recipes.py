@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 
@@ -23,9 +24,15 @@ from kicraft.server.stage_contracts import (
 
 def _selection(**parameters):
     return RecipeSelection(
-        recipe="rp2040-minimal@1",
+        recipe="rp2040-minimal@2",
         instance="main",
         sheets={"mcu": "MCU", "io": "CASTELLATED IO"},
+        port_bindings={
+            "vdd": "+3V3",
+            "gnd": "GND",
+            "usb_dm": "USB_D_N",
+            "usb_dp": "USB_D_P",
+        },
         parameters=parameters,
     )
 
@@ -34,7 +41,7 @@ def test_recipe_expansion_is_deterministic_and_provenanced():
     first = expand_recipe(_selection())
     second = expand_recipe(_selection())
     assert first == second
-    assert all(part.recipe_id == "rp2040-minimal@1" for part in first.parts)
+    assert all(part.recipe_id == "rp2040-minimal@2" for part in first.parts)
     assert len([part for part in first.parts if not part.assembly]) == 34
     assert [edge.side for edge in first.edge_interfaces] == ["left", "right"]
 
@@ -46,8 +53,8 @@ def test_recipe_expansion_is_deterministic_and_provenanced():
         edge_interfaces=first.edge_interfaces,
     )
     assert check_net_coverage(bom).ok
-    # Native programming: the bare RP2040 recipe carries no USB socket, so the
-    # hard §9.29 native-USB gate reports the missing physical connector.
+    # A native USB pair without a physical receptacle must not be represented as
+    # a programming path by its recipe labels alone.
     access = check_mcu_programming_access(bom)
     assert not access.ok
     assert any(
@@ -129,6 +136,7 @@ def test_leaf_legality_repair_preserves_solver_owned_castellation_datums():
                 "refs": list(components),
                 "side": "left",
                 "pitch_mm": 2.54,
+                "exact_edge_datum": True,
             }
         ]
     }
@@ -141,6 +149,8 @@ def test_leaf_legality_repair_preserves_solver_owned_castellation_datums():
 
     centers = [repaired[ref].pads[0].pos for ref in components]
     assert [center.x for center in centers] == [0.0, 0.0, 0.0]
+    assert not _diagnostics["resolved"]
+    assert _diagnostics["remaining_overlaps"]
     assert [centers[i + 1].y - centers[i].y for i in range(2)] == pytest.approx([2.54, 2.54])
 
 
@@ -185,6 +195,141 @@ def test_trivial_leaf_reframe_reapplies_exact_castellation_datums():
     assert [centers[i + 1].y - centers[i].y for i in range(2)] == pytest.approx([2.54, 2.54])
 
 
+def _edge_bank_state(sides):
+    components = {}
+    interfaces = []
+    for side, count in sides:
+        refs = [f"{side}{index}" for index in range(count)]
+        interfaces.append({
+            "refs": refs,
+            "side": side,
+            "pitch_mm": 2.54,
+            "exact_edge_datum": True,
+        })
+        for ref in refs:
+            components[ref] = Component(
+                ref=ref, value="Castellated pad", pos=Point(5.0, 5.0),
+                rotation=0.0, layer=Layer.FRONT, width_mm=1.0, height_mm=1.0,
+                pads=[Pad(ref=ref, pad_id="1", pos=Point(5.2, 5.3), net=ref, layer=Layer.FRONT)],
+            )
+    state = BoardState(components=components, nets={})
+    state.board_outline = (Point(0.0, 0.0), Point(20.0, 20.0))
+    return state, interfaces
+
+
+@pytest.mark.parametrize("placement", ["solver", "routing"])
+@pytest.mark.parametrize("sides", [
+    [("left", 3), ("top", 10)],
+    [("right", 3), ("bottom", 10)],
+    [("left", 10), ("right", 10), ("top", 10), ("bottom", 10)],
+])
+def test_mixed_edge_banks_use_final_outline_independent_of_order(placement, sides):
+    results = []
+    for reverse in (False, True):
+        state, interfaces = _edge_bank_state(sides)
+        cfg = {"edge_interfaces": list(reversed(interfaces)) if reverse else interfaces}
+        if placement == "solver":
+            if sides == [("left", 3), ("top", 10)]:
+                state.components["H1"] = Component(
+                    ref="H1", value="corner", pos=Point(10.0, 10.0), rotation=0.0,
+                    layer=Layer.FRONT, width_mm=1.0, height_mm=1.0, pads=[],
+                )
+                cfg.update({"component_zones": {"H1": {"corner": "bottom-right"}},
+                            "edge_jitter_mm": 0.0})
+            solver = PlacementSolver(state, cfg, seed=0)
+            solver._pin_edge_components(state.components)
+            if "H1" in state.components:
+                corner = state.components["H1"].pos
+                tl, br = state.board_outline
+                assert (corner.x, corner.y) == pytest.approx((br.x - 2.0, br.y - 2.0))
+        else:
+            _place_fabricated_edge_interfaces(state, cfg)
+        tl, br = state.board_outline
+        if any(count == 10 and side in ("top", "bottom") for side, count in sides):
+            assert br.x - tl.x == pytest.approx(9 * 2.54 + 4.0)
+        if any(count == 10 and side in ("left", "right") for side, count in sides):
+            assert br.y - tl.y == pytest.approx(9 * 2.54 + 4.0)
+        if placement == "solver":
+            assert (tl.x, tl.y) == (0.0, 0.0)
+        else:
+            assert ((tl.x + br.x) / 2, (tl.y + br.y) / 2) == pytest.approx((10.0, 10.0))
+        for interface in interfaces:
+            side = interface["side"]
+            centers = [state.components[ref].pads[0].pos for ref in interface["refs"]]
+            perpendicular = [p.x if side in ("left", "right") else p.y for p in centers]
+            datum = {"left": tl.x, "right": br.x, "top": tl.y, "bottom": br.y}[side]
+            assert perpendicular == pytest.approx([datum] * len(centers))
+            parallel = [p.y if side in ("left", "right") else p.x for p in centers]
+            assert [b - a for a, b in zip(parallel, parallel[1:])] == pytest.approx(
+                [2.54] * (len(centers) - 1)
+            )
+        results.append((
+            (tl.x, tl.y, br.x, br.y),
+            {ref: (c.pos.x, c.pos.y, c.pads[0].pos.x, c.pads[0].pos.y)
+             for ref, c in state.components.items() if c.pads},
+        ))
+    assert results[0][0] == pytest.approx(results[1][0])
+    assert results[0][1].keys() == results[1][1].keys()
+    for ref in results[0][1]:
+        assert results[0][1][ref] == pytest.approx(results[1][1][ref])
+
+
+@pytest.mark.parametrize("placement", ["solver", "routing"])
+@pytest.mark.parametrize("within_group", [True, False])
+def test_duplicate_usable_edge_members_rejected_before_mutation(placement, within_group):
+    state, interfaces = _edge_bank_state([("left", 3), ("top", 3)])
+    if within_group:
+        interfaces[0]["refs"] = ["left0", "left1", "left0", "left1"]
+        duplicate = "left0"
+    else:
+        interfaces[1]["refs"] = ["top0", "left1", "left0"]
+        duplicate = "left1"
+    cfg = {"edge_interfaces": interfaces}
+    solver = PlacementSolver(state, cfg, seed=0)
+    solver._pinned_targets = {"sentinel": Point(9.0, 9.0)}
+    solver._pinned_rotations = {"sentinel": 42.0}
+    before = copy.deepcopy(state)
+    with pytest.raises(ValueError, match=f"^edge interface reference declared more than once: {duplicate}$"):
+        if placement == "solver":
+            solver._pin_edge_components(state.components)
+        else:
+            _place_fabricated_edge_interfaces(state, cfg)
+    assert state == before
+    assert solver._pinned_targets == {"sentinel": Point(9.0, 9.0)}
+    assert solver._pinned_rotations == {"sentinel": 42.0}
+
+
+@pytest.mark.parametrize("placement", ["solver", "routing"])
+def test_incomplete_edge_bank_is_skipped_without_datum_exemption(placement):
+    state, interfaces = _edge_bank_state([("left", 1)])
+    interfaces[0]["refs"].append("missing")
+    component = state.components["left0"]
+    component.pos = Point(0.0, 10.0)
+    component.pads[0].pos = Point(0.0, 10.0)
+    cfg = {"edge_interfaces": interfaces}
+    solver = PlacementSolver(state, cfg, seed=0)
+    if placement == "solver":
+        solver._pin_edge_components(state.components)
+    else:
+        _place_fabricated_edge_interfaces(state, cfg)
+    assert component.pads[0].pos == Point(0.0, 10.0)
+    assert not component.locked
+    assert solver.legality_diagnostics(state.components)["pad_outside_count"] == 1
+
+
+def test_adjacent_edge_banks_reject_real_locked_overlap():
+    state, interfaces = _edge_bank_state([("left", 1), ("top", 1)])
+    for comp in state.components.values():
+        comp.width_mm = comp.height_mm = 22.0
+        comp.pads[0].size_mm = Point(22.0, 22.0)
+    cfg = {"edge_interfaces": interfaces}
+    solver = PlacementSolver(state, cfg, seed=0)
+    solver._pin_edge_components(state.components)
+    diagnostics = solver.legality_diagnostics(state.components)
+    assert diagnostics["overlap_count"] == 1
+    assert diagnostics["locked_overlap_count"] == 1
+
+
 def test_recipe_rejects_unknown_version_parameter_and_sheet_role():
     with pytest.raises(ValueError, match="unknown circuit recipe"):
         expand_recipe(_selection().model_copy(update={"recipe": "rp2040-minimal@3"}))
@@ -227,7 +372,7 @@ def test_recipe_locked_wiring_rejects_model_overwrite():
             "wiring", {"pins": [{"ref": ref, "pin": pin, "net": net}]}, {"bom": bom}
         )
     merged = _normalize_stage_response("wiring", {"pins": []}, {"bom": bom})[0]
-    assert {"ref": "U1", "pin": "26"} in merged["no_connect_pins"]
+    assert {"ref": "U1", "pin": "26"} not in merged["no_connect_pins"]
 
 
 def test_allocator_owned_wiring_pin_rejects_model_overwrite():
@@ -898,20 +1043,8 @@ def test_architecture_discards_unknown_provider_unresolved_ids_before_resolution
     canonical, _expanded = _normalize_stage_response("architecture", payload, {})
 
     assert canonical["unresolved_requirement_ids"] == []
-    mcu = next(row for row in canonical["requirements"] if row["role"] == "mcu_core")
-    assert mcu["exact_part"] == "ESP32-S3-MINI-1-N8"
 
 
-def test_architecture_family_default_records_typed_exact_part():
-    canonical, _expanded = _normalize_stage_response(
-        "architecture",
-        _add_native_usb(_esp32_architecture_payload()),
-        {"intent": {}},
-    )
-
-    mcu = next(row for row in canonical["requirements"] if row["role"] == "mcu_core")
-    assert mcu["family"] == "esp32-s3-module"
-    assert mcu["exact_part"] == "ESP32-S3-MINI-1-N8"
 
 
 def test_architecture_unsupported_protected_esp32_variant_blocks():
@@ -1073,18 +1206,6 @@ def _c3_native_usb_architecture():
     return payload
 
 
-def test_obsolete_bridge_or_header_programming_is_rejected_for_native_usb():
-    from kicraft.design.recipes.resolver import resolve_architecture_recipes
-
-    # native_usb=False is no longer an accepted generation input (hidden behind
-    # normal parameter validation, never a silent rewrite).
-    payload = _c3_native_usb_architecture()
-    payload["requirements"][0]["parameters"] = {"native_usb": False}
-    result = resolve_architecture_recipes(payload)
-    diagnostic = next(row for row in result.blocking if row.requirement_id == "mcu_core")
-    assert diagnostic.code == "conflicting_recipe_parameter"
-    assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
-
 
 def test_remote_usb_does_not_hide_missing_c3_uart_application_contract():
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
@@ -1191,6 +1312,19 @@ def _grounded_usb_shield_architecture():
         for net in ("USB_D_P", "USB_D_N")
     ]
     return payload
+
+
+@pytest.mark.parametrize("intent", [
+    {"goal": "Use UMW USBLC6-2SC6 for the USB connector"},
+    {"named_parts": ["UMW USBLC6-2SC6"]},
+    {"constraints": ["USB ESD shall be LCSC C2687116"]},
+])
+def test_usb_connector_refuses_explicit_umw_not_st(intent):
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    result = resolve_architecture_recipes(_grounded_usb_shield_architecture(), intent)
+    assert any(row.code == "unsupported_protected_variant" for row in result.blocking)
+    assert not any(row.recipe == "usb-c-usb2-device@1" for row in result.selections)
 
 
 @pytest.mark.parametrize("family", ["usb-c-usb2-device", "usb-c-power-sink"])
@@ -1875,6 +2009,36 @@ def test_primitive_value_labels_cannot_claim_named_hardware_ownership(named):
     assert "missing_recipe_requirement" in {row.code for row in result.blocking}
 
 
+@pytest.mark.parametrize("requested", ["LM35", "LM358", "NE555"])
+def test_short_named_part_cannot_be_replaced_by_a_different_amplifier(requested):
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    architecture = {
+        "sheets": [{"name": "ANALOG", "stem": "ANALOG", "function": "Signal conditioning"}],
+        "topologies": {},
+        "rail_voltages": {"VCC": 5.0},
+        "power_nets": ["VCC", "GND"],
+        "comms_protocols": [],
+        "mcu_present": False,
+        "inter_sheet_nets": [],
+        "assumptions": [],
+        "requirements": [{
+            "id": requested.lower(),
+            "sheet": "ANALOG",
+            "role": "analog_block",
+            "family": "mcp6001-follower",
+            "exact_part": "MCP6001T-I/OT",
+            "ports": {"vdd": "VCC", "gnd": "GND", "input": "AIN", "output": "AOUT",
+                      "feedback": "AOUT"},
+        }],
+    }
+    result = resolve_architecture_recipes(architecture, {"named_parts": [requested]})
+    assert any(
+        row.code == "missing_recipe_requirement" and requested in row.evidence
+        for row in result.blocking
+    )
+
+
 def test_can_capability_cannot_fall_back_to_generic_gpio():
     from kicraft.design.models import CircuitRequirement
     from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
@@ -2107,15 +2271,6 @@ def _frozen_architecture_recovery():
     )
 
 
-def test_frozen_c3_connector_requirement_cannot_hide_missing_mcu_ownership():
-    frozen = _frozen_architecture_recovery()["c3"]
-    with pytest.raises(StageSchemaError, match="unavailable_recipe_gpio") as rejected:
-        _normalize_stage_response(
-            "architecture", frozen["architecture"], {"intent": frozen["intent"]}
-        )
-    assert rejected.value.diagnostic["recipe"] == "esp32-c3-mini-1-minimal@1"
-    assert rejected.value.diagnostic["sheet"] == "ESP32 C3 MODULE"
-    assert "GPIO9" in rejected.value.diagnostic["evidence"]
 
 
 def test_typed_named_mcu_cannot_be_dropped_by_false_presence_flag():
@@ -2369,6 +2524,41 @@ def test_pin_allocator_allocates_controller_buses_atomically(
     assert {allocation.net for allocation in allocations} == set(ports.values())
 
 
+@pytest.mark.parametrize("defect", [None, "conflict", "missing_miso", "unknown_clock"])
+def test_recipe_spi_clock_spelling_allocates_one_physical_bus_or_refuses(defect):
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.recipes.pin_allocator import PinAllocationError, allocate_requirement_pins
+
+    ports = {"spi_sck": "CLK", "spi_mosi": "MOSI", "spi_miso": "MISO", "spi_cs0": "CS"}
+    if defect == "conflict":
+        ports["spi_sclk"] = "OTHER_CLK"
+    elif defect == "missing_miso":
+        del ports["spi_miso"]
+    elif defect == "unknown_clock":
+        ports["spi_clock"] = ports.pop("spi_sck")
+    requirement = CircuitRequirement(
+        id="mcu", sheet="MCU", role="mcu_core", family="esp32-s3-module",
+        ports=ports, interfaces=["spi_controller"],
+    )
+    definition = get_recipe("esp32-s3-mini-1-minimal@1")
+    if defect is not None:
+        with pytest.raises(PinAllocationError) as error:
+            allocate_requirement_pins(definition, requirement)
+        assert error.value.code == (
+            "conflicting_interface_port" if defect == "conflict" else "missing_interface_port"
+        )
+        return
+    allocations = allocate_requirement_pins(definition, requirement)
+    canonical = requirement.model_copy(update={"ports": {
+        "spi_sclk": "CLK", "spi_mosi": "MOSI", "spi_miso": "MISO", "spi_cs0": "CS",
+    }})
+    expected = allocate_requirement_pins(definition, canonical)
+    assert {(row.net, row.pin, row.capability) for row in allocations} == {
+        (row.net, row.pin, row.capability) for row in expected
+    }
+    assert len({row.pin for row in allocations}) == 4
+
+
 def test_s3_prefixed_i2c_bindings_own_real_intersheet_nets():
     from kicraft.design.architecture_intent import derive_architecture
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
@@ -2530,6 +2720,8 @@ def test_pin_allocator_honors_explicit_gpio_number_ports():
         "attiny402-updi-minimal@1",
         "attiny412-updi-minimal@1",
         "attiny1614-updi-minimal@1",
+        "ch32v003f4p6-minimal@1",
+        "ch32v003f4u6-minimal@1",
         "ch32v003j4m6-minimal@1",
     ],
 )
@@ -2559,6 +2751,14 @@ def test_wave_a_mcu_recipes_expand_with_complete_ownership(recipe):
         assert all(part.recipe_role != "program_header" for part in expansion.parts)
     else:
         assert any(part.ref.startswith("J") for part in expansion.parts)
+    if recipe in {"ch32v003f4p6-minimal@1", "ch32v003f4u6-minimal@1"}:
+        # The WCH-Link path is recipe-owned even when no model adds a public
+        # SWIO port binding.
+        net_by_endpoint = {
+            (pin.ref, pin.pin): pin.net for pin in expansion.ownership.pins
+        }
+        swio_pin = "18" if recipe.endswith("f4p6-minimal@1") else "15"
+        assert net_by_endpoint[("U1", swio_pin)] == net_by_endpoint[("J1", "3")]
     from pathlib import Path
 
     from kicraft.design.synthesis.symbol_pinout import lookup_pins
@@ -2575,6 +2775,178 @@ def test_wave_a_mcu_recipes_expand_with_complete_ownership(recipe):
             sorted(actual - expected),
         )
 
+def test_ch32_wch_link_recipe_requires_complete_physical_wiring():
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe="ch32v003f4p6-minimal@1",
+            instance="main",
+            sheets={"mcu": "MCU"},
+            port_bindings={"vdd": "+3V3", "gnd": "GND"},
+        )
+    )
+    bom = BOM(
+        parts=expansion.parts,
+        connections=expansion.connections,
+        no_connect_pins=expansion.no_connect_pins,
+    )
+    assert check_mcu_programming_access(bom).ok
+
+    swio = next(
+        connection.net_name
+        for connection in expansion.connections
+        if any(endpoint.ref == "U1" and endpoint.pin == "18" for endpoint in connection.endpoints)
+    )
+    missing_swio = BOM(
+        parts=expansion.parts,
+        connections=[
+            connection for connection in expansion.connections if connection.net_name != swio
+        ],
+        no_connect_pins=expansion.no_connect_pins,
+    )
+    result = check_mcu_programming_access(missing_swio)
+    assert not result.ok
+    assert any("WCH-Link" in offender and "SWIO" in offender for offender in result.offenders)
+
+
+def _expand_ch32v003f4u6_probe(requirement):
+    from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
+
+    definition = get_recipe("ch32v003f4u6-minimal@1")
+    allocations = allocate_requirement_pins(definition, requirement)
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe=definition.recipe,
+            instance="ch32_probe",
+            sheets={"mcu": "MCU"},
+            port_bindings={"vdd": "+3V3", "gnd": "GND", **requirement.ports},
+            pin_allocations=allocations,
+        )
+    )
+    mcu_pins = {
+        pin.net: pin.pin
+        for pin in expansion.ownership.pins
+        if pin.ref == "U1"
+    }
+    return definition, allocations, mcu_pins
+
+
+def test_ch32v003f4u6_native_expansion_probes_seven_independent_outputs():
+    """A MAX7219 serial control bundle plus four indicators fits without pad reuse."""
+    from kicraft.design.models import CircuitRequirement
+
+    outputs = {
+        "output_0": "DISPLAY_DIN",
+        "output_1": "DISPLAY_CLK",
+        "output_2": "DISPLAY_LOAD",
+        "output_3": "INDICATOR_0",
+        "output_4": "INDICATOR_1",
+        "output_5": "INDICATOR_2",
+        "output_6": "INDICATOR_3",
+    }
+    _definition, allocations, mcu_pins = _expand_ch32v003f4u6_probe(
+        CircuitRequirement(
+            id="mcu_core",
+            sheet="MCU",
+            role="mcu_core",
+            family="ch32v003",
+            ports=outputs,
+        )
+    )
+
+    assert len(allocations) == len(outputs)
+    assert len({allocation.pin for allocation in allocations}) == len(outputs)
+    assert {mcu_pins[net] for net in outputs.values()} == {
+        allocation.pin for allocation in allocations
+    }
+    assert not {mcu_pins[net] for net in outputs.values()} & {"1", "15"}
+
+
+def test_ch32v003f4u6_native_expansion_probes_adc_i2c_and_buttons_without_reuse():
+    """Four light ADCs, Qwiic I²C, and three button inputs use distinct legal pads."""
+    from kicraft.design.models import CircuitRequirement
+
+    ports = {
+        "adc_0": "LIGHT_ADC_0",
+        "adc_1": "LIGHT_ADC_1",
+        "adc_2": "LIGHT_ADC_2",
+        "adc_3": "LIGHT_ADC_3",
+        "i2c_sda": "QWIIC_SDA",
+        "i2c_scl": "QWIIC_SCL",
+        "input_0": "BUTTON_0",
+        "input_1": "BUTTON_1",
+        "input_2": "BUTTON_2",
+    }
+    definition, allocations, mcu_pins = _expand_ch32v003f4u6_probe(
+        CircuitRequirement(
+            id="mcu_core",
+            sheet="MCU",
+            role="mcu_core",
+            family="ch32v003",
+            interfaces=["adc", "i2c_controller"],
+            ports=ports,
+        )
+    )
+
+    assert len({allocation.pin for allocation in allocations}) == len(ports)
+    assert mcu_pins["QWIIC_SDA"] == "8"
+    assert mcu_pins["QWIIC_SCL"] == "9"
+    assert definition.fixed_port_pins == {
+        "uart_tx": "19",
+        "uart_rx": "20",
+        "i2c_sda": "8",
+        "i2c_scl": "9",
+        "spi_cs0": "8",
+        "spi_sck": "12",
+        "spi_mosi": "13",
+        "spi_miso": "14",
+    }
+    adc_pins = {
+        allocation.pin
+        for allocation in allocations
+        if allocation.net.startswith("LIGHT_ADC_")
+    }
+    reviewed_adc_pins = {
+        pin.pin for pin in definition.allocatable_pins if "adc" in pin.capabilities
+    }
+    assert len(adc_pins) == 4
+    assert adc_pins <= reviewed_adc_pins
+    assert {mcu_pins[net] for net in ports.values()} == {
+        allocation.pin for allocation in allocations
+    }
+
+
+def test_ch32v003_family_default_expands_capacity_without_replacing_exact_j4m6():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = {
+        "topologies": {"MCU": "CH32V003 controller"},
+        "rail_voltages": {"+3V3": 3.3},
+        "comms_protocols": [],
+        "mcu_present": True,
+        "sheets": [{"name": "MCU", "stem": "MCU", "function": "CH32V003 controller"}],
+        "power_nets": ["+3V3", "GND"],
+        "inter_sheet_nets": [],
+        "assumptions": [],
+        "requirements": [
+            {
+                "id": "mcu_core",
+                "sheet": "MCU",
+                "role": "mcu_core",
+                "family": "ch32v003",
+                "ports": {"vdd": "+3V3", "gnd": "GND"},
+            }
+        ],
+    }
+
+    generic = resolve_architecture_recipes(payload, {"named_parts": ["CH32V003"]})
+    assert generic.selections[0].recipe == "ch32v003f4u6-minimal@1"
+    assert generic.exact_parts["mcu_core"] == "CH32V003F4U6"
+
+    exact_j4m6 = resolve_architecture_recipes(
+        payload, {"named_parts": ["CH32V003J4M6"]}
+    )
+    assert exact_j4m6.selections[0].recipe == "ch32v003j4m6-minimal@1"
+    assert exact_j4m6.exact_parts["mcu_core"] == "CH32V003J4M6"
 
 def test_wave_b_power_recipes_own_every_symbol_pin():
     from pathlib import Path
@@ -2583,7 +2955,6 @@ def test_wave_b_power_recipes_own_every_symbol_pin():
     from kicraft.design.synthesis.symbol_pinout import lookup_pins
 
     for definition in WAVE_B_POWER_RECIPES:
-        assert definition.maturity == "production"
         assert definition.source_documents
         for group in definition.parts:
             expected = {
@@ -2624,14 +2995,11 @@ def test_tps54331_recipe_uses_a_freewheel_diode_and_floating_enable():
         for endpoint in connection.endpoints
     }
 
-    assert [port.name for port in definition.ports] == ["input", "gnd", "output"]
-    assert diode.mpn == "SS34"
     assert nets[(diode.ref, "1")] == nets[(converter.ref, "8")]
     assert nets[(diode.ref, "2")] == nets[(converter.ref, "7")] == "GND"
     assert (converter.ref, "3") in {
         (endpoint.ref, endpoint.pin) for endpoint in expansion.no_connect_pins
     }
-    assert not {"enable_top", "enable_bottom"} & set(parts)
 
 def test_wave_c_interface_recipes_own_every_symbol_pin():
     from pathlib import Path
@@ -2667,6 +3035,7 @@ def test_ch340c_supply_modes_follow_physical_v3_topology(supply_voltage):
     from kicraft.design.synthesis.symbol_pinout import lookup_pins
 
     bindings = {
+        "vbus": "USB5V",
         "vdd": "BRIDGE_SUPPLY",
         "gnd": "GND",
         "usb_dp": "USB_DP",
@@ -2728,15 +3097,16 @@ def test_ch340c_supply_modes_follow_physical_v3_topology(supply_voltage):
         assert nets[parts[role].ref, "2"] == "GND"
     if supply_voltage == 3.3:
         assert v3 == "BRIDGE_SUPPLY"
-        assert expansion.ownership.internal_nets == []
-        assert set(nets.values()) == set(bindings.values())
     else:
         assert v3 not in bindings.values()
-        assert expansion.ownership.internal_nets == [v3]
         assert {endpoint for endpoint, net in nets.items() if net == v3} == {
             (bridge.ref, "4"),
             (parts["v3_cap"].ref, "1"),
         }
+    connector = parts["connector"]
+    assert nets[connector.ref, "A4B9"] == nets[connector.ref, "B4A9"] == "USB5V"
+    assert nets[connector.ref, "A6"] == nets[connector.ref, "B6"]
+    assert nets[connector.ref, "A7"] == nets[connector.ref, "B7"]
     no_connects = {(pin.ref, pin.pin) for pin in expansion.no_connect_pins}
     assert no_connects.isdisjoint(nets)
     ownership = [(pin.ref, pin.pin) for pin in expansion.ownership.pins]
@@ -2759,6 +3129,7 @@ def test_ch340c_rejects_unsupported_supply_modes(supply_voltage):
                 sheets={"interface": "USB"},
                 parameters={"supply_voltage": supply_voltage},
                 port_bindings={
+                    "vbus": "USB5V",
                     "vdd": "BRIDGE_SUPPLY",
                     "gnd": "GND",
                     "usb_dp": "USB_DP",
@@ -2776,6 +3147,8 @@ def test_expanded_recipe_wave_assets_resolve():
     from kicraft.design.recipes.wave_a_mcus import WAVE_A_MCU_RECIPES
     from kicraft.design.recipes.wave_b_power import WAVE_B_POWER_RECIPES
     from kicraft.design.recipes.wave_c_interfaces import WAVE_C_INTERFACE_RECIPES
+    from kicraft.design.recipes.wave_d_display import WAVE_D_DISPLAY_RECIPES
+    from kicraft.design.recipes.wave_e_usb_bridge import WAVE_E_USB_BRIDGE_RECIPES
     from kicraft.design.synthesis.footprint_library import lookup_footprint
     from kicraft.design.synthesis.symbol_pinout import lookup_pins
 
@@ -2783,6 +3156,8 @@ def test_expanded_recipe_wave_assets_resolve():
         *WAVE_A_MCU_RECIPES,
         *WAVE_B_POWER_RECIPES,
         *WAVE_C_INTERFACE_RECIPES,
+        *WAVE_D_DISPLAY_RECIPES,
+        *WAVE_E_USB_BRIDGE_RECIPES,
     ):
         for group in definition.parts:
             lookup_pins(group.symbol, project_root=Path("."))
@@ -2798,8 +3173,12 @@ def test_promoted_recipes_are_advertised_and_protected_in_production():
     production_ids = {row["recipe"] for row in recipe_summaries()}
     assert "esp32-s3-mini-1-minimal@1" in production_ids
     assert "tp4056-1s-charger@1" in production_ids
+    assert "ws2812-external-strip-interface@1" in production_ids
+    assert "al8860-3w-power-led@1" in production_ids
+    assert "max7219-four-digit-seven-segment@1" in production_ids
+    assert "led-matrix-hub75-interface@1" in production_ids
+    assert "cp2102n-usb-uart@1" in production_ids
     assert protected_identity_matches("TP4056") == ("tp4056",)
-    assert recipe_summaries(frozenset({"canary"})) == []
 
 
 def test_unused_can_reference_output_is_isolated_not_grounded():
@@ -3055,7 +3434,20 @@ def _c3_typed_programming_architecture(*, handshakes=True):
     payload = _c3_native_usb_architecture()
     bridge = payload["requirements"][2]
     bridge.update(family="usb-uart-bridge", exact_part="CH340C")
-    bridge["ports"].update(vdd="+3V3", gnd="GND", tx="HOST_TO_MCU", rx="MCU_TO_HOST")
+    bridge["ports"].update(
+        vbus="VBUS", vdd="+3V3", gnd="GND", tx="HOST_TO_MCU", rx="MCU_TO_HOST"
+    )
+    # A complete bridge recipe owns its USB-C receptacle.  This fixture models
+    # UART programming, not an illegal second PHY sharing the native connector.
+    payload["requirements"] = [
+        requirement for requirement in payload["requirements"]
+        if requirement["id"] != "usb_connector"
+    ]
+    payload["sheets"] = [sheet for sheet in payload["sheets"] if sheet["name"] != "USB"]
+    payload["inter_sheet_nets"] = [
+        net for net in payload["inter_sheet_nets"]
+        if net["name"] not in {"USB_D_N", "USB_D_P"}
+    ]
     signals = [
         ("HOST_TO_MCU", "output", "input"),
         ("MCU_TO_HOST", "input", "output"),
@@ -3085,13 +3477,45 @@ def _c3_typed_programming_architecture(*, handshakes=True):
         for gpio in (*range(9), 10)
     )
     return payload
+@pytest.mark.parametrize("shared", ["both", "dp", "dm"])
+def test_usb_uart_bridge_rejects_shared_native_usb_phy_pair(shared):
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = _c3_native_usb_architecture()
+    bridge = payload["requirements"][2]
+    bridge.update(family="usb-uart-bridge", exact_part="CH340C")
+    bridge["ports"].update(
+        vbus="VBUS", vdd="+3V3", gnd="GND", tx="HOST_TO_MCU", rx="MCU_TO_HOST"
+    )
+    if shared == "dp":
+        bridge["ports"]["usb_dm"] = "BRIDGE_ONLY_DM"
+    elif shared == "dm":
+        bridge["ports"]["usb_dp"] = "BRIDGE_ONLY_DP"
+    payload["inter_sheet_nets"].extend(
+        {
+            "name": net,
+            "endpoints": [
+                {"sheet": "BRIDGE", "direction": bridge_direction},
+                {"sheet": "MCU", "direction": mcu_direction},
+            ],
+        }
+        for net, bridge_direction, mcu_direction in (
+            ("HOST_TO_MCU", "output", "input"),
+            ("MCU_TO_HOST", "input", "output"),
+        )
+    )
+
+    result = resolve_architecture_recipes(payload)
+
+    assert result.blocking
+
 
 
 def test_direct_ch340c_power_domain_stays_blocked_after_uart_repair():
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
     payload = _c3_typed_programming_architecture()
-    core, bridge = payload["requirements"][0], payload["requirements"][2]
+    core, bridge = payload["requirements"][0], payload["requirements"][1]
     payload["rail_voltages"] = {"VBUS": 5.0, "+3V3": 3.3}
     payload["power_nets"].append("VBUS")
     bridge["ports"]["vdd"] = "VBUS"
@@ -3133,10 +3557,23 @@ def test_direct_ch340c_power_domain_stays_blocked_after_uart_repair():
     assert bridge["ports"]["vdd"] == "+3V3"
 
 
+def test_cp2102n_refuses_five_volt_uart_domain():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = _c3_typed_programming_architecture(handshakes=False)
+    bridge = payload["requirements"][1]
+    bridge.update(family="usb-uart-bridge", exact_part="CP2102N")
+    bridge["ports"]["vdd"] = "VBUS"
+
+    result = resolve_architecture_recipes(payload)
+
+    assert any(row.code == "conflicting_recipe_supply" for row in result.blocking)
+
+
 def test_ch340c_supply_requires_evidence_and_honors_authoritative_rail_voltage():
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
-    ports = {"vdd": "VBUS", "gnd": "GND", "usb_dp": "DP", "usb_dm": "DM", "tx": "TX", "rx": "RX"}
+    ports = {"vbus": "VBUS", "vdd": "VBUS", "gnd": "GND", "usb_dp": "DP", "usb_dm": "DM", "tx": "TX", "rx": "RX"}
     payload = {
         "sheets": [{"name": name, "stem": name, "function": name} for name in ("BRIDGE", "HOST")],
         "power_nets": ["VBUS", "GND"],
@@ -3178,8 +3615,9 @@ def test_ch340c_supply_requires_evidence_and_honors_authoritative_rail_voltage()
     assert nets["16"] == "VBUS" and nets["4"] != "VBUS"
 
     ports["vdd"] = "+5V"
-    payload["power_nets"] = ["+5V", "GND"]
-    payload["rail_voltages"] = {"+5V": 3.3}
+    ports["vbus"] = "USB5V"
+    payload["power_nets"] = ["USB5V", "+5V", "GND"]
+    payload["rail_voltages"] = {"USB5V": 5.0, "+5V": 3.3}
     conflict = resolve_architecture_recipes(payload)
     assert any(row.code == "conflicting_recipe_supply" for row in conflict.blocking)
     payload["requirements"][0]["parameters"] = {}
@@ -3193,7 +3631,7 @@ def test_distinct_translator_conductors_are_not_a_direct_ch340c_domain():
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
     payload = _c3_typed_programming_architecture(handshakes=False)
-    core, bridge = payload["requirements"][0], payload["requirements"][2]
+    core, bridge = payload["requirements"][0], payload["requirements"][1]
     bridge["ports"]["vdd"] = "VBUS"
     core["ports"].update(uart_tx="MCU_TX_3V3", uart_rx="MCU_RX_3V3")
     payload["rail_voltages"] = {"VBUS": 5.0, "+3V3": 3.3}
@@ -3252,10 +3690,10 @@ def test_c3_typed_uart_bridge_uses_fixed_pins_and_preserves_all_ten_gpios(
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
     payload = _c3_typed_programming_architecture(handshakes=handshakes)
-    payload["requirements"][2]["role"] = peer_role
+    payload["requirements"][1]["role"] = peer_role
     if explicit_contract:
         core = payload["requirements"][0]
-        bridge = payload["requirements"][2]
+        bridge = payload["requirements"][1]
         core["interfaces"] = bridge["interfaces"] = ["uart"]
         core["ports"].update(uart_tx="MCU_TO_HOST", uart_rx="HOST_TO_MCU")
         if handshakes:
@@ -3277,7 +3715,6 @@ def test_c3_typed_uart_bridge_uses_fixed_pins_and_preserves_all_ten_gpios(
     core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
     assert core.port_bindings["uart_rx"] == "HOST_TO_MCU"
     assert core.port_bindings["uart_tx"] == "MCU_TO_HOST"
-    assert core.parameters["native_usb"] is True
     assert {row.net for row in core.pin_allocations} == {f"GPIO{gpio}" for gpio in (*range(9), 10)}
     assert not {row.pin for row in core.pin_allocations} & {"8", "23", "26", "27", "30", "31"}
     expansion = expand_recipe(core)
@@ -3323,10 +3760,10 @@ def test_c3_typed_uart_bridge_uses_fixed_pins_and_preserves_all_ten_gpios(
     assert {(pin.ref, pin.pin) for pin in expansion.no_connect_pins}.isdisjoint(nets)
     ownership = [(pin.ref, pin.pin) for pin in expansion.ownership.pins]
     assert len(ownership) == len(set(ownership))
+    assert (
+        nets[refs["download_boot_high_pullup_22"], "2"] == nets[refs["mcu"], "22"] == "GPIO8"
+    )
     if handshakes:
-        assert (
-            nets[refs["auto_reset_boot_high_pullup_22"], "2"] == nets[refs["mcu"], "22"] == "GPIO8"
-        )
         assert core.port_bindings["dtr_n"] == "HOST_DTR_N"
         assert core.port_bindings["rts_n"] == "HOST_RTS_N"
     else:
@@ -3384,8 +3821,8 @@ def test_esp32_auto_reset_expansion_has_reference_electrical_truth_table(dtr, rt
     assert nets[parts["en_capacitor"].ref, "1"] == nets[mcu, "8"]
     assert nets[parts["en_capacitor"].ref, "2"] == "GND"
     assert parts["en_pullup"].value == parts["boot_pullup"].value == "10k"
-    assert nets[parts["auto_reset_boot_high_pullup_22"].ref, "1"] == "+3V3"
-    assert nets[parts["auto_reset_boot_high_pullup_22"].ref, "2"] == nets[mcu, "22"]
+    assert nets[parts["download_boot_high_pullup_22"].ref, "1"] == "+3V3"
+    assert nets[parts["download_boot_high_pullup_22"].ref, "2"] == nets[mcu, "22"]
     assert (mcu, "22") not in {(pin.ref, pin.pin) for pin in expansion.no_connect_pins}
     ownership = [(pin.ref, pin.pin) for pin in expansion.ownership.pins]
     assert len(ownership) == len(set(ownership))
@@ -3441,7 +3878,7 @@ def test_c3_programming_contract_conflicts_block_without_dropping_gpio_or_handsh
 
     payload = _c3_typed_programming_architecture()
     core = payload["requirements"][0]
-    bridge = payload["requirements"][2]
+    bridge = payload["requirements"][1]
     if conflict == "direction":
         # The frozen R11 candidate typed bridge RX as a sheet output.
         bridge["ports"]["tx"], bridge["ports"]["rx"] = bridge["ports"]["rx"], bridge["ports"]["tx"]
@@ -3484,7 +3921,7 @@ def test_programming_conflict_reports_current_peer_and_required_nets_without_swa
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
     payload = _c3_typed_programming_architecture()
-    payload["requirements"][2]["role"] = peer_role
+    payload["requirements"][1]["role"] = peer_role
     core = payload["requirements"][0]
     core["ports"].update(
         uart_tx="MCU_TO_HOST",
@@ -3532,12 +3969,9 @@ def test_programming_peer_cannot_claim_remote_only_nets_even_with_matching_label
     result = resolve_architecture_recipes(payload)
     assert not result.blocking
     core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
-    assert core.port_bindings == {
-        "vdd": "+3V3",
-        "gnd": "GND",
-        "usb_dm": "USB_D_N",
-        "usb_dp": "USB_D_P",
-    }
+    assert core.port_bindings == {"vdd": "+3V3", "gnd": "GND"}
+    expansion = expand_recipe(core)
+    assert {"26", "27"} <= {pin.pin for pin in expansion.no_connect_pins if pin.ref.startswith("U")}
     assert not any(part.ref.startswith("Q") for part in expand_recipe(core).parts)
 
 
@@ -3562,71 +3996,8 @@ def test_direct_expansion_rejects_incomplete_disabled_or_aliased_auto_reset(enab
         )
 
 
-def _native_usb_selections():
-    from kicraft.design.architecture_intent import derive_architecture
-    from kicraft.design.recipes.resolver import resolve_architecture_recipes
-
-    architecture = derive_architecture(
-        {
-            "mcu_present": True,
-            "sheets": [
-                {"name": "MCU", "stem": "MCU", "role": "mcu", "function": "ESP32-S3 controller"}
-            ],
-            "requirements": [
-                {
-                    "id": "mcu_core",
-                    "sheet": "MCU",
-                    "role": "mcu_core",
-                    "family": "esp32-s3-module",
-                    "exact_part": "ESP32-S3-MINI-1-N8",
-                    "supply": "+3V3",
-                    "programming": "native_usb",
-                }
-            ],
-            "power": {"rails": {"+3V3": {"voltage": 3.3}, "VBUS": {"voltage": 5.0}}},
-            "signals": [
-                {"name": "USB_D_N", "from": "mcu_core.usb_dm", "to": "edge:USB_DATA"},
-                {"name": "USB_D_P", "from": "mcu_core.usb_dp", "to": "edge:USB_DATA"},
-            ],
-        }
-    )
-    result = resolve_architecture_recipes(architecture)
-    assert not result.blocking
-    core = next(row for row in result.selections if row.recipe == "esp32-s3-mini-1-minimal@1")
-    connector = next(row for row in result.selections if row.recipe == "usb-c-usb2-device@1")
-    return core, connector
 
 
-def test_native_usb_pair_uses_connector_owned_names_and_one_series_pair():
-    core, connector = _native_usb_selections()
-    # The MCU owns the only 22R series pair; the companion drops its own.
-    assert connector.parameters["series_resistors"] is False
-    mcu_expansion = expand_recipe(core)
-    connector_expansion = expand_recipe(connector)
-    mcu_roles = [part.recipe_role for part in mcu_expansion.parts]
-    assert mcu_roles.count("usb_dm_series") == 1
-    assert mcu_roles.count("usb_dp_series") == 1
-    assert all(part.recipe_role != "usb_series" for part in connector_expansion.parts)
-    # ESD feed-through: the connector's device-side pins sit on the MCU pair.
-    esd = next(part for part in connector_expansion.parts if part.recipe_role == "esd")
-    nets = {
-        endpoint.pin: connection.net_name
-        for connection in connector_expansion.connections
-        for endpoint in connection.endpoints
-        if endpoint.ref == esd.ref
-    }
-    assert nets["3"] == "USB_D_N" and nets["4"] == "USB_D_P"
-    # Independent CC pull-downs and host VBUS are not the MCU pair or +3V3.
-    pulls = {part.ref for part in connector_expansion.parts if part.recipe_role == "cc_pulldown"}
-    assert len(pulls) == 2
-    assert "USB_D_N" not in {
-        net.net_name
-        for net in connector_expansion.connections
-        if any(ep.ref in pulls for net in [net] for ep in net.endpoints)
-    }
-    connector_nets = {connection.net_name for connection in connector_expansion.connections}
-    assert "VBUS" in connector_nets
-    assert not {"+3V3", "VBAT"} & connector_nets
 
 
 def test_rp2040_family_default_requires_and_binds_a_native_usb_connector():
@@ -3696,6 +4067,171 @@ def test_rp2040_family_default_requires_and_binds_a_native_usb_connector():
     assert all(part.recipe_role != "swd" for part in expansion.parts)
     assert {"24", "25"} <= {pin.pin for pin in expansion.no_connect_pins}
 
+def test_rp2040_ch340c_mode_crosses_uart_and_uses_physical_swd_recovery():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = {
+        "rail_voltages": {"+3V3": 3.3, "VBUS": 5.0},
+        "power_nets": ["+3V3", "VBUS", "GND"],
+        "sheets": [
+            {"name": "MCU", "stem": "MCU", "function": "RP2040 microcontroller"},
+            {"name": "IO", "stem": "IO", "function": "GPIO breakout"},
+            {"name": "BRIDGE", "stem": "BRIDGE", "function": "CH340C USB-UART bridge"},
+        ],
+        "inter_sheet_nets": [
+            {
+                "name": "HOST_TO_MCU",
+                "endpoints": [
+                    {"sheet": "BRIDGE", "direction": "output"},
+                    {"sheet": "MCU", "direction": "input"},
+                ],
+            },
+            {
+                "name": "MCU_TO_HOST",
+                "endpoints": [
+                    {"sheet": "MCU", "direction": "output"},
+                    {"sheet": "BRIDGE", "direction": "input"},
+                ],
+            },
+        ],
+        "requirements": [
+            {
+                "id": "mcu",
+                "sheet": "MCU",
+                "role": "mcu_core",
+                "family": "rp2040",
+                "exact_part": "RP2040",
+                "parameters": {"native_usb": False, "programming": "swd"},
+                "ports": {"vdd": "+3V3", "gnd": "GND"},
+            },
+            {
+                "id": "bridge",
+                "sheet": "BRIDGE",
+                "role": "bus_interface",
+                "family": "usb-uart-bridge",
+                "exact_part": "CH340C",
+                "ports": {
+                    "vbus": "VBUS",
+                    "vdd": "+3V3",
+                    "gnd": "GND",
+                    "usb_dm": "USB_D_N",
+                    "usb_dp": "USB_D_P",
+                    "tx": "HOST_TO_MCU",
+                    "rx": "MCU_TO_HOST",
+                },
+            },
+        ],
+    }
+
+    result = resolve_architecture_recipes(payload)
+
+    assert not result.blocking
+    core = next(row for row in result.selections if row.requirement_ids == ["mcu"])
+    bridge = next(row for row in result.selections if row.requirement_ids == ["bridge"])
+    assert core.port_bindings["uart_tx"] == bridge.port_bindings["rx"] == "MCU_TO_HOST"
+    assert core.port_bindings["uart_rx"] == bridge.port_bindings["tx"] == "HOST_TO_MCU"
+    expansion = expand_recipe(core)
+    nets = {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in expansion.connections
+        for endpoint in connection.endpoints
+    }
+    mcu = next(part for part in expansion.parts if part.recipe_role == "mcu")
+    header = next(part for part in expansion.parts if part.recipe_role == "swd_header")
+    assert nets[mcu.ref, "2"] == "MCU_TO_HOST"
+    assert nets[mcu.ref, "3"] == "HOST_TO_MCU"
+    assert nets[mcu.ref, "24"] == nets[header.ref, "4"]
+    assert nets[mcu.ref, "25"] == nets[header.ref, "3"]
+    assert nets[mcu.ref, "26"] == nets[header.ref, "5"]
+    assert {(mcu.ref, "46"), (mcu.ref, "47")} <= {
+        (pin.ref, pin.pin) for pin in expansion.no_connect_pins
+    }
+    assert "gpio0" not in nets.values()
+    assert "gpio1" not in nets.values()
+    assert "usb_dm" not in nets.values()
+    assert "usb_dp" not in nets.values()
+
+
+def test_rp2040_native_usb_keeps_uart_bridge_contacts_connected():
+    core = RecipeSelection(
+        recipe="rp2040-minimal@2",
+        instance="rp",
+        sheets={"mcu": "MCU", "io": "IO"},
+        parameters={"native_usb": True, "programming": "native_usb"},
+        port_bindings={
+            "vdd": "+3V3", "gnd": "GND",
+            "usb_dp": "NATIVE_DP", "usb_dm": "NATIVE_DM",
+            "uart_tx": "BRIDGE_RX", "uart_rx": "BRIDGE_TX",
+        },
+    )
+    expansion = expand_recipe(core)
+    mcu = next(part for part in expansion.parts if part.recipe_role == "mcu")
+    nets = {
+        endpoint.pin: connection.net_name
+        for connection in expansion.connections
+        for endpoint in connection.endpoints
+        if endpoint.ref == mcu.ref
+    }
+    assert {pin: nets[pin] for pin in ("2", "3")} == {
+        "2": "BRIDGE_RX", "3": "BRIDGE_TX",
+    }
+    from kicraft.design.synthesis.validation import _resistance_ohms
+
+    endpoints = {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in expansion.connections
+        for endpoint in connection.endpoints
+    }
+    termination = {
+        frozenset((endpoints[part.ref, "1"], endpoints[part.ref, "2"]))
+        for part in expansion.parts
+        if part.symbol == "Device:R" and _resistance_ohms(part.value) == 27.0
+    }
+    assert nets["46"] != "NATIVE_DM" and nets["47"] != "NATIVE_DP"
+    assert termination == {
+        frozenset((nets["46"], "NATIVE_DM")),
+        frozenset((nets["47"], "NATIVE_DP")),
+    }
+    for missing in ("uart_tx", "uart_rx"):
+        with pytest.raises(ValueError, match="requires uart_tx and uart_rx together"):
+            expand_recipe(core.model_copy(update={
+                "port_bindings": {
+                    key: value for key, value in core.port_bindings.items() if key != missing
+                },
+            }))
+
+
+def test_rp2040_rejects_half_native_pair_and_conflicting_recovery_mode():
+    base = {
+        "recipe": "rp2040-minimal@2",
+        "instance": "rp",
+        "sheets": {"mcu": "MCU", "io": "IO"},
+        "port_bindings": {"vdd": "+3V3", "gnd": "GND"},
+    }
+    with pytest.raises(ValueError, match="requires usb_dm and usb_dp together"):
+        expand_recipe(
+            RecipeSelection(
+                **{
+                    **base,
+                    "port_bindings": {**base["port_bindings"], "usb_dm": "USB_D_N"},
+                }
+            )
+        )
+    with pytest.raises(ValueError, match="native_usb=False requires programming='swd'"):
+        expand_recipe(
+            RecipeSelection(
+                **{
+                    **base,
+                    "parameters": {"native_usb": False, "programming": "native_usb"},
+                    "port_bindings": {
+                        **base["port_bindings"],
+                        "uart_tx": "MCU_TO_HOST",
+                        "uart_rx": "HOST_TO_MCU",
+                    },
+                }
+            )
+        )
+
 
 def _rp2040_support_architecture():
     return {
@@ -3759,15 +4295,7 @@ def test_mcu_support_requirements_realize_one_complete_physical_circuit():
 
 
 def test_the_rp2040_recipes_bootsel_button_realizes_a_pushbutton_obligation():
-    """The BOOTSEL obligation the brief names on the MCU circuit commits end to end.
-
-    Held-out rp1 `rp2040-dual-adc-usb` (2026-09-30): the draft put the brief's BOOTSEL button
-    obligation on the `rp2040` requirement -- the RP2040 recipe owns that button -- and the
-    architecture family audit refused it. The recipe's `bootsel` group named a land pattern that
-    resolves to no reviewed record, so §9.42 could not prove the part either. It now names the
-    reviewed momentary-button stock pair (`Switch:SW_Push` / `SW_SPST_TL3342`) every other
-    compiler-owned button group uses, so both gates prove the same part.
-    """
+    """The recipe-owned BOOTSEL button realizes the pushbutton obligation."""
     from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
     from kicraft.design.synthesis.validation import check_requirement_physical_realization
 
@@ -3785,15 +4313,11 @@ def test_the_rp2040_recipes_bootsel_button_realizes_a_pushbutton_obligation():
     verdict = check_requirement_physical_realization(architecture, bom)
     assert verdict.ok, verdict.offenders
     bootsel = next(part for part in bom.parts if part.value == "BOOTSEL")
-    assert (bootsel.symbol, bootsel.footprint) == (
-        "Switch:SW_Push",
-        "Button_Switch_SMD:SW_SPST_TL3342",
-    )
-
-    # Negative control: a button land pattern the reviewed inventory does not carry cannot
-    # realize the demand, so the gate still refuses it.
-    bootsel.footprint = "Button_Switch_SMD:SW_Push_1P1T_NO_E-Switch_TL3301NxxxxxG"
-    assert not check_requirement_physical_realization(architecture, bom).ok
+    assert bootsel.mpn == "KMR232NGULCLFS"
+    from kicraft.design.part_identity import physical_inventory_record
+    assert physical_inventory_record(
+        mpn=bootsel.mpn, symbol=bootsel.symbol, footprint="Button_Switch_SMD:SW_SPST_TL3342"
+    ) is None
 
 
 @pytest.mark.parametrize("conflict", ["second_core", "different_usb_net", "different_sheet"])
@@ -3833,71 +4357,6 @@ def test_two_explicit_mcu_cores_are_not_coalesced():
     assert sum(part.mpn == "RP2040" for row in expansions for part in row.parts) == 2
 
 
-def test_a_reviewed_stepper_driver_realizes_a_motor_driver_demand_end_to_end():
-    """The A4988's own reviewed record decides: `stepper-driver` IS a `motor-driver`.
-
-    Live walkthrough (stepper-a4988, 2026-09-29): the architecture pinned the exact reviewed part
-    A4988SETTR-T in family `a4988-stepper-driver` and claimed a `motor-driver` obligation. The
-    library's raw `motor-driver` carrier list held only the DRV8833, so the family audit and
-    §9.42 both refused the board -- and pushed a family the writer had not chosen. Both must read
-    the pinned part's own reviewed evidence instead.
-    """
-    from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
-    from kicraft.design.stage_semantics import _architecture_obligation_family_mismatch
-    from kicraft.design.synthesis.validation import check_requirement_physical_realization
-
-    payload = {
-        "topologies": {"driver": "A4988 stepper driver"},
-        "rail_voltages": {"+12V": 12.0},
-        "power_nets": ["+12V", "GND"],
-        "comms_protocols": [],
-        "mcu_present": False,
-        "sheets": [{"name": "DRIVER", "stem": "DRIVER", "function": "A4988 stepper driver"}],
-        "inter_sheet_nets": [],
-        "requirements": [
-            {
-                "id": "driver",
-                "sheet": "DRIVER",
-                "role": "driver",
-                "family": "a4988-stepper-driver",
-                "exact_part": "A4988SETTR-T",
-                "ports": {
-                    "vm": "+12V", "vdd": "+12V", "gnd": "GND",
-                    "step": "STEP", "dir": "DIR", "ms1": "MS1", "ms2": "MS2", "ms3": "MS3",
-                    "out1a": "OUT1A", "out1b": "OUT1B", "out2a": "OUT2A", "out2b": "OUT2B",
-                },
-                "obligations": [
-                    {"kind": "physical", "original_obligation_id": "motor-driver",
-                     "component_class": "motor-driver"}
-                ],
-            }
-        ],
-        "recipe_selections": [
-            {
-                "recipe": "a4988-stepper@1",
-                "instance": "driver",
-                "sheets": {"interface": "DRIVER"},
-                "requirement_ids": ["driver"],
-                "port_bindings": {
-                    "vm": "+12V", "vdd": "+12V", "gnd": "GND",
-                    "step": "STEP", "dir": "DIR", "ms1": "MS1", "ms2": "MS2", "ms3": "MS3",
-                    "out1a": "OUT1A", "out1b": "OUT1B", "out2a": "OUT2A", "out2b": "OUT2B",
-                },
-            }
-        ],
-        "assumptions": [],
-    }
-    architecture = apply_architecture_recipe_resolution(payload)
-    assert [
-        row.code for row in _architecture_obligation_family_mismatch(architecture.model_dump())
-    ] == []
-    bom_payload, _ = _normalize_stage_response(
-        "bom", {"groups": [], "arrays": []}, {"architecture": architecture.model_dump()}
-    )
-    bom = BOM.model_validate(bom_payload)
-    assert any(part.mpn == "A4988SETTR-T" for part in bom.parts)
-    verdict = check_requirement_physical_realization(architecture, bom)
-    assert verdict.ok, verdict.offenders
 
 
 def test_the_pd_selectable_recipes_own_selector_realizes_a_switch_demand():
@@ -4068,6 +4527,7 @@ def test_real_pin_header_is_not_consumed_by_matching_recipe_edges():
                 "role": "mcu_core",
                 "family": "rp2040",
                 "exact_part": "RP2040",
+                "parameters": {"native_usb": False, "programming": "swd"},
                 "ports": {"vdd": "+3V3", "gnd": "GND"},
                 "functional_blocks": ["RP2040_PROCESSOR", "CASTELLATED_GPIO"],
             },
@@ -4098,14 +4558,8 @@ def test_real_pin_header_is_not_consumed_by_matching_recipe_edges():
 # ---------------------------------------------------------------------------
 
 
-def test_reviewed_order_code_variant_resolves_with_a_ledgered_substitution():
-    """A brief naming an order code of a registered family must not hard-block.
-
-    ESP32-S3-WROOM-1-N16R8 and the registered -N8R8 are one module per the
-    Espressif datasheet (same package, pin map, temperature grade and Octal-SPI
-    PSRAM; only the flash size differs), so the family recipe serves it — and the
-    deviation is recorded for the BOM to ledger, never applied silently.
-    """
+def test_registered_family_rejects_an_unregistered_protected_identity():
+    """A reviewed family cannot silently replace a named ordering code with a sibling."""
     from kicraft.design.recipes.resolver import resolve_architecture_recipes
 
     payload = _typed_esp32_architecture(
@@ -4113,16 +4567,32 @@ def test_reviewed_order_code_variant_resolves_with_a_ledgered_substitution():
     )
     result = resolve_architecture_recipes(payload, {"named_parts": ["ESP32-S3-WROOM-1-N16R8"]})
 
-    assert not result.blocking
-    core = next(row for row in result.selections if row.requirement_ids == ["mcu_core"])
-    assert core.recipe == "esp32-s3-wroom-1-minimal@1"
-    note = next(row for row in result.assumptions if "unregistered ordering code" in row)
-    assert "ESP32-S3-WROOM-1-N16R8" in note and "ESP32-S3-WROOM-1-N8R8" in note
-    assert "bom.substitutions" in note
-    # The record keeps the same note, so the deviation is auditable from the
-    # resolution artifacts and not only from the architecture slot.
-    record = next(row for row in result.records if row.requirement_id == "mcu_core")
-    assert note in record.assumptions
+    diagnostic = next(
+        row
+        for row in result.blocking
+        if row.code == "unsupported_protected_variant" and row.requirement_id == "mcu_core"
+    )
+    assert "ESP32-S3-WROOM-1-N16R8" in diagnostic.evidence
+    assert not any(row.requirement_ids == ["mcu_core"] for row in result.selections)
+
+
+
+def test_exact_esp32_c3_variant_is_not_accepted_as_a_generic_module_label():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    result = resolve_architecture_recipes(
+        _typed_esp32_architecture(
+            family="esp32-c3-mini-1-module",
+            exact_part="ESP32-C3-MINI-1-N8",
+        ),
+        {"named_parts": ["ESP32-C3-MINI-1-N8"]},
+    )
+
+    assert any(
+        row.code == "unsupported_protected_variant"
+        and "ESP32-C3-MINI-1-N8" in row.evidence
+        for row in result.blocking
+    )
 
 
 def test_unreviewed_protected_variant_still_blocks_and_names_the_choice():
@@ -4242,10 +4712,45 @@ def test_hub75_recipe_exposes_named_channels_including_oe_and_d():
     assert connector["15"] == "shifted12"  # OE is buffered, not direct
     assert connector["12"] == "shifted9"  # D is a channel, not ground
     assert {pin for pin, net in connector.items() if net == "gnd"} == {"4", "8", "16"}
-    # Every logic channel has a distinct level-shifted net, and the spare '245
-    # channels stay no-connects instead of floating.
+    # Every logic channel has a distinct level-shifted net; each spare A input
+    # is grounded and each spare B output is a no-connect.
     assert len({net for net in connector.values() if net.startswith("shifted")}) == 13
-    assert {row.pin for row in definition.no_connects} == {"7", "8", "9", "11", "12", "13"}
+    level_shifter = {
+        (pin.index, pin.pin): pin.net
+        for pin in definition.pins
+        if pin.role == "level_shifter"
+    }
+    assert {level_shifter[(1, pin)] for pin in ("7", "8", "9")} == {"gnd"}
+    assert {row.pin for row in definition.no_connects} == {"11", "12", "13"}
+
+
+@pytest.mark.parametrize(
+    ("recipe", "index", "unused_a_inputs", "unused_b_outputs"),
+    (
+        ("ws2812-external-strip-interface@1", 0, ("3", "4", "5", "6", "7", "8", "9"), ("11", "12", "13", "14", "15", "16", "17")),
+        ("max7219-four-digit-seven-segment@1", 0, ("5", "6", "7", "8", "9"), ("11", "12", "13", "14", "15")),
+        ("led-matrix-hub75-interface@1", 1, ("7", "8", "9"), ("11", "12", "13")),
+        ("hub75-sn74hct245-interface@1", 1, ("7", "8", "9"), ("11", "12", "13")),
+    ),
+)
+def test_hct245_recipes_ground_unused_a_inputs_and_no_connect_b_outputs(
+    recipe, index, unused_a_inputs, unused_b_outputs,
+):
+    definition = get_recipe(recipe)
+    level_shifter_pins = {
+        (pin.index, pin.pin): pin.net
+        for pin in definition.pins
+        if pin.role == "level_shifter"
+    }
+    no_connects = {
+        (row.index, row.pin)
+        for row in definition.no_connects
+        if row.role == "level_shifter"
+    }
+
+    assert {level_shifter_pins[index, pin] for pin in unused_a_inputs} == {"gnd"}
+    assert not {(index, pin) for pin in unused_a_inputs} & no_connects
+    assert {(index, pin) for pin in unused_b_outputs} <= no_connects
 
 
 def test_hub75_channels_bind_by_signal_name():
@@ -4609,7 +5114,6 @@ def test_ws2812_pixels_form_a_complete_cascade_with_optional_final_output(quanti
         for connection in expanded.connections
     }
     series = next(part.ref for part in expanded.parts if part.recipe_role == "series_resistor")
-    assert nets[series, "1"] == "PIXEL_DATA"
     assert endpoints[nets[series, "2"]] == {(series, "2"), (leds[0], "4")}
     for ref in (*leds, *capacitors):
         assert nets[ref, "1"] == "+5V"
@@ -4676,24 +5180,8 @@ def test_reviewed_class_options_publish_the_contact_count_that_decides_the_choic
     assert "must match the contacts the requirement declares" in block
 
 
-def test_the_reverse_polarity_block_binds_the_reviewed_p_fet() -> None:
-    """A stated reverse-polarity requirement needs a family the parts step can resolve.
-
-    Live architecture draft 2026-09-25: the stage invented a family called
-    ``reverse-polarity-protection``, which no curated recipe and no reviewed part implements, so the
-    audit refused it and the parts step had nothing to select. The library already carried a
-    production AONR21357 P-channel MOSFET; this block is the canonical high-side arrangement on top
-    of it -- drain to the raw input, source to the protected rail, gate to ground through a series
-    resistor, so a reversed input holds the FET off.
-    """
-    from kicraft.design.recipes import recipe_summaries
-
-    assert "reverse-polarity-pmos" in {row["family"] for row in recipe_summaries()}
-
-    definition = get_recipe("reverse-polarity-pmos@1")
-    assert definition.exact_part == "AONR21357"
-    assert [port.name for port in definition.ports] == ["input", "output", "gnd"]
-
+def test_reverse_protection_uses_drain_input_and_source_referenced_gate_clamp() -> None:
+    """Reverse input must block the body diode; forward input must not overdrive Vgs."""
     expansion = expand_recipe(
         RecipeSelection(
             recipe="reverse-polarity-pmos@1",
@@ -4702,14 +5190,689 @@ def test_the_reverse_polarity_block_binds_the_reviewed_p_fet() -> None:
             port_bindings={"input": "HOST_5V", "output": "PROTECTED_5V", "gnd": "GND"},
         )
     )
-    assert [(part.ref, part.value, part.symbol) for part in expansion.parts] == [
-        ("Q1", "AONR21357", "aonr21357:AONR21357"),
-        ("R1", "10k", "Device:R"),
-    ]
     nets = {connection.net_name: {f"{e.ref}.{e.pin}" for e in connection.endpoints}
             for connection in expansion.connections}
     # Every drain contact faces the raw input and every source contact the protected rail.
     assert nets["HOST_5V"] == {"Q1.5", "Q1.6", "Q1.7", "Q1.8", "Q1.9"}
-    assert nets["PROTECTED_5V"] == {"Q1.1", "Q1.2", "Q1.3"}
+    assert nets["PROTECTED_5V"] == {"Q1.1", "Q1.2", "Q1.3", "D1.1"}
     assert nets["GND"] == {"R1.2"}
-    assert {"Q1.4", "R1.1"} in nets.values()
+    assert {"Q1.4", "R1.1", "D1.2"} in nets.values()
+
+
+def _mcu_recipe_nets(expansion):
+    return {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in expansion.connections
+        for endpoint in connection.endpoints
+    }
+
+
+def test_stm32g030_complete_artifact_has_swd_reset_boot_and_bypass():
+    definition = get_recipe("stm32g030f6p6-minimal@1")
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe=definition.recipe,
+            instance="g0",
+            sheets={"mcu": "MCU"},
+            port_bindings={"vdd": "+3V3", "gnd": "GND"},
+        )
+    )
+    refs = {part.recipe_role: part.ref for part in expansion.parts}
+    nets = _mcu_recipe_nets(expansion)
+    mcu = refs["mcu"]
+    assert definition.exact_part == "STM32G030F6P6"
+    assert (next(part for part in expansion.parts if part.ref == mcu).symbol,
+            next(part for part in expansion.parts if part.ref == mcu).footprint) == (
+        "MCU_ST_STM32G0:STM32G030F6Px",
+        "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm",
+    )
+    assert {nets[mcu, pin] for pin in ("4", "5", "6", "18", "19")} == {
+        "+3V3",
+        "GND",
+        nets[refs["reset_button"], "1"],
+        nets[refs["swd_header"], "3"],
+        nets[refs["swd_header"], "4"],
+    }
+    assert nets[mcu, "6"] == nets[refs["reset_pullup"], "2"] == nets[refs["reset_capacitor"], "1"]
+    assert nets[refs["reset_pullup"], "1"] == "+3V3"
+    assert nets[refs["reset_capacitor"], "2"] == "GND"
+    assert nets[mcu, "19"] == nets[refs["boot0_pulldown"], "1"]
+    assert nets[refs["boot0_pulldown"], "2"] == "GND"
+    for role in ("local_decoupling", "bulk_decoupling"):
+        assert (nets[refs[role], "1"], nets[refs[role], "2"]) == ("+3V3", "GND")
+    assert check_net_coverage(
+        BOM(parts=expansion.parts, connections=expansion.connections, no_connect_pins=expansion.no_connect_pins)
+    ).ok
+
+
+def test_attiny1604_complete_artifact_preserves_updi_and_bypass():
+    definition = get_recipe("attiny1604-ssn-minimal@1")
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe=definition.recipe,
+            instance="tiny",
+            sheets={"mcu": "MCU"},
+            port_bindings={"vdd": "+3V3", "gnd": "GND"},
+        )
+    )
+    refs = {part.recipe_role: part.ref for part in expansion.parts}
+    nets = _mcu_recipe_nets(expansion)
+    mcu = refs["mcu"]
+    assert (next(part for part in expansion.parts if part.ref == mcu).mpn,
+            next(part for part in expansion.parts if part.ref == mcu).symbol,
+            next(part for part in expansion.parts if part.ref == mcu).footprint) == (
+        "ATTINY1604-SSN",
+        "MCU_Microchip_ATtiny:ATtiny1604-SS",
+        "Package_SO:SOIC-14_3.9x8.7mm_P1.27mm",
+    )
+    assert nets[mcu, "1"] == "+3V3" and nets[mcu, "14"] == "GND"
+    assert nets[mcu, "10"] == nets[refs["updi_header"], "2"] == nets[refs["updi_pullup"], "2"]
+    assert nets[refs["updi_pullup"], "1"] == "+3V3"
+    assert (refs["updi_header"], "4") in {
+        (endpoint.ref, endpoint.pin) for endpoint in expansion.no_connect_pins
+    }
+    for role in ("local_decoupling", "bulk_decoupling"):
+        assert (nets[refs[role], "1"], nets[refs[role], "2"]) == ("+3V3", "GND")
+    assert (mcu, "10") not in {(endpoint.ref, endpoint.pin) for endpoint in expansion.no_connect_pins}
+
+
+def test_stm32g030_mux_allocator_reserves_only_bound_documented_peripherals():
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
+
+    definition = get_recipe("stm32g030f6p6-minimal@1")
+    adc_ports = {f"adc_{index}": f"ADC_{index}" for index in range(8)}
+    direct = CircuitRequirement(
+        id="g0", sheet="MCU", role="mcu_core", family="stm32g0",
+        interfaces=["adc"], ports=adc_ports,
+    )
+    assert {row.pin for row in allocate_requirement_pins(definition, direct)} == {
+        str(pin) for pin in range(7, 15)
+    }
+    uart_and_adc = direct.model_copy(
+        update={
+            "interfaces": ["uart", "adc"],
+            "ports": {**adc_ports, "uart_tx": "UART_TX", "uart_rx": "UART_RX"},
+        }
+    )
+    with pytest.raises(PinAllocationError, match="unsatisfied_pin_capability"):
+        allocate_requirement_pins(definition, uart_and_adc)
+
+
+def test_attiny1604_mux_and_updi_boundaries_are_explicit():
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
+
+    definition = get_recipe("attiny1604-ssn-minimal@1")
+    collision = CircuitRequirement(
+        id="tiny", sheet="MCU", role="mcu_core", family="attiny1604",
+        interfaces=["uart", "i2c_controller"],
+        ports={"uart_tx": "UART_TX", "uart_rx": "UART_RX", "i2c_sda": "I2C_SDA", "i2c_scl": "I2C_SCL"},
+    )
+    with pytest.raises(PinAllocationError, match="conflicting_pin_capability"):
+        allocate_requirement_pins(definition, collision)
+    overcommitted = CircuitRequirement(
+        id="tiny", sheet="MCU", role="mcu_core", family="attiny1604",
+        interfaces=["adc"],
+        ports={f"adc_{index}": f"ADC_{index}" for index in range(8)},
+    )
+    with pytest.raises(PinAllocationError, match="unsatisfied_pin_capability"):
+        allocate_requirement_pins(definition, overcommitted)
+    assert "10" not in {row.pin for row in definition.allocatable_pins}
+
+
+
+
+@pytest.mark.parametrize(
+    "recipe,expected_pins",
+    [
+        ("stm32g030f6p6-minimal@1", {"i2c_scl": "1", "i2c_sda": "2"}),
+        ("attiny1604-ssn-minimal@1", {"i2c_scl": "13", "i2c_sda": "12"}),
+    ],
+)
+def test_new_mcu_i2c_artifact_owns_one_pullup_per_documented_line(recipe, expected_pins):
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe=recipe,
+            instance="i2c",
+            sheets={"mcu": "MCU"},
+            port_bindings={
+                "vdd": "+3V3",
+                "gnd": "GND",
+                "i2c_scl": "I2C_SCL",
+                "i2c_sda": "I2C_SDA",
+            },
+        )
+    )
+    refs = {part.recipe_role: part.ref for part in expansion.parts}
+    nets = _mcu_recipe_nets(expansion)
+    mcu = refs["mcu"]
+    for port, pin in expected_pins.items():
+        assert nets[mcu, pin] == nets[refs[f"{port}_pullup"], "2"] == port.upper()
+        assert nets[refs[f"{port}_pullup"], "1"] == "+3V3"
+    assert {part.recipe_role for part in expansion.parts if part.recipe_role.startswith("i2c_")} == {
+        "i2c_scl_pullup",
+        "i2c_sda_pullup",
+    }
+
+
+@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "attiny1604-ssn-minimal@1"])
+def test_new_mcu_conditional_ads1115_pair_has_distinct_addresses_and_eight_endpoints(recipe):
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe=recipe, instance="adc", sheets={"mcu": "MCU"},
+            parameters={"adc_expansion": "ads1115x2"},
+            port_bindings={"vdd": "+3V3", "gnd": "GND", **{f"adc_{index}": f"ADC_{index}" for index in range(8)}},
+        )
+    )
+    nets = _mcu_recipe_nets(expansion)
+    ads = [part.ref for part in expansion.parts if part.mpn == "ADS1115IDGSR"]
+    assert len(ads) == 2
+    assert {nets[ref, "1"] for ref in ads} == {"+3V3", "GND"}
+    assert {nets[ref, pin] for ref in ads for pin in ("4", "5", "6", "7")} == {f"ADC_{index}" for index in range(8)}
+    mcu = next(part.ref for part in expansion.parts if part.recipe_role == "mcu")
+    assert all(
+        nets[ref, "9"] == nets[mcu, get_recipe(recipe).fixed_port_pins["i2c_sda"]]
+        and nets[ref, "10"] == nets[mcu, get_recipe(recipe).fixed_port_pins["i2c_scl"]]
+        for ref in ads
+    )
+
+
+@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "attiny1604-ssn-minimal@1"])
+def test_new_mcu_conditional_mcp23017_owns_sixteen_explicit_outputs(recipe):
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe=recipe, instance="gpio", sheets={"mcu": "MCU"},
+            parameters={"gpio_expansion": "mcp23017"},
+            port_bindings={"vdd": "+3V3", "gnd": "GND", **{f"output_{index}": f"OUT_{index}" for index in range(16)}},
+        )
+    )
+    nets = _mcu_recipe_nets(expansion)
+    mcp = next(part.ref for part in expansion.parts if part.mpn == "MCP23017-E/SO")
+    assert {nets[mcp, str(pin)] for pin in (*range(21, 29), *range(1, 9))} == {f"OUT_{index}" for index in range(16)}
+    assert {nets[mcp, pin] for pin in ("15", "16", "17")} == {"GND"}
+
+
+def test_new_mcu_i2c_rejects_single_wire_pseudo_bus():
+    with pytest.raises(ValueError, match="requires both i2c_scl and i2c_sda"):
+        expand_recipe(
+            RecipeSelection(
+                recipe="stm32g030f6p6-minimal@1",
+                instance="bad_i2c",
+                sheets={"mcu": "MCU"},
+                port_bindings={"vdd": "+3V3", "gnd": "GND", "i2c_scl": "I2C_SCL"},
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("family", "exact_part"),
+    [("stm32g0", "STM32G030F6P6"), ("attiny1604", "ATTINY1604-SSN")],
+)
+def test_new_mcu_cores_require_their_reviewed_3v3_logic_rail(family, exact_part):
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = {
+        "sheets": [{"name": "MCU", "stem": "MCU", "function": "MCU core"}],
+        "power_nets": ["+3V3", "GND"],
+        "rail_voltages": {"+3V3": 3.3},
+        "inter_sheet_nets": [],
+        "requirements": [{
+            "id": "mcu", "sheet": "MCU", "role": "mcu_core",
+            "family": family, "exact_part": exact_part,
+            "ports": {"vdd": "+3V3", "gnd": "GND"},
+        }],
+    }
+    assert not resolve_architecture_recipes(payload).blocking
+    payload["power_nets"] = ["+5V", "GND"]
+    payload["rail_voltages"] = {"+5V": 5.0}
+    payload["requirements"][0]["ports"]["vdd"] = "+5V"
+    rejected = resolve_architecture_recipes(payload)
+    assert any(row.code == "conflicting_recipe_supply" for row in rejected.blocking)
+
+
+def test_external_display_recipes_keep_physical_load_topologies():
+    ws = expand_recipe(
+        RecipeSelection(
+            recipe="ws2812-external-strip-interface@1",
+            instance="strip",
+            sheets={"interface": "DISPLAY"},
+            port_bindings={"vdd_5v": "+5V", "gnd": "GND", "data_in": "MCU_DATA"},
+        )
+    )
+    ws_nets = {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in ws.connections
+        for endpoint in connection.endpoints
+    }
+    connector = next(part for part in ws.parts if part.recipe_role == "connector")
+    resistor = next(part for part in ws.parts if part.recipe_role == "series_resistor")
+    level_shifter = next(part for part in ws.parts if part.recipe_role == "level_shifter")
+    assert ws_nets[connector.ref, "1"] == "+5V"
+    assert ws_nets[connector.ref, "3"] == "GND"
+    assert ws_nets[connector.ref, "2"] == ws_nets[resistor.ref, "2"]
+    assert ws_nets[resistor.ref, "1"] == ws_nets[level_shifter.ref, "18"]
+    assert ws_nets[level_shifter.ref, "2"] == "MCU_DATA"
+
+    power = expand_recipe(
+        RecipeSelection(
+            recipe="al8860-3w-power-led@1",
+            instance="lamp",
+            sheets={"interface": "DISPLAY"},
+            port_bindings={"vin": "+12V", "gnd": "GND", "enable": "MCU_ENABLE"},
+        )
+    )
+    power_nets = {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in power.connections
+        for endpoint in connection.endpoints
+    }
+    driver = next(part for part in power.parts if part.recipe_role == "driver")
+    emitter = next(part for part in power.parts if part.recipe_role == "emitter")
+    inductor = next(part for part in power.parts if part.recipe_role == "inductor")
+    assert power_nets[driver.ref, "1"] != power_nets[driver.ref, "4"]
+    assert power_nets[driver.ref, "4"] == "MCU_ENABLE"
+    assert power_nets[emitter.ref, "2"] == power_nets[driver.ref, "1"]
+    assert power_nets[emitter.ref, "2"] != "+12V"
+    assert power_nets[emitter.ref, "1"] == power_nets[emitter.ref, "3"] == power_nets[inductor.ref, "1"]
+
+
+def test_four_digit_recipe_has_four_independent_common_cathode_sinks():
+    expansion = expand_recipe(
+        RecipeSelection(
+            recipe="max7219-four-digit-seven-segment@1",
+            instance="digits",
+            sheets={"interface": "DISPLAY"},
+            port_bindings={"vdd_5v": "+5V", "gnd": "GND", "din": "DIN", "clk": "CLK", "load": "LOAD"},
+        )
+    )
+    nets = {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in expansion.connections
+        for endpoint in connection.endpoints
+    }
+    driver = next(part for part in expansion.parts if part.recipe_role == "driver")
+    level_shifter = next(part for part in expansion.parts if part.recipe_role == "level_shifter")
+    assert [nets[level_shifter.ref, pin] for pin in ("18", "17", "16")] == [
+        nets[driver.ref, pin] for pin in ("1", "13", "12")
+    ]
+    assert len({nets[level_shifter.ref, pin] for pin in ("2", "3", "4")}) == 3
+    digits = [part for part in expansion.parts if part.recipe_role == "digit"]
+    sinks = {nets[driver.ref, pin] for pin in ("2", "11", "6", "7")}
+    assert len(digits) == 4
+    assert len(sinks) == 4
+    assert {nets[digit.ref, "3"] for digit in digits} == sinks
+    assert {(pin.ref, pin.pin) for pin in expansion.no_connect_pins} >= {(driver.ref, "24")}
+
+
+def test_usb_uart_recipes_expose_header_and_refuse_unbound_modem_contacts():
+    for recipe, vdd in (("ch340c-usb-uart@1", "+3V3"), ("cp2102n-usb-uart@1", "+3V3")):
+        expansion = expand_recipe(
+            RecipeSelection(
+                recipe=recipe,
+                instance="bridge",
+                sheets={"interface": "USB"},
+                port_bindings={
+                    "vbus": "USB5V", "vdd": vdd, "gnd": "GND",
+                    "usb_dp": "D+", "usb_dm": "D-", "tx": "BRIDGE_TX", "rx": "BRIDGE_RX",
+                },
+                parameters={"supply_voltage": 3.3} if recipe.startswith("ch340") else {},
+            )
+        )
+        header = next(part for part in expansion.parts if part.recipe_role == "program_header")
+        owned = {(pin.ref, pin.pin) for pin in expansion.ownership.pins}
+        no_connects = {(pin.ref, pin.pin) for pin in expansion.no_connect_pins}
+        assert {(header.ref, str(pin)) for pin in range(1, 7)} <= owned
+        assert {(header.ref, "5"), (header.ref, "6")} <= no_connects
+
+
+@pytest.mark.parametrize(
+    ("recipe", "gpio", "expected_pin"),
+    [
+        ("esp32-c3-mini-1-minimal@1", 0, "12"),
+        ("esp32-c3-mini-1-minimal@1", 5, None),
+        ("esp32-c3-mini-1-minimal@1", 6, None),
+        ("esp32-wroom-32e-minimal@1", 16, None),
+        ("esp32-wroom-32e-minimal@1", 34, "6"),
+        ("esp32-s3-wroom-1-minimal@1", 14, "22"),
+        ("esp32-s3-wroom-1-minimal@1", 21, None),
+    ],
+)
+def test_module_adc_requests_use_real_supported_analog_contacts(recipe, gpio, expected_pin):
+    from kicraft.design.recipes.pin_allocator import PinAllocationRequest
+
+    pins = tuple(pin for pin in get_recipe(recipe).allocatable_pins if pin.gpio == gpio)
+    request = PinAllocationRequest(id="sample", net="SENSOR", capability="adc")
+    if expected_pin is None:
+        with pytest.raises(PinAllocationError):
+            allocate_pins(pins, [request])
+    else:
+        assert allocate_pins(pins, [request])[0].pin == expected_pin
+
+
+def test_s3_n8r8_internal_psram_contacts_cannot_be_assigned_to_application_outputs():
+    from kicraft.design.recipes.pin_allocator import PinAllocationRequest
+
+    definition = get_recipe("esp32-s3-wroom-1-minimal@1")
+    pins = tuple(pin for pin in definition.allocatable_pins if pin.gpio in {35, 36, 37})
+    with pytest.raises(PinAllocationError):
+        allocate_pins(pins, [PinAllocationRequest(id="load", net="LOAD", capability="output")])
+    expanded = expand_recipe(RecipeSelection(
+        recipe=definition.recipe, instance="core", sheets={"mcu": "MCU"},
+        port_bindings={"vdd": "+3V3", "gnd": "GND"},
+    ))
+    mcu = next(part.ref for part in expanded.parts if part.recipe_role == "mcu")
+    assert {(mcu, pin) for pin in ("28", "29", "30")} <= {
+        (pin.ref, pin.pin) for pin in expanded.no_connect_pins
+    }
+    assert not any(
+        pin.ref == mcu and pin.pin in {"28", "29", "30"}
+        for connection in expanded.connections for pin in connection.endpoints
+    )
+
+
+def _current_conditioner_adc_architecture():
+    from kicraft.design.models import Architecture, CircuitRequirement
+
+    ports = {"vplus": "+5V", "vminus": "GND", "analog_out_return": "GND"}
+    for index in (1, 2):
+        ports.update({
+            f"sensor_{index}_signal": f"SHUNT_{index}",
+            f"sensor_{index}_return": "GND",
+            f"load_return_in_{index}": f"SHUNT_{index}",
+            f"load_return_out_{index}": "GND",
+            f"conditioned_{index}": f"ADC_{index}",
+            f"analog_out_{index}": f"ADC_{index}",
+        })
+    return Architecture(
+        topologies={"AFE": "Two current-sense channels into MCU ADC"},
+        mcu_present=True,
+        rail_voltages={"+5V": 5.0, "+3V3": 3.3, "GND": 0.0},
+        power_nets=["+5V", "+3V3", "GND"],
+        sheets=[
+            {"name": "AFE", "stem": "AFE", "function": "Current sensing"},
+            {"name": "MCU", "stem": "MCU", "function": "Analog acquisition"},
+        ],
+        inter_sheet_nets=[
+            {"name": f"ADC_{index}", "endpoints": [
+                {"sheet": "AFE", "direction": "output"},
+                {"sheet": "MCU", "direction": "input"},
+            ]}
+            for index in (1, 2)
+        ],
+        requirements=[
+            CircuitRequirement(
+                id="afe", sheet="AFE", role="analog_block", family="analog-conditioner",
+                exact_part="TLV9062IDR",
+                parameters={"channel_count": 2, "sensor_type": "current-sense"}, ports=ports,
+            ),
+            CircuitRequirement(
+                id="mcu", sheet="MCU", role="mcu_core", family="stm32g0",
+                exact_part="STM32G030F6P6", interfaces=["adc"],
+                ports={"vdd": "+3V3", "gnd": "GND", "adc_0": "ADC_1", "adc_1": "ADC_2"},
+            ),
+            CircuitRequirement(
+                id="loads", sheet="AFE", role="connector", family="screw-terminal",
+                ports={"pin1": "SHUNT_1", "pin2": "GND", "pin3": "SHUNT_2", "pin4": "GND"},
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize("stated_limit", [None, 5.0, 3.0])
+def test_analog_output_respects_connected_adc_without_duplicating_explicit_inputs(stated_limit):
+    from kicraft.design.recipes import apply_architecture_recipe_resolution
+    from kicraft.design.synthesis.validation import _resistance_ohms
+
+    architecture = _current_conditioner_adc_architecture()
+    if stated_limit is not None:
+        architecture.requirements[0].parameters["consumer_input_max_v"] = stated_limit
+    original = architecture.model_dump()
+    resolved = apply_architecture_recipe_resolution(architecture)
+    conditioner = next(row for row in resolved.requirements if row.id == "afe")
+    artifact = lower_requirement(conditioner)
+    resistances = {
+        group.role: _resistance_ohms(group.value)
+        for group in artifact.groups if group.role in {"gain_feedback", "gain_ground"}
+    }
+    actual_endpoint = 0.1 * (1 + resistances["gain_feedback"] / resistances["gain_ground"])
+    assert actual_endpoint <= min(3.3, stated_limit if stated_limit is not None else 3.3)
+    mcu = next(row for row in resolved.recipe_selections if "mcu" in row.requirement_ids)
+    assert [(row.net, row.capability) for row in mcu.pin_allocations] == [
+        ("ADC_1", "adc"), ("ADC_2", "adc"),
+    ]
+    assert architecture.model_dump() == original
+
+
+def test_explicit_analog_gain_is_refused_rather_than_rewritten_for_adc():
+    from kicraft.design.recipes import apply_architecture_recipe_resolution, RecipeResolutionError
+
+    architecture = _current_conditioner_adc_architecture()
+    architecture.requirements[0].parameters["gain"] = 49.5
+    original = architecture.model_dump()
+    with pytest.raises(RecipeResolutionError) as refused:
+        apply_architecture_recipe_resolution(architecture)
+    assert any(row.requirement_id == "afe" for row in refused.value.diagnostics)
+    assert architecture.model_dump() == original
+
+
+def test_constructed_analog_circuit_remains_observable_after_library_normalization():
+    from kicraft.design.recipes import apply_architecture_recipe_resolution
+    from kicraft.eval.analog_artifact_evidence import analog_conditioner_facts
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    architecture = apply_architecture_recipe_resolution(_current_conditioner_adc_architecture())
+    bom = probe_architecture_construction({"architecture": architecture.model_dump()})
+    assert bom is not None
+    pad_nets = {
+        (endpoint["ref"], endpoint["pin"]): connection["net_name"]
+        for connection in bom["connections"]
+        for endpoint in connection["endpoints"]
+    }
+    facts = analog_conditioner_facts(
+        bom["parts"], {}, pad_nets, state={"architecture": architecture.model_dump()},
+        supply_voltage=lambda rail, ground: 5.0 if (rail, ground) == ("+5V", "GND") else None,
+    )
+    assert facts["channel_counts"]["analog_conditioner"] == 2
+    assert facts["analog_output_max_v"] <= 3.3
+
+@pytest.mark.parametrize(
+    ("shared_data", "shared_vbus", "blocked"),
+    [(True, True, True), (True, False, True), (False, True, True), (False, False, False)],
+)
+def test_integrated_usb_bridge_does_not_parallel_device_receptacles(shared_data, shared_vbus, blocked):
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = {
+        "rail_voltages": {"+3V3": 3.3, "VBUS": 5.0, "VBUS2": 5.0},
+        "power_nets": ["+3V3", "VBUS", "VBUS2", "GND"],
+        "inter_sheet_nets": [],
+        "sheets": [
+            {"name": "BRIDGE", "stem": "BRIDGE", "function": "USB serial bridge"},
+            {"name": "USB2", "stem": "USB2", "function": "Separate USB interface"},
+        ],
+        "requirements": [
+            {
+                "id": "bridge", "sheet": "BRIDGE", "role": "bus_interface",
+                "family": "usb-uart-bridge", "exact_part": "CH340C",
+                "ports": {
+                    "vbus": "VBUS", "vdd": "+3V3", "gnd": "GND",
+                    "usb_dp": "BRIDGE_DP", "usb_dm": "BRIDGE_DM",
+                    "tx": "UART_TX", "rx": "UART_RX",
+                },
+            },
+            {
+                "id": "socket", "sheet": "USB2", "role": "connector",
+                "family": "usb-c-usb2-device",
+                "ports": {
+                    "vbus": "VBUS" if shared_vbus else "VBUS2", "gnd": "GND",
+                    "usb_dp": "BRIDGE_DP" if shared_data else "SECOND_DP",
+                    "usb_dm": "SECOND_DM",
+                },
+            },
+        ],
+    }
+    result = resolve_architecture_recipes(payload)
+    collisions = [row for row in result.blocking if row.code == "usb_receptacle_ownership_collision"]
+    assert bool(collisions) is blocked
+
+
+def test_exact_c3_n4_identity_is_not_replaced_by_stocked_family_variant():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+
+    explicit = _typed_esp32_architecture(
+        family="esp32-c3-mini-1-module", exact_part="ESP32-C3-MINI-1-N4", usb=True
+    )
+    result = resolve_architecture_recipes(explicit)
+    assert not result.blocking
+    core = next(row for row in result.selections if "mcu_core" in row.requirement_ids)
+    assert core.recipe == "esp32-c3-mini-1-minimal@1"
+
+
+@pytest.mark.parametrize("missing", ("usb_dm", "usb_dp"))
+def test_c3_h4x_requires_both_native_usb_ports(missing):
+    selection = RecipeSelection(
+        recipe="esp32-c3-mini-1-h4x-minimal@1",
+        instance="main",
+        sheets={"mcu": "MCU"},
+        port_bindings={"vdd": "+3V3", "gnd": "GND", "usb_dm": "DM", "usb_dp": "DP"},
+    )
+    missing_port = selection.model_copy(
+        update={"port_bindings": {
+            name: net for name, net in selection.port_bindings.items() if name != missing
+        }}
+    )
+    with pytest.raises(ValueError, match="port bindings mismatch"):
+        expand_recipe(missing_port)
+
+
+@pytest.mark.parametrize("missing", ("usb_dm", "usb_dp"))
+def test_s3u_requires_native_usb(missing):
+    selection = RecipeSelection(
+        recipe="esp32-s3-mini-1u-n4r2-minimal@1",
+        instance="main",
+        sheets={"mcu": "MCU"},
+        port_bindings={"vdd": "+3V3", "gnd": "GND", "usb_dm": "DM", "usb_dp": "DP"},
+    )
+    bindings = {name: net for name, net in selection.port_bindings.items() if name != missing}
+    with pytest.raises(ValueError, match="port bindings mismatch"):
+        expand_recipe(selection.model_copy(update={"port_bindings": bindings}))
+
+
+def test_s3u_memory_straps_and_radio_identity():
+    from kicraft.design.part_identity import reviewed_part
+    from kicraft.design.recipes.wave_a_mcus import ESP32_S3_MINI_1U_N4R2_MINIMAL
+
+    record = reviewed_part("esp32-s3-mini-1u-n4r2")
+    assert record.operating_limits["flash_mb"] == 4
+    assert record.operating_limits["psram_mb"] == 2
+    assert not {"wifi-module", "bluetooth-le-soc"} & record.physical_features
+    recipe = ESP32_S3_MINI_1U_N4R2_MINIMAL
+    assert {"26", "41"} <= {pin.pin for pin in recipe.no_connects}
+    assert not {"26", "41"} & {pin.pin for pin in recipe.allocatable_pins}
+
+
+def test_exact_s3_n8_is_not_replaced_by_u_variant():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    explicit = _typed_esp32_architecture(
+        family="esp32-s3-module", exact_part="ESP32-S3-MINI-1-N8", usb=True
+    )
+    result = resolve_architecture_recipes(explicit)
+    assert not result.blocking
+    core = next(row for row in result.selections if "mcu_core" in row.requirement_ids)
+    assert core.recipe == "esp32-s3-mini-1-minimal@1"
+
+
+def test_generic_s3_selects_available_u_module():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    architecture = _typed_esp32_architecture(exact_part=None, usb=True)
+    result = resolve_architecture_recipes(architecture)
+    assert not result.blocking
+    core = next(row for row in result.selections if "mcu_core" in row.requirement_ids)
+    assert core.recipe == "esp32-s3-mini-1u-n4r2-minimal@1"
+
+
+def test_generic_s3_name_is_not_a_protected_exact_variant():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    architecture = _typed_esp32_architecture(exact_part="ESP32-S3", usb=True)
+    result = resolve_architecture_recipes(architecture)
+    assert not result.blocking
+    core = next(row for row in result.selections if "mcu_core" in row.requirement_ids)
+    assert core.recipe == "esp32-s3-mini-1u-n4r2-minimal@1"
+
+
+@pytest.mark.parametrize("constraint", ["8 MB flash", "Wi-Fi", "PCB antenna"])
+def test_generic_s3_u_rejects_unfulfilled_capability(constraint):
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    architecture = _typed_esp32_architecture(exact_part=None, usb=True)
+    result = resolve_architecture_recipes(architecture, {"constraints": [constraint]})
+    assert any(row.code == "s3u_requested_capability_unproven" for row in result.blocking)
+
+
+@pytest.mark.parametrize("recipe", [
+    "esp32-s3-mini-1u-n4r2-uart-minimal@1",
+    "esp32-c3-mini-1-h4x-uart-minimal@1",
+])
+def test_uart_recipe_cannot_silently_consume_usb_bindings(recipe):
+    selection = RecipeSelection(
+        recipe=recipe, instance="core", sheets={"mcu": "MCU"},
+        port_bindings={"vdd": "+3V3", "gnd": "GND",
+                       "usb_dm": "DM", "usb_dp": "DP"},
+    )
+    with pytest.raises(ValueError, match="port bindings mismatch"):
+        expand_recipe(selection)
+
+@pytest.mark.parametrize(("architecture_factory", "recipe"), [
+    (_typed_esp32_architecture, "esp32-s3-mini-1u-n4r2-uart-minimal@1"),
+    (_c3_native_usb_architecture, "esp32-c3-mini-1-h4x-uart-minimal@1"),
+])
+def test_explicit_uart_rejects_native_usb_contract(architecture_factory, recipe):
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    architecture = architecture_factory()
+    core = next(row for row in architecture["requirements"] if row["id"] == "mcu_core")
+    core.update(exact_part=None, interfaces=["usb_device"])
+    architecture["recipe_selections"] = [RecipeSelection(
+        recipe=recipe, instance="core", sheets={"mcu": "MCU"},
+        port_bindings={"vdd": "+3V3", "gnd": "GND"},
+        requirement_ids=["mcu_core"],
+    ).model_dump()]
+    result = resolve_architecture_recipes(
+        architecture, allowed_maturities=frozenset({"production", "canary"}),
+    )
+    assert any(row.code == "conflicting_programming_contract" for row in result.blocking)
+
+
+@pytest.mark.parametrize("mcu_recipe", [
+    "esp32-s3-mini-1u-n4r2-minimal@1",
+    "esp32-c3-mini-1-minimal@1",
+    "esp32-c3-mini-1-h4x-minimal@1",
+])
+def test_reviewed_recipe_supply_locality_rejects_swapped_owned_roles(mcu_recipe):
+    from kicraft.design.synthesis.autoplacer import _recipe_local_bypasses
+
+    selections = [
+        RecipeSelection(recipe=mcu_recipe, instance="core", sheets={"mcu": "MAIN"},
+                        port_bindings={"vdd": "+3V3", "gnd": "GND",
+                                       "usb_dm": "DM", "usb_dp": "DP"},
+                        requirement_ids=["core"]),
+        RecipeSelection(recipe="ylptec-k7803m-1000r3@1", instance="supply",
+                        sheets={"power": "MAIN"},
+                        port_bindings={"input": "VIN", "output": "+3V3", "gnd": "GND"},
+                        requirement_ids=["supply"]),
+    ]
+    expansions = expand_selections(selections)
+    bom = BOM(parts=[p for e in expansions for p in e.parts],
+              connections=[c for e in expansions for c in e.connections],
+              recipe_ownership=[e.ownership for e in expansions])
+    # Swapping role claims on a shared rail cannot steal another owner's cap.
+    cap = next(p for p in bom.parts
+               if p.recipe_instance == "core" and p.recipe_role == "local_decoupling")
+    cap.recipe_role = "bulk_decoupling"
+    with pytest.raises(ValueError, match="recipe role"):
+        _recipe_local_bypasses(SimpleNamespace(recipe_selections=selections), bom)

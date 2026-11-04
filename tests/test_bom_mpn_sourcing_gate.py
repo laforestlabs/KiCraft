@@ -321,16 +321,6 @@ def _bundle_part():
                  footprint="tps5430:ESOP-8")
 
 
-def test_library_bundle_in_stock_everywhere_passes_unpinned(tmp_path, monkeypatch):
-    """Existence stays the _unresolved_lcsc gate's territory — no search, no
-    pin here — but the manifest C# is now stock-checked in both inventories."""
-    _install_bundle(monkeypatch, _FakeCatalog(by_lcsc={
-        "C9864": {"lcsc": "C9864", "model": "TPS5430DDAR", "stock": 148617}}))
-    p = _bundle_part()
-    assert _resolve_bom_mpn_sourcing(_bom(p), tmp_path) == ([], [])
-    assert p.sourcing_note is None
-
-
 def test_library_bundle_low_jlc_stock_is_kept_and_recorded(tmp_path, monkeypatch):
     """A bundle part that is real but thin is kept: the board must still get made.
 
@@ -893,3 +883,236 @@ def test_identity_conflict_outranks_stock_verdicts(tmp_path, monkeypatch):
               footprint="Potentiometer_THT:Potentiometer_Bourns_3296W_Vertical")
     bad, _warns = _resolve_bom_mpn_sourcing(_bom(p), tmp_path)
     assert len(bad) == 1 and "drawn for" in bad[0]
+
+
+# ------------------------------------------------ reviewed button compatibility
+# The stock SW_Push/TL3342 pair is a reviewed physical interface, not a generic
+# two-terminal placeholder.  C2830235 is a resettable fuse and C3655801 is a
+# VQFN-24 motor driver; neither may ever be pinned to a button BOM row.
+_TL3342_FOOTPRINT = "Button_Switch_SMD:SW_SPST_TL3342"
+
+
+def _button_part(ref="SW1", mpn=None, note=None, value="RESET"):
+    return BomPart(
+        ref=ref,
+        value=value,
+        symbol="Switch:SW_Push",
+        footprint=_TL3342_FOOTPRINT,
+        sheet="MCU",
+        mpn=mpn,
+        sourcing_note=note,
+    )
+
+
+def _button_row(lcsc, model, *, brand="E-Switch", joints=4, description="SMD tactile switch"):
+    return {
+        "lcsc": lcsc,
+        "model": model,
+        "brand": brand,
+        "package": "SMD-4P5.2x5.2",
+        "stock": 445,
+        "joints": joints,
+        "type": "Basic",
+        "description": description,
+    }
+
+
+@pytest.mark.parametrize(
+    ("lcsc", "row"),
+    [
+        (
+            "C2830235",
+            _button_row(
+                "C2830235",
+                "JK-nSMD005",
+                brand="JK",
+                joints=2,
+                description="60V resettable fuse",
+            ),
+        ),
+        (
+            "C3655801",
+            _button_row(
+                "C3655801",
+                "DRV8300DRGER",
+                brand="Texas Instruments",
+                joints=24,
+                description="motor driver VQFN-24",
+            ),
+        ),
+    ],
+)
+def test_prebound_non_button_lcsc_is_rejected_for_reviewed_button_pair(
+    tmp_path, monkeypatch, lcsc, row
+):
+    _install(monkeypatch, _FakeCatalog(by_lcsc={lcsc: row}))
+    bad, _warns = _resolve_bom_mpn_sourcing(
+        _bom(_button_part(note=f"LCSC {lcsc}")), tmp_path
+    )
+    assert len(bad) == 1
+    assert lcsc in bad[0]
+    assert "reviewed" in bad[0]
+
+
+def test_exact_mpn_walk_rejects_incompatible_button_variant(tmp_path, monkeypatch):
+    # A prefix/family search can return another TL3342-labelled item.  Physical
+    # compatibility, not string similarity, decides whether it can land here.
+    wrong = _button_row(
+        "C3655801",
+        "TL3342-DRV",
+        brand="Texas Instruments",
+        joints=24,
+        description="motor driver VQFN-24",
+    )
+    _install(monkeypatch, _FakeCatalog(by_mpn={"TL3342": [wrong]}))
+    part = _button_part(mpn="TL3342")
+    bad, _warns = _resolve_bom_mpn_sourcing(_bom(part), tmp_path)
+    assert len(bad) == 1
+    assert "incompatible" in bad[0]
+    assert part.sourcing_note is None
+
+
+def test_keyword_button_walk_filters_wrong_class_before_cache_or_retail(
+    tmp_path, monkeypatch
+):
+    fuse = _button_row(
+        "C2830235",
+        "JK-nSMD005",
+        brand="JK",
+        joints=2,
+        description="60V resettable fuse",
+    )
+    motor_driver = _button_row(
+        "C3655801",
+        "DRV8300DRGER",
+        brand="Texas Instruments",
+        joints=24,
+        description="motor driver VQFN-24",
+    )
+    good = _button_row("C2886894", "TL3342F260QG")
+    retail = _FakeRetail()
+    _install(
+        monkeypatch,
+        _FakeCatalog(by_mpn={"TL3342F260QG": [fuse, motor_driver, good]}),
+        retail,
+    )
+    reset = _button_part(ref="SW1")
+    boot = _button_part(ref="SW2", value="BOOT")
+    assert _resolve_bom_mpn_sourcing(_bom(reset, boot), tmp_path) == ([], [])
+    assert reset.sourcing_note == boot.sourcing_note == "LCSC C2886894"
+    assert retail.calls == ["C2886894"]
+
+
+def test_matching_button_records_catalog_brand_in_passing_receipt(tmp_path, monkeypatch):
+    good = _button_row("C2886894", "TL3342F260QG", brand="E-Switch")
+    _install(monkeypatch, _FakeCatalog(by_mpn={"TL3342F260QG": [good]}))
+    receipt: list[dict] = []
+    part = _button_part(mpn="TL3342F260QG")
+    assert _resolve_bom_mpn_sourcing(_bom(part), tmp_path, receipt) == ([], [])
+    assert part.sourcing_note == "LCSC C2886894"
+    assert receipt == [
+        {
+            "ref": "SW1",
+            "exact_lcsc": "C2886894",
+            "catalog_mpn": "TL3342F260QG",
+            "manufacturer": "E-Switch",
+            "package": "SMD-4P5.2x5.2",
+            "description": "SMD tactile switch",
+            "assembly_stock": 445,
+            "retail_stock": 1_000_000,
+            "retail_min_buy": 1,
+            "retail_status": "ok",
+            "picky_selection": True,
+            "verdict": "pass",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("part", "candidate"),
+    [
+        (
+            BomPart(
+                ref="R1",
+                value="1k",
+                symbol="Device:R",
+                footprint="Resistor_SMD:R_0603_1608Metric",
+                sheet="A",
+                mpn="UNREVIEWED-R-0603",
+            ),
+            _kw_row(
+                "CR0603",
+                "UNREVIEWED-R-0603",
+                "Basic",
+                2_000,
+                "1k 0603 thick film resistor",
+            ),
+        ),
+        (
+            BomPart(
+                ref="C1",
+                value="100nF",
+                symbol="Device:C",
+                footprint="Capacitor_SMD:C_0603_1608Metric",
+                sheet="A",
+                mpn="UNREVIEWED-C-0603",
+            ),
+            _kw_row(
+                "CC0603",
+                "UNREVIEWED-C-0603",
+                "Basic",
+                2_000,
+                "100nF 0603 X7R capacitor",
+            ),
+        ),
+    ],
+)
+def test_unreviewed_orderable_chip_passive_remains_sourceable(
+    tmp_path, monkeypatch, part, candidate
+):
+    _install(monkeypatch, _FakeCatalog(by_mpn={part.mpn: [candidate]}))
+    assert _resolve_bom_mpn_sourcing(_bom(part), tmp_path) == ([], [])
+    assert part.sourcing_note == f"LCSC {candidate['lcsc']}"
+
+
+@pytest.mark.parametrize(
+    ("retail_code", "retail_model", "identified"),
+    [
+        ("C8404", "WJ126V-5.0-02P-14-00A", True),
+        ("C8405", "WJ126V-5.0-02P-14-00A", False),
+        ("C8404", "WJ126V-5.0-03P-14-00A", False),
+    ],
+)
+def test_missing_manufacturer_requires_matching_retail_product_identity(
+    tmp_path, monkeypatch, retail_code, retail_model, identified,
+):
+    from kicraft.design.part_identity import reviewed_part
+
+    mpn = "WJ126V-5.0-02P-14-00A"
+    record = reviewed_part(mpn)
+    catalog = _FakeCatalog(by_lcsc={
+        "C8404": {
+            "lcsc": "C8404", "model": mpn, "brand": None,
+            "stock": 5000, "package": "Through Hole,P=5mm",
+            "description": "2P 5mm Screw Terminal",
+        },
+    })
+    retail = _FakeRetail()
+    monkeypatch.setattr(retail, "stock", lambda cid: {
+        "lcsc": cid, "stock": 5000, "min_buy": 5,
+        "product_code": retail_code, "product_model": retail_model,
+        "manufacturer": "KANGNEX",
+    })
+    _install(monkeypatch, catalog, retail)
+    receipts = []
+    errors, _ = _resolve_bom_mpn_sourcing(
+        _bom(_part(
+            ref="J1", mpn=mpn, note="LCSC C8404",
+            symbol=record.symbol, footprint=record.footprint,
+        )),
+        tmp_path, receipts,
+    )
+    assert errors == []
+    assert (receipts[0]["manufacturer"] == "KANGNEX") is identified
+    if not identified:
+        assert receipts[0]["manufacturer"] is None

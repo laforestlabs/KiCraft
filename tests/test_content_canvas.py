@@ -265,6 +265,116 @@ class TestSetExtractionCanvas:
         )
         assert any("content_canvas test" in n for n in extraction.notes)
 
+def _edge_bank_fixture(sides):
+    components = {"U1": _comp("U1", 106.0, 25.0, 4.0, 4.0)}
+    interfaces = []
+    for side in sides:
+        refs = []
+        for index in range(17):
+            ref = f"{side[0].upper()}{index + 1}"
+            x = 0.0 if side == "left" else 212.0
+            y = 5.0 + index * 2.54
+            if side in ("top", "bottom"):
+                x, y = y, (0.0 if side == "top" else 212.0)
+            pad = Pad(
+                ref=ref, pad_id="1", pos=Point(x, y), net="",
+                layer=Layer.FRONT, size_mm=Point(1.0, 1.0),
+            )
+            components[ref] = Component(
+                ref=ref, value="", pos=Point(x, y), rotation=0.0,
+                layer=Layer.FRONT, width_mm=1.0, height_mm=1.0, pads=[pad],
+            )
+            refs.append(ref)
+        interfaces.append({
+            "refs": refs, "side": side, "pitch_mm": 2.54,
+            "exact_edge_datum": True,
+        })
+    board = BoardState(
+        components=components, nets={},
+        board_outline=(Point(-5.0, -5.0), Point(220.0, 220.0)),
+    )
+    leaf = SubCircuitDefinition(
+        id=SubCircuitId(sheet_name="LEAF", sheet_file="leaf.kicad_sch", instance_path="/leaf"),
+        schematic_path="/nonexistent/leaf.kicad_sch",
+        component_refs=list(components), ports=[], child_ids=[], parent_id=None, is_leaf=True,
+    )
+    extraction = extract_leaf_board_state(leaf, board, margin_mm=5.0)
+    set_extraction_canvas(extraction, 220.0, 220.0)
+    return extraction, interfaces
+
+
+def _reduce_edge_fixture(monkeypatch, extraction, interfaces):
+    from kicraft.autoplacer.brain import leaf_size_reduction as reduction
+
+    reroutes = []
+
+    def reroute(candidate, components, cfg, **kwargs):
+        reroutes.append(candidate.local_state.board_outline)
+        return ({"failed": False, "validation": {"accepted": True},
+                 "_trace_segments": [], "_via_objects": []}, {})
+
+    monkeypatch.setattr(reduction, "route_local_subcircuit", reroute)
+    best = SolveRoundResult(
+        round_index=1, seed=0, score=1.0, placement=PlacementScore(),
+        components=dict(extraction.local_state.components),
+        routing={"failed": False, "validation": {"accepted": True}},
+        routed=True,
+    )
+    result, _, summary = reduction.attempt_leaf_size_reduction(
+        extraction, best,
+        {"edge_interfaces": interfaces, "leaf_size_reduction_margin_mm": 2.0,
+         "leaf_size_reduction_max_attempts": 1, "legality_clearance_mm": 0.2},
+    )
+    return result, summary, reroutes
+
+
+def test_opposite_exact_banks_compact_without_seed_separation(monkeypatch):
+    extraction, interfaces = _edge_bank_fixture(("left", "right"))
+    canvas = derive_content_canvas(
+        extraction.local_state.components, fill_target=0.28,
+        placement_clearance_mm=0.5, edge_interfaces=interfaces,
+    )
+    assert 16 * 2.54 + 4.0 - 0.01 <= canvas[1] < 60.0
+    assert canvas[0] < 60.0
+    reduced, summary, reroutes = _reduce_edge_fixture(monkeypatch, extraction, interfaces)
+    assert summary["accepted"] and len(reroutes) == 1
+    assert reduced.local_state.board_width < 60.0
+    assert reduced.local_state.board_height >= 16 * 2.54 + 4.0 - 1e-6
+    assert reduced.local_state.board_height < 60.0
+    for interface in interfaces:
+        pads = [reduced.local_state.components[ref].pads[0].pos for ref in interface["refs"]]
+        edge = 0.0 if interface["side"] == "left" else reduced.local_state.board_width
+        assert all(p.x == pytest.approx(edge) for p in pads)
+        assert all(b.y - a.y == pytest.approx(2.54) for a, b in zip(pads, pads[1:]))
+
+
+@pytest.mark.parametrize("side", ["right", "bottom"])
+def test_one_sided_datum_rebases_content_from_near_edge(monkeypatch, side):
+    extraction, interfaces = _edge_bank_fixture((side,))
+    reduced, summary, reroutes = _reduce_edge_fixture(monkeypatch, extraction, interfaces)
+    assert summary["accepted"] and len(reroutes) == 1
+    tl, br = reduced.local_state.components["U1"].physical_bbox()
+    assert tl.x == pytest.approx(2.0)
+    assert tl.y == pytest.approx(2.0)
+    if side == "right":
+        assert reduced.local_state.board_width - br.x == pytest.approx(2.5)
+    else:
+        assert reduced.local_state.board_height - br.y == pytest.approx(2.5)
+
+
+@pytest.mark.parametrize("invalid", ["missing", "non_exact"])
+def test_unusable_declarations_keep_ordinary_geometry_bounds(monkeypatch, invalid):
+    extraction, interfaces = _edge_bank_fixture(("left", "right"))
+    if invalid == "missing":
+        interfaces[0]["refs"].append("MISSING")
+        interfaces[1]["refs"].append("MISSING")
+    else:
+        for interface in interfaces:
+            interface["exact_edge_datum"] = False
+    _, summary, _ = _reduce_edge_fixture(monkeypatch, extraction, interfaces)
+    assert summary["edge_datum_requirements"] == []
+    assert summary["tight_geometry_bounds"]["width_mm"] >= 212.0
+
 
 # ---------------------------------------------------------------------------
 # board_utilization_metrics (Phase 0)

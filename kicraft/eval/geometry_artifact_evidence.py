@@ -7,6 +7,7 @@ being promoted from a label or a design-stage assertion.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from math import atan2, cos, degrees, hypot, radians, sin
@@ -62,9 +63,9 @@ def _point(value: Any) -> _Point | None:
         return None
 
 
-def _box(item: Any) -> tuple[float, float, float, float] | None:
+def _box(item: Any, *, include_text: bool = True) -> tuple[float, float, float, float] | None:
     try:
-        box = item.GetBoundingBox()
+        box = item.GetBoundingBox() if include_text else item.GetBoundingBox(False, False)
         return (_mm(box.GetLeft()), _mm(box.GetTop()), _mm(box.GetRight()), _mm(box.GetBottom()))
     except Exception:
         return None
@@ -77,6 +78,28 @@ def _board_box(board: Any) -> tuple[float, float, float, float] | None:
     except Exception:
         return None
     return result if result[2] > result[0] and result[3] > result[1] else None
+
+
+def _closed_outline_geometry(board: Any) -> tuple[tuple[float, float, float, float], list[_Point]] | None:
+    """Measure the routed edge centreline, not drawing stroke width or an open point cloud."""
+    try:
+        import pcbnew
+        polygon = pcbnew.SHAPE_POLY_SET()
+        if not board.GetBoardPolygonOutlines(polygon) or polygon.OutlineCount() != 1:
+            return None
+        contour = polygon.Outline(0)
+        points = [_point(contour.CPoint(index)) for index in range(contour.PointCount())]
+        if len(points) < 3 or any(point is None for point in points):
+            return None
+        bounds = polygon.BBox()
+        box = tuple(_mm(value) for value in (
+            bounds.GetLeft(), bounds.GetTop(), bounds.GetRight(), bounds.GetBottom(),
+        ))
+        if box[2] <= box[0] or box[3] <= box[1]:
+            return None
+        return box, points
+    except Exception:
+        return None
 
 
 def _iter(value: Any) -> list[Any]:
@@ -754,13 +777,20 @@ def _connector_edge_facts(board: Any, records: Mapping[str, Any], box: tuple[flo
             continue
         if not _is_connector(records.get(ref)):
             continue
-        fp_box = _box(fp)
+        fp_box = _box(fp, include_text=False)
         if fp_box is None:
             continue
         distances = {"left": fp_box[0] - box[0], "right": box[2] - fp_box[2],
                      "top": fp_box[1] - box[1], "bottom": box[3] - fp_box[3]}
         edge, gap = min(distances.items(), key=lambda item: item[1])
-        measured[ref] = {"edge": edge, "gap_mm": round(gap, 3), "at_edge": gap <= _EDGE_TOUCH_TOL_MM}
+        near_edges = [
+            name for name, distance in distances.items()
+            if distance <= _EDGE_TOUCH_TOL_MM and _rect_hits(fp_box, box)
+        ]
+        measured[ref] = {
+            "edge": edge, "gap_mm": round(gap, 3),
+            "at_edge": bool(near_edges), "near_edges": sorted(near_edges),
+        }
     return measured
 
 
@@ -1322,6 +1352,92 @@ def _snowman_leds(vertices: list[_Point], leds: list[tuple[str, _Point]], box: t
         return {"count": len(leds), "sections": [], "pass": False}
 
 
+_EXTERNAL_SIZE_GATE = re.compile(
+    r"external_board_size_under_([0-9]+(?:\.[0-9]+)?)x([0-9]+(?:\.[0-9]+)?)_mm"
+)
+_NON_CONNECTOR_STOCK_LIBRARIES = frozenset({
+    "Resistor_SMD", "Resistor_THT", "Capacitor_SMD", "Capacitor_THT",
+    "Inductor_SMD", "Inductor_THT", "Diode_SMD", "Diode_THT",
+    "LED_SMD", "LED_THT", "Fuse", "Button_Switch_SMD", "Button_Switch_THT",
+    "Crystal", "Oscillator",
+})
+
+
+def _external_geometry_facts(board, state, contract, records, outline_geometry, connector_edges) -> dict:
+    """Generic brief obligations, observed without reading the generator or draft intent."""
+    gates: dict[str, str] = {}
+    facts: dict[str, Any] = {"gates": gates}
+    layers = int(board.GetCopperLayerCount())
+    facts["board_copper_layers"] = layers
+    gates["external_two_layer_stackup"] = "pass" if layers == 2 else "fail"
+    gates["external_four_layer_stackup"] = "pass" if layers == 4 else "fail"
+    requested = {
+        str(check.get("gate"))
+        for obligation in contract.get("obligations", [])
+        if isinstance(obligation, Mapping)
+        and isinstance(check := obligation.get("check"), Mapping)
+        and check.get("kind") == "gate"
+    }
+    if outline_geometry is None:
+        for gate in requested:
+            if _EXTERNAL_SIZE_GATE.fullmatch(gate) or gate == "external_all_connectors_one_edge":
+                gates[gate] = "fail"
+        return facts
+    box, vertices = outline_geometry
+    width, height = box[2] - box[0], box[3] - box[1]
+    facts.update({"board_width_mm": width, "board_height_mm": height})
+    for gate in requested:
+        match = _EXTERNAL_SIZE_GATE.fullmatch(gate)
+        if match:
+            max_width, max_height = (float(value) for value in match.groups())
+            fits = (
+                width < max_width and height < max_height
+                or width < max_height and height < max_width
+            )
+            gates[gate] = "pass" if fits else "fail"
+    if "external_all_connectors_one_edge" not in requested:
+        return facts
+    # Side names are meaningful only for a rectangular perimeter. Rounded,
+    # chamfered or concave contours need their own mating-edge observation.
+    rectangular = abs(_polygon_area(vertices) - width * height) < 1e-6
+    if not rectangular:
+        return facts
+    import pcbnew
+    parts = _parts_by_ref(state)
+    unclassified: list[str] = []
+    for fp in _iter(board.GetFootprints()):
+        ref = _footprint_ref(fp)
+        if ref in records:
+            if _is_connector(records[ref]) and ref not in connector_edges:
+                unclassified.append(ref)
+            continue
+        pads = _iter(fp.Pads())
+        if pads and all(pad.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH for pad in pads):
+            continue
+        part = parts.get(ref, {})
+        footprint = str(part.get("footprint") or "")
+        if (
+            footprint.partition(":")[0] in _NON_CONNECTOR_STOCK_LIBRARIES
+            and _realizes_footprint(footprint, fp)
+        ):
+            continue
+        unclassified.append(ref)
+    common_edges = {"left", "right", "top", "bottom"}
+    for evidence in connector_edges.values():
+        common_edges.intersection_update(evidence["near_edges"])
+    # A known counterexample proves failure even if another part is unknown.
+    # A positive verdict requires every physical component to be classified.
+    if connector_edges and not common_edges:
+        gates["external_all_connectors_one_edge"] = "fail"
+    elif connector_edges and not unclassified:
+        gates["external_all_connectors_one_edge"] = "pass"
+    facts["external_connector_geometry"] = {
+        "common_edges": sorted(common_edges) if connector_edges else [],
+        "unclassified_refs": sorted(unclassified),
+    }
+    return facts
+
+
 def extract_geometry_facts(rundir: Path, state: dict, board: object, contract: dict) -> dict:
     """Return only fact deltas proved by the supplied, already-loaded board."""
     del rundir
@@ -1334,14 +1450,22 @@ def extract_geometry_facts(rundir: Path, state: dict, board: object, contract: d
     if box is None:
         return {"geometry_diagnostics": {"reason": "no_edge_cuts_bounding_box"}}
     holes = _mounting_holes(board, records)
+    outline_geometry = _closed_outline_geometry(board)
+    if outline_geometry is not None:
+        box = outline_geometry[0]
     connector_edges = _connector_edge_facts(board, records, box)
-    has_closed_outline = len(vertices) >= 3 or bool(_edge_circles(board))
+    has_closed_outline = outline_geometry is not None
     facts: dict[str, Any] = {
         "geometry_counts": {"mounting_hole": len(holes)},
         "gates": {"geometry": "pass" if has_closed_outline else "fail"},
         "geometry_diagnostics": {"outline": outline, "mounting_holes": holes,
                                  "connector_edges": connector_edges},
     }
+    external = _external_geometry_facts(
+        board, state, contract, records, outline_geometry, connector_edges,
+    )
+    facts["gates"].update(external.pop("gates"))
+    facts.update(external)
     if outline.get("shape"):
         facts["outline"] = {key: value for key, value in outline.items() if key in {"shape", "diameter_mm"}}
     if holes:

@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:689db3625088b7c1f3d7e56c7623bbe6e3f116caa1ffef15e2c0a52b72c9e028",
+  "datasheet_url": "https://www.kingbrightusa.com/images/catalog/SPEC/APTF1616LSEEZGKQBKC.pdf",
+  "description": "Kingbright(\u4eca\u53f0) APTF1616LSEEZGKQBKC",
+  "footprint_name": "LED-SMD_4P-L1.6-W1.6_XZMDKDGCBD110W",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "APTF1616LSEEZGKQBKC",
+  "name": "aptf1616lseezgkqbkc",
+  "provenance": {
+    "added_at": "2026-10-11T03:47:07Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C3019103"
+  },
+  "symbol_name": "APTF1616LSEEZGKQBKC",
+  "tags": [
+    "rgb",
+    "status-indicator"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Kingbright DSAO4453 Rev 9B visual review: common anode pin 1; red cathode 2, green cathode 3, blue cathode 4. Recommended land pattern 2.6 mm x 1.5 mm overall with 0.9 mm horizontal and 0.5 mm vertical pad spacing; do not substitute KiCad six-pin LED_RGB."
+}

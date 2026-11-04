@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:ae3d457b7a38d962a37a40550e916fe435266792adeea57525216e0eb50037f7",
+  "datasheet_url": "https://sensirion.com/media/documents/EA647515/63A5A524/Datasheet_SHT3x_ARP.pdf",
+  "description": "Sensirion(\u745e\u58eb\u76db\u601d\u9510) SHT30-ARP-B2.5KS",
+  "footprint_name": "DFN-8_L2.5-W2.5-P0.50-TL-EP",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "SHT30-ARP-B2.5KS",
+  "name": "sht30-arp",
+  "provenance": {
+    "added_at": "2026-11-03T03:16:28Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C86346"
+  },
+  "symbol_name": "SHT30-ARP",
+  "tags": [
+    "sensor",
+    "humidity"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Sensirion SHT3x-ARP datasheet v4 (Dec 2022), table6 exact pin functions and fig13 manufacturer land pattern: 0.55x0.25mm pads, 0.5mm pitch, 2.35mm row centers, 1.1x1.8mm die pad tied to VSS, 0.9x1.6mm EP paste aperture; supplier original retained in development evidence. 100nF bypass and 1nF on each analog output; RH output needs >=50kohm load; nRESET active low, external pullup >=2kohm. No energized accuracy, assembly qualification or 3D body asserted."
+}

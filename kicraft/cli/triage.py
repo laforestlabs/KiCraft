@@ -172,10 +172,19 @@ def iter_stage_events(run: Path):
 
 
 def iter_subcircuit_debugs(exp: Path):
+    from kicraft.autoplacer.brain import pins
+
     for dbg in sorted(exp.glob("subcircuits/*/debug.json")):
         payload = _jdict(dbg)
-        if payload:
-            yield dbg, _classify_subcircuit_debug(payload), payload
+        if not payload:
+            continue
+        pinned_round = pins.is_pinned(exp, dbg.parent.name)
+        if pinned_round is not None:
+            # Triage must not report a later solve invocation merely because
+            # an old pin predated diagnostic custody.  Resolve the selected
+            # round in memory; pin/compose persists this same reconciliation.
+            payload = pins.pinned_debug_payload(dbg.parent, pinned_round, payload)
+        yield dbg, _classify_subcircuit_debug(payload), payload
 
 
 def parent_rounds(exp: Path) -> list[tuple[Path, dict]]:
@@ -915,6 +924,7 @@ def collect_leaves(exp: Path) -> list[dict]:
         failed_gates = [g for g, r in gates.items()
                         if isinstance(r, dict) and r.get("passed") is False]
         nu = gates.get("no_unconnected") or {}
+        drc = la_raw.get("drc")
         name = ((ex.get("solve_summary") or {}).get("sheet_name")
                 or (payload.get("metadata") or {}).get("sheet_name")
                 or dbg.parent.name)
@@ -934,6 +944,10 @@ def collect_leaves(exp: Path) -> list[dict]:
                 "ignored_interface": nu.get("ignored_interface_nets"),
                 "ignored_poured": nu.get("ignored_poured_nets"),
             } if nu else None,
+            "raw_drc": {
+                "unconnected": drc.get("unconnected"),
+                "unconnected_nets": drc.get("unconnected_nets"),
+            } if isinstance(drc, dict) else None,
             "signal_repair": la_raw.get("signal_unconnected_repair"),
             "placement": {
                 "median_pin_mm": pdiag.get("median_pin_mm"),
@@ -1165,11 +1179,16 @@ def print_run(d: dict) -> None:
             print(f"  [{lf['name']}] accepted={lf['accepted']} "
                   f"reject={lf['rejection_reasons']} failed_gates={lf['failed_gates'] or '-'}")
             nu = lf["unconnected"]
-            if nu and nu["total"]:
-                print(f"      unconnected: total={nu['total']} signal={nu['signal']} "
+            if nu and nu["total"] is not None:
+                print(f"      gate unconnected: total={nu['total']} signal={nu['signal']} "
                       f"interface(compose-owned)={nu['ignored_interface']} "
                       f"poured={nu['ignored_poured']}")
-                print("      router residue — may close on another seed")
+                if nu["total"]:
+                    print("      router residue — may close on another seed")
+            raw = lf.get("raw_drc")
+            if raw is not None:
+                print(f"      raw DRC: unconnected={raw['unconnected']} "
+                      f"nets={raw['unconnected_nets']}")
             if lf["placement"]:
                 p = lf["placement"]
                 print(f"      placement: median_pin={p['median_pin_mm']}mm "
@@ -1647,7 +1666,9 @@ def collect_bom_realness(run: Path) -> dict:
     try:
         from kicraft.design.models import BOM as _BOM
         from kicraft.design.synthesis.validation import mcu_programming_facts
-        facts = mcu_programming_facts(_BOM.model_validate(bom)) if bom else None
+        facts = mcu_programming_facts(
+            _BOM.model_validate(bom), architecture=st.get("architecture"),
+        ) if bom else None
         out["pass_d"]["mcu_programming"] = facts
     except Exception:
         out["pass_d"]["mcu_programming"] = None

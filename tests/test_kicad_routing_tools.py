@@ -87,6 +87,54 @@ def test_parent_routes_stamped_board_once_with_krt(monkeypatch, tmp_path):
     assert list(result).count("routing_stats") == 1
 
 
+def test_parent_route_uses_parent_timeout_budget(monkeypatch, tmp_path):
+    """The parent route gets its own (longer) KRT slice, not the leaf cap.
+
+    A parent's in-run recovery ladder (rip -> #103 reconciliation) does not fit
+    the 120 s leaf cap; production runs were SIGTERMed mid-reconciliation.
+    """
+    import kicraft.autoplacer.kicad_routing_tools as krt
+    import kicraft.autoplacer.routing_board as board_utils
+    import kicraft.cli._compose_route as compose_route
+
+    stamped = tmp_path / "parent_stamped.kicad_pcb"
+    stamped.write_text("(kicad_pcb stamped)\n")
+    seen: list[dict] = []
+
+    def fake_route(source, output, config):
+        seen.append(dict(config))
+        Path(output).write_text("(kicad_pcb routed)\n")
+        return {"backend": "kicad-routing-tools", "returncode": 0}
+
+    monkeypatch.setattr(krt, "route_with_kicad_routing_tools", fake_route)
+    monkeypatch.setattr(board_utils, "import_routed_copper", lambda p: {"traces": [], "vias": []})
+    monkeypatch.setattr(
+        board_utils, "validate_routed_board", lambda *a, **k: {"accepted": True, "drc": {}}
+    )
+    state = SimpleNamespace(composition=SimpleNamespace())
+    base = {
+        "gnd_zone_net": "",
+        "power_plane_enabled": False,
+        "signal_unconnected_repair_enabled": False,
+        "illegal_geometry_repair_enabled": False,
+    }
+
+    compose_route._route_parent_board(
+        stamped,
+        state,
+        tmp_path,
+        {**base, "kicad_routing_tools_timeout_s": 120,
+         "kicad_routing_tools_parent_timeout_s": 420},
+    )
+    assert seen[-1]["kicad_routing_tools_timeout_s"] == 420
+
+    # Callers that only know the leaf cap keep their value.
+    compose_route._route_parent_board(
+        stamped, state, tmp_path, {**base, "kicad_routing_tools_timeout_s": 90}
+    )
+    assert seen[-1]["kicad_routing_tools_timeout_s"] == 90
+
+
 def _runtime(root: Path) -> dict[str, str]:
     return {
         "backend": "kicad-routing-tools",
@@ -369,6 +417,95 @@ def test_krt_route_rejects_missing_input_copper(monkeypatch, tmp_path):
     assert output_board.with_suffix(".kicad_pro").read_bytes() == original_rules
 
 
+def _trace_span(x: float) -> dict[str, object]:
+    return {
+        "start_x": x,
+        "start_y": 2.0,
+        "end_x": x + 2.0,
+        "end_y": 4.0,
+        "layer": "FRONT",
+        "width": 0.2,
+    }
+
+
+def _run_bridge_with_missing_input_trace(monkeypatch, tmp_path, stdout):
+    import kicraft.autoplacer.routing_board as board_utils
+
+    root = tmp_path / "krt"
+    root.mkdir()
+    input_board = tmp_path / "input.kicad_pcb"
+    output_board = tmp_path / "output.kicad_pcb"
+    input_board.write_text("input\n")
+    _write_project(input_board)
+    kept, pruned = _trace_span(1.0), _trace_span(9.0)
+
+    def fake_import(path):
+        is_input = Path(path).resolve() == input_board.resolve()
+        return {
+            "traces": [kept, pruned] if is_input else [kept],
+            "vias": [_via()],
+            "trace_count": 2 if is_input else 1,
+            "via_count": 1,
+            "total_length_mm": 4.0,
+        }
+
+    class FakeProcess:
+        returncode = 0
+        pid = 321
+
+        def __init__(self, command, **kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            output_board.write_text("routed\n")
+            return (stdout, "")
+
+    monkeypatch.setattr(rb, "preflight_kicad_routing_tools", lambda _: _runtime(root))
+    monkeypatch.setattr(rb.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(board_utils, "import_routed_copper", fake_import)
+    return input_board, output_board, root
+
+
+def test_krt_route_accepts_declared_unloaded_input_prune(monkeypatch, tmp_path):
+    """A removal the router DECLARES as unloaded cleanup is not copper loss.
+
+    The dead-end/orphan-island sweep strips original-file segments that reach no
+    pad and no continuation even under --keep-input-copper; refusing those turned
+    fully routed parents (brief 2, project 1121) into route failures.
+    """
+    input_board, output_board, root = _run_bridge_with_missing_input_trace(
+        monkeypatch,
+        tmp_path,
+        "Removed 1 dead-end input segment(s) from the output\n"
+        'JSON_SUMMARY: {"successful": 1}\n',
+    )
+    stats = rb.route_with_kicad_routing_tools(
+        str(input_board),
+        str(output_board),
+        {"kicad_routing_tools_path": str(root)},
+    )
+    assert stats["copper_preservation_declared_prune"] is True
+    assert stats["pruned_unloaded_input_traces"] == 1
+    assert stats["preserved_existing_copper"] is False
+
+
+def test_krt_route_rejects_undeclared_missing_input_copper(monkeypatch, tmp_path):
+    """Same missing trace, no declared cleanup: still a custody failure."""
+    input_board, output_board, root = _run_bridge_with_missing_input_trace(
+        monkeypatch,
+        tmp_path,
+        'JSON_SUMMARY: {"successful": 1}\n',
+    )
+    with pytest.raises(rb.RoutingCopperPreservationError) as caught:
+        rb.route_with_kicad_routing_tools(
+            str(input_board),
+            str(output_board),
+            {"kicad_routing_tools_path": str(root)},
+        )
+    assert caught.value.stats["input_copper_preservation"]["traces"]["missing_count"] == 1
+    assert "declared dead-end removals=0" in str(caught.value)
+
+
 def test_npth_rule_area_staging_preserves_source_and_is_idempotent(tmp_path):
     pcbnew = pytest.importorskip("pcbnew")
     footprint_lib = (
@@ -492,3 +629,180 @@ def test_npth_rule_area_staging_preserves_source_and_is_idempotent(tmp_path):
     assert sum(len(footprint.Pads()) for footprint in stripped.Footprints()) == sum(
         len(footprint.Pads()) for footprint in restamped.Footprints()
     )
+
+
+def test_assembly_pad_keepouts_reach_pinned_router(tmp_path):
+    """Mask edge + off-centre drill, same-net pads and reviewed thermal lands."""
+    pcbnew = pytest.importorskip("pcbnew")
+    root = Path("/home/kicraft/KiCadRoutingTools")
+    python = Path("/home/kicraft/krt-venv/bin/python")
+    if not python.is_file() or not (root / "py_router" / "obstacle_map.py").is_file():
+        pytest.skip("pinned KiCadRoutingTools runtime not installed")
+    source = tmp_path / "source.kicad_pcb"
+    source.write_text("""(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal)
+          (36 "B.SilkS" user "b.silkscreen") (37 "F.SilkS" user "f.silkscreen")
+          (38 "B.Mask" user) (39 "F.Mask" user))
+  (setup (pad_to_mask_clearance 0.05))
+  (net 0 "") (net 1 "SAME")
+  (footprint "Test:Ordinary" (layer "F.Cu") (at 10 10)
+    (property "Reference" "R1" (at 0 0) (layer "F.SilkS"))
+    (property "Value" "R" (at 0 0) (layer "F.Fab"))
+    (pad "1" smd rect (at 0 0) (size 1 1)
+      (layers "F.Cu" "F.Mask") (net 1 "SAME")))
+  (footprint "Test:BULETM-SMD_ESPRESSIF_ESP32-S3-MINI-1U-N8" (layer "F.Cu") (at 20 10)
+    (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))
+    (property "Value" "ESP32-S3-MINI-1U-N8" (at 0 0) (layer "F.Fab"))
+    (pad "61" smd rect (at 0 0) (size 1.2 1.2)
+      (layers "F.Cu" "F.Mask") (net 1 "SAME")))
+  (zone (net 0) (net_name "") (layer "F.Cu") (name "authored")
+    (hatch edge 0.5) (keepout (tracks not_allowed) (vias not_allowed)
+      (pads allowed) (copperpour allowed) (footprints allowed))
+    (polygon (pts (xy 30 10) (xy 31 10) (xy 31 11) (xy 30 11)))))
+""")
+    original = source.read_bytes()
+    staged = tmp_path / "staged.kicad_pcb"
+    staged.write_bytes(original)
+    assert rb._board_has_assembly_pads(staged)
+    zone_name = rb._PAD_VIA_KEEPOUT_ZONE_NAME + " test"
+    summary = rb._stamp_pad_via_keepouts(staged, zone_name)
+    assert summary == {"pads": 1, "zones": 1, "authorized_thermal_pads": 1}
+    assert source.read_bytes() == original
+
+    # Use the pinned parser and its real obstacle-map rasterizer, not a
+    # reimplementation of its interpretation of KiCad rule areas.
+    probe = """
+import sys
+from types import SimpleNamespace
+sys.path[:0] = [sys.argv[1] + '/py_router', sys.argv[1] + '/py_tools']
+from kicad_parser import extract_keepouts
+from obstacle_map import add_rule_area_keepout_obstacles
+from routing_config import GridRouteConfig
+areas = extract_keepouts(open(sys.argv[2]).read())
+assert len(areas) == 2
+assert any(a['tracks_allowed'] and not a['vias_allowed'] for a in areas)
+class Capture:
+    def __init__(self):
+        self.vias = set()
+        self.tracks = set()
+    def add_blocked_vias_batch(self, cells):
+        self.vias.update(map(tuple, cells.tolist()))
+    def add_blocked_cells_batch(self, cells):
+        self.tracks.update(map(tuple, cells.tolist()))
+c = Capture()
+pcb = SimpleNamespace(board_info=SimpleNamespace(keepouts=areas, board_bounds=None))
+cfg = GridRouteConfig(grid_step=0.05, via_size=0.6, via_drill=0.3, clearance=0.15)
+add_rule_area_keepout_obstacles(c, pcb, cfg)
+assert (200, 200) in c.vias       # own-net pad centre
+assert (213, 200) in c.vias       # x=10.65: drill intersects mask at x=10.55
+assert not any(x == 200 and y == 200 for x, y, *_ in c.tracks)
+assert (400, 200) not in c.vias   # explicitly authorised thermal pad
+assert (600, 200) in c.vias       # authored keepout survives
+"""
+    subprocess.run([str(python), "-c", probe, str(root), str(staged)], check=True)
+    rb._strip_pad_via_keepouts(staged, zone_name)
+    board = pcbnew.LoadBoard(str(staged))
+    assert [z.GetZoneName() for z in board.Zones() if z.GetIsRuleArea()] == ["authored"]
+    via = pcbnew.PCB_VIA(board)
+    via.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(10.65), pcbnew.FromMM(10)))
+    via.SetWidth(pcbnew.FromMM(0.6))
+    via.SetDrill(pcbnew.FromMM(0.3))
+    via.SetNetCode(1)
+    board.Add(via)
+    board.Save(str(staged))
+    with pytest.raises(RuntimeError, match="Via drill intersects assembly mask"):
+        rb._reject_vias_in_assembly_openings(staged)
+
+
+def test_krt_command_passes_configured_grid_step(tmp_path):
+    """The escape knob reaches KRT only when configured (default = router's 0.1)."""
+    board = tmp_path / "in.kicad_pcb"
+    board.write_text("(kicad_pcb)\n")
+    base = {
+        "kicad_routing_tools_path": str(tmp_path / "krt"),
+        "kicad_routing_tools_layers": ["F.Cu", "B.Cu"],
+    }
+
+    cmd = rb._krt_command(
+        str(board),
+        str(tmp_path / "out.kicad_pcb"),
+        {**base, "kicad_routing_tools_grid_step_mm": 0.05},
+        tmp_path / "fab.txt",
+    )
+    assert "--grid-step" in cmd
+    assert cmd[cmd.index("--grid-step") + 1] == "0.05"
+
+    default_cmd = rb._krt_command(
+        str(board), str(tmp_path / "out.kicad_pcb"), base, tmp_path / "fab.txt"
+    )
+    assert "--grid-step" not in default_cmd
+
+
+def test_default_config_leaves_grid_step_to_the_router():
+    from kicraft.autoplacer.config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["kicad_routing_tools_grid_step_mm"] is None
+
+
+def test_grid_step_env_override_parses_and_rejects_junk(monkeypatch):
+    """The escape knob is operable from the environment, and a typo fails loudly."""
+    from kicraft.autoplacer.config import _optional_env_float
+
+    monkeypatch.delenv("KICRAFT_KICAD_ROUTING_TOOLS_GRID_STEP_MM", raising=False)
+    assert _optional_env_float("KICRAFT_KICAD_ROUTING_TOOLS_GRID_STEP_MM") is None
+    monkeypatch.setenv("KICRAFT_KICAD_ROUTING_TOOLS_GRID_STEP_MM", "0.05")
+    assert _optional_env_float("KICRAFT_KICAD_ROUTING_TOOLS_GRID_STEP_MM") == 0.05
+    monkeypatch.setenv("KICRAFT_KICAD_ROUTING_TOOLS_GRID_STEP_MM", "bogus")
+    with pytest.raises(ValueError, match="must be a number"):
+        _optional_env_float("KICRAFT_KICAD_ROUTING_TOOLS_GRID_STEP_MM")
+
+
+def test_route_timeout_knobs_are_env_overridable(monkeypatch):
+    from kicraft.autoplacer import config as cfgmod
+
+    assert cfgmod._optional_env_float("NOPE", 300) == 300
+    monkeypatch.setenv("NOPE", "0")
+    assert cfgmod._optional_env_float("NOPE", 300) == 0.0
+
+
+def test_parent_route_does_not_inherit_the_leaf_grid_step(monkeypatch, tmp_path):
+    """A leaf-tuned routing grid must not be forced on the (much larger) parent.
+
+    Driving 0.05 globally in the 2026-10-02 experiment made the parent route
+    exceed a 600 s cap; the parent's grid is its own key.
+    """
+    import kicraft.autoplacer.kicad_routing_tools as krt
+    import kicraft.autoplacer.routing_board as board_utils
+    import kicraft.cli._compose_route as compose_route
+
+    stamped = tmp_path / "parent_stamped.kicad_pcb"
+    stamped.write_text("(kicad_pcb stamped)\n")
+    seen: list[dict] = []
+
+    def fake_route(source, output, config):
+        seen.append(dict(config))
+        Path(output).write_text("(kicad_pcb routed)\n")
+        return {"backend": "kicad-routing-tools", "returncode": 0}
+
+    monkeypatch.setattr(krt, "route_with_kicad_routing_tools", fake_route)
+    monkeypatch.setattr(board_utils, "import_routed_copper", lambda p: {"traces": [], "vias": []})
+    monkeypatch.setattr(
+        board_utils, "validate_routed_board", lambda *a, **k: {"accepted": True, "drc": {}}
+    )
+    state = SimpleNamespace(composition=SimpleNamespace())
+    base = {
+        "gnd_zone_net": "",
+        "power_plane_enabled": False,
+        "signal_unconnected_repair_enabled": False,
+        "illegal_geometry_repair_enabled": False,
+        "kicad_routing_tools_grid_step_mm": 0.05,
+    }
+
+    compose_route._route_parent_board(stamped, state, tmp_path, dict(base))
+    assert seen[-1]["kicad_routing_tools_grid_step_mm"] is None
+
+    compose_route._route_parent_board(
+        stamped, state, tmp_path, {**base, "kicad_routing_tools_parent_grid_step_mm": 0.1}
+    )
+    assert seen[-1]["kicad_routing_tools_grid_step_mm"] == 0.1

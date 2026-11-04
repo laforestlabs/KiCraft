@@ -30,6 +30,8 @@ _GUIDELINES = (
     "https://docs.espressif.com/projects/esp-hardware-design-guidelines/"
     "en/latest/esp32s3/schematic-checklist.html"
 )
+_S3_SOC_DATASHEET = "https://documentation.espressif.com/esp32-s3_datasheet_en.pdf"
+
 
 _GPIO_TO_PIN = {
     0: "4",
@@ -94,17 +96,17 @@ ESP32_S3_MINI_1_MINIMAL = RecipeDefinition(
     recipe=_RECIPE_ID,
     family="esp32-s3-module",
     exact_part="ESP32-S3-MINI-1-N8",
-    default_for_family=True,
+    default_for_family=False,
     maturity="production",
     identity_aliases=(
         "ESP32-S3-MINI-1",
         "ESP32-S3-MINI-1-N8",
         "esp32-s3-mini-1:ESP32-S3-MINI-1-N8",
     ),
-    protected_aliases=("ESP32-S3", "ESP32-S3 module"),
+    protected_aliases=(),
     required_sheet_roles=("mcu",),
-    parameter_defaults={"native_usb": True},
-    allowed_parameters={"native_usb": (True,)},
+    parameter_defaults={"native_usb": True, "consumer_input_max_v": 2.9},
+    allowed_parameters={"native_usb": (True,), "consumer_input_max_v": (2.9,)},
     ports=(
         Port(name="vdd", direction="power"),
         Port(name="gnd", direction="power"),
@@ -172,17 +174,19 @@ ESP32_S3_MINI_1_MINIMAL = RecipeDefinition(
             role="reset_button",
             reference_prefix="SW",
             value="RESET",
-            symbol="Switch:SW_Push",
-            footprint="Button_Switch_SMD:SW_SPST_TL3342",
+            symbol="kmr232ngulclfs:KMR232NGULCLFS",
+            footprint="kmr232ngulclfs:KMR232NGULCLFS",
             sheet_role="mcu",
+            mpn="KMR232NGULCLFS",
         ),
         Group(
             role="boot_button",
             reference_prefix="SW",
             value="BOOT",
-            symbol="Switch:SW_Push",
-            footprint="Button_Switch_SMD:SW_SPST_TL3342",
+            symbol="kmr232ngulclfs:KMR232NGULCLFS",
+            footprint="kmr232ngulclfs:KMR232NGULCLFS",
             sheet_role="mcu",
+            mpn="KMR232NGULCLFS",
         ),
     ),
     pins=(
@@ -277,6 +281,13 @@ ESP32_S3_MINI_1_MINIMAL = RecipeDefinition(
             reviewed_date="2026-09-09",
             sections=("Power Supply", "Chip Power-up and Reset Timing", "Strapping Pins", "USB"),
         ),
+        SourceDocument(
+            url=_S3_SOC_DATASHEET,
+            title="ESP32-S3 Series Datasheet",
+            revision="current",
+            reviewed_date="2026-10-11",
+            sections=("5.2.2.1 SAR ADC", "ADC Calibration Results: ATTEN3 effective measurement range"),
+        ),
     ),
 )
 
@@ -295,6 +306,7 @@ def expand_esp32_s3_mini_1(
                 role="usb_dm_series",
                 reference_prefix="R",
                 value="22R",
+                mpn="RC0603FR-0722RL",
                 symbol="Device:R",
                 footprint="Resistor_SMD:R_0603_1608Metric",
                 sheet_role="mcu",
@@ -303,6 +315,7 @@ def expand_esp32_s3_mini_1(
                 role="usb_dp_series",
                 reference_prefix="R",
                 value="22R",
+                mpn="RC0603FR-0722RL",
                 symbol="Device:R",
                 footprint="Resistor_SMD:R_0603_1608Metric",
                 sheet_role="mcu",

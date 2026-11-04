@@ -69,6 +69,78 @@ def _edge_connector_zone_injections(
     return out
 
 
+def _recipe_local_bypasses(architecture: Architecture, bom: BOM) -> list[dict]:
+    """Resolve reviewed recipe pin contracts from selection, manifest and wiring."""
+    from kicraft.design.recipes.registry import get_recipe
+
+    actual = {(ep.ref, ep.pin): net.net_name for net in bom.connections for ep in net.endpoints}
+    result = []
+    for selection in architecture.recipe_selections:
+        try:
+            definition = get_recipe(selection.recipe)
+        except (KeyError, ValueError):
+            continue
+        rules = [r for r in definition.placement_constraints if r.kind == "owned_bypass"]
+        if not rules:
+            continue
+        manifests = [m for m in bom.recipe_ownership
+                     if m.recipe == selection.recipe and m.instance == selection.instance]
+        if len(manifests) != 1:
+            raise ValueError(f"{selection.instance}: missing canonical bypass recipe ownership")
+        manifest = manifests[0]
+        if (manifest.port_bindings != selection.port_bindings or
+                set(manifest.requirement_ids) != set(selection.requirement_ids)):
+            raise ValueError(f"{selection.instance}: bypass recipe ownership bindings mismatch")
+        parts = [p for p in bom.parts if p.recipe_id == selection.recipe
+                 and p.recipe_instance == selection.instance and p.resolution_source == "recipe"]
+        if {p.ref for p in parts} != set(manifest.refs):
+            raise ValueError(f"{selection.instance}: bypass recipe component ownership mismatch")
+        pins = {(p.ref, p.pin): p for p in manifest.pins}
+
+        def role_part(role):
+            groups = [g for g in definition.parts if g.role == role]
+            members = [p for p in parts if p.recipe_role == role]
+            if len(groups) != 1 or groups[0].quantity != 1 or len(members) != 1:
+                raise ValueError(f"{selection.instance}: ambiguous recipe role {role}")
+            group, part = groups[0], members[0]
+            if (part.value, part.symbol, part.footprint, part.mpn) != (
+                    group.value, group.symbol, group.footprint, group.mpn):
+                raise ValueError(f"{selection.instance}: altered recipe role {role}")
+            return part
+
+        for rule in rules:
+            owner = role_part(str(rule.parameters["anchor_role"]))
+            cap = role_part(str(rule.role))
+            power, ground = str(rule.parameters["power_net"]), str(rule.parameters["ground_net"])
+
+            def pin_numbers(role, logical):
+                return [str(p.pin) for p in definition.pins if p.role == role and p.net == logical]
+
+            op = pin_numbers(owner.recipe_role, power)
+            og = pin_numbers(owner.recipe_role, ground)
+            cp = pin_numbers(cap.recipe_role, power)
+            cg = pin_numbers(cap.recipe_role, ground)
+            if len(op) != 1 or not og or len(cp) != 1 or len(cg) != 1:
+                raise ValueError(f"{selection.instance}: invalid reviewed bypass pins")
+            for ref, numbers, logical in ((owner.ref, op, power), (owner.ref, og, ground),
+                                           (cap.ref, cp, power), (cap.ref, cg, ground)):
+                net = selection.port_bindings.get(logical)
+                for number in numbers:
+                    row = pins.get((ref, number))
+                    if (not net or row is None or row.owner != "recipe"
+                            or row.owner_id != selection.recipe
+                            or (row.requirement_id not in selection.requirement_ids
+                                if selection.requirement_ids else row.requirement_id is not None)
+                            or row.net != net or actual.get((ref, number)) != net):
+                        raise ValueError(f"{selection.instance}: unproven bypass pin {ref}.{number}")
+            result.append({
+                "owner_ref": owner.ref, "bypass_ref": cap.ref,
+                "power_pins": [op[0], cp[0]], "ground_pins": [og, cg[0]],
+                "max_distance_mm": float(rule.parameters["max_mm"]),
+            })
+    return result
+
+
 def write_autoplacer_json(
     project_dir: Path,
     project_stem: str,
@@ -105,6 +177,42 @@ def write_autoplacer_json(
         "pcb_file": f"{project_stem}.kicad_pcb",
         "power_nets": sorted(set(architecture.power_nets)),
     }
+    # Reconstruct compiler-owned constraints, rather than accepting candidate
+    # metadata. The canonical check includes all roles and their wired nets.
+    from kicraft.design.lowering import lower_requirement
+    from kicraft.design.synthesis.validation import _canonical_lowerer_refs
+
+    local_bypasses = []
+    for requirement in architecture.requirements:
+        try:
+            artifact = lower_requirement(requirement)
+        except ValueError:
+            # Other requirements may be recipe-owned rather than realizable
+            # by a registered lowerer. Do not change their export behavior.
+            if any(p.resolution_source == "lowerer" and
+                   p.lowering_requirement_id == requirement.id for p in bom.parts):
+                raise
+            continue
+        if artifact is None or not artifact.local_bypasses:
+            continue
+        refs = _canonical_lowerer_refs(requirement, bom)
+        if not refs:
+            raise ValueError(f"{requirement.id}: local bypass lacks canonical BOM/wiring ownership")
+        by_role = {
+            (part.lowering_role, part.lowering_index): part.ref
+            for part in bom.parts if part.ref in refs
+        }
+        for local in artifact.local_bypasses:
+            local_bypasses.append({
+                "owner_ref": by_role[(local.owner_role, local.owner_index)],
+                "bypass_ref": by_role[(local.bypass_role, local.bypass_index)],
+                "power_pins": list(local.power_pins),
+                "ground_pins": list(local.ground_pins),
+                "max_distance_mm": local.max_distance_mm,
+            })
+    local_bypasses.extend(_recipe_local_bypasses(architecture, bom))
+    if local_bypasses:
+        body["local_bypasses"] = local_bypasses
 
     # Start with BOM-derived values; fold in library fragments additively.
     ic_groups: dict[str, list[str]] = {ic: list(members) for ic, members in bom.ic_groups.items()}

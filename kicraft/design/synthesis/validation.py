@@ -23,6 +23,7 @@ from collections.abc import Callable, Iterable, Mapping
 from kicraft.design.models import (
     GND_NET_PATTERNS,
     POWER_NET_PATTERNS,
+    Architecture,
     FunctionalSpec,
     InterSheetNet,
     NetConnection,
@@ -1397,6 +1398,9 @@ def check_power_pin_polarity(bom) -> CheckResult:
     tied the MCU's VDD pin to GND and its VSS pin to +3V3). ERC cannot see it --
     both ends are valid power nets. Fires only when BOTH the pin name and the net
     polarity are unambiguous AND opposite, so a correctly-wired rail never trips.
+
+    A reviewed logical supply selector may be strapped low. Its exact device
+    and package evidence never exempt a real supply pin or an unknown part.
     """
     info, _ = _pin_info_by_ref(bom)
     bad: list[str] = []
@@ -1416,6 +1420,10 @@ def check_power_pin_polarity(bom) -> CheckResult:
             if pos_pin == gnd_pin:  # neither, or ambiguously both -> skip
                 continue
             if pos_pin and net_gnd:
+                part = next((part for part in bom.parts if part.ref == ep.ref), None)
+                record = _reviewed_identity_for_bom_part(part) if part is not None else None
+                if record is not None and record.port_pins.get("external_vcc_select") == ep.pin:
+                    continue  # manufacturer-defined logic-low selector, not a supply input
                 bad.append(
                     f"{ep.ref}.{ep.pin} (pin {nm!r}, a positive supply) is wired to "
                     f"ground net {c.net_name!r} -- power pins look reversed"
@@ -1520,8 +1528,10 @@ _REGULATOR_VREF: dict[str, float] = {
 
 _GND_NET_NAMES = frozenset({"GND", "AGND", "PGND", "DGND", "0V", "GNDA"})
 
-_R_VALUE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([kKmMrR]?)(?:\s*(?:Ω|ohm|Ohm|OHM))?\s*$")
-_R_INFIX_RE = re.compile(r"^(\d+)([kKmMrR])(\d+)$")  # 4k7 style
+_R_VALUE_RE = re.compile(
+    r"^(\d+(?:\.\d+)?)\s*([kKmMrR]?)(?:\s*(?:Ω|ohm|Ohm|OHM))?(?=$|[\s,])"
+)
+_R_INFIX_RE = re.compile(r"^(\d+)([kKmMrR])(\d+)(?=$|[\s,])")  # 4k7 style
 # '3V3' / '1V25' (digits around V) or '3.3V' / '12V' / '+5V' (decimal + V).
 _NET_VOLTAGE_RE = re.compile(
     r"(?:^|[^0-9.])(\d{1,2})V(\d{1,2})?(?:$|[^0-9])"
@@ -1535,6 +1545,7 @@ _R_SCALE = {"k": 1e3, "K": 1e3, "m": 1e-3, "M": 1e6, "r": 1.0, "R": 1.0, "": 1.0
 
 
 def _resistance_ohms(value: str) -> float | None:
+    """Parse an unambiguous leading resistance; only a separated suffix may follow."""
     s = (value or "").strip()
     m = _R_INFIX_RE.match(s)
     if m:
@@ -2165,8 +2176,8 @@ def check_family_wiring_contracts(bom) -> CheckResult:
 # a capacitor on a nearby net, or graph reachability through a control pin is
 # not evidence that energy can reach a load.
 
-_CAP_VALUE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(p|n|u|µ|m)?(?:f|farad(?:s)?)?$", re.I)
-_INDUCTANCE_VALUE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(n|u|µ|m)?h$", re.I)
+_CAP_VALUE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(p|n|u|µ|m)?(f|farad(?:s)?)?(?=$|[\s,])", re.I)
+_INDUCTANCE_VALUE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(n|u|µ|m)?h(?=$|[\s,])", re.I)
 _CAP_SCALE = {"p": 1e-12, "n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3, "": 1.0}
 _INDUCTANCE_SCALE = {"n": 1e-9, "u": 1e-6, "µ": 1e-6, "m": 1e-3, "": 1.0}
 
@@ -2176,8 +2187,10 @@ def _capacitance_farads(value: str) -> float | None:
     match = _CAP_VALUE_RE.match((value or "").strip())
     if match is None:
         return None
-    magnitude, prefix = match.groups()
-    return float(magnitude) * _CAP_SCALE[prefix.lower()]
+    magnitude, prefix, unit = match.groups()
+    if prefix is None and unit is None:
+        return None
+    return float(magnitude) * _CAP_SCALE[(prefix or "").lower()]
 
 
 def _inductance_henries(value: str) -> float | None:
@@ -2186,7 +2199,7 @@ def _inductance_henries(value: str) -> float | None:
     if match is None:
         return None
     magnitude, prefix = match.groups()
-    return float(magnitude) * _INDUCTANCE_SCALE[prefix.lower()]
+    return float(magnitude) * _INDUCTANCE_SCALE[(prefix or "").lower()]
 
 
 def _reviewed_fact_for_part(part) -> dict | None:
@@ -2537,11 +2550,65 @@ def _reviewed_enable_defects(architecture, part, fact, bom, info, nets) -> list[
     ]
 
 
+def _reviewed_pass_through_rails(architecture, bom, info, nets) -> tuple[dict, list[str]]:
+    """Infer nominal on-state rails only across explicitly reviewed non-converting paths.
+
+    This is not a voltage-drop, current-delivery or thermal qualification. Converter
+    switches, inductors, resistors and control connections cannot supply this evidence.
+    """
+    rails = dict(architecture.rail_voltages)
+    graph: dict[str, set[str]] = defaultdict(set)
+    for part in bom.parts:
+        fact = _reviewed_fact_for_part(part)
+        transfer = (fact or {}).get("power_transfer") or {}
+        if transfer.get("preserves_nominal_voltage") is not True:
+            continue
+        terminals = []
+        for key in ("from_pin", "to_pin"):
+            number = _pin_number_named(info, part.ref, str(transfer.get(key) or "").upper())
+            terminals.append((nets.get(part.ref) or {}).get(number or ""))
+        source, target = terminals
+        if source and target and source != target:
+            graph[source].add(target)
+            graph[target].add(source)
+    errors: list[str] = []
+    remaining = set(graph)
+    while remaining:
+        pending = [min(remaining)]
+        component: set[str] = set()
+        while pending:
+            net = pending.pop()
+            if net in component:
+                continue
+            component.add(net)
+            pending.extend(graph[net] - component)
+        remaining.difference_update(component)
+        values = {
+            voltage
+            for net in component
+            if (voltage := _fact_number(rails, net)) is not None
+        }
+        if len(values) > 1:
+            declarations = ", ".join(
+                f"{net}={rails[net]}V" for net in sorted(component) if net in rails
+            )
+            errors.append(
+                "E_PASS_THROUGH_RAIL_CONFLICT: nominal rails disagree across reviewed "
+                f"non-converting power paths: {declarations}"
+            )
+        elif values:
+            voltage = next(iter(values))
+            for net in component:
+                rails.setdefault(net, voltage)
+    return rails, errors
+
+
 def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
     """§9.38 — compare typed rails with device and selected capacitor ratings."""
     info, _ = _pin_info_by_ref(bom)
     nets = _nets_by_ref(bom)
-    bad = _catalog_capacitor_voltage_defects(architecture, bom, nets)
+    rail_voltages, bad = _reviewed_pass_through_rails(architecture, bom, info, nets)
+    bad.extend(_catalog_capacitor_voltage_defects(architecture, bom, nets))
     for part in bom.parts:
         fact = _reviewed_fact_for_part(part)
         if fact is None:
@@ -2587,7 +2654,7 @@ def check_reviewed_input_operating_ranges(architecture, bom) -> CheckResult:
                 f"has no wired {vin} pin; actual input voltage is unproven"
             )
             continue
-        raw_voltage = architecture.rail_voltages.get(actual_net)
+        raw_voltage = rail_voltages.get(actual_net)
         try:
             voltage = float(raw_voltage)
         except (TypeError, ValueError):
@@ -3692,35 +3759,168 @@ def _part_is_deterministic_owned(bom, ref: str) -> bool:
 
 def _part_names_exact_part(part, reviewed_record, exact_part: str | None) -> bool:
     """Whether a BOM part is the exact identity a requirement pinned."""
+    from kicraft.design.part_identity import (
+        matches_part_identity,
+        reviewed_identity_for_order_code,
+        reviewed_part,
+    )
+
     if exact_part is None:
         return True
     if reviewed_record is not None:
-        return reviewed_record.identity == exact_part.casefold()
+        requested_record = reviewed_part(reviewed_identity_for_order_code(exact_part))
+        if requested_record is not None:
+            # A reviewed exact ordering code stays exact. Device/family member
+            # matching below must not turn a documented deviation (for example,
+            # a different flash capacity) into this requirement's owner.
+            return requested_record.identity == reviewed_record.identity
+        return matches_part_identity(exact_part, reviewed_record.identity)
     return str(getattr(part, "mpn", "") or "").casefold() == exact_part.casefold()
 
 
-def _physical_requirement_parts(requirement, bom, reviewed, recipe_refs: set[str]):
+def _physical_requirement_parts(requirement, bom, reviewed, support_refs: set[str]):
     """Parts that can satisfy one requirement's physical obligations.
 
-    An exact_part pins the requirement's principal component, not every
-    supporting component a reviewed recipe emits.  Recipe ownership is the
-    narrow exception: only refs emitted by the committed recipe selection for
-    this requirement can supply its crystal, flash, connector, or other
-    support-part obligation.  Model parts remain bound to exact_part evidence.
+    An exact_part pins the principal component, not every supporting component
+    of a deterministic circuit. Only refs owned by this requirement's committed
+    recipe or independently reconstructed complete lowerer may supply support
+    obligations. Model parts remain bound to exact_part evidence.
     """
     return [
         part
         for part in bom.parts
         if part.sheet == requirement.sheet
         and (
-            part.ref in recipe_refs
+            part.ref in support_refs
             or _part_names_exact_part(part, reviewed.get(part.ref), requirement.exact_part)
         )
     ]
 
 
-def _has_trusted_lowerer_topology_witness(requirement, bom, component_class: str) -> bool:
-    """Prove one complete topology from its canonical lowerer-owned BOM parts."""
+def _has_trusted_recipe_topology_witness(requirement, bom, component_class: str) -> bool:
+    """Prove a recipe topology from the committed parts *and* connected pins.
+
+    Recipe ownership is provenance, not a waiver.  A witness is earned only when the
+    manifest's registered recipe can be reconstructed from exact recipe-owned BOM
+    parts and every pin the definition requires is on its declared net.  This
+    specifically prevents a lone PMOS, a deleted gate-bias resistor, or a source/
+    drain swap from satisfying reverse-polarity protection merely because a recipe
+    label survived normalization.
+    """
+    from kicraft.design.part_identity import lowerer_witnesses_physical_class
+    from kicraft.design.recipes.registry import get_recipe
+
+    manifests = [
+        manifest
+        for manifest in getattr(bom, "recipe_ownership", ()) or ()
+        if requirement.id in (getattr(manifest, "requirement_ids", ()) or ())
+    ]
+    if not manifests:
+        return False
+    nets = _nets_by_ref(bom)
+    for manifest in manifests:
+        recipe_id = str(getattr(manifest, "recipe", "") or "")
+        if not lowerer_witnesses_physical_class(recipe_id, component_class):
+            continue
+        try:
+            definition = get_recipe(recipe_id)
+        except (KeyError, ValueError):
+            continue
+        # A role has no persisted index.  Recipes that repeat a role cannot be
+        # independently reconstructed from the BOM provenance and therefore do
+        # not receive this witness until that evidence exists.
+        roles = [group.role for group in definition.parts]
+        if len(roles) != len(set(roles)):
+            continue
+        instance = str(getattr(manifest, "instance", "") or "")
+        owned = [
+            part
+            for part in bom.parts
+            if getattr(part, "resolution_source", None) == "recipe"
+            and getattr(part, "recipe_id", None) == recipe_id
+            and getattr(part, "recipe_instance", None) == instance
+        ]
+        if {part.ref for part in owned} != set(getattr(manifest, "refs", ()) or ()):
+            continue
+        parts_by_role: dict[str, list[object]] = defaultdict(list)
+        for part in owned:
+            parts_by_role[str(getattr(part, "recipe_role", "") or "")].append(part)
+        if set(parts_by_role) != set(roles):
+            continue
+        for group in definition.parts:
+            members = sorted(parts_by_role[group.role], key=lambda part: str(part.ref))
+            if len(members) != group.quantity or any(
+                member.value != group.value
+                or member.symbol != group.symbol
+                or member.footprint != group.footprint
+                or member.mpn != group.mpn
+                for member in members
+            ):
+                break
+        else:
+            refs_by_role = {
+                role: sorted(parts, key=lambda part: str(part.ref))
+                for role, parts in parts_by_role.items()
+            }
+            ports = {port.name: port for port in definition.ports}
+            bindings = dict(getattr(manifest, "port_bindings", {}) or {})
+
+            def expected_net(logical: str) -> str | None:
+                # Parameter-derived nets cannot be proven from a manifest that
+                # does not retain the resolved parameter values.
+                if logical.startswith("@parameter:"):
+                    return None
+                if logical in bindings:
+                    return str(bindings[logical])
+                port = ports.get(logical)
+                if port is not None and port.default_tie:
+                    return str(bindings.get(port.default_tie) or "") or None
+                if logical in definition.internal_nets:
+                    name = definition.recipe.rsplit("@", 1)[0].replace("-", "_")
+                    return f"__KICRAFT_RECIPE__{name}__{instance}__{logical}"
+                return logical
+
+            expected: dict[tuple[str, str], str] = {}
+            for spec in definition.pins:
+                members = refs_by_role.get(spec.role, [])
+                if spec.index >= len(members) or (net := expected_net(spec.net)) is None:
+                    break
+                expected[(members[spec.index].ref, spec.pin)] = net
+            else:
+                owned_pins = {
+                    (str(row.ref), str(row.pin)): row
+                    for row in getattr(manifest, "pins", ()) or ()
+                }
+                if all(
+                    (row := owned_pins.get(key)) is not None
+                    and row.owner == "recipe"
+                    and row.owner_id == recipe_id
+                    and row.requirement_id == requirement.id
+                    and row.net == net
+                    and nets.get(key[0], {}).get(key[1]) == net
+                    for key, net in expected.items()
+                ):
+                    return True
+    return False
+
+
+def _requires_trusted_lowerer_topology(requirement, component_class: str) -> bool:
+    """Whether the registered lowerer is the only proof for this physical class."""
+    from kicraft.design.lowering import registered_lowerers
+    from kicraft.design.part_identity import lowerer_witnesses_physical_class
+
+    family = str(getattr(requirement, "family", "") or "")
+    return any(
+        family in lowerer.families
+        and lowerer_witnesses_physical_class(lowerer.lowerer_id, component_class)
+        for lowerer in registered_lowerers()
+    )
+
+
+def _canonical_lowerer_refs(
+    requirement, bom, *, component_class: str | None = None
+) -> set[str]:
+    """Refs proven by the complete canonical lowerer and its actual pin/net graph."""
     from kicraft.design.lowering import lower_requirement
     from kicraft.design.part_identity import lowerer_witnesses_physical_class
 
@@ -3732,13 +3932,18 @@ def _has_trusted_lowerer_topology_witness(requirement, bom, component_class: str
     ]
     lowerer_ids = {str(getattr(part, "resolution_id", "") or "") for part in owned}
     if len(lowerer_ids) != 1:
-        return False
+        return set()
     (lowerer_id,) = lowerer_ids
-    if not lowerer_witnesses_physical_class(lowerer_id, component_class):
-        return False
-    artifact = lower_requirement(requirement)
+    if component_class is not None and not lowerer_witnesses_physical_class(
+        lowerer_id, component_class
+    ):
+        return set()
+    try:
+        artifact = lower_requirement(requirement)
+    except ValueError:
+        return set()
     if artifact is None or artifact.lowerer_id != lowerer_id:
-        return False
+        return set()
     expected = {
         (group.role, index): group for group in artifact.groups for index in range(group.quantity)
     }
@@ -3758,11 +3963,81 @@ def _has_trusted_lowerer_topology_witness(requirement, bom, component_class: str
             or group.value != getattr(part, "value", None)
             or group.symbol != getattr(part, "symbol", None)
             or group.footprint != getattr(part, "footprint", None)
-            or group.mpn != getattr(part, "mpn", None)
+            or (group.mpn is not None and group.mpn != getattr(part, "mpn", None))
         ):
-            return False
+            return set()
         seen[key] = part
-    return set(seen) == set(expected)
+    if set(seen) != set(expected):
+        return set()
+    nets = _nets_by_ref(bom)
+    if not all(
+        nets.get(str(seen[(pin.role, pin.index)].ref), {}).get(str(pin.pin)) == pin.net
+        for pin in artifact.pins
+    ):
+        return set()
+    return {str(part.ref) for part in owned}
+
+
+def _invalid_lowerer_ownership(architecture, bom) -> list[str]:
+    """Prove persisted lowerer pin ownership against the committed architecture."""
+    from kicraft.design.lowering import lower_requirement
+
+    requirements = {
+        requirement.id: requirement for requirement in getattr(architecture, "requirements", ()) or ()
+    }
+    rows_by_requirement: dict[str, list] = defaultdict(list)
+    for row in bom.lowerer_ownership:
+        rows_by_requirement[row.requirement_id].append(row)
+    invalid: list[str] = []
+    for requirement_id, rows in rows_by_requirement.items():
+        requirement = requirements.get(requirement_id)
+        refs = {row.ref for row in rows}
+        canonical_refs = _canonical_lowerer_refs(requirement, bom) if requirement else set()
+        if not canonical_refs or refs != canonical_refs:
+            invalid.extend(f"{row.ref}.{row.pin}" for row in rows)
+            continue
+        artifact = lower_requirement(requirement)
+        parts = {part.ref: part for part in bom.parts if part.ref in refs}
+        if any(part.sheet != requirement.sheet for part in parts.values()):
+            invalid.extend(f"{row.ref}.{row.pin}" for row in rows)
+            continue
+        role_refs = {
+            (part.lowering_role, part.lowering_index): part.ref for part in parts.values()
+        }
+        expected = {
+            (role_refs[(pin.role, pin.index)], str(pin.pin), pin.net)
+            for pin in artifact.pins
+        } | {
+            (role_refs[(pin.role, pin.index)], str(pin.pin), None)
+            for pin in artifact.no_connects
+        }
+        declared = {(row.ref, row.pin, row.net) for row in rows}
+        actual = {
+            (endpoint.ref, endpoint.pin, connection.net_name, connection.sheet)
+            for connection in bom.connections for endpoint in connection.endpoints
+            if endpoint.ref in refs
+        } | {
+            (endpoint.ref, endpoint.pin, None, parts[endpoint.ref].sheet)
+            for endpoint in bom.no_connect_pins if endpoint.ref in refs
+        }
+        expected_graph = {
+            (ref, pin, net, parts[ref].sheet) for ref, pin, net in expected
+        }
+        if declared != expected or actual != expected_graph:
+            invalid.extend(f"{row.ref}.{row.pin}" for row in rows)
+    return sorted(set(invalid))
+
+
+def _has_trusted_lowerer_topology_witness(requirement, bom, component_class: str) -> bool:
+    """Prove one complete topology from canonical lowerer-owned BOM parts."""
+    return bool(_canonical_lowerer_refs(requirement, bom, component_class=component_class))
+
+
+def _has_trusted_topology_witness(requirement, bom, component_class: str) -> bool:
+    """Whether a lowerer or recipe proves this complete physical topology."""
+    return _has_trusted_lowerer_topology_witness(
+        requirement, bom, component_class
+    ) or _has_trusted_recipe_topology_witness(requirement, bom, component_class)
 
 
 def _part_implements_physical_class(part, reviewed_record, component_class: str) -> bool:
@@ -3874,12 +4149,44 @@ def check_requirement_physical_realization(
         for part in bom.parts
         if (record := _reviewed_identity_for_bom_part(part)) is not None
     }
-    recipe_refs_by_requirement: dict[str, set[str]] = defaultdict(set)
+    support_refs_by_requirement: dict[str, set[str]] = defaultdict(set)
     for manifest in getattr(bom, "recipe_ownership", ()) or ():
         refs = {str(ref) for ref in (getattr(manifest, "refs", ()) or ())}
         for requirement_id in getattr(manifest, "requirement_ids", ()) or ():
-            recipe_refs_by_requirement[str(requirement_id)].update(refs)
+            support_refs_by_requirement[str(requirement_id)].update(refs)
     requirements_by_id = {requirement.id: requirement for requirement in architecture.requirements}
+    for requirement in architecture.requirements:
+        if requirement.exact_part is None or not any(
+            obligation.kind == "physical" for obligation in requirement.obligations
+        ):
+            continue
+        canonical_refs = _canonical_lowerer_refs(requirement, bom)
+        # Supporting parts never replace a missing or wrong pinned principal.
+        if any(
+            part.ref in canonical_refs
+            and _part_names_exact_part(part, reviewed.get(part.ref), requirement.exact_part)
+            for part in bom.parts
+        ):
+            support_refs_by_requirement[requirement.id].update(canonical_refs)
+    quantity_owner_counts: Counter[tuple[str, str, str]] = Counter()
+    for requirement in architecture.requirements:
+        physical_classes = {
+            obligation.component_class.casefold()
+            for obligation in requirement.obligations
+            if obligation.kind == "physical"
+        }
+        for obligation in requirement.obligations:
+            if obligation.kind != "quantity":
+                continue
+            count_row = str(
+                getattr(obligation, "original_obligation_id", None) or obligation.subject
+            )
+            for component_class in physical_classes:
+                if quantity_subject_binds(obligation.subject, component_class):
+                    quantity_owner_counts[
+                        (requirement.sheet, component_class, count_row)
+                    ] += 1
+
 
     bad: list[str] = []
     aggregate_demands: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
@@ -3888,7 +4195,7 @@ def check_requirement_physical_realization(
             requirement,
             bom,
             reviewed,
-            recipe_refs_by_requirement.get(requirement.id, set()),
+            support_refs_by_requirement.get(requirement.id, set()),
         )
         physical_classes = {
             obligation.component_class.casefold()
@@ -3912,39 +4219,49 @@ def check_requirement_physical_realization(
                     )
                     # A count on a position-array terminal class is a *contact* demand: the
                     # requirement still needs one implementing block of its own, and the count
-                    # is charged once per sheet below, in the class's own count unit. Charging
-                    # the whole count to every requirement that carries the shared row refused
-                    # a correct board (2026-09-30: three reviewed blocks, 4+4+2 positions, for a
-                    # nine-contact demand each read "requires 9 ... found 2").
-                    if not class_counts_contacts(component_class):
+                    # is charged once per sheet below, in the class's own count unit. The same
+                    # holds for separate physical requirements that carry one original count row:
+                    # each owns one instance while the aggregate enforces the stated total.
+                    count_row = str(
+                        getattr(obligation, "original_obligation_id", None)
+                        or obligation.subject
+                    )
+                    if (
+                        not class_counts_contacts(component_class)
+                        and quantity_owner_counts[
+                            (requirement.sheet, component_class, count_row)
+                        ] == 1
+                    ):
                         local_demands[component_class] = max(
                             local_demands[component_class], obligation.minimum
                         )
-                    count_rows[component_class] = str(
-                        getattr(obligation, "original_obligation_id", None) or obligation.subject
-                    )
+                    count_rows[component_class] = count_row
                     break
         for component_class, minimum in local_demands.items():
-            witness = _has_trusted_lowerer_topology_witness(requirement, bom, component_class)
-            matching = (
-                [requirement]
-                if witness
-                else [
+            topology_required = _requires_trusted_lowerer_topology(
+                requirement, component_class
+            )
+            witness = _has_trusted_topology_witness(requirement, bom, component_class)
+            if witness:
+                matching = [requirement]
+                realized = 1
+            elif topology_required:
+                # A registered topology is one physical implementation; a subset of its
+                # lowerer-owned parts cannot be reclassified as independent proof.
+                matching = []
+                realized = 0
+            else:
+                matching = [
                     part
                     for part in requirement_parts
                     if _part_implements_physical_class(
                         part, reviewed.get(part.ref), component_class
                     )
                 ]
-            )
-            realized = (
-                1
-                if witness
-                else sum(
+                realized = sum(
                     reviewed_realization_units(reviewed.get(part.ref), component_class)
                     for part in matching
                 )
-            )
             if realized < minimum:
                 # "reviewed" only where the library could answer; a class it has never
                 # covered is proven by a real resolved part instead.
@@ -3964,22 +4281,6 @@ def check_requirement_physical_realization(
         claim = requirement.declared_interface
         if claim is None or not bom.connections:
             continue  # BOM commit proves identity; wiring owns pin/net evidence.
-        def _is_named_part(part) -> bool:
-            """Whether this part is the identity the requirement names.
-
-            The requirement's ``exact_part`` is an order code, and a vendored bundle part carries
-            none: its *resolved reviewed identity* is what the requirement named. Comparing only
-            ``part.mpn`` excluded such a part and reported a missing component instead of the real
-            defect (live seed-43 run, 2026-09-26: the power LED, whose declared pin sat on the
-            wrong net).
-            """
-            if requirement.exact_part is None:
-                return True
-            names = {str(getattr(part, "mpn", "") or "").casefold()}
-            record = reviewed.get(part.ref)
-            if record is not None:
-                names.add(str(getattr(record, "identity", "")).casefold())
-            return requirement.exact_part.casefold() in names
 
         interface_parts = [
             part
@@ -3991,7 +4292,7 @@ def check_requirement_physical_realization(
             and (bool(getattr(part, "mpn", None)) or part.ref in reviewed)
             and bool(part.symbol)
             and bool(part.footprint)
-            and _is_named_part(part)
+            and _part_names_exact_part(part, reviewed.get(part.ref), requirement.exact_part)
         ]
         deterministic_owned = any(
             _part_is_deterministic_owned(bom, part.ref) for part in interface_parts
@@ -4043,7 +4344,7 @@ def check_requirement_physical_realization(
                 part.ref: part
                 for part in bom.parts
                 if part.ref in {candidate.ref for candidate in interface_parts}
-                or part.ref in recipe_refs_by_requirement.get(requirement.id, set())
+                or part.ref in support_refs_by_requirement.get(requirement.id, set())
                 or (units and getattr(part, "resolution_id", None) in units)
                 or str(getattr(part, "lowering_requirement_id", "") or "") == requirement.id
             }
@@ -4090,8 +4391,10 @@ def check_requirement_physical_realization(
             requirement = requirements_by_id.get(requirement_id)
             if requirement is None:
                 continue
-            if _has_trusted_lowerer_topology_witness(requirement, bom, component_class):
+            if _has_trusted_topology_witness(requirement, bom, component_class):
                 topology_witnesses += 1
+                continue
+            if _requires_trusted_lowerer_topology(requirement, component_class):
                 continue
             candidate_refs.update(
                 part.ref
@@ -4099,7 +4402,7 @@ def check_requirement_physical_realization(
                     requirement,
                     bom,
                     reviewed,
-                    recipe_refs_by_requirement.get(requirement_id, set()),
+                    support_refs_by_requirement.get(requirement_id, set()),
                 )
                 if _part_implements_physical_class(part, reviewed.get(part.ref), component_class)
             )
@@ -4154,11 +4457,14 @@ _GENERIC_MCU_RE = re.compile(
 _BOOT0_PIN_RE = re.compile(r"^(IO0|GPIO0|BOOT0?)$", re.I)
 _SWD_PIN_RE = re.compile(r"SWCLK|SWDIO|^SWD$|^TCK$|^TMS$|^TDI$|^TDO$|JTAG", re.I)
 _UPDI_PIN_RE = re.compile(r"UPDI", re.I)
+_CH32_FAMILY_RE = re.compile(r"ch32", re.I)
+_CH32_SWIO_PIN_RE = re.compile(r"SWIO", re.I)
+_CH32_RESET_PIN_RE = re.compile(r"(?:N?RST|RESET)", re.I)
 # A part whose symbol/value/sourcing_note names a programming interface --
 # the physical access point a programmer clips or plugs onto.
 _PROG_ACCESS_PART_RE = re.compile(
-    r"updi|swd|swdio|jtag|icsp|\bisp\b|debug|prog|tag-?connect|tc2030"
-    r"|test[ _-]?(point|pad)",
+    r"updi|swd|swdio|jtag|icsp|\bisp\b|debug|prog|tag-?connect|tc2030|"
+    r"wch[-_ ]?linke?|test[ _-]?(point|pad)",
     re.I,
 )
 _USB_PART_RE = re.compile(r"usb", re.I)
@@ -4188,13 +4494,8 @@ def _esp_boot_problem(pins, wired):
     return None
 
 
-def _rp2040_boot_problem(pins, wired, nc, ref, bom):
-    """Prove an RP2040 SWD or BOOTSEL path from the committed net graph."""
-    if not bom.connections:
-        return (
-            "no programming graph is committed: SWDIO/SWCLK must reach one "
-            "external interface or BOOTSEL must switch QSPI_CS to GND"
-        )
+def _rp2040_swd_access(bom, ref: str) -> bool:
+    """Prove one physical SWD connector carries both RP2040 debug conductors."""
     info, _ = _pin_info_by_ref(bom)
     nets = _nets_by_ref(bom)
     access = _programming_access_parts(bom)
@@ -4205,11 +4506,14 @@ def _rp2040_boot_problem(pins, wired, nc, ref, bom):
     }
     mcu_pins = info.get(ref, {})
     swdio = [
-        number for number, pin in mcu_pins.items() if re.search(r"SWDIO|TMS", pin["name"], re.I)
+        number
+        for number, pin in mcu_pins.items()
+        if re.search(r"SWDIO|^SWD$|TMS", pin["name"], re.I)
     ]
     swclk = [
         number for number, pin in mcu_pins.items() if re.search(r"SWCLK|TCK", pin["name"], re.I)
     ]
+    wired = nets.get(ref, {})
     swdio_nets = {wired.get(number) for number in swdio if wired.get(number)}
     swclk_nets = {wired.get(number) for number in swclk if wired.get(number)}
     for access_ref in access_refs:
@@ -4220,8 +4524,21 @@ def _rp2040_boot_problem(pins, wired, nc, ref, bom):
             _net_is_positive_rail(net) or re.search(r"vtref|vref", net, re.I) for net in access_nets
         )
         if has_signal_pair and has_ground and has_vtref:
-            return None
+            return True
+    return False
 
+
+def _rp2040_boot_problem(pins, wired, nc, ref, bom):
+    """Prove an RP2040 SWD or BOOTSEL path from the committed net graph."""
+    if not bom.connections:
+        return (
+            "no programming graph is committed: SWDIO/SWCLK must reach one "
+            "external interface or BOOTSEL must switch QSPI_CS to GND"
+        )
+    if _rp2040_swd_access(bom, ref):
+        return None
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
     cs_nets = {
         net
         for part in bom.parts
@@ -4240,7 +4557,23 @@ def _rp2040_boot_problem(pins, wired, nc, ref, bom):
         if _ref_prefix(part.ref) not in {"SW", "S", "JP"}:
             continue
         switch_nets = set(nets.get(part.ref, {}).values())
-        if switch_nets & cs_nets and any(_net_looks_ground(net) for net in switch_nets):
+        if not any(_net_looks_ground(net) for net in switch_nets):
+            continue
+        if switch_nets & cs_nets:
+            return None
+        if any(
+            {first, second} <= switch_nets | cs_nets
+            and ((first in switch_nets and second in cs_nets) or (second in switch_nets and first in cs_nets))
+            for resistor in bom.parts
+            if _ref_prefix(resistor.ref) in _USB_SERIES_REF_PREFIXES
+            for first, second in [
+                (
+                    nets.get(resistor.ref, {}).get("1"),
+                    nets.get(resistor.ref, {}).get("2"),
+                )
+            ]
+            if first and second
+        ):
             return None
     return (
         "no programming path: SWDIO and SWCLK do not reach the same external "
@@ -4335,6 +4668,93 @@ def _programming_access_parts(bom) -> list:
             out.append(p)
     return out
 
+def _ch32_wch_link_gaps(bom, mcus, access) -> list[str]:
+    """Prove a named WCH-Link header carries the CH32 flash/recovery conductors.
+
+    The general access-part check still permits a deliberately exposed test-pad
+    programming path. A connector specifically labeled WCH-Link, however, makes
+    a stronger, checkable claim: its SWIO, supply, return, and (where exposed)
+    reset conductors must actually reach the MCU.
+    """
+    if not bom.connections:
+        return []
+    info, _ = _pin_info_by_ref(bom)
+    nets = _nets_by_ref(bom)
+    gaps: list[str] = []
+    for mcu in mcus:
+        ident = f"{mcu.symbol} {mcu.value}"
+        if not _CH32_FAMILY_RE.search(ident):
+            continue
+        headers = [
+            part
+            for part in access
+            if _PROG_ACCESS_PART_RE.search(
+                f"{part.symbol} {part.value} {getattr(part, 'sourcing_note', None) or ''}"
+            )
+            and re.search(
+                r"wch[-_ ]?linke?",
+                f"{part.symbol} {part.value} {getattr(part, 'sourcing_note', None) or ''}",
+                re.I,
+            )
+        ]
+        if not headers:
+            continue
+        pins = info.get(mcu.ref, {})
+        wired = nets.get(mcu.ref, {})
+        swio_pins = {
+            number
+            for number, pin in pins.items()
+            if _CH32_SWIO_PIN_RE.search(pin["name"] or "")
+        }
+        vdd_pins = {
+            number
+            for number, pin in pins.items()
+            if re.fullmatch(r"V(?:DD|CC)", pin["name"] or "", re.I)
+        }
+        ground_pins = {
+            number
+            for number, pin in pins.items()
+            if re.fullmatch(r"V(?:SS|GND)|GND", pin["name"] or "", re.I)
+        }
+        reset_pins = {
+            number
+            for number, pin in pins.items()
+            if _CH32_RESET_PIN_RE.fullmatch(pin["name"] or "")
+        }
+        if not swio_pins or not vdd_pins or not ground_pins:
+            continue
+        required = {
+            "SWIO": {wired[number] for number in swio_pins if wired.get(number)},
+            "VDD": {wired[number] for number in vdd_pins if wired.get(number)},
+            "GND": {wired[number] for number in ground_pins if wired.get(number)},
+        }
+        if reset_pins:
+            required["NRST"] = {
+                wired[number] for number in reset_pins if wired.get(number)
+            }
+        missing_by_header: dict[str, list[str]] = {}
+        for header in headers:
+            header_nets = set(nets.get(header.ref, {}).values())
+            missing = sorted(
+                conductor
+                for conductor, mcu_nets in required.items()
+                if not (mcu_nets & header_nets)
+            )
+            if not missing:
+                break
+            missing_by_header[header.ref] = missing
+        else:
+            details = ", ".join(
+                f"{ref} missing {', '.join(missing)}"
+                for ref, missing in sorted(missing_by_header.items())
+            )
+            gaps.append(
+                f"{mcu.ref} ({ident}): WCH-Link header must carry MCU SWIO, VDD, GND"
+                + (", and NRST" if "NRST" in required else "")
+                + f"; {details}"
+            )
+    return gaps
+
 
 # Button/part identities for the family strap rules. Matched against
 # "symbol value sourcing_note" like _PROG_ACCESS_PART_RE.
@@ -4348,7 +4768,192 @@ _USB_UART_BRIDGE_RE = re.compile(
 )
 
 
-def _family_strap_gaps(bom, mcus, access) -> list[str]:
+_ROM_UART_MODULE_PINS = {
+    "esp32-s3-mini-1u-n4r2": ("3", "1", "39", "40", "45", "4"),
+    "esp32-c3-mini-1-h4x": ("3", "1", "31", "30", "8", "23"),
+}
+
+
+def _rom_uart_module_pins(part):
+    record = _reviewed_identity_for_bom_part(part)
+    return _ROM_UART_MODULE_PINS.get(record.bundle) if record else None
+
+
+def _rom_uart_headers(bom, info):
+    """Only the explicitly named, physically resolved single-row header."""
+    return [
+        part for part in bom.parts
+        if _ref_prefix(part.ref) in ("J", "P", "CN", "H")
+        and (part.value or "").strip().upper() == "UART PROGRAM"
+        and (part.symbol or "").lower() == "connector_generic:conn_01x06"
+        and set(info.get(part.ref, {})) == set("123456")
+    ]
+
+
+def _rom_uart_programming_proven(bom, part, info=None, architecture=None):
+    """Prove all six direct physical connections, never from inventory alone."""
+    module_pins = _rom_uart_module_pins(part)
+    if not module_pins or not bom.connections:
+        return False
+    if info is None:
+        info, _ = _pin_info_by_ref(bom)
+    if not set(module_pins) <= set(info.get(part.ref, {})):
+        return False
+    # A pin on multiple nets or an NC endpoint is not a physical connection.
+    pin_nets = defaultdict(set)
+    net_groups = defaultdict(list)
+    for connection in bom.connections:
+        net = connection.net_name
+        if not net or not net.strip():
+            continue
+        net_groups[net].append(connection)
+        for endpoint in connection.endpoints:
+            pin_nets[(endpoint.ref, endpoint.pin)].add(net)
+    nc = {(ep.ref, ep.pin) for ep in (bom.no_connect_pins or [])}
+    if isinstance(architecture, dict):
+        try:
+            architecture = Architecture.model_validate(architecture)
+        except (TypeError, ValueError):
+            architecture = None
+    def field(row, name, default=None):
+        return row.get(name, default) if isinstance(row, dict) else getattr(row, name, default)
+
+    part_sheets = {p.ref: getattr(p, "sheet", None) for p in bom.parts}
+    declared = {
+        field(row, "name"): {field(endpoint, "sheet") for endpoint in field(row, "endpoints", ())}
+        for row in field(architecture, "inter_sheet_nets", ()) or ()
+    }
+
+    def unambiguous(net):
+        groups = net_groups[net]
+        if len(groups) == 1:
+            return True
+        sheets = [field(group, "sheet") for group in groups]
+        if not all(sheets) or len(set(sheets)) != len(sheets):
+            return False
+        if any(
+            part_sheets.get(endpoint.ref) != sheet
+            for group, sheet in zip(groups, sheets)
+            for endpoint in group.endpoints
+        ):
+            return False
+        # Global power symbols join these exact names. Other crossings need
+        # declared sheet endpoints; same spelling alone is not proof.
+        return is_power_or_ground_name(net) or set(sheets) <= declared.get(net, set())
+
+    for header in _rom_uart_headers(bom, info):
+        shared = []
+        for header_pin, module_pin in zip("123456", module_pins):
+            endpoints = ((header.ref, header_pin), (part.ref, module_pin))
+            if any(ep in nc or len(pin_nets[ep]) != 1 for ep in endpoints):
+                break
+            header_net = next(iter(pin_nets[endpoints[0]]))
+            if pin_nets[endpoints[1]] != {header_net} or not unambiguous(header_net):
+                break
+            shared.append(header_net)
+        if not (
+            len(shared) == 6
+            and len(set(shared)) == 6
+            and _net_is_positive_rail(shared[0])
+            and _net_looks_ground(shared[1])
+        ):
+            continue
+        vdd, ground = shared[:2]
+
+        def connected(ref, pin, net):
+            return (
+                (ref, pin) not in nc
+                and pin_nets[(ref, pin)] == {net}
+                and pin in info.get(ref, {})
+            )
+
+        bypass = any(
+            _ref_prefix(p.ref) == "C"
+            and set(info.get(p.ref, {})) == {"1", "2"}
+            and (
+                (connected(p.ref, "1", vdd) and connected(p.ref, "2", ground))
+                or (connected(p.ref, "2", vdd) and connected(p.ref, "1", ground))
+            )
+            for p in bom.parts
+        )
+        def connector_supplies(positive, negative):
+            return any(
+                p.ref not in (part.ref, header.ref)
+                and str(getattr(p, "recipe_role", None) or "") != "program_header"
+                and str(getattr(p, "value", None) or "").strip().upper() != "UART PROGRAM"
+                and _ref_prefix(p.ref) in ("J", "P", "CN")
+                and any(connected(p.ref, num, positive) for num in info.get(p.ref, {}))
+                and any(connected(p.ref, num, negative) for num in info.get(p.ref, {}))
+                for p in bom.parts
+            )
+
+        def reviewed_converter_supplies(p):
+            record = _reviewed_identity_for_bom_part(p)
+            if record is None or record.support_network.get("topology") != "integrated-buck":
+                return False
+            voltage = record.operating_limits.get("output_voltage_v")
+            ports = record.port_pins
+            input_pin, output_pin, ground_pin = (
+                ports.get("input"), ports.get("output"), ports.get("ground")
+            )
+            if (
+                not isinstance(voltage, (int, float))
+                or not 3.0 <= voltage <= 3.6
+                or not input_pin or not output_pin or not ground_pin
+                or not connected(p.ref, output_pin, vdd)
+                or not connected(p.ref, ground_pin, ground)
+                or len(pin_nets[(p.ref, input_pin)]) != 1
+            ):
+                return False
+            input_net = next(iter(pin_nets[(p.ref, input_pin)]))
+            def reference_cap(mpn, rail):
+                return bool(mpn) and any(
+                    _ref_prefix(cap.ref) == "C"
+                    and (cap.mpn or "").casefold() == str(mpn).casefold()
+                    and set(info.get(cap.ref, {})) == {"1", "2"}
+                    and (
+                        (connected(cap.ref, "1", rail) and connected(cap.ref, "2", ground))
+                        or (connected(cap.ref, "2", rail) and connected(cap.ref, "1", ground))
+                    )
+                    for cap in bom.parts
+                )
+
+            return bool(
+                input_net not in (vdd, ground)
+                and unambiguous(input_net)
+                and connected(p.ref, input_pin, input_net)
+                and connector_supplies(input_net, ground)
+                and reference_cap(record.support_network.get("reference_input_cap_mpn"), input_net)
+                and reference_cap(record.support_network.get("reference_output_cap_mpn"), vdd)
+            )
+
+        # A power-output electrical type alone does not establish that its
+        # source is powered.  The reviewed fixed-output converter alternative
+        # must have a physical input connector and common return.
+        source = connector_supplies(vdd, ground) or any(
+            reviewed_converter_supplies(p)
+            for p in bom.parts if p.ref not in (part.ref, header.ref)
+        )
+        if bypass and source:
+            return True
+    return False
+
+
+def _rom_uart_candidate(bom, part):
+    """BOM-stage eligibility only; this is not a wiring proof."""
+    if not _rom_uart_module_pins(part):
+        return False
+    info, _ = _pin_info_by_ref(bom)
+    return bool(_rom_uart_headers(bom, info))
+
+
+def _rom_uart_available(bom, part, architecture=None):
+    if not bom.connections:
+        return _rom_uart_candidate(bom, part)
+    return _rom_uart_programming_proven(bom, part, architecture=architecture)
+
+
+def _family_strap_gaps(bom, mcus, access, architecture=None) -> list[str]:
     """Bootloader-strap families need more than "a USB connector exists".
 
     Returns one offender string per MCU whose family requirement is unmet;
@@ -4379,7 +4984,8 @@ def _family_strap_gaps(bom, mcus, access) -> list[str]:
         elif _ESP_FAMILY_RE.search(ident):
             has_boot = any(_BOOT_BUTTON_RE.search(_ident(p)) for p in buttons)
             has_reset = any(_RESET_BUTTON_RE.search(_ident(p)) for p in buttons)
-            if not (bridge or (has_boot and has_reset) or len(tps) >= 2):
+            if not (bridge or (has_boot and has_reset) or len(tps) >= 2
+                    or _rom_uart_available(bom, part, architecture)):
                 gaps.append(
                     f"{part.ref} ({ident}): entering ESP32 download mode "
                     "needs the BOOT strap plus a reset -- add BOOT and "
@@ -4411,9 +5017,6 @@ _USB_CONNECTOR_DM_PIN_RE = re.compile(r"^(?:DN|DM|D-|USB_?DM|USB_D-)\d*$", re.I)
 _USB_CONNECTOR_DP_PIN_RE = re.compile(r"^(?:DP|D\+|USB_?DP|USB_D\+)\d*$", re.I)
 _USB_HEADER_IDENTITY_RE = re.compile(r"conn_01x|pinheader|pin header|\bheader\b", re.I)
 _NATIVE_USB_OFFENDER_PREFIX = "native_usb_programming_required"
-# Reviewed USBLC6-2SC6 feed-through pairs: connector-side line to device-side
-# line. 2 = GND and 5 = VBUS are rails and are never crossed.
-_USBLC6_FEED_THROUGH = {"1": "3", "3": "1", "6": "4", "4": "6"}
 _USB_SERIES_REF_PREFIXES = frozenset({"R", "RV", "RT", "RP"})
 
 
@@ -4474,10 +5077,15 @@ def _usb_series_other_pin(part, pin, info, nets) -> str | None:
 
 
 def _usb_feed_through_other_pin(part, pin) -> str | None:
-    ident = f"{part.symbol} {part.value} {part.mpn or ''}"
-    if not re.search(r"usblc6", ident, re.I):
+    record = _reviewed_identity_for_bom_part(part)
+    if record is None:
         return None
-    return _USBLC6_FEED_THROUGH.get(pin)
+    for first, second in (record.support_network or {}).get("usb_feed_through_pairs", ()):
+        if pin == first:
+            return second
+        if pin == second:
+            return first
+    return None
 
 
 def _usb_reachable_pins(bom, info, nets, by_ref, start_pins) -> set[tuple[str, str]]:
@@ -4514,7 +5122,7 @@ def _usb_reachable_pins(bom, info, nets, by_ref, start_pins) -> set[tuple[str, s
     return reachable
 
 
-def _native_usb_programming_gaps(bom, mcus) -> list[str]:
+def _native_usb_programming_gaps(bom, mcus, architecture=None) -> list[str]:
     """§9.29 native-USB proof: each reviewed native MCU's D-/D+ must reach the
     correspondingly named pins of ONE physical USB data connector.
 
@@ -4531,6 +5139,21 @@ def _native_usb_programming_gaps(bom, mcus) -> list[str]:
         ident = f"{part.symbol} {part.value}".strip()
         family = next((row for row in _NATIVE_USB_FAMILIES if row[0].search(ident)), None)
         if family is None:
+            continue
+        if _rom_uart_available(bom, part, architecture):
+            continue
+        if _RP2040_FAMILY_RE.search(ident) and (
+            _rp2040_swd_access(bom, part.ref)
+            or (
+                not bom.connections
+                and any(
+                    _PROG_ACCESS_PART_RE.search(
+                        f"{access_part.symbol} {access_part.value} {access_part.sourcing_note or ''}"
+                    )
+                    for access_part in _programming_access_parts(bom)
+                )
+            )
+        ):
             continue
         _family_re, dm_fn, dp_fn = family
         offender = f"{_NATIVE_USB_OFFENDER_PREFIX}:{part.ref}"
@@ -4573,6 +5196,12 @@ def _native_usb_programming_gaps(bom, mcus) -> list[str]:
         reachable_dp = _usb_reachable_pins(
             bom, info, nets, by_ref, [(part.ref, num) for num in dp_pins]
         )
+        if reachable_dm & reachable_dp:
+            gaps.append(
+                f"{offender} ({ident}): native USB D- and D+ are shorted "
+                "through a reviewed series path"
+            )
+            continue
         ok = False
         swapped = False
         for connector in connectors:
@@ -4603,7 +5232,7 @@ def _native_usb_programming_gaps(bom, mcus) -> list[str]:
     return gaps
 
 
-def check_mcu_programming_access(bom) -> CheckResult:
+def check_mcu_programming_access(bom, architecture=None) -> CheckResult:
     """§9.29 (hard) -- an MCU board must be physically programmable.
 
     Two layers, matching what is statically decidable at each stage:
@@ -4616,10 +5245,22 @@ def check_mcu_programming_access(bom) -> CheckResult:
       fine, physically unprogrammable -- and "pre-programmed" as a silent
       default is not an accepted answer; test pads cost nothing and satisfy
       even a "no connectors" brief.
+    * **WCH-Link reachability** (runs once ``connections`` exist, at wiring
+      commit): a header named for the CH32 WCH-Link path must carry SWIO, VDD,
+      GND and, when exposed by the MCU package, NRST. Test-pad paths remain
+      valid alternatives.
+
     * **UPDI reachability** (runs once ``connections`` exist, at wiring
       commit): a UPDI-programmed MCU's UPDI pin must share a net with one of
       those access parts. Wired-to-a-pullup-only is the observed failure
       mode; conservative for other families (SWD heuristics stay §9.21).
+    * **Reviewed ESP32 ROM UART**: the exact S3-MINI-1U-N4R2 and
+      C3-MINI-1-H4X may instead use a UART PROGRAM 1x6 header. Once wired,
+      each of its six physical pins must directly reach the corresponding
+      module pin on a distinct net; the supply and return also require a
+      separate supply endpoint and a bypass capacitor. Before wiring, this
+      header is only a candidate and proves no connection.
+
 
     **Family strap/reset requirements** (part presence, BOM commit): "has a
     USB connector" is NOT a sufficient programming story for bootloader-strap
@@ -4657,8 +5298,9 @@ def check_mcu_programming_access(bom) -> CheckResult:
             offenders=[f"{p.ref} ({p.symbol} {p.value})" for p in mcus],
         )
     bad: list[str] = []
-    bad.extend(_family_strap_gaps(bom, mcus, access))
-    bad.extend(_native_usb_programming_gaps(bom, mcus))
+    bad.extend(_family_strap_gaps(bom, mcus, access, architecture))
+    bad.extend(_native_usb_programming_gaps(bom, mcus, architecture))
+    bad.extend(_ch32_wch_link_gaps(bom, mcus, access))
     if bom.connections:
         from collections import defaultdict as _dd
 
@@ -4693,7 +5335,8 @@ def check_mcu_programming_access(bom) -> CheckResult:
         name="9.29 MCU programming access",
         ok=not bad,
         message=(
-            "every MCU has a physical programming path"
+            ("programming access parts present; wiring remains unproven"
+             if not bom.connections else "every MCU has a physical programming path")
             if not bad
             else f"{len(bad)} MCU(s) missing a workable programming/recovery "
             f"path (strap buttons, debug access, or reachability)"
@@ -4702,7 +5345,7 @@ def check_mcu_programming_access(bom) -> CheckResult:
     )
 
 
-def mcu_programming_facts(bom) -> dict | None:
+def mcu_programming_facts(bom, architecture=None) -> dict | None:
     """Deterministic programming-path facts for the eval digest (2026-07-27
     fix-plan P2.5).
 
@@ -4716,12 +5359,16 @@ def mcu_programming_facts(bom) -> dict | None:
     if not mcus:
         return None
     access = _programming_access_parts(bom)
-    acc = check_mcu_programming_access(bom)
+    acc = check_mcu_programming_access(bom, architecture)
     path = check_mcu_programming_path(bom)
     return {
         "mcus": [f"{p.ref} ({p.symbol} {p.value})".strip() for p in mcus],
         "access_parts": [f"{p.ref} ({(p.value or p.symbol).strip()})" for p in access],
         "access_ok": acc.ok,
+        "wiring_committed": bool(bom.connections),
+        "rom_uart_proven": [
+            p.ref for p in mcus if _rom_uart_programming_proven(bom, p, architecture=architecture)
+        ],
         "access_problems": list(acc.offenders),
         "path_ok": path.ok,
         "path_problems": list(path.offenders),
@@ -5156,6 +5803,7 @@ def collect_validations(
     project_dir: Path,
     project_stem: str,
     bom=None,
+    architecture=None,
 ) -> list[CheckResult]:
     """Run §9.1-§9.12 and return ALL results (does not raise).
 
@@ -5185,7 +5833,7 @@ def collect_validations(
         results.append(check_rf_feed_isolation(bom))
         results.append(check_single_net_per_pin(bom))
         results.append(check_family_wiring_contracts(bom))
-        results.append(check_mcu_programming_access(bom))
+        results.append(check_mcu_programming_access(bom, architecture))
         results.append(
             check_connectivity(
                 project_dir,
@@ -5202,10 +5850,11 @@ def run_validations(
     project_dir: Path,
     project_stem: str,
     bom=None,
+    architecture=None,
 ) -> list[CheckResult]:
     """Run §9.1-§9.12 (see ``collect_validations``) and raise
     ``SynthesisValidationError`` if any check failed."""
-    results = collect_validations(project_dir, project_stem, bom=bom)
+    results = collect_validations(project_dir, project_stem, bom=bom, architecture=architecture)
     failures = [r for r in results if not r.ok]
     if failures:
         raise SynthesisValidationError(failures)
@@ -5330,7 +5979,6 @@ _MPN_TOKEN_RE = re.compile(
     r"\b(?:(?i:ESP32[ _-][CS]\d|(?:ATtiny|ATmega)[ _-]?[0-9]{2,}|[A-Z]{2,4}[0-9]{2,}))"
     r"(?:[A-Za-z0-9.]|-(?=[A-Z0-9]))*",
 )
-_SHORT_MCU_FAMILY_RE = re.compile(r"^(?:ESP32|STM32|NRF51|NRF52|NRF53|NRF54)$", re.I)
 _MPN_STOPWORD_RE = re.compile(
     r"^(?:USB|COM|GPIO|ADC|DAC|TIM|UART|USART|SPI|I2C|I2S|CAN|PWM|AIN|AOUT|"
     r"EXTI|REV|VER|LQFP|TQFP|QFN|DFN|SOIC|SOP|SSOP|TSSOP|MSOP|SOT|DIP|PDIP|"
@@ -5352,9 +6000,7 @@ def named_part_tokens(texts) -> dict[str, str]:
         text = _NONCOMMITTAL_EXAMPLE_RE.sub("", str(text))
         for match in _MPN_TOKEN_RE.finditer(text):
             token = match.group(0).rstrip(".-")
-            if (
-                len(token) < 6 and not _SHORT_MCU_FAMILY_RE.fullmatch(token)
-            ) or _MPN_STOPWORD_RE.match(token):
+            if _MPN_STOPWORD_RE.match(token):
                 continue
             out.setdefault(token.lower(), token)
     return out
@@ -5826,7 +6472,7 @@ def check_composed_wiring(
         check_rf_feed_isolation(bom),
         check_single_net_per_pin(bom),
         check_family_wiring_contracts(bom),
-        check_mcu_programming_access(bom),
+        check_mcu_programming_access(bom, architecture),
         check_repeated_block_coverage(bom),
         check_regulator_feedback_vout(bom),
         check_reviewed_device_support_networks(bom),

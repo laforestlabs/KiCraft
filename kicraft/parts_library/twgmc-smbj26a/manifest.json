@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:121b1d5a85c2ee8623946d2b5266d081bf1476aa738e90ac65c5d59cd39cd038",
+  "datasheet_url": "https://lcsc.com/product-detail/TVS_TWGMC-SMBJ26A_C726831.html",
+  "description": "TWGMC(\u8fea\u5609) SMBJ26A",
+  "footprint_name": "SMB_L4.4-W3.6-LS5.3-RD",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "SMBJ26A",
+  "name": "twgmc-smbj26a",
+  "provenance": {
+    "added_at": "2026-11-03T04:09:45Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C726831"
+  },
+  "symbol_name": "SMBJ26A_C726831",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": null
+}

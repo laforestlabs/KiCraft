@@ -462,6 +462,17 @@ class KiCadAdapter:
         # --- Components + Pads ---
         components: dict[str, Component] = {}
         net_pads: dict[str, list[tuple[str, str]]] = {}  # net_name -> [(ref, pad_id)]
+        # A castellated edge interface has no in-board package body: its real
+        # physical extent is the plated pad.  Its F.Fab nominal-pitch graphic
+        # is not a courtyard and must not create a false same-column overlap.
+        castellated_datum_refs = {
+            str(ref)
+            for interface in self.cfg.get("edge_interfaces", []) or []
+            if isinstance(interface, dict)
+            and interface.get("exact_edge_datum", False)
+            and str(interface.get("behavior", "")) == "castellated"
+            for ref in interface.get("refs", []) or []
+        }
 
         for fp in board.Footprints():
             ref = fp.GetReferenceAsString()
@@ -598,7 +609,18 @@ class KiCadAdapter:
                 )
                 comp.pads.append(p)
                 net_pads.setdefault(net_name, []).append((ref, pad.GetNumber()))
-
+            if ref in castellated_datum_refs and comp.pads:
+                pad_tl, pad_br = comp.pads[0].bbox()
+                for pad in comp.pads[1:]:
+                    tl, br = pad.bbox()
+                    pad_tl = Point(min(pad_tl.x, tl.x), min(pad_tl.y, tl.y))
+                    pad_br = Point(max(pad_br.x, br.x), max(pad_br.y, br.y))
+                comp.width_mm = pad_br.x - pad_tl.x
+                comp.height_mm = pad_br.y - pad_tl.y
+                comp.body_center = Point(
+                    (pad_tl.x + pad_br.x) / 2.0,
+                    (pad_tl.y + pad_br.y) / 2.0,
+                )
             components[ref] = comp
 
         # --- Nets ---

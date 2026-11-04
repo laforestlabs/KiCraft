@@ -37,6 +37,8 @@ from kicraft.server.stage_contracts import (
         ("STM32L0", "STM32L031K6T6"),
         ("STM32L0", "STM32L072CZU6"),
         ("STM32G0", "STM32G030F6P6"),
+        ("ESP32-S3", "ESP32-S3-MINI-1-N8"),
+        ("ESP32-S3", "ESP32-S3-MINI-1U-N4R2"),
     ],
 )
 def test_reviewed_candidates_implement_requested_identity(requested, candidate):
@@ -67,6 +69,10 @@ def test_reviewed_candidates_implement_requested_identity(requested, candidate):
         ("STM32L0", "STM32L0-controller"),
         ("STM32G0", "STM32G0"),
         ("STM32G0", "STM32G071CBT6"),
+        ("ESP32-C3", "ESP32-S3-MINI-1U-N4R2"),
+        ("ESP32-S3-WROOM-1-N8R8", "ESP32-S3-MINI-1U-N4R2"),
+        ("ESP32-S3-MINI-1-N8", "ESP32-S3-MINI-1U-N4R2"),
+        ("ESP32-S3", "ESP32-S3-MINI-1U-UNREVIEWED"),
         ("STM32G0", "STM32F103C8T6"),
         ("STM32G030F6P6", "STM32G0"),
         ("STM32G030F6P6", "STM32G030F6P7"),
@@ -720,41 +726,46 @@ def test_quantity_subject_binds_only_the_class_it_names(subject, component_class
     assert quantity_subject_binds(subject, component_class) is binds
 
 
-def test_the_vendored_xh_header_answers_the_jst_xh_demand():
-    """Plan section 6, steps 1 and 4: the vendored part gets its reviewed record, and it is the
-    only carrier of the demanded class.
-
-    The seed-37 walkthrough's brief asked for two JST-XH connectors; the demand had no reviewed
-    carrier, so the parts step could not build it (recorded as the owner's priority). The bundle
-    `b2b-xh-a-lf-sn` was already vendored and marked `production`, so this record states its real
-    order code, its LCSC id, the datasheet, its two signal contacts and the class the demand names.
-    """
+def test_reviewed_jst_headers_cover_only_their_matching_contact_counts():
+    """Generic JST demand is satisfied by reviewed XH headers, never a function-specific Qwiic part."""
     from kicraft.design.part_identity import (
         has_reviewed_coverage,
         reviewed_part,
         reviewed_parts_for_feature,
     )
 
-    part = reviewed_part("B2B-XH-A(LF)(SN)")
-    assert part is not None, "the vendored part must resolve by its real order code"
-    assert part.is_portable_candidate
-    assert part.bundle == "b2b-xh-a-lf-sn"
-    assert part.symbol == "b2b-xh-a-lf-sn:B2B-XH-A"
-    assert part.footprint == "b2b-xh-a-lf-sn:CONN-TH_B2B-XH-A-LF-SN"
-    assert "jst-xh-connector" in part.physical_features
-    assert part.contacts == ("1", "2")
-    assert part.lcsc == "C158012"
-    assert part.manufacturer_sources, "the record must carry its provenance"
-
-    # The demand is answered, and by exactly this part -- a different connector cannot answer it,
-    # which is what keeps a 2-contact XH demand from being filled by something else.
-    assert has_reviewed_coverage("jst-xh-connector")
-    assert tuple(p.identity for p in reviewed_parts_for_feature("jst-xh-connector")) == (
-        part.identity,
+    two = reviewed_part("B2B-XH-A(LF)(SN)")
+    four = reviewed_part("B4B-XH-A(LF)(SN)")
+    assert two is not None and four is not None
+    assert two.is_portable_candidate and four.is_portable_candidate
+    assert two.bundle == "b2b-xh-a-lf-sn"
+    assert two.symbol == "b2b-xh-a-lf-sn:B2B-XH-A"
+    assert two.footprint == "b2b-xh-a-lf-sn:CONN-TH_B2B-XH-A-LF-SN"
+    assert two.contacts == ("1", "2")
+    assert four.symbol == "Connector_Generic:Conn_01x04"
+    assert four.footprint == "Connector_JST:JST_XH_B4B-XH-A_1x04_P2.50mm_Vertical"
+    assert four.contacts == ("1", "2", "3", "4")
+    assert all("jst-connector" in part.physical_features for part in (two, four))
+    assert all(part.manufacturer_sources for part in (two, four))
+    assert has_reviewed_coverage("jst-connector")
+    assert tuple(part.identity for part in reviewed_parts_for_feature("jst-xh-connector")) == (
+        two.identity,
+        four.identity,
     )
-    assert part.identity not in {
-        p.identity for p in reviewed_parts_for_feature("screw-terminal")
-    }
+
+
+def test_reviewed_jumper_header_has_the_real_shunt_contact_map():
+    from kicraft.design.part_identity import canonical_physical_features, reviewed_part
+
+    jumper = reviewed_part("TSW-102-07-G-S")
+    assert jumper is not None and jumper.is_portable_candidate
+    assert jumper.physical_features >= {"jumper", "jumper-header"}
+    assert jumper.contacts == ("1", "2")
+    assert jumper.port_pins == {"signal": "1", "selected_level": "2"}
+    assert jumper.support_network["fitted_accessory_mpn"] == "SNT-100-BK-G"
+    assert "fitted=closed, removed=open" in jumper.support_network["fitted_accessory"]
+    assert canonical_physical_features("removable jumper") == {"jumper"}
+    assert jumper.manufacturer_sources
 
 
 def test_the_selection_lookups_see_every_reviewed_set_and_researched_records(tmp_path, monkeypatch):
@@ -826,3 +837,64 @@ def test_researched_feature_synonyms_preserve_physical_acceptance(
         mpn="researched-feature", sheet="INPUT",
     )
     assert _group_has_physical_feature(group, demand) is accepted
+
+
+@pytest.mark.parametrize(
+    ("requested", "candidate", "accepted"),
+    [
+        ("MCP6002", "MCP6002T-I/SN", True),
+        ("MCP6002-I/SN", "MCP6002T-I/SN", True),
+        ("MCP6002T-I/SN", "MCP6002-I/SN", True),
+        ("MCP6002", "MCP6002T-E/SN", False),
+        ("MCP6002", "MCP6002T-I/MS", False),
+        ("MCP6002", "MCP6004T-I/SL", False),
+    ],
+)
+def test_mcp6002_shipping_carrier_preserves_device_grade_and_package(
+    requested, candidate, accepted
+):
+    assert matches_part_identity(requested, candidate) is accepted
+
+
+def test_mcp6002_tape_reel_group_has_a_reviewed_owner_without_rewriting_its_mpn():
+    from kicraft.server.stage_work_units import (
+        _adopt_reviewed_library_pair,
+        _requirement_obligation_defects,
+    )
+
+    record = reviewed_part("MCP6002-I/SN")
+    group = BomComponentGroup(
+        id="amplifier", reference_prefix="U", quantity=1, sheet="ANALOG",
+        value="MCP6002", mpn="MCP6002T-I/SN",
+        symbol=record.symbol, footprint=record.footprint,
+    )
+    requirement = {
+        "id": "amplifier", "sheet": "ANALOG", "role": "analog_block",
+        "family": "operational-amplifier", "exact_part": "MCP6002",
+        "obligations": [
+            {"kind": "physical", "original_obligation_id": "opamp",
+             "component_class": "op-amp"}
+        ],
+        "declared_interface": {
+            "ports": [{"key": "vdd", "pin": "8", "direction": "power"}]
+        },
+    }
+    adopted = _adopt_reviewed_library_pair(group)
+    assert adopted.mpn == "MCP6002T-I/SN"
+    assert not any(_requirement_obligation_defects([requirement], [adopted]).values())
+    assert physical_inventory_record(
+        mpn=group.mpn, symbol=record.symbol, footprint=record.footprint,
+    ) == record
+    assert physical_inventory_record(
+        mpn=group.mpn, symbol=record.symbol,
+        footprint="Package_SO:MSOP-8_3x3mm_P0.65mm",
+    ) is None
+
+
+def test_external_antenna_s3_is_a_module_without_proving_a_complete_radio():
+    module = reviewed_part("esp32-s3-mini-1u-n4r2")
+    assert reviewed_record_realizes_class(module, "microcontroller-module")
+    assert not reviewed_record_realizes_class(module, "wifi-module")
+    assert not reviewed_record_realizes_class(
+        reviewed_part("stm32g030f6p6"), "microcontroller-module",
+    )

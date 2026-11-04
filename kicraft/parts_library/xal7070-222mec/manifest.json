@@ -1,0 +1,18 @@
+{
+  "content_hash": "sha256:364397e03540e019814831610b6f81f516120d5d18104a02b631b9da4118f9ae",
+  "datasheet_url": "https://www.coilcraft.com/getmedia/1ba55433-bcc8-4838-9b21-382f497e12e0/xal7070.pdf",
+  "description": "Coilcraft XAL7070-222MEC shielded power inductor",
+  "footprint_name": "XAL7070-222MEC",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "XAL7070-222MEC",
+  "name": "xal7070-222mec",
+  "provenance": {"added_at": "2026-10-11T05:00:00Z", "kicad_version": "9.0.0", "source": "manual", "source_project_stem": null},
+  "schema_version": "1",
+  "sourcing": {"lcsc": "C3911470", "digikey": "15794559"},
+  "symbol_name": "XAL7070-222MEC",
+  "tags": ["inductor", "power", "boost"],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Coilcraft Document 856-1 land pattern: 1.92 x 6.50 mm pads on 4.82 mm centers. Isat is a typical 30% inductance-drop figure; Irms is defined at a temperature rise and is not an application ambient guarantee."
+}

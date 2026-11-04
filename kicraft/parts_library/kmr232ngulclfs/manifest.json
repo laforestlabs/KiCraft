@@ -1,0 +1,18 @@
+{
+  "schema_version": "1",
+  "name": "kmr232ngulclfs",
+  "version": "1.0.0",
+  "content_hash": "sha256:445124b80c8f41dc0f51a4135a0662ff44d1e2ea3e5ccffd5d66ff7886734fb6",
+  "description": "C&K KMR232NGULCLFS low-current SPST-NO tactile switch",
+  "mpn": "KMR232NGULCLFS",
+  "sourcing": {"lcsc": "C221681"},
+  "datasheet_url": "https://datasheet.lcsc.com/datasheet/pdf/b5da7fd4e81211d634f1332fb1486a1f.pdf",
+  "tags": ["momentary-button", "tactile-switch"],
+  "watch_out_for": "Manufacturer KMR2 NG recommended land: 5 mm width, 3.2 mm inner gap, 2.6 mm height, 0.6 mm vertical gap. Manufacturer terminals 4/1 share logical 1; 3/2 share logical 2. ULC minimum 1 uA at 1.8 V; maximum 50 mA, 32 V and 1 VA, silver long-life 3 N version. No ground terminal. Supplier-associated nominal 223JMVXX body is a geometric equivalent, not manufacturer-certified CAD; raw STEP translated +1.42 mm Z into its matching WRL frame. 3D source: JLCEDA/EasyEDA Official Library, https://lceda.cn/ and https://easyeda.com/, product C221681.",
+  "maturity": "reviewed",
+  "symbol_name": "KMR232NGULCLFS",
+  "footprint_name": "KMR232NGULCLFS",
+  "kicad_version_min": "9.0.0",
+  "provenance": {"source": "manufacturer-datasheet; supplier nominal equivalent 3D body", "source_project_stem": null, "added_at": "2026-11-02T18:52:41.143035Z", "kicad_version": "9.0.0"},
+  "three_d_model": null
+}

@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import errno
 import hashlib
 import json
 import math
@@ -252,6 +253,60 @@ def _build_label(build_rc: int | None, rundir: Path) -> str | None:
 def _now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
+def _initial_storage_receipt(root: Path) -> bool:
+    """Validate a declared initial-entry receipt for this filesystem."""
+    declared = os.environ.get("KICRAFT_EVAL_INITIAL_STORAGE_RECEIPT")
+    if declared is None:
+        return False
+    if not declared:
+        raise ValueError("KICRAFT_EVAL_INITIAL_STORAGE_RECEIPT must name a receipt")
+    path = Path(declared).resolve()
+    try:
+        receipt = json.loads(path.read_bytes())
+        if path.stat().st_dev != root.stat().st_dev:
+            raise ValueError("receipt and storage root are on different filesystems")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid initial storage receipt {path}: {exc}") from exc
+    minimums = {
+        "free_after_bytes": 8 * 1024**3,
+        "initial_minimum_bytes": 8 * 1024**3,
+        "production_floor_bytes": 4 * 1024**3,
+    }
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("initial_numeric_gate_met") is not True
+        or any(
+            type(receipt.get(key)) is not int or receipt[key] < minimum
+            for key, minimum in minimums.items()
+        )
+    ):
+        raise ValueError(f"invalid initial storage receipt {path}: initial gate not proven")
+    return True
+
+
+
+def _require_storage(root: Path, *, initial: bool = False) -> None:
+    """Refuse new work without the operator's remaining-write reservation."""
+    continuation = _initial_storage_receipt(root) if initial else False
+    raw = os.environ.get("KICRAFT_EVAL_RESERVED_WRITE_BYTES")
+    if raw is None:
+        if continuation:
+            raise ValueError("KICRAFT_EVAL_RESERVED_WRITE_BYTES is required with an initial storage receipt")
+        return
+    remaining = int(raw)
+    if remaining < 0:
+        raise ValueError("KICRAFT_EVAL_RESERVED_WRITE_BYTES must be nonnegative")
+    required = 4 * 1024**3 + 2 * remaining
+    if initial and not continuation:
+        required = max(required, 8 * 1024**3)
+    free = shutil.disk_usage(root).free
+    if free < required:
+        raise OSError(
+            errno.ENOSPC,
+            f"storage admission refused: free={free}, required={required}, "
+            f"remaining_writes={remaining}; retained artifacts are preserved",
+        )
+
 
 def _stable_hash(value) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -300,10 +355,18 @@ def _external_runtime_identity(settings) -> dict:
 
     root = Path(__file__).resolve().parents[2]
     config_paths = [root / ".env"]
+    receipt = os.environ.get("KICRAFT_EVAL_INITIAL_STORAGE_RECEIPT")
+    receipt_path = Path(receipt).resolve() if receipt else None
     return {
         "settings": settings.redacted(),
         "routing": asdict(routing_config.load()),
         "ledger_path": str(Path(settings.ledger_path).resolve()),
+        "storage_reserved_write_bytes": os.environ.get("KICRAFT_EVAL_RESERVED_WRITE_BYTES"),
+        "initial_storage_receipt_path": str(receipt_path) if receipt_path else None,
+        "initial_storage_receipt_sha256": (
+            hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+            if receipt_path and receipt_path.is_file() else None
+        ),
         "config_hashes": {
             str(path): hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
             for path in config_paths
@@ -578,7 +641,7 @@ def run_design(
             client=client,
             progress=progress,
             run_id=run_id,
-            **({"auto_default_questions": False} if not auto_answer_questions else {}),
+            auto_default_questions=auto_answer_questions,
         )
         _add_cost(res)
         status = res.get("status")
@@ -614,7 +677,7 @@ def run_design(
                     run_id=run_id,
                     client=client,
                     reconcile_passes=bom_passes,
-                    **({"auto_default_questions": False} if not auto_answer_questions else {}),
+                    auto_default_questions=auto_answer_questions,
                 )
                 if bom_passes == prev:
                     break  # budget exhausted; fail honestly below
@@ -980,7 +1043,6 @@ def evaluate_one(
                 progress,
                 max_park_rounds=max_park_rounds,
                 run_id=run_id,
-                **({"auto_answer_questions": False} if product_policy is not None else {}),
             )
             rec.update(
                 design_status=d["status"],
@@ -1108,6 +1170,7 @@ def evaluate_one(
                     # The host-wide build slot is held for the BUILD only, never
                     # across the (blocking-HTTP) design re-drive.
                     with build_gate or contextlib.nullcontext():
+                        _require_storage(rundir)
                         return run_build(rundir, progress, timeout_s=build_timeout_s)
 
                 # Same shared build-to-design policy as the web worker: the
@@ -2135,6 +2198,11 @@ def main(argv=None) -> int:
     from kicraft.server.client import make_client
     from kicraft.server.config import Settings
 
+    try:
+        _require_storage(Path.cwd(), initial=not args.resume)
+    except (OSError, ValueError) as exc:
+        ap.error(str(exc))
+
     s = Settings.from_env()
     execution_policy = None
     campaign_guard = None
@@ -2159,7 +2227,7 @@ def main(argv=None) -> int:
             "total_cap_usd": total_cap,
             "parallel": args.parallel,
             "build_slots": build_slots,
-            "auto_answer_questions": False,
+            "auto_answer_questions": True,
             "full_events": not args.lean_events,
         }
         # Process-local limits also reach the pinned interpreter and lifecycle clients.
@@ -2386,6 +2454,14 @@ def main(argv=None) -> int:
                 "product_failure_kind": "interrupted_attempt",
                 "error": "Prior attempt has artifacts but no terminal record; preserved without retry",
             }
+        try:
+            _require_storage(out_dir)
+        except OSError as exc:
+            return {
+                **base,
+                "product_failure_kind": "campaign_storage_exhausted",
+                "error": str(exc),
+            }
         reservation = frozen_policy["max_cost_usd"]
         assert campaign_guard is not None and execution_policy is not None
         with admission:
@@ -2535,7 +2611,12 @@ def main(argv=None) -> int:
         meta["runtime_unchanged"] = _external_runtime_identity(s) == frozen_runtime
         meta["campaign_complete"] = not any(
             row.get("product_failure_kind")
-            in {"campaign_budget_exhausted", "interrupted_attempt", "campaign_identity_changed"}
+            in {
+                "campaign_budget_exhausted",
+                "campaign_storage_exhausted",
+                "interrupted_attempt",
+                "campaign_identity_changed",
+            }
             for row in by_run.values()
         )
     meta["wall_s"] = round(time.monotonic() - t_mono, 1)

@@ -1,0 +1,23 @@
+(kicad_symbol_lib
+  (version 20211014)
+  (generator kicraft)
+  (symbol "XAL7070-682MEC"
+    (in_bom yes)
+    (on_board yes)
+    (property "Reference" "L" (id 0) (at 0 5.08 0) (effects (font (size 1.27 1.27))))
+    (property "Value" "XAL7070-682MEC" (id 1) (at 0 -5.08 0) (effects (font (size 1.27 1.27))))
+    (property "Footprint" "xal7070-682mec:XAL7070-682MEC" (id 2) (at 0 -7.62 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Datasheet" "https://www.coilcraft.com/getmedia/1ba55433-bcc8-4838-9b21-382f497e12e0/xal7070.pdf" (id 3) (at 0 -10.16 0) (effects (font (size 1.27 1.27)) hide))
+    (property "Manufacturer" "Coilcraft" (id 4) (at 0 -12.70 0) (effects (font (size 1.27 1.27)) hide))
+    (property "MPN" "XAL7070-682MEC" (id 5) (at 0 -15.24 0) (effects (font (size 1.27 1.27)) hide))
+    (property "ki_keywords" "power inductor Coilcraft XAL7070" (id 8) (at 0 -20.32 0) (effects (font (size 1.27 1.27)) hide))
+    (symbol "XAL7070-682MEC_0_1"
+      (arc (start -2.27 0.02) (mid -3.28 1.10) (end -4.29 0.02) (stroke (width 0) (type default)) (fill (type none)))
+      (arc (start -0.11 0.02) (mid -1.12 1.10) (end -2.13 0.02) (stroke (width 0) (type default)) (fill (type none)))
+      (arc (start 2.04 0.02) (mid 1.03 1.10) (end 0.02 0.02) (stroke (width 0) (type default)) (fill (type none)))
+      (arc (start 4.23 0.02) (mid 3.22 1.10) (end 2.21 0.02) (stroke (width 0) (type default)) (fill (type none)))
+      (pin passive line (at 5.08 0 180) (length 1.27) (name "2" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+      (pin passive line (at -5.08 0 0) (length 1.27) (name "1" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+    )
+  )
+)

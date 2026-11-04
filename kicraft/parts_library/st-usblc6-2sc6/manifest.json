@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:ec128c1422ab60269b527bf32345fbc086b368e14bb66398965b42b69f45e78a",
+  "datasheet_url": "https://www.st.com/resource/en/datasheet/usblc6-2.pdf",
+  "description": "USBLC6-2SC6",
+  "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "USBLC6-2SC6",
+  "name": "st-usblc6-2sc6",
+  "provenance": {
+    "added_at": "2026-11-03T03:13:25Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C7519"
+  },
+  "symbol_name": "USBLC6-2SC6",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "ST DS4260 Rev 7 Figure 19: pads 0.60 x 1.20 mm, 0.95 mm pitch, row centers 2.30 mm; ESD effectiveness depends on short connector-to-device and ground paths. Geometry derived from C7519 supplier CAD with pads enlarged to ST recommendation; no energized or system ESD claim."
+}

@@ -210,6 +210,36 @@ def test_perimeter_tie_routes_around_bbox(tmp_path):
     assert not any(abs(x - 10.0) < 0.5 and abs(y - 10.0) < 0.5 for x, y in s.waypoints)
 
 
+def test_perimeter_tie_detours_same_footprint_clearance_keepout(tmp_path):
+    # U4's SOT-23-5 shape: the VBUS pad-to-pad line misses sibling GND pad 2
+    # physically, but not by its full copper clearance. A perimeter tie has a
+    # legal detour, so it must not use the dense-row collision-only exception.
+    path = str(tmp_path / "b.kicad_pcb")
+    _board(
+        path,
+        (10.0, 10.0),
+        {
+            "1": ("VBUS", 9.0, 9.0),
+            "2": ("GND", 10.0, 9.65),
+            "4": ("VBUS", 11.0, 9.0),
+        },
+    )
+    board = pcbnew.LoadBoard(path)
+    for footprint in board.GetFootprints():
+        for pad in footprint.Pads():
+            pad.SetShape(pcbnew.PAD_SHAPE_RECT)
+    board.Save(path)
+    specs = perimeter_tie_specs(board, "J1", net_names=["VBUS"], margin_mm=1.0)
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.strict_same_footprint is True
+    assert len(spec.waypoints) > 1  # perimeter walk, never the unsafe direct tie
+    assert add_breakout_stubs(path, specs)["stubs"] == 1
+
+
+
+
 def test_perimeter_tie_uses_pad_field_not_inflated_bbox(tmp_path):
     # Regression for the U1 power-leaf short. An LDO ties VIN+EN (both VBUS) in a
     # left pad column; +3V3 and an NC pad sit in a right column. A courtyard/silk

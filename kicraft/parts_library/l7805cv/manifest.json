@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:555dfd4c48b56d1be0b5751b4419370f63d7e7c85c79910c4246232986e930ff",
+  "datasheet_url": "https://lcsc.com/product-detail/Linear-Voltage-Regulators_STMicroelectronics_L7805CV_L7805CV_C111887.html",
+  "description": "ST(\u610f\u6cd5\u534a\u5bfc\u4f53) L7805CV",
+  "footprint_name": "TO-220-3_L10.0-W4.5-P2.54-L",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "L7805CV",
+  "name": "l7805cv",
+  "provenance": {
+    "added_at": "2026-11-03T05:04:12Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C111887"
+  },
+  "symbol_name": "L7805CV",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": null
+}

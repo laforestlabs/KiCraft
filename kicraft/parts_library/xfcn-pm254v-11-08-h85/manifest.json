@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:864229ee1f610f841d7bc67cc70737ffd58cdf10a4d9f2e6913e7487b5cad17e",
+  "datasheet_url": "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8773172995512909824",
+  "description": "XFCN PM254V-11-08-H85 single-row vertical female header",
+  "footprint_name": "XFCN_PM254V_11_08_H85",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "PM254V-11-08-H85",
+  "name": "xfcn-pm254v-11-08-h85",
+  "provenance": {
+    "added_at": "2026-11-02T18:52:41.143035Z",
+    "kicad_version": "9.0.0",
+    "source": "manual from XFCN drawing PM254V-11-XX-H85 rev A1; supplier nominal body model",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C46595973"
+  },
+  "symbol_name": "PM254V-11-08-H85",
+  "tags": [
+    "connector",
+    "female-header"
+  ],
+  "three_d_model": null,
+  "version": "1.0.0",
+  "watch_out_for": "Manufacturer recommended 1.02 mm holes and 2.54 mm pitch; library zero-angle and body-centered origin match exact supplier CAD, pin 1 left. Drawing labels 1 and 2; remaining sequential contact labels are the supplier/library convention. Raw supplier STEP was translated (0,-1.25,+4.25) mm to its matching WRL frame; no scaling or replacement geometry. Nominal supplier body is not a maximum-tolerance assembly guarantee. 3D source: JLCEDA/EasyEDA Official Library, https://lceda.cn/ and https://easyeda.com/, product C46595973."
+}

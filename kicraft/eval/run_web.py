@@ -95,7 +95,7 @@ def _programming_evidence(state: dict, bom: dict | None) -> str:
         from kicraft.design.models import BOM as _BOM
         from kicraft.design.synthesis.validation import mcu_programming_facts
 
-        facts = mcu_programming_facts(_BOM.model_validate(bom))
+        facts = mcu_programming_facts(_BOM.model_validate(bom), architecture=state.get("architecture"))
     except Exception as exc:
         return f"Programming analysis unavailable ({type(exc).__name__}); no absence conclusion is supported."
     if facts is None:

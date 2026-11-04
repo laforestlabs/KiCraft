@@ -688,3 +688,262 @@ def test_can_termination_is_proved_from_actual_switch_and_resistor_pads(tmp_path
         tmp_path, {"bom": {"parts": parts}}, board, {},
     )
     assert (facts["net_paths"].get("switchable_can_termination") is True) is (defect is None)
+
+
+def _tps54331_power_artifact(
+    *,
+    broken_feedback=False,
+    source_return="GND",
+    enable_jumper_defect=None,
+    enable_jumper_style="solder",
+):
+    """Delivered-pad fixture for a 3.3 V adjustable buck and its input/control."""
+    from kicraft.design.part_identity import reviewed_part
+
+    buck = reviewed_part("TPS54331DDAR")
+    terminal = reviewed_part("WJ126V-5.0-02P-14-00A")
+    jumper_pads = {
+        None: [("1", "EN"), ("2", "GND")],
+        "misbound_input": [("1", "VIN"), ("2", "GND")],
+        "misbound_return": [("1", "EN"), ("2", "FLOAT")],
+        "missing_terminal": [("1", "EN")],
+        "not_a_jumper": [("1", "EN"), ("2", "GND")],
+    }[enable_jumper_defect]
+    jumper_symbol, jumper_footprint = {
+        "solder": (
+            "Jumper:SolderJumper_2_Open",
+            "Jumper:SolderJumper-2_P1.3mm_Open_RoundedPad1.0x1.5mm",
+        ),
+        "header": (
+            "Connector_Generic:Conn_01x02",
+            "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+        ),
+    }[enable_jumper_style]
+    if enable_jumper_defect == "not_a_jumper":
+        jumper_symbol = "Device:R"
+        jumper_footprint = "Resistor_SMD:R_0603_1608Metric"
+    rows = [
+        ("U1", buck.footprint, [("1", "BOOT"), ("2", "VIN"), ("3", "EN"), ("5", "FB"), ("7", "GND"), ("8", "PH"), ("9", "GND")]),
+        ("L1", "Inductor_SMD:L_6.3x6.3_H3", [("1", "PH"), ("2", "VOUT")]),
+        ("C1", "Capacitor_SMD:C_1206_3216Metric", [("1", "VOUT"), ("2", "GND")]),
+        ("C2", "Capacitor_SMD:C_0603_1608Metric", [("1", "BOOT"), ("2", "PH")]),
+        ("C3", "Capacitor_SMD:C_0603_1608Metric", [("1", "VIN"), ("2", "GND")]),
+        ("R1", "Resistor_SMD:R_0603_1608Metric", [("1", "VOUT"), ("2", "FB")]),
+        ("R2", "Resistor_SMD:R_0603_1608Metric", [("1", "FB"), ("2", "GND" if not broken_feedback else "FLOAT")]),
+        ("JP1", jumper_footprint, jumper_pads),
+        ("J1", terminal.footprint, [("1", "VIN"), ("2", source_return)]),
+        ("J2", terminal.footprint, [("1", "VOUT"), ("2", "GND")]),
+    ]
+    parts = [
+        {"ref": "U1", "mpn": "TPS54331DDAR", "symbol": buck.symbol, "footprint": buck.footprint},
+        {"ref": "L1", "symbol": "Device:L", "footprint": rows[1][1]},
+        {"ref": "C1", "symbol": "Device:C", "footprint": rows[2][1], "value": "22uF"},
+        {"ref": "C2", "symbol": "Device:C", "footprint": rows[3][1], "value": "100nF"},
+        {"ref": "C3", "symbol": "Device:C", "footprint": rows[4][1], "value": "100nF"},
+        {"ref": "R1", "symbol": "Device:R", "footprint": rows[5][1], "value": "31.6k"},
+        {"ref": "R2", "symbol": "Device:R", "footprint": rows[6][1], "value": "10k"},
+        {"ref": "JP1", "symbol": jumper_symbol, "footprint": jumper_footprint},
+        *[
+            {"ref": ref, "mpn": "WJ126V-5.0-02P-14-00A", "symbol": terminal.symbol, "footprint": terminal.footprint}
+            for ref in ("J1", "J2")
+        ],
+    ]
+    names = {
+        ("U1", "1"): "BOOT", ("U1", "2"): "VIN", ("U1", "3"): "EN",
+        ("U1", "5"): "VSENSE", ("U1", "7"): "GND", ("U1", "8"): "PH", ("U1", "9"): "GND",
+    }
+    return {"bom": {"parts": parts}}, _EvidenceBoard([_EvidenceFootprint(*row) for row in rows]), names
+
+
+@pytest.mark.parametrize(
+    ("enable_jumper_style", "enable_jumper_defect"),
+    (
+        ("solder", None),
+        ("header", None),
+        ("solder", "misbound_input"),
+        ("solder", "misbound_return"),
+        ("solder", "missing_terminal"),
+        ("solder", "not_a_jumper"),
+    ),
+)
+def test_adjustable_buck_enable_jumper_requires_reviewed_enable_shunt(
+    tmp_path, monkeypatch, enable_jumper_style, enable_jumper_defect
+):
+    """The delivered shunt must join the reviewed EN pad to converter ground."""
+    contract = {"obligations": [
+        {"check": {"kind": "gate", "gate": "external_enable_jumper_function"}},
+    ]}
+    state, board, names = _tps54331_power_artifact(
+        enable_jumper_defect=enable_jumper_defect,
+        enable_jumper_style=enable_jumper_style,
+    )
+    monkeypatch.setattr(electrical_artifact_evidence, "_pin_names", lambda *_: names)
+    facts = electrical_artifact_evidence.extract_electrical_facts(
+        tmp_path, state, board, contract
+    )
+    assert (
+        facts["gates"].get("external_enable_jumper_function") == "pass"
+    ) is (enable_jumper_defect is None)
+
+
+def _lm2577_power_artifact(*, broken_compensation=False, broken_rectifier=False):
+    """Delivered LM2577 reference topology with reviewed support components."""
+    from kicraft.design.part_identity import reviewed_part
+
+    converter = reviewed_part("LM2577T-ADJ/NOPB")
+    limiter = reviewed_part("TPS25940LRVCR")
+    inductor = reviewed_part("SRP1770TA-101M")
+    diode = reviewed_part("1N5821RLG")
+    input_bulk = reviewed_part("SPZ1CM221E08O00RAXXX")
+    output_bulk = reviewed_part("SPZ1EM681F14000RAXXX")
+    comp_cap = reviewed_part("CC0603KRX7R8BB334")
+    terminal = reviewed_part("WJ126V-5.0-02P-14-00A")
+    rows = [
+        ("U1", converter.footprint, [("1", "COMP"), ("2", "FB"), ("3", "GND"), ("4", "SW"), ("5", "PROTECTED")]),
+        ("U2", limiter.footprint, [
+            *((str(pin), "VIN") for pin in range(9, 14)),
+            *((str(pin), "PROTECTED") for pin in range(4, 9)),
+            ("16", "GND"), ("21", "GND"),
+        ]),
+        ("L1", inductor.footprint, [("1", "PROTECTED"), ("2", "SW")]),
+        ("D1", diode.footprint, [("1", "VIN" if broken_rectifier else "SW"), ("2", "VOUT")]),
+        ("C1", input_bulk.footprint, [("1", "VIN"), ("2", "GND")]),
+        ("C2", output_bulk.footprint, [("1", "VOUT"), ("2", "GND")]),
+        ("R1", "Resistor_SMD:R_0603_1608Metric", [("1", "VOUT"), ("2", "FB_TOP")]),
+        ("R2", "Resistor_SMD:R_0603_1608Metric", [("1", "FB_TOP"), ("2", "FB")]),
+        ("R3", "Resistor_SMD:R_0603_1608Metric", [("1", "FB"), ("2", "GND")]),
+        ("R4", "Resistor_SMD:R_0603_1608Metric", [("1", "COMP"), ("2", "COMP_RC")]),
+        ("C3", comp_cap.footprint, [("1", "COMP_RC"), ("2", "FLOAT" if broken_compensation else "GND")]),
+        ("J1", terminal.footprint, [("1", "VIN"), ("2", "GND")]),
+        ("J2", terminal.footprint, [("1", "VOUT"), ("2", "GND")]),
+    ]
+    parts = [
+        {"ref": "U1", "mpn": "LM2577T-ADJ/NOPB", "symbol": converter.symbol, "footprint": converter.footprint},
+        {"ref": "U2", "mpn": "TPS25940LRVCR", "symbol": limiter.symbol, "footprint": limiter.footprint},
+        {"ref": "L1", "mpn": "SRP1770TA-101M", "symbol": inductor.symbol, "footprint": inductor.footprint},
+        {"ref": "D1", "mpn": "1N5821RLG", "symbol": diode.symbol, "footprint": diode.footprint},
+        {"ref": "C1", "mpn": "SPZ1CM221E08O00RAXXX", "symbol": input_bulk.symbol, "footprint": input_bulk.footprint},
+        {"ref": "C2", "mpn": "SPZ1EM681F14000RAXXX", "symbol": output_bulk.symbol, "footprint": output_bulk.footprint},
+        {"ref": "C3", "mpn": "CC0603KRX7R8BB334", "symbol": comp_cap.symbol, "footprint": comp_cap.footprint},
+        *[
+            {"ref": ref, "symbol": "Device:R", "footprint": "Resistor_SMD:R_0603_1608Metric", "value": value}
+            for ref, value in (("R1", "48.7k"), ("R2", "511"), ("R3", "5.62k"), ("R4", "2k"))
+        ],
+        *[
+            {"ref": ref, "mpn": "WJ126V-5.0-02P-14-00A", "symbol": terminal.symbol, "footprint": terminal.footprint}
+            for ref in ("J1", "J2")
+        ],
+    ]
+    names = {
+        ("U1", "1"): "COMP", ("U1", "2"): "FB", ("U1", "3"): "GND",
+        ("U1", "4"): "SW", ("U1", "5"): "VIN", ("D1", "1"): "A", ("D1", "2"): "K",
+    }
+    return {"bom": {"parts": parts}}, _EvidenceBoard(
+        [_EvidenceFootprint(*row) for row in rows]
+    ), names
+
+
+def test_lm2577_artifact_requires_reviewed_bulk_rectifier_and_compensation(
+    tmp_path, monkeypatch
+):
+    """A complete delivered boost support network may publish voltage, never current."""
+    contract = {"obligations": [
+        {"check": {"kind": "gate", "gate": "external_18v_dc_input_binding"}},
+        {"check": {"kind": "gate", "gate": "external_conversion_to_12v_binding"}},
+    ]}
+    state, board, names = _lm2577_power_artifact()
+    monkeypatch.setattr(electrical_artifact_evidence, "_pin_names", lambda *_: names)
+    facts = electrical_artifact_evidence.extract_electrical_facts(
+        tmp_path, state, board, contract
+    )
+    assert facts["output_voltage_v"] == pytest.approx(12.0, rel=0.05)
+    assert "output_current_rating_a" not in facts
+    assert facts["gates"]["external_18v_dc_input_binding"] == "pass"
+    assert facts["gates"]["external_conversion_to_12v_binding"] == "pass"
+
+    state, board, names = _lm2577_power_artifact(broken_compensation=True)
+    monkeypatch.setattr(electrical_artifact_evidence, "_pin_names", lambda *_: names)
+    facts = electrical_artifact_evidence.extract_electrical_facts(
+        tmp_path, state, board, contract
+    )
+    assert "output_voltage_v" not in facts
+    assert "external_conversion_to_12v_binding" not in facts["gates"]
+
+    state, board, names = _lm2577_power_artifact(broken_rectifier=True)
+    monkeypatch.setattr(electrical_artifact_evidence, "_pin_names", lambda *_: names)
+    facts = electrical_artifact_evidence.extract_electrical_facts(
+        tmp_path, state, board, contract
+    )
+    assert "output_voltage_v" not in facts
+    assert "external_conversion_to_12v_binding" not in facts["gates"]
+
+
+def test_adjustable_buck_artifact_binds_output_current_source_and_enable(tmp_path, monkeypatch):
+    """Only the complete delivered TPS54331 topology can publish power facts."""
+    contract = {"obligations": [
+        {"check": {"kind": "gate", "gate": "external_18v_dc_input_binding"}},
+        {"check": {"kind": "gate", "gate": "external_conversion_to_3.3v_binding"}},
+        {"check": {"kind": "gate", "gate": "external_enable_jumper_function"}},
+    ]}
+    state, board, names = _tps54331_power_artifact()
+    monkeypatch.setattr(electrical_artifact_evidence, "_pin_names", lambda *_: names)
+    facts = electrical_artifact_evidence.extract_electrical_facts(tmp_path, state, board, contract)
+    assert facts["output_voltage_v"] == pytest.approx(3.328)
+    assert "output_current_rating_a" not in facts
+    assert facts["gates"]["external_conversion_to_3.3v_binding"] == "pass"
+    assert facts["gates"]["external_18v_dc_input_binding"] == "pass"
+    assert facts["gates"]["external_enable_jumper_function"] == "pass"
+
+    state, board, names = _tps54331_power_artifact(broken_feedback=True)
+    monkeypatch.setattr(electrical_artifact_evidence, "_pin_names", lambda *_: names)
+    facts = electrical_artifact_evidence.extract_electrical_facts(tmp_path, state, board, contract)
+    assert "output_voltage_v" not in facts
+    assert "external_conversion_to_3.3v_binding" not in facts.get("gates", {})
+
+    state, board, names = _tps54331_power_artifact(source_return="FLOAT")
+    monkeypatch.setattr(electrical_artifact_evidence, "_pin_names", lambda *_: names)
+    facts = electrical_artifact_evidence.extract_electrical_facts(tmp_path, state, board, contract)
+    assert "external_18v_dc_input_binding" not in facts.get("gates", {})
+
+
+def test_tps26600_source_gate_rejects_control_return_short(tmp_path):
+    """Numerical TPS26600 pins include a separate RTN/PowerPAD control return."""
+    from kicraft.design.part_identity import reviewed_part
+
+    switch = reviewed_part("TPS26600PWPR")
+    terminal = reviewed_part("WJ126V-5.0-02P-14-00A")
+    parts = [
+        {"ref": "U1", "mpn": "TPS26600PWPR", "symbol": switch.symbol, "footprint": switch.footprint},
+        *[
+            {"ref": ref, "symbol": "Device:R", "footprint": "Resistor_SMD:R_0603_1608Metric", "value": value}
+            for ref, value in (("R1", "100k"), ("R2", "10k"), ("R3", "10k"), ("R4", "30.1k"))
+        ],
+        *[
+            {"ref": ref, "symbol": "Device:C", "footprint": "Capacitor_SMD:C_0603_1608Metric", "value": "100nF"}
+            for ref in ("C1", "C2")
+        ],
+        *[
+            {"ref": ref, "mpn": "WJ126V-5.0-02P-14-00A", "symbol": terminal.symbol, "footprint": terminal.footprint}
+            for ref in ("J1", "J2")
+        ],
+    ]
+    contract = {"obligations": [{"check": {"kind": "gate", "gate": "external_18v_dc_input_binding"}}]}
+    for control_return, expected in (("RTN", True), ("GND", False)):
+        board = _EvidenceBoard([
+            _EvidenceFootprint("U1", switch.footprint, [
+                ("1", "VIN"), ("2", "VIN"), ("3", "UVLO"), ("5", "OVP"), ("8", control_return), ("9", "GND"),
+                ("11", "ILIM"), ("15", "VOUT"), ("16", "VOUT"), ("17", control_return),
+            ]),
+            _EvidenceFootprint("R1", "Resistor_SMD:R_0603_1608Metric", [("1", "VIN"), ("2", "UVLO")]),
+            _EvidenceFootprint("R2", "Resistor_SMD:R_0603_1608Metric", [("1", "UVLO"), ("2", "OVP")]),
+            _EvidenceFootprint("R3", "Resistor_SMD:R_0603_1608Metric", [("1", "OVP"), ("2", control_return)]),
+            _EvidenceFootprint("R4", "Resistor_SMD:R_0603_1608Metric", [("1", "ILIM"), ("2", control_return)]),
+            _EvidenceFootprint("C1", "Capacitor_SMD:C_0603_1608Metric", [("1", "VIN"), ("2", "GND")]),
+            _EvidenceFootprint("C2", "Capacitor_SMD:C_0603_1608Metric", [("1", "VOUT"), ("2", "GND")]),
+            _EvidenceFootprint("J1", terminal.footprint, [("1", "VIN"), ("2", "GND")]),
+            _EvidenceFootprint("J2", terminal.footprint, [("1", "VOUT"), ("2", "GND")]),
+        ])
+        facts = electrical_artifact_evidence.extract_electrical_facts(
+            tmp_path, {"bom": {"parts": parts}}, board, contract,
+        )
+        assert ("external_18v_dc_input_binding" in facts["gates"]) is expected

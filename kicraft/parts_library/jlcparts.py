@@ -74,6 +74,14 @@ _KW_QUALIFIER_RE = re.compile(
     r"^(\d+(\.\d+)?V|X[57]R|C0G|NP0|Y5V|±?\d+(\.\d+)?%)$", re.IGNORECASE
 )
 
+# The stock TL3342 KiCad land pattern has one reviewed orderable mate.  RESET
+# and BOOT are functional labels, not catalog search terms; use the physical
+# pattern's manufacturer order code when a legacy/generic BOM omitted it.
+_REVIEWED_FOOTPRINT_KEYWORDS = {
+    "sw_spst_tl3342": "TL3342F260QG",
+}
+
+
 
 def is_unsourceable_hardware(footprint: str) -> bool:
     """True for reviewed bare-board features with no orderable part."""
@@ -90,17 +98,20 @@ def is_unsourceable_hardware(footprint: str) -> bool:
 def bom_keyword(value: str, footprint: str) -> str | None:
     """The catalog search term for a generic (no-MPN, no-C#) BOM part.
 
-    Generic passives search as ``<value> <size>`` ("1k 0603"). KiCad-ism
-    values like "PinHeader_1x02" match NOTHING in the catalog — J2-class parts
-    previously fell through pricing silently, ending up with no part number,
-    no cost and no vendor link anywhere — so known footprint families are
-    normalized to terms the catalog actually answers ("pin header 2.54mm
-    1x2P"), µ/Ω spellings become the dump's ASCII (u / bare suffix), and
-    mojibake from the pre-`d8fc7b3` SSE decode bug ("1ÂµF") is repaired.
+    Generic passives search as ``<value> <size>`` ("1k 0603"). Known
+    footprint families normalize to catalog terms or, where a reviewed land
+    pattern has one exact orderable mate, its MPN. KiCad-ism values like
+    "PinHeader_1x02" match NOTHING in the catalog — J2-class parts previously
+    fell through pricing silently, ending up with no part number, no cost and
+    no vendor link anywhere. µ/Ω spellings become the dump's ASCII (u / bare
+    suffix), and mojibake from the pre-`d8fc7b3` SSE decode bug ("1ÂµF") is
+    repaired.
     Returns None when the part has nothing searchable; callers should treat
     that as unsourceable rather than skipping it quietly.
     """
     fp_leaf = (footprint or "").split(":", 1)[-1]
+    if keyword := _REVIEWED_FOOTPRINT_KEYWORDS.get(fp_leaf.casefold()):
+        return keyword
     m = _FP_PIN_HEADER_RE.search(fp_leaf)
     if m:
         rows, cols, pitch = int(m.group(1)), int(m.group(2)), m.group(3)

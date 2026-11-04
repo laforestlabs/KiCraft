@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:3473ad02ac42ed34cdc62e3a0fae51d45eea43a1cfd1cf7c05db67f4a3f08882",
+  "datasheet_url": "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8603362912006254592",
+  "description": "YLPTEC K7803M-1000R3 3.3V SIP-3 regulator module; source-defined 6-36V/1A; derating and no hotplug apply",
+  "footprint_name": "PWRM-TH_K78XXM-1000R3",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "K7803M-1000R3",
+  "name": "ylptec-k7803m-1000r3",
+  "provenance": {
+    "added_at": "2026-11-03T06:41:12Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C22749779"
+  },
+  "symbol_name": "K7803M-1000R3_C22749779",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": null
+}

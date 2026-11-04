@@ -51,10 +51,10 @@ FIXED_INTERFACES = {
         (("scl", "i2c_scl"), "i2c-scl"),
     ),
     "spi_controller": (
-        (("sclk", "spi_sclk"), "spi-sclk"),
+        (("sclk", "spi_sclk", "spi_sck"), "spi-sclk"),
         (("mosi", "spi_mosi"), "spi-mosi"),
         (("miso", "spi_miso"), "spi-miso"),
-        (("cs", "spi_cs"), "spi-cs"),
+        (("cs", "spi_cs", "spi_cs0"), "spi-cs"),
     ),
     "uart": ((("tx", "uart_tx"), "uart-tx"), (("rx", "uart_rx"), "uart-rx")),
     "can_controller": ((("can_tx",), "can-tx"), (("can_rx",), "can-rx")),
@@ -400,6 +400,19 @@ def requests_from_requirement(
     return requests
 
 
+_FIXED_PORT_CAPABILITIES = {
+    "uart_tx": "uart-tx",
+    "uart_rx": "uart-rx",
+    "i2c_sda": "i2c-sda",
+    "i2c_scl": "i2c-scl",
+    "spi_sck": "spi-sclk",
+    "spi_mosi": "spi-mosi",
+    "spi_miso": "spi-miso",
+    "spi_cs": "spi-cs",
+    "spi_cs0": "spi-cs",
+}
+
+
 def allocate_requirement_pins(
     definition: RecipeDefinition,
     requirement: CircuitRequirement,
@@ -407,17 +420,68 @@ def allocate_requirement_pins(
     existing: list[RecipePinAllocation] | None = None,
     required_capabilities: dict[str, str] | None = None,
 ) -> list[RecipePinAllocation]:
-    fixed_ports = {port.name for port in definition.ports}
+    fixed_port_pins = definition.fixed_port_pins
+    fixed_ports = (
+        set(fixed_port_pins)
+        if fixed_port_pins is not None
+        else {port.name for port in definition.ports}
+    )
     requests = [
         request
         for request in requests_from_requirement(requirement, fixed_ports=fixed_ports)
         if request.id not in fixed_ports
     ]
+    pin_by_number = {pin.pin: pin for pin in definition.allocatable_pins}
+    fixed_allocations: list[RecipePinAllocation] = []
+    if fixed_port_pins is not None:
+        for port, pin_number in sorted(fixed_port_pins.items()):
+            net = requirement.ports.get(port)
+            if not net:
+                continue
+            pin = pin_by_number.get(pin_number)
+            capability = _FIXED_PORT_CAPABILITIES.get(port)
+            if pin is None or capability is None or not _supports(
+                pin,
+                PinAllocationRequest(id=port, net=net, capability=capability),
+            ):
+                raise PinAllocationError(
+                    "invalid_fixed_interface_pin",
+                    f"fixed port {port!r} does not have its documented allocatable MCU pin",
+                    requirement_id=requirement.id,
+                    capability=capability,
+                )
+            fixed_allocations.append(
+                RecipePinAllocation(net=net, pin=pin_number, capability=capability)
+            )
+        by_pin: dict[str, set[str]] = defaultdict(set)
+        for allocation in fixed_allocations:
+            by_pin[allocation.pin].add(allocation.net)
+        conflicts = {pin: nets for pin, nets in by_pin.items() if len(nets) > 1}
+        if conflicts:
+            raise PinAllocationError(
+                "conflicting_pin_capability",
+                f"fixed MCU functions share a physical pad: {dict(conflicts)!r}",
+                requirement_id=requirement.id,
+            )
+        existing_conflicts = {
+            allocation.pin
+            for allocation in existing or []
+            for fixed in fixed_allocations
+            if allocation.pin == fixed.pin and allocation.net != fixed.net
+        }
+        if existing_conflicts:
+            raise PinAllocationError(
+                "conflicting_pin_capability",
+                f"existing allocation conflicts with fixed MCU interface pins {sorted(existing_conflicts)}",
+                requirement_id=requirement.id,
+            )
+    reserved_pins = {allocation.pin for allocation in fixed_allocations}
+    available_pins = tuple(
+        pin for pin in definition.allocatable_pins if pin.pin not in reserved_pins
+    )
     requested_nets = {request.net for request in requests}
     pins_by_gpio = {
-        pin.gpio: pin
-        for pin in definition.allocatable_pins
-        if pin.gpio is not None and not pin.reserved
+        pin.gpio: pin for pin in available_pins if pin.gpio is not None and not pin.reserved
     }
     explicit: list[RecipePinAllocation] = []
     for port_name, net in sorted(requirement.ports.items()):
@@ -440,14 +504,13 @@ def allocate_requirement_pins(
     if required_capabilities:
         requests_by_net = {request.net: request for request in requests}
         fixed_by_net: dict[str, list[str]] = defaultdict(list)
-        for allocation in existing or []:
+        for allocation in [*(existing or []), *fixed_allocations]:
             fixed_by_net[allocation.net].append(allocation.pin)
         for port_name, net in requirement.ports.items():
             match = re.fullmatch(r"gpio[_-]?(\d+)", port_name, re.IGNORECASE)
             if match is not None:
                 pin = pins_by_gpio.get(int(match.group(1)))
                 fixed_by_net[net].append(pin.pin if pin is not None else "")
-        pins_by_number = {pin.pin: pin for pin in definition.allocatable_pins}
         for net, capability in required_capabilities.items():
             request = requests_by_net.get(net)
             if (
@@ -466,7 +529,7 @@ def allocate_requirement_pins(
                     prior.net == net
                     and prior.capability != capability
                     and not (capability == "touch" and prior.capability in {"input", "gpio"})
-                    for prior in existing or []
+                    for prior in [*(existing or []), *fixed_allocations]
                 )
             ):
                 raise PinAllocationError(
@@ -486,8 +549,8 @@ def allocate_requirement_pins(
             if (
                 len(fixed_pins) > 1
                 or any(
-                    pin_number not in pins_by_number
-                    or not _supports(pins_by_number[pin_number], constrained)
+                    pin_number not in pin_by_number
+                    or not _supports(pin_by_number[pin_number], constrained)
                     for pin_number in fixed
                 )
                 or any(
@@ -507,7 +570,7 @@ def allocate_requirement_pins(
                 explicit.append(RecipePinAllocation(net=net, pin=fixed[0], capability=capability))
         requests = [requests_by_net[request.net] for request in requests]
     allocations = allocate_pins(
-        definition.allocatable_pins,
+        available_pins,
         requests,
         existing=[*(existing or []), *explicit],
         requirement_id=requirement.id,
@@ -526,4 +589,4 @@ def allocate_requirement_pins(
                     requirement_id=requirement.id,
                     capability=required_capabilities[allocation.net],
                 )
-    return allocations
+    return sorted([*fixed_allocations, *allocations], key=lambda row: (row.net, row.pin))

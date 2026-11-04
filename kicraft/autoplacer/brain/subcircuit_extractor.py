@@ -21,6 +21,7 @@ import copy
 import math
 from dataclasses import dataclass, field
 from typing import Any
+from .edge_datum import edge_datum_outline_floors, edge_datum_requirements
 
 from .types import (
     BoardState,
@@ -296,6 +297,7 @@ def derive_content_canvas(
     fill_target: float,
     placement_clearance_mm: float = 2.84,
     component_zones: dict[str, Any] | None = None,
+    edge_interfaces: list[dict[str, Any]] | None = None,
     min_side_mm: float = 5.0,
 ) -> tuple[float, float]:
     """Solve-canvas size derived from component CONTENT, not seed positions.
@@ -315,15 +317,26 @@ def derive_content_canvas(
       component zones pin parts to BOTH opposite edges of that axis --
       the signal-flow axis wants the longer dimension.
     - Floors: each side >= the largest single part's max dimension plus
-      margin (rotation-safe), and >= *min_side_mm*.
+      margin (rotation-safe), and >= *min_side_mm*. Exact edge-interface
+      members reserve their declared span and physical in-board depth rather
+      than their stale seed-board separation.
     """
     fill = max(0.05, float(fill_target))
     clearance = max(0.0, float(placement_clearance_mm))
 
+    datum_cfg = {"edge_interfaces": edge_interfaces or []}
+    requirements = edge_datum_requirements(
+        components,
+        datum_cfg,
+        edge_margin_mm=max(2.0, float(placement_clearance_mm)),
+    )
+    datum_refs = requirements["refs"]
     comp_area = 0.0
     padded_area = 0.0
     max_part_dim = 0.0
-    for comp in components.values():
+    for ref, comp in components.items():
+        if ref in datum_refs:
+            continue
         tl, br = comp.physical_bbox()
         w = max(0.0, br.x - tl.x)
         h = max(0.0, br.y - tl.y)
@@ -338,8 +351,9 @@ def derive_content_canvas(
     edges = {
         str(spec.get("edge"))
         for ref, spec in zones.items()
-        if ref in components and isinstance(spec, dict) and spec.get("edge")
+        if ref in components and ref not in datum_refs and isinstance(spec, dict) and spec.get("edge")
     }
+    edges.update(group["side"] for group in requirements["groups"])
     horizontal_span = {"left", "right"} <= edges
     vertical_span = {"top", "bottom"} <= edges
     if horizontal_span and not vertical_span:
@@ -356,6 +370,13 @@ def derive_content_canvas(
     side_floor = max(min_side_mm, max_part_dim + 2.0 * axis_margin)
     width = max(width, side_floor)
     height = max(height, side_floor)
+    if requirements["groups"]:
+        width, height = edge_datum_outline_floors(
+            requirements,
+            content_width_mm=width,
+            content_height_mm=height,
+            content_margin_mm=axis_margin,
+        )
 
     return (round(width, 2), round(height, 2))
 

@@ -107,6 +107,22 @@ def test_verify_gate_strand_plus_shorts_still_fails(monkeypatch, tmp_path):
     assert STRAND[0] in gate["reasons"]
 
 
+
+def test_verify_gate_illegal_routed_geometry_is_not_fab_acceptable(monkeypatch, tmp_path):
+    # Clearance/copper-edge violations may leave shorts and ratsnest counts at
+    # zero, but the routed-board safety verdict must still block fab export.
+    _patch_validate(
+        monkeypatch,
+        accepted=False,
+        reasons=["illegal_routed_geometry"],
+    )
+    monkeypatch.setattr(cli_app, "_connector_stranded_refs", lambda _pcb: [])
+    gate = cli_app._verify_routed_board(tmp_path / "board.kicad_pcb")
+    assert gate["ok"] is False
+    assert gate["fab_acceptable"] is False
+
+
+
 def test_verify_gate_passes_clean_board(monkeypatch, tmp_path):
     # Accepted, clean DRC, no stranding -> fab-ready (no regression).
     _patch_validate(monkeypatch, accepted=True)

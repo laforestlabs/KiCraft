@@ -1125,7 +1125,8 @@ def test_stage_commit_bom_accepts_resolvable_footprints(tmp_path, capsys):
 
 
 @_footprints_installed
-def test_bom_partial_deterministic_wiring_defers_full_coverage(tmp_path, capsys):
+@pytest.mark.parametrize("owner", ["recipe", "forged", "unowned"])
+def test_bom_partial_deterministic_wiring_defers_full_coverage(tmp_path, capsys, owner):
     state_path = _commit_chain_through_arch(tmp_path, capsys)
     bom = _valid_bom()
     partial_wiring = {
@@ -1155,6 +1156,19 @@ def test_bom_partial_deterministic_wiring_defers_full_coverage(tmp_path, capsys)
             ],
         }
     ]
+    if owner == "unowned":
+        bom["recipe_ownership"] = []
+    if owner == "forged":
+        bom["recipe_ownership"] = []
+        next(part for part in bom["parts"] if part["ref"] == "U1").update({
+            "resolution_source": "lowerer", "resolution_id": "test-lowerer@1",
+            "lowering_requirement_id": "test", "lowering_role": "device",
+        })
+        bom["lowerer_ownership"] = [{
+            "ref": "U1", "pin": "1", "net": "LOCAL",
+            "owner": "lowerer", "owner_id": "test-lowerer@1",
+            "requirement_id": "test",
+        }]
     bom_slot = _write_slot(tmp_path, "bom", bom)
 
     rc, payload = _run(
@@ -1167,6 +1181,14 @@ def test_bom_partial_deterministic_wiring_defers_full_coverage(tmp_path, capsys)
         str(state_path),
     )
 
+    if owner == "unowned":
+        assert rc == 3
+        assert payload["offenders"] == ["U1.1"]
+        return
+    if owner == "forged":
+        assert rc == 3
+        assert "BOM lowerer connection provenance is not canonical" in payload["errors"]
+        return
     assert rc == 0, payload
     wiring_slot = _write_slot(tmp_path, "wiring", partial_wiring)
     rc, payload = _run(
@@ -1180,6 +1202,76 @@ def test_bom_partial_deterministic_wiring_defers_full_coverage(tmp_path, capsys)
     )
     assert rc == 3
     assert any("9.11 net coverage" in error for error in payload["errors"])
+
+
+@_footprints_installed
+def test_bom_commit_proves_actual_lowerer_against_architecture(tmp_path, capsys):
+    from kicraft.server.stage_work_units import (
+        StageWorkUnit, aggregate_stage_work_units, deterministic_bom_candidate,
+        validate_unit_candidate,
+    )
+
+    state_path = _commit_chain_through_arch(tmp_path, capsys)
+    state = json.loads(state_path.read_text())
+    requirement = {
+        "id": "terminal", "sheet": "MCU", "role": "connector",
+        "family": "screw-terminal", "exact_part": "WJ126V-5.0-02P-14-00A",
+        "parameters": {"rows": 1}, "ports": {"positive": "+3V3", "negative": "GND"},
+        "functional_blocks": ["TERMINAL"],
+    }
+    state["architecture"]["requirements"].append(requirement)
+    state["functional_spec"]["blocks"].append({
+        "name": "TERMINAL", "category": "interface",
+        "purpose": "Expose the 3.3 V rail and ground on a screw terminal.",
+    })
+    state_path.write_text(json.dumps(state))
+    unit = StageWorkUnit("bom-r001", "bom", "MCU", requirement_ids=("terminal",))
+    candidate = deterministic_bom_candidate(unit, state)
+    candidate = validate_unit_candidate(unit, candidate, state, {})
+    lowered, _, _, _, _ = aggregate_stage_work_units(
+        "bom", (unit,), {unit.unit_id: candidate}, state,
+        unit_sources={unit.unit_id: "lowerer"},
+    )
+    bom = _valid_bom()
+    bom["parts"].extend(lowered["parts"])
+    bom["connections"] = lowered["connections"]
+    bom["no_connect_pins"] = lowered["no_connect_pins"]
+    bom["lowerer_ownership"] = lowered["lowerer_ownership"]
+
+    for defect in ("unknown_requirement", "unknown_lowerer", "changed_net"):
+        forged = json.loads(json.dumps(bom))
+        lowerer_parts = [part for part in forged["parts"] if part.get("resolution_source") == "lowerer"]
+        rows = forged["lowerer_ownership"]
+        if defect == "unknown_requirement":
+            for part in lowerer_parts:
+                part["lowering_requirement_id"] = "unknown"
+            for row in rows:
+                row["requirement_id"] = "unknown"
+        elif defect == "unknown_lowerer":
+            for part in lowerer_parts:
+                part["resolution_id"] = "unknown@1"
+            for row in rows:
+                row["owner_id"] = "unknown@1"
+        else:
+            connection = forged["connections"][0]
+            endpoint = connection["endpoints"][0]
+            connection["net_name"] = "FORGED_NET"
+            for row in rows:
+                if (row["ref"], row["pin"]) == (endpoint["ref"], endpoint["pin"]):
+                    row["net"] = "FORGED_NET"
+        slot = _write_slot(tmp_path, "forged_bom", forged)
+        rc, payload = _run(
+            capsys, "stage-commit", "bom", "--slot-file", str(slot),
+            "--no-archive", str(state_path),
+        )
+        assert rc == 3, (defect, payload)
+
+    slot = _write_slot(tmp_path, "actual_lowerer_bom", bom)
+    rc, payload = _run(
+        capsys, "stage-commit", "bom", "--slot-file", str(slot),
+        "--no-archive", str(state_path),
+    )
+    assert rc == 0, payload
 
 
 @_footprints_installed

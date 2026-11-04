@@ -640,3 +640,90 @@ def test_a_pin_bank_is_not_a_pad_field(tmp_path):
     assert proto["pad_grid"]["pads"] == 0
     assert proto["pad_grid"]["holes"] == 0
     assert gate == "fail"
+
+
+def _external_contract(*gates):
+    return {
+        "slug": "external-brief",
+        "obligations": [
+            {"id": gate, "check": {"kind": "gate", "gate": gate}}
+            for gate in gates
+        ],
+    }
+
+
+@pytest.mark.parametrize(("width", "expected"), [(99.5, "pass"), (100.0, "fail"), (100.5, "fail")])
+def test_external_size_uses_closed_cut_centreline_and_strict_bound(tmp_path, width, expected):
+    path = tmp_path / "dimensions.kicad_pcb"
+    board = _board(path, width=width)
+    for drawing in board.GetDrawings():
+        drawing.SetWidth(_MM(2.0))
+    board.SetCopperLayerCount(4)
+    pcbnew.SaveBoard(str(path), board)
+    facts = gae.extract_geometry_facts(
+        tmp_path, {"architecture": {"copper_layers": 2}}, pcbnew.LoadBoard(str(path)),
+        _external_contract("external_board_size_under_100x100_mm"),
+    )
+    assert facts["board_width_mm"] == pytest.approx(width)
+    assert facts["gates"]["external_board_size_under_100x100_mm"] == expected
+    assert facts["gates"]["external_four_layer_stackup"] == "pass"
+    assert facts["gates"]["external_two_layer_stackup"] == "fail"
+
+
+def test_open_outline_is_not_a_measured_board_size(tmp_path):
+    path = tmp_path / "open.kicad_pcb"
+    board = _board(path)
+    board.Remove(next(iter(board.GetDrawings())))
+    pcbnew.SaveBoard(str(path), board)
+    facts = gae.extract_geometry_facts(
+        tmp_path, {}, pcbnew.LoadBoard(str(path)),
+        _external_contract("external_board_size_under_100x100_mm"),
+    )
+    assert facts["gates"]["geometry"] == "fail"
+    assert facts["gates"]["external_board_size_under_100x100_mm"] == "fail"
+    assert "board_width_mm" not in facts
+
+
+def test_one_edge_checks_all_real_connectors_not_reference_text(tmp_path):
+    path = tmp_path / "connectors.kicad_pcb"
+    board = _board(path, width=60.0, height=40.0)
+    library = "screw-terminal-5mm-2p"
+    item = "CONN-TH_WJ126V-5.0-2P"
+    folder = Path(__file__).resolve().parents[1] / "kicraft" / "parts_library" / library / f"{library}.pretty"
+    parts = []
+    footprints = []
+    for index, ref in enumerate(("J1", "J2")):
+        fp = pcbnew.FootprintLoad(str(folder), item)
+        fp.SetReference(ref)
+        fp.SetFPID(pcbnew.LIB_ID(library, item))
+        bounds = fp.GetBoundingBox(False, False)
+        fp.SetPosition(pcbnew.VECTOR2I(
+            _MM(5 + 25 * index) - bounds.GetLeft(), _MM(0.25) - bounds.GetTop(),
+        ))
+        board.Add(fp)
+        footprints.append(fp)
+        parts.append({
+            "ref": ref, "mpn": "WJ126V-5.0-02P-14-00A",
+            "symbol": f"{library}:WJ126V-5.0-2P", "footprint": f"{library}:{item}",
+        })
+    state = {"bom": {"parts": parts}}
+    contract = _external_contract("external_all_connectors_one_edge")
+
+    def observe():
+        pcbnew.SaveBoard(str(path), board)
+        return gae.extract_geometry_facts(tmp_path, state, pcbnew.LoadBoard(str(path)), contract)
+
+    assert observe()["gates"]["external_all_connectors_one_edge"] == "pass"
+    moved = footprints[1]
+    original = pcbnew.VECTOR2I(moved.GetPosition())
+    bounds = moved.GetBoundingBox(False, False)
+    moved.SetPosition(moved.GetPosition() + pcbnew.VECTOR2I(0, _MM(39.75) - bounds.GetBottom()))
+    moved.Reference().SetPosition(pcbnew.VECTOR2I(_MM(30), _MM(0)))
+    assert observe()["gates"]["external_all_connectors_one_edge"] == "fail"
+
+    moved.SetPosition(original)
+    unknown = _footprint(board, "J3", "unknown:UnreviewedConnector", (30, 20))
+    _pth_pad(unknown, "1", (30, 20))
+    facts = observe()
+    assert "external_all_connectors_one_edge" not in facts["gates"]
+    assert facts["external_connector_geometry"]["unclassified_refs"] == ["J3"]

@@ -1000,11 +1000,25 @@ def _compute_final_outline(
     barrel_sides = {
         "left": False, "right": False, "top": False, "bottom": False,
     }
+    # A footprint-owned antenna rule area deliberately projects beyond the
+    # body-facing support line. Unlike a phantom page-frame anchor, that
+    # overhang has a bounded, transformed-source geometry witness.
+    antenna_overhang_mm = {"left": 0.0, "right": 0.0, "top": 0.0, "bottom": 0.0}
     for c in constraints:
         if c.target == "edge":
             edge_constrained_sides[c.value] = True
             if getattr(c, "barrel_overhang", False) and c.value in barrel_sides:
                 barrel_sides[c.value] = True
+            intent = getattr(c, "antenna_intent", None)
+            if (getattr(c, "anchor_kind", None) == "antenna" and intent is not None
+                    and c.ref in anchor_positions and intent.local_polygon
+                    and c.value in antenna_overhang_mm):
+                axis = "x" if intent.local_direction in ("left", "right") else "y"
+                coords = [getattr(point, axis) for point in intent.local_polygon]
+                anchor = getattr(intent.local_anchor_midpoint, axis)
+                overhang = (anchor - min(coords) if intent.local_direction in ("left", "top")
+                            else max(coords) - anchor)
+                antenna_overhang_mm[c.value] = max(antenna_overhang_mm[c.value], overhang)
         elif c.target == "corner":
             for side in c.value.split("-"):
                 if side in corner_constrained_sides:
@@ -1041,6 +1055,8 @@ def _compute_final_outline(
             # Pad-anchored long-barrel connector: trust the anchor (the barrel
             # overhangs by design, so c_val is meant to sit inboard of g_val).
             return c_val
+        if antenna_overhang_mm[side] > 0 and 0 <= c_val - g_val <= antenna_overhang_mm[side] + 0.2:
+            return c_val
         if edge_constrained_sides[side]:
             if abs(c_val - g_val) > anchor_slack_mm:
                 print(
@@ -1060,6 +1076,8 @@ def _compute_final_outline(
             # Pad-anchored long-barrel connector: trust the anchor (the barrel
             # overhangs by design, so the board edge c_val sits inboard of the
             # placed geometry edge g_val at the barrel tip).
+            return c_val
+        if antenna_overhang_mm[side] > 0 and 0 <= g_val - c_val <= antenna_overhang_mm[side] + 0.2:
             return c_val
         if edge_constrained_sides[side]:
             if abs(c_val - g_val) > anchor_slack_mm:

@@ -158,3 +158,19 @@ def test_repair_rebuilds_courtyard_around_pads_and_body(tmp_path):
 
     # Idempotent: a repaired courtyard is no longer malformed.
     assert repair_malformed_courtyard(fp2) is False
+
+
+def test_amphenol_68000_uart_header_manufacturer_drill_and_pitch():
+    lib = Path(__file__).resolve().parents[1] / "kicraft/parts_library/amphenol-68000-406hlf/amphenol-68000-406hlf.pretty"
+    fp = pcbnew.FootprintLoad(str(lib), "HDR-TH_6P-P2.54-V-M-1")
+    assert fp is not None
+    pads = sorted(fp.Pads(), key=lambda pad: int(pad.GetNumber()))
+    assert [pad.GetNumber() for pad in pads] == list("123456")
+    assert all(pad.GetAttribute() == pcbnew.PAD_ATTRIB_PTH for pad in pads)
+    assert all(pcbnew.ToMM(pad.GetDrillSize().x) == pytest.approx(1.02, abs=1e-3) for pad in pads)
+    assert all(pcbnew.ToMM(pad.GetDrillSize().y) == pytest.approx(1.02, abs=1e-3) for pad in pads)
+    assert all((pcbnew.ToMM(pad.GetSize().x) - 1.02) / 2 >= 0.389 for pad in pads)
+    x = [pcbnew.ToMM(pad.GetPosition().x) for pad in pads]
+    y = [pcbnew.ToMM(pad.GetPosition().y) for pad in pads]
+    assert all(y[i] == pytest.approx(y[0], abs=1e-3) for i in range(6))
+    assert all(x[i + 1] - x[i] == pytest.approx(2.54, abs=1e-3) for i in range(5))

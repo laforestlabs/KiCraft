@@ -10,6 +10,9 @@ an outline that already encloses everything.
 from __future__ import annotations
 
 from types import SimpleNamespace
+import struct
+
+import pytest
 
 from kicraft.autoplacer.brain.types import (
     BoardState,
@@ -116,6 +119,24 @@ def test_edge_connector_body_overhang_does_not_grow_outline():
     # Body overhang to x=-4 is exempt; pad at x=3 is already inside -> no grow.
     assert result["repaired"] is False
     assert bs.board_outline[0].x == 0.0
+
+
+def test_rf_edge_overhang_preserves_anchor_but_not_outboard_copper():
+    owner = _comp("U1", 30, 2.9, 13.29, 16.69,
+                  pads=[_pad("U1", 30, 0.7, w=0.4, h=0.8)], kind="ic")
+    nearby = _comp("C1", 22, 2.57, 1.91, 1.01,
+                   pads=[_pad("C1", 22, 2.57, w=0.56, h=0.62)])
+    board = BoardState(components={"U1": owner, "C1": nearby},
+                       board_outline=(Point(0, 0), Point(75, 75)))
+    state = _state(board, edge_refs={"U1"}, connector_sides={"top"})
+    _repair_parent_outline(state, margin_mm=2.0, pad_edge_clearance_mm=0.2)
+    assert board.board_outline[0].y == pytest.approx(0.0)
+    assert _validate_parent_geometry(state)["accepted"]
+
+    # Real copper at the line is not covered by the antenna-body exemption.
+    owner.pads[0].pos.y = 0.2
+    _repair_parent_outline(state, margin_mm=2.0, pad_edge_clearance_mm=0.2)
+    assert board.board_outline[0].y == pytest.approx(-0.4)
 
 
 def test_connector_edge_not_buried_by_inboard_neighbor():
@@ -226,6 +247,53 @@ def test_manual_outline_is_authoritative_no_grow_and_loud_validation():
     assert "authoritative" in result["reason"]
     assert bs.board_outline == (Point(0.0, 0.0), Point(10.0, 10.0))
     assert _validate_parent_geometry(state)["accepted"] is False
+
+
+@pytest.mark.parametrize("authority", ["manual", "standard"])
+def test_compacted_castellated_leaf_cannot_grow_authoritative_parent(authority):
+    # The leaf's terminals have moved to the edges of its smaller local
+    # outline; an unrelated ordinary component now extends beyond the parent.
+    left = _comp("E1", 0.0, 5.0, 1.0, 1.0, [_pad("E1", 0.0, 5.0)])
+    right = _comp("E2", 8.0, 5.0, 1.0, 1.0, [_pad("E2", 8.0, 5.0)])
+    bs = BoardState(
+        components={"E1": left, "E2": right, "U1": _comp("U1", 12.0, 5.0, 4.0, 4.0)},
+        board_outline=(Point(0.0, 0.0), Point(10.0, 10.0)),
+    )
+    manual = {"shape": "rect", "min": {"x": 0.0, "y": 0.0},
+              "max": {"x": 10.0, "y": 10.0}}
+    state = _state(bs, manual_outline=manual if authority == "manual" else None)
+    state.outline_authoritative = authority == "standard"
+    state.fabricated_edge_refs = frozenset({"E1", "E2"})
+    # Simulate the leaf's changed/compacted geometry rather than a stale seed.
+    right.pos = Point(6.0, 5.0)
+    right.body_center = Point(6.0, 5.0)
+    right.pads[0].pos = Point(6.0, 5.0)
+
+    def outline_bytes():
+        tl, br = bs.board_outline
+        return struct.pack("!4d", tl.x, tl.y, br.x, br.y)
+
+    before = outline_bytes()
+    result = _repair_parent_outline(state, margin_mm=2.0)
+    assert not result["repaired"]
+    assert outline_bytes() == before
+    validation = _validate_parent_geometry(state)
+    assert not validation["accepted"]
+    assert {item["ref"] for item in validation["outside_components"]} == {"U1"}
+    assert outline_bytes() == before
+
+
+def test_advisory_requested_shape_does_not_make_outline_authoritative():
+    bs = BoardState(
+        components={"U1": _comp("U1", 12.0, 5.0, 4.0, 4.0)},
+        board_outline=(Point(0.0, 0.0), Point(10.0, 10.0)),
+    )
+    state = _state(bs)
+    state.requested_shape = {"shape": "rect", "width_mm": 10.0, "height_mm": 10.0}
+    state.outline_authoritative = False
+    assert _repair_parent_outline(state, margin_mm=2.0)["repaired"]
+    assert bs.board_outline[1].x > 10.0
+    assert _validate_parent_geometry(state)["accepted"]
 
 
 def test_manual_circle_outline_flags_geometry_in_aabb_corner():

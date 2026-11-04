@@ -8,6 +8,7 @@ or directly from this module in new code.
 from __future__ import annotations
 
 import copy
+import json
 import math
 import os
 import random
@@ -108,6 +109,10 @@ from .types import (
     opening_rotation_for_edge,
 )
 
+# One picometre in mm: suppress binary round-off only, far below KiCad's
+# one-nanometre internal coordinate quantum and any physical design rule.
+_PAD_INSET_ROUNDOFF_MM = 1e-9
+
 
 _DIRECTION_VECTORS = {
     "left": Point(-1.0, 0.0),
@@ -192,6 +197,11 @@ class PlacementSolver:
         # Effective config is solver-local: inferred antenna defaults never
         # mutate the caller's project config.
         self.cfg = copy.deepcopy(config or {})
+        self._local_bypass_group_by_ref = {
+            ref: spec["owner_ref"]
+            for spec in self.cfg.get("local_bypasses", [])
+            for ref in (spec["owner_ref"], spec["bypass_ref"])
+        }
         self._antenna_intents_by_ref = {
             intent.owner_ref: intent for intent in state.antenna_edge_intents
         }
@@ -500,6 +510,11 @@ class PlacementSolver:
         # the SA phase that consumes best_comps as its input.
         _record_placed_extent(phase_t, "solve_force_loop", best_comps)
 
+        # Reserve mandatory owned supply groups before the passive grid spends
+        # their pin-adjacent space. The normal legalizers then move unowned
+        # components around these locked, courtyard-legal groups.
+        self._reserve_local_bypasses(best_comps)
+
         # Discrete anchor-relative grid (connectivity-first) is the leaf placement
         # path: with the anchors placed, derive pin-adjacent slots from their pad
         # geometry so SA becomes *assignment* (which passive -> which slot) rather
@@ -520,6 +535,18 @@ class PlacementSolver:
                 (tl, br)
                 for tl, br, _owner in _resolved_keepout_rects(self.state.keepout_rects, best_comps)
             ]
+            # Grid's ordinary obstacle cull rejects courtyard overlap but
+            # does not reserve the solver's legality gap. Preserve that gap
+            # around the owned groups through the final grid re-snap.
+            reserved_gap = max(
+                self.legality_clearance,
+                float(self.cfg.get("courtyard_overlap_min_gap_mm", 0.15)),
+            )
+            keepouts.extend(
+                c.physical_bbox(reserved_gap)
+                for ref, c in best_comps.items()
+                if ref in self._local_bypass_group_by_ref and c.locked
+            )
             grid = build_anchor_grid(
                 best_comps,
                 board_outline=self.state.board_outline,
@@ -864,6 +891,10 @@ class PlacementSolver:
         # invariant. Restore their exact drill datums after every generic clamp
         # and courtyard pass; no subsequent geometry pass may move them.
         self._restore_fabricated_edge_interfaces(best_comps)
+        # A compiler-owned bypass must survive every legalization and grid
+        # operation. Never hand an unsatisfied local pair to the router.
+        self._place_local_bypasses(best_comps)
+
 
         # Final score
         work_state.components = best_comps
@@ -876,6 +907,468 @@ class PlacementSolver:
         )
 
         return best_comps
+
+    def _place_local_bypasses(self, comps: dict[str, Component], *, reserve: bool = False) -> None:
+        """Place owned supply capacitors jointly, or refuse an infeasible leaf.
+
+        Both pad-center distances are checked against the actual owner's power
+        pad and a reviewed same-net ground pad. Search retains the existing
+        legality/courtyard gaps, edge margin and keepouts.
+        """
+        groups: dict[str, list[dict]] = {}
+        for spec in self.cfg.get("local_bypasses", []):
+            owner_ref, cap_ref = spec["owner_ref"], spec["bypass_ref"]
+            if owner_ref not in comps and cap_ref not in comps:
+                continue
+            if owner_ref not in comps or cap_ref not in comps:
+                raise ValueError(f"local bypass {owner_ref}/{cap_ref} split across leaves")
+            groups.setdefault(owner_ref, []).append(spec)
+        gap = max(self.legality_clearance,
+                  float(self.cfg.get("courtyard_overlap_min_gap_mm", 0.15)))
+
+
+        for owner_ref, specs in groups.items():
+            owner = comps[owner_ref]
+            owner_pads = {p.pad_id: p for p in owner.pads}
+            cap_refs = {s["bypass_ref"] for s in specs}
+            if len(cap_refs) != len(specs):
+                raise ValueError(f"{owner_ref}: duplicate local bypass ownership")
+            def obstacle(ref, component):
+                return (not reserve or ref == owner_ref or ref in cap_refs
+                        or self._locality_fixed(ref, component))
+
+            def overlaps(a, b):
+                if _blocker_pair_compatible(a, b) and _back_courtyard(a) != _back_courtyard(b):
+                    return False
+                # Ordinary locked obstacles must also survive the solver's
+                # broader separation heuristic; the owned group is already
+                # checked against its actual legality/courtyard gap.
+                pair_gap = (max(gap, self.clearance)
+                            if reserve and b.ref != owner_ref and b.ref not in cap_refs
+                            else gap)
+                at, ab = _effective_bbox(a, pair_gap / 2)
+                bt, bb = _effective_bbox(b, pair_gap / 2)
+                ox, oy = _bbox_overlap_xy(at, ab, bt, bb)
+                return ox > 0 and oy > 0
+            # Most calls are post-legalization rechecks of an already placed
+            # group. Avoid enumerating thousands of candidate grid positions.
+            def current_is_valid(spec):
+                cap = comps[spec["bypass_ref"]]
+                cp = {p.pad_id: p for p in cap.pads}
+                po, pc = spec["power_pins"]
+                go, gc = spec["ground_pins"]
+                grounds = [go] if isinstance(go, str) else list(go)
+                if (po not in owner_pads or pc not in cp or gc not in cp or not grounds
+                        or any(g not in owner_pads for g in grounds)):
+                    return False
+                if (not cp[pc].net or cp[pc].net != owner_pads[po].net
+                        or not cp[gc].net
+                        or any(owner_pads[g].net != cp[gc].net for g in grounds)):
+                    return False
+                if (owner_pads[po].pos.dist(cp[pc].pos) > float(spec["max_distance_mm"])
+                        or min(owner_pads[g].pos.dist(cp[gc].pos) for g in grounds)
+                        > float(spec["max_distance_mm"])):
+                    return False
+                tl, br = cap.physical_bbox()
+                bt, bb = self.state.board_outline
+                if (tl.x < bt.x + self.edge_margin or tl.y < bt.y + self.edge_margin
+                        or br.x > bb.x - self.edge_margin or br.y > bb.y - self.edge_margin):
+                    return False
+                if any(overlaps(cap, other) for ref, other in comps.items()
+                       if ref != cap.ref and obstacle(ref, other)):
+                    return False
+                for keepout in getattr(self.state, "keepout_rects", None) or []:
+                    if keepout.owner_ref != cap.ref:
+                        kt, kb = self._keepout_rect_now(keepout, comps)
+                        ox, oy = _bbox_overlap_xy(tl, br, kt, kb)
+                        if ox > 0 and oy > 0:
+                            return False
+                for entry in self.cfg.get("parent_keep_in_rects", []):
+                    protected = comps.get(entry.get("ref"))
+                    if protected is not None and protected.ref != cap.ref:
+                        kt, kb = protected.bbox(float(entry.get("margin_mm", 0.0)))
+                        ox, oy = _bbox_overlap_xy(tl, br, kt, kb)
+                        if ox > 0 and oy > 0:
+                            return False
+                return True
+
+            if all(current_is_valid(spec) for spec in specs):
+                continue
+            options = []
+            for spec in specs:
+                cap_ref = spec["bypass_ref"]
+                cap = comps[cap_ref]
+                power_owner, power_cap = spec["power_pins"]
+                ground_owner, ground_cap = spec["ground_pins"]
+                grounds = [ground_owner] if isinstance(ground_owner, str) else list(ground_owner)
+                cap_pads = {p.pad_id: p for p in cap.pads}
+                if (power_owner not in owner_pads or not grounds
+                        or any(pin not in owner_pads for pin in grounds)
+                        or power_cap not in cap_pads or ground_cap not in cap_pads):
+                    raise ValueError(f"local bypass {owner_ref}/{cap_ref} missing pads")
+                if (not owner_pads[power_owner].net
+                        or owner_pads[power_owner].net != cap_pads[power_cap].net
+                        or not cap_pads[ground_cap].net
+                        or any(owner_pads[p].net != cap_pads[ground_cap].net for p in grounds)):
+                    raise ValueError(f"local bypass {owner_ref}/{cap_ref} has mismatched nets")
+                limit = float(spec["max_distance_mm"])
+
+                def distances(candidate):
+                    pads = {p.pad_id: p for p in candidate.pads}
+                    return (owner_pads[power_owner].pos.dist(pads[power_cap].pos),
+                            min(owner_pads[p].pos.dist(pads[ground_cap].pos) for p in grounds))
+
+                def legal(candidate):
+                    tl, br = candidate.physical_bbox()
+                    board_tl, board_br = self.state.board_outline
+                    margin = self.edge_margin
+                    if (tl.x < board_tl.x + margin or tl.y < board_tl.y + margin
+                            or br.x > board_br.x - margin or br.y > board_br.y - margin):
+                        return False
+                    if any(overlaps(candidate, other) for ref, other in comps.items()
+                           if ref not in cap_refs and obstacle(ref, other)):
+                        return False
+                    for keepout in getattr(self.state, "keepout_rects", None) or []:
+                        if keepout.owner_ref != cap_ref:
+                            kt, kb = self._keepout_rect_now(keepout, comps)
+                            ox, oy = _bbox_overlap_xy(tl, br, kt, kb)
+                            if ox > 0 and oy > 0:
+                                return False
+                    for entry in self.cfg.get("parent_keep_in_rects", []):
+                        protected = comps.get(entry.get("ref"))
+                        if protected is not None and protected.ref != cap_ref:
+                            kt, kb = protected.bbox(float(entry.get("margin_mm", 0.0)))
+                            ox, oy = _bbox_overlap_xy(tl, br, kt, kb)
+                            if ox > 0 and oy > 0:
+                                return False
+                    return True
+
+                candidates = []
+                if max(distances(cap)) <= limit and legal(cap):
+                    candidates.append(((max(distances(cap)), sum(distances(cap)), 0), copy.deepcopy(cap)))
+                fixed = self._locality_fixed(cap_ref, cap)
+                if not fixed:
+                    anchor = owner_pads[power_owner].pos
+                    steps = math.ceil(limit / 0.1)
+                    for delta in (0, 90, 180, 270):
+                        candidate = copy.deepcopy(cap)
+                        rotate_component_in_place(candidate, delta)
+                        if candidate.allowed_rotations and not any(
+                            abs((candidate.rotation - angle + 180) % 360 - 180) < 1e-6
+                            for angle in candidate.allowed_rotations
+                        ):
+                            continue
+                        cp = next(p for p in candidate.pads if p.pad_id == power_cap)
+                        offset = Point(cp.pos.x - candidate.pos.x, cp.pos.y - candidate.pos.y)
+                        for ix in range(-steps, steps + 1):
+                            for iy in range(-steps, steps + 1):
+                                if math.hypot(ix * 0.1, iy * 0.1) > limit:
+                                    continue
+                                old = Point(candidate.pos.x, candidate.pos.y)
+                                candidate.pos = Point(anchor.x + ix * 0.1 - offset.x,
+                                                      anchor.y + iy * 0.1 - offset.y)
+                                _update_pad_positions(candidate, old, candidate.rotation)
+                                ds = distances(candidate)
+                                if max(ds) <= limit and legal(candidate):
+                                    score = (max(ds), sum(ds), cap.pos.dist(candidate.pos))
+                                    candidates.append((score, copy.deepcopy(candidate)))
+                if not candidates:
+                    ds = distances(cap)
+
+                    def box(rect):
+                        tl, br = rect
+                        return [tl.x, tl.y, br.x, br.y]
+
+                    def component_evidence(component):
+                        return {
+                            "ref": component.ref, "locked": component.locked,
+                            "zone": (self.cfg.get("component_zones") or {}).get(component.ref),
+                            "pinned": component.ref in getattr(self, "_pinned_targets", {}),
+                            "fabricated_edge": component.ref in getattr(self, "_fabricated_edge_refs", set()),
+                            "antenna_edge": component.ref in self._antenna_intents_by_ref,
+                            "position_mm": [component.pos.x, component.pos.y],
+                            "rotation_deg": component.rotation,
+                            "layer": str(component.layer),
+                            "courtyard_bbox_mm": box(component.bbox()),
+                            "physical_bbox_mm": box(component.physical_bbox()),
+                            "pads": [
+                                {"pin": p.pad_id, "net": p.net, "xy_mm": [p.pos.x, p.pos.y],
+                                 "bbox_mm": box(p.bbox())} for p in component.pads
+                            ],
+                        }
+
+                    ctl, cbr = cap.physical_bbox()
+                    blockers = [
+                        component_evidence(other) for ref, other in comps.items()
+                        if ref not in cap_refs and obstacle(ref, other) and overlaps(cap, other)
+                    ]
+                    keepout_blockers = []
+                    for keepout in getattr(self.state, "keepout_rects", None) or []:
+                        if keepout.owner_ref != cap_ref:
+                            kt, kb = self._keepout_rect_now(keepout, comps)
+                            ox, oy = _bbox_overlap_xy(ctl, cbr, kt, kb)
+                            if ox > 0 and oy > 0:
+                                keepout_blockers.append({
+                                    "owner_ref": keepout.owner_ref,
+                                    "bbox_mm": box((kt, kb)),
+                                })
+                    keepin_blockers = []
+                    for entry in self.cfg.get("parent_keep_in_rects", []):
+                        protected = comps.get(entry.get("ref"))
+                        if protected is not None and protected.ref != cap_ref:
+                            kt, kb = protected.bbox(float(entry.get("margin_mm", 0.0)))
+                            ox, oy = _bbox_overlap_xy(ctl, cbr, kt, kb)
+                            if ox > 0 and oy > 0:
+                                keepin_blockers.append({"ref": protected.ref, "bbox_mm": box((kt, kb))})
+                    evidence = {
+                        "reserve": reserve, "fixed": fixed, "owner": component_evidence(owner),
+                        "cap": component_evidence(cap), "power_pins": [power_owner, power_cap],
+                        "ground_pins": [grounds, ground_cap], "power_distance_mm": ds[0],
+                        "ground_distance_mm": ds[1], "max_distance_mm": limit,
+                        "board_bbox_mm": box(self.state.board_outline), "edge_margin_mm": self.edge_margin,
+                        "legality_gap_mm": gap, "blockers": blockers,
+                        "keepout_blockers": keepout_blockers, "keepin_blockers": keepin_blockers,
+                    }
+                    raise ValueError(
+                        f"local bypass {owner_ref}/{cap_ref}: no legal placement within "
+                        f"{limit:g} mm of both owned pads; evidence="
+                        + json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+                    )
+                candidates.sort(key=lambda row: row[0])
+                options.append((cap_ref, candidates))
+
+            # Do not greedily take the best slot for the first capacitor: it
+            # can block every legal slot for the second on the same IC.
+            options.sort(key=lambda row: len(row[1]))
+            chosen: list[tuple[str, Component]] = []
+
+            def assign(index):
+                if index == len(options):
+                    return True
+                ref, candidates = options[index]
+                for _, candidate in candidates:
+                    if any(overlaps(candidate, other) for _, other in chosen):
+                        continue
+                    chosen.append((ref, candidate))
+                    if assign(index + 1):
+                        return True
+                    chosen.pop()
+                return False
+
+            if not assign(0):
+                # These are the complete independently legal candidate sets,
+                # not a claim that either cap alone can represent the pair.
+                geometry = []
+                for ref, candidates in options:
+                    components = [candidate for _, candidate in candidates]
+                    geometry.append({
+                        "ref": ref, "count": len(components),
+                        "x_range_mm": [min(c.pos.x for c in components),
+                                       max(c.pos.x for c in components)],
+                        "y_range_mm": [min(c.pos.y for c in components),
+                                       max(c.pos.y for c in components)],
+                        "rotations_deg": sorted({c.rotation for c in components}),
+                        "courtyard_sizes_mm": sorted({
+                            (c.width_mm, c.height_mm) for c in components
+                        }),
+                    })
+                raise ValueError(
+                    f"local bypasses for {owner_ref}: no joint legal placement; "
+                    "joint_evidence=" + json.dumps(
+                        {"owner_ref": owner_ref, "gap_mm": gap, "specs": specs,
+                         "candidate_geometry": geometry},
+                        sort_keys=True, separators=(",", ":"),
+                    )
+                )
+            for ref, component in chosen:
+                comps[ref] = component
+
+    def _locality_fixed(self, ref: str, component: Component) -> bool:
+        """Explicit/pinned geometry must never be moved to satisfy locality."""
+        return (component.locked or ref in (self.cfg.get("component_zones") or {})
+                or ref in getattr(self, "_fabricated_edge_refs", set())
+                or ref in self._antenna_intents_by_ref
+                or ref in getattr(self, "_pinned_targets", {}))
+
+    def _reserve_local_bypasses(self, comps: dict[str, Component]) -> None:
+        """Reserve complete owned groups before unowned parts are packed.
+
+        Movable unrelated parts are not obstacles yet: the existing overlap
+        legalizer moves them around the reserved groups. Authored zones, locked
+        parts, board edges and keepouts remain hard constraints. If necessary,
+        search alternative owner positions on the existing board outline.
+        """
+        original = self.cfg.get("local_bypasses", [])
+        groups: dict[str, list[dict]] = {}
+        for spec in original:
+            owner, cap = spec["owner_ref"], spec["bypass_ref"]
+            if owner not in comps and cap not in comps:
+                continue
+            if owner not in comps or cap not in comps:
+                raise ValueError(f"local bypass {owner}/{cap} split across leaves")
+            groups.setdefault(owner, []).append(spec)
+        self._local_bypass_group_by_ref = {
+            ref: owner for owner, specs in groups.items()
+            for ref in (owner, *(spec["bypass_ref"] for spec in specs))
+        }
+        board_tl, board_br = self.state.board_outline
+        try:
+            for owner_ref, specs in groups.items():
+                self.cfg["local_bypasses"] = specs
+                owner = comps[owner_ref]
+                original_pos = Point(owner.pos.x, owner.pos.y)
+                fixed = self._locality_fixed(owner_ref, owner)
+                offsets = [(0.0, 0.0)]
+                if not fixed:
+                    nx = math.ceil(board_br.x - board_tl.x)
+                    ny = math.ceil(board_br.y - board_tl.y)
+                    offsets += sorted(
+                        ((float(x), float(y)) for x in range(-nx, nx + 1)
+                         for y in range(-ny, ny + 1) if x or y),
+                        key=lambda xy: (xy[0] * xy[0] + xy[1] * xy[1], xy),
+                    )
+                failure = None
+                failure_reason = "owner_blocked"
+                failure_blocker = None
+                for dx, dy in offsets:
+                    old = Point(owner.pos.x, owner.pos.y)
+                    owner.pos = Point(original_pos.x + dx, original_pos.y + dy)
+                    _update_pad_positions(owner, old, owner.rotation)
+                    tl, br = owner.physical_bbox()
+                    margin = self.edge_margin
+                    if owner_ref in self._antenna_intents_by_ref:
+                        # The antenna's physical body intentionally overhangs
+                        # Edge.Cuts. Its copper pads, not its body AABB, must
+                        # remain inside the solver's established pad inset.
+                        inset = float(self.cfg.get("pad_inset_margin_mm", 0.3))
+                        if any(pt.x < board_tl.x + inset - _PAD_INSET_ROUNDOFF_MM
+                               or pt.y < board_tl.y + inset - _PAD_INSET_ROUNDOFF_MM
+                               or pb.x > board_br.x - inset + _PAD_INSET_ROUNDOFF_MM
+                               or pb.y > board_br.y - inset + _PAD_INSET_ROUNDOFF_MM
+                               for pt, pb in (pad.bbox() for pad in owner.pads)):
+                            failure_reason = "antenna_pad_inset"
+                            continue
+                    elif owner_ref not in getattr(self, "_fabricated_edge_refs", set()):
+                        if (tl.x < board_tl.x + margin or tl.y < board_tl.y + margin
+                                or br.x > board_br.x - margin or br.y > board_br.y - margin):
+                            failure_reason = "owner_board_margin"
+                            continue
+                    owner_tl, owner_br = _effective_bbox(owner, self.clearance / 2)
+                    blocked = False
+                    for ref, other in comps.items():
+                        if ref == owner_ref or not self._locality_fixed(ref, other):
+                            continue
+                        if ref in {spec["bypass_ref"] for spec in specs}:
+                            continue
+                        if (_blocker_pair_compatible(owner, other)
+                                and _back_courtyard(owner) != _back_courtyard(other)):
+                            continue
+                        ot, ob = _effective_bbox(other, self.clearance / 2)
+                        ox, oy = _bbox_overlap_xy(owner_tl, owner_br, ot, ob)
+                        if ox > 0 and oy > 0:
+                            failure_reason = "fixed_component_overlap"
+                            failure_blocker = ref
+                            blocked = True
+                            break
+                    if blocked:
+                        continue
+                    for keepout in getattr(self.state, "keepout_rects", None) or []:
+                        if keepout.owner_ref != owner_ref:
+                            kt, kb = self._keepout_rect_now(keepout, comps)
+                            ox, oy = _bbox_overlap_xy(tl, br, kt, kb)
+                            if ox > 0 and oy > 0:
+                                blocked = True
+                                failure_reason = "keepout_overlap"
+                                failure_blocker = keepout.owner_ref
+                                break
+                    if blocked:
+                        continue
+                    for entry in self.cfg.get("parent_keep_in_rects", []):
+                        protected = comps.get(entry.get("ref"))
+                        if protected is not None and protected.ref != owner_ref:
+                            kt, kb = protected.bbox(float(entry.get("margin_mm", 0.0)))
+                            ox, oy = _bbox_overlap_xy(tl, br, kt, kb)
+                            if ox > 0 and oy > 0:
+                                blocked = True
+                                failure_reason = "keepin_overlap"
+                                failure_blocker = protected.ref
+                                break
+                    if blocked:
+                        continue
+                    try:
+                        self._place_local_bypasses(comps, reserve=True)
+                    except ValueError as exc:
+                        if "no legal placement" not in str(exc) and "no joint legal placement" not in str(exc):
+                            raise
+                        failure = exc
+                        continue
+                    for ref in (owner_ref, *(spec["bypass_ref"] for spec in specs)):
+                        comps[ref].locked = True
+                    break
+                else:
+                    def box(rect):
+                        low, high = rect
+                        return [low.x, low.y, high.x, high.y]
+
+                    intent = self._antenna_intents_by_ref.get(owner_ref)
+                    inset = float(self.cfg.get("pad_inset_margin_mm", 0.3))
+                    owner_evidence = {
+                        "reason": failure_reason, "blocker_ref": failure_blocker,
+                        "fixed": fixed, "locked": owner.locked,
+                        "zone": (self.cfg.get("component_zones") or {}).get(owner_ref),
+                        "pinned_target": (
+                            [target.x, target.y]
+                            if (target := getattr(self, "_pinned_targets", {}).get(owner_ref))
+                            is not None else None
+                        ),
+                        "fabricated_edge": owner_ref in getattr(self, "_fabricated_edge_refs", set()),
+                        "position_mm": [owner.pos.x, owner.pos.y], "rotation_deg": owner.rotation,
+                        "courtyard_bbox_mm": box(owner.bbox()),
+                        "physical_bbox_mm": box(owner.physical_bbox()),
+                        "board_bbox_mm": box(self.state.board_outline),
+                        "pad_inset_mm": inset, "edge_margin_mm": self.edge_margin,
+                        "placement_clearance_mm": self.clearance,
+                        "pads": [
+                            {"pin": p.pad_id, "net": p.net, "xy_mm": [p.pos.x, p.pos.y],
+                             "bbox_mm": box(p.bbox())} for p in owner.pads
+                        ],
+                        "antenna_intent": None if intent is None else {
+                            "target_edge": intent.target_edge,
+                            "local_direction": intent.local_direction,
+                            "local_anchor_mm": intent.local_anchor_mm,
+                            "local_anchor_midpoint_mm": [
+                                intent.local_anchor_midpoint.x, intent.local_anchor_midpoint.y,
+                            ],
+                            "inset_mm": intent.inset_mm,
+                            "world_anchor_offset_mm": [
+                                antenna_anchor_offset(intent, owner).x,
+                                antenna_anchor_offset(intent, owner).y,
+                            ],
+                        },
+                        "keepouts": [
+                            {"owner_ref": k.owner_ref, "bbox_mm": box(self._keepout_rect_now(k, comps))}
+                            for k in (getattr(self.state, "keepout_rects", None) or [])
+                        ],
+                    }
+                    if failure_blocker in comps:
+                        other = comps[failure_blocker]
+                        owner_evidence["blocker"] = {
+                            "ref": other.ref, "locked": other.locked,
+                            "zone": (self.cfg.get("component_zones") or {}).get(other.ref),
+                            "position_mm": [other.pos.x, other.pos.y],
+                            "courtyard_bbox_mm": box(other.bbox()),
+                            "physical_bbox_mm": box(other.physical_bbox()),
+                        }
+                    old = Point(owner.pos.x, owner.pos.y)
+                    owner.pos = original_pos
+                    _update_pad_positions(owner, old, owner.rotation)
+                    raise ValueError(
+                        f"local bypasses for {owner_ref}: no legal group reservation "
+                        f"on the board; {failure or 'owner blocked'}; owner_evidence="
+                        + json.dumps(owner_evidence, sort_keys=True, separators=(",", ":"))
+                    )
+        finally:
+            self.cfg["local_bypasses"] = original
 
     def _score_rotation_for_routing(self, work_state: BoardState, comp: Component) -> float:
         """Score component rotation for routability.
@@ -1032,11 +1525,43 @@ class PlacementSolver:
         Saves target positions in self._pinned_targets for later restoration
         by _restore_pinned_positions().
         """
+        # Validate every usable declaration before changing even the saved
+        # pinned-target state. Leaf-local subsets may omit whole interfaces.
+        interfaces = []
+        seen_refs: set[str] = set()
+        for interface in self.cfg.get("edge_interfaces", []) or []:
+            refs = [str(ref) for ref in interface.get("refs", [])]
+            edge = str(interface.get("side", ""))
+            pitch = float(interface.get("pitch_mm", 0.0))
+            if not refs or edge not in {"left", "right", "top", "bottom"} or pitch <= 0:
+                continue
+            members = [comps.get(ref) for ref in refs]
+            if any(member is None or not member.pads for member in members):
+                continue
+            for ref in refs:
+                if ref in seen_refs:
+                    raise ValueError(f"edge interface reference declared more than once: {ref}")
+                seen_refs.add(ref)
+            interfaces.append((refs, edge, pitch, members))
+
+        tl, br = self.state.board_outline
+        margin = self.edge_margin
+        width, height = br.x - tl.x, br.y - tl.y
+        for refs, edge, pitch, _members in interfaces:
+            required_span = (len(refs) - 1) * pitch + 2 * margin
+            if edge in {"left", "right"}:
+                height = max(height, required_span)
+            else:
+                width = max(width, required_span)
+        if width > br.x - tl.x or height > br.y - tl.y:
+            br = Point(tl.x + width, tl.y + height)
+            self.state.board_outline = (tl, br)
+
+        self._fabricated_edge_refs = seen_refs
         self._pinned_targets: dict[str, Point] = {}
         self._pinned_rotations: dict[str, float] = {}
         self.antenna_edge_conflicts: list[str] = []
         tl, br = self.state.board_outline
-        margin = self.edge_margin
         zones = self.cfg.get("component_zones", {})
         unlock_all = self.cfg.get("unlock_all_footprints", False)
         jitter = self.cfg.get("edge_jitter_mm", 5.0)
@@ -1203,10 +1728,10 @@ class PlacementSolver:
             for pad in comp.pads:
                 pad_tl, pad_br = pad.bbox()
                 if (
-                    pad_tl.x < tl.x + pad_inset
-                    or pad_br.x > br.x - pad_inset
-                    or pad_tl.y < tl.y + pad_inset
-                    or pad_br.y > br.y - pad_inset
+                    pad_tl.x < tl.x + pad_inset - _PAD_INSET_ROUNDOFF_MM
+                    or pad_br.x > br.x - pad_inset + _PAD_INSET_ROUNDOFF_MM
+                    or pad_tl.y < tl.y + pad_inset - _PAD_INSET_ROUNDOFF_MM
+                    or pad_br.y > br.y - pad_inset + _PAD_INSET_ROUNDOFF_MM
                 ):
                     return True
             return False
@@ -1528,22 +2053,7 @@ class PlacementSolver:
         # Fabrication primitives are not ordinary edge connectors. Their plated
         # pad centers must lie on Edge.Cuts, at the declared pitch and in the
         # declared order; body-flush placement leaves the drill stranded inside.
-        for interface in self.cfg.get("edge_interfaces", []) or []:
-            refs = [str(ref) for ref in interface.get("refs", [])]
-            edge = str(interface.get("side", ""))
-            pitch = float(interface.get("pitch_mm", 0.0))
-            if not refs or edge not in {"left", "right", "top", "bottom"} or pitch <= 0:
-                continue
-            members = [comps.get(ref) for ref in refs]
-            if any(member is None or not member.pads for member in members):
-                continue
-            required_span = (len(refs) - 1) * pitch + 2 * margin
-            if edge in {"left", "right"} and required_span > br.y - tl.y:
-                br = Point(br.x, tl.y + required_span)
-                self.state.board_outline = (tl, br)
-            elif edge in {"top", "bottom"} and required_span > br.x - tl.x:
-                br = Point(tl.x + required_span, br.y)
-                self.state.board_outline = (tl, br)
+        for refs, edge, pitch, members in interfaces:
             parallel_start = (
                 (tl.y + br.y - (len(refs) - 1) * pitch) / 2
                 if edge in {"left", "right"}
@@ -1684,11 +2194,7 @@ class PlacementSolver:
                 comp.locked = not unlock_all
 
     def _restore_fabricated_edge_interfaces(self, comps: dict[str, Component]) -> None:
-        refs = {
-            str(ref)
-            for interface in self.cfg.get("edge_interfaces", []) or []
-            for ref in interface.get("refs", []) or []
-        }
+        refs = getattr(self, "_fabricated_edge_refs", set())
         for ref in refs:
             comp = comps.get(ref)
             target = self._pinned_targets.get(ref)
@@ -3762,6 +4268,15 @@ class PlacementSolver:
                     if getattr(a, "array_member", False) and getattr(b, "array_member", False):
                         continue
 
+                    # Reservation already checked the owned pair against
+                    # actual legality, not this wider heuristic. Never move a
+                    # reserved member or another locked datum in a both-locked
+                    # conflict; the ordinary legality gate reports a real one.
+                    group = self._local_bypass_group_by_ref
+                    if (a.locked and b.locked
+                            and (refs[i] in group or refs[j] in group)):
+                        continue
+
                     if a.locked and b.locked:
                         zones = self.cfg.get("component_zones", {})
                         a_pinned = refs[i] in zones and (
@@ -3890,6 +4405,12 @@ class PlacementSolver:
             edge pin). Returns True when a part moved."""
             if a.kind == "mounting_hole" or b.kind == "mounting_hole":
                 return False
+            # Reserved locality members are rigid, even if another locked
+            # part intrudes. Report the conflict rather than silently tearing
+            # their pin contract apart through this connector-specific slide.
+            if (ref_a in self._local_bypass_group_by_ref
+                    or ref_b in self._local_bypass_group_by_ref):
+                return False
             a_tl, a_br = _effective_bbox(a, half_gap)
             b_tl, b_br = _effective_bbox(b, half_gap)
             ox, oy = _bbox_overlap_xy(a_tl, a_br, b_tl, b_br)
@@ -4000,6 +4521,26 @@ class PlacementSolver:
         pads_outside: list[dict[str, object]] = []
         overlaps: list[dict[str, object]] = []
         refs = list(comps.keys())
+        # An explicit fabrication datum names one pad that must lie ON its
+        # declared Edge.Cuts side.  The generic inset check is for ordinary
+        # pads and must not drag a castellation inboard; it still reports every
+        # other side violation and every non-datum pad normally.
+        datum_sides: dict[tuple[str, str], str] = {}
+        for interface in self.cfg.get("edge_interfaces", []) or []:
+            if not isinstance(interface, dict) or not interface.get("exact_edge_datum", False):
+                continue
+            side = str(interface.get("side", ""))
+            if side not in {"left", "right", "top", "bottom"}:
+                continue
+            refs_in_interface = [str(ref) for ref in interface.get("refs", []) or []]
+            if (
+                not refs_in_interface
+                or float(interface.get("pitch_mm", 0.0)) <= 0
+                or any(ref not in comps or not comps[ref].pads for ref in refs_in_interface)
+            ):
+                continue
+            for ref in refs_in_interface:
+                datum_sides[(ref, comps[ref].pads[0].pad_id)] = side
         for ref, comp in comps.items():
             for pad in comp.pads:
                 violations: list[str] = []
@@ -4011,6 +4552,15 @@ class PlacementSolver:
                     violations.append("top")
                 if pad.pos.y > br.y - inset:
                     violations.append("bottom")
+                datum_side = datum_sides.get((ref, pad.pad_id))
+                on_datum = (
+                    (datum_side == "left" and abs(pad.pos.x - tl.x) <= 1e-3)
+                    or (datum_side == "right" and abs(pad.pos.x - br.x) <= 1e-3)
+                    or (datum_side == "top" and abs(pad.pos.y - tl.y) <= 1e-3)
+                    or (datum_side == "bottom" and abs(pad.pos.y - br.y) <= 1e-3)
+                )
+                if on_datum:
+                    violations = [side for side in violations if side != datum_side]
                 if violations:
                     pads_outside.append(
                         {
@@ -4197,6 +4747,7 @@ class PlacementSolver:
             self._resolve_overlaps(comps)
             self._clamp_to_board(comps)
             self._clamp_pads_to_board(comps)
+            self._restore_fabricated_edge_interfaces(comps)
             diagnostics = self.legality_diagnostics(comps)
             if _diag_key(diagnostics) < _diag_key(best_diagnostics):
                 best_snapshot = {ref: copy.deepcopy(comp) for ref, comp in comps.items()}

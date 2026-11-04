@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "version": "1.0.0",
+  "content_hash": "sha256:f800af47e3314d232cf958e9797f7c75f9ce71efd77ccc0e0fe49032e61c897f",
+  "name": "a4988-carrier-socket",
+  "mpn": "",
+  "description": "Board-side 2x8 female socket footprint for Pololu A4988 stepper motor driver carrier",
+  "symbol_name": "A4988_CARRIER_SOCKET",
+  "footprint_name": "A4988_CARRIER_SOCKET_POLolu_1182",
+  "datasheet_url": "https://www.pololu.com/product-info-merged/1182",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "provenance": {"added_at": "2026-10-11T00:00:00Z", "kicad_version": "9.0.0", "source": "Pololu 1182 carrier page and dimension diagram 0J1082", "source_project_stem": null},
+  "tags": ["portable", "reviewed", "socket", "stepper-driver"],
+  "watch_out_for": "This is a board-side mating interface, not a single manufacturer-orderable part or an A4988 IC land pattern. Populate two 1x08 female headers 15.24 mm apart for the 15.2 x 20.3 mm carrier. No manufacturer part number is claimed for this composite footprint."
+}

@@ -38,10 +38,10 @@ def test_stated_stack_up_is_recorded_as_a_board_obligation() -> None:
         (FOUR_LAYER_BRIEF, 4),
         ("Use a two-layer stack-up.", 2),
         ("A 6-layer PCB with a radio.", 6),
-        # A count that merely sits near a number is not a stack-up, and a count no stack-up can
-        # carry is left unrecorded rather than turned into a failed build.
         ("Keep it under 100 x 100 mm and use a power LED.", None),
-        ("Make it a hundred-layer board.", None),
+        ("Make it a hundred-layer board.", 100),
+        ("Use a 4.5-layer PCB.", 4.5),
+        ("Use a 34-layer PCB.", 34),
     ],
 )
 def test_the_recorded_count_comes_from_the_briefs_own_words(brief, expected) -> None:
@@ -51,7 +51,7 @@ def test_the_recorded_count_comes_from_the_briefs_own_words(brief, expected) -> 
     assert len(recorded) == (0 if expected is None else 1)
 
 
-def test_a_writers_own_stack_up_row_is_left_alone() -> None:
+def test_the_original_stackup_overrides_a_contradictory_writer_row() -> None:
     written = {
         "kind": "quantitative",
         "original_obligation_id": "pcb_layers",
@@ -61,8 +61,61 @@ def test_a_writers_own_stack_up_row_is_left_alone() -> None:
         "unit": "layers",
     }
     completed = complete_intent_classification(FOUR_LAYER_BRIEF, {"obligations": [written]})
-    assert completed["obligations"] == [written]
+    assert completed["obligations"][0]["value"] == 4.0
+    assert completed["obligations"][0]["original_obligation_id"] == "pcb_layers"
+    assert written["value"] == 2.0
     assert complete_intent_classification(FOUR_LAYER_BRIEF, completed) == completed
+
+
+def test_board_dimensions_are_ownerless_but_cannot_set_the_copper_stack() -> None:
+    from kicraft.design.models import (
+        ConversationState,
+        obligation_requires_requirement_owner,
+    )
+    from kicraft.design.synthesize import _requested_copper_layers
+
+    geometry = {
+        "kind": "quantitative",
+        "original_obligation_id": "board_size",
+        "quantity": "board dimensions",
+        "relation": "maximum",
+        "value": 10.0,
+        "unit": "mm per side",
+    }
+    state = ConversationState(intent={"goal": "Small board", "obligations": [geometry]})
+    assert not obligation_requires_requirement_owner(state.intent.obligations[0])
+    assert _requested_copper_layers(state) == 2
+    geometry["quantity"] = "connector dimensions"
+    assert obligation_requires_requirement_owner(geometry)
+
+
+@pytest.mark.parametrize("count", [0, 1, 3, 4.5, 34, 100])
+def test_unusable_stated_stackup_is_refused_without_rounding_or_defaulting(count) -> None:
+    from kicraft.design.models import ConversationState
+    from kicraft.design.synthesize import SynthesisInputError, _requested_copper_layers
+
+    intent = complete_intent_classification(f"Use a {count}-layer PCB.", {"goal": "Board"})
+    state = ConversationState(intent=intent)
+    assert state.intent.obligations[0].value == count
+    with pytest.raises(SynthesisInputError):
+        _requested_copper_layers(state)
+
+
+def test_conflicting_typed_stackups_cannot_silently_select_the_first() -> None:
+    from kicraft.design.models import ConversationState
+    from kicraft.design.synthesize import SynthesisInputError, _requested_copper_layers
+
+    rows = [
+        {
+            "kind": "quantitative", "original_obligation_id": f"layers_{count}",
+            "quantity": "copper layers" if count == 4 else "PCB copper layers", "relation": "equal",
+            "value": count, "unit": "layers",
+        }
+        for count in (2, 4)
+    ]
+    state = ConversationState(intent={"goal": "Board", "obligations": rows})
+    with pytest.raises(SynthesisInputError):
+        _requested_copper_layers(state)
 
 
 def _board(tmp_path, name: str, copper_layers: int):
@@ -87,6 +140,27 @@ def test_the_seed_board_declares_the_requested_layers(tmp_path) -> None:
     # The default board every earlier design gets is untouched.
     default = pcbnew.LoadBoard(str(write_empty_pcb(tmp_path, "TWOUP", None)))
     assert default.GetCopperLayerCount() == 2
+
+
+def test_unqualified_copper_layer_fact_reaches_the_actual_seed_board(tmp_path) -> None:
+    from kicraft.design.models import ConversationState
+    from kicraft.design.synthesize import _requested_copper_layers
+    from kicraft.design.synthesis.kicad_pcb_stub import write_empty_pcb
+
+    pcbnew = pytest.importorskip("pcbnew")
+    state = ConversationState(intent={
+        "goal": "Temperature board",
+        "obligations": [{
+            "kind": "quantitative", "original_obligation_id": "copper_layers",
+            "quantity": "copper layers", "relation": "equal", "value": 4,
+            "unit": "layers",
+        }],
+    })
+    path = write_empty_pcb(
+        tmp_path, "COPPER_LAYERS", None,
+        copper_layers=_requested_copper_layers(state),
+    )
+    assert pcbnew.LoadBoard(str(path)).GetCopperLayerCount() == 4
 
 
 def test_the_fab_stack_follows_the_board_it_plots(tmp_path) -> None:

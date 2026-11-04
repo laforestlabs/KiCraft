@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:b5d6cc624af2db21cf7dca5c412f149cabee773e6efd4a766a3acd13266680ec",
+  "datasheet_url": "https://documentation.espressif.com/esp32-s3-mini-1_mini-1u_datasheet_en.pdf",
+  "description": "ESPRESSIF(\u4e50\u946b) ESP32-S3-MINI-1U-N4R2",
+  "footprint_name": "BULETM-SMD_ESPRESSIF_ESP32-S3-MINI-1U-N8",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "ESP32-S3-MINI-1U-N4R2",
+  "name": "esp32-s3-mini-1u-n4r2",
+  "provenance": {
+    "added_at": "2026-11-03T03:14:01Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C22356044"
+  },
+  "symbol_name": "ESP32-S3-MINI-1U-N4R2",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": null
+}

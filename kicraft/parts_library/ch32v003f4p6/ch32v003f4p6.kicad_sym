@@ -1,0 +1,192 @@
+(kicad_symbol_lib
+  (version 20211014)
+  (generator https://github.com/uPesy/easyeda2kicad.py)
+
+  (symbol "CH32V003F4P6"
+    (in_bom yes)
+    (on_board yes)
+    (property
+      "Reference"
+      "U"
+      (id 0)
+      (at 0 16.51 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Value"
+      "CH32V003F4P6"
+      (id 1)
+      (at 0 -16.51 0)
+      (effects (font (size 1.27 1.27) ) )
+    )
+    (property
+      "Footprint"
+      "ch32v003f4p6:TSSOP-20_L6.5-W4.4-P0.65-LS6.4-BL"
+      (id 2)
+      (at 0 -19.05 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Datasheet"
+      "https://www.lcsc.com/datasheet/C5187096.pdf"
+      (id 3)
+      (at 0 -21.59 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "Manufacturer"
+      "WCH(南京沁恒)"
+      (id 4)
+      (at 0 -24.13 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "MPN"
+      "CH32V003F4P6"
+      (id 5)
+      (at 0 -26.67 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (property
+      "LCSC Part"
+      "C5187096"
+      (id 6)
+      (at 0 -29.21 0)
+      (effects (font (size 1.27 1.27) ) hide)
+    )
+    (symbol "CH32V003F4P6_0_1"
+      (rectangle
+        (start -67.31 13.97)
+        (end 67.31 -13.97)
+        (stroke (width 0) (type default))
+        (fill (type background))
+      )
+      (circle
+        (center -66.04 12.70)
+        (radius 0.38)
+        (stroke (width 0) (type default))
+        (fill (type none))
+      )
+      (pin unspecified line
+        (at -69.85 11.43 0)
+        (length 2.54)
+        (name "PD4/A7/UCK/T2CH1ETR/OPO/T1CH4ETR_" (effects (font (size 1.27 1.27))))
+        (number "1" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -69.85 8.89 0)
+        (length 2.54)
+        (name "PD5/A5/UTX/T2CH4_/URX_" (effects (font (size 1.27 1.27))))
+        (number "2" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -69.85 6.35 0)
+        (length 2.54)
+        (name "PD6/A6/URX/T2CH3_/UTX_" (effects (font (size 1.27 1.27))))
+        (number "3" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -69.85 3.81 0)
+        (length 2.54)
+        (name "PD7/NRST/T2CH4/OPP1/UCK_" (effects (font (size 1.27 1.27))))
+        (number "4" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -69.85 1.27 0)
+        (length 2.54)
+        (name "PA1/OSCI/A1/T1CH2/OPN0" (effects (font (size 1.27 1.27))))
+        (number "5" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -69.85 -1.27 0)
+        (length 2.54)
+        (name "PA2/OSCO/A0/T1CH2N/OPP0/AETR2_" (effects (font (size 1.27 1.27))))
+        (number "6" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -69.85 -3.81 0)
+        (length 2.54)
+        (name "VSS" (effects (font (size 1.27 1.27))))
+        (number "7" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -69.85 -6.35 0)
+        (length 2.54)
+        (name "PD0/T1CH1N/OPN1/SDA_/UTX_" (effects (font (size 1.27 1.27))))
+        (number "8" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -69.85 -8.89 0)
+        (length 2.54)
+        (name "VDD" (effects (font (size 1.27 1.27))))
+        (number "9" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at -69.85 -11.43 0)
+        (length 2.54)
+        (name "PC0/T2CH3/UTX_/NSS_/T1CH3_" (effects (font (size 1.27 1.27))))
+        (number "10" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 69.85 -11.43 180)
+        (length 2.54)
+        (name "PC1/SDA/NSS/T2CH4_/T2CH1ETR_/T1BKIN_/URX_" (effects (font (size 1.27 1.27))))
+        (number "11" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 69.85 -8.89 180)
+        (length 2.54)
+        (name "PC2/SCL/URTS/T1BKIN/AETR_/T2CH2_/T1ETR_" (effects (font (size 1.27 1.27))))
+        (number "12" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 69.85 -6.35 180)
+        (length 2.54)
+        (name "PC3/T1CH3/T1CH1N_/UCTS_" (effects (font (size 1.27 1.27))))
+        (number "13" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 69.85 -3.81 180)
+        (length 2.54)
+        (name "PC4/A2/T1CH4/MCO/T1CH1CH2N_" (effects (font (size 1.27 1.27))))
+        (number "14" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 69.85 -1.27 180)
+        (length 2.54)
+        (name "PC5/SCK/T1ETR/T2CH1ETR_/SCL_/UCK_/T1CH3_" (effects (font (size 1.27 1.27))))
+        (number "15" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 69.85 1.27 180)
+        (length 2.54)
+        (name "PC6/MOSI/T1CH1CH3N_/UCTS_/SDA_" (effects (font (size 1.27 1.27))))
+        (number "16" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 69.85 3.81 180)
+        (length 2.54)
+        (name "PC7/MISO/T1CH2_/T2CH2_/URTS_" (effects (font (size 1.27 1.27))))
+        (number "17" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 69.85 6.35 180)
+        (length 2.54)
+        (name "PD1/SWIO/AETR2/T1CH3N/SCL_/URX_" (effects (font (size 1.27 1.27))))
+        (number "18" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 69.85 8.89 180)
+        (length 2.54)
+        (name "PD2/A3/T1CH1/T2CH3_/T1CH2N_" (effects (font (size 1.27 1.27))))
+        (number "19" (effects (font (size 1.27 1.27))))
+      )
+      (pin unspecified line
+        (at 69.85 11.43 180)
+        (length 2.54)
+        (name "PD3/A4/T2CH2/AETR/UCTS/T1CH4_" (effects (font (size 1.27 1.27))))
+        (number "20" (effects (font (size 1.27 1.27))))
+      )
+    )
+  )
+)

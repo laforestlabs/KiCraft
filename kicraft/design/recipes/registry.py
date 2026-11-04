@@ -80,11 +80,14 @@ def recipe_summaries(
             "family": definition.family,
             "exact_part": definition.exact_part,
             "maturity": definition.maturity,
+            "default_for_family": definition.default_for_family,
             "required_sheet_roles": list(definition.required_sheet_roles),
             "parameter_defaults": definition.parameter_defaults,
+            "rated_output_current_a": definition.rated_output_current_a,
+            "allowed_parameters": definition.allowed_parameters,
             "external_ports": [port.model_dump() for port in definition.ports],
             "owned_parts": [
-                {"role": part.role, "quantity": part.quantity, "value": part.value}
+                {"role": part.role, "quantity": part.quantity, "value": part.value, "mpn": part.mpn}
                 for part in definition.parts
             ],
             "allocatable_gpios": sorted(
@@ -534,6 +537,9 @@ def locked_pin_assignments(bom: dict) -> dict[tuple[str, str], str]:
         for row in manifest.get("pins") or []:
             if row.get("net") is not None:
                 locked[(str(row["ref"]), str(row["pin"]))] = str(row["net"])
+    for row in bom.get("lowerer_ownership") or []:
+        if row.get("net") is not None:
+            locked[(str(row["ref"]), str(row["pin"]))] = str(row["net"])
     if manifests:
         return locked
 
@@ -565,6 +571,9 @@ def locked_no_connect_pins(bom: dict) -> set[tuple[str, str]]:
         for row in manifest.get("pins") or []:
             if row.get("net") is None:
                 locked.add((str(row["ref"]), str(row["pin"])))
+    for row in bom.get("lowerer_ownership") or []:
+        if row.get("net") is None:
+            locked.add((str(row["ref"]), str(row["pin"])))
     if manifests:
         return locked
 

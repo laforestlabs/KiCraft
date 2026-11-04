@@ -405,3 +405,112 @@ class TestPromotedButRejectedParent:
             parent_output_json=pipeline,
         )
         assert tier == "functional"
+
+
+class TestParentComposedReporting:
+    """The round record must not alias ``parent_composed`` to ``parent_routed``.
+
+    Reading routing success back as composition is what made the 2026-10-01
+    handoff conclude "no leaf was accepted, no parent was composed" for two
+    briefs whose parents were composed and routed on disk.
+    """
+
+    def test_missing_snapshot_is_not_composed(self, tmp_path: Path):
+        from kicraft.cli.autoexperiment import _parent_was_composed
+
+        assert _parent_was_composed(tmp_path / "absent.json") is False
+
+    def test_empty_composition_is_not_composed(self, tmp_path: Path):
+        from kicraft.cli.autoexperiment import _parent_was_composed
+
+        path = tmp_path / "parent_pipeline.json"
+        path.write_text(json.dumps({"state": {"entry_count": 0}, "composition": {}}))
+        assert _parent_was_composed(path) is False
+
+    def test_composed_but_unrouted_is_composed(self, tmp_path: Path):
+        from kicraft.cli.autoexperiment import _parent_was_composed
+
+        path = tmp_path / "parent_pipeline.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "state": {"entry_count": 6, "routed_validation": {"accepted": False}},
+                    "composition": {"summary": "BOARD [/] children=6 components=73"},
+                }
+            )
+        )
+        assert _parent_was_composed(path) is True
+
+
+def _leaf_validation(*, unconnected: int, nets: list[str], accepted: bool = True) -> dict:
+    """A validation block shaped like a real ``solved_layout.json`` (routing verdict)."""
+    return {
+        "accepted": accepted,
+        "anchor_summary": {"all_required_present": True, "missing_required": []},
+        "board_exists": True,
+        "board_path": "leaf_routed.kicad_pcb",
+        "copper_outside_outline": {"ok": True, "outside_tracks": 0, "outside_vias": 0},
+        "drc": {
+            "unconnected": unconnected,
+            "unconnected_nets": list(nets),
+            "shorts": 0,
+            "clearance": 0,
+            "items_not_allowed": 0,
+            "ran": True,
+            "returncode": 0,
+            "violations": 0,
+        },
+        "interface_port_names": ["MOTOR_IN1"],
+        "malformed_board_geometry": False,
+        "obviously_illegal_routed_geometry": False,
+        "pre_route_validation": {},
+        "python_exception": False,
+        "rejection_reasons": [],
+        "render_diagnostics": {},
+        "round_board_pre_route": "",
+        "round_board_routed": "",
+        "signal_unconnected_repair": {},
+        "track_summary": {},
+    }
+
+
+class TestLeafGateVerdict:
+    """A pinned snapshot must never read raw routing validation as the gate.
+
+    New round snapshots persist their gate verdict with the board; retained
+    snapshots lacking it are re-derived here under strict defaults. Project
+    1125's RP2040 CONTROL leaf once read accepted while its own DRC said
+    "Found 13 unconnected pads".
+    """
+
+    def test_unconnected_round_snapshot_is_rejected(self):
+        from kicraft.cli.autoexperiment import _leaf_gate_accepted
+
+        validation = _leaf_validation(
+            unconnected=13, nets=["QSPI_SD0", "gpio7"], accepted=True
+        )
+        assert validation["accepted"] is True  # routing verdict says fine
+        assert _leaf_gate_accepted(validation, {}) is False
+
+    def test_clean_round_snapshot_is_accepted(self):
+        from kicraft.cli.autoexperiment import _leaf_gate_accepted
+
+        assert _leaf_gate_accepted(_leaf_validation(unconnected=0, nets=[]), {}) is True
+
+    def test_persisted_gate_verdict_is_authoritative(self):
+        from kicraft.cli.autoexperiment import _leaf_gate_accepted
+
+        rejected = _leaf_validation(unconnected=0, nets=[])
+        rejected["leaf_acceptance_result"] = {"accepted": False}
+        assert _leaf_gate_accepted(rejected) is False
+
+        accepted = _leaf_validation(unconnected=0, nets=[])
+        accepted["accepted"] = False
+        accepted["leaf_acceptance_result"] = {"accepted": True}
+        assert _leaf_gate_accepted(accepted) is True
+
+    def test_missing_config_hash_keeps_the_strict_unconnected_gate(self):
+        from kicraft.cli.autoexperiment import _leaf_acceptance_config_for
+
+        config = _leaf_acceptance_config_for({})
+        assert config.max_unconnected == 0

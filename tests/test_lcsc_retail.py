@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 import urllib.error
 
 import pytest
@@ -115,8 +116,20 @@ def test_expired_disk_entry_refetches(monkeypatch, tmp_path):
     calls = []
     _serve(monkeypatch, {"C7": _ok(123)}, calls)
     cache = tmp_path / "retail.json"
-    cache.write_text(json.dumps({"C7": {"stock": 999, "min_buy": 1, "ts": 1}}))
+    cache.write_text(json.dumps({"C7": {"schema_version": 1, "stock": 999, "min_buy": 1, "ts": 1}}))
     assert lcsc_retail.stock("C7")["stock"] == 123  # stale ts=1 → refetch
+    assert calls == ["C7"]
+
+
+def test_fresh_stock_only_cache_is_replaced_by_identity_capable_reading(monkeypatch, tmp_path):
+    calls = []
+    _serve(monkeypatch, {"C7": _ok(123)}, calls)
+    (tmp_path / "retail.json").write_text(json.dumps({
+        "C7": {"stock": 999, "min_buy": 1, "ts": time.time()},
+    }))
+    assert lcsc_retail.stock("C7")["stock"] == 123
+    lcsc_retail.clear_cache()
+    assert lcsc_retail.stock("C7")["stock"] == 123
     assert calls == ["C7"]
 
 

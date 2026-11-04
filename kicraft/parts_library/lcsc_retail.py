@@ -18,7 +18,7 @@ turns the whole thing off.
 Readings are cached on disk (``~/.kicraft/lcsc_retail_cache.json``, override
 ``$KICRAFT_LCSC_RETAIL_CACHE``) because each stage-commit attempt runs in a
 fresh subprocess — an in-process cache would re-fetch the whole BOM on every
-one of the stage's up-to-5 attempts. Entries carry only part identifiers and
+one of the stage's up-to-5 attempts. Entries carry supplier identity evidence and
 stock counts, no design content; writes are best-effort and atomic, a missing
 or corrupt file is treated as empty.
 """
@@ -127,7 +127,7 @@ def _save_disk(cid: str, entry: dict) -> None:
 
 
 def _fresh(entry: dict | None) -> dict | None:
-    if not isinstance(entry, dict):
+    if not isinstance(entry, dict) or entry.get("schema_version") != 1:
         return None
     try:
         if time.time() - float(entry.get("ts", 0)) < _TTL_S:
@@ -178,24 +178,32 @@ def _fetch(cid: str) -> dict:
         min_buy = max(1, int(result.get("minBuyNumber") or 1))
     except (TypeError, ValueError):
         min_buy = 1
-    return {"stock": stock_n, "min_buy": min_buy}
+    return {
+        "stock": stock_n,
+        "min_buy": min_buy,
+        "product_code": result.get("productCode"),
+        "product_model": result.get("productModel"),
+        "manufacturer": result.get("brandNameEn"),
+    }
 
 
 def stock(cid: str) -> dict:
-    """Live retail reading for one C#: ``{"lcsc","stock","min_buy",
-    "checked_at"}``. TTL-cached (memory, then disk); raises
-    ``RetailUnavailable`` on any transport/WAF trouble."""
+    """Live retail stock and supplier identity evidence for one C#.
+    Identity fields remain None when the storefront supplies none. TTL-cached
+    in memory and on disk; raises ``RetailUnavailable`` on transport/WAF trouble."""
     cid = _norm(cid)
     with _LOCK:
         entry = _fresh(_MEM.get(cid)) or _fresh(_load_disk().get(cid))
         if entry is None:
             got = _fetch(cid)
-            entry = {"stock": got["stock"], "min_buy": got["min_buy"],
-                     "ts": time.time()}
+            entry = {**got, "schema_version": 1, "ts": time.time()}
             _save_disk(cid, entry)
         _MEM[cid] = entry
     return {"lcsc": cid, "stock": int(entry["stock"]),
             "min_buy": int(entry.get("min_buy") or 1),
+            "product_code": entry.get("product_code"),
+            "product_model": entry.get("product_model"),
+            "manufacturer": entry.get("manufacturer"),
             "checked_at": _dt.datetime.fromtimestamp(
                 float(entry["ts"]), _dt.timezone.utc).isoformat()}
 

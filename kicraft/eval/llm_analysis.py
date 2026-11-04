@@ -741,7 +741,7 @@ def _programming_analysis(state: dict) -> dict:
             {"ref": ref, "sheet": sheet}
             for ref, sheet in bom_parts_on_unknown_sheets(arch_model, bom_model)
         ]
-        facts = mcu_programming_facts(bom_model)
+        facts = mcu_programming_facts(bom_model, architecture=arch_model)
     except Exception:
         facts = None
     texts = " ".join(

@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:a8247fdf3b07f4d467c50208a1d4ac15f21deb55bba61d006645beb3e729eb64",
+  "datasheet_url": "https://www.ti.com/lit/ds/symlink/tps22948.pdf",
+  "description": "TPS22948DCKR current-limited reverse-blocking load switch; SC-70-6",
+  "footprint_name": "SC-70-6_L2.0-W1.3-P0.65-LS2.1-BR",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "TPS22948DCKR",
+  "name": "tps22948dckr",
+  "provenance": {
+    "added_at": "2026-10-11T19:03:33Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C1849487"
+  },
+  "symbol_name": "TPS22948DCKR",
+  "tags": [
+    "power",
+    "load-switch"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "IN1 GND2 ON3 NC4 FLT5 OUT6. Supply 2.5-5.5 V, rated 130 mA. Shutdown current <=5 uA is specified at VIN=5 V, ON low, OUT grounded, -40..125 C; do not extrapolate this bound to 3.3 V. Switching times are typical, not guaranteed maxima. TI recommends 1 uF input bypass and 18 nF at OUT. Land pattern corrected against TI DCK0006A; electrical pin types reviewed."
+}

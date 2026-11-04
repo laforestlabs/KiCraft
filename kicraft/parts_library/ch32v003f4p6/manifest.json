@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:fecf46093a00b38166a4d8ec481ea8f7ec81bfd5e738e2b30fdae7098bc25f10",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C5187096.pdf",
+  "description": "WCH(\u5357\u4eac\u6c81\u6052) CH32V003F4P6",
+  "footprint_name": "TSSOP-20_L6.5-W4.4-P0.65-LS6.4-BL",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "CH32V003F4P6",
+  "name": "ch32v003f4p6",
+  "provenance": {
+    "added_at": "2026-10-11T23:12:05Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C5187096"
+  },
+  "symbol_name": "CH32V003F4P6",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": null
+}

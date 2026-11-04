@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from kicraft.design.lowering import (
     lowerer_contract_diagnostic,
+    lowerer_port_direction,
     lower_requirement,
     registered_lowerers,
 )
@@ -25,6 +26,7 @@ from kicraft.design.part_identity import (
     is_part_family,
     matches_part_identity,
     physical_inventory_record,
+    reviewed_part,
 )
 from kicraft.design.synthesis.validation import _net_voltage, named_part_tokens
 
@@ -38,6 +40,18 @@ _PROGRAMMING_PEER_PORTS = {
     "dtr_n": "dtr_n",
     "rts_n": "rts_n",
 }
+
+_ROM_UART_VARIANTS = {
+    "esp32-s3-mini-1u-n4r2-minimal@1": "esp32-s3-mini-1u-n4r2-uart-minimal@1",
+    "esp32-c3-mini-1-h4x-minimal@1": "esp32-c3-mini-1-h4x-uart-minimal@1",
+}
+
+
+def _rom_uart_variant_for(
+    definition: RecipeDefinition, recipes: Iterable[RegisteredRecipe],
+) -> RegisteredRecipe | None:
+    recipe_id = _ROM_UART_VARIANTS.get(definition.recipe)
+    return next((row for row in recipes if row.definition.recipe == recipe_id), None)
 
 
 def _identity(value: object) -> str:
@@ -72,6 +86,51 @@ class RecipeResolutionError(ValueError):
     def __init__(self, diagnostics: list[ResolutionDiagnostic]):
         self.diagnostics = diagnostics
         super().__init__("; ".join(f"{row.code}: {row.message}" for row in diagnostics))
+
+
+def _power_output_current_diagnostics(
+    definition: RecipeDefinition, requirement: CircuitRequirement,
+) -> list[ResolutionDiagnostic]:
+    """Compare only explicitly owned, whole-output load demands to the recipe rating."""
+    rating = definition.rated_output_current_a
+    if requirement.role != "regulator" or rating is None:
+        return []
+    output_ports = [port.name for port in definition.ports if re.fullmatch(r"output(?:[_-].+)?", port.name)]
+    if output_ports != ["output"]:
+        return []
+    diagnostics = []
+    for obligation in requirement.obligations:
+        if obligation.kind != "quantitative":
+            continue
+        quantity = re.sub(r"[_-]+", " ", obligation.quantity.casefold())
+        if re.search(r"\b(?:inputs?|sources?|inductors?|switch(?:es)?|channels?|per|each)\b", quantity):
+            continue
+        if not (
+            re.search(r"\b(?:output|load)\s+current\b", quantity)
+            or re.search(r"\bsupply\s+current\s+capacity\b", quantity)
+        ):
+            continue
+        # A maximum alone is a ceiling, not a demand for that much current.
+        if obligation.relation == "maximum":
+            continue
+        value = obligation.maximum if obligation.relation == "range" else obligation.value
+        scale = {"a": 1.0, "ma": 1e-3}.get(obligation.unit.strip().lower())
+        if value is None or scale is None or value * scale <= rating:
+            continue
+        diagnostics.append(ResolutionDiagnostic(
+            code="recipe_output_current_exceeded",
+            requirement_id=requirement.id,
+            recipe=definition.recipe,
+            sheet=requirement.sheet,
+            message=f"requested output current exceeds recipe {definition.recipe}'s rated circuit output current",
+            evidence=[
+                f"obligation={obligation.original_obligation_id}",
+                f"quantity={obligation.quantity!r}; relation={obligation.relation}",
+                f"requested={value:g} {obligation.unit} ({value * scale:g} A)",
+                f"rated_output_current_a={rating:g}",
+            ],
+        ))
+    return diagnostics
 
 
 def _exact_selectors(recipe: RegisteredRecipe) -> set[str]:
@@ -272,6 +331,16 @@ def _recipe_for_unique_family_prefix(
     }
     if len(matches) == 1:
         return next(iter(matches.values()))
+    # A reviewed broad alias may deliberately name one default even when
+    # several more specific S3 variants share its prefix. Exact order codes
+    # and package aliases are resolved by _recipe_for_exact first.
+    alias_defaults = [
+        recipe for recipe in matches.values()
+        if recipe.definition.default_for_family
+        and token in {_identity(alias) for alias in recipe.definition.protected_aliases}
+    ]
+    if len(alias_defaults) == 1:
+        return alias_defaults[0]
     # An exact family request may use its explicitly reviewed default ordering
     # code. A partial prefix or an exact variant never gains this fallback.
     if matches and all(
@@ -316,51 +385,9 @@ def _looks_exact_variant(value: str) -> bool:
     lowered = value.lower()
     return bool(
         re.search(
-            r"(?:mini[-_ ]?1|wroom|esp32[-_ ]?c3|c8t6|tiny(?:402|412|1614)|ch32v003)",
+            r"(?:mini[-_ ]?1|wroom|esp32[-_ ]?c3|c8t6|g030|tiny(?:402|412|1604|1614)|ch32v003)",
             lowered,
         )
-    )
-
-
-def _registered_variant_for(
-    identity: str | None,
-    recipes: tuple[RegisteredRecipe, ...],
-) -> RegisteredRecipe | None:
-    """The single registered recipe that may serve ``identity``'s order code.
-
-    Membership is explicit and reviewed in ``part_identity`` — never inferred
-    from the name (``ESP32-S3-WROOM-1-N16R8`` is served by the recipe pinning the
-    ``-N8R8`` module because the datasheet lists them as one module differing only
-    in flash). An identity with no reviewed member, or one spanning two families,
-    returns None so the caller blocks instead of guessing.
-    """
-    if not identity or not identity.strip():
-        return None
-    matches = [
-        recipe
-        for recipe in recipes
-        if recipe.definition.exact_part
-        and recipe.definition.exact_part.strip().casefold() != identity.strip().casefold()
-        and matches_part_identity(identity, recipe.definition.exact_part)
-    ]
-    # Exactly one serving recipe in exactly one family: a second candidate means
-    # the identity is ambiguous, and guessing which variant to ship is not this
-    # function's call.
-    if len(matches) != 1:
-        return None
-    return matches[0]
-
-
-def _substitution_note(identity: str, recipe: RegisteredRecipe) -> str:
-    """Record, in the resolved architecture's own assumptions, that a requested
-    order code is served by a different registered variant — the deviation must
-    reach ``bom.substitutions`` (§9.33), never be silent."""
-    definition = recipe.definition
-    return (
-        f"{identity!r} is an unregistered ordering code of {definition.family!r}; "
-        f"served by {definition.recipe} ({definition.exact_part}). Record the "
-        f"deviation in bom.substitutions: wanted={identity!r}, "
-        f"got={definition.exact_part!r}, reason=<why>"
     )
 
 
@@ -427,6 +454,18 @@ _HUB75_PORT_ALIASES = {
     "oe": ("HUB75_OE",),
 }
 _PORT_ALIASES = {**_USB_PORT_ALIASES, **_HUB75_PORT_ALIASES}
+
+
+_MCU_FIXED_PORT_ALIASES = {
+    "tx": "uart_tx",
+    "rx": "uart_rx",
+    "sda": "i2c_sda",
+    "scl": "i2c_scl",
+    "mosi": "spi_mosi",
+    "miso": "spi_miso",
+    "sck": "spi_sck",
+    "cs": "spi_cs0",
+}
 
 
 def _net_identity(value: str) -> str:
@@ -631,6 +670,10 @@ def _port_bindings(
 ) -> tuple[dict[str, str], list[ResolutionDiagnostic]]:
     declared = {port.name: port for port in definition.ports}
     bindings = {name: net for name, net in requirement.ports.items() if name in declared}
+    if definition.fixed_port_pins is not None:
+        for alias, canonical in _MCU_FIXED_PORT_ALIASES.items():
+            if canonical in declared and canonical not in bindings and alias in requirement.ports:
+                bindings[canonical] = requirement.ports[alias]
     if "gnd" in declared:
         bindings.setdefault("gnd", "GND")
     if "vdd" in declared:
@@ -644,6 +687,7 @@ def _port_bindings(
         for net in architecture.inter_sheet_nets
         if any(endpoint.sheet == requirement.sheet for endpoint in net.endpoints)
     }
+    claimed_nets = set(requirement.ports.values()) | set(bindings.values())
     for port_name, port in declared.items():
         if port.direction == "power" or port_name in bindings:
             continue
@@ -653,7 +697,7 @@ def _port_bindings(
         candidates = sorted(
             net
             for net, directions in local_nets.items()
-            if not (
+            if net not in claimed_nets and not (
                 port.direction in {"input", "output"}
                 and ("output" if port.direction == "input" else "input") in directions
             )
@@ -675,6 +719,7 @@ def _port_bindings(
         ]
         if len(matches) == 1:
             bindings[port_name] = matches[0]
+            claimed_nets.add(matches[0])
     for port_name, port in declared.items():
         if port.default_tie and port_name not in bindings:
             target = bindings.get(port.default_tie)
@@ -726,40 +771,143 @@ def _bound_rail_voltage(architecture: Architecture, net: str | None) -> float | 
     return _net_voltage(net)
 
 
+_MCU_CORE_LOGIC_RAILS = {
+    "RP2040": (1.62, 3.63, 3.3),
+    "STM32G030F6P6": (2.0, 3.6, 3.3),
+    "ATTINY1604-SSN": (1.8, 5.5, 3.3),
+    "CH32V003F4P6": (2.7, 5.5, 3.3),
+    "CH32V003F4U6": (2.7, 5.5, 3.3),
+}
+
+
+def _mcu_core_supply_diagnostics(
+    definition: RecipeDefinition,
+    requirement: CircuitRequirement,
+    architecture: Architecture,
+    bindings: dict[str, str],
+    parameters: dict,
+) -> list[ResolutionDiagnostic]:
+    """Require the documented logic rail for complete fixed MCU cores."""
+    limits = _MCU_CORE_LOGIC_RAILS.get(definition.exact_part or "")
+    if limits is None:
+        return []
+    minimum, maximum, configured = limits
+    net = bindings.get("vdd")
+    voltage = _bound_rail_voltage(architecture, net)
+    parameter_voltage = parameters.get("logic_voltage_v")
+    if (
+        voltage is None
+        or not math.isfinite(voltage)
+        or voltage < minimum
+        or voltage > maximum
+        or parameter_voltage != configured
+        or abs(voltage - configured) > 0.05
+    ):
+        return [
+            ResolutionDiagnostic(
+                code="conflicting_recipe_supply",
+                requirement_id=requirement.id,
+                recipe=definition.recipe,
+                sheet=requirement.sheet,
+                message=(
+                    f"{definition.exact_part} core requires its documented {configured:g} V "
+                    f"default logic rail; vdd={net!r}, voltage={voltage!r} V, "
+                    f"recipe logic_voltage_v={parameter_voltage!r}. Do not connect it to "
+                    "a source rail directly or silently retarget the core supply."
+                ),
+                evidence=[
+                    f"vdd={net!r}",
+                    f"voltage={voltage!r} V",
+                    f"operating_range={minimum:g}–{maximum:g} V",
+                    f"default_logic_voltage={configured:g} V",
+                ],
+            )
+        ]
+    return []
+
+
+def _mcu_expansion_plan(
+    definition: RecipeDefinition,
+    requirement: CircuitRequirement,
+    parameters: dict,
+) -> tuple[dict, CircuitRequirement]:
+    """Select a reviewed I²C expansion only after direct MCU capacity is exhausted."""
+    if definition.exact_part not in {"STM32G030F6P6", "ATTINY1604-SSN"}:
+        return parameters, requirement
+    ports = dict(requirement.ports)
+    adc_ports = sorted(name for name in ports if re.fullmatch(r"adc(?:_\d+)?", name))
+    output_ports = sorted(
+        name for name in ports if re.fullmatch(r"(?:output|parallel)_\d+", name)
+    )
+    fixed = definition.fixed_port_pins or {}
+    occupied = {
+        pin for port, pin in fixed.items() if ports.get(port)
+    }
+    adc_capacity = sum(
+        "adc" in pin.capabilities and pin.pin not in occupied
+        for pin in definition.allocatable_pins
+    )
+    output_capacity = sum(
+        ("output" in pin.capabilities or "gpio" in pin.capabilities) and pin.pin not in occupied
+        for pin in definition.allocatable_pins
+    )
+    updated = dict(parameters)
+    allocation_ports = dict(ports)
+    interfaces = list(requirement.interfaces)
+    if len(adc_ports) > adc_capacity:
+        if len(adc_ports) != 8:
+            return parameters, requirement
+        updated["adc_expansion"] = "ads1115x2"
+        allocation_ports = {name: net for name, net in allocation_ports.items() if name not in adc_ports}
+        interfaces = [name for name in interfaces if name != "adc"]
+    if len(output_ports) > output_capacity:
+        if len(output_ports) > 16:
+            return parameters, requirement
+        updated["gpio_expansion"] = "mcp23017"
+        allocation_ports = {
+            name: net for name, net in allocation_ports.items() if name not in output_ports
+        }
+        interfaces = [name for name in interfaces if name != "parallel_output"]
+    return updated, requirement.model_copy(
+        update={"ports": allocation_ports, "interfaces": interfaces}
+    )
+
 def _complete_ch340c_supply_mode(
     definition: RecipeDefinition,
     requirement: CircuitRequirement,
     architecture: Architecture,
 ) -> tuple[CircuitRequirement, list[ResolutionDiagnostic]]:
-    """Select the V3 circuit from the actual supply, never from a voltage default."""
-    if definition.exact_part != "CH340C":
+    """Validate physical USB VBUS and bridge UART-domain rails."""
+    device = definition.exact_part or ""
+    if device not in {"CH340C", "CP2102N"}:
         return requirement, []
     bindings, _diagnostics = _port_bindings(definition, requirement, architecture)
     net = bindings.get("vdd")
     voltage = _bound_rail_voltage(architecture, net)
+    vbus = bindings.get("vbus")
+    vbus_voltage = _bound_rail_voltage(architecture, vbus)
     explicit = requirement.parameters.get("supply_voltage")
+    allowed_vdd = (3.3, 5.0) if device == "CH340C" else (3.3,)
     evidence = [
         f"{requirement.id} ({requirement.sheet}).ports.vdd={net!r}; voltage={voltage!r} V",
+        f"{requirement.id} ({requirement.sheet}).ports.vbus={vbus!r}; voltage={vbus_voltage!r} V",
         f"{requirement.id}.parameters.supply_voltage={explicit!r}",
-        (
-            f"architecture.rail_voltages[{net!r}]={voltage!r}"
-            if net in architecture.rail_voltages
-            else f"rail-name voltage evidence: {net!r} -> {voltage!r}"
-        ),
     ]
     error = None
-    if voltage is None or not math.isfinite(voltage):
-        error = "CH340C supply voltage is unproven"
-    elif voltage not in (3.3, 5.0):
-        error = "CH340C bound supply has no reviewed 3.3 V or 5.0 V operating mode"
+    if vbus_voltage is None or not math.isfinite(vbus_voltage) or vbus_voltage != 5.0:
+        error = f"{device} USB-C receptacle VBUS must bind a proven 5 V rail"
+    elif voltage is None or not math.isfinite(voltage):
+        error = f"{device} UART-domain supply voltage is unproven"
+    elif voltage not in allowed_vdd:
+        error = f"{device} bound UART-domain rail has no reviewed {allowed_vdd!r} operating mode"
     elif "supply_voltage" in requirement.parameters and (
         isinstance(explicit, bool)
         or not isinstance(explicit, (int, float))
         or not math.isfinite(explicit)
-        or explicit not in (3.3, 5.0)
+        or explicit not in allowed_vdd
         or explicit != voltage
     ):
-        error = "CH340C explicit supply_voltage is unsupported or conflicts with its bound rail"
+        error = f"{device} explicit supply_voltage is unsupported or conflicts with its bound rail"
     if error is not None:
         return requirement, [
             ResolutionDiagnostic(
@@ -768,9 +916,8 @@ def _complete_ch340c_supply_mode(
                 recipe=definition.recipe,
                 sheet=requirement.sheet,
                 message=(
-                    f"{error}: {'; '.join(evidence)}. Declare the actual rail voltage and "
-                    "a matching numeric supply_voltage (3.3 or 5.0), or explicitly repair "
-                    "the physical supply binding; do not guess VBUS voltage or silently move rails."
+                    f"{error}: {'; '.join(evidence)}. Declare the actual rails and preserve "
+                    "the bridge's USB VBUS and UART-domain separation; do not guess or move rails."
                 ),
                 evidence=evidence,
             )
@@ -788,7 +935,7 @@ def _ch340c_esp32_domain_diagnostics(
     architecture: Architecture,
     recipes: tuple[RegisteredRecipe, ...],
 ) -> list[ResolutionDiagnostic]:
-    """Check only direct typed CH340C UART conductors reaching a known ESP32."""
+    """Check direct typed USB-UART conductors reaching a known ESP32."""
     if not (definition.exact_part or "").startswith("ESP32"):
         return []
     bindings, _diagnostics = _port_bindings(definition, requirement, architecture)
@@ -798,7 +945,7 @@ def _ch340c_esp32_domain_diagnostics(
     for peer in architecture.requirements:
         exact = _recipe_for_exact(peer.exact_part or peer.family, recipes)
         matches = [exact] if exact is not None else _family_recipes(peer.family, recipes)
-        if len(matches) != 1 or matches[0].definition.exact_part != "CH340C":
+        if len(matches) != 1 or matches[0].definition.exact_part not in {"CH340C", "CP2102N"}:
             continue
         direct = {
             name: net
@@ -829,8 +976,9 @@ def _ch340c_esp32_domain_diagnostics(
             and bindings["gnd"] == peer_bindings.get("gnd")
         ):
             continue
+        bridge_device = matches[0].definition.exact_part
         evidence = [
-            f"{peer.id} ({peer.sheet}, CH340C).ports.vdd={peer_rail!r}; voltage={peer_voltage!r} V; "
+            f"{peer.id} ({peer.sheet}, {bridge_device}).ports.vdd={peer_rail!r}; voltage={peer_voltage!r} V; "
             f"gnd={peer_bindings.get('gnd')!r}",
             f"{requirement.id} ({requirement.sheet}, {definition.exact_part}).ports.vdd="
             f"{mcu_rail!r}; voltage={mcu_voltage!r} V; gnd={bindings.get('gnd')!r}",
@@ -840,8 +988,7 @@ def _ch340c_esp32_domain_diagnostics(
                 f"{sorted(port for port, bound in bindings.items() if bound == net)!r}"
                 for name, net in sorted(direct.items())
             ),
-            "WCH CH340DS1 v3D sections 5.1, 6.2, 7.6-7.7: unified supply recommended; "
-            "at VCC=5.0 V, non-USB VOH minimum is VCC-0.6=4.4 V",
+            f"{bridge_device} direct UART operation requires its VDD/VIO logic domain to match the MCU",
         ]
         if (definition.exact_part or "").startswith("ESP32-C3-MINI-1"):
             evidence.append(
@@ -856,7 +1003,7 @@ def _ch340c_esp32_domain_diagnostics(
                 recipe=definition.recipe,
                 sheet=requirement.sheet,
                 message=(
-                    "Direct CH340C-to-ESP32 UART requires the reviewed common 3.3 V rail "
+                    f"Direct {bridge_device}-to-ESP32 UART requires the reviewed common 3.3 V rail "
                     f"and common ground: {'; '.join(evidence)}. Explicitly choose a real common "
                     "3.3 V supply binding for both devices, or implement typed isolation/level "
                     "translation with distinct conductors on each side. Renaming signals or "
@@ -868,16 +1015,23 @@ def _ch340c_esp32_domain_diagnostics(
     return diagnostics
 
 
-def _complete_typed_programming_peer(
+def _complete_typed_uart_peer(
     definition: RecipeDefinition,
     requirement: CircuitRequirement,
     architecture: Architecture,
     recipes: tuple[RegisteredRecipe, ...],
 ) -> tuple[CircuitRequirement, list[ResolutionDiagnostic]]:
-    """Cross UART directions only for one verified bridge with local typed nets."""
-    if requirement.role != "mcu_core" or "auto_reset" not in definition.parameter_defaults:
+    """Cross a verified bridge UART only through its typed physical peer contract."""
+    is_auto_reset_mcu = "auto_reset" in definition.parameter_defaults
+    is_rp2040 = definition.exact_part == "RP2040"
+    if requirement.role != "mcu_core" or not (is_auto_reset_mcu or is_rp2040):
         return requirement, []
     directions = {port.name: port.direction for port in definition.ports}
+    uart_ports = {
+        name for name in _PROGRAMMING_PEER_PORTS if name in directions
+    }
+    if not {"uart_tx", "uart_rx"} <= uart_ports:
+        return requirement, []
     nets = {net.name: net for net in architecture.inter_sheet_nets}
     candidates: list[dict[str, str]] = []
     peer_contracts: list[str] = []
@@ -897,7 +1051,8 @@ def _complete_typed_programming_peer(
         expected = {
             name: peer.ports[peer_name]
             for name, peer_name in _PROGRAMMING_PEER_PORTS.items()
-            if peer_name in peer.ports
+            if name in uart_ports
+            and peer_name in peer.ports
             and peer_directions.get(peer_name)
             == ("input" if directions[name] == "output" else "output")
         }
@@ -922,14 +1077,14 @@ def _complete_typed_programming_peer(
                 f"with {source} (output) -> {sink} (input)"
             )
         needed = (
-            set(_PROGRAMMING_PEER_PORTS)
-            if {"dtr_n", "rts_n"} & local.keys()
+            uart_ports
+            if is_auto_reset_mcu and {"dtr_n", "rts_n"} & local.keys()
             else {"uart_tx", "uart_rx"}
         )
         missing = needed - local.keys()
         if missing:
             errors.append(
-                f"{peer.id}: missing local typed programming ports {sorted(missing)}; "
+                f"{peer.id}: missing local typed UART ports {sorted(missing)}; "
                 "bind each missing bridge port and declare its net on both "
                 f"{peer.sheet!r} and {requirement.sheet!r} with the typed directions"
             )
@@ -956,12 +1111,12 @@ def _complete_typed_programming_peer(
         candidates.append(local)
     if len(candidates) > 1:
         errors.append(
-            "multiple local UART programming peers; select one unambiguous typed contract"
+            "multiple local UART bridge peers; select one unambiguous typed contract"
         )
     ports = dict(requirement.ports)
     if len(candidates) == 1:
         ports.update(candidates[0])
-    for name in _PROGRAMMING_PEER_PORTS:
+    for name in uart_ports:
         net = nets.get(ports.get(name, ""))
         if net is not None and any(
             endpoint.sheet == requirement.sheet
@@ -970,25 +1125,25 @@ def _complete_typed_programming_peer(
             for endpoint in net.endpoints
         ):
             errors.append(f"{name}: local endpoint conflicts with MCU {directions[name]} direction")
-    programming_nets = {net for name, net in ports.items() if name in _PROGRAMMING_PEER_PORTS}
+    uart_nets = {net for name, net in ports.items() if name in uart_ports}
     aliases = [
         name
         for name, net in requirement.ports.items()
-        if name not in _PROGRAMMING_PEER_PORTS and net in programming_nets
+        if name not in uart_ports and net in uart_nets
     ]
     if aliases:
         errors.append(
-            f"programming nets also request non-programming ports "
+            f"typed UART bridge nets also request non-UART ports "
             f"{[f'{name}={requirement.ports[name]!r}' for name in sorted(aliases)]}; "
-            "use fixed uart_tx/uart_rx/dtr_n/rts_n, never allocate reset handshakes to GPIO"
+            "do not allocate bridge conductors to GPIO"
         )
-    if len(programming_nets) != sum(name in ports for name in _PROGRAMMING_PEER_PORTS):
+    if len(uart_nets) != sum(name in ports for name in uart_ports):
         errors.append(
-            "programming ports alias the same net; give UART TX, UART RX, DTR and RTS "
-            "distinct physical nets in both typed peers and their sheet endpoints"
+            "UART bridge ports alias the same net; give UART TX and UART RX distinct "
+            "physical nets in both typed peers and their sheet endpoints"
         )
     parameters = dict(requirement.parameters)
-    if {"dtr_n", "rts_n"} & ports.keys():
+    if is_auto_reset_mcu and {"dtr_n", "rts_n"} & ports.keys():
         if parameters.get("auto_reset") is False:
             errors.append(
                 f"{requirement.id}.parameters.auto_reset=False conflicts with typed "
@@ -996,14 +1151,13 @@ def _complete_typed_programming_peer(
                 f"rts_n={ports.get('rts_n', '<unbound>')!r}; "
                 "set auto_reset=True to implement these controls through the fixed reset circuit"
             )
-        elif set(_PROGRAMMING_PEER_PORTS) <= ports.keys():
+        elif uart_ports <= ports.keys():
             parameters["auto_reset"] = True
     if errors:
         if peer_contracts:
             errors.append(
                 "Repair the explicit bindings and sheet directions to agree with the typed "
-                "physical connections (do not allocate programming signals to GPIO): "
-                + "; ".join(peer_contracts)
+                "physical connections: " + "; ".join(peer_contracts)
             )
         return requirement, [
             ResolutionDiagnostic(
@@ -1016,6 +1170,53 @@ def _complete_typed_programming_peer(
             )
         ]
     return requirement.model_copy(update={"ports": ports, "parameters": parameters}), []
+
+
+def _rp2040_mode_diagnostics(
+    definition: RecipeDefinition,
+    requirement: CircuitRequirement,
+    parameters: dict,
+    bindings: dict[str, str],
+) -> list[ResolutionDiagnostic]:
+    """Keep the native RP2040 PHY and SWD recovery declarations mutually exclusive."""
+    if definition.exact_part != "RP2040":
+        return []
+    native_usb = parameters.get("native_usb")
+    programming = parameters.get("programming")
+    usb = {"usb_dm", "usb_dp"}.intersection(bindings)
+    uart = {"uart_tx", "uart_rx"}.intersection(bindings)
+    errors: list[str] = []
+    if native_usb is True:
+        if programming != "native_usb":
+            errors.append("native_usb=True requires programming='native_usb'")
+        if usb != {"usb_dm", "usb_dp"}:
+            errors.append("native_usb=True requires both usb_dm and usb_dp bindings")
+    elif native_usb is False:
+        if programming != "swd":
+            errors.append("native_usb=False requires programming='swd'")
+        if usb:
+            errors.append("native_usb=False forbids RP2040 usb_dm/usb_dp bindings")
+    else:
+        errors.append(f"native_usb must be boolean, got {native_usb!r}")
+    if uart and uart != {"uart_tx", "uart_rx"}:
+        errors.append("a UART bridge requires the complete crossed uart_tx/uart_rx pair")
+    if not errors:
+        return []
+    return [
+        ResolutionDiagnostic(
+            code="conflicting_programming_contract",
+            requirement_id=requirement.id,
+            recipe=definition.recipe,
+            sheet=requirement.sheet,
+            message="; ".join(errors),
+            evidence=[
+                *errors,
+                f"native_usb={native_usb!r}",
+                f"programming={programming!r}",
+                *(f"{name}={bindings.get(name)!r}" for name in ("usb_dm", "usb_dp", "uart_tx", "uart_rx")),
+            ],
+        )
+    ]
 
 
 def _complete_typed_mcu_interfaces(
@@ -1155,6 +1356,103 @@ def _unowned_endpoint_diagnostics(
     ]
 
 
+def _bind_analog_adc_limits(
+    result: ResolutionResult,
+    definitions: dict[str, RecipeDefinition],
+    rail_voltages: dict[str, float],
+) -> None:
+    """Constrain a bound analog producer by its actual reviewed ADC consumers."""
+    producers = {
+        family: lowerer
+        for lowerer in registered_lowerers()
+        if "consumer_input_max_v" in lowerer.parameter_keys
+        for family in lowerer.families
+    }
+    if not any(row.family in producers for row in result.requirements):
+        return
+    limits: dict[str, float] = {}
+    unknown: set[str] = set()
+    for selection in result.selections:
+        adc_nets = {
+            row.net for row in selection.pin_allocations if row.capability == "adc"
+        }
+        adc_nets.update(
+            net for port, net in selection.port_bindings.items()
+            if port == "adc" or port.startswith("adc_")
+        )
+        if not adc_nets:
+            continue
+        definition = definitions[selection.recipe]
+        maximum = definition.parameter_defaults.get("consumer_input_max_v")
+        if (
+            type(maximum) not in (int, float)
+            or not math.isfinite(maximum)
+            or maximum <= 0
+        ):
+            unknown.update(adc_nets)
+            continue
+        supply = rail_voltages.get(selection.port_bindings.get("vdd", ""))
+        if supply is not None:
+            maximum = min(maximum, supply)
+        for net in adc_nets:
+            limits[net] = min(limits.get(net, maximum), maximum)
+    for index, requirement in enumerate(result.requirements):
+        lowerer = producers.get(requirement.family)
+        if lowerer is None:
+            continue
+        outputs = {
+            net for port, net in requirement.ports.items()
+            if lowerer_port_direction(lowerer, port) == "output"
+        }
+        if outputs & unknown:
+            result.blocking.append(ResolutionDiagnostic(
+                code="unverified_adc_input_range",
+                requirement_id=requirement.id,
+                sheet=requirement.sheet,
+                message="An attached ADC has no reviewed analog input range.",
+                evidence=sorted(outputs & unknown),
+            ))
+            continue
+        bound = outputs & limits.keys()
+        if not bound:
+            continue
+        maximum = min(limits[net] for net in bound)
+        parameters = dict(requirement.parameters)
+        if "consumer_input_max_v" in parameters:
+            try:
+                stated = float(parameters["consumer_input_max_v"])
+            except (TypeError, ValueError):
+                continue  # The original invalid lowerer parameter remains a refusal.
+            if not math.isfinite(stated) or stated <= 0:
+                result.blocking.append(ResolutionDiagnostic(
+                    code="invalid_analog_consumer_limit",
+                    requirement_id=requirement.id,
+                    sheet=requirement.sheet,
+                    message="The stated analog consumer limit must be finite and positive.",
+                ))
+                continue
+            maximum = min(maximum, stated)
+        parameters["consumer_input_max_v"] = maximum
+        updated = requirement.model_copy(update={"parameters": parameters})
+        result.requirements[index] = updated
+        diagnostic = lowerer_contract_diagnostic(updated)
+        if diagnostic is not None:
+            result.blocking.append(ResolutionDiagnostic(
+                code="unsupported_lowerer_contract",
+                requirement_id=requirement.id,
+                sheet=requirement.sheet,
+                message=diagnostic.message,
+                evidence=[
+                    *diagnostic.evidence,
+                    f"attached ADC maximum={maximum:g} V; nets={sorted(bound)!r}",
+                ],
+            ))
+        result.assumptions.append(
+            f"{requirement.id}: analog output constrained to the attached ADC's "
+            f"reviewed maximum {maximum:g} V; explicit gain/range requirements retained (derived)"
+        )
+
+
 def resolve_architecture_recipes(
     architecture: Architecture | dict,
     intent: dict | BaseModel | None = None,
@@ -1258,13 +1556,12 @@ def resolve_architecture_recipes(
     user_named = [str(value) for value in intent_payload.get("named_parts") or []]
     for named in user_named:
         named_identity = _identity(named)
+        named_is_concrete = reviewed_part(named) is not None
         selected = _recipe_for_exact(named, recipes) or _recipe_for_unique_family_prefix(
             named, recipes
         )
-        sibling = _registered_variant_for(named, recipes) if selected is None else None
         if (
             selected is None
-            and sibling is None
             and _looks_protected(named, recipes)
             and _looks_exact_variant(named)
             and not any(
@@ -1284,10 +1581,6 @@ def resolve_architecture_recipes(
                 )
             )
             continue
-        if sibling is not None:
-            note = _substitution_note(named, sibling)
-            if note not in result.assumptions:
-                result.assumptions.append(note)
         if selected is None:
             # Unregistered parts remain model-owned, but an exact user token
             # still needs a typed owner rather than a mention in sheet prose.
@@ -1328,6 +1621,12 @@ def resolve_architecture_recipes(
                 if named_identity in primitive_identities.get(row.id, ())
                 or (
                     row.family not in primitive_families
+                    and not named_is_concrete
+                    and row.exact_part is not None
+                    and matches_part_identity(named, row.exact_part)
+                )
+                or (
+                    row.family not in primitive_families
                     and (
                         _recipe_for_exact(row.exact_part or row.family, recipes)
                         or _recipe_for_unique_family_prefix(row.exact_part or row.family, recipes)
@@ -1340,17 +1639,11 @@ def resolve_architecture_recipes(
                     for recipe in _family_recipes(row.family, recipes)
                     for part in recipe.definition.parts
                 )
-                # An unregistered ordering code of a registered family is owned
-                # by a requirement bound to that family (the deviation is
-                # recorded as an assumption and ledgers at BOM under §9.33).
-                or (sibling is not None and row.family == sibling.definition.family)
             ]
         if not owners:
             choices = (
                 [_recipe_requirement_choice(selected.definition)] if selected is not None else []
             )
-            if sibling is not None:
-                choices = [_recipe_requirement_choice(sibling.definition)]
             result.blocking.append(
                 ResolutionDiagnostic(
                     code="missing_recipe_requirement",
@@ -1457,6 +1750,11 @@ def resolve_architecture_recipes(
                     and _identity(requirement.family) == _identity(recipe.definition.family)
                 )
             )
+            and (
+                architecture_exact is None
+                or _identity(recipe.definition.family or "")
+                != _identity(architecture_exact.definition.family or "")
+            )
             and requirement.exact_part
             and any(
                 _identity(part.mpn) == _identity(requirement.exact_part)
@@ -1485,39 +1783,28 @@ def resolve_architecture_recipes(
             and not lowerer_owns_exact
             and (family_matches or _looks_protected(requirement.exact_part, recipes))
         ):
-            sibling = _registered_variant_for(requirement.exact_part, recipes)
-            if sibling is None:
-                result.blocking.append(
-                    ResolutionDiagnostic(
-                        code="unsupported_protected_variant",
-                        requirement_id=requirement.id,
-                        message=(
-                            f"protected variant {requirement.exact_part!r} has no verified recipe"
-                        ),
-                        evidence=list(
-                            dict.fromkeys(
-                                [
-                                    requirement.exact_part,
-                                    *(
-                                        _recipe_requirement_choice(row.definition)
-                                        for row in family_matches
-                                    ),
-                                    *_registered_identity_choices(requirement.exact_part, recipes),
-                                ]
-                            )
-                        ),
-                    )
+            result.blocking.append(
+                ResolutionDiagnostic(
+                    code="unsupported_protected_variant",
+                    requirement_id=requirement.id,
+                    message=(
+                        f"protected variant {requirement.exact_part!r} has no verified recipe"
+                    ),
+                    evidence=list(
+                        dict.fromkeys(
+                            [
+                                requirement.exact_part,
+                                *(
+                                    _recipe_requirement_choice(row.definition)
+                                    for row in family_matches
+                                ),
+                                *_registered_identity_choices(requirement.exact_part, recipes),
+                            ]
+                        )
+                    ),
                 )
-                continue
-            # A registered family can serve this ordering code (same symbol,
-            # footprint and pin map): bind that family's recipe and surface the
-            # deviation as an assumption so BOM must ledger it (§9.33), instead
-            # of hard-blocking on an order code the registry has no reason to
-            # enumerate separately.
-            sibling_recipes = _family_recipes(sibling.definition.family, recipes)
-            if sibling_recipes:
-                family_matches = sibling_recipes
-            assumption_rows.append(_substitution_note(requirement.exact_part, sibling))
+            )
+            continue
         if selected is None and family_matches:
             defaults = [recipe for recipe in family_matches if recipe.definition.default_for_family]
             if len(defaults) == 1:
@@ -1534,6 +1821,114 @@ def resolve_architecture_recipes(
             result.unresolved_requirements.append(requirement.id)
             continue
         definition = selected.definition
+        selected_exact_part = definition.exact_part
+        if definition.recipe in {
+            "esp32-s3-mini-1u-n4r2-minimal@1",
+            "esp32-s3-mini-1u-n4r2-uart-minimal@1",
+        }:
+            requested = " ".join(str(value) for value in (
+                intent_payload.get("goal", ""),
+                *(intent_payload.get("constraints") or []),
+                *(intent_payload.get("named_parts") or []),
+                requirement.exact_part or "",
+                *(obligation.model_dump_json() for obligation in requirement.obligations),
+            ))
+            memory = re.findall(r"\b(\d+)\s*[- ]?\s*(?:mi?b|mbytes?|megabytes?)\b", requested, re.I)
+            radio = re.search(
+                r"\b(?:wi[\s-]?fi|wireless|bluetooth|ble|pcb[\s-]*antenna|on[\s-]*board\s+antenna)\b",
+                requested, re.I,
+            )
+            if radio or any(int(value) > 4 for value in memory):
+                result.blocking.append(ResolutionDiagnostic(
+                    code="s3u_requested_capability_unproven",
+                    requirement_id=requirement.id,
+                    recipe=definition.recipe,
+                    message=(
+                        "The S3-MINI-1U-N4R2 has 4 MB flash and no supplied external "
+                        "antenna; it cannot silently satisfy larger memory or radio requirements."
+                    ),
+                    evidence=[requested],
+                ))
+                continue
+        # Prefer a production-qualified UART construction for an otherwise
+        # unconstrained module. Explicit recipe selections and USB contracts
+        # retain their programming method and exact selected silicon.
+        uart_variants = _ROM_UART_VARIANTS
+        existing_selection = existing_by_requirement.get(requirement.id)
+        variant = _rom_uart_variant_for(definition, recipes)
+        uart_recipe = variant.definition.recipe if variant is not None else None
+        explicit_uart = existing_selection is not None and existing_selection.recipe == uart_recipe
+        direct_uart = definition.recipe in uart_variants.values()
+        if direct_uart:
+            usb_bindings, _ = _port_bindings(definition, requirement, architecture_model)
+            usb_required = (
+                {"usb_dm", "usb_dp"} & (
+                    set(requirement.ports) | set(usb_bindings)
+                    | set(existing_selection.port_bindings if existing_selection is not None else ())
+                )
+                or "usb_device" in requirement.interfaces
+                or requirement.parameters.get("native_usb") is True
+                or requirement.parameters.get("programming") == "native_usb"
+            )
+            if usb_required:
+                result.blocking.append(ResolutionDiagnostic(
+                    code="conflicting_programming_contract",
+                    requirement_id=requirement.id,
+                    recipe=definition.recipe,
+                    message="A ROM-UART recipe cannot satisfy a native USB programming or USB port contract.",
+                ))
+                continue
+        default_uart = (
+            existing_selection is None
+            and variant is not None
+            and variant.definition.maturity == "production"
+        )
+        if variant is not None and (explicit_uart or default_uart):
+            usb_bindings, _ = _port_bindings(definition, requirement, architecture_model)
+            usb_required = (
+                {"usb_dm", "usb_dp"} & (
+                    set(requirement.ports) | set(usb_bindings)
+                    | set(existing_selection.port_bindings if existing_selection is not None else ())
+                )
+                or "usb_device" in requirement.interfaces
+                or requirement.parameters.get("native_usb") is True
+                or requirement.parameters.get("programming") == "native_usb"
+            )
+            if usb_required and explicit_uart:
+                result.blocking.append(ResolutionDiagnostic(
+                    code="conflicting_programming_contract",
+                    requirement_id=requirement.id,
+                    recipe=existing_selection.recipe,
+                    message="A ROM-UART recipe cannot satisfy a native USB programming or USB port contract.",
+                ))
+                continue
+            if not usb_required:
+                selected = variant
+                definition = variant.definition
+        # The same ordering code is sold by UMW and ST.  A named UMW device
+        # cannot be fulfilled by this recipe's physically distinct ST bundle.
+        if definition.recipe in {"usb-c-usb2-device@1", "ch340c-usb-uart@1", "cp2102n-usb-uart@1"}:
+            requested = " ".join(
+                str(value) for value in (
+                    intent_payload.get("goal", ""),
+                    *(intent_payload.get("constraints") or []),
+                    *(intent_payload.get("named_parts") or []),
+                    requirement.exact_part or "",
+                )
+            )
+            if re.search(r"\bC2687116\b", requested, re.I) or (
+                re.search(r"\bUMW\b", requested, re.I)
+                and re.search(r"USBLC6[\s-]*2SC6", requested, re.I)
+            ):
+                result.blocking.append(
+                    ResolutionDiagnostic(
+                        code="unsupported_protected_variant",
+                        requirement_id=requirement.id,
+                        message="UMW USBLC6-2SC6 cannot be substituted by the ST USB protection bundle",
+                        evidence=["UMW USBLC6-2SC6 C2687116", definition.recipe],
+                    )
+                )
+                continue
         if definition.maturity not in allowed_maturities:
             result.blocking.append(
                 ResolutionDiagnostic(
@@ -1547,7 +1942,11 @@ def resolve_architecture_recipes(
                 )
             )
             continue
-        requirement, programming_diagnostics = _complete_typed_programming_peer(
+        current_diagnostics = _power_output_current_diagnostics(definition, requirement)
+        if current_diagnostics:
+            result.blocking.extend(current_diagnostics)
+            continue
+        requirement, programming_diagnostics = _complete_typed_uart_peer(
             definition, requirement, architecture_model, recipes
         )
         domain_diagnostics = _ch340c_esp32_domain_diagnostics(
@@ -1660,6 +2059,12 @@ def resolve_architecture_recipes(
                 f"{requirement.id}: firmware must enable CAN remap {parameters['can_remap']}"
             )
         bindings, port_diagnostics = _port_bindings(definition, requirement, architecture_model)
+        mcu_supply_diagnostics = _mcu_core_supply_diagnostics(
+            definition, requirement, architecture_model, bindings, parameters
+        )
+        if mcu_supply_diagnostics:
+            result.blocking.extend(mcu_supply_diagnostics)
+            continue
         if "auto_reset" in definition.parameter_defaults:
             programming = {
                 name: bindings[name] for name in _PROGRAMMING_PEER_PORTS if name in bindings
@@ -1685,13 +2090,25 @@ def resolve_architecture_recipes(
                     )
                 )
                 continue
-        if "native_usb" in definition.parameter_defaults and {"usb_dm", "usb_dp"} <= set(bindings):
+        if (
+            "native_usb" in definition.parameter_defaults
+            and {"usb_dm", "usb_dp"} <= set(bindings)
+            and parameters.get("native_usb") is not False
+        ):
             parameters["native_usb"] = True
-        if port_diagnostics:
-            result.blocking.extend(port_diagnostics)
+        rp2040_diagnostics = _rp2040_mode_diagnostics(
+            definition, requirement, parameters, bindings
+        )
+        if port_diagnostics or rp2040_diagnostics:
+            result.blocking.extend([*port_diagnostics, *rp2040_diagnostics])
             continue
         existing = existing_by_requirement.get(requirement.id)
-        allocation_requirement = requirement
+        effective_requirement = requirement.model_copy(
+            update={"ports": {**requirement.ports, **bindings}}
+        )
+        parameters, allocation_requirement = _mcu_expansion_plan(
+            definition, effective_requirement, parameters
+        )
         if "uart" in requirement.interfaces:
             # A proved fixed UART already implements this interface. Only an
             # additional application tx/rx contract needs allocatable MCU pins.
@@ -1717,9 +2134,11 @@ def resolve_architecture_recipes(
                     if endpoint.sheet == requirement.sheet
                 )
             ):
-                allocation_requirement = requirement.model_copy(
+                allocation_requirement = allocation_requirement.model_copy(
                     update={
-                        "interfaces": [name for name in requirement.interfaces if name != "uart"]
+                        "interfaces": [
+                            name for name in allocation_requirement.interfaces if name != "uart"
+                        ]
                     }
                 )
         try:
@@ -1783,7 +2202,7 @@ def resolve_architecture_recipes(
             pin_allocations=allocations,
         )
         result.selections.append(selection)
-        exact_part = definition.exact_part or requirement.exact_part
+        exact_part = definition.exact_part or selected_exact_part or requirement.exact_part
         if exact_part is not None:
             result.exact_parts[requirement.id] = exact_part
         result.assumptions.extend(assumption_rows)
@@ -1795,13 +2214,111 @@ def resolve_architecture_recipes(
                 assumptions=assumption_rows,
             )
         )
+        # Keep the selected converter's actual output in the canonical requirement.  The recipe
+        # selection already carries all defaults, but conversion-obligation acceptance must compare
+        # its output against the original request after resolution.
+        resolved_parameters = dict(requirement.parameters)
+        if "output_voltage" in parameters:
+            resolved_parameters["output_voltage"] = parameters["output_voltage"]
         result.requirements.append(
             requirement.model_copy(
-                update={"exact_part": exact_part, "ports": {**requirement.ports, **bindings}}
+                update={
+                    "exact_part": exact_part,
+                    "parameters": resolved_parameters,
+                    "ports": {**requirement.ports, **bindings},
+                }
             )
         )
     _coalesce_mcu_support_requirements(result, requirements, recipes)
     definitions = {recipe.definition.recipe: recipe.definition for recipe in recipes}
+    # A USB-UART bridge is itself the one device-side USB PHY.  Native-USB MCU
+    # pins may still implement UART programming, but MUST NOT share the bridge's
+    # physical D+/D- pair: that would place two PHYs on one receptacle.
+    bridge_phys = [
+        selection
+        for selection in result.selections
+        if definitions[selection.recipe].exact_part in {"CH340C", "CP2102N"}
+        and {"usb_dp", "usb_dm"}.intersection(selection.port_bindings)
+    ]
+    native_phys = [
+        selection
+        for selection in result.selections
+        if "mcu" in definitions[selection.recipe].required_sheet_roles
+        and {"usb_dp", "usb_dm"} <= set(selection.port_bindings)
+    ]
+    for bridge in bridge_phys:
+        bridge_pair = (
+            bridge.port_bindings.get("usb_dp"),
+            bridge.port_bindings.get("usb_dm"),
+        )
+        for mcu in native_phys:
+            shared = {net for net in bridge_pair if net}.intersection(
+                (mcu.port_bindings["usb_dp"], mcu.port_bindings["usb_dm"])
+            )
+            if not shared:
+                continue
+            result.blocking.append(
+                ResolutionDiagnostic(
+                    code="usb_two_phy_pair",
+                    requirement_id=bridge.requirement_ids[0] if bridge.requirement_ids else None,
+                    recipe=bridge.recipe,
+                    message=(
+                        f"USB-UART bridge {bridge.instance!r} and native-USB MCU {mcu.instance!r} "
+                        f"share USB data conductors {sorted(shared)!r}. Bind bridge UART to the MCU and "
+                        "leave the MCU native USB PHY off this receptacle; do not erase either identity."
+                    ),
+                    evidence=[
+                        f"bridge={bridge.recipe}:{bridge.instance}",
+                        f"mcu={mcu.recipe}:{mcu.instance}",
+                        f"usb_dp={bridge_pair[0]}",
+                        f"usb_dm={bridge_pair[1]}",
+                    ],
+                )
+            )
+
+    # Each complete device recipe owns a physical receptacle. Two device-side
+    # sockets cannot share data wires or directly parallel their host supplies.
+    usb_devices = [
+        selection
+        for selection in result.selections
+        if "vbus" in selection.port_bindings
+        and any(
+            (record := physical_inventory_record(
+                mpn=group.mpn, symbol=group.symbol, footprint=group.footprint
+            )) is not None
+            and "usb-c-receptacle" in record.physical_features
+            for group in definitions[selection.recipe].parts
+        )
+    ]
+    for index, left in enumerate(usb_devices):
+        for right in usb_devices[index + 1:]:
+            left_data = {
+                left.port_bindings[port] for port in ("usb_dp", "usb_dm")
+                if port in left.port_bindings
+            }
+            right_data = {
+                right.port_bindings[port] for port in ("usb_dp", "usb_dm")
+                if port in right.port_bindings
+            }
+            shared_data = left_data & right_data
+            shared_vbus = left.port_bindings["vbus"] == right.port_bindings["vbus"]
+            if shared_data or shared_vbus:
+                result.blocking.append(ResolutionDiagnostic(
+                    code="usb_receptacle_ownership_collision",
+                    requirement_id=right.requirement_ids[0] if right.requirement_ids else None,
+                    recipe=right.recipe,
+                    message=(
+                        f"{left.instance!r} and {right.instance!r} each already own a USB-C "
+                        "receptacle. Do not add a duplicate connector to an integrated bridge; "
+                        "distinct USB interfaces need separate data pairs and separate VBUS "
+                        "nets, with an explicit reviewed power-selection circuit if combined."
+                    ),
+                    evidence=[
+                        f"shared_data={sorted(shared_data)!r}",
+                        f"shared_vbus={left.port_bindings['vbus']!r}" if shared_vbus else "VBUS separate",
+                    ],
+                ))
+
     for selection in result.selections:
         for port in definitions[selection.recipe].ports:
             if port.direction == "output" and port.name in selection.port_bindings:
@@ -1818,6 +2335,7 @@ def resolve_architecture_recipes(
     result.selections.sort(key=lambda selection: (selection.recipe, selection.instance))
     resolved_requirements = {row.id: row for row in result.requirements}
     result.requirements = [resolved_requirements.get(row.id, row) for row in requirements]
+    _bind_analog_adc_limits(result, definitions, architecture_model.rail_voltages)
     result.records.sort(key=lambda record: record.requirement_id)
     selected_requirement_ids = {
         requirement_id

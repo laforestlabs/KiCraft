@@ -637,7 +637,7 @@ def is_board_level_quantitative_obligation(obligation: object) -> bool:
     - an explicit board/PCB subject with an outline dimension in a geometric unit (board width in
       mm);
     - an explicit board/PCB subject with a build stack-up term in a build unit ("PCB copper
-      layers" in `layers`).
+      layers" in `layers`), or the unqualified stack-up name "copper layers" in that unit.
 
     Everything else still requires all three pieces of semantic evidence to be attached to its
     realizing requirement: a current, voltage, frequency, contact pitch, or component value must
@@ -648,12 +648,22 @@ def is_board_level_quantitative_obligation(obligation: object) -> bool:
     quantity_terms = set(
         re.findall(r"[a-z0-9]+", str(_obligation_field(obligation, "quantity") or "").casefold())
     )
-    unit = re.sub(r"\s+", "", str(_obligation_field(obligation, "unit") or "").casefold())
+    unit_text = str(_obligation_field(obligation, "unit") or "").casefold().strip()
+    unit_text = re.sub(r"\s+per\s+(?:side|axis|dimension)$", "", unit_text)
+    unit = re.sub(r"\s+", "", unit_text)
     if not (_BOARD_SUBJECT_TERMS & quantity_terms):
-        return False
+        return unit in _BOARD_STACKUP_UNITS and quantity_terms in (
+            {"copper", "layer"}, {"copper", "layers"},
+        )
     if unit in _BOARD_DIMENSION_UNITS and _BOARD_DIMENSION_TERMS & quantity_terms:
         return True
     return unit in _BOARD_STACKUP_UNITS and bool(_BOARD_STACKUP_TERMS & quantity_terms)
+
+
+def is_board_stackup_obligation(obligation: object) -> bool:
+    """Distinguish a board's copper stack from its geometric measurements."""
+    unit = str(_obligation_field(obligation, "unit") or "").casefold().strip()
+    return unit in _BOARD_STACKUP_UNITS and is_board_level_quantitative_obligation(obligation)
 
 
 #: Copper layers a printed stack-up can carry. A board is built from an even number of copper
@@ -663,25 +673,33 @@ MAX_BOARD_COPPER_LAYERS = 32
 
 
 def board_copper_layers(obligations: object) -> int | None:
-    """The copper-layer count the design asked for, or ``None`` when it never said.
+    """Read a stated copper stack; refuse invalid or contradictory counts.
 
-    Reads the board-level stack-up obligation ("PCB copper layers" in `layers`) the intent
-    contract asks the writer for. Callers keep the conventional two-layer default when this
-    returns ``None``; a stated count no stack-up can carry is theirs to refuse, not to round.
+    ``None`` means no stack-up was requested, never an unusable stated count.
+    Geometric dimensions cannot supply a copper-layer count.
     """
+    requested = None
     for obligation in obligations or ():
-        if not is_board_level_quantitative_obligation(obligation):
+        if not is_board_stackup_obligation(obligation):
             continue
         value = _obligation_field(obligation, "value")
-        if value is None:
-            continue
         try:
-            count = int(float(value))
-        except (TypeError, ValueError):
-            continue
-        if MIN_BOARD_COPPER_LAYERS <= count <= MAX_BOARD_COPPER_LAYERS:
-            return count
-    return None
+            count = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid stated copper-layer count: {value!r}") from exc
+        if (
+            not count.is_integer()
+            or not MIN_BOARD_COPPER_LAYERS <= count <= MAX_BOARD_COPPER_LAYERS
+            or count % 2
+        ):
+            raise ValueError(
+                f"the design asks for {value!r} copper layers; supported counts are even "
+                f"integers from {MIN_BOARD_COPPER_LAYERS} to {MAX_BOARD_COPPER_LAYERS}"
+            )
+        if requested is not None and requested != int(count):
+            raise ValueError(f"contradictory copper-layer counts: {requested} and {int(count)}")
+        requested = int(count)
+    return requested
 
 
 def obligation_requires_requirement_owner(obligation: object) -> bool:
@@ -1268,6 +1286,7 @@ class BOM(BaseModel):
     no_connect_pins: list[PinEndpoint] = Field(default_factory=list)
     edge_interfaces: list[EdgeInterface] = Field(default_factory=list)
     recipe_ownership: list[RecipeOwnershipManifest] = Field(default_factory=list)
+    lowerer_ownership: list[PinOwnership] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _refs_unique(self):
@@ -1325,7 +1344,8 @@ class BOM(BaseModel):
 
     @model_validator(mode="after")
     def _recipe_ownership_is_disjoint_and_known(self):
-        ref_set = {part.ref for part in self.parts}
+        parts_by_ref = {part.ref: part for part in self.parts}
+        ref_set = set(parts_by_ref)
         owned_refs: set[str] = set()
         owned_pins: set[tuple[str, str]] = set()
         internal_nets: set[str] = set()
@@ -1354,6 +1374,28 @@ class BOM(BaseModel):
                         f"recipe ownership pin overlaps: {ownership.ref}.{ownership.pin}"
                     )
                 owned_pins.add(key)
+        for ownership in self.lowerer_ownership:
+            key = (ownership.ref, ownership.pin)
+            if ownership.owner != "lowerer":
+                raise ValueError("lowerer ownership must name a lowerer owner")
+            if ownership.ref not in ref_set:
+                raise ValueError(f"lowerer ownership pin references unknown ref {ownership.ref!r}")
+            part = parts_by_ref[ownership.ref]
+            if (
+                part.resolution_source != "lowerer"
+                or not part.resolution_id
+                or ownership.owner_id != part.resolution_id
+                or not ownership.requirement_id
+                or ownership.requirement_id != part.lowering_requirement_id
+                or not part.lowering_role
+            ):
+                raise ValueError(
+                    f"lowerer ownership does not match BOM provenance: "
+                    f"{ownership.ref}.{ownership.pin}"
+                )
+            if key in owned_pins:
+                raise ValueError(f"deterministic ownership pin overlaps: {ownership.ref}.{ownership.pin}")
+            owned_pins.add(key)
         return self
 
     @model_validator(mode="after")

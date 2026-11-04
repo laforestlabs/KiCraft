@@ -89,6 +89,12 @@ def test_search_terms_fallback_over_description(catalog):
     assert rows[0]["package"] is None                   # '-' normalized to None
 
 
+def test_button_footprint_keyword_uses_its_reviewed_order_code():
+    footprint = "Button_Switch_SMD:SW_SPST_TL3342"
+    assert jlcparts.bom_keyword("RESET", footprint) == "TL3342F260QG"
+    assert jlcparts.bom_keyword("BOOT", footprint) == "TL3342F260QG"
+
+
 def test_is_multi_element_array_signals():
     # Any one signal triggers: joints, LCSC array package convention, or an
     # "array" description. A plain 2-joint chip passive is not an array.

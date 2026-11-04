@@ -10,7 +10,7 @@ When a footprint has authoritative antenna keepout geometry, KiCraft should by d
 
 1. infer which side of the footprint radiates outward;
 2. rotate the footprint so that side faces an exterior board edge;
-3. place the outward boundary of the antenna keepout directly on that board edge;
+3. place the body-facing boundary of the antenna keepout directly on that board edge, leaving the antenna area outboard rather than burying it inside the substrate;
 4. preserve the same antenna direction and anchor through leaf routing, parent composition, outline repair, promotion, and verification;
 5. keep all pads and ordinary copper inboard while keeping other components out of the RF keepout;
 6. apply this to every design without relying on `ANT*`, `U1`, `ESP32`, connector classification, or a hard-coded module list;

@@ -1,0 +1,17 @@
+{
+  "schema_version": "1",
+  "version": "1.0.0",
+  "content_hash": "sha256:08036ab0aedc3a68137d527c1898a109f6e4c205895fd017b6c4887f47b33d40",
+  "name": "tb6612fng",
+  "mpn": "TB6612FNG",
+  "description": "Toshiba TB6612FNG dual DC motor driver",
+  "symbol_name": "TB6612FNG",
+  "footprint_name": "SSOP24-P-300-0.65A",
+  "datasheet_url": "https://toshiba.semicon-storage.com/info/TB6612FNG_datasheet_en_20141001.pdf?did=10660&prodName=TB6612FNG",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "sourcing": {"lcsc": "C88224"},
+  "provenance": {"added_at": "2026-10-11T00:00:00Z", "kicad_version": "9.0.0", "source": "Toshiba TB6612FNG datasheet pin table and package drawing", "source_project_stem": null},
+  "tags": ["portable", "reviewed", "motor-driver"],
+  "watch_out_for": "Pins 1/2, 5/6, 7/8, 11/12 are paired power outputs; VM and PGND pins must all be wired."
+}

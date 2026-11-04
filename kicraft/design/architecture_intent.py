@@ -61,6 +61,7 @@ from .recipes.resolver import (
     _family_recipes,
     _net_identity,
     _recipe_for_exact,
+    _rom_uart_variant_for,
 )
 from .synthesis.board_features import (
     PROTOTYPING_AREA_FEATURE,
@@ -177,31 +178,35 @@ _USB_DATA_PORTS = frozenset({"usb_dm", "usb_dp"})
 _USB_DEVICE_CONNECTOR_FAMILY = "usb-c-usb2-device"
 _USB_DEVICE_CONNECTOR_PART = "USB-C-USB2-DEVICE"
 _USB_DEVICE_CONNECTOR_RECIPE = "usb-c-usb2-device@1"
-# Reviewed factory-native-programmable families: their USB pair must reach one physical
-# data connector, never a UART header.
+# Reviewed native-USB families; connector completion follows the selected programming mode.
 _NATIVE_USB_MCU_RECIPES = frozenset(
     {
         "esp32-s3-mini-1-minimal@1",
+        "esp32-s3-mini-1u-n4r2-minimal@1",
         "esp32-s3-wroom-1-minimal@1",
         "esp32-c3-mini-1-minimal@1",
+        "esp32-c3-mini-1-h4x-minimal@1",
         "rp2040-minimal@2",
     }
 )
-# Recipes whose own expansion already carries the 22R MCU-side series pair, so the
+# Recipes whose own expansion carries the MCU-specific series pair, so the
 # data connector must not add a second one.
 _MCU_OWNED_USB_SERIES_RECIPES = frozenset(
     {
         "esp32-s3-mini-1-minimal@1",
+        "esp32-s3-mini-1u-n4r2-minimal@1",
         "esp32-s3-wroom-1-minimal@1",
         "esp32-c3-mini-1-minimal@1",
+        "esp32-c3-mini-1-h4x-minimal@1",
+        "rp2040-minimal@2",
     }
 )
 _HEADER_FAMILY = "pin-header"
 # Port a requirement's `supply` rail feeds, in preference order: a logic part its vdd, a motor
 # driver its vm, a regulator its input, a socket its vbus.
-_SUPPLY_PORTS = ("vdd", "vm", "vin", "input", "vdd_5v", "vcc", "vbus", "supply")
+_SUPPLY_PORTS = ("vdd", "vm", "vin", "vplus", "input", "vdd_5v", "vcc", "vbus", "supply")
 # Supply/ground tokens a *qualified* pin name is built from (`vdd_logic`, `vbus_5v`, `gnd_field`).
-_SUPPLY_TOKENS = ("vdd", "vcc", "vbus", "vin", "vm", "supply", "positive")
+_SUPPLY_TOKENS = ("vdd", "vcc", "vbus", "vin", "vm", "vplus", "supply", "positive")
 # The ports that *are* a part's reference (return) connection. A qualified name (`gnd_field`,
 # `vss_digital`) is still the reference; `negative`/`common` are not, because a terminal named
 # that way is just as often a floating output pair (a relay contact, a motor return).
@@ -665,11 +670,19 @@ def _supply_port(catalog: _Catalog, rail: str) -> str | None:
 
 
 def _reference_port(catalog: _Catalog) -> str | None:
-    """The port a requirement's reference (ground) connection lands on, or None.
+    """Return the family's single published reference, then conventional names.
 
-    Exact conventional names first, then the single qualified candidate (`gnd_field`). Anything
-    else stays unbound: the compiler does not guess which pin is the return.
+    A lowerer's explicit return identity is authoritative even when its name
+    (`vminus`, `sleeve`, `negative`) is not a conventional ground token.
+    Ambiguous published references do not select a pin by guesswork.
     """
+    if catalog.lowerer is not None:
+        published = [
+            port for port in catalog.lowerer.reference_port_keys
+            if port in catalog.directions
+        ]
+        if len(published) == 1:
+            return published[0]
     for name in _REFERENCE_PORTS:
         if name in catalog.directions:
             return name
@@ -760,7 +773,11 @@ def _lowerer_realizes_exact_part(family: str, identity: str) -> bool:
         str(code)
         for lowerer in registered_lowerers()
         if family in lowerer.families
-        for code in (lowerer.required_exact_part, lowerer.reviewed_exact_part)
+        for code in (
+            lowerer.required_exact_part,
+            lowerer.reviewed_exact_part,
+            *lowerer.reviewed_exact_parts,
+        )
         if code
     ]
     if wanted.casefold() in {code.casefold() for code in published}:
@@ -779,27 +796,12 @@ def _lowerer_realizes_exact_part(family: str, identity: str) -> bool:
     )
 
 
-def _carrier_family_for_class(component_class: str) -> str | None:
-    """The family that realizes this class, when the library has exactly one carrier family."""
-    from kicraft.design.part_identity import reviewed_parts_for_feature
-
-    families = sorted(
-        {part.family for part in reviewed_parts_for_feature(component_class) if part.family}
-    )
-    return families[0] if len(families) == 1 else None
 
 
-def _declared_ports_from_signals(payload: dict, requirement_id: str, contacts: tuple) -> list[dict]:
-    """Interface for a reviewed part with no recipe, built from the signals the draft already sends.
-
-    The compiler needs a `pin` per declared port and refuses a function claimed on a contact the
-    part does not have, so each port takes the carrier's own contact in the order the draft wires
-    them, and its function names the net the draft carries. Nothing here is invented: the port
-    names are the draft's, the contacts are the part's, and the function names its own signal.
-    """
-    ports: list[dict] = []
+def _signal_ports_from_payload(payload: dict, requirement_id: str) -> list[tuple[str, str]]:
+    """The unique requirement ports actually named by the draft's signals, in draft order."""
+    ports: list[tuple[str, str]] = []
     seen: set[str] = set()
-    index = 0
     for signal in payload.get("signals") or []:
         if not isinstance(signal, dict):
             continue
@@ -813,17 +815,219 @@ def _declared_ports_from_signals(payload: dict, requirement_id: str, contacts: t
             if key in seen:
                 continue
             seen.add(key)
-            pin = str(contacts[index]) if index < len(contacts) else key
-            ports.append(
-                {
-                    "key": key,
-                    "pin": pin,
-                    "direction": "passive",
-                    "function": f"carries {signal.get('name')}",
-                }
-            )
-            index += 1
+            ports.append((key, str(signal.get("name") or "")))
     return ports
+
+
+def _declared_ports_from_signals(payload: dict, requirement_id: str, contacts: tuple) -> list[dict]:
+    """Declare only the real carrier contacts already named by draft signals.
+
+    ``pinN`` is an explicit physical contact name, not an ordinal label the compiler may remap.
+    Other names are permitted for a generic connector and take the reviewed contacts in signal
+    order. Either form refuses to invent a contact the selected physical record does not carry.
+    """
+    named = _signal_ports_from_payload(payload, requirement_id)
+    if not named:
+        return []
+    contact_set = {str(contact) for contact in contacts}
+    explicit = [re.fullmatch(r"pin([1-9][0-9]*)", key) for key, _ in named]
+    if all(explicit):
+        pins = [match.group(1) for match in explicit if match is not None]
+        if any(pin not in contact_set for pin in pins):
+            return []
+    else:
+        if len(named) > len(contacts):
+            return []
+        pins = [str(contact) for contact in contacts[: len(named)]]
+    return [
+        {
+            "key": key,
+            "pin": pin,
+            "direction": "passive",
+            "function": f"carries {signal}",
+        }
+        for (key, signal), pin in zip(named, pins, strict=True)
+    ]
+
+
+def _required_carrier_contacts(payload: dict, requirement: dict) -> int:
+    """Contact cardinality required by explicit interface evidence, never a default series size."""
+    declared = requirement.get("declared_ports")
+    if isinstance(declared, list) and declared:
+        keys = [str(row.get("key") or "") for row in declared if isinstance(row, dict)]
+    else:
+        keys = [key for key, _ in _signal_ports_from_payload(payload, str(requirement.get("id") or ""))]
+    numbered = [re.fullmatch(r"pin([1-9][0-9]*)", key) for key in keys]
+    if keys and all(numbered):
+        return max(int(match.group(1)) for match in numbered if match is not None)
+    return len(keys)
+
+
+def _carrier_record_for_contacts(component_class: str, contacts: int):
+    """The one reviewed generic carrier whose physical contact count meets the draft exactly."""
+    if contacts < 1:
+        return None
+    from kicraft.design.part_identity import reviewed_parts_for_feature
+
+    candidates = [
+        part
+        for part in reviewed_parts_for_feature(component_class)
+        if len(part.contacts) == contacts
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _recipe_owns_enable_shunt(definition) -> bool:
+    """Whether this recipe publishes its own selectable, ground-sinking control.
+
+    The public ``enable`` port can name a recipe-private control node.  TPS61088
+    deliberately shunts its eFuse's ``efuse_enable`` node, not a literal net
+    named ``enable``.  Treat only a selectable two-pin jumper from such a
+    private enable node to ground as recipe-owned; an arbitrary jumper or an
+    externally driven control remains subject to the regular safety checks.
+    """
+    if (
+        definition.parameter_defaults.get("enable_control") is not False
+        or True not in definition.allowed_parameters.get("enable_control", ())
+        or not any(port.name == "enable" for port in definition.ports)
+        or not any(group.role == "enable_jumper" for group in definition.parts)
+    ):
+        return False
+    jumper_pins = {
+        (pin.pin, pin.net)
+        for pin in definition.pins
+        if pin.role == "enable_jumper"
+    }
+    private_enable_nets = {
+        net
+        for pin, net in jumper_pins
+        if pin == "1"
+        and net in definition.internal_nets
+        and (net == "enable" or net.endswith("_enable"))
+    }
+    if len(private_enable_nets) != 1:
+        return False
+    return jumper_pins == {("1", next(iter(private_enable_nets))), ("2", "gnd")}
+
+
+def _complete_enable_jumper_requirements(payload: dict) -> dict:
+    """Complete an unowned enable jumper using one unambiguous reviewed converter.
+
+    Recipe-owned sink shunts retain their complete internal bias network. Other
+    converters use a high-true shunt only from a sourced rail within their EN limit.
+    Explicit controls, voltage-selection jumpers and ambiguous targets are not rewritten.
+    """
+    from kicraft.design.part_identity import canonical_physical_features, class_key
+    from kicraft.design.recipes.registry import registered_recipes
+    from kicraft.design.recipes.wave_b_power import enable_control_max_voltage
+
+    requirements = [
+        row for row in payload.get("requirements") or [] if isinstance(row, dict)
+    ]
+    obligations = [
+        row for row in payload.get("obligations") or [] if isinstance(row, dict)
+    ]
+    rails = (payload.get("power") or {}).get("rails") or {}
+    signals = [row for row in payload.get("signals") or [] if isinstance(row, dict)]
+    if not requirements or not obligations or not isinstance(rails, dict):
+        return payload
+    owned = {
+        str(identifier)
+        for requirement in requirements
+        for identifier in requirement.get("obligation_ids") or []
+    }
+    requirement_ids = {str(requirement.get("id") or "") for requirement in requirements}
+    definitions = {
+        definition.family: definition
+        for registered in registered_recipes()
+        if (definition := registered.definition).family
+    }
+
+    def _enable_is_explicit(requirement_id: str, requirement: dict) -> bool:
+        if str((requirement.get("ties") or {}).get("enable") or "").strip():
+            return True
+        prefix = f"{requirement_id}.enable"
+        for signal in signals:
+            peers = signal.get("to")
+            references = [signal.get("from"), *(peers if isinstance(peers, list) else [peers])]
+            if any(str(reference or "") == prefix for reference in references):
+                return True
+        return False
+
+    for obligation in obligations:
+        if (
+            obligation.get("kind") != "adjustability"
+            or "jumper"
+            not in canonical_physical_features(class_key(str(obligation.get("mechanism") or "")))
+            or str(obligation.get("parameter") or "").strip().casefold()
+            not in {"enable", "power enable", "converter enable", "regulator enable"}
+        ):
+            continue
+        obligation_id = str(obligation.get("original_obligation_id") or "")
+        if not obligation_id or obligation_id in owned or obligation_id in requirement_ids:
+            continue
+        candidates = []
+        for requirement in requirements:
+            definition = definitions.get(str(requirement.get("family") or ""))
+            if definition is None or not any(port.name == "enable" for port in definition.ports):
+                continue
+            maximum = enable_control_max_voltage(definition.recipe)
+            owns_shunt = _recipe_owns_enable_shunt(definition)
+            supply = str(requirement.get("supply") or "")
+            rail = rails.get(supply)
+            if (
+                maximum is None
+                or not isinstance(rail, dict)
+                or not rail.get("from")
+                or not isinstance(rail.get("voltage"), (int, float))
+                or not 0 < rail["voltage"]
+                or (not owns_shunt and rail["voltage"] > maximum)
+                or _enable_is_explicit(str(requirement.get("id") or ""), requirement)
+            ):
+                continue
+            candidates.append((requirement, supply, owns_shunt))
+        if len(candidates) != 1:
+            continue
+        target, control_rail, owns_shunt = candidates[0]
+        if owns_shunt:
+            target["parameters"] = {
+                **(target.get("parameters") or {}),
+                "enable_control": True,
+            }
+            target["obligation_ids"] = [
+                *(target.get("obligation_ids") or []),
+                obligation_id,
+            ]
+            owned.add(obligation_id)
+            continue
+        target_id = str(target["id"])
+        signal_name = f"{target_id.upper()}_ENABLE_JUMPER"
+        if any(str(signal.get("name") or "") == signal_name for signal in signals):
+            continue
+        requirements.append(
+            {
+                "id": obligation_id,
+                "sheet": target["sheet"],
+                "role": "user_io",
+                "family": "switch-input",
+                "parameters": {"pull_policy": "external", "active_level": "high"},
+                "supply": control_rail,
+                "functional_blocks": list(target.get("functional_blocks") or []),
+                "obligation_ids": [obligation_id],
+            }
+        )
+        signals.append(
+            {
+                "name": signal_name,
+                "from": f"{obligation_id}.signal",
+                "to": f"{target_id}.enable",
+            }
+        )
+        owned.add(obligation_id)
+        requirement_ids.add(obligation_id)
+    payload["requirements"] = requirements
+    payload["signals"] = signals
+    return payload
 
 
 def _adopt_carrier_families(payload: dict) -> dict:
@@ -863,6 +1067,7 @@ def _adopt_carrier_families(payload: dict) -> dict:
 
     changed = False
     lowerers = _lowerer_families()
+    generic_connector_classes = {"pin-header", "screw-terminal", "jst-connector", "jst-xh-connector", "jst-ph"}
     for requirement in requirements:
         family = str(requirement.get("family") or "")
         if family.casefold() not in lowerers:
@@ -885,6 +1090,11 @@ def _adopt_carrier_families(payload: dict) -> dict:
             # that composition publishes).
             continue
         target = None
+        role = str(requirement.get("role") or "").casefold()
+        record_is_generic_connector = bool(
+            record is not None
+            and generic_connector_classes & record.physical_features
+        )
         if (
             record is not None
             and record.family
@@ -895,31 +1105,29 @@ def _adopt_carrier_families(payload: dict) -> dict:
             # resistor and took §9.36 -- which keys on the lowerer family -- out of play (live
             # 2026-09-25). A lowerer that cannot answer the class still adopts the carrier's family.
             and record.family not in canonical_physical_features(family)
+            and not (record_is_generic_connector and role == "mcu_core")
         ):
             target = record.family
         else:
             for obligation in _physical_obligations(requirement):
-                if obligation.get("kind") != "physical":
+                if obligation.get("kind") != "physical" or role != "connector":
                     continue
                 component_class = str(obligation.get("component_class") or "")
-                carrier_family = _carrier_family_for_class(component_class) if component_class else None
+                contacts = _required_carrier_contacts(payload, requirement)
+                carrier = _carrier_record_for_contacts(component_class, contacts)
+                if carrier is None:
+                    # A generic connector has no safe default width without all of the contact
+                    # evidence. Leave it for the owning contract to refuse instead of choosing a
+                    # two-contact carrier and inventing pin numbers that do not exist.
+                    continue
+                carrier_family = carrier.family
                 if (
-                    carrier_family
-                    and family != carrier_family
+                    family != carrier_family
                     and carrier_family not in canonical_physical_features(family)
                 ):
                     target = carrier_family
                     if record is None:
-                        from kicraft.design.part_identity import reviewed_parts_for_feature
-
-                        record = next(
-                            (
-                                part
-                                for part in reviewed_parts_for_feature(component_class)
-                                if part.family == carrier_family
-                            ),
-                            None,
-                        )
+                        record = carrier
                     break
         if target is None or target == family:
             continue
@@ -928,7 +1136,14 @@ def _adopt_carrier_families(payload: dict) -> dict:
         for key in _LOWERER_ONLY_PARAMETERS:
             parameters.pop(key, None)
         requirement["parameters"] = parameters
-        if record is not None and not requirement.get("declared_ports"):
+        # Ordinal contact assignment is only valid for interchangeable connector
+        # contacts, never the functional pins of an LED, MCU, or analog device.
+        if (
+            record is not None
+            and generic_connector_classes & record.physical_features
+            and role == "connector"
+            and not requirement.get("declared_ports")
+        ):
             declared = _declared_ports_from_signals(payload, str(requirement.get("id") or ""), record.contacts)
             if declared:
                 requirement["declared_ports"] = declared
@@ -1021,7 +1236,9 @@ def complete_architecture_payload(payload: dict) -> dict:
     """
     if not isinstance(payload, dict):
         return payload
-    # Family and interface repairs first: they change what the later steps see.
+    # Requirement production precedes family/interface repairs so the same contracts see generated
+    # and authored controls. The producer acts only on one unowned, unambiguous safe jumper fact.
+    _complete_enable_jumper_requirements(payload)
     _adopt_carrier_families(payload)
     _complete_terminal_returns(payload)
     requirements = [row for row in payload.get("requirements") or [] if isinstance(row, dict)]
@@ -1228,6 +1445,14 @@ def _catalog(
         selected = (
             defaults[0] if len(defaults) == 1 else (matches[0] if len(matches) == 1 else None)
         )
+    if (
+        selected is not None
+        and requirement.role == "mcu_core"
+        and requirement.programming in {"uart", "rom_uart"}
+    ):
+        variant = _rom_uart_variant_for(selected.definition, recipes)
+        if variant is not None and variant.definition.maturity == "production":
+            selected = variant
     if selected is not None:
         definition = selected.definition
         return _Catalog(
@@ -1241,6 +1466,14 @@ def _catalog(
                 for port in definition.ports
                 if port.default_tie is not None
             },
+        )
+    # A reviewed JST carrier has the draft's own pin-by-pin interface. Treat that interface as
+    # authoritative during architecture binding so an exact part can be checked against its real
+    # contact count; the deterministic JST lowerer still owns the emitted part once nets exist.
+    if requirement.family in {"jst-connector", "jst-xh-connector"} and requirement.declared_ports:
+        return _Catalog(
+            directions={port.key: port.direction for port in requirement.declared_ports},
+            source="declared",
         )
     if requirement.family in lowerers:
         lowerer = lowerers[requirement.family]
@@ -1389,6 +1622,74 @@ def _merge_alias_rails(
     )
 
 
+def _append_data_logger_storage(
+    intent: ArchitectureIntent, functional_spec: object | None,
+) -> tuple[ArchitectureIntent, str | None]:
+    """Complete a committed logger block using its MCU's already-declared I2C bus."""
+    rows = (
+        functional_spec.get("blocks")
+        if isinstance(functional_spec, Mapping)
+        else getattr(functional_spec, "blocks", ())
+    )
+    blocks = []
+    for row in rows or ():
+        data = row if isinstance(row, Mapping) else row.model_dump()
+        if data.get("category") == "process" and re.search(
+            r"\b(?:data[ -]?(?:logger|logging)|logged\s+(?:data|measurements|readings))\b",
+            f"{data.get('name', '')} {data.get('purpose', '')}", re.I,
+        ):
+            blocks.append(data)
+    if not blocks or any(row.family == "i2c-eeprom-256k" for row in intent.requirements):
+        return intent, None
+    if len(blocks) != 1:
+        return intent, "Data-logger storage needs one unambiguous committed processing block."
+    mcus = [row for row in intent.requirements if row.role == "mcu_core" and row.supply]
+    if len(mcus) != 1:
+        return intent, "Data-logger storage needs one declared MCU supply and I2C owner."
+    mcu = mcus[0]
+    grounds = set(mcu.reference_bindings.values()) or {GND_NET}
+    if len(grounds) != 1:
+        return intent, "Data-logger storage needs one declared MCU reference domain."
+    signals = list(intent.signals)
+    matched: dict[str, int] = {}
+    for mcu_port, storage_port in (("i2c_sda", "sda"), ("i2c_scl", "scl")):
+        hits = [
+            index for index, signal in enumerate(signals)
+            if f"{mcu.id}.{mcu_port}" in (signal.from_ref, *signal.peers())
+        ]
+        if not hits or len({signals[index].name for index in hits}) != 1:
+            return intent, f"Data-logger storage needs one unambiguous existing {mcu_port} bus."
+        matched[storage_port] = hits[0]
+    if len({signals[index].name for index in matched.values()}) != 2:
+        return intent, "Data-logger I2C data and clock must be distinct nets."
+    storage_id = "data_logger_storage"
+    sheet = IntentSheet(
+        name="NONVOLATILE STORAGE", stem="NONVOLATILE_STORAGE", role="storage",
+        function="Writable I2C nonvolatile storage for the committed data-logger block",
+    )
+    if any(row.id == storage_id for row in intent.requirements) or any(
+        row.name == sheet.name or row.stem == sheet.stem for row in intent.sheets
+    ):
+        return intent, "Declare the existing storage owner explicitly as an I2C EEPROM requirement."
+    block = blocks[0]
+    requirement = IntentRequirement(
+        id=storage_id, sheet=sheet.name, role="bus_interface", family="i2c-eeprom-256k",
+        exact_part="24LC256T-I/SN", supply=mcu.supply,
+        reference_bindings={"gnd": next(iter(grounds))},
+        functional_blocks=[block["name"]],
+    )
+    for storage_port, index in matched.items():
+        signal = signals[index]
+        signals[index] = signal.model_copy(
+            update={"to": [*signal.peers(), f"{storage_id}.{storage_port}"]},
+        )
+    return intent.model_copy(update={
+        "sheets": [*intent.sheets, sheet],
+        "requirements": [*intent.requirements, requirement],
+        "signals": signals,
+    }), None
+
+
 def derive_architecture(
     intent: ArchitectureIntent | dict,
     functional_spec: object | None = None,
@@ -1402,6 +1703,7 @@ def derive_architecture(
     names all the parts, ports and rails it could not derive wiring from in a single answer.
     """
     intent = ArchitectureIntent.model_validate(intent)
+    intent, storage_diagnostic = _append_data_logger_storage(intent, functional_spec)
     recipes = tuple(registered_recipes())
     lowerers = {family: row for row in registered_lowerers() for family in row.families}
     diagnostics: list[IntentDiagnostic] = []
@@ -1409,6 +1711,8 @@ def derive_architecture(
 
     def _fail(code: str, message: str, **kw) -> None:
         diagnostics.append(IntentDiagnostic(code=code, message=message, **kw))
+    if storage_diagnostic:
+        _fail("data_logger_storage_contract", storage_diagnostic)
 
     def _advise(code: str, message: str, **kw) -> None:
         """Record a property that could not be *proven*; the design still compiles.
@@ -1493,7 +1797,7 @@ def derive_architecture(
             continue  # model-owned, or refused below once we know whether a signal needs its pins
         catalogs[row.id] = catalog
         declared_ports = list(row.declared_ports)
-        if catalog.source == "declared" and row.exact_part:
+        if declared_ports and row.exact_part:
             from kicraft.design.part_identity import reviewed_part
             from kicraft.design.synthesis.symbol_pinout import lookup_pins
 
@@ -1559,7 +1863,7 @@ def derive_architecture(
             functional_blocks=list(row.functional_blocks),
             declared_interface=(
                 DeclaredInterfaceClaim(ports=declared_ports)
-                if catalog.source == "declared"
+                if declared_ports
                 else None
             ),
             obligations=_owned_obligations(row),
@@ -1784,6 +2088,38 @@ def derive_architecture(
         for net in ports.values()
     }
     rail_names = set(intent.power.rails)
+    # A curated core remains recipe-owned even when an author also publishes
+    # package contacts.  Map only a validated declared contact that is exactly
+    # one of the recipe primary-device supply/reference pins; the contact claim
+    # itself remains on the requirement for later audit.
+    for requirement_id, catalog in sorted(catalogs.items()):
+        if catalog.source != "recipe" or catalog.recipe is None:
+            continue
+        model = models_by_id.get(requirement_id)
+        if model is None or not model.declared_ports:
+            continue
+        primary_nets = {
+            pin.pin: pin.net
+            for pin in catalog.recipe.definition.pins
+            if pin.role == "mcu" and pin.index == 0
+        }
+        supply = model.supply if model.supply in rail_names else (
+            next(iter(rail_names)) if len(rail_names) == 1 else None
+        )
+        declared_primary_ports = {
+            primary_nets.get(declared.pin or "")
+            for declared in requirements[requirement_id].declared_interface.ports
+        }
+        if {"vdd", "gnd"} & declared_primary_ports:
+            if supply is not None:
+                _bind(requirement_id, "vdd", supply, "power", context="validated declared MCU supply interface")
+            _bind(requirement_id, "gnd", GND_NET, "power", context="validated declared MCU supply interface")
+        for declared in requirements[requirement_id].declared_interface.ports:
+            recipe_port = primary_nets.get(declared.pin or "")
+            if recipe_port == "gnd":
+                _bind(requirement_id, "gnd", GND_NET, "power", context="validated declared MCU contact")
+            elif recipe_port == "vdd" and supply is not None:
+                _bind(requirement_id, "vdd", supply, "power", context="validated declared MCU contact")
     for requirement_id, ports in standard_port_bindings.items():
         for port, net in ports.items():
             # A power/ground pin of a standard shield IS that rail (the board is powered
@@ -2228,6 +2564,54 @@ def derive_architecture(
             return existing[0], existing[1]
         if label in failed_edges:
             return None
+        source_recipe = catalogs[source.requirement.id].recipe
+        source_recipe_name = source_recipe.definition.recipe if source_recipe is not None else None
+        mode = (
+            "usb"
+            if source.port in _USB_DATA_PORTS and source_recipe_name in _NATIVE_USB_MCU_RECIPES
+            else "header"
+        )
+        if mode == "usb":
+            vbus = _usb_vbus_rail(intent)
+            reusable = [
+                owner_id for owner_id, owner in requirements.items()
+                if owner_id in models_by_id and models_by_id[owner_id].exact_part is None
+                and catalogs[owner_id].recipe is not None
+                and catalogs[owner_id].recipe.definition.recipe == "usb-c-5v-sink@1"
+                and vbus is not None
+                and (
+                    bindings.get(owner_id, {}).get("vbus") == vbus
+                    or intent.power.rails[vbus].from_ref == f"{owner_id}.vbus"
+                )
+            ]
+            if len(reusable) == 1:
+                owner_id = reusable[0]
+                owner = requirements[owner_id]
+                parameters = {
+                    **owner.parameters,
+                    "series_resistors": source_recipe_name not in _MCU_OWNED_USB_SERIES_RECIPES,
+                }
+                requirements[owner_id] = owner.model_copy(update={
+                    "family": _USB_DEVICE_CONNECTOR_FAMILY,
+                    "exact_part": _USB_DEVICE_CONNECTOR_PART,
+                    "parameters": parameters,
+                    "functional_blocks": list(dict.fromkeys([
+                        *owner.functional_blocks, *source.requirement.functional_blocks,
+                    ])),
+                })
+                model = models_by_id[owner_id].model_copy(update={
+                    "family": _USB_DEVICE_CONNECTOR_FAMILY, "parameters": parameters,
+                })
+                replacement_catalog = _catalog(model, recipes, lowerers)
+                assert replacement_catalog is not None
+                catalogs[owner_id] = replacement_catalog
+                models_by_id[owner_id] = model
+                edge_connectors[label] = (owner_id, mode, [])
+                derived_notes.append(
+                    f"{owner_id}: used the existing USB-C power receptacle for native USB "
+                    "data, preserving its power contacts and requirement ownership (derived)"
+                )
+                return owner_id, mode
         sheet = sheet_by_stem.get(label)
         if sheet is None:
             sheet = Sheet(
@@ -2247,13 +2631,6 @@ def derive_architecture(
             )
             failed_edges.add(label)
             return None
-        source_recipe = catalogs[source.requirement.id].recipe
-        source_recipe_name = source_recipe.definition.recipe if source_recipe is not None else None
-        mode = (
-            "usb"
-            if source.port in _USB_DATA_PORTS and source_recipe_name in _NATIVE_USB_MCU_RECIPES
-            else "header"
-        )
         if mode == "usb":
             vbus = _usb_vbus_rail(intent)
             if vbus is None:
@@ -2286,7 +2663,7 @@ def derive_architecture(
                 family=_USB_DEVICE_CONNECTOR_FAMILY,
                 exact_part=_USB_DEVICE_CONNECTOR_PART,
                 functional_blocks=list(source.requirement.functional_blocks),
-                # A recipe that already expands the 22R MCU-side pair owns it; the
+                # A recipe that expands the MCU-side pair owns its termination;
                 # socket must not add a second pair in series with the same lines.
                 parameters=(
                     {"series_resistors": False}
@@ -2642,20 +3019,106 @@ def derive_architecture(
                 context=f"tie {port_name!r}",
             )
 
-    # A factory-native-programmable MCU's USB data pair is not an optional signal: the part is
-    # flashed and recovered over it, and the reviewed satisfier is a registered recipe. Asking
-    # the draft for the connector refused live run 1 -- an RP2040 current-sense brief that never
-    # mentioned USB -- with `unbound_required_port: requirement 'rp2040' port 'usb_dm' is
-    # required by rp2040-minimal@2 and nothing wires it`. The draft was not wrong; the brief
-    # never named USB. The compiler therefore completes the connector the same way it completes
-    # a published supply contact, and records why the part is on the board. A design that wires
-    # its own USB data pair is untouched: `_open_edge` already built that connector from its
-    # signal, and an authored tie owns its port before this runs.
+    # A typed UART bridge carries RP2040 serial traffic, not its programming protocol.
+    # Where no native USB pair or programming mode was requested, provide independent SWD
+    # recovery instead of adding another USB PHY to the bridge's connector.
+    for requirement_id, catalog in sorted(catalogs.items()):
+        if catalog.recipe is None or catalog.recipe.definition.exact_part != "RP2040":
+            continue
+        requirement = requirements[requirement_id]
+        parameters = dict(requirement.parameters)
+        model = models_by_id[requirement_id]
+        requested_programming = model.programming
+        if requested_programming not in {None, "swd", "native_usb", "bootsel"}:
+            _fail(
+                "unsupported_mcu_programming",
+                "RP2040 UART carries application data, not ROM programming. Select swd "
+                "for independent recovery with a USB-UART bridge, or native_usb/bootsel "
+                "for its own USB programming connector.",
+                requirement_id=requirement_id,
+                sheet=requirement.sheet,
+            )
+            continue
+        if requested_programming in {"swd", "native_usb", "bootsel"}:
+            mode = "swd" if requested_programming == "swd" else "native_usb"
+            if (
+                parameters.get("programming", mode) != mode
+                or parameters.get("native_usb", mode == "native_usb") is not (mode == "native_usb")
+            ):
+                _fail(
+                    "conflicting_programming_contract",
+                    "RP2040 programming intent conflicts with its explicit native_usb/programming parameters.",
+                    requirement_id=requirement_id,
+                    sheet=requirement.sheet,
+                )
+                continue
+            parameters.setdefault("programming", mode)
+            parameters.setdefault("native_usb", mode == "native_usb")
+        bound = bindings.get(requirement_id, {})
+        bridge_peers = []
+        for peer_id, peer_catalog in catalogs.items():
+            if peer_id == requirement_id or peer_catalog.recipe is None:
+                continue
+            peer_ports = {
+                port.name: port.direction for port in peer_catalog.recipe.definition.ports
+            }
+            if not _USB_DATA_PORTS <= peer_ports.keys():
+                continue
+            if peer_ports.get("tx") != "output" or peer_ports.get("rx") != "input":
+                continue
+            peer_bound = bindings.get(peer_id, {})
+            if (
+                bound.get("uart_rx")
+                and bound.get("uart_tx")
+                and bound["uart_rx"] != bound["uart_tx"]
+                and bound["uart_rx"] == peer_bound.get("tx")
+                and bound["uart_tx"] == peer_bound.get("rx")
+            ):
+                bridge_peers.append(peer_id)
+        if (
+            requested_programming is None
+            and "native_usb" not in parameters
+            and "programming" not in parameters
+            and not _USB_DATA_PORTS.intersection(bound)
+            and len(bridge_peers) == 1
+        ):
+            parameters.update(native_usb=False, programming="swd")
+            derived_notes.append(
+                f"{requirement_id}: {bridge_peers[0]} carries UART data; selected independent "
+                "SWD programming and left the RP2040 USB PHY disconnected (derived)"
+            )
+        if parameters.get("native_usb") is False:
+            parameters.setdefault("programming", "swd")
+        elif parameters.get("programming") == "swd":
+            parameters.setdefault("native_usb", False)
+        requirements[requirement_id] = requirement.model_copy(update={"parameters": parameters})
+
+    # Complete the host supply of an integrated USB bridge only from an already
+    # declared, unambiguous 5-V USB rail. Its logic supply remains independent.
+    for requirement_id, catalog in sorted(catalogs.items()):
+        if (
+            catalog.recipe is None
+            or catalog.recipe.definition.exact_part not in {"CH340C", "CP2102N"}
+            or bindings.get(requirement_id, {}).get("vbus")
+        ):
+            continue
+        vbus = _usb_vbus_rail(intent)
+        if vbus is not None and abs(intent.power.rails[vbus].voltage - 5.0) < 1e-6:
+            _bind(requirement_id, "vbus", vbus, "input", context="integrated USB host supply")
+            derived_notes.append(
+                f"{requirement_id}: integrated USB receptacle uses declared {vbus} "
+                "at 5 V; its logic supply is unchanged (derived)"
+            )
+
+    # Complete a native programming connector only for a selected native-USB mode.
+    # Authored USB bindings and connectors remain authoritative.
     if not any(row.family == _USB_DEVICE_CONNECTOR_FAMILY for row in requirements.values()):
         for requirement_id, catalog in sorted(catalogs.items()):
             if catalog.source != "recipe" or catalog.recipe is None:
                 continue
             if catalog.recipe.definition.recipe not in _NATIVE_USB_MCU_RECIPES:
+                continue
+            if requirements[requirement_id].parameters.get("native_usb") is False:
                 continue
             if all(bindings.get(requirement_id, {}).get(port) for port in _USB_DATA_PORTS):
                 continue
@@ -2746,6 +3209,129 @@ def derive_architecture(
                     context="published reference port",
                 )
 
+
+    # The writer binds consumer-side analog_out_<n> ports, supply and return.
+    # Sensor nodes, return aliases and conditioned_<n> are compiler-owned.
+    # In particular, an isolated conditioned node must never be exposed through
+    # a second connector that bypasses the on-board switch. Missing consumers,
+    # isolation supply or supervisor release remain contract failures.
+    for requirement_id, requirement in sorted(requirements.items()):
+        model = models_by_id.get(requirement_id)
+        if (
+            model is None
+            or model.family.casefold().replace("_", "-") not in {
+                "analog-conditioner",
+                "sensor-conditioner",
+            }
+        ):
+            continue
+        try:
+            channels = int(requirement.parameters.get("channel_count", 2))
+        except (TypeError, ValueError):
+            continue
+        if type(requirement.parameters.get("channel_count", 2)) is bool or channels not in {2, 4, 8}:
+            continue
+        bound = bindings.setdefault(requirement_id, {})
+        analog_return = bound.get("vminus")
+        if analog_return is not None:
+            return_ports = [
+                "analog_out_return",
+                *(f"sensor_{index}_return" for index in range(1, channels + 1)),
+            ]
+            if str(requirement.parameters.get("sensor_type", requirement.parameters.get("topology", ""))).casefold().replace("_", "-") == "current-sense":
+                return_ports.extend(
+                    f"load_return_out_{index}" for index in range(1, channels + 1)
+                )
+            for port in return_ports:
+                if port not in bound:
+                    _bind(
+                        requirement_id,
+                        port,
+                        analog_return,
+                        "bidirectional",
+                        context="analog conditioner return alias",
+                    )
+                    derived_notes.append(
+                        f"{requirement_id}.{port}: shares {analog_return} with vminus "
+                        "(analog conditioner topology) (derived)"
+                    )
+        sensor = str(
+            requirement.parameters.get(
+                "sensor_type", requirement.parameters.get("topology", "temperature")
+            )
+        ).casefold().replace("_", "-")
+        for index in range(1, channels + 1):
+            signal = f"sensor_{index}_signal"
+            load_input = f"load_return_in_{index}"
+            if sensor == "current-sense":
+                if signal not in bound and load_input in bound:
+                    _bind(
+                        requirement_id,
+                        signal,
+                        bound[load_input],
+                        "bidirectional",
+                        context="current-sense conditioner input alias",
+                    )
+                    derived_notes.append(
+                        f"{requirement_id}.{signal}: shares {bound[load_input]} with "
+                        f"{load_input} (current-sense topology) (derived)"
+                    )
+                elif load_input not in bound and signal in bound:
+                    _bind(
+                        requirement_id,
+                        load_input,
+                        bound[signal],
+                        "bidirectional",
+                        context="current-sense conditioner input alias",
+                    )
+                    derived_notes.append(
+                        f"{requirement_id}.{load_input}: shares {bound[signal]} with "
+                        f"{signal} (current-sense topology) (derived)"
+                    )
+            elif signal not in bound:
+                net = f"__KICRAFT_ANALOG__{requirement_id}__SENSOR_{index}"
+                _bind(
+                    requirement_id,
+                    signal,
+                    net,
+                    "bidirectional",
+                    context="on-board analog sensor output",
+                )
+                derived_notes.append(
+                    f"{requirement_id}.{signal}: bound to on-board sensor node {net} "
+                    "(analog conditioner topology) (derived)"
+                )
+        isolated = requirement.parameters.get("power_cycle_isolation") is True
+        for index in range(1, channels + 1):
+            conditioned = f"conditioned_{index}"
+            output = f"analog_out_{index}"
+            if conditioned in bound:
+                continue
+            if isolated:
+                net = f"__KICRAFT_ANALOG__{requirement_id}__CONDITIONED_{index}"
+                _bind(
+                    requirement_id,
+                    conditioned,
+                    net,
+                    "output",
+                    context="isolated analog conditioner internal output",
+                )
+                derived_notes.append(
+                    f"{requirement_id}.{conditioned}: bound to its on-board isolation input "
+                    f"{net} (derived)"
+                )
+            elif output in bound:
+                _bind(
+                    requirement_id,
+                    conditioned,
+                    bound[output],
+                    "output",
+                    context="analog conditioner direct output alias",
+                )
+                derived_notes.append(
+                    f"{requirement_id}.{conditioned}: shares {bound[output]} with "
+                    f"{output} (analog conditioner topology) (derived)"
+                )
     # A port the reviewed recipe requires and nothing wired is a missing design statement, not
     # a bookkeeping slip: the part cannot work without it. Name it here, once, instead of
     # letting the part reach BOM expansion and fail on a port binding mismatch.
@@ -2785,6 +3371,95 @@ def derive_architecture(
                 continue  # the tie target is itself unwired: its own refusal names it
             _bind(requirement_id, port, net, "bidirectional", context="recipe default tie")
             derived_notes.append(f"{requirement_id}: {port} tied to {target} ({net}) (derived)")
+
+    # A removable enable jumper is a circuit, not merely a two-pin connector. Its signal must
+    # land on exactly one recipe-published EN input, and the shunt's selected level must be a
+    # sourced logic rail inside that exact recipe's reviewed EN limit. This leaves an ordinary
+    # switch-input free for buttons while refusing a raw 18/24 V rail or an invented target.
+    from kicraft.design.part_identity import canonical_physical_features, class_key
+    from kicraft.design.recipes.wave_b_power import enable_control_max_voltage
+
+    for requirement_id, requirement in sorted(requirements.items()):
+        mechanisms = {
+            feature
+            for obligation in requirement.obligations
+            if obligation.kind == "adjustability"
+            for feature in canonical_physical_features(class_key(obligation.mechanism))
+        }
+        if "jumper" not in mechanisms:
+            continue
+        owner_catalog = catalogs.get(requirement_id)
+        if (
+            owner_catalog is not None
+            and owner_catalog.recipe is not None
+            and _recipe_owns_enable_shunt(owner_catalog.recipe.definition)
+            and requirement.parameters.get("enable_control") is True
+        ):
+            if bindings.get(requirement_id, {}).get("enable"):
+                _fail(
+                    "unsafe_enable_jumper_control",
+                    "A recipe-owned EN-to-ground shunt must not also receive an external drive.",
+                    requirement_id=requirement_id,
+                    sheet=requirement.sheet,
+                    evidence=[f"enable={bindings[requirement_id]['enable']}"],
+                )
+            continue
+        bound = bindings.get(requirement_id, {})
+        signal = bound.get("signal")
+        control_rail = bound.get("vdd")
+        targets = [
+            (target_id, catalog)
+            for target_id, catalog in catalogs.items()
+            if catalog.source == "recipe"
+            and "enable" in catalog.directions
+            and bindings.get(target_id, {}).get("enable") == signal
+        ]
+        if not signal or len(targets) != 1:
+            _fail(
+                "enable_jumper_target_missing",
+                (
+                    f"jumper {requirement_id!r} must bind its signal to exactly one "
+                    "recipe-published enable port"
+                ),
+                requirement_id=requirement_id,
+                sheet=requirement.sheet,
+                evidence=[
+                    f"signal={signal!r}",
+                    *[
+                        f"{target_id}.enable"
+                        for target_id, _catalog in targets
+                    ],
+                ],
+            )
+            continue
+        target_id, target_catalog = targets[0]
+        recipe = target_catalog.recipe.definition.recipe if target_catalog.recipe is not None else ""
+        maximum = enable_control_max_voltage(recipe)
+        rail = intent.power.rails.get(control_rail) if control_rail else None
+        if (
+            requirement.parameters.get("active_level") != "high"
+            or rail is None
+            or rail.from_ref is None
+            or str(rail.from_ref).startswith(f"{target_id}.")
+            or rail.voltage <= 0
+            or maximum is None
+            or rail.voltage > maximum
+        ):
+            _fail(
+                "unsafe_enable_jumper_control",
+                (
+                    f"jumper {requirement_id!r} must drive {target_id!r}.enable high from a "
+                    "sourced rail within that recipe's reviewed EN limit"
+                ),
+                requirement_id=requirement_id,
+                sheet=requirement.sheet,
+                evidence=[
+                    f"target_recipe={recipe or '(none)'}",
+                    f"control_rail={control_rail!r}",
+                    f"control_voltage={getattr(rail, 'voltage', None)!r}",
+                    f"enable_max_voltage={maximum!r}",
+                ],
+            )
 
     for requirement_id, catalog in sorted(catalogs.items()):
         if catalog.source != "recipe":
@@ -2908,8 +3583,6 @@ def _usb_vbus_rail(intent: ArchitectureIntent) -> str | None:
         for net, rail in intent.power.rails.items()
         if rail.from_ref and rail.from_ref.partition(".")[0] in usb_input_ids
     ]
-    if len(from_input) == 1:
-        return from_input[0]
     # A self-powered board may have both regulated +5V and the host's VBUS.
     # The USB data edge's explicit rail declaration disambiguates them without
     # joining the two supplies merely because their voltages happen to match.
@@ -2926,6 +3599,8 @@ def _usb_vbus_rail(intent: ArchitectureIntent) -> str | None:
         name = next(iter(explicit))
         rail = intent.power.rails.get(name)
         return name if rail is not None and abs(rail.voltage - 5.0) <= 0.5 else None
+    if len(from_input) == 1:
+        return from_input[0]
     named = [name for name in _USB_VBUS_RAIL_NAMES if name in intent.power.rails]
     if len(named) == 1:
         return named[0]

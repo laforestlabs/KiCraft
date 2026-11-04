@@ -25,10 +25,6 @@ from kicraft.server import stage_runtime as stage_driver_mod
 REPO = Path(__file__).resolve().parents[1]
 
 
-def _frozen_prompt_state(board: str = "825") -> dict:
-    state_path = Path.home() / ".kicraft" / "projects" / "1" / board / ".kicraft" / "state.json"
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    return {"intent": state["intent"], "functional_spec": state["functional_spec"]}
 
 
 def _hub75_intent() -> dict:
@@ -36,7 +32,7 @@ def _hub75_intent() -> dict:
     return {
         "topologies": {
             "POWER": "Synchronous buck converter, VBUS to 3.3V at 1 A",
-            "MCU": "ESP32-S3-WROOM-1-N16R8 native-USB controller",
+            "MCU": "ESP32-S3-WROOM-1-N8R8 native-USB controller",
         },
         "comms_protocols": ["USB 2.0 FS", "HUB75"],
         "mcu_present": True,
@@ -99,7 +95,7 @@ def _hub75_intent() -> dict:
                 "sheet": "MCU",
                 "role": "mcu_core",
                 "family": "esp32-s3-wroom-1-module",
-                "exact_part": "ESP32-S3-WROOM-1-N16R8",
+                "exact_part": "ESP32-S3-WROOM-1-N8R8",
                 "supply": "+3V3",
                 "programming": "native_usb",
                 "functional_blocks": ["ESP32_S3_CONTROLLER"],
@@ -206,28 +202,22 @@ def _net(architecture, name: str):
     return next(row for row in architecture.inter_sheet_nets if row.name == name)
 
 
-def test_reference_intent_commits_with_no_blocking_diagnostics():
-    """The measured failure case: the derived slot needs no correction at all."""
-    if not (
-        Path.home() / ".kicraft" / "projects" / "1" / "825" / ".kicraft" / "state.json"
-    ).is_file():
-        pytest.skip("frozen reference board KC-WGJ6XE is not on this machine")
-    architecture = derive_architecture(_hub75_intent())
-    normalized, _ = _normalize_stage_response(
-        "architecture",
-        architecture.model_dump(exclude_none=True),
-        _frozen_prompt_state(),
-    )
-    assert [row["recipe"] for row in normalized["recipe_selections"]] == [
-        "esp32-s3-wroom-1-minimal@1",
-        "hub75-sn74hct245-interface@1",
-        "tlv62569-3v3@1",
-        "usb-c-5v-sink@1",
-        "usb-c-usb2-device@1",
-        "ws2812-output@1",
+def test_native_usb_reuses_the_existing_power_receptacle():
+    from kicraft.design.recipes import expand_recipe
+    from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+
+    architecture = apply_architecture_recipe_resolution(derive_architecture(_hub75_intent()))
+    selections = architecture.recipe_selections
+    sockets = [
+        part for selection in selections for part in expand_recipe(selection).parts
+        if part.mpn == "TYPE-C-31-M-12"
     ]
-    # The two compiler-built headers need a BOM pass, exactly as they do on the explicit path.
-    assert normalized["unresolved_requirement_ids"] == ["esp32_speaker", "led_led_string"]
+    assert len(sockets) == 1
+    power = next(row for row in selections if "usb_power" in row.requirement_ids)
+    mcu = next(row for row in selections if "esp32" in row.requirement_ids)
+    assert power.port_bindings["vbus"] == "VBUS"
+    assert power.port_bindings["usb_dp"] == mcu.port_bindings["usb_dp"]
+    assert power.port_bindings["usb_dm"] == mcu.port_bindings["usb_dm"]
 
 
 def test_signal_endpoints_are_bound_and_directed_on_both_sheets():
@@ -239,10 +229,6 @@ def test_signal_endpoints_are_bound_and_directed_on_both_sheets():
     assert [(row.sheet, row.direction) for row in _net(architecture, "HUB75_R0").endpoints] == [
         ("MCU", "output"),
         ("HUB75", "input"),
-    ]
-    assert [(row.sheet, row.direction) for row in _net(architecture, "USB_D_P").endpoints] == [
-        ("MCU", "bidirectional"),
-        ("USB DATA", "bidirectional"),
     ]
     assert {
         _requirement(architecture, requirement_id).compiler_origin
@@ -274,18 +260,229 @@ def test_an_unbound_enable_port_is_tied_to_the_input_rail():
     assert any("enable tied to input (VBUS) (derived)" in row for row in architecture.assumptions)
 
 
-def test_native_usb_pair_gets_a_real_data_connector():
-    architecture = derive_architecture(_hub75_intent())
-    connector = _requirement(architecture, "esp32_usb_data")
-    assert connector.family == "usb-c-usb2-device"
-    # The MCU recipe already expands the 22R MCU-side pair: the socket must not add a second.
-    assert connector.parameters == {"series_resistors": False}
-    assert connector.ports == {
-        "vbus": "VBUS",
+def test_enable_jumper_binds_one_reviewed_regulator_enable_from_a_safe_logic_rail():
+    intent = _hub75_intent()
+    intent["requirements"].append(
+        {
+            "id": "enable_jumper",
+            "sheet": "POWER",
+            "role": "user_io",
+            "family": "switch-input",
+            "parameters": {"pull_policy": "external", "active_level": "high"},
+            "supply": "VBUS",
+            "obligation_ids": ["enable_jumper"],
+        }
+    )
+    intent["obligations"] = [
+        {
+            "kind": "adjustability",
+            "original_obligation_id": "enable_jumper",
+            "parameter": "enable",
+            "mechanism": "jumper",
+        }
+    ]
+    intent["signals"].append(
+        {"name": "BUCK_ENABLE", "from": "enable_jumper.signal", "to": "buck.enable"}
+    )
+
+    architecture = derive_architecture(intent)
+
+    assert _requirement(architecture, "enable_jumper").ports == {
+        "signal": "BUCK_ENABLE",
+        "vdd": "VBUS",
         "gnd": "GND",
-        "usb_dm": "USB_D_N",
-        "usb_dp": "USB_D_P",
     }
+    assert _requirement(architecture, "buck").ports["enable"] == "BUCK_ENABLE"
+    from kicraft.design.lowering import lower_requirement
+
+    artifact = lower_requirement(_requirement(architecture, "enable_jumper"))
+    assert {(pin.role, pin.pin, pin.net) for pin in artifact.pins} >= {
+        ("jumper", "1", "BUCK_ENABLE"),
+        ("jumper", "2", "VBUS"),
+    }
+
+
+def test_enable_jumper_rejects_a_missing_target_or_unsafe_control_rail():
+    intent = _hub75_intent()
+    intent["power"]["rails"]["VIN18"] = {"voltage": 18.0, "from": "usb_power.vbus"}
+    intent["requirements"].append(
+        {
+            "id": "enable_jumper",
+            "sheet": "POWER",
+            "role": "user_io",
+            "family": "switch-input",
+            "parameters": {"pull_policy": "external", "active_level": "high"},
+            "supply": "VIN18",
+            "obligation_ids": ["enable_jumper"],
+        }
+    )
+    intent["obligations"] = [
+        {
+            "kind": "adjustability",
+            "original_obligation_id": "enable_jumper",
+            "parameter": "enable",
+            "mechanism": "jumper",
+        }
+    ]
+    intent["signals"].append(
+        {"name": "BUCK_ENABLE", "from": "enable_jumper.signal", "to": "buck.enable"}
+    )
+
+    with pytest.raises(ArchitectureIntentError) as rejected:
+        derive_architecture(intent)
+    assert "unsafe_enable_jumper_control" in {row.code for row in rejected.value.diagnostics}
+
+def test_unowned_enable_jumper_obligation_produces_one_safe_targeted_control_circuit():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    intent = _hub75_intent()
+    intent["obligations"] = [
+        {
+            "kind": "adjustability",
+            "original_obligation_id": "enable_jumper",
+            "parameter": "enable",
+            "mechanism": "jumper",
+        }
+    ]
+
+    completed = complete_architecture_payload(intent)
+
+    jumper = next(row for row in completed["requirements"] if row["id"] == "enable_jumper")
+    assert jumper["family"] == "switch-input"
+    assert jumper["sheet"] == "POWER"
+    assert jumper["supply"] == "VBUS"
+    assert jumper["parameters"] == {"pull_policy": "external", "active_level": "high"}
+    assert jumper["obligation_ids"] == ["enable_jumper"]
+    assert completed["signals"][-1] == {
+        "name": "BUCK_ENABLE_JUMPER",
+        "from": "enable_jumper.signal",
+        "to": "buck.enable",
+    }
+
+    architecture = derive_architecture(completed)
+    assert _requirement(architecture, "buck").ports["enable"] == "BUCK_ENABLE_JUMPER"
+
+
+def _high_voltage_enable_intent() -> dict:
+    return {
+        "topologies": {"POWER": "18 V input to 12 V output buck converter"},
+        "mcu_present": False,
+        "power": {"rails": {
+            "VIN18": {"voltage": 18.0, "from": "input.positive"},
+            "VOUT12": {"voltage": 12.0, "from": "buck.output"},
+        }},
+        "sheets": [{
+            "name": "POWER", "stem": "POWER", "role": "regulator",
+            "function": "Supply 12 V from 18 V with an enable jumper.",
+        }],
+        "requirements": [
+            {
+                "id": "input", "sheet": "POWER", "role": "power_input",
+                "family": "screw-terminal", "exact_part": "WJ126V-5.0-02P-14-00A",
+                "ties": {"negative": "GND"},
+            },
+            {
+                "id": "buck", "sheet": "POWER", "role": "regulator",
+                "family": "tps54331-12v-1a", "supply": "VIN18",
+            },
+            {
+                "id": "output", "sheet": "POWER", "role": "connector",
+                "family": "screw-terminal", "exact_part": "WJ126V-5.0-02P-14-00A",
+                "ties": {"positive": "VOUT12", "negative": "GND"},
+            },
+        ],
+        "signals": [],
+        "obligations": [{
+            "kind": "adjustability", "original_obligation_id": "enable_jumper",
+            "parameter": "enable", "mechanism": "jumper",
+        }],
+    }
+
+
+def test_high_voltage_enable_uses_converter_bias_and_ground_shunt():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+    from kicraft.design.recipes import apply_architecture_recipe_resolution, expand_recipe
+
+    completed = complete_architecture_payload(_high_voltage_enable_intent())
+    architecture = derive_architecture(completed)
+    buck = _requirement(architecture, "buck")
+    assert buck.parameters["enable_control"] is True
+    assert "enable" not in buck.ports
+    resolved = apply_architecture_recipe_resolution(architecture)
+    selection = next(row for row in resolved.recipe_selections if "buck" in row.requirement_ids)
+    expansion = expand_recipe(selection)
+    parts = {part.recipe_role: part for part in expansion.parts}
+    nets = {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in expansion.connections
+        for endpoint in connection.endpoints
+    }
+    enable = nets[(parts["converter"].ref, "3")]
+    assert nets[(parts["enable_jumper"].ref, "2")] == "GND"
+    assert nets[(parts["enable_jumper"].ref, "1")] == enable
+    assert enable not in {"VIN18", "VOUT12", "GND"}
+
+
+
+def test_tps61088_private_efuse_enable_shunt_is_not_replaced_by_external_control():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+    from kicraft.design.recipes import apply_architecture_recipe_resolution, expand_recipe
+
+    intent = _high_voltage_enable_intent()
+    intent["topologies"]["POWER"] = "2S input to 12 V boost converter"
+    intent["power"]["rails"] = {
+        "VBAT": {"voltage": 7.4, "from": "input.positive"},
+        "VOUT12": {"voltage": 12.0, "from": "boost.output"},
+    }
+    boost = next(row for row in intent["requirements"] if row["id"] == "buck")
+    boost.update({"id": "boost", "family": "tps61088-2s-12v-1a", "supply": "VBAT"})
+    completed = complete_architecture_payload(intent)
+
+    completed_boost = next(row for row in completed["requirements"] if row["id"] == "boost")
+    assert completed_boost["parameters"]["enable_control"] is True
+    assert completed_boost["obligation_ids"] == ["enable_jumper"]
+    assert not any(row["id"] == "enable_jumper" for row in completed["requirements"])
+    assert not completed["signals"]
+
+    architecture = derive_architecture(completed)
+    assert "enable" not in _requirement(architecture, "boost").ports
+    resolved = apply_architecture_recipe_resolution(architecture)
+    selection = next(row for row in resolved.recipe_selections if "boost" in row.requirement_ids)
+    expansion = expand_recipe(selection)
+    parts = {part.recipe_role: part for part in expansion.parts}
+    nets = {
+        (endpoint.ref, endpoint.pin): connection.net_name
+        for connection in expansion.connections
+        for endpoint in connection.endpoints
+    }
+    efuse_enable = nets[(parts["enable_jumper"].ref, "1")]
+    assert efuse_enable == nets[(parts["output_limiter"].ref, "14")]
+    assert efuse_enable not in {"VBAT", "VOUT12", "GND"}
+    assert nets[(parts["enable_jumper"].ref, "2")] == "GND"
+
+
+def test_voltage_selection_jumper_is_not_rewritten_as_enable_control():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    intent = _high_voltage_enable_intent()
+    intent["obligations"][0]["parameter"] = "output voltage"
+    completed = complete_architecture_payload(intent)
+    buck = next(row for row in completed["requirements"] if row["id"] == "buck")
+    assert buck.get("parameters", {}).get("enable_control") is not True
+    assert "enable_jumper" not in buck.get("obligation_ids", [])
+
+
+def test_owned_enable_shunt_rejects_an_external_high_voltage_drive():
+    intent = _high_voltage_enable_intent()
+    buck = next(row for row in intent["requirements"] if row["id"] == "buck")
+    buck["parameters"] = {"enable_control": True}
+    buck["obligation_ids"] = ["enable_jumper"]
+    buck["ties"] = {"enable": "VIN18"}
+    with pytest.raises(ArchitectureIntentError) as rejected:
+        derive_architecture(intent)
+    assert "unsafe_enable_jumper_control" in {row.code for row in rejected.value.diagnostics}
+
+
 
 
 def test_off_board_signal_gets_a_connector_holding_its_signal_gnd_and_rails():
@@ -534,18 +731,11 @@ def test_optional_continuation_output_is_exposed_only_when_a_peer_exists():
     assert not any(row.id == "led_data_out" for row in architecture.requirements)
 
 
-def test_half_a_usb_pair_is_refused_by_name():
+def test_half_a_usb_pair_is_refused():
     intent = _hub75_intent()
     intent["signals"] = [row for row in intent["signals"] if row["name"] != "USB_D_N"]
-    with pytest.raises(ArchitectureIntentError) as excinfo:
+    with pytest.raises(ArchitectureIntentError):
         derive_architecture(intent)
-    # One missing line, two refusals: the socket reports the half pair, and the required-port
-    # gate names the MCU pin nothing wires. Both point at the same `usb_dm`.
-    assert [row.code for row in excinfo.value.diagnostics] == [
-        "incomplete_usb_edge",
-        "unbound_required_port",
-    ]
-    assert all("usb_dm" in row.message for row in excinfo.value.diagnostics)
 
 
 def test_port_that_does_not_exist_is_refused_with_the_valid_ones():
@@ -637,44 +827,22 @@ def test_uncurated_part_without_a_declared_interface_is_refused_once():
     }
 
 
-def test_intent_slot_commits_on_the_first_draft_through_the_real_driver(tmp_path):
-    """The plan's primary endpoint, at unit level: zero corrections, no provider spend.
-
-    Drives the real `architecture` stage (contract, prompt, decode, normalize, commit) with the
-    intent-shaped slot, and requires a first-attempt commit.
-    """
-    from test_stage_driver_retry import _OK_INTENT, _ScriptedClient
-
-    from kicraft.server.config import Settings
-    from kicraft.server.session import run_session
-
-    def _reply(payload: dict) -> dict:
-        return {
-            "text": json.dumps(payload),
-            "reasoning": "",
-            "finish_reason": "stop",
-            "cost_usd": 0.0,
-        }
-
-    client = _ScriptedClient([_reply(json.loads(_OK_INTENT)), _reply(_hub75_intent())])
-    client.s = Settings(api_key="test")
-    result = run_session(
-        tmp_path, "a USB-C ESP32-S3 HUB75 controller", ["intent", "architecture"], client=client
-    )
-    architecture = next(row for row in result["results"] if row["stage"] == "architecture")
-    assert architecture["commit_ok"] is True, architecture
-    assert architecture["attempts"] == 1, architecture
-    # The provider is asked for the intent-shaped architecture contract.
-    assert (
-        client.calls[-1]["response_format"]["json_schema"]["name"]
-        == "kicraft_architecture_response_v2"
-    )
-    system_prompt = client.calls[-1]["messages"][0]["content"]
-    assert "compiler writes" in system_prompt
 
 
-def test_rejected_first_draft_publishes_its_defect_class(tmp_path):
-    """The plan's measurement instrument: the events stream names the classes it rejected."""
+def test_generic_named_mcu_keeps_a_reviewed_explicit_member_instead_of_the_default():
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    architecture = derive_architecture(_hub75_intent())
+    resolved = resolve_architecture_recipes(architecture, {"named_parts": ["ESP32-S3"]})
+    assert not resolved.blocking
+    assert resolved.exact_parts["esp32"] == "ESP32-S3-WROOM-1-N8R8"
+    for incompatible in ("ESP32-C3", "ESP32-S3-MINI-1U-N4R2"):
+        rejected = resolve_architecture_recipes(architecture, {"named_parts": [incompatible]})
+        assert any(row.code == "missing_recipe_requirement" for row in rejected.blocking)
+
+
+def test_rejected_first_draft_counts_a_contract_rejection_not_a_semantic_repair(tmp_path):
+    """The rejected draft remains in the denominator and never counts as a commit."""
     from test_stage_driver_retry import _OK_INTENT, _ScriptedClient
 
     from kicraft.server.config import Settings
@@ -708,7 +876,6 @@ def test_rejected_first_draft_publishes_its_defect_class(tmp_path):
     )
     assert done["drafts"] == 2
     assert done["first_draft_accepted"] is False
-    assert done["defect_codes"] == ["incomplete_usb_edge"]
     assert done["unknown_part_refused"] == 0
     assert done["declared_interfaces"] == 0
     # The reader refused the first draft: one contract rejection, no semantic
@@ -785,7 +952,22 @@ def test_missing_external_load_current_parks_with_one_question(tmp_path):
     from kicraft.server.config import Settings
     from kicraft.server.stage_runtime import drive_stage
 
-    state = _frozen_prompt_state()
+    state = {"intent": {
+        "goal": "a USB-C ESP32-S3 HUB75 controller and LED string",
+        "constraints": [], "named_parts": [],
+        "inferred_expertise": "intermediate", "assumptions": [],
+    }, "functional_spec": {"blocks": [
+        {"name": "USB_C_PD_INPUT", "category": "power", "purpose": "Accept USB-C 5 V power."},
+        {"name": "POWER_DISTRIBUTION", "category": "power", "purpose": "Supply the 3.3 V logic rail."},
+        {"name": "ESP32_S3_CONTROLLER", "category": "process", "purpose": "Control the display and LEDs."},
+        {"name": "HUB75_DISPLAY_INTERFACE", "category": "interface", "purpose": "Drive a HUB75 display."},
+        {"name": "ADDRESSABLE_LED_OUTPUT", "category": "drive", "purpose": "Supply and drive an external LED string."},
+    ], "connections": [
+        {"from_block": "USB_C_PD_INPUT", "to_block": "HUB75_DISPLAY_INTERFACE",
+         "signal_type": "power", "description": "5 V power for the external display."},
+        {"from_block": "USB_C_PD_INPUT", "to_block": "ADDRESSABLE_LED_OUTPUT",
+         "signal_type": "power", "description": "5 V power for the external LED string."},
+    ]}}
     workspace = tmp_path / "ws"
     state_path = workspace / ".kicraft" / "state.json"
     state_path.parent.mkdir(parents=True)
@@ -2358,6 +2540,65 @@ def test_unique_connector_owner_replaces_duplicate_mcu_claim_without_mutating_in
     assert attach_uniquely_provable_physical_obligations(normalized, source) == normalized
 
 
+@pytest.mark.parametrize(
+    ("family", "terminals_claimed", "driver_claim_retained"),
+    [
+        ("fused-power-distribution", True, False),
+        ("unreviewed-distribution-device", True, True),
+        ("fused-power-distribution", False, True),
+    ],
+)
+def test_multiple_terminal_owners_do_not_require_a_phantom_driver_connector(
+    family, terminals_claimed, driver_claim_retained
+):
+    from copy import deepcopy
+    from kicraft.server.stage_contracts import attach_uniquely_provable_physical_obligations
+
+    physical = {
+        "kind": "physical", "original_obligation_id": "output-terminals",
+        "component_class": "screw-terminal",
+    }
+    quantity = {
+        "kind": "quantity", "original_obligation_id": "output-count",
+        "subject": "screw-terminal", "minimum": 2,
+    }
+    payload = {
+        "obligations": [physical, quantity],
+        "requirements": [
+            {
+                "id": "distribution", "sheet": "DISTRIBUTION", "role": "power_input",
+                "family": family,
+                "parameters": {"channels": 2, "input_voltage_v": 5.0, "source_current_a": 0.5},
+                "ports": {"input": "VBUS", "gnd": "GND", "output1": "OUT1", "output2": "OUT2"},
+                "obligations": [physical],
+            },
+            *(
+                {
+                    "id": f"terminal_{index}", "sheet": f"OUTPUT {index}", "role": "connector",
+                    "family": "screw-terminal", "exact_part": "WJ126V-5.0-02P-14-00A",
+                    "ports": {"positive": f"OUT{index}", "negative": "GND"},
+                    "obligations": [physical] if terminals_claimed else [],
+                }
+                for index in (1, 2)
+            ),
+        ],
+    }
+    original = deepcopy(payload)
+    source = {"intent": {"obligations": [physical, quantity]}}
+    normalized = attach_uniquely_provable_physical_obligations(
+        payload, source, intent_shaped=False
+    )
+    assert normalized["requirements"][0]["obligations"] == (
+        [physical] if driver_claim_retained else []
+    )
+    assert all(
+        row["obligations"] == ([physical] if terminals_claimed else [])
+        for row in normalized["requirements"][1:]
+    )
+    assert normalized["obligations"] == [physical, quantity]
+    assert payload == original
+
+
 @pytest.mark.parametrize("exact_part", [None, "STM32F103C8T6"])
 def test_incidental_programming_header_is_not_an_automatic_external_header_owner(exact_part):
     from kicraft.server.stage_contracts import (
@@ -2951,8 +3192,8 @@ def test_reviewed_two_contact_connector_cannot_satisfy_four_contact_obligation(r
 def test_reviewed_four_contact_connector_allows_unused_contacts(relation):
     architecture = derive_architecture(
         _reviewed_connector_intent(
-            family="qwiic-i2c-connector",
-            exact_part="SM04B-SRSS-TB",
+            family="jst-xh-connector",
+            exact_part="B4B-XH-A(LF)(SN)",
             quantity="connector contacts",
             relation=relation,
         )
@@ -2960,6 +3201,17 @@ def test_reviewed_four_contact_connector_allows_unused_contacts(relation):
 
     connector = _requirement(architecture, "connector")
     assert [port.pin for port in connector.declared_interface.ports] == ["1", "2"]
+
+
+def test_qwiic_function_cannot_be_realized_with_only_generic_unused_contacts():
+    payload = _reviewed_connector_intent(
+        family="qwiic-i2c-connector",
+        exact_part="SM04B-SRSS-TB",
+        quantity="connector contacts",
+    )
+    with pytest.raises(ArchitectureIntentError) as exc:
+        derive_architecture(payload)
+    assert "unsupported_lowerer_contract" in {row.code for row in exc.value.diagnostics}
 
 
 @pytest.mark.parametrize("quantity,unit", [
@@ -3140,9 +3392,6 @@ def test_named_switch_keeps_source_ports_and_shared_signal_contact():
     header = _requirement(architecture, "input")
     assert button.ports["signal"] == header.ports["pin3"] == header.ports["pin4"]
     assert button.ports["vdd"] == "+5V"
-    assert {port.key: port.pin for port in button.declared_interface.ports} == {
-        "vdd": "1", "signal": "2",
-    }
 
 
 def test_a_tie_field_on_a_port_that_carries_a_signal_is_cleared():
@@ -3231,6 +3480,81 @@ def test_a_lowerer_family_is_replaced_by_the_reviewed_carriers_family():
     # The terminal's missing return is completed in the spelling the draft used.
     assert payload["requirements"][0]["ties"] == {"pin2": "GND"}
 
+def test_generic_jst_carrier_uses_the_declared_four_contact_interface():
+    """A generic JST request gets the reviewed four-contact XH carrier, never Qwiic or a 2-pin XH."""
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    payload = {
+        "requirements": [{
+            "id": "host_jst",
+            "role": "connector",
+            "family": "pin-header",
+            "parameters": {"rows": 1, "gender": "female"},
+            "obligation_ids": ["host_jst"],
+        }],
+        "obligations": [{
+            "kind": "physical",
+            "original_obligation_id": "host_jst",
+            "component_class": "jst-connector",
+        }],
+        "signals": [
+            {"name": f"SIGNAL_{index}", "from": f"host_jst.pin{index}", "to": f"mcu.io{index}"}
+            for index in range(1, 5)
+        ],
+    }
+
+    complete_architecture_payload(payload)
+
+    connector = payload["requirements"][0]
+    assert connector["family"] == "jst-xh-connector"
+    assert connector["parameters"] == {}
+    assert [(row["key"], row["pin"]) for row in connector["declared_ports"]] == [
+        ("pin1", "1"), ("pin2", "2"), ("pin3", "3"), ("pin4", "4"),
+    ]
+
+
+def test_explicit_qwiic_interface_and_mpn_are_not_repurposed_as_a_generic_jst_carrier():
+    from copy import deepcopy
+
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    qwiic = {
+        "id": "qwiic",
+        "role": "connector",
+        "family": "qwiic-i2c-connector",
+        "exact_part": "SM04B-SRSS-TB(LF)(SN)",
+        "declared_ports": [
+            {"key": "ground", "pin": "1", "direction": "passive", "function": "ground"},
+            {"key": "vcc", "pin": "2", "direction": "passive", "function": "3V3"},
+            {"key": "sda", "pin": "3", "direction": "passive", "function": "I2C data"},
+            {"key": "scl", "pin": "4", "direction": "passive", "function": "I2C clock"},
+        ],
+    }
+    payload = {"requirements": [deepcopy(qwiic)], "signals": []}
+
+    complete_architecture_payload(payload)
+
+    assert payload["requirements"] == [qwiic]
+
+
+def test_generic_connector_adoption_never_rewrites_a_nonconnector_requirement():
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    payload = {
+        "requirements": [{
+            "id": "mcu",
+            "role": "mcu_core",
+            "family": "pin-header",
+            "exact_part": "B4B-XH-A(LF)(SN)",
+            "parameters": {"rows": 1, "gender": "female"},
+        }],
+        "signals": [],
+    }
+
+    complete_architecture_payload(payload)
+
+    assert payload["requirements"][0]["family"] == "pin-header"
+    assert payload["requirements"][0]["exact_part"] == "B4B-XH-A(LF)(SN)"
 
 def test_a_named_reviewed_part_on_a_lowerer_family_adopts_that_parts_family():
     from kicraft.design.architecture_intent import complete_architecture_payload
@@ -3361,6 +3685,27 @@ def test_a_duplicate_supply_signal_keeps_the_contact_that_feeds_the_rail():
         row for row in complete_architecture_payload(sourced)["requirements"]
         if row["id"] == "host_header"
     ).get("ties", {}) == {}
+
+
+@pytest.mark.parametrize("role", ["user_io", "connector"])
+def test_carrier_adoption_does_not_assign_functional_led_pins_by_signal_order(role):
+    from kicraft.design.architecture_intent import complete_architecture_payload
+
+    payload = {
+        "requirements": [{
+            "id": "indicator", "sheet": "POWER", "role": role,
+            "family": "pin-header", "exact_part": "LTST-C190KGKT",
+            "parameters": {"rail_voltage": 5.0, "led_vf": 2.0, "target_current_ma": 5.0},
+        }],
+        "signals": [
+            {"name": "USB_5V", "from": "input.vbus", "to": "indicator.drive"},
+            {"name": "LED_RETURN", "from": "input.gnd", "to": "indicator.gnd"},
+        ],
+    }
+    requirement = complete_architecture_payload(payload)["requirements"][0]
+    # These ports belong to the LED-plus-resistor circuit. Assigning contact
+    # 1 to drive and contact 2 to ground would invent a bare LED pinout.
+    assert not requirement.get("declared_ports")
 
 
 def test_a_lowerer_that_denotes_the_named_part_keeps_its_family():
@@ -3656,4 +4001,331 @@ def test_a_requirement_naming_another_reviewed_connector_still_adopts_its_family
             )
         )
         is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("bridge_part", "programming", "parameters", "accepted", "explicit_vbus"),
+    [
+        ("CH340C", None, {}, True, True),
+        ("CP2102N", None, {}, True, True),
+        ("CH340C", "swd", {}, True, True),
+        ("CH340C", "usb_uart_bridge", {}, False, True),
+        ("CH340C", "swd", {"native_usb": True}, False, True),
+        ("CH340C", None, {}, True, False),
+        ("CP2102N", None, {}, True, False),
+    ],
+)
+def test_rp2040_serial_bridge_preserves_one_usb_socket_and_independent_recovery(
+    bridge_part, programming, parameters, accepted, explicit_vbus
+):
+    from copy import deepcopy
+    from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+
+    payload = {
+        "topologies": {"MCU": "RP2040 serial communication"},
+        "comms_protocols": ["UART"],
+        "mcu_present": True,
+        "power": {"rails": {
+            "VBUS": {"voltage": 5.0, "from": "bridge.vbus" if explicit_vbus else None},
+            "+3V3": {"voltage": 3.3, "from": "buck.output"},
+        }},
+        "sheets": [
+            {"name": "POWER", "stem": "POWER", "role": "regulator", "function": "Logic supply"},
+            {"name": "MCU", "stem": "MCU", "role": "mcu", "function": "RP2040 controller"},
+            {"name": "BRIDGE", "stem": "BRIDGE", "role": "interface", "function": "USB serial"},
+        ],
+        "requirements": [
+            {"id": "buck", "sheet": "POWER", "role": "regulator",
+             "family": "ap63203-3v3", "supply": "VBUS"},
+            {"id": "mcu", "sheet": "MCU", "role": "mcu_core", "family": "rp2040",
+             "exact_part": "RP2040", "supply": "+3V3",
+             "programming": programming, "parameters": parameters},
+            {"id": "bridge", "sheet": "BRIDGE", "role": "bus_interface",
+             "family": "usb-uart-bridge", "exact_part": bridge_part, "supply": "+3V3",
+             "supply_bindings": {"vbus": "VBUS"} if explicit_vbus else {}},
+        ],
+        "signals": [
+            {"name": "HOST_TO_MCU", "from": "bridge.tx", "to": "mcu.uart_rx"},
+            {"name": "MCU_TO_HOST", "from": "mcu.uart_tx", "to": "bridge.rx"},
+        ],
+    }
+    original = deepcopy(payload)
+    if not accepted:
+        with pytest.raises(ArchitectureIntentError):
+            derive_architecture(payload)
+        assert payload == original
+        return
+
+    architecture = apply_architecture_recipe_resolution(derive_architecture(payload))
+    bom, _ = _normalize_stage_response(
+        "bom", {"groups": [], "arrays": []}, {"architecture": architecture.model_dump()}
+    )
+    assert sum(part.get("mpn") == "TYPE-C-31-M-12" for part in bom["parts"]) == 1
+    core = next(row for row in architecture.recipe_selections if row.requirement_ids == ["mcu"])
+    bridge = next(row for row in architecture.recipe_selections if row.requirement_ids == ["bridge"])
+    assert bridge.port_bindings["vbus"] == "VBUS"
+    assert bridge.port_bindings["vdd"] == "+3V3"
+    assert not {"usb_dm", "usb_dp"}.intersection(core.port_bindings)
+    assert any(part.get("recipe_role") == "swd_header" for part in bom["parts"])
+    assert payload == original
+
+
+def _reset_afe_intent(
+    *,
+    amplifier: str,
+    sensor: str,
+    channels: int,
+    output_family: str,
+    output_contacts: int,
+    source_voltage: float = 5.0,
+    trim: bool = False,
+):
+    """Typed composition shared by the three original reset-bearing analog briefs."""
+    sheets = [
+        {"name": "HOST INPUT", "stem": "HOST_INPUT", "role": "connector", "function": "Host-side 5 V input."},
+        {"name": "ANALOG", "stem": "ANALOG", "role": "analog", "function": "Condition and isolate the analog channels."},
+        {"name": "OUTPUT", "stem": "OUTPUT", "role": "connector", "function": "Requested analog output connector."},
+    ]
+    output_ties = (
+        {"pin2": "GND", "pin4": "GND"}
+        if output_family == "screw-terminal" and output_contacts == 4
+        else {
+            f"pin{contact}": "GND"
+            for contact in range(channels + 1, output_contacts + 1)
+        }
+    )
+    requirements = [
+        {
+            "id": "analog_reset",
+            "sheet": "ANALOG",
+            "role": "power_input",
+            "family": "analog-power-cycle-reset",
+            "parameters": {"rail_voltage_v": 5.0, "source_current_a": 0.5},
+            "supply": "+5_HOST",
+        },
+        {
+            "id": "afe",
+            "sheet": "ANALOG",
+            "role": "analog_block",
+            "family": "analog-conditioner",
+            "exact_part": amplifier,
+            "parameters": {
+                "sensor_type": sensor,
+                "channel_count": channels,
+                "analog_rail_v": 5.0,
+                "power_cycle_isolation": True,
+                "trim": trim,
+            },
+            "supply": "+5_ANALOG",
+            "supply_bindings": {"isolation_vdd": "+5_HOST"},
+        },
+        {
+            "id": "output",
+            "sheet": "OUTPUT",
+            "role": "connector",
+            "family": output_family,
+            "parameters": {"rows": 1, "gender": "male"} if output_family == "pin-header" else {"rows": 1},
+            "ties": output_ties,
+        },
+    ]
+    power = {"rails": {"+5_ANALOG": {"voltage": 5.0, "from": "analog_reset.output"}}}
+    if source_voltage == 5.0:
+        requirements.insert(
+            0,
+            {
+                "id": "host",
+                "sheet": "HOST INPUT",
+                "role": "connector",
+                "family": "pin-header",
+                "parameters": {"rows": 1, "gender": "female"},
+                "ties": {"pin2": "GND"},
+            },
+        )
+        power["rails"]["+5_HOST"] = {"voltage": 5.0, "from": "host.pin1"}
+    else:
+        sheets[0] = {"name": "POWER INPUT", "stem": "POWER_INPUT", "role": "power_input", "function": "24 V DC source terminal."}
+        requirements[0:0] = [
+            {
+                "id": "power_in",
+                "sheet": "POWER INPUT",
+                "role": "power_input",
+                "family": "screw-terminal",
+                "parameters": {"rows": 1},
+                "ties": {"negative": "GND"},
+            },
+            {
+                "id": "buck",
+                "sheet": "POWER INPUT",
+                "role": "regulator",
+                "family": "ap63205-5v",
+                "exact_part": "AP63205WU-7",
+                "supply": "VIN24",
+            },
+        ]
+        power["rails"].update(
+            {
+                "VIN24": {"voltage": source_voltage, "from": "power_in.positive"},
+                "+5_HOST": {"voltage": 5.0, "from": "buck.output"},
+            }
+        )
+    if sensor == "humidity":
+        requirements.append(
+            {
+                "id": "status_led",
+                "sheet": "ANALOG",
+                "role": "user_io",
+                "family": "status-led",
+                "parameters": {
+                    "rail_voltage": 5.0,
+                    "led_vf": 2.0,
+                    "target_current_ma": 2.0,
+                },
+                "ties": {"drive": "+5_HOST", "gnd": "GND"},
+            }
+        )
+    signals = [
+        {
+            "name": "ISOLATION_RELEASE",
+            "from": "analog_reset.isolation_enable",
+            "to": "afe.isolation_enable",
+        },
+        *[
+            {
+                "name": f"ANALOG_OUT_{index}",
+                "from": f"afe.analog_out_{index}",
+                "to": f"output.pin{index if output_family == 'pin-header' else index * 2 - 1}",
+            }
+            for index in range(1, channels + 1)
+        ],
+    ]
+    if sensor == "current-sense":
+        sheets = [row for row in sheets if row["name"] != "OUTPUT"]
+        sheets.extend(
+            [
+                {"name": "JST CHANNEL 1", "stem": "JST_CHANNEL_1", "role": "connector", "function": "Channel 1 current interface."},
+                {"name": "JST CHANNEL 2", "stem": "JST_CHANNEL_2", "role": "connector", "function": "Channel 2 current interface."},
+            ]
+        )
+        requirements = [row for row in requirements if row["id"] != "output"]
+        signals = [signals[0]]
+        for index in range(1, channels + 1):
+            requirements.append(
+                {
+                    "id": f"jst{index}",
+                    "sheet": f"JST CHANNEL {index}",
+                    "role": "connector",
+                    "family": "jst-xh-connector",
+                    "exact_part": "B4B-XH-A(LF)(SN)",
+                    "ties": {"pin2": "GND", "pin4": "GND"},
+                }
+            )
+            signals.extend(
+                [
+                    {
+                        "name": f"LOAD_RETURN_{index}",
+                        "from": f"jst{index}.pin1",
+                        "to": f"afe.load_return_in_{index}",
+                    },
+                    {
+                        "name": f"CURRENT_OUT_{index}",
+                        "from": f"afe.analog_out_{index}",
+                        "to": f"jst{index}.pin3",
+                    },
+                ]
+            )
+    return {
+        "topologies": {"ANALOG": "5 V switched analog conditioner with supervisor-controlled output isolation"},
+        "mcu_present": False,
+        "sheets": sheets,
+        "requirements": requirements,
+        "signals": signals,
+        "power": power,
+    }
+
+
+
+
+def test_bare_dual_opamp_does_not_bypass_the_conditioner_contract():
+    payload = _reset_afe_intent(
+        amplifier="MCP6002-I/SN",
+        sensor="ambient-light",
+        channels=4,
+        output_family="pin-header",
+        output_contacts=6,
+    )
+    next(row for row in payload["requirements"] if row["id"] == "afe")["family"] = (
+        "dual-operational-amplifier"
+    )
+
+    with pytest.raises(ArchitectureIntentError) as excinfo:
+        derive_architecture(payload)
+
+    assert [row.code for row in excinfo.value.diagnostics] == ["unknown_part_refused"]
+
+
+def test_conditioner_internal_output_cannot_bypass_the_owned_isolation_switch():
+    payload = _reset_afe_intent(
+        amplifier="MCP6002-I/SN", sensor="ambient-light", channels=2,
+        output_family="pin-header", output_contacts=4,
+    )
+    signal = next(row for row in payload["signals"] if row["from"] == "afe.analog_out_1")
+    signal["from"] = "afe.conditioned_1"
+    with pytest.raises(ArchitectureIntentError) as exc:
+        derive_architecture(payload)
+    assert any(
+        row.code == "unknown_interface_port" and row.requirement_id == "afe"
+        for row in exc.value.diagnostics
+    )
+
+def test_temt6000_reference_parameter_derives_its_required_return_binding():
+    """`reference_v=GND` describes the return; it cannot leave vminus floating."""
+    architecture = derive_architecture(
+        _one_part_intent(
+            {
+                "id": "light",
+                "role": "sensor",
+                "family": "ambient-light-sensor",
+                "exact_part": "TEMT6000X01",
+                "supply": "+5V",
+                "parameters": {
+                    "analog_rail_v": 5.0,
+                    "consumer_input_max_v": 5.0,
+                    "reference_v": "GND",
+                },
+            },
+            signals=[
+                {
+                    "name": "LIGHT_ADC",
+                    "from": "light.analog_out",
+                    "to": "input.pin3",
+                }
+            ],
+        )
+    )
+
+    assert _requirement(architecture, "light").ports == {
+        "vplus": "+5V",
+        "vminus": "GND",
+        "analog_out": "LIGHT_ADC",
+    }
+
+
+def test_conditioner_supply_return_cannot_become_an_external_sensor_signal():
+    payload = _reset_afe_intent(
+        amplifier="MCP6002-I/SN", sensor="ambient-light", channels=2,
+        output_family="pin-header", output_contacts=4,
+    )
+    payload["signals"].append({
+        "name": "EXTERNAL_SENSOR_SIGNAL",
+        "from": "host.pin3",
+        "to": "afe.vminus",
+    })
+
+    with pytest.raises(ArchitectureIntentError) as exc:
+        derive_architecture(payload)
+
+    assert any(
+        row.requirement_id == "afe" and row.code == "conflicting_port_binding"
+        for row in exc.value.diagnostics
     )

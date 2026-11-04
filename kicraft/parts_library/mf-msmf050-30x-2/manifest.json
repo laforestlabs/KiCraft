@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:5aab23631a8a00b2d0a64d1fa9ee01dadf177d92fbdbda67569682729fe2c17b",
+  "datasheet_url": "https://www.bourns.com/docs/product-datasheets/mf-msmf.pdf",
+  "description": "MF-MSMF050/30X-2 (imported)",
+  "footprint_name": "MF-MSMF-1812",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "MF-MSMF050/30X-2",
+  "name": "mf-msmf050-30x-2",
+  "provenance": {
+    "added_at": "2026-10-11T03:48:49Z",
+    "kicad_version": "9.0.0",
+    "source": "file-import",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C3761417"
+  },
+  "symbol_name": "Polyfuse_1812",
+  "tags": [
+    "resettable-fuse",
+    "branch-protection"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Bourns MF-MSMF050/30X-2: 30V maximum, 0.50A hold and 1.0A trip at 23C. Hold current is not a precision current limit or continuous-load guarantee."
+}

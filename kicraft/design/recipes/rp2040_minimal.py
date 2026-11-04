@@ -14,21 +14,13 @@ from .models import (
     RecipePinSpec as Pin,
 )
 
-RP2040_MINIMAL = RecipeDefinition(
-    recipe="rp2040-minimal@1",
+RP2040_CORE = RecipeDefinition(
+    # This is an unregistered component core.  The production composable
+    # definition is `rp2040-minimal@2` in rp2040_minimal_v2.py.
+    recipe="rp2040-core",
     required_sheet_roles=("mcu", "io"),
-    parameter_defaults={
-        "usb": True,
-        "programming": "bootsel",
-        "flash_mbit": 16,
-        "gpio_exposed": 30,
-    },
-    allowed_parameters={
-        "usb": (True,),
-        "programming": ("bootsel",),
-        "flash_mbit": (16,),
-        "gpio_exposed": (30,),
-    },
+    parameter_defaults={},
+    allowed_parameters={},
     parts=(
         Group(
             role="mcu",
@@ -70,17 +62,34 @@ RP2040_MINIMAL = RecipeDefinition(
             role="bootsel",
             reference_prefix="SW",
             value="BOOTSEL",
-            # The reviewed momentary-button stock pair every other compiler-owned button group
-            # names (``Switch:SW_Push`` on ``Button_Switch_SMD:SW_SPST_TL3342``, the
-            # ``kicad-tl3342-button`` record whose physical features include ``momentary-button``,
-            # i.e. the reviewed class ``pushbutton``). The previous TL3301 land pattern is a real
-            # KiCad footprint but resolves to no reviewed record, so a BOOTSEL obligation on the
-            # RP2040 was unrealizable in *both* gates that ask the same question
-            # (:func:`reviewed_record_realizes_class`): the architecture family audit refused
-            # requirement 'rp2040' for claiming 'pushbutton' (held-out rp1 rp2040-dual-adc-usb)
-            # and §9.42 could never prove the emitted button either.
-            symbol="Switch:SW_Push",
-            footprint="Button_Switch_SMD:SW_SPST_TL3342",
+            symbol="kmr232ngulclfs:KMR232NGULCLFS",
+            footprint="kmr232ngulclfs:KMR232NGULCLFS",
+            sheet_role="mcu",
+            mpn="KMR232NGULCLFS",
+        ),
+        Group(
+            role="bootsel_resistor",
+            reference_prefix="R",
+            value="1k",
+            symbol="Device:R",
+            footprint="Resistor_SMD:R_0402_1005Metric",
+            sheet_role="mcu",
+        ),
+        Group(
+            role="reset_button",
+            reference_prefix="SW",
+            value="RESET",
+            symbol="kmr232ngulclfs:KMR232NGULCLFS",
+            footprint="kmr232ngulclfs:KMR232NGULCLFS",
+            sheet_role="mcu",
+            mpn="KMR232NGULCLFS",
+        ),
+        Group(
+            role="reset_pullup",
+            reference_prefix="R",
+            value="10k",
+            symbol="Device:R",
+            footprint="Resistor_SMD:R_0402_1005Metric",
             sheet_role="mcu",
         ),
         Group(
@@ -178,7 +187,9 @@ RP2040_MINIMAL = RecipeDefinition(
         Pin(role="flash", pin="6", net="QSPI_SCLK"),
         Pin(role="flash", pin="7", net="QSPI_SD3"),
         Pin(role="flash", pin="8", net="3V3"),
-        Pin(role="bootsel", pin="1", net="QSPI_CS"),
+        Pin(role="bootsel_resistor", pin="1", net="QSPI_CS"),
+        Pin(role="bootsel_resistor", pin="2", net="bootsel"),
+        Pin(role="bootsel", pin="1", net="bootsel"),
         Pin(role="bootsel", pin="2", net="GND"),
         Pin(role="crystal", pin="1", net="XIN"),
         Pin(role="crystal", pin="3", net="XOUT"),
@@ -186,6 +197,11 @@ RP2040_MINIMAL = RecipeDefinition(
         Pin(role="crystal", pin="4", net="GND"),
         Pin(role="xout_resistor", pin="1", net="XOUT_RAW"),
         Pin(role="xout_resistor", pin="2", net="XOUT"),
+        Pin(role="mcu", pin="26", net="run"),
+        Pin(role="reset_button", pin="1", net="run"),
+        Pin(role="reset_button", pin="2", net="GND"),
+        Pin(role="reset_pullup", pin="1", net="3V3"),
+        Pin(role="reset_pullup", pin="2", net="run"),
         Pin(role="dvdd_decoupling", pin="1", net="DVDD_1V1"),
         Pin(role="dvdd_decoupling", pin="2", net="GND"),
         Pin(role="bulk_decoupling", pin="1", net="3V3"),
@@ -252,7 +268,6 @@ RP2040_MINIMAL = RecipeDefinition(
     no_connects=(
         NoConnect(role="mcu", pin="24"),
         NoConnect(role="mcu", pin="25"),
-        NoConnect(role="mcu", pin="26"),
     ),
     edges=(
         RecipeEdgeSpec(role="cast_left", side="left", pitch_mm=2.54),

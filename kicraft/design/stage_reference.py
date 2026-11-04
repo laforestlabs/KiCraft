@@ -6,12 +6,14 @@ Both read this module, which is why the builders live in the design layer rather
 provider call: a checkpoint that under-reports the reference data asks the owner to judge a draft
 against inputs it never had.
 
-Every builder takes the committed intent (or an empty dict, during tests) and returns text or
-plain rows. Nothing here reads the database or the network.
+The recipe reference may read the local assembly catalog and vendored manifest
+for a snapshot of a recipe's exact principal part. It never accesses the network.
 """
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import re
 
 from kicraft.design.lowering import lowerer_summaries
@@ -118,6 +120,8 @@ def reviewed_class_options_block(intent: dict) -> str | None:
         options: dict[str, str] = {}
         for feature in sorted(canonical_physical_features(component_class)):
             for part in reviewed_parts_for_feature(feature):
+                if part.identity.startswith("kicad-"):
+                    continue  # Reserved library-pattern namespace, not manufacturer MPNs.
                 limits = dict(part.operating_limits or {})
                 ratings = [
                     f"{key.removesuffix('_v').removesuffix('_a').replace('_', ' ')}="
@@ -142,13 +146,46 @@ def reviewed_class_options_block(intent: dict) -> str | None:
         return None
     return "\n".join(
         [
-            "REVIEWED PARTS FOR THE DEMANDED CLASSES: a demanded physical class is realized "
-            "only by one of these reviewed identities (with its own symbol/footprint pair), "
-            "so prefer them, and name `exact_part` only from this list. Where a part's contact "
-            "count is given, it must match the contacts the requirement declares:",
+            "REVIEWED MANUFACTURER PARTS FOR THE DEMANDED CLASSES: prefer these identities "
+            "with their reviewed symbol/footprint pairs. Generic KiCad library-pattern "
+            "identifiers are not ordering codes: leave exact_part null for an unspecified "
+            "generic component rather than inventing an MPN. A listed contact count must "
+            "match the contacts the requirement declares:",
             *lines,
         ]
     )
+
+
+def _principal_part_assembly_snapshot(definition) -> dict | None:
+    """Report only the vendored exact part's pinned C#; this is not a whole-BOM verdict."""
+    from kicraft.parts_library import jlcparts
+
+    if not definition.exact_part or not jlcparts.available():
+        return None
+    for part in definition.parts:
+        if not part.mpn or part.mpn.casefold() != definition.exact_part.casefold():
+            continue
+        bundle, separator, _ = part.symbol.partition(":")
+        if not separator or not bundle or "/" in bundle or "\\" in bundle:
+            continue
+        path = Path(__file__).resolve().parents[1] / "parts_library" / bundle / "manifest.json"
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if str(manifest.get("mpn") or "").casefold() != part.mpn.casefold():
+            continue
+        lcsc = str((manifest.get("sourcing") or {}).get("lcsc") or "").strip()
+        if not lcsc:
+            continue
+        row = jlcparts.lookup(lcsc)
+        return {
+            "mpn": part.mpn,
+            "lcsc": lcsc,
+            "assembly_catalog": "present" if row is not None else "absent",
+            "assembly_stock": row.get("stock") if row is not None else None,
+        }
+    return None
 
 
 
@@ -168,6 +205,10 @@ def architecture_recipe_summaries(intent: dict) -> list[dict]:
     from kicraft.design.recipes import get_recipe, recipe_summaries
 
     summaries = recipe_summaries()
+    for summary in summaries:
+        snapshot = _principal_part_assembly_snapshot(get_recipe(summary["recipe"]))
+        if snapshot is not None:
+            summary["principal_part_assembly_snapshot"] = snapshot
     raw_named = [str(value) for value in intent.get("named_parts") or []]
     named = {
         re.sub(r"[^a-z0-9]", "", str(value).lower()) for value in intent.get("named_parts") or []

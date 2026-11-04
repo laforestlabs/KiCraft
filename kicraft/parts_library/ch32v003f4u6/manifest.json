@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:96fe9d56d434a7a5d9926b57351855bedfb9fe7d5394fd554b8d6bad5c90c9c8",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C5299908.pdf",
+  "description": "WCH(\u5357\u4eac\u6c81\u6052) CH32V003F4U6",
+  "footprint_name": "QFN-20_L3.0-W3.0-P0.40-TL-EP1.7",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "CH32V003F4U6",
+  "name": "ch32v003f4u6",
+  "provenance": {
+    "added_at": "2026-10-11T23:12:03Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C5299908"
+  },
+  "symbol_name": "CH32V003F4U6",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": null
+}

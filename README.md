@@ -629,6 +629,55 @@ from the command line.
 - `inspect-subcircuits` — Inspect subcircuit hierarchy
 - `inspect-solved-subcircuits` — Inspect solved subcircuit artifacts
 
+## ESP32 ROM-UART constructions
+
+`esp32-s3-mini-1u-n4r2-uart-minimal@1` and
+`esp32-c3-mini-1-h4x-uart-minimal@1` are production-eligible after independent
+physical and fabrication audits of their four-layer 18 V sensor and two-layer
+24 V relay references, respectively. Otherwise unconstrained matching module
+requirements prefer these constructions; exact selected silicon is preserved.
+Explicit recipe selections and native USB requirements retain their programming
+contract rather than silently switching interfaces.
+
+Both constructions expose a six-pin 3.3 V ROM-UART header with EN and BOOT
+recovery; neither supplies native USB. The S3 1U module requires an external
+antenna for radio use. Reference qualification does not establish RF performance,
+firmware execution, an arbitrary supply/thermal domain, or fabrication readiness
+of a different generated board; those require their own evidence. UART uses
+compatible 3.3 V logic without competing power sources. Reference relay contact
+ratings establish neither whole-board current ratings nor mains isolation.
+
+For supported typed intents, the staged runtime can construct the functional
+description and architecture without asking a model to rediscover the circuit:
+24 V ESP32-C3 relay products with two to four outputs, or ESP32-S3 temperature
+acquisition with one to four independent user buttons and a 6 V ≤ input < 30 V
+DC supply. These are conservative planning domains, not whole-board operating
+ratings. Existing schemas, source qualification, electrical/physical checks,
+review and commit gates still apply. Unsupported facts retain the authored
+path; incompatible already-committed descriptions are not rewritten.
+
+Typed module, input-rail and copper-layer facts keep their original obligation
+IDs. Copper-layer counts describe the board stack; contradictory counts are
+refused. A generic named MCU can be owned by an explicitly selected reviewed
+member instead of the default recipe. This does not make pinned variants
+interchangeable or qualify an unavailable part.
+
+The resulting compiler-owned BOM includes the actual support connections.
+Accepting it preserves those verified ownership claims while clearing stale
+authored wiring; final wiring acceptance still checks the complete graph.
+Recovery BOOT/RESET controls do not replace requested user buttons. A generated
+board still needs its own routing, manufacturing exports and independent audit.
+
+Product inventory qualification binds the selected catalog order to the
+reviewed BOM/board symbol-and-footprint contract as well as its stock receipt.
+Matching pin numbers alone do not prove that an ordered package lands.
+Manufacturer-qualified records also retain their reviewed supplier order:
+identical printed MPNs do not merge different manufacturers or land patterns.
+Intentionally generic, null-MPN chip parts retain only the finite reviewed
+standard-case exception, with an exact catalog package match; an explicit
+unknown MPN cannot use that exception. Missing proof stays unverified.
+This does not replace the independent audit of actual pad geometry and exports.
+
 ## Package Structure
 
 ```

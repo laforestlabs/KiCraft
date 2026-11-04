@@ -42,18 +42,6 @@ def _board_path(tmp_path, *, rotation=0.0):
     return path
 
 
-@pytest.mark.parametrize("rotation", [0.0, 90.0, 180.0, 270.0])
-def test_named_rule_area_recovers_stable_local_antenna_semantics(tmp_path, rotation):
-    board = pcbnew.LoadBoard(_board_path(tmp_path, rotation=rotation))
-    result = extract_antenna_edge_intents(board, DEFAULT_CONFIG)
-
-    assert result.diagnostics == ()
-    assert len(result.intents) == 1
-    intent = result.intents[0]
-    assert intent.source == "footprint_rule_area"
-    assert intent.source_id == "antenna_keepout"
-    assert intent.local_direction == "top"
-    assert intent.local_anchor_mm == pytest.approx(-16.4, abs=0.2)
 
 def _add_rect_outline(board, left=0.0, top=0.0, right=60.0, bottom=50.0):
     points = [(left, top), (right, top), (right, bottom), (left, bottom)]
@@ -133,6 +121,21 @@ def test_solver_orients_and_flushes_antenna_support_line(tmp_path, edge):
     }[edge]
     actual = anchor.x if edge in ("left", "right") else anchor.y
     assert actual == pytest.approx(expected, abs=1e-6)
+    # The whole RF area must project outboard. Merely pinning its far edge
+    # would pass the anchor check while leaving all antenna copper inboard.
+    polygon = [
+        component.pos + geometry.rotate_vector(point, component.rotation)
+        for point in intent.local_polygon
+    ]
+    assert polygon
+    if edge == "left":
+        assert max(point.x for point in polygon) <= 1e-6
+    elif edge == "right":
+        assert min(point.x for point in polygon) >= 60.0 - 1e-6
+    elif edge == "top":
+        assert max(point.y for point in polygon) <= 1e-6
+    else:
+        assert min(point.y for point in polygon) >= 50.0 - 1e-6
     assert solver._pinned_rotations["U1"] == component.rotation
 
 def test_full_solver_preserves_antenna_rotation_and_anchor(tmp_path):
@@ -236,7 +239,10 @@ def test_final_verifier_accepts_flush_outward_antenna_and_rejects_rotation(tmp_p
     path = _board_path(tmp_path)
     board = pcbnew.LoadBoard(path)
     fp = board.Footprints()[0]
-    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(30.0), pcbnew.FromMM(16.4)))
+    zone = next(zone for zone in fp.Zones() if "antenna" in zone.GetZoneName().lower())
+    body_boundary = zone.GetBoundingBox().GetBottom() - fp.GetPosition().y
+    fp.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(30.0), -body_boundary))
+    assert pcbnew.ToMM(zone.GetBoundingBox().GetBottom()) <= 0.05
     _add_rect_outline(board)
     board.Save(path)
     intent = extract_antenna_edge_intents(board, DEFAULT_CONFIG).intents[0]

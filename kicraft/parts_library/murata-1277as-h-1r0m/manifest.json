@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:234acec3bfbe52e96eb74ddff8a1b77d5476cfc9145945fa5dd285a644b21333",
+  "datasheet_url": "https://jlcpcb.com/api/file/downloadByFileSystemAccessId/8588910335092789248",
+  "description": "muRata(\u6751\u7530) 1277AS-H-1R0M=P2",
+  "footprint_name": "IND-SMD_L3.2-W2.5_L3225",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "1277AS-H-1R0M=P2",
+  "name": "murata-1277as-h-1r0m",
+  "provenance": {
+    "added_at": "2026-11-03T03:35:23Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C237284"
+  },
+  "symbol_name": "1277AS-H-1R0MP2",
+  "tags": [
+    "power",
+    "inductor"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": null
+}

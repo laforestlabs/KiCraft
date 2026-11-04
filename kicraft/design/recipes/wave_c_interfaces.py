@@ -61,6 +61,7 @@ def _recipe(
     no_connects: tuple[NoConnect, ...] = (),
     parameters: dict | None = None,
     allowed: dict | None = None,
+    aliases: tuple[str, ...] = (),
     safety: bool = False,
 ) -> RecipeDefinition:
     constraints = [
@@ -79,8 +80,8 @@ def _recipe(
         family=family,
         exact_part=exact,
         maturity="production",
-        protected_aliases=(family, exact),
-        identity_aliases=(exact,),
+        protected_aliases=(family, exact, *aliases),
+        identity_aliases=(exact, *aliases),
         required_sheet_roles=("interface",),
         parameter_defaults=parameters or {},
         allowed_parameters=allowed or {},
@@ -252,6 +253,14 @@ DRV8833_DUAL_MOTOR = _recipe(
         _passive("vcp_cap", "C", "10nF"),
         _passive("vint_cap", "C", "2.2uF"),
         _passive("sense", "R", "0R", 2),
+        _passive("control_pulldown", "R", "100k", 5),
+        _part(
+            "motor_terminal", "J", "WJ126V-5.0-2P",
+            "screw-terminal-5mm-2p:WJ126V-5.0-2P",
+            "screw-terminal-5mm-2p:CONN-TH_WJ126V-5.0-2P",
+            quantity=2, mpn="WJ126V-5.0-02P-14-00A",
+        ),
+        _part("motor_tvs", "D", "SMBJ5.0A-13-F", "diodes-smbj5-0a:SMBJ5.0A-13-F", "diodes-smbj5-0a:SMB_L4.6-W3.6-LS5.3-RD", mpn="SMBJ5.0A-13-F"),
     ),
     pins=(
         Pin(role="driver", pin="1", net="sleep_n"),
@@ -288,6 +297,18 @@ DRV8833_DUAL_MOTOR = _recipe(
         Pin(role="sense", index=0, pin="2", net="gnd"),
         Pin(role="sense", index=1, pin="1", net="bisense"),
         Pin(role="sense", index=1, pin="2", net="gnd"),
+        Pin(role="control_pulldown", index=0, pin="1", net="ain1"),
+        Pin(role="control_pulldown", index=1, pin="1", net="ain2"),
+        Pin(role="control_pulldown", index=2, pin="1", net="bin1"),
+        Pin(role="control_pulldown", index=3, pin="1", net="bin2"),
+        Pin(role="control_pulldown", index=4, pin="1", net="sleep_n"),
+        *(Pin(role="control_pulldown", index=index, pin="2", net="gnd") for index in range(5)),
+        Pin(role="motor_terminal", index=0, pin="1", net="aout1"),
+        Pin(role="motor_terminal", index=0, pin="2", net="aout2"),
+        Pin(role="motor_terminal", index=1, pin="1", net="bout1"),
+        Pin(role="motor_terminal", index=1, pin="2", net="bout2"),
+        Pin(role="motor_tvs", pin="1", net="vm"),
+        Pin(role="motor_tvs", pin="2", net="gnd"),
     ),
     source="https://www.ti.com/lit/ds/symlink/drv8833.pdf",
     assertions=(
@@ -298,103 +319,6 @@ DRV8833_DUAL_MOTOR = _recipe(
     ),
 )
 
-A4988_STEPPER = _recipe(
-    recipe="a4988-stepper@1",
-    family="a4988-stepper-driver",
-    exact="A4988SETTR-T",
-    safety=True,
-    ports=(
-        Port(name="vm", direction="power"),
-        Port(name="vdd", direction="power"),
-        Port(name="gnd", direction="power"),
-        Port(name="step", direction="input"),
-        Port(name="dir", direction="input"),
-        *(Port(name=name, direction="input", allow_ground=True) for name in ("ms1", "ms2", "ms3")),
-        *(Port(name=name, direction="output") for name in ("out1a", "out1b", "out2a", "out2b")),
-    ),
-    internal=("cp1", "cp2", "vcp", "vreg", "sense1", "sense2", "ref", "reset_sleep"),
-    parts=(
-        _part(
-            "driver",
-            "U",
-            "A4988SETTR-T",
-            "a4988:A4988SETTR-T",
-            "a4988:WQFN-28_L5.0-W5.0-P0.50-BL-EP3.2",
-            mpn="A4988SETTR-T",
-        ),
-        _passive("charge_pump", "C", "100nF", 2),
-        _passive("vreg_cap", "C", "220nF"),
-        _passive("vdd_cap", "C", "220nF"),
-        _part(
-            "vm_bulk", "C", "100uF 50V", "Device:C_Polarized",
-            "Capacitor_THT:CP_Radial_D6.3mm_P2.50mm",
-            mpn="JBLH2101M050C120RLM 100UF 50V",
-            datasheet="https://www.lcsc.com/datasheet/C19270686.pdf",
-        ),
-        _part(
-            "sense", "R", "0.1R", "Device:R",
-            "Resistor_SMD:R_2512_6332Metric", quantity=2, mpn="RLP25FEER100",
-            datasheet="https://www.lcsc.com/datasheet/C160587.pdf",
-        ),
-        _passive("ref_top", "R", "33k"),
-        _passive("ref_bottom", "R", "10k"),
-        _passive("reset_pullup", "R", "10k"),
-    ),
-    pins=(
-        Pin(role="driver", pin="1", net="out2b"),
-        Pin(role="driver", pin="2", net="gnd"),
-        Pin(role="driver", pin="3", net="gnd"),
-        Pin(role="driver", pin="4", net="cp1"),
-        Pin(role="driver", pin="5", net="cp2"),
-        Pin(role="driver", pin="6", net="vcp"),
-        Pin(role="driver", pin="8", net="vreg"),
-        Pin(role="driver", pin="9", net="ms1"),
-        Pin(role="driver", pin="10", net="ms2"),
-        Pin(role="driver", pin="11", net="ms3"),
-        Pin(role="driver", pin="12", net="reset_sleep"),
-        Pin(role="driver", pin="13", net="gnd"),
-        Pin(role="driver", pin="14", net="reset_sleep"),
-        Pin(role="driver", pin="15", net="vdd"),
-        Pin(role="driver", pin="16", net="step"),
-        Pin(role="driver", pin="17", net="ref"),
-        Pin(role="driver", pin="18", net="gnd"),
-        Pin(role="driver", pin="19", net="dir"),
-        Pin(role="driver", pin="21", net="out1b"),
-        Pin(role="driver", pin="22", net="vm"),
-        Pin(role="driver", pin="23", net="sense1"),
-        Pin(role="driver", pin="24", net="out1a"),
-        Pin(role="driver", pin="26", net="out2a"),
-        Pin(role="driver", pin="27", net="sense2"),
-        Pin(role="driver", pin="28", net="vm"),
-        Pin(role="driver", pin="29", net="gnd"),
-        Pin(role="charge_pump", index=0, pin="1", net="cp1"),
-        Pin(role="charge_pump", index=0, pin="2", net="cp2"),
-        Pin(role="charge_pump", index=1, pin="1", net="vcp"),
-        Pin(role="charge_pump", index=1, pin="2", net="vm"),
-        Pin(role="vreg_cap", pin="1", net="vreg"),
-        Pin(role="vreg_cap", pin="2", net="gnd"),
-        Pin(role="vdd_cap", pin="1", net="vdd"),
-        Pin(role="vdd_cap", pin="2", net="gnd"),
-        Pin(role="vm_bulk", pin="1", net="vm"),
-        Pin(role="vm_bulk", pin="2", net="gnd"),
-        *(Pin(role="sense", index=i, pin="1", net=f"sense{i + 1}") for i in range(2)),
-        *(Pin(role="sense", index=i, pin="2", net="gnd") for i in range(2)),
-        Pin(role="ref_top", pin="1", net="vdd"),
-        Pin(role="ref_top", pin="2", net="ref"),
-        Pin(role="ref_bottom", pin="1", net="ref"),
-        Pin(role="ref_bottom", pin="2", net="gnd"),
-        Pin(role="reset_pullup", pin="1", net="vdd"),
-        Pin(role="reset_pullup", pin="2", net="reset_sleep"),
-    ),
-    no_connects=tuple(NoConnect(role="driver", pin=pin) for pin in ("7", "20", "25")),
-    source="https://www.allegromicro.com/-/media/files/datasheets/a4988-datasheet.pdf",
-    assertions=(
-        Assertion(
-            code="stepper_current_limit",
-            message="Itrip = VDD * 10/(33+10) / (8 * 0.1 ohm): 0.959 A at 3.3 V logic, 1.453 A at 5 V; motor and thermal limits require review",
-        ),
-    ),
-)
 
 
 def _i2c_device(
@@ -553,8 +477,8 @@ ADS1115_I2C_ADC = _i2c_device(
 # HUB75 (16-pin IDC) logic channels, in connector-pin order. Ground is pins 4, 8
 # and 16: pin 12 is the D address line (used by 1/32-scan panels), NOT a ground —
 # grounding it silently dropped the D channel. The two '245 banks carry all
-# thirteen channels, so U1 uses five of its eight and its three spare channels
-# are no-connects.
+# thirteen channels, so U1 uses five of its eight: its spare A inputs are tied
+# low and its spare B outputs are no-connects.
 _HUB75_SIGNALS = (
     ("r0", 1), ("g0", 2), ("b0", 3),
     ("r1", 5), ("g1", 6), ("b1", 7),
@@ -601,8 +525,9 @@ HUB75_SN74HCT245_INTERFACE = _recipe(
             "connector",
             "J",
             "HUB75",
-            "Connector_Generic:Conn_02x08_Odd_Even",
-            "Connector_IDC:IDC-Header_2x08_P2.54mm_Vertical",
+            "dc3-2p54-16pas:DC3-2.54-16PAS",
+            "dc3-2p54-16pas:IDC-TH_16P-P2.54_C3406",
+            mpn="DC3-2.54-16PAS",
         ),
         _passive("decoupling", "C", "100nF", 2),
     ),
@@ -623,10 +548,11 @@ HUB75_SN74HCT245_INTERFACE = _recipe(
             )
         ),
         *(Pin(role="connector", pin=str(pin), net="gnd") for pin in _HUB75_GROUND_PINS),
+        *(Pin(role="level_shifter", index=1, pin=str(pin), net="gnd") for pin in (7, 8, 9)),
     ),
     no_connects=tuple(
         NoConnect(role="level_shifter", index=1, pin=str(pin))
-        for pin in (7, 8, 9, 11, 12, 13)
+        for pin in (11, 12, 13)
     ),
     source="https://www.ti.com/lit/ds/symlink/sn74hct245.pdf",
     assertions=(
@@ -650,7 +576,7 @@ WS2812_OUTPUT = _recipe(
         Port(name="data_in", direction="input"),
         Port(name="data_out", direction="output", required=False),
     ),
-    internal=("data_series",),
+    internal=("data_shifted", "data_series"),
     parameters={"quantity": 1},
     allowed={"quantity": tuple(range(1, 501))},
     parts=(
@@ -662,6 +588,13 @@ WS2812_OUTPUT = _recipe(
             "ws2812b:LED-SMD_4P-L5.0-W5.0-TL_WS2812B-B",
             mpn="WS2812B-B/T",
         ),
+        _part(
+            "level_shifter", "U", "SN74AHCT1G125DBVR",
+            "74xGxx:74AHCT1G125", "Package_TO_SOT_SMD:SOT-23-5",
+            mpn="SN74AHCT1G125DBVR",
+        ),
+        _passive("buffer_decoupling", "C", "100nF"),
+        _passive("data_pulldown", "R", "100k"),
         _passive("series_resistor", "R", "330R"),
         _passive("decoupling", "C", "100nF"),
         _passive("bulk", "C", "10uF"),
@@ -671,7 +604,16 @@ WS2812_OUTPUT = _recipe(
         Pin(role="led", pin="2", net="data_out"),
         Pin(role="led", pin="3", net="gnd"),
         Pin(role="led", pin="4", net="data_series"),
-        Pin(role="series_resistor", pin="1", net="data_in"),
+        Pin(role="level_shifter", pin="1", net="gnd"),
+        Pin(role="level_shifter", pin="2", net="data_in"),
+        Pin(role="level_shifter", pin="3", net="gnd"),
+        Pin(role="level_shifter", pin="4", net="data_shifted"),
+        Pin(role="level_shifter", pin="5", net="vdd"),
+        Pin(role="buffer_decoupling", pin="1", net="vdd"),
+        Pin(role="buffer_decoupling", pin="2", net="gnd"),
+        Pin(role="data_pulldown", pin="1", net="data_in"),
+        Pin(role="data_pulldown", pin="2", net="gnd"),
+        Pin(role="series_resistor", pin="1", net="data_shifted"),
         Pin(role="series_resistor", pin="2", net="data_series"),
         Pin(role="decoupling", pin="1", net="vdd"),
         Pin(role="decoupling", pin="2", net="gnd"),
@@ -688,7 +630,9 @@ WS2812_OUTPUT = _recipe(
     assertions=(
         Assertion(
             code="ws2812_logic_level",
-            message="Controller high level must meet the LED VIH bound at the selected supply",
+            message="SN74AHCT1G125 regenerates TTL-compatible controller data at the LED supply. "
+            "The composed circuit requires 4.5–5.3 V, a controller VOH >= 2.0 V / VOL <= 0.8 V, "
+            "and input transitions <= 20 ns/V; each buffer and pixel has its own 100 nF bypass.",
         ),
     ),
 )
@@ -697,11 +641,13 @@ CH340C_USB_UART = _recipe(
     recipe="ch340c-usb-uart@1",
     family="usb-uart-bridge",
     exact="CH340C",
+    aliases=("CH340C USB-UART bridge",),
     ports=(
+        Port(name="vbus", direction="power"),
         Port(name="vdd", direction="power"),
         Port(name="gnd", direction="power"),
-        Port(name="usb_dp", direction="bidirectional"),
-        Port(name="usb_dm", direction="bidirectional"),
+        Port(name="usb_dp", direction="bidirectional", required=False),
+        Port(name="usb_dm", direction="bidirectional", required=False),
         Port(name="tx", direction="output"),
         Port(name="rx", direction="input"),
         Port(name="dtr_n", direction="output", required=False),
@@ -709,61 +655,49 @@ CH340C_USB_UART = _recipe(
     ),
     parameters={"supply_voltage": 3.3},
     allowed={"supply_voltage": (3.3, 5.0)},
-    internal=(),
+    internal=("usb_dp", "usb_dm", "cc1", "cc2", "dp_conn", "dm_conn", "shield"),
     parts=(
-        _part(
-            "bridge",
-            "U",
-            "CH340C",
-            "ch340c:CH340C",
-            "ch340c:SOP-16_L10.0-W3.9-P1.27-LS6.0-BL",
-            mpn="CH340C",
-        ),
+        _part("bridge", "U", "CH340C", "ch340c:CH340C", "ch340c:SOP-16_L10.0-W3.9-P1.27-LS6.0-BL", mpn="CH340C"),
+        _part("connector", "J", "TYPE-C-31-M-12", "usb-c-16p:TYPE-C-31-M-12", "usb-c-16p:USB-C_SMD-TYPE-C-31-M-12_1", mpn="TYPE-C-31-M-12"),
+        _part("esd", "U", "USBLC6-2SC6", "st-usblc6-2sc6:USBLC6-2SC6", "st-usblc6-2sc6:SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BL", mpn="USBLC6-2SC6"),
+        _passive("cc_pulldown", "R", "5.1k", 2),
         _passive("decoupling", "C", "100nF"),
         _passive("v3_cap", "C", "100nF"),
+        _part("program_header", "J", "UART-PROG", "Connector_Generic:Conn_01x06", "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"),
     ),
     pins=(
-        Pin(role="bridge", pin="1", net="gnd"),
-        Pin(role="bridge", pin="2", net="tx"),
-        Pin(role="bridge", pin="3", net="rx"),
-        Pin(role="bridge", pin="4", net="vdd"),
-        Pin(role="bridge", pin="5", net="usb_dp"),
-        Pin(role="bridge", pin="6", net="usb_dm"),
-        Pin(role="bridge", pin="13", net="dtr_n"),
-        Pin(role="bridge", pin="14", net="rts_n"),
+        Pin(role="bridge", pin="1", net="gnd"), Pin(role="bridge", pin="2", net="tx"),
+        Pin(role="bridge", pin="3", net="rx"), Pin(role="bridge", pin="4", net="vdd"),
+        Pin(role="bridge", pin="5", net="usb_dp"), Pin(role="bridge", pin="6", net="usb_dm"),
+        Pin(role="bridge", pin="13", net="dtr_n"), Pin(role="bridge", pin="14", net="rts_n"),
         Pin(role="bridge", pin="16", net="vdd"),
-        Pin(role="decoupling", pin="1", net="vdd"),
-        Pin(role="decoupling", pin="2", net="gnd"),
-        Pin(role="v3_cap", pin="1", net="vdd"),
-        Pin(role="v3_cap", pin="2", net="gnd"),
+        Pin(role="connector", pin="A4B9", net="vbus"), Pin(role="connector", pin="B4A9", net="vbus"),
+        Pin(role="connector", pin="A1B12", net="gnd"), Pin(role="connector", pin="B1A12", net="gnd"),
+        Pin(role="connector", pin="A5", net="cc1"), Pin(role="connector", pin="B5", net="cc2"),
+        Pin(role="connector", pin="A6", net="dp_conn"), Pin(role="connector", pin="B6", net="dp_conn"),
+        Pin(role="connector", pin="A7", net="dm_conn"), Pin(role="connector", pin="B7", net="dm_conn"),
+        *(Pin(role="connector", pin=str(pin), net="shield") for pin in range(1, 5)),
+        Pin(role="cc_pulldown", index=0, pin="1", net="cc1"), Pin(role="cc_pulldown", index=0, pin="2", net="gnd"),
+        Pin(role="cc_pulldown", index=1, pin="1", net="cc2"), Pin(role="cc_pulldown", index=1, pin="2", net="gnd"),
+        Pin(role="esd", pin="1", net="dm_conn"), Pin(role="esd", pin="3", net="dp_conn"),
+        Pin(role="esd", pin="2", net="gnd"), Pin(role="esd", pin="5", net="vbus"),
+        Pin(role="esd", pin="6", net="usb_dm"), Pin(role="esd", pin="4", net="usb_dp"),
+        Pin(role="decoupling", pin="1", net="vdd"), Pin(role="decoupling", pin="2", net="gnd"),
+        Pin(role="v3_cap", pin="1", net="vdd"), Pin(role="v3_cap", pin="2", net="gnd"),
+        Pin(role="program_header", pin="1", net="gnd"), Pin(role="program_header", pin="2", net="vdd"),
+        Pin(role="program_header", pin="3", net="tx"), Pin(role="program_header", pin="4", net="rx"),
+        Pin(role="program_header", pin="5", net="dtr_n"), Pin(role="program_header", pin="6", net="rts_n"),
     ),
-    no_connects=tuple(
-        NoConnect(role="bridge", pin=pin) for pin in ("7", "8", "9", "10", "11", "12", "15")
+    no_connects=(
+        *(NoConnect(role="bridge", pin=pin) for pin in ("7", "8", "9", "10", "11", "12", "15")),
+        NoConnect(role="connector", pin="A8"), NoConnect(role="connector", pin="B8"),
     ),
     source=Source(
         url="https://www.wch-ic.com/downloads/CH340DS1_PDF.html",
-        title="CH340 data sheet",
-        revision="3D",
-        reviewed_date="2026-09-11",
-        sections=(
-            "5.1 Clock, Reset, Power, Connection",
-            "6.2 5V Electrical Parameters",
-            "6.3 3.3V Electrical Parameters",
-            "7.6 Connect to MCU Serial Port, Unified Power Supply",
-            "7.7 Connect to MCU, Supply Power to Each, and Prevent Flooding in Both Directions",
-        ),
+        title="CH340 data sheet", revision="3D", reviewed_date="2026-10-11",
+        sections=("5.1 Clock, Reset, Power, Connection", "6.2 5V Electrical Parameters", "6.3 3.3V Electrical Parameters", "7.6 Connect to MCU Serial Port, Unified Power Supply", "7.7 Connect to MCU, Supply Power to Each, and Prevent Flooding in Both Directions"),
     ),
-    assertions=(
-        Assertion(
-            code="usb_uart_power_mode",
-            message=(
-                "CH340DS1 v3D §5.1: at 3.3 V, V3 and VCC share vdd; at 5 V, "
-                "V3 is a private node with only a 100 nF bypass to ground. "
-                "UART/control levels depend on VCC (§6.2); separate MCU supplies "
-                "require reviewed isolation/translation (§§7.6–7.7)."
-            ),
-        ),
-    ),
+    assertions=(Assertion(code="usb_uart_complete_device", message="The USB-C receptacle has both Rd pulldowns, connector-side USBLC6 protection, direct data paths without added series resistors, and one CH340C PHY. VBUS is a 5 V USB rail; VCC/V3 define the UART domain. USB compliance, host interoperability, and regulator/current margin remain unmeasured."),),
 )
 
 
@@ -776,7 +710,7 @@ def expand_ch340c_usb_uart(resolved):
     if supply_voltage == 5.0:
         definition = definition.model_copy(
             update={
-                "internal_nets": ("v3",),
+                "internal_nets": (*definition.internal_nets, "v3"),
                 "pins": tuple(
                     pin.model_copy(update={"net": "v3"})
                     if (pin.role, pin.pin) in {("bridge", "4"), ("v3_cap", "1")}
@@ -787,6 +721,30 @@ def expand_ch340c_usb_uart(resolved):
         )
     elif supply_voltage != 3.3:
         raise ValueError(f"recipe {definition.recipe} supply_voltage must be 3.3 or 5.0")
+    optional = {
+        "dtr_n": (("bridge", "13"), ("program_header", "5")),
+        "rts_n": (("bridge", "14"), ("program_header", "6")),
+    }
+    absent = tuple(
+        pin
+        for port, pins in optional.items()
+        if port not in resolved.selection.port_bindings
+        for pin in pins
+    )
+    if absent:
+        absent_pins = set(absent)
+        definition = definition.model_copy(
+            update={
+                "pins": tuple(
+                    pin for pin in definition.pins
+                    if (pin.role, pin.pin) not in absent_pins
+                ),
+                "no_connects": (
+                    *definition.no_connects,
+                    *(NoConnect(role=role, pin=pin) for role, pin in absent),
+                ),
+            }
+        )
     return expand_static_definition(definition, resolved)
 
 
@@ -845,7 +803,6 @@ WAVE_C_INTERFACE_RECIPES = (
     SN65HVD230_CAN_NODE,
     MAX3485_RS485_NODE,
     DRV8833_DUAL_MOTOR,
-    A4988_STEPPER,
     PCA9685_SERVO_BANK,
     TCA9555_GPIO_EXPANDER,
     ADS1115_I2C_ADC,

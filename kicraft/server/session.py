@@ -233,9 +233,10 @@ def record_answers(ws, stage: str, answers: list[dict]) -> None:
 
 def null_downstream(ws, stage: str) -> list[str]:
     """Null the slots downstream of `stage` (and drop their open_questions) so an
-    edit cannot leave stale data behind; the caller then re-drives them. wiring's
-    data lives in the bom slot, so clearing it empties bom.connections /
-    no_connect_pins. Returns the stages cleared."""
+    edit cannot leave stale authored data behind; the caller then re-drives them.
+    Wiring lives in the BOM: accepting a BOM keeps only its compiler-published
+    pin graph, which the normal commit gates must still validate.
+    Returns the stages cleared."""
     state_path = Path(ws) / ".kicraft" / "state.json"
     sj = _read_state_for_update(ws)
     if sj is None:

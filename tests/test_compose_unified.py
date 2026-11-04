@@ -520,6 +520,39 @@ def test_compute_final_outline_rejects_far_outboard_edge_anchor():
     )
 
 
+def test_rf_support_line_survives_expected_antenna_courtyard_overhang():
+    from kicraft.autoplacer.brain.types import AntennaEdgeIntent
+
+    # Q7 native parent frame: the footprint's 5.4 mm antenna rule area
+    # extends outward, and its courtyard extends another 0.045 mm.
+    intent = AntennaEdgeIntent(
+        owner_ref="U1", source="footprint_rule_area", source_id="antenna_keepout",
+        local_direction="top", local_anchor_mm=-5.6,
+        local_anchor_midpoint=Point(0, -5.6),
+        local_polygon=(Point(-6.6, -11), Point(6.6, -11),
+                       Point(6.6, -5.6), Point(-6.6, -5.6)),
+        target_edge="top",
+    )
+    constraint = AttachmentConstraint(
+        ref="U1", target="edge", value="top",
+        inward_keep_in_mm=0, outward_overhang_mm=0, source="child_artifact",
+        child_index=0, strict=True, anchor_kind="antenna", antenna_intent=intent,
+    )
+    bounds = [(Point(6, 74.970599), Point(77.542119, 153.397999))]
+    anchor = Point(60, 80.415599)
+    tl, _ = _compute_final_outline(bounds, [constraint], {"U1": anchor}, spacing_mm=1.17)
+    assert tl.y == pytest.approx(anchor.y)
+
+    # Source geometry cannot excuse a phantom antenna anchor in the wrong
+    # frame, nor a different object extending beyond the bounded overhang.
+    far_anchor = Point(60, 100)
+    tl, _ = _compute_final_outline(bounds, [constraint], {"U1": far_anchor}, spacing_mm=1.17)
+    assert tl.y == pytest.approx(74.970599 - 1.17)
+    outboard = Point(60, 60)
+    tl, _ = _compute_final_outline(bounds, [constraint], {"U1": outboard}, spacing_mm=1.17)
+    assert tl.y == pytest.approx(74.970599 - 1.17)
+
+
 def test_compute_final_outline_unconstrained_gets_margin():
     # No constraints at all -> all four sides are unconstrained and
     # should land at geom +/- spacing_mm. This branch is also untouched

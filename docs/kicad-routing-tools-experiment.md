@@ -36,6 +36,8 @@ export KICRAFT_KICAD_ROUTING_TOOLS_PYTHON=/opt/krt-venv/bin/python
 - requires distinct input and output board paths;
 - removes stale output before launch;
 - stages the authoritative sibling `.kicad_pro` and optional `.kicad_dru`;
+- adds temporary via-only rule areas around ordinary assembly pad mask openings, including same-net and plated through-hole pads, using pcbnew's transformed pad shapes and mask expansion; KRT inflates those areas by via copper radius plus clearance, so the via drill remains outside the opening;
+- exempts only the reviewed Espressif thermal lands shared with ground finishing, strips only its uniquely named temporary areas after routing, and rejects any remaining via-drill/opening intersections (including pre-existing ones);
 - invokes `py_router/route.py` with all nets, project rules unchanged, and input copper retained;
 - disables ripping pre-existing copper and plane finalization;
 - records every `JSON_SUMMARY` line and diagnostic stream;

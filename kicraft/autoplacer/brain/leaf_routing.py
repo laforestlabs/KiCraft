@@ -536,6 +536,11 @@ def route_local_subcircuit(
             route_timing,
         )
 
+    # The final pre-stamp repair may have moved individual footprints after
+    # solve(). Re-establish compiler-owned pin locality on the actual input.
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    PlacementSolver(extraction.local_state, cfg)._place_local_bypasses(repaired_components)
+
     route_input_board = copy.deepcopy(extraction.local_state)
     route_input_board.components = copy.deepcopy(repaired_components)
     route_input_board.traces = []
@@ -560,10 +565,35 @@ def route_local_subcircuit(
     leaf_routing_cfg = {**cfg, "pcb_path": str(source_pcb)}
     _breakout_specs = _resolve_breakout_specs(cfg)
 
-    # GND pre-escape (default on): plane-bond stubs for fine-pitch GND pads,
-    # early in the spec order so they claim space before the signal escapes
-    # and the router do -- the post-route escape pass finds those pads walled
-    # in (GND is never routed; signals can route around locked copper).
+    # Fine-pitch signal pads must reserve a legal dog-bone before GND escapes
+    # and power ties lock their only exit corridor.  Stamp in a separate pass:
+    # later producers reload this board, so their shared guard must honour any
+    # signal copper that proved legal rather than merely winning list order.
+    try:
+        import pcbnew
+
+        from kicraft.autoplacer.brain.breakout_stubs import add_breakout_stubs
+        from kicraft.autoplacer.brain.signal_escape import fine_pitch_signal_escape_specs
+
+        _signal_board = pcbnew.LoadBoard(str(pre_route_board))
+        _signal_specs = fine_pitch_signal_escape_specs(_signal_board, cfg)
+        del _signal_board
+        if _signal_specs:
+            _signal_escape = add_breakout_stubs(str(pre_route_board), _signal_specs, cfg=cfg)
+            if _signal_escape["stubs"] > 0:
+                leaf_routing_cfg["routing_preserve_existing_copper"] = True
+                print(
+                    f"  Signal pre-escapes: {_signal_escape['stubs']}/{len(_signal_specs)} "
+                    f"pad(s), {_signal_escape['vias']} fanout via(s), "
+                    f"{len(_signal_escape['skipped'])} blocked"
+                )
+    except Exception as exc:  # finishing step must never fail the leaf
+        print(f"  WARNING: signal pre-escape step failed: {exc}")
+
+    # GND pre-escape (default on): plane-bond stubs for fine-pitch GND pads.
+    # It deliberately follows signal reservation: GND is never routed, while a
+    # dense signal pad has no recovery path once a locked plane bond occupies
+    # its only legal corridor.
     if cfg.get("gnd_pre_escape", True):
         try:
             import pcbnew
@@ -1358,8 +1388,8 @@ def _place_fabricated_edge_interfaces(board_state: BoardState, cfg: dict[str, An
     interfaces = cfg.get("edge_interfaces", []) or []
     if not interfaces:
         return
-    tl, br = board_state.board_outline
-    margin = float(cfg.get("edge_margin_mm", 2.0))
+    groups = []
+    seen: set[str] = set()
     for interface in interfaces:
         refs = [str(ref) for ref in interface.get("refs", [])]
         members = [board_state.components.get(ref) for ref in refs]
@@ -1372,15 +1402,25 @@ def _place_fabricated_edge_interfaces(board_state: BoardState, cfg: dict[str, An
             or any(member is None or not member.pads for member in members)
         ):
             continue
-        span = (len(refs) - 1) * pitch
-        if side in {"left", "right"} and br.y - tl.y < span + 2 * margin:
-            center = (tl.y + br.y) / 2
-            half = (span + 2 * margin) / 2
-            tl, br = Point(tl.x, center - half), Point(br.x, center + half)
-        elif side in {"top", "bottom"} and br.x - tl.x < span + 2 * margin:
-            center = (tl.x + br.x) / 2
-            half = (span + 2 * margin) / 2
-            tl, br = Point(center - half, tl.y), Point(center + half, br.y)
+        for ref in refs:
+            if ref in seen:
+                raise ValueError(f"edge interface reference declared more than once: {ref}")
+            seen.add(ref)
+        groups.append((members, side, pitch))
+    tl, br = board_state.board_outline
+    margin = float(cfg.get("edge_margin_mm", 2.0))
+    width, height = br.x - tl.x, br.y - tl.y
+    for members, side, pitch in groups:
+        span = (len(members) - 1) * pitch
+        if side in {"left", "right"}:
+            height = max(height, span + 2 * margin)
+        else:
+            width = max(width, span + 2 * margin)
+    center_x, center_y = (tl.x + br.x) / 2, (tl.y + br.y) / 2
+    tl = Point(center_x - width / 2, center_y - height / 2)
+    br = Point(center_x + width / 2, center_y + height / 2)
+    for members, side, pitch in groups:
+        span = (len(members) - 1) * pitch
         start = (tl.y + br.y - span) / 2 if side in {"left", "right"} else (tl.x + br.x - span) / 2
         for index, member in enumerate(members):
             pad = member.pads[0]
@@ -1472,6 +1512,9 @@ def _stamp_trivial_leaf(
             },
             route_timing,
         )
+
+    from kicraft.autoplacer.brain.placement_solver import PlacementSolver
+    PlacementSolver(extraction.local_state, cfg)._place_local_bypasses(repaired_components)
 
     route_input_board = copy.deepcopy(extraction.local_state)
     route_input_board.components = copy.deepcopy(repaired_components)

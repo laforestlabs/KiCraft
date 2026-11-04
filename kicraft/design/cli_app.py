@@ -658,19 +658,36 @@ _RIGHT_ANGLE_DESC_RE = re.compile(r"elbow|right[ -]?angle", re.IGNORECASE)
 
 
 def _lcsc_identity_conflict(part, hit: dict) -> str | None:
-    """A confident contradiction between what the BOM claims a part is (its
-    symbol/footprint) and what the offline catalog says the pinned C# is;
-    ``None`` when nothing contradicts.
+    """Return a confident catalog-versus-land-pattern contradiction, if any.
 
-    Only meaningful for STOCK-footprint parts: a curated bundle's footprint
-    is drawn for the manifest's own part, and bundle naming doesn't follow
-    the stock conventions these heuristics read — the caller exempts them.
+    A reviewed *momentary-button* pair is a physical interface contract:
+    another catalog part cannot land on its four-pad tactile-switch pattern.
+    Other reviewed stock-library pairs are generic components (for example
+    0603 passives), not an allowlist of every orderable SKU; their absence
+    from the reviewed inventory is never a sourcing contradiction.
     """
     ident = f"{part.symbol or ''} {part.footprint or ''}"
     desc = hit.get("description") or ""
     pkg = (hit.get("package") or "").strip()
     fp_lib = _lib_prefix(part.footprint or "") or ""
     fp_name = (part.footprint or "").split(":", 1)[-1]
+
+    from kicraft.design.part_identity import physical_inventory_record
+
+    expected = physical_inventory_record(
+        mpn=None, symbol=part.symbol, footprint=part.footprint
+    )
+    if expected is not None and "momentary-button" in expected.physical_features:
+        catalog_mpn = str(hit.get("model") or "").strip()
+        actual = physical_inventory_record(
+            mpn=catalog_mpn, symbol=part.symbol, footprint=part.footprint
+        )
+        if actual is None or "momentary-button" not in actual.physical_features:
+            return (
+                f"the catalog MPN {catalog_mpn or '<missing>'!r} does not match "
+                f"the reviewed tactile-switch symbol/footprint pair"
+            )
+
     if _POT_PART_RE.search(ident) and "resistor" in desc.lower() and not _POT_DESC_RE.search(desc):
         return "the catalog part is a fixed resistor, not a potentiometer/trimmer"
     if "_THT" in fp_lib and _SMD_CHIP_PKG_RE.match(pkg):
@@ -877,12 +894,23 @@ def _resolve_bom_mpn_sourcing(
     ) -> None:
         if receipt is None:
             return
+        catalog = hit or {}
+        retail = info or {}
+        manufacturer = catalog.get("brand") or catalog.get("manufacturer")
+        if (
+            not manufacturer
+            and retail.get("product_code") == cid
+            and isinstance(retail.get("product_model"), str)
+            and retail["product_model"].strip().casefold()
+            == str(catalog.get("model") or "").strip().casefold()
+        ):
+            manufacturer = retail.get("manufacturer")
         receipt.append(
             {
                 "ref": part.ref,
                 "exact_lcsc": cid,
                 "catalog_mpn": (hit or {}).get("model"),
-                "manufacturer": (hit or {}).get("manufacturer") or (hit or {}).get("mfr"),
+                "manufacturer": manufacturer,
                 "package": (hit or {}).get("package"),
                 "description": (hit or {}).get("description"),
                 "assembly_stock": (hit or {}).get("stock"),
@@ -914,6 +942,7 @@ def _resolve_bom_mpn_sourcing(
                 return (
                     str(c.get("lcsc")) not in seen
                     and (c.get("stock") or 0) >= floor
+                    and _lcsc_identity_conflict(part, c) is None
                     and not is_multi_element_array(c)
                     and (not _single or not _vtok or chip_value_matches(_vtok, c))
                 )
@@ -1011,8 +1040,12 @@ def _resolve_bom_mpn_sourcing(
         bom.assumptions.append(decision.reason)
         warnings.append(f"{part.ref} ({label}): {decision.reason}")
 
-    best_by_mpn: dict[tuple[str, bool], tuple[dict | None, list[str], bool]] = {}
-    best_by_kw: dict[tuple[str, bool], tuple[dict | None, bool, bool]] = {}
+    best_by_mpn: dict[
+        tuple[str, bool, str, str], tuple[dict | None, list[str], bool]
+    ] = {}
+    best_by_kw: dict[
+        tuple[str, bool, str, str], tuple[dict | None, bool, bool]
+    ] = {}
     for part in bom.parts or []:
         mpn = (part.mpn or "").strip()
         note = part.sourcing_note or ""
@@ -1050,7 +1083,9 @@ def _resolve_bom_mpn_sourcing(
                         f"LCSC {man_cid} — verify the pinned part matches the "
                         f"footprint's land pattern"
                     )
-            conflict = None if (hit is None or fp_is_bundle) else _lcsc_identity_conflict(part, hit)
+            conflict = None
+            if hit is not None and not fp_is_bundle:
+                conflict = _lcsc_identity_conflict(part, hit)
             if hit is None:
                 bad.append(
                     f"{part.ref} ({label}): sourcing_note claims LCSC "
@@ -1126,6 +1161,7 @@ def _resolve_bom_mpn_sourcing(
                 elif verdict == "unverified":
                     unverified.append(f"{part.ref} ({cid})")
                 elif verdict == "ok":
+                    part.sourcing_note = (f"{note} " if note else "") + f"LCSC {cid}"
                     _receipt(part, cid, hit, verdict, info, False)
             continue
         if not mpn:
@@ -1141,11 +1177,15 @@ def _resolve_bom_mpn_sourcing(
                 )
                 continue
             single = _is_single_passive_footprint(part.footprint or "")
-            if (kw, single) not in best_by_kw:
+            key = (kw, single, part.symbol, part.footprint)
+            if key not in best_by_kw:
 
                 def _kw_candidates(term: str) -> list[dict]:
                     stocked = [
-                        c for c in jlcparts.search(term, limit=10) if (c.get("stock") or 0) >= floor
+                        c
+                        for c in jlcparts.search(term, limit=10)
+                        if (c.get("stock") or 0) >= floor
+                        and _lcsc_identity_conflict(part, c) is None
                     ]
                     if single:
                         # Never hand a 2-pad passive a multi-element array
@@ -1184,8 +1224,8 @@ def _resolve_bom_mpn_sourcing(
                         unv = True
                         break
                     # "dry": walk on to the next JLC-stocked candidate.
-                best_by_kw[(kw, single)] = (best, unv, bool(cands))
-            best, unv, had_cands = best_by_kw[(kw, single)]
+                best_by_kw[key] = (best, unv, bool(cands))
+            best, unv, had_cands = best_by_kw[key]
             if best is not None:
                 part.sourcing_note = (f"{note} " if note else "") + f"LCSC {best['lcsc']}"
                 verdict, info = _retail_verdict(best["lcsc"], picky=True)
@@ -1207,27 +1247,33 @@ def _resolve_bom_mpn_sourcing(
             continue
         single = _is_single_passive_footprint(part.footprint or "")
         mkey = mpn.upper()
-        key = (mkey, single)
+        key = (mkey, single, part.symbol, part.footprint)
         if key not in best_by_mpn:
             matches: list[dict] = []
-            skipped_arrays: list[str] = []
+            tried: list[str] = []
             for cand in jlcparts.search(mpn, limit=10):
                 model = (cand.get("model") or "").upper()
                 # Exact model, or the orderable MPN extends the family name
                 # (e.g. "SS34" -> "SS34F"). Results are stock-ordered, so
                 # earlier matches are better-stocked.
                 if model == mkey or model.startswith(mkey):
+                    conflict = _lcsc_identity_conflict(part, cand)
+                    if conflict:
+                        tried.append(
+                            f"{cand.get('model')} ({cand['lcsc']}) is incompatible with "
+                            f"{part.footprint!r}: {conflict}"
+                        )
+                        continue
                     if single and is_multi_element_array(cand):
                         # Family broadening must not swap a single passive
                         # for its array sibling — §9.28 rejects those pins.
-                        skipped_arrays.append(
+                        tried.append(
                             f"{cand.get('model')} ({cand['lcsc']}) is a "
                             f"multi-element array — unusable on a single "
                             f"2-pad footprint"
                         )
                         continue
                     matches.append(cand)
-            tried: list[str] = skipped_arrays
             eligible: list[dict] = []
             for cand in matches:
                 if (cand.get("stock") or 0) >= floor:
@@ -1492,7 +1538,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             check_rf_feed_isolation(state.bom),
             check_single_net_per_pin(state.bom),
             check_family_wiring_contracts(state.bom),
-            check_mcu_programming_access(state.bom),
+            check_mcu_programming_access(state.bom, architecture=state.architecture),
             # §9.31/§9.32 previously first fired in the BUILD-time
             # collect_validations -- after the wiring stage's retry budget was
             # gone, so a fixable miss (3 of 4 jacks inert, self-eval 2026-07-19
@@ -4218,6 +4264,18 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             )
             return 3
 
+    if stage == "bom" and state.bom is not None and state.bom.lowerer_ownership:
+        from kicraft.design.synthesis.validation import _invalid_lowerer_ownership
+
+        invalid_lowerer_pins = _invalid_lowerer_ownership(state.architecture, state.bom)
+        if invalid_lowerer_pins:
+            print(json.dumps({
+                "ok": False,
+                "errors": ["BOM lowerer connection provenance is not canonical"],
+                "offenders": invalid_lowerer_pins[:20],
+            }, indent=2))
+            return 3
+
     # BOM may already contain deterministic recipe connections. Validate only
     # those emitted endpoints here; intentionally unwired model-owned parts are
     # not a complete-design wiring candidate yet.
@@ -4225,6 +4283,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
         recipe_pins = {
             (row.ref, row.pin) for manifest in state.bom.recipe_ownership for row in manifest.pins
         }
+        recipe_pins.update((row.ref, row.pin) for row in state.bom.lowerer_ownership)
         unowned_endpoints = [
             f"{endpoint.ref}.{endpoint.pin}"
             for connection in state.bom.connections
@@ -4372,7 +4431,7 @@ def _cmd_stage_commit(args: argparse.Namespace) -> int:
             # connections are empty at BOM commit, so only the
             # part check runs here; UPDI reachability gates the
             # wiring commit below.
-            check_mcu_programming_access(state.bom),
+            check_mcu_programming_access(state.bom, architecture=state.architecture),
         ]
         # §9.33/§9.34 (2026-07-27 fix-plan P2) are RECORD-class under the BLOCK-vs-RECORD bar
         # (design-yield-recovery plan §4.3 B): a spec-named MPN or brief-stated mount type the
@@ -5772,6 +5831,10 @@ def _verify_routed_board(pcb: Path) -> dict:
     keepout = int(drc.get("items_not_allowed", 0) or 0)
     accepted = bool(v.get("accepted", False))
     reasons = list(v.get("rejection_reasons", []))
+    illegal_geometry = bool(
+        v.get("obviously_illegal_routed_geometry", False)
+        or "illegal_routed_geometry" in reasons
+    )
 
     # Courtyard severity: a residual overlap the placement pass could not remove
     # (e.g. between two pinned parts) is graded by real intersection geometry.
@@ -5839,12 +5902,17 @@ def _verify_routed_board(pcb: Path) -> dict:
             for s in strand
         )
     # Hard fab-blockers only. A minor-courtyard-only or strand-only board is
-    # NOT "ok" (it carries warnings) but it is fab-acceptable; the caller decides.
+    # NOT "ok" (it carries warnings) but it is fab-acceptable; genuine routed
+    # geometry errors are never exportable.
     blocking_courtyard = courtyard > 0 and not courtyard_minor_only
     return {
         "ok": accepted and shorts == 0 and unconnected == 0 and courtyard == 0 and keepout == 0,
         "fab_acceptable": (
-            shorts == 0 and unconnected == 0 and keepout == 0 and not blocking_courtyard
+            shorts == 0
+            and unconnected == 0
+            and keepout == 0
+            and not blocking_courtyard
+            and not illegal_geometry
         ),
         "shorts": shorts,
         "unconnected": unconnected,

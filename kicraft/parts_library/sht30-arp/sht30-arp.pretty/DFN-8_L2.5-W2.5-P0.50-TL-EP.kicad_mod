@@ -1,0 +1,325 @@
+(footprint "DFN-8_L2.5-W2.5-P0.50-TL-EP"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(property "Reference" "REF**"
+		(at 0 -4.75 0)
+		(layer "F.SilkS")
+		(uuid "5883578e-48aa-4c7f-846a-09b06ca15a6e")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "DFN-8_L2.5-W2.5-P0.50-TL-EP"
+		(at 0 4.75 0)
+		(layer "F.Fab")
+		(uuid "36bcb998-a921-4041-99d5-4a8cea00a876")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "bfa66a96-5968-4267-8e77-841ac00cf092")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" ""
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "d1b5ec07-efd1-4786-aed0-fca7c0743b3f")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "LCSC Part" "C86346"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "e977fd89-f286-446b-859d-5cb0198ad6a7")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(fp_line
+		(start -1.33 -1.33)
+		(end -1.33 -1.33)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "93dafb8c-859a-4e71-b8b0-d5300f9f32ed")
+	)
+	(fp_line
+		(start -1.33 -1.33)
+		(end 1.33 -1.33)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "8c80639a-f87f-4410-ac46-19ad2bd4fa1e")
+	)
+	(fp_line
+		(start -1.33 -1.08)
+		(end -1.33 -1.33)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "e2fdb6ae-319a-4c57-891f-cd3c9221f78b")
+	)
+	(fp_line
+		(start -1.33 1.08)
+		(end -1.33 1.33)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "9f02b549-dd30-4eea-9b8f-7dab2f49db63")
+	)
+	(fp_line
+		(start -1.33 1.33)
+		(end -1.33 1.33)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "7549665c-5a41-4ebc-b75a-0b163acf1b5b")
+	)
+	(fp_line
+		(start -1.33 1.33)
+		(end 1.33 1.33)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "1ef6390d-588a-43c8-bbcd-ef1029f7bd7f")
+	)
+	(fp_line
+		(start 1.33 -1.33)
+		(end 1.33 -1.33)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "ac166f8a-2281-4850-a2be-4ac3ddbc900c")
+	)
+	(fp_line
+		(start 1.33 -1.33)
+		(end 1.33 -1.08)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "ad58aa32-7c50-45c7-8eec-736b7e328158")
+	)
+	(fp_line
+		(start 1.33 1.33)
+		(end 1.33 1.08)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "8917f1e3-f151-4344-85b9-9f2bcd79f791")
+	)
+	(fp_line
+		(start 1.33 1.33)
+		(end 1.33 1.33)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "1c40d9e8-9351-472b-9169-b1a6f35590bd")
+	)
+	(fp_circle
+		(center -1.76 -0.75)
+		(end -1.69 -0.75)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.SilkS")
+		(uuid "5d71b07b-5f44-4078-98c8-2f0dc0b25b37")
+	)
+	(fp_circle
+		(center -1.25 -1.25)
+		(end -1.22 -1.25)
+		(stroke
+			(width 0.06)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.SilkS")
+		(uuid "513609eb-24fb-4069-810f-f9d907c7dcf9")
+	)
+	(fp_circle
+		(center -1.55 -0.75)
+		(end -1.47 -0.75)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(fill no)
+		(layer "Cmts.User")
+		(uuid "53af7c51-3b0c-48c6-8ac0-bfc1010e7770")
+	)
+	(fp_line
+		(start -1.65 -1.295)
+		(end 1.65 -1.295)
+		(stroke
+			(width 0.05)
+			(type default)
+		)
+		(layer "F.CrtYd")
+		(uuid "392e8af1-d07f-404f-9629-fb589cfc54b3")
+	)
+	(fp_line
+		(start -1.65 1.295)
+		(end -1.65 -1.295)
+		(stroke
+			(width 0.05)
+			(type default)
+		)
+		(layer "F.CrtYd")
+		(uuid "4dbafd76-6644-4405-b62e-543d333ecd28")
+	)
+	(fp_line
+		(start 1.65 -1.295)
+		(end 1.65 1.295)
+		(stroke
+			(width 0.05)
+			(type default)
+		)
+		(layer "F.CrtYd")
+		(uuid "30e6ebda-586b-48f7-9778-4547fe23b7df")
+	)
+	(fp_line
+		(start 1.65 1.295)
+		(end -1.65 1.295)
+		(stroke
+			(width 0.05)
+			(type default)
+		)
+		(layer "F.CrtYd")
+		(uuid "d8b41790-2c3c-4013-b1ac-574d60bbb14c")
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(uuid "8d911395-0b3b-4adc-8957-05bce879c575")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(pad "1" smd rect
+		(at -1.175 -0.75)
+		(size 0.55 0.25)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.06)
+		(uuid "e3c7a5fc-5d27-49e4-b8ce-d4554c0bed6c")
+	)
+	(pad "2" smd rect
+		(at -1.175 -0.25)
+		(size 0.55 0.25)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.06)
+		(uuid "81bb3a1e-4244-4b62-85d3-cbdcc75fcc1b")
+	)
+	(pad "3" smd rect
+		(at -1.175 0.25)
+		(size 0.55 0.25)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.06)
+		(uuid "80c4b1a8-8f88-4df5-8640-740093dbbfc5")
+	)
+	(pad "4" smd rect
+		(at -1.175 0.75)
+		(size 0.55 0.25)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.06)
+		(uuid "769bb986-e380-4fc4-8ee6-6b14ddf864af")
+	)
+	(pad "5" smd rect
+		(at 1.175 0.75)
+		(size 0.55 0.25)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.06)
+		(uuid "eee5796d-9ae0-4c91-90a4-d8f7b090b270")
+	)
+	(pad "6" smd rect
+		(at 1.175 0.25)
+		(size 0.55 0.25)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.06)
+		(uuid "1206fe7a-d7c9-40e4-a026-80f91a482013")
+	)
+	(pad "7" smd rect
+		(at 1.175 -0.25)
+		(size 0.55 0.25)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.06)
+		(uuid "dd03a9c8-30a6-46b7-8f21-fce9fa764c01")
+	)
+	(pad "8" smd rect
+		(at 1.175 -0.75)
+		(size 0.55 0.25)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.06)
+		(uuid "91247852-8df1-4e15-8e86-bfdc5bd71f13")
+	)
+	(pad "9" smd rect
+		(at 0 0)
+		(size 1.1 1.8)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.06)
+		(solder_paste_margin -0.1)
+		(uuid "179d1130-0f18-4cf4-9939-460376e9d08a")
+	)
+	(embedded_fonts no)
+	(model "${KIPRJMOD}/3dmodels/sht30-arp/DFN-8_L2.5-W2.5-H1.0-P0.50.wrl"
+		(offset
+			(xyz 0 0 0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz 0 0 0)
+		)
+	)
+)

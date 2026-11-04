@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:ef022669bda05c15976ac7dee612f151d6c9ffd2b7952edf983cf319b51cd037",
+  "datasheet_url": "https://www.lcsc.com/datasheet/C6807778.pdf",
+  "description": "FUXINSEMI(\u5bcc\u82af\u68ee\u7f8e) B360A",
+  "footprint_name": "SMA_L4.3-W2.6-LS5.1-RD",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "B360A",
+  "name": "fuxinsemi-b360a",
+  "provenance": {
+    "added_at": "2026-11-03T05:13:19Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C6807778"
+  },
+  "symbol_name": "B360A",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "FUXINSEMI B350A/B360A v2.1 p3: cathode1/anode2; recommended SMA landsA=2.80mm(vertical),B=1.60mm(horizontal),C=2.20mm innergap =>centres\u00b11.90mm. Corrected via nativeSDK from supplier2x2mm/\u00b12.2. OriginalCAD preserved. Silk moved off enlarged solderlands; no assembled/energized/thermal qualification asserted. Prototype maturity retained."
+}

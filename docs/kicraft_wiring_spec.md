@@ -72,6 +72,25 @@ These rules drive the placement and routing algorithms in §7–§9. Sources: [S
 - **P5 Anchor centering.** The leaf's "anchor IC" (the highest-pin-count IC, ties broken by ref dictionary order) is placed at the sheet's spatial center (148.5, 105 mm on A4 portrait).
 - **P6 Functional grouping.** Parts in the same `BOM.ic_groups[<anchor_ref>]` are placed in a contiguous spatial cluster around their anchor.
 
+Schematic grouping is not a PCB distance guarantee. Compiler-owned TMP102
+bypasses are exported separately as `local_bypasses`: both VDD and GND pad
+centers must be within 2.5 mm of their respective owned sensor pads. This
+conservative bound accommodates the qualified DRL courtyard and 0603
+capacitor courtyard; the PCB placer rejects a placement it cannot fit under
+the existing board, courtyard and keepout constraints. It does not prove
+short routed copper or a low-inductance return path; those require inspection
+of the routed board.
+For the reviewed ESP32-S3-MINI-1U and ESP32-C3-MINI-1 variants, the bulk
+and local supply capacitors each have a 3 mm pad-center bound to VDD and a
+reviewed same-net module GND pad. For the reviewed K7803M-1000R3 converter,
+input and output capacitors each have a 4.5 mm bound to their respective
+converter pin and GND. The latter accommodates the converter's SIP-3 and 1206
+capacitor courtyards. These are placement bounds, not routed-loop guarantees.
+The placer reserves each owned IC/capacitor group before assigning unrelated
+passives, retaining board-edge, keepout and courtyard constraints. If the
+owner's original position has no legal group arrangement, it searches other
+positions within the board; fixed or explicitly zoned owners are not moved.
+
 ### Net rendering rules (N-rules)
 
 - **N1 Power symbols, not wires.** Every endpoint of a net in `Architecture.power_nets` is rendered with a `(symbol "power:<NAME>" …)` block (KiCad convention: `power:+3V3`, `power:GND`, `power:VBUS`, etc.), pointing in the canonical direction (up for positive rails, down for ground). No long wire trunks for power.

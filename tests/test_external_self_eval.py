@@ -230,3 +230,137 @@ def test_external_budget_refusal_preserves_denominator_without_dispatch(tmp_path
     assert summary["product_denominator"] == 2
     assert summary["product_failure_families"] == {"campaign_budget_exhausted": 2}
     assert summary["campaign_complete"] is False
+
+
+@pytest.mark.parametrize(
+    ("free", "remaining", "initial", "allowed"),
+    [
+        (8 * 1024**3, 2 * 1024**3, True, True),
+        (8 * 1024**3 - 1, 2 * 1024**3, True, False),
+        (6 * 1024**3, 1024**3, False, True),
+        (6 * 1024**3 - 1, 1024**3, False, False),
+        (7 * 1024**3, 0, True, False),
+    ],
+)
+def test_storage_admission_protects_reserved_writes(
+    tmp_path, monkeypatch, free, remaining, initial, allowed
+):
+    from types import SimpleNamespace
+    import errno
+
+    monkeypatch.delenv("KICRAFT_EVAL_INITIAL_STORAGE_RECEIPT", raising=False)
+    monkeypatch.setenv("KICRAFT_EVAL_RESERVED_WRITE_BYTES", str(remaining))
+    monkeypatch.setattr(se.shutil, "disk_usage", lambda _: SimpleNamespace(free=free))
+    if allowed:
+        se._require_storage(tmp_path, initial=initial)
+    else:
+        with pytest.raises(OSError) as error:
+            se._require_storage(tmp_path, initial=initial)
+        assert error.value.errno == errno.ENOSPC
+
+def test_storage_receipt_allows_continuation_but_preserves_floor(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import errno
+
+    receipt = tmp_path / "initial.json"
+    receipt.write_text(json.dumps({
+        "initial_numeric_gate_met": True,
+        "free_after_bytes": 8 * 1024**3,
+        "initial_minimum_bytes": 8 * 1024**3,
+        "production_floor_bytes": 4 * 1024**3,
+    }))
+    original = receipt.read_bytes()
+    monkeypatch.setenv("KICRAFT_EVAL_INITIAL_STORAGE_RECEIPT", str(receipt))
+    monkeypatch.setenv("KICRAFT_EVAL_RESERVED_WRITE_BYTES", str(1024**3))
+    monkeypatch.setattr(se.shutil, "disk_usage", lambda _: SimpleNamespace(free=6 * 1024**3))
+    se._require_storage(tmp_path, initial=True)
+    monkeypatch.setattr(se.shutil, "disk_usage", lambda _: SimpleNamespace(free=6 * 1024**3 - 1))
+    with pytest.raises(OSError) as error:
+        se._require_storage(tmp_path, initial=True)
+    assert error.value.errno == errno.ENOSPC
+    monkeypatch.setenv("KICRAFT_EVAL_RESERVED_WRITE_BYTES", "0")
+    monkeypatch.setattr(se.shutil, "disk_usage", lambda _: SimpleNamespace(free=4 * 1024**3 - 1))
+    with pytest.raises(OSError) as error:
+        se._require_storage(tmp_path, initial=True)
+    assert error.value.errno == errno.ENOSPC
+    assert receipt.read_bytes() == original
+
+
+@pytest.mark.parametrize("contents", [
+    None, "not json", "[]",
+    json.dumps({"initial_numeric_gate_met": False, "free_after_bytes": 8 * 1024**3,
+                "initial_minimum_bytes": 8 * 1024**3, "production_floor_bytes": 4 * 1024**3}),
+    json.dumps({"initial_numeric_gate_met": True, "free_after_bytes": 8 * 1024**3 - 1,
+                "initial_minimum_bytes": 8 * 1024**3, "production_floor_bytes": 4 * 1024**3}),
+    json.dumps({"initial_numeric_gate_met": True, "free_after_bytes": 8 * 1024**3,
+                "initial_minimum_bytes": 8 * 1024**3 - 1, "production_floor_bytes": 4 * 1024**3}),
+    json.dumps({"initial_numeric_gate_met": True, "free_after_bytes": 8 * 1024**3,
+                "initial_minimum_bytes": 8 * 1024**3, "production_floor_bytes": 4 * 1024**3 - 1}),
+    json.dumps({"initial_numeric_gate_met": True, "free_after_bytes": True,
+                "initial_minimum_bytes": 8 * 1024**3, "production_floor_bytes": 4 * 1024**3}),
+])
+def test_storage_invalid_initial_receipt_refused(tmp_path, monkeypatch, contents):
+    receipt = tmp_path / "initial.json"
+    if contents is not None:
+        receipt.write_text(contents)
+    monkeypatch.setenv("KICRAFT_EVAL_INITIAL_STORAGE_RECEIPT", str(receipt))
+    monkeypatch.setenv("KICRAFT_EVAL_RESERVED_WRITE_BYTES", "0")
+    with pytest.raises(ValueError, match="initial storage receipt"):
+        se._require_storage(tmp_path, initial=True)
+
+def test_storage_receipt_on_another_filesystem_refused(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    receipt = tmp_path / "initial.json"
+    receipt.write_text(json.dumps({
+        "initial_numeric_gate_met": True,
+        "free_after_bytes": 8 * 1024**3,
+        "initial_minimum_bytes": 8 * 1024**3,
+        "production_floor_bytes": 4 * 1024**3,
+    }))
+    monkeypatch.setenv("KICRAFT_EVAL_INITIAL_STORAGE_RECEIPT", str(receipt))
+    monkeypatch.setenv("KICRAFT_EVAL_RESERVED_WRITE_BYTES", "0")
+    original_stat = type(tmp_path).stat
+
+    def stat(path, *args, **kwargs):
+        if path == tmp_path:
+            return SimpleNamespace(st_dev=receipt.stat().st_dev + 1)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(tmp_path), "stat", stat)
+    with pytest.raises(ValueError, match="different filesystems"):
+        se._require_storage(tmp_path, initial=True)
+
+
+
+def test_external_storage_refusal_preserves_denominator_without_dispatch(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    paths = _inputs(tmp_path)
+    _settings(tmp_path, monkeypatch)
+    monkeypatch.setenv("KICRAFT_EVAL_RESERVED_WRITE_BYTES", str(1024**3))
+    readings = iter([8 * 1024**3, 6 * 1024**3 - 1, 6 * 1024**3 - 1])
+    monkeypatch.setattr(
+        se.shutil, "disk_usage", lambda _: SimpleNamespace(free=next(readings))
+    )
+    monkeypatch.setattr(
+        se, "evaluate_one", lambda *a, **kw: pytest.fail("storage reservation unavailable")
+    )
+    out = tmp_path / "campaign"
+    assert se.main(
+        [
+            "--out", str(out),
+            "--brief-manifest", str(paths[0]),
+            "--obligations", str(paths[1]),
+            "--campaign-budget-usd", "5",
+            "--parallel", "1",
+            "--build-slots", "1",
+            "--no-judge",
+        ]
+    ) == 2
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["product_denominator"] == 2
+    assert summary["product_failure_families"] == {"campaign_storage_exhausted": 2}
+    assert summary["campaign_complete"] is False
+    assert not (out / "run_01_alpha").exists()
+    assert not (out / "run_02_beta").exists()

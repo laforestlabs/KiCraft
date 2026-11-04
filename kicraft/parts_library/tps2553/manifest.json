@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:b6a79caac9376175ab40b2ebc95d345219f5e2046335b03dbb838dfbd9f74ea3",
+  "datasheet_url": "https://www.ti.com/lit/ds/symlink/tps2553.pdf",
+  "description": "Texas Instruments TPS2553DBVR current-limited load switch",
+  "footprint_name": "SOT-23-6_L2.9-W1.6-P0.95-LS2.8-BR",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "TPS2553DBVR",
+  "name": "tps2553",
+  "provenance": {
+    "added_at": "2026-11-03T00:00:00Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C55266"
+  },
+  "symbol_name": "TPS2553DBVR",
+  "tags": [
+    "power",
+    "load-switch"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Prototype only. DBV pins IN=1 GND=2 EN=3 FAULT=4 ILIM=5 OUT=6; exact-source footprint, courtyard extended for pads. No assembled, energized, transient or thermal qualification."
+}

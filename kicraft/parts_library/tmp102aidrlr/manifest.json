@@ -1,0 +1,25 @@
+{
+  "content_hash": "sha256:a0ef81ed7fe2238ec607ab500035d1778641046055d6469f7830c42467fdb698",
+  "datasheet_url": "https://www.ti.com/lit/ds/symlink/tmp102.pdf",
+  "description": "TI(\u5fb7\u5dde\u4eea\u5668) TMP102AIDRLR",
+  "footprint_name": "TI_DRL0006A_TMP102",
+  "kicad_version_min": "9.0.0",
+  "maturity": "prototype",
+  "mpn": "TMP102AIDRLR",
+  "name": "tmp102aidrlr",
+  "provenance": {
+    "added_at": "2026-11-03T15:50:38Z",
+    "kicad_version": "9.0.0",
+    "source": "easyeda2kicad symbol; TI DRL0006A drawing 4223266/F footprint based on KiCad SOT-563",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C99269"
+  },
+  "symbol_name": "TMP102AIDRLR",
+  "tags": [],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "TI drawing 4223266/F: NSMD mask expansion at most 0.05 mm; paste example assumes 0.10 mm stencil. Courtyard is KiCad placement allowance, not specified by TI. Stock KiCad symbol is used by the reviewed lowerer."
+}

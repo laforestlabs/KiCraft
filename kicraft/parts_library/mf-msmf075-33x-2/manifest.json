@@ -1,0 +1,28 @@
+{
+  "content_hash": "sha256:5e2e97d9ec4c22f75ecae376705554ecac51488b9c0433e3c623443e8e8da76b",
+  "datasheet_url": "https://www.bourns.com/docs/product-datasheets/mf-msmf.pdf",
+  "description": "MF-MSMF075/33X-2 (imported)",
+  "footprint_name": "MF-MSMF-1812",
+  "kicad_version_min": "9.0.0",
+  "maturity": "reviewed",
+  "mpn": "MF-MSMF075/33X-2",
+  "name": "mf-msmf075-33x-2",
+  "provenance": {
+    "added_at": "2026-10-11T03:48:58Z",
+    "kicad_version": "9.0.0",
+    "source": "file-import",
+    "source_project_stem": null
+  },
+  "schema_version": "1",
+  "sourcing": {
+    "lcsc": "C3760814"
+  },
+  "symbol_name": "Polyfuse_1812",
+  "tags": [
+    "resettable-fuse",
+    "source-protection"
+  ],
+  "three_d_model": null,
+  "version": "0.1.0",
+  "watch_out_for": "Bourns MF-MSMF075/33X-2: 33V maximum, 0.75A hold and 1.5A trip at 23C. Hold current is not a precision current limit or continuous-load guarantee."
+}

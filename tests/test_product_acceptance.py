@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import zipfile
+
+import pytest
 
 from kicraft.eval import artifact_evidence
 from kicraft.eval import electrical_artifact_evidence
@@ -385,6 +388,59 @@ def test_artifact_extractor_selects_canonical_delivered_board_not_best_candidate
         )
         is None
     )
+
+
+def _unchanged_run_copy(tmp_path):
+    original = tmp_path / "original"
+    board = original / "generated/board/board.kicad_pcb"
+    board.parent.mkdir(parents=True)
+    board.write_text("(kicad_pcb (general (thickness 1.6)))")
+    board.with_suffix(".kicad_pro").write_text('{"net_settings": {"classes": []}}')
+    board.with_suffix(".kicad_dru").write_text('(version 1)')
+    state = {"artifacts": {"routed_pcb": str(board)}, "intent": {"goal": "original brief"}}
+    (original / ".kicraft").mkdir()
+    (original / ".kicraft/state.json").write_text(json.dumps(state))
+    copied = tmp_path / "copy"
+    shutil.copytree(original, copied)
+    return original, copied, state
+
+
+def test_unchanged_run_copy_selects_local_board_without_rewriting_state(tmp_path):
+    original, copied, state = _unchanged_run_copy(tmp_path)
+    original_state = (original / ".kicraft/state.json").read_bytes()
+
+    selected = artifact_evidence._delivered_board_path(copied, state, copied / "generated")
+
+    assert selected == copied / "generated/board/board.kicad_pcb"
+    assert (copied / ".kicraft/state.json").read_bytes() == original_state
+    assert (original / ".kicraft/state.json").read_bytes() == original_state
+
+
+@pytest.mark.parametrize(("relative", "changed"), [
+    (".kicraft/state.json", '{"intent": {"goal": "different brief"}}'),
+    ("generated/board/board.kicad_pcb", "(kicad_pcb (general (thickness 2.0)))"),
+    ("generated/board/board.kicad_pro", '{"net_settings": {"classes": [{"clearance": 0.1}]}}'),
+    ("generated/board/board.kicad_dru", '(version 1) (rule "changed" (constraint clearance (min 0.1mm)))'),
+])
+def test_run_copy_cannot_rebind_changed_design_or_rules(tmp_path, relative, changed):
+    _, copied, state = _unchanged_run_copy(tmp_path)
+    (copied / relative).write_text(changed)
+
+    assert artifact_evidence._delivered_board_path(copied, state, copied / "generated") is None
+
+
+def test_run_copy_cannot_drop_original_design_rules(tmp_path):
+    _, copied, state = _unchanged_run_copy(tmp_path)
+    (copied / "generated/board/board.kicad_dru").unlink()
+
+    assert artifact_evidence._delivered_board_path(copied, state, copied / "generated") is None
+
+
+def test_run_copy_cannot_certify_missing_original_board(tmp_path):
+    original, copied, state = _unchanged_run_copy(tmp_path)
+    (original / "generated/board/board.kicad_pcb").unlink()
+
+    assert artifact_evidence._delivered_board_path(copied, state, copied / "generated") is None
 
 
 def test_electrical_extractor_uses_kicad_footprint_identity_not_swig_repr():

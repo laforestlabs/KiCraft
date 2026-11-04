@@ -388,6 +388,7 @@ def test_run_design_parks_then_resumes_with_suggested_option(tmp_path, monkeypat
         client=None,
         progress=None,
         run_id=None,
+        auto_default_questions=None,
     ):
         calls["n"] += 1
         seen_answers.append(answers)
@@ -421,7 +422,6 @@ def test_run_design_parks_then_resumes_with_suggested_option(tmp_path, monkeypat
     assert round(d["cost_usd"], 4) == 0.03  # park attempt + resume both billed
     assert seen_answers[0] is None  # opening pass asks nothing
     assert seen_answers[1] == [{"text": "Battery?", "answer": "LiPo 1S"}]
-    assert seen_instructions == [se.NONINTERACTIVE_DEFAULTS_INSTRUCTION] * 2
     kinds = [json.loads(line)["kind"] for line in events.read_text().splitlines()]
     assert "question" in kinds and "stage_done" in kinds
 

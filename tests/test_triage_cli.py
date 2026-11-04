@@ -218,6 +218,68 @@ def test_leaves_classifies_replica_and_parent(tmp_path):
     assert kinds == ["leaf", "replica"]  # the parent artifact is excluded
     leaf = next(lf for lf in leaves if lf["kind"] == "leaf")
     assert leaf["unconnected"]["signal"] == ["A"]
+    assert leaf["raw_drc"] is None
+
+
+@pytest.mark.parametrize("raw_count", [6, 0, None])
+@pytest.mark.parametrize("persisted_rejection", [False, True])
+def test_leaf_raw_drc_is_selected_evidence_not_gate_acceptance(
+    tmp_path, capsys, raw_count, persisted_rejection,
+):
+    from kicraft.autoplacer.brain import pins
+
+    run, _sd, exp = make_run(tmp_path)
+    leaf = exp / "subcircuits" / "leaf_a"
+    validation = {"accepted": True}
+    if raw_count is not None:
+        validation["drc"] = {"unconnected": raw_count, "unconnected_nets": ["DATA"]}
+    selected = {"round_index": 2, "routing": {"validation": validation}}
+    if persisted_rejection:
+        selected["routing"]["_round_acceptance"] = {
+            "accepted": False, "rejection_reasons": ["no_unconnected"],
+            "gate_results": {"no_unconnected": {
+                "passed": False, "unconnected_total": 6,
+            }},
+        }
+    stale = {"round_index": 5, "routing": {
+        "validation": {"drc": {"unconnected": 9}},
+        "_round_acceptance": {
+            "accepted": False, "gate_results": {
+                "no_unconnected": {"passed": False, "unconnected_total": 9},
+            },
+        },
+    }}
+    _write(leaf / "debug.json", {"extra": {
+        "all_rounds": [selected, stale],
+        "leaf_acceptance": stale["routing"]["validation"],
+        "leaf_acceptance_structured": stale["routing"]["_round_acceptance"],
+    }})
+    _write(leaf / "metadata.json", {})
+    _write(leaf / "solved_layout.json", {})
+    _write(leaf / "round_0002_metadata.json", {})
+    _write(leaf / "round_0002_solved_layout.json", {"validation": validation})
+    (leaf / "round_0002_leaf_routed.kicad_pcb").write_text("(kicad_pcb)")
+    pins.pin_leaf(exp, leaf.name, 2)
+    data = triage.collect_run(run)
+    report = data["leaves"][0]
+    assert report["accepted"] is False
+    if persisted_rejection:
+        assert report["rejection_reasons"] == ["no_unconnected"]
+        assert report["unconnected"]["total"] == 6
+    else:
+        assert report["rejection_reasons"] == ["pinned_round_acceptance_unavailable"]
+        assert report["unconnected"] is None
+    assert report["raw_drc"] == (
+        {"unconnected": raw_count, "unconnected_nets": ["DATA"]}
+        if raw_count is not None else None
+    )
+    triage.print_run(data)
+    text = capsys.readouterr().out
+    if raw_count is not None:
+        assert f"raw DRC: unconnected={raw_count} nets=['DATA']" in text
+    else:
+        assert "raw DRC:" not in text
+    assert ("router residue" in text) is persisted_rejection
 
 
 # ---------------------------------------------------------------------------
