@@ -477,3 +477,79 @@ def test_extvcc_mode_requires_exact_reviewed_device_and_package(field, value):
     converter = next(part for part in bom.parts if part.recipe_role == "converter")
     setattr(converter, field, value)
     assert not check_power_pin_polarity(bom).ok
+
+
+def _exact_converter_family(family="k7803m-1000r3", *, load=0.5):
+    return {
+        "sheets": [{"name": "POWER", "stem": "POWER", "function": "24 V to 3.3 V supply"}],
+        "power_nets": ["VIN", "VOUT", "GND"],
+        "rail_voltages": {"VIN": 24.0, "VOUT": 3.3},
+        "inter_sheet_nets": [],
+        "requirements": [{
+            "id": "reg", "sheet": "POWER", "role": "regulator", "family": family,
+            "parameters": {"output_voltage": 3.3},
+            "ports": {"input": "VIN", "gnd": "GND", "output": "VOUT"},
+            "obligations": [{
+                "kind": "quantitative", "original_obligation_id": "load",
+                "quantity": "output current", "relation": "minimum", "value": load, "unit": "A",
+            }],
+        }],
+    }
+
+
+def test_exact_converter_identity_in_family_owns_its_complete_native_power_graph():
+    from kicraft.design.architecture_intent import derive_architecture
+    from kicraft.design.recipes.resolver import apply_architecture_recipe_resolution
+    from kicraft.server.stage_work_units import probe_architecture_construction
+
+    native = derive_architecture({
+        "sheets": [{"name": "POWER", "stem": "POWER", "role": "power", "function": "Supply"}],
+        "requirements": [
+            {"id": "input", "sheet": "POWER", "role": "power_input",
+             "family": "screw-terminal", "ties": {"negative": "GND"}},
+            {"id": "reg", "sheet": "POWER", "role": "regulator",
+             "family": "k7803m-1000r3", "supply_bindings": {"input": "VIN"},
+             "parameters": {"output_voltage": 3.3}},
+        ],
+        "power": {"rails": {
+            "VIN": {"voltage": 24.0, "from": "input.positive"},
+            "VOUT": {"voltage": 3.3, "from": "reg.output"},
+        }},
+        "signals": [],
+    })
+    resolved = apply_architecture_recipe_resolution(native)
+    reg = next(row for row in resolved.requirements if row.id == "reg")
+    assert reg.family == "ylptec-k7803m-1000r3"
+    assert reg.declared_interface is None
+    construction = probe_architecture_construction({"architecture": resolved.model_dump(mode="json")})
+    module = next(part for part in construction["parts"] if part.get("recipe_role") == "converter")
+    assert module["mpn"] == "K7803M-1000R3"
+    pins = {
+        endpoint["pin"]: connection["net_name"]
+        for connection in construction["connections"]
+        for endpoint in connection["endpoints"] if endpoint["ref"] == module["ref"]
+    }
+    assert pins == {"1": "VIN", "2": "GND", "3": "VOUT"}
+    for role, rail in (("input_cap", "VIN"), ("output_cap", "VOUT")):
+        cap = next(part for part in construction["parts"] if part.get("recipe_role") == role)
+        assert {
+            endpoint["pin"]: connection["net_name"]
+            for connection in construction["connections"]
+            for endpoint in connection["endpoints"] if endpoint["ref"] == cap["ref"]
+        } == {"1": rail, "2": "GND"}
+
+
+def test_exact_converter_family_does_not_expand_prefixes_or_override_user_parts():
+    unresolved = resolve_architecture_recipes(_exact_converter_family("k7803m"))
+    assert unresolved.unresolved_requirements == ["reg"]
+    assert unresolved.selections == []
+    conflict = _exact_converter_family()
+    conflict["requirements"][0]["exact_part"] = "AP63203WU-7"
+    result = resolve_architecture_recipes(conflict, {"named_parts": ["K7803M-1000R3"]})
+    assert any(d.code == "conflicting_exact_variant" for d in result.blocking)
+
+
+def test_exact_converter_family_keeps_the_reviewed_output_current_limit():
+    result = resolve_architecture_recipes(_exact_converter_family(load=0.501))
+    assert any(d.code == "recipe_output_current_exceeded" for d in result.blocking)
+    assert result.selections == []

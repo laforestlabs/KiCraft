@@ -709,6 +709,19 @@ authored wiring; final wiring acceptance still checks the complete graph.
 Recovery BOOT/RESET controls do not replace requested user buttons. A generated
 board still needs its own routing, manufacturing exports and independent audit.
 
+Generic `STM32G0`/`STM32G030` requests use the reviewed
+`stm32g030k6t6-minimal@1` LQFP-32 construction (C529331). Its supply pair,
+reset/boot/SWD network and ADC/GPIO allocation are package-specific; the stock
+symbol's no-connect contacts 19/21 remain unused. Exact or saved
+`STM32G030F6P6` TSSOP-20 selections stay F6 rather than being relabelled or
+silently migrated. This is manufacturer/nominal library qualification, not an
+independent acceptance of a newly generated board.
+
+An exact reviewed ordering code in a requirement's family field selects its
+existing native construction and canonical family, rather than a model-owned
+approximation of the internals. This does not recognize unreviewed prefixes,
+override an exact user part, or bypass the construction's electrical envelope.
+
 Product inventory qualification binds the selected catalog order to the
 reviewed BOM/board symbol-and-footprint contract as well as its stock receipt.
 Matching pin numbers alone do not prove that an ordered package lands.

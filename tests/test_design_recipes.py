@@ -5395,6 +5395,91 @@ def test_stm32g030_complete_artifact_has_swd_reset_boot_and_bypass():
     ).ok
 
 
+def test_stm32g030k6_native_graph_and_four_adc_resources():
+    from kicraft.design.models import CircuitRequirement
+    from kicraft.design.recipes.pin_allocator import allocate_requirement_pins
+    from kicraft.design.part_identity import reviewed_part
+
+    definition = get_recipe("stm32g030k6t6-minimal@1")
+    f6 = get_recipe("stm32g030f6p6-minimal@1")
+    assert sum("adc" in pin.capabilities for pin in definition.allocatable_pins) == 14
+    assert sum("adc" in pin.capabilities for pin in f6.allocatable_pins) == 8
+    assert {"19", "21"}.isdisjoint({pin.pin for pin in definition.allocatable_pins})
+    assert all(pin.input_only for pin in definition.allocatable_pins if pin.pin in {"2", "3"})
+    ports = {f"adc_{index}": f"ADC_{index}" for index in range(4)}
+    requirement = CircuitRequirement(
+        id="g0", sheet="MCU", role="mcu_core", family="stm32g0",
+        interfaces=["adc"], ports=ports,
+    )
+    allocations = allocate_requirement_pins(definition, requirement)
+    assert len({row.pin for row in allocations}) == 4
+    assert {row.pin for row in allocations} <= {
+        "7", "8", "9", "10", "11", "12", "13", "14",
+        "15", "16", "17", "22", "23", "31",
+    }
+    expansion = expand_recipe(RecipeSelection(
+        recipe=definition.recipe, instance="g0", sheets={"mcu": "MCU"},
+        port_bindings={"vdd": "+3V3", "gnd": "GND", **ports},
+        pin_allocations=allocations,
+    ))
+    refs = {part.recipe_role: part.ref for part in expansion.parts}
+    nets = _mcu_recipe_nets(expansion)
+    mcu = refs["mcu"]
+    assert {(mcu, "19"), (mcu, "21")} <= {
+        (endpoint.ref, endpoint.pin) for endpoint in expansion.no_connect_pins
+    }
+    part = next(part for part in expansion.parts if part.ref == mcu)
+    record = reviewed_part(part.mpn)
+    assert (part.mpn, part.symbol, part.footprint) == (
+        "STM32G030K6T6", record.symbol, record.footprint,
+    )
+    assert record.lcsc == "C529331" and len(record.contacts) == 32
+    assert nets[mcu, "4"] == "+3V3" and nets[mcu, "5"] == "GND"
+    assert nets[mcu, "6"] == nets[refs["swd_header"], "5"] == nets[refs["reset_button"], "1"]
+    assert nets[mcu, "24"] == nets[refs["swd_header"], "3"]
+    assert nets[mcu, "25"] == nets[refs["swd_header"], "4"] == nets[refs["boot0_pulldown"], "1"]
+    assert nets[refs["boot0_pulldown"], "2"] == "GND"
+    assert nets[refs["reset_pullup"], "1"] == "+3V3"
+    assert nets[refs["reset_pullup"], "2"] == nets[mcu, "6"] == nets[refs["reset_capacitor"], "1"]
+    assert nets[refs["reset_capacitor"], "2"] == "GND"
+    for role in ("local_decoupling", "bulk_decoupling"):
+        assert (nets[refs[role], "1"], nets[refs[role], "2"]) == ("+3V3", "GND")
+    for allocation in allocations:
+        assert nets[mcu, allocation.pin] == allocation.net
+    assert check_net_coverage(BOM(parts=expansion.parts, connections=expansion.connections,
+                                  no_connect_pins=expansion.no_connect_pins)).ok
+
+
+def test_stm32g0_family_resolution_preserves_exact_and_saved_f6():
+    from kicraft.design.part_identity import matches_part_identity
+    from kicraft.design.recipes.resolver import resolve_architecture_recipes
+
+    payload = {
+        "sheets": [{"name": "MCU", "stem": "MCU", "function": "MCU core"}],
+        "power_nets": ["+3V3", "GND"], "rail_voltages": {"+3V3": 3.3},
+        "inter_sheet_nets": [],
+        "requirements": [{
+            "id": "mcu", "sheet": "MCU", "role": "mcu_core", "family": "stm32g0",
+            "ports": {"vdd": "+3V3", "gnd": "GND"},
+        }],
+    }
+    for family in ("STM32G0", "STM32G030"):
+        result = resolve_architecture_recipes(payload, {"named_parts": [family]})
+        assert not result.blocking
+        assert result.exact_parts["mcu"] == "STM32G030K6T6"
+        assert next(part for part in expand_recipe(result.selections[0]).parts
+                    if part.recipe_role == "mcu").mpn == "STM32G030K6T6"
+    exact = resolve_architecture_recipes(payload, {"named_parts": ["STM32G030F6P6"]})
+    assert not exact.blocking
+    assert exact.exact_parts["mcu"] == "STM32G030F6P6"
+    assert next(part for part in expand_recipe(exact.selections[0]).parts
+                if part.recipe_role == "mcu").footprint == "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm"
+    saved = RecipeSelection(recipe="stm32g030f6p6-minimal@1", instance="old",
+                            sheets={"mcu": "MCU"}, port_bindings={"vdd": "+3V3", "gnd": "GND"})
+    assert next(part for part in expand_recipe(saved).parts if part.recipe_role == "mcu").mpn == "STM32G030F6P6"
+    assert not matches_part_identity("STM32G030F6P6", "STM32G030K6T6")
+
+
 def test_attiny1604_complete_artifact_preserves_updi_and_bypass():
     definition = get_recipe("attiny1604-ssn-minimal@1")
     expansion = expand_recipe(
@@ -5477,6 +5562,7 @@ def test_attiny1604_mux_and_updi_boundaries_are_explicit():
     "recipe,expected_pins",
     [
         ("stm32g030f6p6-minimal@1", {"i2c_scl": "1", "i2c_sda": "2"}),
+        ("stm32g030k6t6-minimal@1", {"i2c_scl": "32", "i2c_sda": "1"}),
         ("attiny1604-ssn-minimal@1", {"i2c_scl": "13", "i2c_sda": "12"}),
     ],
 )
@@ -5506,7 +5592,7 @@ def test_new_mcu_i2c_artifact_owns_one_pullup_per_documented_line(recipe, expect
     }
 
 
-@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "attiny1604-ssn-minimal@1"])
+@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@1", "attiny1604-ssn-minimal@1"])
 def test_new_mcu_conditional_ads1115_pair_has_distinct_addresses_and_eight_endpoints(recipe):
     expansion = expand_recipe(
         RecipeSelection(
@@ -5528,7 +5614,7 @@ def test_new_mcu_conditional_ads1115_pair_has_distinct_addresses_and_eight_endpo
     )
 
 
-@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "attiny1604-ssn-minimal@1"])
+@pytest.mark.parametrize("recipe", ["stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@1", "attiny1604-ssn-minimal@1"])
 def test_new_mcu_conditional_mcp23017_owns_sixteen_explicit_outputs(recipe):
     expansion = expand_recipe(
         RecipeSelection(
@@ -5557,7 +5643,7 @@ def test_new_mcu_i2c_rejects_single_wire_pseudo_bus():
 
 @pytest.mark.parametrize(
     ("family", "exact_part"),
-    [("stm32g0", "STM32G030F6P6"), ("attiny1604", "ATTINY1604-SSN")],
+    [("stm32g0", "STM32G030F6P6"), ("stm32g0", "STM32G030K6T6"), ("attiny1604", "ATTINY1604-SSN")],
 )
 def test_new_mcu_cores_require_their_reviewed_3v3_logic_rail(family, exact_part):
     from kicraft.design.recipes.resolver import resolve_architecture_recipes

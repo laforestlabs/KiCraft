@@ -1079,9 +1079,8 @@ STM32G030F6P6_MINIMAL = RecipeDefinition(
     recipe="stm32g030f6p6-minimal@1",
     family="stm32g0",
     exact_part="STM32G030F6P6",
-    default_for_family=True,
+    default_for_family=False,
     maturity="production",
-    protected_aliases=("STM32G0", "STM32G030"),
     identity_aliases=("stm32g030f6p6", "MCU_ST_STM32G0:STM32G030F6Px"),
     required_sheet_roles=("mcu",),
     parameter_defaults={
@@ -1201,6 +1200,80 @@ STM32G030F6P6_MINIMAL = RecipeDefinition(
         SourceDocument(url="https://www.st.com/resource/en/application_note/an5096-getting-started-with-stm32g0-mcus-hardware-development-stmicroelectronics.pdf", title="STM32G0 hardware development", revision="AN5096 Rev. 4", reviewed_date=_REVIEW_DATE, sections=("Figure 5 reset", "Figure 9 decoupling", "boot modes", "debug")),
     ),
 )
+
+
+# DS12991 Figure 4 and Tables 12–14 describe the KxT package separately
+# from the F6 TSSOP: notably SWD and I2C are on different contacts.
+_STM32G030K6T6_DATASHEET = "https://www.st.com/resource/en/datasheet/stm32g030k8.pdf"
+STM32G030K6T6_MINIMAL = STM32G030F6P6_MINIMAL.model_copy(update={
+    "recipe": "stm32g030k6t6-minimal@1",
+    "exact_part": "STM32G030K6T6",
+    "default_for_family": True,
+    "protected_aliases": ("STM32G0", "STM32G030"),
+    "identity_aliases": ("stm32g030k6t6", "MCU_ST_STM32G0:STM32G030K6Tx"),
+    "fixed_port_pins": {
+        "uart_tx": "9", "uart_rx": "10",
+        "i2c_scl": "32", "i2c_sda": "1",
+        "spi_sck": "12", "spi_mosi": "14",
+        "spi_miso": "13", "spi_cs0": "11",
+    },
+    "parts": (
+        Group(role="mcu", reference_prefix="U", value="STM32G030K6T6",
+              symbol="MCU_ST_STM32G0:STM32G030K6Tx",
+              footprint="Package_QFP:LQFP-32_7x7mm_P0.8mm",
+              sheet_role="mcu", mpn="STM32G030K6T6", datasheet=_STM32G030K6T6_DATASHEET),
+        *STM32G030F6P6_MINIMAL.parts[1:],
+    ),
+    "pins": (
+        Pin(role="mcu", pin="4", net="vdd"),
+        Pin(role="mcu", pin="5", net="gnd"),
+        Pin(role="mcu", pin="6", net="nrst"),
+        Pin(role="mcu", pin="24", net="swdio"),
+        Pin(role="mcu", pin="25", net="swclk_boot0"),
+        *STM32G030F6P6_MINIMAL.pins[5:],
+    ),
+    "no_connects": (
+        *STM32G030F6P6_MINIMAL.no_connects,
+        NoConnect(role="mcu", pin="19"),
+        NoConnect(role="mcu", pin="21"),
+    ),
+    "allocatable_pins": (
+        AllocatablePin(role="mcu", pin="32", capabilities=("gpio", "input", "output", "interrupt", "i2c-scl")),
+        AllocatablePin(role="mcu", pin="1", capabilities=("gpio", "input", "output", "interrupt", "i2c-sda")),
+        *(AllocatablePin(role="mcu", pin=str(pin), gpio=pin - 7,
+                         capabilities=("gpio", "input", "output", "interrupt", "adc",
+                                       *(("pwm",) if pin in (11, 13, 14) else ()),
+                                       *(("uart-tx",) if pin == 9 else ()),
+                                       *(("uart-rx",) if pin == 10 else ()),
+                                       *(("spi-cs",) if pin == 11 else ()),
+                                       *(("spi-sclk",) if pin == 12 else ()),
+                                       *(("spi-miso",) if pin == 13 else ()),
+                                       *(("spi-mosi",) if pin == 14 else ())))
+          for pin in range(7, 15)),
+        *(AllocatablePin(role="mcu", pin=str(pin), capabilities=("gpio", "input", "output", "interrupt", "adc"))
+          for pin in (15, 16, 17, 22, 23, 31)),
+        # Stock symbol marks PA9/PA10 (19/21) NC by default and the emitter
+        # cannot select their alternates. Do not allocate those contacts.
+        *(AllocatablePin(role="mcu", pin=str(pin), capabilities=("gpio", "input", "output", "interrupt"))
+          for pin in (18, 20, 26, 27, 28, 29, 30)),
+        # PC14/PC15 have backup-domain output restrictions; expose inputs only.
+        *(AllocatablePin(role="mcu", pin=str(pin), capabilities=("gpio", "input", "interrupt"), input_only=True)
+          for pin in (2, 3)),
+    ),
+    "placement_constraints": (
+        PlacementConstraint(kind="decoupling_proximity", role="local_decoupling", parameters={"anchor_role": "mcu", "max_mm": 3.0}),
+        PlacementConstraint(kind="decoupling_proximity", role="bulk_decoupling", parameters={"anchor_role": "mcu", "max_mm": 3.0}),
+    ),
+    "electrical_assertions": (
+        Assertion(code="stm32g0_supply_3v3", message="STM32G030K6T6 VDD/VDDA is supplied at 3.3 V"),
+        Assertion(code="stm32g0_swd_reset_access", message="SWDIO, SWCLK/BOOT0, NRST, VTREF, and ground reach the physical SWD header"),
+        Assertion(code="stm32g0_boot_low", message="PA14/BOOT0 has a 10 kΩ pulldown and no default bootloader switch"),
+    ),
+    "source_documents": (
+        SourceDocument(url="https://datasheet.lcsc.com/datasheet/pdf/753f35401d4598e355b1dd55569495e1.pdf?productCode=C529331", title="STM32G030x6/x8 data sheet (ST document, distributor mirror)", revision="DS12991 Rev. 3", reviewed_date="2026-11-04", sections=("Figure 4 LQFP32 pinout", "Tables 12–14 pin and alternate functions", "Figure 9 supply decoupling", "Table 21 operating conditions")),
+        STM32G030F6P6_MINIMAL.source_documents[1],
+    ),
+})
 
 
 ATTINY1604_SSN_MINIMAL = RecipeDefinition(
@@ -1690,6 +1763,7 @@ WAVE_A_MCU_RECIPES = (
     ESP32_S3_MINI_1U_N4R2_UART,
     ESP32_C3_MINI_1_H4X_UART,
     STM32G030F6P6_MINIMAL,
+    STM32G030K6T6_MINIMAL,
     STM32F103C8T6_MINIMAL,
     ATTINY402_UPDI_MINIMAL,
     ATTINY402_SSNR_UPDI_MINIMAL,
@@ -1728,7 +1802,7 @@ def expand_wave_a_mcu(resolved):
         for port, pin in definition.fixed_port_pins.items():
             if port in bindings and pin not in allocated_pins:
                 pins.append(Pin(role="mcu", pin=pin, net=port))
-    if definition.recipe in {"stm32g030f6p6-minimal@1", "attiny1604-ssn-minimal@1"}:
+    if definition.recipe in {"stm32g030f6p6-minimal@1", "stm32g030k6t6-minimal@1", "attiny1604-ssn-minimal@1"}:
         i2c_ports = {"i2c_scl", "i2c_sda"}
         bound_i2c = i2c_ports.intersection(bindings)
         ads_enabled = resolved.parameters.get("adc_expansion") == "ads1115x2"

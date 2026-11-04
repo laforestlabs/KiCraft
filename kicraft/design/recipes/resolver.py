@@ -361,11 +361,17 @@ def _family_recipes(
     recipes: tuple[RegisteredRecipe, ...],
 ) -> list[RegisteredRecipe]:
     token = _identity(family)
-    return [
+    matches = [
         recipe
         for recipe in recipes
         if recipe.definition.family and _identity(recipe.definition.family) == token
     ]
+    if matches:
+        return matches
+    # A reviewed exact order code is also a valid construction selector. Share
+    # this rule with the intent compiler; never broaden an unreviewed prefix.
+    exact = _recipe_for_exact(family, recipes)
+    return [exact] if exact is not None else []
 
 
 def _looks_protected(value: str, recipes: tuple[RegisteredRecipe, ...]) -> bool:
@@ -774,6 +780,7 @@ def _bound_rail_voltage(architecture: Architecture, net: str | None) -> float | 
 _MCU_CORE_LOGIC_RAILS = {
     "RP2040": (1.62, 3.63, 3.3),
     "STM32G030F6P6": (2.0, 3.6, 3.3),
+    "STM32G030K6T6": (2.0, 3.6, 3.3),
     "ATTINY1604-SSN": (1.8, 5.5, 3.3),
     "CH32V003F4P6": (2.7, 5.5, 3.3),
     "CH32V003F4U6": (2.7, 5.5, 3.3),
@@ -832,7 +839,7 @@ def _mcu_expansion_plan(
     parameters: dict,
 ) -> tuple[dict, CircuitRequirement]:
     """Select a reviewed I²C expansion only after direct MCU capacity is exhausted."""
-    if definition.exact_part not in {"STM32G030F6P6", "ATTINY1604-SSN"}:
+    if definition.exact_part not in {"STM32G030F6P6", "STM32G030K6T6", "ATTINY1604-SSN"}:
         return parameters, requirement
     ports = dict(requirement.ports)
     adc_ports = sorted(name for name in ports if re.fullmatch(r"adc(?:_\d+)?", name))
@@ -2394,6 +2401,11 @@ def resolve_architecture_recipes(
             requirement.model_copy(
                 update={
                     "exact_part": exact_part,
+                    "family": (
+                        definition.family or requirement.family
+                        if _recipe_for_exact(requirement.family, recipes) is not None
+                        else requirement.family
+                    ),
                     "parameters": resolved_parameters,
                     "ports": {**requirement.ports, **bindings},
                 }

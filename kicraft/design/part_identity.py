@@ -3225,6 +3225,39 @@ REVIEWED_PARTS: tuple[ReviewedPart, ...] = (
         # TSSOP20 contacts 9/10 and USART2 TX/RX on AF1.
         port_pins={"uart_tx": "9", "uart_rx": "10"},
     ),
+    # DS12991 Figure 4/Table 12: this K6 is a distinct 32-contact package,
+    # not a footprint substitution for the F6 TSSOP.
+    ReviewedPart(
+        identity="stm32g030k6t6",
+        family="stm32g0",
+        package="STMicroelectronics STM32G030K6T6 LQFP-32, 7 x 7 mm, 0.8 mm pitch",
+        bundle="kicad-standard",
+        symbol="MCU_ST_STM32G0:STM32G030K6Tx",
+        footprint="Package_QFP:LQFP-32_7x7mm_P0.8mm",
+        physical_features=frozenset({"microcontroller", "swd-programmable", "stm32g0"}),
+        contacts=tuple(str(number) for number in range(1, 33)),
+        manufacturer_sources=(
+            "https://www.st.com/en/microcontrollers-microprocessors/stm32g030k6.html",
+            "https://www.st.com/resource/en/datasheet/stm32g030k8.pdf",
+            "https://datasheet.lcsc.com/datasheet/pdf/753f35401d4598e355b1dd55569495e1.pdf?productCode=C529331",
+            "https://www.lcsc.com/product-detail/C529331.html",
+        ),
+        lcsc="C529331",
+        operating_limits={
+            "supply_min_v": 2.0, "supply_max_v": 3.6,
+            "temperature_min_c": -40, "temperature_max_c": 85,
+            "maximum_cpu_mhz": 64,
+            "output_high_min_v_at_3v3": 2.9, "output_low_max_v_at_3v3": 0.4,
+        },
+        support_network={
+            "gpio_output_test_conditions": {
+                "supply_v": 3.3, "source_sink_current_a": 0.006,
+                "source": "https://www.st.com/resource/en/datasheet/stm32g030k8.pdf",
+                "table": "50; CMOS I/O",
+            },
+        },
+        port_pins={"uart_tx": "9", "uart_rx": "10"},
+    ),
     # Microchip DS21952A orders MCP23017-E/SO as the 28-lead SOIC (wide body).
     # That is a different package from the SSOP-28 MCP23017T-E/SS record above,
     # so neither is a member of the other's identity; each is selected only with
@@ -7064,9 +7097,10 @@ _DEVICE_MEMBERS: dict[str, frozenset[str]] = {
 # https://www.st.com/resource/en/datasheet/stm32l072cz.pdf
 _FAMILY_MEMBERS: dict[str, frozenset[str]] = {
     "stm32l0": frozenset({"stm32l031k6t6", "stm32l072czu6"}),
-    # Existing reviewed TSSOP-20 device; STM32G0 is a family request, not an MPN.
-    # https://www.st.com/en/microcontrollers-microprocessors/stm32g030f6.html
-    "stm32g0": frozenset({"stm32g030f6p6"}),
+    # Independently reviewed 20- and 32-contact devices; family membership
+    # does not make either exact ordering code interchangeable with the other.
+    "stm32g0": frozenset({"stm32g030f6p6", "stm32g030k6t6"}),
+    "stm32g030": frozenset({"stm32g030f6p6", "stm32g030k6t6"}),
     # "STM32F103" and "STM32" are design-level family selectors, never
     # construction hardware: every member below is an independently reviewed
     # STM32 identity.  stm32l072czu6 is reviewed identity-only (no library
